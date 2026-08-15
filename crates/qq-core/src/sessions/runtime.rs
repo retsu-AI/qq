@@ -98,6 +98,46 @@ pub trait WorkspaceGrantAuthority: Send + Sync + 'static {
     fn promote_grant(&self, workspace: &Path, grant: &ApprovalGrant) -> GrantPromotionFuture;
 }
 
+/// Everything an approval reviewer may see about one held tool call. The
+/// transcript is deliberately absent: a poisoned context must not be able to
+/// argue its own call safe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewRequest {
+    pub tool_name: String,
+    pub shell: Option<ShellCommandPreview>,
+    pub edit: Option<EditPreview>,
+    pub workspace: String,
+}
+
+/// A reviewer's answer for one held tool call. Anything other than a clear
+/// `Approve` leaves the call waiting for a human; the reviewer can expedite
+/// approvals but can never widen a denial or bypass the client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewVerdict {
+    Approve,
+    /// The reviewer declines to decide; the human approval path continues.
+    Escalate {
+        reason: String,
+    },
+    /// The reviewer judges the call unsafe. Treated exactly like `Escalate`
+    /// today (the human still decides); carried separately so the verdict
+    /// vocabulary does not need a wire change to harden later.
+    Deny {
+        reason: String,
+    },
+}
+
+pub type ReviewFuture = Pin<Box<dyn Future<Output = ReviewVerdict> + Send + 'static>>;
+
+/// A model-backed adjudicator for tool calls that static policy holds for
+/// approval. The embedding application implements this against its provider
+/// layer; qq-core stays ignorant of model routing and prompting. Reviewer
+/// failures and timeouts must resolve as `Escalate`, never hang: the gate
+/// keeps its own human timeout regardless.
+pub trait ApprovalReviewer: Send + Sync + 'static {
+    fn review(&self, request: ReviewRequest) -> ReviewFuture;
+}
+
 pub type SessionEventStream =
     Pin<Box<dyn Stream<Item = Result<SessionEventEnvelope, SessionRuntimeError>> + Send + 'static>>;
 
@@ -111,6 +151,9 @@ pub struct SessionRuntimeOptions {
     /// seed no config grants and approve-for-workspace decisions record only
     /// their session grant (the promotion reports failure).
     pub grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
+    /// Model-backed adjudication for calls held for approval under `Auto`
+    /// mode. Absent, held calls wait for a client exactly as before.
+    pub approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
 }
 
 impl std::fmt::Debug for SessionRuntimeOptions {
@@ -121,6 +164,7 @@ impl std::fmt::Debug for SessionRuntimeOptions {
             .field("max_active_runs", &self.max_active_runs)
             .field("approval_timeout", &self.approval_timeout)
             .field("grant_authority", &self.grant_authority.is_some())
+            .field("approval_reviewer", &self.approval_reviewer.is_some())
             .finish()
     }
 }
@@ -133,12 +177,19 @@ impl SessionRuntimeOptions {
             max_active_runs: 8,
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             grant_authority: None,
+            approval_reviewer: None,
         }
     }
 
     #[must_use]
     pub fn with_grant_authority(mut self, authority: Arc<dyn WorkspaceGrantAuthority>) -> Self {
         self.grant_authority = Some(authority);
+        self
+    }
+
+    #[must_use]
+    pub fn with_approval_reviewer(mut self, reviewer: Arc<dyn ApprovalReviewer>) -> Self {
+        self.approval_reviewer = Some(reviewer);
         self
     }
 }
@@ -152,6 +203,7 @@ pub(super) struct SessionRuntimeInner {
     pub(super) store: Store,
     pub(super) loader: Arc<dyn RuntimeLoader>,
     pub(super) grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
+    pub(super) approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
     pub(super) permits: Arc<Semaphore>,
     /// Run permits for child (sub-agent) sessions, deliberately a separate
     /// pool from `permits`: a parent run holds its permit for its whole
@@ -198,6 +250,7 @@ impl SessionRuntime {
             store,
             loader,
             grant_authority: options.grant_authority,
+            approval_reviewer: options.approval_reviewer,
             permits: Arc::new(Semaphore::new(options.max_active_runs)),
             child_permits: Arc::new(Semaphore::new(options.max_active_runs)),
             schedule,

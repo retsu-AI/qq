@@ -361,9 +361,15 @@ impl App {
                                     ApprovalResolution::ApprovedForWorkspace => {
                                         "tool call approved for this workspace"
                                     }
+                                    ApprovalResolution::ApprovedByReviewer => {
+                                        "tool call already approved by the reviewer"
+                                    }
                                     ApprovalResolution::Denied => "tool call denied",
                                     ApprovalResolution::DeniedTimeout => {
                                         "tool call already denied by timeout"
+                                    }
+                                    ApprovalResolution::DeniedByReviewer => {
+                                        "tool call already denied by the reviewer"
                                     }
                                 }
                                 .to_owned(),

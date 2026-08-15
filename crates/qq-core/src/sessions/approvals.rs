@@ -68,7 +68,7 @@ impl ToolGate for SessionToolGate {
                     let mut resolved = inner.register_approval(call.id, claimed.run_id);
                     match inner
                         .store
-                        .request_tool_approval(&claimed, call.id, shell, edit)
+                        .request_tool_approval(&claimed, call.id, shell.clone(), edit.clone())
                         .await
                     {
                         Ok(event) => inner.notify(event.cursor),
@@ -77,20 +77,80 @@ impl ToolGate for SessionToolGate {
                             return internal_denial();
                         }
                     }
-                    let timed_out = tokio::select! {
-                        biased;
-                        changed = cancellation.changed() => {
-                            // Run cancellation or shutdown: leave the call
-                            // awaiting so run completion interrupts it.
-                            let _ = changed;
-                            inner.remove_approval(call.id);
-                            return GateDecision::Deny {
-                                message: "The run stopped before this approval was resolved."
-                                    .to_owned(),
-                            };
+                    // The reviewer adjudicates only under Auto — the mode
+                    // whose held bucket is "dangerous-shaped but possibly
+                    // fine". Ask means the human asked to decide everything;
+                    // ReadOnly never reaches here. Any verdict other than a
+                    // clear Approve leaves the human path exactly as it was.
+                    let mut review: Option<ReviewFuture> = match (&inner.approval_reviewer, mode) {
+                        (Some(reviewer), ApprovalMode::Auto) => {
+                            Some(reviewer.review(ReviewRequest {
+                                tool_name: call.name.clone(),
+                                shell,
+                                edit,
+                                workspace: claimed.workspace.clone(),
+                            }))
                         }
-                        result = &mut resolved => result.is_err(),
-                        () = tokio::time::sleep(inner.approval_timeout) => true,
+                        _ => None,
+                    };
+                    // One deadline for the whole wait: a reviewer escalation
+                    // must not restart the human approval timeout.
+                    let deadline = tokio::time::Instant::now() + inner.approval_timeout;
+                    let timed_out = loop {
+                        if let Some(pending_review) = review.as_mut() {
+                            tokio::select! {
+                                biased;
+                                changed = cancellation.changed() => {
+                                    let _ = changed;
+                                    inner.remove_approval(call.id);
+                                    return GateDecision::Deny {
+                                        message: "The run stopped before this approval was resolved."
+                                            .to_owned(),
+                                    };
+                                }
+                                result = &mut resolved => break result.is_err(),
+                                verdict = pending_review => {
+                                    review = None;
+                                    if matches!(verdict, ReviewVerdict::Approve) {
+                                        match inner
+                                            .store
+                                            .resolve_approval_by_reviewer(&claimed, call.id)
+                                            .await
+                                        {
+                                            Ok(Some(event)) => {
+                                                inner.notify(event.cursor);
+                                                inner.remove_approval(call.id);
+                                                return GateDecision::Execute;
+                                            }
+                                            // A client resolution won the
+                                            // race or the write failed:
+                                            // fall through to conclude,
+                                            // which reads the durable state.
+                                            Ok(None) | Err(_) => break false,
+                                        }
+                                    }
+                                    // Escalate or Deny: keep waiting for the
+                                    // human on the remaining select arms.
+                                }
+                                () = tokio::time::sleep_until(deadline) => break true,
+                            }
+                        } else {
+                            tokio::select! {
+                                biased;
+                                changed = cancellation.changed() => {
+                                    // Run cancellation or shutdown: leave the call
+                                    // awaiting so run completion interrupts it.
+                                    let _ = changed;
+                                    inner.remove_approval(call.id);
+                                    return GateDecision::Deny {
+                                        message: "The run stopped before this approval was resolved."
+                                            .to_owned(),
+                                    };
+                                }
+                                result = &mut resolved => break result.is_err(),
+                                () = tokio::time::sleep_until(deadline) => break true,
+                            }
+                        }
                     };
                     inner.remove_approval(call.id);
                     match inner

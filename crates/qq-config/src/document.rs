@@ -480,6 +480,8 @@ pub(super) struct Document {
     model: StringField,
     #[serde(default, skip_serializing_if = "StringField::is_missing")]
     worker_model: StringField,
+    #[serde(default, skip_serializing_if = "StringField::is_missing")]
+    reviewer_model: StringField,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     max_output_tokens: Field<u32>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
@@ -562,6 +564,7 @@ impl Document {
         self.organization.is_present()
             || self.model.is_present()
             || self.worker_model.is_present()
+            || self.reviewer_model.is_present()
             || self.providers.is_present()
             || self.mcp.is_present()
             || self.policy.as_ref().is_some_and(PolicyPatch::has_grants)
@@ -589,6 +592,8 @@ impl Document {
             #[serde(skip_serializing_if = "Option::is_none")]
             worker_model: Option<&'a StringField>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            reviewer_model: Option<&'a StringField>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             providers: Option<&'a Field<UniqueMap<String, ProviderEntryPatch>>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             mcp: Option<&'a Field<UniqueMap<String, McpServerPatch>>>,
@@ -604,6 +609,10 @@ impl Document {
             organization: self.organization.is_present().then_some(&self.organization),
             model: self.model.is_present().then_some(&self.model),
             worker_model: self.worker_model.is_present().then_some(&self.worker_model),
+            reviewer_model: self
+                .reviewer_model
+                .is_present()
+                .then_some(&self.reviewer_model),
             providers: present(&self.providers),
             mcp: present(&self.mcp),
             policy_grants: self
@@ -638,6 +647,9 @@ impl Document {
         }
         if self.worker_model.is_present() {
             touched.push(ConfigKey::WorkerModel);
+        }
+        if self.reviewer_model.is_present() {
+            touched.push(ConfigKey::ReviewerModel);
         }
         if self.max_output_tokens.is_present() {
             touched.push(ConfigKey::MaxOutputTokens);
@@ -1014,6 +1026,7 @@ pub(super) struct MergeState {
     organization: Option<String>,
     model: Option<String>,
     worker_model: Option<String>,
+    reviewer_model: Option<String>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
     mcp: BTreeMap<String, McpServerConfig>,
@@ -1081,6 +1094,7 @@ impl MergeState {
                 organization: None,
                 model: None,
                 worker_model: None,
+                reviewer_model: None,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
                 providers,
                 mcp: BTreeMap::new(),
@@ -1123,6 +1137,9 @@ impl MergeState {
         }
         if apply_optional_string(&document.worker_model, &mut self.worker_model) {
             self.provenance.worker_model = Some(source.clone());
+        }
+        if apply_optional_string(&document.reviewer_model, &mut self.reviewer_model) {
+            self.provenance.reviewer_model = Some(source.clone());
         }
         self.apply_providers(&document.providers, source);
         self.apply_mcp(&document.mcp);
@@ -1428,7 +1445,11 @@ impl MergeState {
     pub(super) fn finish(self, reports: Vec<SourceReport>) -> Result<ConfigSnapshot, ConfigError> {
         let model = ModelRoute::parse(self.model.ok_or(ConfigError::ModelRequired)?)?;
         let worker_model = self.worker_model.map(ModelRoute::parse).transpose()?;
-        for route in std::iter::once(&model).chain(worker_model.as_ref()) {
+        let reviewer_model = self.reviewer_model.map(ModelRoute::parse).transpose()?;
+        for route in std::iter::once(&model)
+            .chain(worker_model.as_ref())
+            .chain(reviewer_model.as_ref())
+        {
             if !self.providers.contains_key(route.provider()) {
                 return Err(ConfigError::UnknownProvider(route.provider().to_owned()));
             }
@@ -1439,6 +1460,7 @@ impl MergeState {
             organization: self.organization,
             model,
             worker_model,
+            reviewer_model,
             max_output_tokens: self.max_output_tokens,
             providers: self.providers,
             mcp: self.mcp,

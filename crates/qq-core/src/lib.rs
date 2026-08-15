@@ -42,10 +42,11 @@ use runtime::{
 
 pub use mcp::{MCP_TOOL_PREFIX, McpCallFuture, McpRegistry, McpSpecsFuture, McpToolResult};
 pub use sessions::{
-    GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, RuntimeLoadError, RuntimeLoadFuture,
-    RuntimeLoadRequest, RuntimeLoader, SessionEventStream, SessionRuntime, SessionRuntimeError,
-    SessionRuntimeOptions, SpawnModelValidationFuture, WorkerRuntimeLoadFuture,
-    WorkspaceGrantAuthority, WorkspaceGrantSeed,
+    ApprovalReviewer, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, ReviewFuture,
+    ReviewRequest, ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadRequest,
+    RuntimeLoader, SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions,
+    SpawnModelValidationFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority,
+    WorkspaceGrantSeed,
 };
 
 pub type RunStream = Pin<Box<dyn Stream<Item = RunEvent> + Send + 'static>>;

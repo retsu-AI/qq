@@ -31,6 +31,11 @@ use tokio::time::Instant;
 /// How long a cancelled run may take to reach its terminal durable event
 /// before the invocation gives up and reports a harness failure.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+/// How long an `auto` headless run holds an escalated approval open for the
+/// configured reviewer before denying it. Covers the reviewer's own 10s
+/// request timeout with margin; without a verdict by then the deny proceeds
+/// so the run never stalls.
+const REVIEWER_DENY_GRACE: Duration = Duration::from_secs(20);
 
 /// Byte budget for one concise tool-activity line in text format.
 const MAX_ACTIVITY_BYTES: usize = 160;
@@ -46,6 +51,10 @@ pub struct HeadlessOptions {
     /// Source of the pricing table used for durable accounting.
     pub pricing_provenance: Option<String>,
     pub approval: HeadlessApproval,
+    /// Whether the workspace configuration declares a reviewer model. With a
+    /// reviewer, `auto` holds an escalated call briefly so the reviewer can
+    /// approve it, instead of denying the moment the request is published.
+    pub reviewer_configured: bool,
     pub timeout: Option<Duration>,
     pub max_turns: Option<u16>,
     pub max_cost_usd_nanos: Option<u64>,
@@ -672,17 +681,38 @@ async fn stream_run(
                     }
                     SessionEvent::ToolApprovalRequested { tool_call, .. } => {
                         // The headless invocation is the approval client.
-                        // Full approves everything unattended; auto approves
-                        // whatever the policy escalated (dangerous shell)
-                        // only if the caller opted into full autonomy —
-                        // otherwise it denies so the run never stalls
-                        // waiting for a human.
+                        // Full approves everything unattended; auto denies
+                        // whatever the policy escalated (dangerous shell) so
+                        // the run never stalls waiting for a human — but
+                        // when a reviewer model is configured the deny is
+                        // deferred briefly, giving the reviewer its window.
+                        // A late deny is harmless: resolution is idempotent,
+                        // so a reviewer approval that landed first stands.
                         let decision = match options.approval {
-                            HeadlessApproval::Full => ApprovalDecision::ApproveOnce,
-                            HeadlessApproval::Auto => ApprovalDecision::Deny,
-                            HeadlessApproval::ReadOnly => ApprovalDecision::Deny,
+                            HeadlessApproval::Full => Some(ApprovalDecision::ApproveOnce),
+                            HeadlessApproval::Auto if options.reviewer_configured => {
+                                if let Some(run_id) = envelope.run_id {
+                                    let sessions = sessions.clone();
+                                    let tool_call_id = tool_call.id;
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(REVIEWER_DENY_GRACE).await;
+                                        let _ = send(
+                                            &sessions,
+                                            SessionCommand::RespondToolApproval {
+                                                run_id,
+                                                tool_call_id,
+                                                decision: ApprovalDecision::Deny,
+                                            },
+                                        )
+                                        .await;
+                                    });
+                                }
+                                None
+                            }
+                            HeadlessApproval::Auto => Some(ApprovalDecision::Deny),
+                            HeadlessApproval::ReadOnly => Some(ApprovalDecision::Deny),
                         };
-                        if let Some(run_id) = envelope.run_id {
+                        if let (Some(run_id), Some(decision)) = (envelope.run_id, decision) {
                             respond_approval(sessions, run_id, tool_call.id, decision, stderr)
                                 .await;
                         }
@@ -1490,6 +1520,7 @@ mod tests {
             context_window: Some(128_000),
             pricing_provenance: Some("test fixture".to_owned()),
             approval: HeadlessApproval::ReadOnly,
+            reviewer_configured: false,
             timeout: None,
             max_turns: None,
             max_cost_usd_nanos: None,

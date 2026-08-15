@@ -286,6 +286,56 @@ fn worker_model_uses_primary_model_route_validation_and_policy() {
 }
 
 #[test]
+fn reviewer_model_layers_validates_and_tracks_provenance_like_worker_model() {
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, reviewer_model: "anthropic/global-reviewer")"#,
+    );
+
+    let inherited = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(
+        inherited.reviewer_model().map(ModelRoute::as_str),
+        Some("anthropic/global-reviewer")
+    );
+    assert_eq!(
+        inherited.provenance().reviewer_model().unwrap().kind(),
+        SourceKind::Global
+    );
+    assert_eq!(
+        inherited.model().as_str(),
+        "openai/test-model",
+        "reviewer selection must not replace the primary model"
+    );
+
+    let cleared = tree
+        .loader()
+        .load(
+            &tree
+                .request()
+                .with_explicit_content(r#"(version: 1, reviewer_model: Clear)"#),
+        )
+        .unwrap();
+    assert_eq!(cleared.reviewer_model(), None);
+
+    let malformed = tree
+        .request()
+        .with_explicit_content(r#"(version: 1, reviewer_model: "missing-provider-separator")"#);
+    assert!(matches!(
+        tree.loader().load(&malformed),
+        Err(ConfigError::InvalidModelRoute(route)) if route == "missing-provider-separator"
+    ));
+
+    let unknown = tree
+        .request()
+        .with_explicit_content(r#"(version: 1, reviewer_model: "unknown/reviewer")"#);
+    assert!(matches!(
+        tree.loader().load(&unknown),
+        Err(ConfigError::UnknownProvider(provider)) if provider == "unknown"
+    ));
+}
+
+#[test]
 fn applies_every_layer_in_documented_order() {
     let tree = TempTree::new();
     fs::create_dir_all(tree.path("work/child/deeper")).unwrap();

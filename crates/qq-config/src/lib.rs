@@ -1189,6 +1189,7 @@ pub enum ConfigKey {
     Organization,
     Model,
     WorkerModel,
+    ReviewerModel,
     MaxOutputTokens,
     Providers,
     Provider(String),
@@ -1234,6 +1235,7 @@ pub struct ConfigProvenance {
     organization: Option<SourceIdentity>,
     model: Option<SourceIdentity>,
     worker_model: Option<SourceIdentity>,
+    reviewer_model: Option<SourceIdentity>,
     max_output_tokens: Option<SourceIdentity>,
     providers: BTreeMap<String, SourceIdentity>,
     grant_tools: BTreeMap<String, SourceIdentity>,
@@ -1254,6 +1256,11 @@ impl ConfigProvenance {
     #[must_use]
     pub const fn worker_model(&self) -> Option<&SourceIdentity> {
         self.worker_model.as_ref()
+    }
+
+    #[must_use]
+    pub const fn reviewer_model(&self) -> Option<&SourceIdentity> {
+        self.reviewer_model.as_ref()
     }
 
     #[must_use]
@@ -1322,6 +1329,7 @@ pub struct ConfigSnapshot {
     organization: Option<String>,
     model: ModelRoute,
     worker_model: Option<ModelRoute>,
+    reviewer_model: Option<ModelRoute>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
     mcp: BTreeMap<String, McpServerConfig>,
@@ -1345,6 +1353,12 @@ impl ConfigSnapshot {
     #[must_use]
     pub const fn worker_model(&self) -> Option<&ModelRoute> {
         self.worker_model.as_ref()
+    }
+
+    /// The model route that adjudicates held tool approvals, when configured.
+    #[must_use]
+    pub const fn reviewer_model(&self) -> Option<&ModelRoute> {
+        self.reviewer_model.as_ref()
     }
 
     #[must_use]

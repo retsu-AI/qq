@@ -45,10 +45,11 @@ mod store;
 mod subagents;
 
 pub use runtime::{
-    GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, RuntimeLoadError, RuntimeLoadFuture,
-    RuntimeLoadRequest, RuntimeLoader, SessionEventStream, SessionRuntime, SessionRuntimeError,
-    SessionRuntimeOptions, SpawnModelValidationFuture, WorkerRuntimeLoadFuture,
-    WorkspaceGrantAuthority, WorkspaceGrantSeed,
+    ApprovalReviewer, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, ReviewFuture,
+    ReviewRequest, ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadRequest,
+    RuntimeLoader, SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions,
+    SpawnModelValidationFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority,
+    WorkspaceGrantSeed,
 };
 
 use approvals::ConcludedApproval;
@@ -2370,6 +2371,60 @@ fn request_tool_approval(
     Ok(event)
 }
 
+/// Resolves one awaiting approval as reviewer-approved, unless a client
+/// resolution already committed — the client always wins the race. Returns
+/// the resolution event to publish when the reviewer's approval landed, and
+/// `None` when the call was no longer awaiting (already resolved, or the run
+/// finished and interrupted it).
+fn resolve_approval_by_reviewer(
+    connection: &mut Connection,
+    store_id: StoreId,
+    claimed: &ClaimedRun,
+    tool_call_id: ToolCallId,
+) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+    let transaction = connection
+        .transaction()
+        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let now = now_ms();
+    let updated = transaction
+        .execute(
+            "UPDATE tool_calls
+             SET state = 'requested', approval_resolution = ?2, resolved_at_ms = ?3
+             WHERE id = ?1 AND run_id = ?4 AND state = 'awaiting_approval'
+               AND approval_resolution IS NULL",
+            params![
+                tool_call_id.to_string(),
+                approval_resolution_str(ApprovalResolution::ApprovedByReviewer),
+                now,
+                claimed.run_id.to_string(),
+            ],
+        )
+        .map_err(|_| SessionRuntimeError::Persistence)?;
+    if updated != 1 {
+        return Ok(None);
+    }
+    let tool_call = load_tool_call(&transaction, tool_call_id)?;
+    let event = append_event(
+        &transaction,
+        EventContext {
+            store_id,
+            workspace_id: claimed.workspace_id,
+            session_id: claimed.session_id,
+            run_id: Some(claimed.run_id),
+            caused_by: Some(claimed.command_id),
+            occurred_at_ms: now,
+        },
+        SessionEvent::ToolApprovalResolved {
+            tool_call,
+            resolution: ApprovalResolution::ApprovedByReviewer,
+        },
+    )?;
+    transaction
+        .commit()
+        .map_err(|_| SessionRuntimeError::Persistence)?;
+    Ok(Some(event))
+}
+
 fn conclude_tool_approval(
     connection: &mut Connection,
     store_id: StoreId,
@@ -2402,13 +2457,14 @@ fn conclude_tool_approval(
         return match parse_approval_resolution(&resolution)? {
             ApprovalResolution::ApprovedOnce
             | ApprovalResolution::ApprovedForSession
-            | ApprovalResolution::ApprovedForWorkspace => Ok(ConcludedApproval::Approved),
-            ApprovalResolution::Denied | ApprovalResolution::DeniedTimeout => {
-                Ok(ConcludedApproval::Denied {
-                    message: result.unwrap_or_else(|| approval::USER_DENIED_RESULT.to_owned()),
-                    event: None,
-                })
-            }
+            | ApprovalResolution::ApprovedForWorkspace
+            | ApprovalResolution::ApprovedByReviewer => Ok(ConcludedApproval::Approved),
+            ApprovalResolution::Denied
+            | ApprovalResolution::DeniedTimeout
+            | ApprovalResolution::DeniedByReviewer => Ok(ConcludedApproval::Denied {
+                message: result.unwrap_or_else(|| approval::USER_DENIED_RESULT.to_owned()),
+                event: None,
+            }),
         };
     }
     if !timed_out || state != "awaiting_approval" {
@@ -4659,8 +4715,10 @@ const fn approval_resolution_str(resolution: ApprovalResolution) -> &'static str
         ApprovalResolution::ApprovedOnce => "approved_once",
         ApprovalResolution::ApprovedForSession => "approved_for_session",
         ApprovalResolution::ApprovedForWorkspace => "approved_for_workspace",
+        ApprovalResolution::ApprovedByReviewer => "approved_by_reviewer",
         ApprovalResolution::Denied => "denied",
         ApprovalResolution::DeniedTimeout => "denied_timeout",
+        ApprovalResolution::DeniedByReviewer => "denied_by_reviewer",
     }
 }
 
@@ -4669,8 +4727,10 @@ fn parse_approval_resolution(value: &str) -> Result<ApprovalResolution, SessionR
         "approved_once" => Ok(ApprovalResolution::ApprovedOnce),
         "approved_for_session" => Ok(ApprovalResolution::ApprovedForSession),
         "approved_for_workspace" => Ok(ApprovalResolution::ApprovedForWorkspace),
+        "approved_by_reviewer" => Ok(ApprovalResolution::ApprovedByReviewer),
         "denied" => Ok(ApprovalResolution::Denied),
         "denied_timeout" => Ok(ApprovalResolution::DeniedTimeout),
+        "denied_by_reviewer" => Ok(ApprovalResolution::DeniedByReviewer),
         _ => Err(SessionRuntimeError::Persistence),
     }
 }
@@ -5926,6 +5986,28 @@ mod tests {
         approval_timeout: Duration,
         grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
     ) -> ApprovalHarness {
+        approval_harness_with_reviewer(
+            mode,
+            tool,
+            arguments,
+            tool_turns,
+            approval_timeout,
+            grant_authority,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn approval_harness_with_reviewer(
+        mode: ApprovalMode,
+        tool: &'static str,
+        arguments: &'static str,
+        tool_turns: usize,
+        approval_timeout: Duration,
+        grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
+        approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
+    ) -> ApprovalHarness {
         let directory = tempfile::tempdir().unwrap();
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let runtime = SessionRuntime::open(
@@ -5934,6 +6016,7 @@ mod tests {
                 max_active_runs: 1,
                 approval_timeout,
                 grant_authority,
+                approval_reviewer,
             },
             Arc::new(ApprovalLoader {
                 requests: Arc::clone(&requests),
@@ -11829,6 +11912,7 @@ mod tests {
                 max_active_runs: 1,
                 approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
                 grant_authority: None,
+                approval_reviewer: None,
             },
             Arc::new(CapturingLoader {
                 requests: Arc::clone(&requests),
@@ -12062,6 +12146,7 @@ mod tests {
                 max_active_runs: 1,
                 approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
                 grant_authority: None,
+                approval_reviewer: None,
             },
             Arc::new(CapturingLoader {
                 requests: Arc::clone(&requests),
@@ -12827,6 +12912,247 @@ mod tests {
             SessionEvent::ToolCallFinished { tool_call }
                 if tool_call.state == ToolCallState::Completed
         )));
+    }
+
+    /// A reviewer whose verdict is released by the test: `hold` starts
+    /// occupied, and dropping or sending on the release channel lets the
+    /// verdict return. Consultations are counted for never-consulted cases.
+    struct StubReviewer {
+        verdict: ReviewVerdict,
+        release: StdMutex<Option<oneshot::Receiver<()>>>,
+        consulted: Arc<StdMutex<Vec<ReviewRequest>>>,
+    }
+
+    impl StubReviewer {
+        fn immediate(verdict: ReviewVerdict) -> (Arc<Self>, Arc<StdMutex<Vec<ReviewRequest>>>) {
+            let consulted = Arc::new(StdMutex::new(Vec::new()));
+            (
+                Arc::new(Self {
+                    verdict,
+                    release: StdMutex::new(None),
+                    consulted: Arc::clone(&consulted),
+                }),
+                consulted,
+            )
+        }
+
+        fn held(verdict: ReviewVerdict) -> (Arc<Self>, oneshot::Sender<()>) {
+            let (sender, receiver) = oneshot::channel();
+            (
+                Arc::new(Self {
+                    verdict,
+                    release: StdMutex::new(Some(receiver)),
+                    consulted: Arc::new(StdMutex::new(Vec::new())),
+                }),
+                sender,
+            )
+        }
+    }
+
+    impl ApprovalReviewer for StubReviewer {
+        fn review(&self, request: ReviewRequest) -> ReviewFuture {
+            self.consulted.lock().unwrap().push(request);
+            let release = self.release.lock().unwrap().take();
+            let verdict = self.verdict.clone();
+            Box::pin(async move {
+                if let Some(release) = release {
+                    let _ = release.await;
+                }
+                verdict
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn reviewer_approval_executes_a_held_call_without_a_client() {
+        let (reviewer, consulted) = StubReviewer::immediate(ReviewVerdict::Approve);
+        let mut harness = approval_harness_with_reviewer(
+            ApprovalMode::Auto,
+            "__test_shell",
+            r#"{"command":"git push --force origin main"}"#,
+            1,
+            DEFAULT_APPROVAL_TIMEOUT,
+            None,
+            Some(reviewer),
+        )
+        .await;
+        let observed = collect_through_finished(&mut harness.events).await;
+        assert!(
+            observed
+                .iter()
+                .any(|event| matches!(&event.event, SessionEvent::ToolApprovalRequested { .. }))
+        );
+        assert!(observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::ToolApprovalResolved {
+                resolution: ApprovalResolution::ApprovedByReviewer,
+                ..
+            }
+        )));
+        assert!(observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::ToolCallFinished { tool_call }
+                if tool_call.state == ToolCallState::Completed
+        )));
+        assert!(matches!(
+            &observed.last().unwrap().event,
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::Completed,
+                ..
+            }
+        ));
+        let requests = consulted.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].tool_name, "__test_shell");
+        assert_eq!(
+            requests[0]
+                .shell
+                .as_ref()
+                .map(|shell| shell.command.as_str()),
+            Some("git push --force origin main")
+        );
+    }
+
+    #[tokio::test]
+    async fn reviewer_escalation_leaves_the_call_waiting_for_a_client() {
+        let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::Escalate {
+            reason: "unsure".to_owned(),
+        });
+        let mut harness = approval_harness_with_reviewer(
+            ApprovalMode::Auto,
+            "__test_shell",
+            r#"{"command":"git push --force origin main"}"#,
+            1,
+            DEFAULT_APPROVAL_TIMEOUT,
+            None,
+            Some(reviewer),
+        )
+        .await;
+        let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+        assert_eq!(tool_call.state, ToolCallState::AwaitingApproval);
+        respond_approval(
+            &harness.runtime,
+            harness.run_id,
+            tool_call.id,
+            ApprovalDecision::ApproveOnce,
+        )
+        .await
+        .unwrap();
+        let observed = collect_through_finished(&mut harness.events).await;
+        assert!(observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::ToolApprovalResolved {
+                resolution: ApprovalResolution::ApprovedOnce,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn reviewer_denial_still_lets_the_client_decide() {
+        let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::Deny {
+            reason: "dangerous".to_owned(),
+        });
+        let mut harness = approval_harness_with_reviewer(
+            ApprovalMode::Auto,
+            "__test_shell",
+            r#"{"command":"git push --force origin main"}"#,
+            1,
+            DEFAULT_APPROVAL_TIMEOUT,
+            None,
+            Some(reviewer),
+        )
+        .await;
+        let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+        respond_approval(
+            &harness.runtime,
+            harness.run_id,
+            tool_call.id,
+            ApprovalDecision::Deny,
+        )
+        .await
+        .unwrap();
+        let observed = collect_through_finished(&mut harness.events).await;
+        assert!(observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::ToolApprovalResolved {
+                resolution: ApprovalResolution::Denied,
+                ..
+            }
+        )));
+        assert!(
+            !observed
+                .iter()
+                .any(|event| matches!(event.event, SessionEvent::ToolCallStarted { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn client_resolution_wins_over_a_late_reviewer_approval() {
+        let (reviewer, release) = StubReviewer::held(ReviewVerdict::Approve);
+        let mut harness = approval_harness_with_reviewer(
+            ApprovalMode::Auto,
+            "__test_shell",
+            r#"{"command":"git push --force origin main"}"#,
+            1,
+            DEFAULT_APPROVAL_TIMEOUT,
+            None,
+            Some(reviewer),
+        )
+        .await;
+        let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+        respond_approval(
+            &harness.runtime,
+            harness.run_id,
+            tool_call.id,
+            ApprovalDecision::ApproveOnce,
+        )
+        .await
+        .unwrap();
+        // The reviewer answers only after the client's resolution committed.
+        let _ = release.send(());
+        let observed = collect_through_finished(&mut harness.events).await;
+        assert!(observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::ToolApprovalResolved {
+                resolution: ApprovalResolution::ApprovedOnce,
+                ..
+            }
+        )));
+        assert!(!observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::ToolApprovalResolved {
+                resolution: ApprovalResolution::ApprovedByReviewer,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn ask_mode_never_consults_the_reviewer() {
+        let (reviewer, consulted) = StubReviewer::immediate(ReviewVerdict::Approve);
+        let mut harness = approval_harness_with_reviewer(
+            ApprovalMode::Ask,
+            "__test_mutate",
+            "{}",
+            1,
+            DEFAULT_APPROVAL_TIMEOUT,
+            None,
+            Some(reviewer),
+        )
+        .await;
+        let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+        assert!(consulted.lock().unwrap().is_empty());
+        respond_approval(
+            &harness.runtime,
+            harness.run_id,
+            tool_call.id,
+            ApprovalDecision::ApproveOnce,
+        )
+        .await
+        .unwrap();
+        collect_through_finished(&mut harness.events).await;
+        assert!(consulted.lock().unwrap().is_empty());
     }
 
     /// Like `collect_through_finished`, with a deadline generous enough for

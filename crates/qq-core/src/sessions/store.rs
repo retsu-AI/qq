@@ -518,6 +518,19 @@ impl Store {
         .await
     }
 
+    pub(super) async fn resolve_approval_by_reviewer(
+        &self,
+        claimed: &ClaimedRun,
+        tool_call_id: ToolCallId,
+    ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let claimed = claimed.clone();
+        self.call(Priority::Output, move |connection| {
+            resolve_approval_by_reviewer(connection, store_id, &claimed, tool_call_id)
+        })
+        .await
+    }
+
     pub(super) async fn finish_run(
         &self,
         claimed: &ClaimedRun,

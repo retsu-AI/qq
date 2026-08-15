@@ -205,8 +205,15 @@ pub enum ApprovalResolution {
     /// Approved with a session grant plus a requested promotion into the
     /// workspace configuration.
     ApprovedForWorkspace,
+    /// Approved by the configured approval reviewer model, without a human
+    /// in the loop. Carries no grant: the approval covers this call only.
+    ApprovedByReviewer,
     Denied,
     DeniedTimeout,
+    /// Denied by the configured approval reviewer model. Reserved: the
+    /// current reviewer escalates to a human instead of denying, but the
+    /// wire vocabulary is versioned with the feature.
+    DeniedByReviewer,
 }
 
 /// The durable fate of one workspace-lifetime grant promotion, carried by
