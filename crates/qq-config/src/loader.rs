@@ -10,8 +10,8 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ConfigError, ConfigLoader, ConfigPaths, ConfigSnapshot, LoadRequest, MAX_CONFIG_BYTES,
-    PendingTrust, SourceIdentity, SourceKind, SourceReport, SourceStatus,
+    ConfigError, ConfigLoader, ConfigPaths, ConfigSnapshot, ConfigSources, LoadRequest,
+    MAX_CONFIG_BYTES, PendingTrust, SourceIdentity, SourceKind, SourceReport, SourceStatus,
     document::{Document, MergeState},
     managed::MdmConfiguration,
     remote,
@@ -65,16 +65,19 @@ pub(super) fn load(
     loader: &ConfigLoader,
     request: &LoadRequest,
 ) -> Result<ConfigSnapshot, ConfigError> {
-    let cwd = canonical_working_directory(&request.cwd)?;
     let mut probes = Probes::default();
     let probes = &mut probes;
+    probes.record(&request.cwd);
+    let cwd = canonical_working_directory(&request.cwd)?;
     probes.record(&cwd);
     let trust = TrustState::load(&loader.paths, probes)?;
     let mdm = read_mdm_document(loader)?;
     let organization = selected_organization(loader, request, &cwd, &trust, mdm.as_ref(), probes)?;
     let (mut merged, compiled_report) = MergeState::compiled();
-    let mut reports = vec![compiled_report];
-    let mut pending = Vec::new();
+    let mut report = LoadReport {
+        sources: vec![compiled_report],
+        pending: Vec::new(),
+    };
     let mut seen = BTreeSet::new();
     let mut admitted_packs = 0_usize;
 
@@ -95,14 +98,7 @@ pub(super) fn load(
         && let Some((document, source)) =
             remote::load_cached_if_enrolled(&loader.paths, &organization, probes)?
     {
-        apply_document(
-            document,
-            source,
-            &trust,
-            &mut merged,
-            &mut reports,
-            &mut pending,
-        )?;
+        apply_document(document, source, &trust, &mut merged, &mut report, probes)?;
     }
 
     for candidate in discover_layer_directory(
@@ -118,8 +114,8 @@ pub(super) fn load(
             &mut seen,
             &trust,
             &mut merged,
-            &mut reports,
-            &mut pending,
+            &mut report,
+            probes,
         )?;
     }
 
@@ -151,8 +147,8 @@ pub(super) fn load(
                 &mut seen,
                 &trust,
                 &mut merged,
-                &mut reports,
-                &mut pending,
+                &mut report,
+                probes,
             )?;
         }
         for candidate in discover_layer_directory(
@@ -168,8 +164,8 @@ pub(super) fn load(
                 &mut seen,
                 &trust,
                 &mut merged,
-                &mut reports,
-                &mut pending,
+                &mut report,
+                probes,
             )?;
         }
     }
@@ -188,8 +184,8 @@ pub(super) fn load(
             &mut seen,
             &trust,
             &mut merged,
-            &mut reports,
-            &mut pending,
+            &mut report,
+            probes,
         )?;
     }
 
@@ -205,18 +201,21 @@ pub(super) fn load(
             source,
             &trust,
             &mut merged,
-            &mut reports,
-            &mut pending,
+            &mut report,
+            probes,
         )?;
     }
 
     if !request.overrides.is_empty() {
         let source = SourceIdentity::virtual_source(SourceKind::Runtime, "runtime overrides");
         let touched = merged.apply_runtime(&request.overrides, &source);
-        reports.push(SourceReport::new(source, SourceStatus::Applied, touched));
+        report
+            .sources
+            .push(SourceReport::new(source, SourceStatus::Applied, touched));
     }
 
     // Administrator-owned files and native MDM values intentionally run last.
+    probes.record(&loader.paths.managed_dir);
     if loader.paths.enforce_managed_ownership {
         validate_managed_directory_if_present(&loader.paths.managed_dir)?;
     }
@@ -233,8 +232,8 @@ pub(super) fn load(
             &mut seen,
             &trust,
             &mut merged,
-            &mut reports,
-            &mut pending,
+            &mut report,
+            probes,
         )?;
     }
 
@@ -244,15 +243,18 @@ pub(super) fn load(
             mdm.source,
             &trust,
             &mut merged,
-            &mut reports,
-            &mut pending,
+            &mut report,
+            probes,
         )?;
     }
 
-    if !pending.is_empty() {
-        return Err(ConfigError::TrustRequired { pending, reports });
+    if !report.pending.is_empty() {
+        return Err(ConfigError::TrustRequired {
+            pending: report.pending,
+            reports: report.sources,
+        });
     }
-    merged.finish(reports, std::mem::take(probes).into_paths())
+    merged.finish(report.sources, std::mem::take(probes).into_sources())
 }
 
 fn selected_organization(
@@ -318,6 +320,7 @@ fn selected_organization(
         organization = Some(selected.to_owned());
     }
 
+    probes.record(&loader.paths.managed_dir);
     if loader.paths.enforce_managed_ownership {
         validate_managed_directory_if_present(&loader.paths.managed_dir)?;
     }
@@ -459,21 +462,131 @@ pub(super) fn grant_pending_trust(
 /// exactly these paths instead of rediscovering: every directory whose
 /// presence or listing mattered, every candidate file whether or not it
 /// existed, and every VCS root marker probed while bounding the project walk.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Probes {
     paths: Vec<PathBuf>,
+    states: Vec<SourceState>,
 }
 
 impl Probes {
     pub(super) fn record(&mut self, path: &Path) {
         if !self.paths.iter().any(|recorded| recorded == path) {
+            // Retain the first observation, before discovery or a read. A
+            // later probe must not certify changed bytes as the old input.
+            self.states.push(SourceState::capture(path));
             self.paths.push(path.to_owned());
         }
     }
 
-    pub(super) fn into_paths(self) -> Vec<PathBuf> {
-        self.paths
+    pub(super) fn into_sources(self) -> ConfigSources {
+        ConfigSources(std::sync::Arc::new(self))
     }
+
+    pub(super) fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+
+    pub(super) fn is_current(&self) -> bool {
+        self.paths.iter().zip(&self.states).all(|(path, state)| {
+            !matches!(state.entry, MetadataState::Unreadable(_))
+                && !matches!(state.target, Some(MetadataState::Unreadable(_)))
+                && SourceState::capture(path) == *state
+        })
+    }
+
+    pub(super) fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + 2 * std::mem::size_of::<usize>()
+            + self.paths.capacity() * std::mem::size_of::<PathBuf>()
+            + self.states.capacity() * std::mem::size_of::<SourceState>()
+            + self.paths.iter().map(PathBuf::capacity).sum::<usize>()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceState {
+    entry: MetadataState,
+    target: Option<MetadataState>,
+}
+
+impl SourceState {
+    fn capture(path: &Path) -> Self {
+        let metadata = fs::symlink_metadata(path);
+        // Configuration files reject links, but VCS marker discovery follows
+        // them. Retain target state too so that decision stays revalidatable.
+        let target = metadata
+            .as_ref()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            .then(|| MetadataState::observe(fs::metadata(path)));
+        Self {
+            entry: MetadataState::observe(metadata),
+            target,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MetadataState {
+    Absent,
+    Present {
+        len: u64,
+        modified: Option<SystemTime>,
+        #[cfg(unix)]
+        device: u64,
+        #[cfg(unix)]
+        inode: u64,
+        #[cfg(unix)]
+        mode: u32,
+        #[cfg(unix)]
+        uid: u32,
+        is_dir: bool,
+    },
+    Unreadable(std::io::ErrorKind),
+}
+
+impl MetadataState {
+    fn observe(metadata: std::io::Result<fs::Metadata>) -> Self {
+        match metadata {
+            Ok(metadata) => {
+                #[cfg(unix)]
+                use std::os::unix::fs::MetadataExt;
+                Self::Present {
+                    len: metadata.len(),
+                    modified: metadata.modified().ok(),
+                    #[cfg(unix)]
+                    device: metadata.dev(),
+                    #[cfg(unix)]
+                    inode: metadata.ino(),
+                    #[cfg(unix)]
+                    mode: metadata.mode(),
+                    #[cfg(unix)]
+                    uid: metadata.uid(),
+                    is_dir: metadata.is_dir(),
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::Absent,
+            Err(error) => Self::Unreadable(error.kind()),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static REWRITE_AFTER_READ: std::cell::RefCell<Option<(PathBuf, usize, String)>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(super) fn rewrite_after_read(path: PathBuf, read: usize, content: String) {
+    REWRITE_AFTER_READ.with(|rewrite| {
+        assert!(
+            rewrite
+                .borrow_mut()
+                .replace((path, read, content))
+                .is_none()
+        );
+    });
 }
 
 #[derive(Clone, Debug)]
@@ -482,14 +595,19 @@ pub(super) struct FileCandidate {
     kind: SourceKind,
 }
 
+struct LoadReport {
+    sources: Vec<SourceReport>,
+    pending: Vec<PendingTrust>,
+}
+
 fn apply_candidate(
     candidate: FileCandidate,
     enforce_managed_ownership: bool,
     seen: &mut BTreeSet<PathBuf>,
     trust: &TrustState,
     merged: &mut MergeState,
-    reports: &mut Vec<SourceReport>,
-    pending: &mut Vec<PendingTrust>,
+    report: &mut LoadReport,
+    probes: &mut Probes,
 ) -> Result<(), ConfigError> {
     if !seen.insert(candidate.path.clone()) {
         return Err(ConfigError::DuplicateSource {
@@ -508,7 +626,7 @@ fn apply_candidate(
                 .expect("global file sources always have a path"),
         )?;
     }
-    apply_document(document, source, trust, merged, reports, pending)
+    apply_document(document, source, trust, merged, report, probes)
 }
 
 fn apply_document(
@@ -516,8 +634,8 @@ fn apply_document(
     source: SourceIdentity,
     trust: &TrustState,
     merged: &mut MergeState,
-    reports: &mut Vec<SourceReport>,
-    pending: &mut Vec<PendingTrust>,
+    report: &mut LoadReport,
+    probes: &mut Probes,
 ) -> Result<(), ConfigError> {
     let pending_digest = if source.kind() == SourceKind::Project {
         document
@@ -529,15 +647,19 @@ fn apply_document(
     let sensitive = pending_digest.is_none();
     merged.apply_document(&document, &source, sensitive);
     if sensitive {
-        apply_explicit_packs(&document, &source, merged)?;
+        apply_explicit_packs(&document, &source, merged, probes)?;
     }
     let status = if let Some(digest) = pending_digest {
-        pending.push(PendingTrust::new(source.clone(), digest));
+        report
+            .pending
+            .push(PendingTrust::new(source.clone(), digest));
         SourceStatus::PartiallyAppliedPendingTrust
     } else {
         SourceStatus::Applied
     };
-    reports.push(SourceReport::new(source, status, document.touched()));
+    report
+        .sources
+        .push(SourceReport::new(source, status, document.touched()));
     Ok(())
 }
 
@@ -549,6 +671,7 @@ fn apply_explicit_packs(
     document: &Document,
     source: &SourceIdentity,
     merged: &mut MergeState,
+    probes: &mut Probes,
 ) -> Result<(), ConfigError> {
     use crate::document::{Field, PackPatch};
     match document.packs() {
@@ -558,7 +681,6 @@ fn apply_explicit_packs(
             Ok(())
         }
         Field::Set(patches) => {
-            let mut probes = Probes::default();
             for (id, patch) in &patches.0 {
                 match patch {
                     PackPatch::Remove => merged.remove_pack(id),
@@ -577,14 +699,16 @@ fn apply_explicit_packs(
                                 ),
                             });
                         };
-                        if !resolved.join(crate::pack::PACK_MANIFEST_FILE).is_file() {
+                        let manifest = resolved.join(crate::pack::PACK_MANIFEST_FILE);
+                        probes.record(&manifest);
+                        if !manifest.is_file() {
                             return Err(ConfigError::PackMissing {
                                 id: id.clone(),
                                 path: resolved,
                             });
                         }
                         let pack =
-                            crate::pack::load_explicit(&resolved, id, source.kind(), &mut probes)?;
+                            crate::pack::load_explicit(&resolved, id, source.kind(), probes)?;
                         merged.admit_pack(pack);
                     }
                 }
@@ -848,6 +972,19 @@ pub(super) fn read_candidate(
     let content = String::from_utf8(bytes).map_err(|_| ConfigError::InvalidUtf8 {
         origin: source.clone(),
     })?;
+    #[cfg(test)]
+    REWRITE_AFTER_READ.with(|rewrite| {
+        let mut rewrite = rewrite.borrow_mut();
+        if let Some((path, reads_left, _)) = rewrite.as_mut()
+            && *path == candidate.path
+        {
+            *reads_left -= 1;
+            if *reads_left == 0 {
+                let (path, _, content) = rewrite.take().unwrap();
+                fs::write(path, content).unwrap();
+            }
+        }
+    });
     Ok((source, content))
 }
 

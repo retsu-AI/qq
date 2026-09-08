@@ -8,6 +8,29 @@ pub(crate) const BUDGET_FINAL_RESPONSE_NOTICE: &str = "The run's budget is exhau
 tools are available for this reply. Report concisely what was accomplished, what remains, and \
 the exact next step. This is the final response of the run.";
 
+/// One inherited allowance and the parent's absolute deadline. Preparation
+/// and queueing may reduce the allowance's clock, never restart it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ChildBudget {
+    pub(crate) limits: RunLimits,
+    pub(crate) deadline: Option<Instant>,
+}
+
+impl ChildBudget {
+    pub(crate) fn limits_at(self, now: Instant) -> Result<RunLimits, BudgetLimitKind> {
+        let mut limits = self.limits;
+        if let Some(deadline) = self.deadline {
+            let left = deadline.saturating_duration_since(now);
+            if left.is_zero() {
+                return Err(BudgetLimitKind::Duration);
+            }
+            limits.max_duration_ms =
+                Some(u64::try_from(left.as_millis()).unwrap_or(u64::MAX).max(1));
+        }
+        Ok(limits)
+    }
+}
+
 /// Core-owned accounting of one run against its caller-imposed `RunLimits`.
 ///
 /// The meter charges turns, tool calls, tokens, and cost as the runtime
@@ -149,6 +172,13 @@ impl BudgetMeter {
                 self.output_tokens = None;
             }
         }
+    }
+
+    pub(crate) fn child_budget(&self, now: Instant) -> Result<ChildBudget, BudgetLimitKind> {
+        self.remaining(now).map(|limits| ChildBudget {
+            limits,
+            deadline: self.deadline(),
+        })
     }
 
     /// The budget a child spawned now may be given: every imposed cost,

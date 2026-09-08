@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,9 +21,41 @@ jobs:
       - name: Formatting
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Tests
         run: cargo test --workspace
+
+  windows-teardown:
+    name: native Windows shell teardown
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record active toolchain
+        run: |
+          rustc --version --verbose
+          cargo --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-teardown
+      - name: Dropped waiter drains its owned process
+        run: cargo test --locked -p qq-core --lib tools::tests::dropped_windows_shell_waiter_kills_the_owned_process_before_drain -- --exact
+      - name: Timeout confirms owned process exit
+        run: cargo test --locked -p qq-core --lib tools::tests::windows_shell_timeout_kills_the_owned_process -- --exact
+      - name: Panicked process leaves cleanup unconfirmed
+        run: cargo test --locked -p qq-core --lib tools::tests::panicked_shell_task_never_reports_confirmed_quiescence -- --exact
+      - name: Unconfirmed process blocks session continuation
+        run: cargo test --locked -p qq-core --lib sessions::tests::unconfirmed_shell_exit_prevents_session_continuation -- --exact
+      - name: Dropped write drains the atomic apply
+        run: cargo test --locked -p qq-core --lib tools::tests::dropped_write_waiter_drains_the_actual_atomic_apply -- --exact
+      - name: Child mutation drains before replacement work
+        run: cargo test --locked -p qq-core --lib sessions::tests::child_mutation_drains_before_steering_or_a_replacement_run_can_write -- --exact
+      - name: Steering retains pending child admission
+        run: cargo test --locked -p qq-core --lib sessions::tests::interrupting_steering_owns_a_child_whose_creation_reply_is_pending -- --exact
+      - name: Shutdown drains started child preparation
+        run: cargo test --locked -p qq-core --lib sessions::tests::shutdown_waits_for_started_child_loader_work_without_creating_a_child -- --exact
+      - name: Failed child cancellation blocks continuation
+        run: cargo test --locked -p qq-core --lib sessions::tests::child_cancellation_persistence_failure_prevents_parent_continuation -- --exact
 
   release-size:
     name: release build size

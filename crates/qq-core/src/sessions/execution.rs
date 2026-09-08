@@ -1747,7 +1747,8 @@ async fn execute_started_run(
             // published by the tool gate before this event is emitted.
             RunInput::Event(Some(RuntimeEvent::ToolCallDenied { .. })) => {}
             // The audit record is durable on the run before the run settles
-            // or revises; its spend joins the run's accounting.
+            // or revises. Its spend is stored on the audit child and included
+            // by subtree accounting, never duplicated in the parent's direct totals.
             RunInput::Event(Some(RuntimeEvent::Audited {
                 outcome,
                 findings,
@@ -1756,7 +1757,6 @@ async fn execute_started_run(
                 cost_usd_nanos,
                 audit_session: _,
             })) => {
-                accounting.record_review(usage, cost_usd_nanos);
                 let record = AuditRecord {
                     outcome,
                     findings,

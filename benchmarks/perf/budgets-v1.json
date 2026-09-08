@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
-  "fixture_version": 3,
+  "fixture_version": 4,
   "max_median_absolute_deviation_percent": 50,
   "metrics": [
-    { "metric": "qq_release_binary_bytes", "max_regression_percent": 5, "maximum_p95": 70000000 },
+    { "metric": "qq_release_binary_bytes", "max_regression_percent": 5, "maximum_p95": 48000000 },
     { "metric": "qq_fresh_process_version_ns", "max_regression_percent": 15 },
     { "metric": "qq_server_process_ready_ns", "max_regression_percent": 20 },
     { "metric": "qq_idle_server_rss_bytes", "max_regression_percent": 10, "operating_systems": ["linux"] },
     { "metric": "qq_idle_server_peak_rss_bytes", "max_regression_percent": 10, "operating_systems": ["linux"] },
-    { "metric": "qq_minimal_release_binary_bytes", "max_regression_percent": 5, "maximum_p95": 56000000 },
+    { "metric": "qq_minimal_release_binary_bytes", "max_regression_percent": 5, "maximum_p95": 41000000 },
     { "metric": "qq_minimal_dependency_closure_crates", "max_regression_percent": 5, "maximum_p95": 300 },
     { "metric": "qq_minimal_fresh_process_version_ns", "max_regression_percent": 15 },
     { "metric": "qq_minimal_server_process_ready_ns", "max_regression_percent": 20 },

@@ -8,11 +8,11 @@ and requires the amendments listed in [Amendments](#amendments-to-existing-plans
 before D4 or D5 may land.
 
 The 2026-09-04 follow-up review reopened D4 ownership (H23) and D2 remaining
-budget admission (H24), scheduled by the backend plan's Phase 5a. H23's first
-slice, outcome-read saturation and hard-failure handling, is implemented and
-locally validated; see its receipt in the backend plan. Interrupting steering
-and execution teardown remain the next required slice. The prior shipped
-receipts do not qualify those newly identified failure windows.
+budget admission (H24), scheduled by the backend plan's Phase 5a. Both H23
+ownership slices are implemented and locally validated on Linux; native Windows
+teardown remains unqualified. H24's admission and accounting repair is implemented
+2026-09-05; its validation and performance receipt is in the backend plan. The
+next implementation slice is H25 live credential binding.
 
 This plan covers four related runtime behaviors:
 
@@ -243,11 +243,31 @@ partial turn visible to the next prompt; content filter still fails as
 
 Owner: `qq-core`, `qq-protocol`. Prerequisite for any depth above one.
 
-H24 follow-up: recompute the remaining budget at each sequential child
-admission, after charging earlier children in the same turn. Test cost,
-tokens, elapsed duration, unknown spend, and zero remainder. Specify parallel
-fanout reservation or permitted overshoot explicitly; giving each child the
-same stale allowance does not establish an aggregate bound.
+H24 implemented 2026-09-05: each sequential child, including an auditor,
+receives the remaining allowance after earlier children settle. Any finite cost,
+total-token, input-token, or output-token cap serializes the entire
+child-containing turn. Unbounded and duration-only read fanout retain existing
+concurrency. No reservation scheduler was added. These are observed-spend bounds;
+an individual provider turn or reserved final response may still overshoot.
+A completed run may consume its exact cap, but a new child requires a positive,
+known remainder for every imposed family. Audit admission uses the same rule,
+without estimating a minimum audit cost.
+
+The inherited absolute deadline covers preflight, admission queues, and child
+execution. Expired preflight creates no child. Already accepted store creation
+may commit after expiry; cancellation retains its owner and waits for execution
+cleanup before releasing the parent. Expiry requests cancellation; it does not
+end the cleanup wait. Refusals identify the exhausted family, including duration.
+
+A settled child receipt includes its own run and the initial runs of its exact
+owned descendants. Later user prompts in those sessions are excluded. Unknown
+usage and cost propagate independently; missing, incomplete, malformed, or
+overflowing accounting fails closed. A cancelled run that never started and has
+no recorded model turn contributes zero; started work without measurable usage
+remains unknown. Deleting an owned session is refused while any owning
+ancestor run is active, retaining accounting rows until receipts can settle.
+Auditors store direct spend only on their child run, and parent inclusive
+accounting includes it once.
 
 - Child limits are the parent's remaining budget: remaining cost, remaining
   wall clock, and remaining tokens where the parent carries token limits;
@@ -270,7 +290,12 @@ same stale allowance does not establish an aggregate bound.
   CTE limited to `MAX_CHILD_DEPTH`), computed from runs, never by summing
   cached child inclusives.
 
-Tests: remaining-budget derivation at 0%, 50%, and 100% spend; token roll-up
+Tests: same-turn sequential spend attenuation; cost, total/input/output tokens,
+zero and unknown remainders at one and three configured child slots; preflight
+expiry and elapsed duration; audit inheritance, exhaustion, and charge-once
+accounting; descendant spend, follow-up exclusion, corruption, overflow, and
+owned-history deletion. Earlier tests cover remaining-budget derivation at
+0%, 50%, and 100% spend; token roll-up
 exhausts the parent's `max_total_tokens`; read child schema hash excludes
 mutating tools; escalation refused; subtree accounting at depth three.
 
@@ -378,7 +403,7 @@ boundary. Native Windows teardown tests are added but remain unqualified on
 Windows; remote MCP effects and detached processes remain uncertain. See the
 [H23 slice 2 receipt](speed-first-extensible-agent-harness.md#h23-slice-2-receipt--2026-09-04)
 for validation and latency/resource results. H24 remaining-budget admission is
-the next implementation slice; it is not repaired by H23.
+repaired separately by D2's 2026-09-05 follow-up.
 
 Reviewer widening. `ReviewRequest` gains bounded `arguments` (16 KiB),
 `task_brief` (the child's brief, 8 KiB), `origin: Root | Child { depth,
@@ -431,7 +456,9 @@ boundary of a root run (the same seam steering uses "in place of
 completion"), audit runs when any of: a file was mutated, a non-read shell
 command executed, at least 12 tool calls ran, or a child was spawned. It never
 runs for child runs, internal runs, cancelled or failed runs, budget-final
-turns, or when the remaining budget cannot fund the auditor's minimum.
+turns, or when an imposed cost/token bound has no positive known remainder or
+the inherited deadline has expired. Unbounded families need no estimate; the
+runtime does not predict a minimum audit cost.
 
 Mechanism. The loop consults an `AuditHook` trait in core (shape of
 `ApprovalReviewer`: typed request, deadline, fail policy). The sessions
@@ -443,12 +470,15 @@ verify the claims using read-only tools and reply with one JSON object
 ordinary child session marked `purpose: audit`, so it inherits every bound,
 accounting, cancellation, and recovery rule from D2 and D4.
 
-Outcome. `pass` completes the run. `revise` (at most `max_revisions`) pushes
+Outcome. After charging audit spend, an exceeded or unknown imposed bound
+settles as `budget_exhausted`, even when the auditor passed. Otherwise `pass`
+completes the run. `revise` (at most `max_revisions`) pushes
 the assistant message and `Message::user(AUDIT_REVISION_NOTICE)` with the
 findings, then continues the loop; the revised answer is not re-audited when
 the cap is reached. Audit failure, timeout, or unparseable verdict is
-fail-open: the answer completes and `AuditCompleted { outcome: Unavailable }`
-is recorded. The verdict, findings, and cost persist in `runs.audit_json`
+fail-open when the parent budget still permits completion, and
+`AuditCompleted { outcome: Unavailable }` is recorded. The verdict, findings,
+and cost persist in `runs.audit_json`
 before `RunFinished`.
 
 Protocol. `SessionEvent::AuditStarted`, `AuditCompleted { verdict, findings,

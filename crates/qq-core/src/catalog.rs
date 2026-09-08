@@ -334,8 +334,14 @@ impl ToolCatalog {
         let static_order: Vec<usize> = static_order.iter().map(|i| position_of[*i]).collect();
         let external_order: Vec<usize> = external_order.iter().map(|i| position_of[*i]).collect();
 
-        let exposure = if external_order.len() <= FULL_EXPOSURE_TOOLS
-            && external_schema_bytes <= FULL_EXPOSURE_SCHEMA_BYTES
+        // An explicit exposure can omit the selector. Keep those permitted
+        // tools directly callable within the existing catalog size bounds.
+        let has_selector = static_order
+            .iter()
+            .any(|index| sorted[*index].host == ToolHost::SelectTools);
+        let exposure = if !has_selector
+            || (external_order.len() <= FULL_EXPOSURE_TOOLS
+                && external_schema_bytes <= FULL_EXPOSURE_SCHEMA_BYTES)
         {
             Exposure::Full
         } else {

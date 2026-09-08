@@ -323,20 +323,21 @@ descriptor or its digest.
 Credential rotation is tracked separately by an opaque `CredentialEpoch` owned
 by `qq-auth`: every durable credential write advances the store's index
 revision, including in-place rotation of an existing entry. The root records
-the epoch beside a compiled plan and rekeys its MCP registry cache by
-declaration digest plus epoch, so a rotated secret rebuilds live authorization
-without changing behavioral identity. No cache key in the process hashes raw
-secret bytes.
+the epoch beside a compiled plan. Live provider access and admitted MCP
+declarations also retain exact in-memory equality, including inline credentials,
+header values, and full endpoints. These live bindings are never hashed or
+serialized into durable identity. An epoch or binding change rebuilds live
+authorization while active runs retain their original handles.
 
 The root's `PlanCache` holds one generation per (canonical workspace, model
 selection, explicit configuration) key and revalidates it on every load with a
 fixed list of `stat` calls: every path the configuration loader probed
-(`ConfigSnapshot::probed_paths`), the credential index file, the workspace's
+(`ConfigSnapshot::sources`, captured before discovery and reads), the credential index file, the workspace's
 `AGENTS.md`/`CLAUDE.md`, the skill roots the index was compiled from, and the
 selected pack's manifest and persona, plus one in-memory generation compare
 per external tool host. A warm lookup performs no configuration parsing,
 credential I/O, directory listing, or host round trip. Any observable change recompiles; an
-identical digest and epoch keeps the live generation, otherwise the new
+identical digest, epoch, and live bindings keep the live generation, otherwise the new
 generation is published atomically for later runs while active runs keep the
 `Arc` they were admitted with. A failed recompile returns the configuration
 error to the triggering run and leaves the previous generation cached. The
@@ -371,7 +372,9 @@ declares. `qq-config` does not depend on `qq-protocol`; the root translates.
 
 The catalog is compiled once per plan by `qq-core::catalog` from the static
 built-ins and every `ExternalToolHost` the root attached. Static tools are
-trusted and never excluded. External tools are validated by name shape
+trusted; profile/pack policy and optional `policy.exposed_tools` may remove
+them before catalog construction. Exposure lists intersect across config
+layers, and grant no execution authority. External tools are validated by name shape
 (`mcp__<server>__<tool>`, `ext__<host>__<tool>`), deduplicated against the
 static names and each other, bounded per tool (16 KiB schema, 4 KiB
 description) and per catalog (512 tools, 1 MiB of external schema), and every
@@ -382,7 +385,7 @@ descriptions, serialized schemas, effect classes, and the exposure mode.
 
 Exposure is a compile-time decision. A catalog with at most 24 external tools
 and 32 KiB of external schema is sent whole on every request (`Full`). A larger
-catalog is `Progressive`: requests carry the static tools plus one
+catalog with an admitted selector is `Progressive`: requests carry the static tools plus one
 `select_tools` meta-tool, and the system prompt carries a compact index of
 external names, descriptions, and host readiness. The model pins tools by
 keyword (`select_tools` ranks by deterministic token overlap, at most 8 matches
@@ -391,6 +394,9 @@ run, and a recovered run re-pins from the `select_tools` results already in its
 transcript, so the request the provider sees after a restart matches the one
 before it. Calling an unpinned external tool is a typed tool error that names
 `select_tools`, never a silent lookup miss.
+If explicit exposure omits `select_tools`, all permitted external schemas
+are sent directly under the same catalog bounds, so every admitted tool
+remains callable.
 
 `ExternalToolHost` is the single seam for anything that is not a built-in:
 `catalog_blocking` returns a generation-stamped `HostCatalog` with readiness;
@@ -462,11 +468,16 @@ the block and records the outcome; `Closed` fails the run with
 Every event a client can observe is published after its durable commit. The
 store encodes each envelope exactly once, inside the transaction that persists
 it, and keeps that encoding as a `PublishedEvent { envelope, json }`. After the
-transaction commits, the store worker publishes the batch to a bounded
-per-workspace `broadcast` feed (1024 events); a failed transaction publishes
-nothing. `SessionRuntime::subscribe_published` catches a subscriber up from
-SQLite in pages of `MAX_REPLAY_EVENTS`, then delivers from the feed with no
-store access per event; a subscriber that lags past the feed capacity is
+transaction commits, the store worker appends the batch to a bounded,
+sequence-indexed per-workspace ring (1024 events) that exists only while the
+workspace has a subscriber; a failed transaction publishes nothing.
+`SessionRuntime::subscribe_published` reads by cursor. A cursor the ring covers
+attaches and catches up from memory with no store job, so reconnecting
+observers and fan-out attachments do not queue behind the store worker; any
+other cursor is validated and paged from SQLite in pages of
+`MAX_REPLAY_EVENTS` inside one control job that also joins the ring, so no
+commit can land between the page and the first live read. Live delivery is
+then a ring lookup per event; a subscriber that lags past the ring capacity is
 redirected to SQLite catch-up from its last cursor, so every subscriber
 observes a contiguous, complete sequence at its own pace and slows only
 itself. The HTTP server writes `json` into the SSE frame as-is, so a live
@@ -622,9 +633,22 @@ spent the last permitted turn becomes a tool-free final status response; an
 elapsed wall clock or a provider turn that omits usage under a cost cap settles
 immediately. Every bound produces the typed `budget_exhausted` outcome, never a
 provider failure, so the TUI, server, and headless adapter observe one
-contract. Sub-agents are admitted with the parent's remaining wall clock, cost,
-and token bounds (`BudgetMeter::remaining`), never its original caps, and
-charge their settled (or unknown) usage and cost back to the parent's meter.
+contract. Each sequential child admission, including an auditor, derives fresh
+remaining cost and token bounds after charging earlier children. A turn containing
+children executes sequentially when the parent has any finite cost or token
+bound; unbounded and duration-only read fanout keep their existing concurrency.
+These are observed-spend limits: a provider turn or reserved final response can
+still overshoot; there is no prepaid reservation or estimated audit minimum.
+
+Children share the parent's absolute deadline. Preflight and queueing consume
+that clock; expiry cancels the owned work and waits for cleanup, which can finish
+after the deadline. Creation accepted by the store may commit after expiry and
+is then cancelled under the same retained owner. Settled child receipts charge
+that run and its exact owned descendants, excluding later user prompts in child
+sessions. Unknown usage or cost stays unknown and refuses a new child when the
+corresponding bound is imposed. Descendant history cannot be deleted until every
+owning ancestor run settles. Auditors store their direct spend on their own run;
+the parent meter and inclusive accounting each include that spend once.
 A read-only session is not offered the mutating, shell, or non-read external
 schemas its policy would deny, and a spawned child's approval mode can be
 lowered but never raised by a client command.
@@ -720,10 +744,15 @@ transcript. The child verifies the claims against the workspace with its own
 tools and answers one JSON verdict. `pass` completes the run; `revise` pushes
 the answer plus the findings as a runtime notice and continues once (bounded by
 `max_revisions`); an auditor that fails, is refused, or answers prose is
-`unavailable` and the answer stands. The record is durable on the run
+`unavailable` and the answer stands, provided the parent's budget still permits
+completion after charging audit spend. Otherwise the run settles as
+`budget_exhausted`, even when the auditor passed. The record is durable on the run
 (`runs.audit_json`, published as `run_audit_completed`) before the run settles,
 and the child's spend is charged to the audited run. Children, internal runs,
-budget-final turns, and runs that cannot fund an auditor are never audited. At dispatch `resolve_delegation_route` applies explicit
+budget-final turns, and runs without a positive, known remainder for each imposed
+cost/token bound or with an expired deadline are never audited. Unbounded
+families do not require an affordability estimate. At dispatch
+`resolve_delegation_route` applies explicit
 model, then role, then the roster's default role; without a roster the legacy
 worker/parent fallback and full authenticated route list remain, and the
 session spawner still validates every resolved route against the authenticated
@@ -866,6 +895,36 @@ The same HTTP/SSE protocol serves local TUI clients, remote TUI clients, and
 future browser or mobile clients. Protocol replay means moving between devices
 does not require transferring in-memory client state.
 
+## Hosting Boundary
+
+QQ is designed to be run by a **supervisor**: a batch runner, CI job,
+evaluation harness, or hosted service that launches `qq run` inside an
+environment it controls and consumes the JSONL record stream and exit code.
+[`headless-contract.md`](./headless-contract.md) fixes that contract and the
+division of responsibility.
+
+The division is: QQ owns everything that must work on one machine for one
+user with no network other than the model endpoint — the agent loop,
+providers, tools, approvals, run limits, the durable session store, events,
+and the typed outcome. The supervisor owns everything that needs more than one
+tenant, more than one worker, or an authoritative record of money — isolation,
+repository checkout, patch extraction, spend authority, attempts and leases,
+independent verification, artifacts, identity, and billing.
+
+Three rules follow:
+
+- A supervisor consumes QQ as a binary through argv, environment, inline
+  configuration, and stdout. It never links `qq-core` into a process that
+  also executes untrusted repository code.
+- QQ has no supervisor-only mode and no product vocabulary. A capability a
+  supervisor needs is added only in a form a local user, a CI job, and an
+  evaluation harness could also use. CLI plumbing and compilation stay off
+  the run hot path; generic opt-in completion validation and bounded repair
+  belong in core, preserve default behavior when disabled, and require
+  cancellation, budget, and performance acceptance.
+- The headless contract is public and pinned by fixtures in this repository so
+  a supervisor can test against it without reading QQ source.
+
 ## Performance Discipline
 
 Optimize end-to-end time to a useful result, not isolated microbenchmarks.
@@ -886,9 +945,10 @@ following yet:
 - Native or cross-platform mobile application.
 - JavaScript/TypeScript packages or package workspace.
 - Separate server executable.
-- Distributed workers or cloud control plane.
+- Distributed workers or cloud control plane. These belong to a supervisor
+  above the headless contract; see "Hosting Boundary".
 - Plugin marketplace or public extension interface.
-- Multi-user tenancy.
+- Multi-user tenancy. Same boundary.
 - Multi-agent editing orchestration.
 
 The HTTP/SSE server and client crates are designed to permit future surfaces,

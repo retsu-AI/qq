@@ -288,6 +288,11 @@ pub(super) struct Store {
     store_id: StoreId,
 }
 
+pub(super) struct FeedAttachment {
+    pub(super) live: feed::FeedReceiver,
+    pub(super) page: Vec<Arc<feed::PublishedEvent>>,
+}
+
 struct StoreInner {
     control: Sender<WorkerMessage>,
     control_slots: Arc<Semaphore>,
@@ -358,14 +363,60 @@ impl Store {
         self.inner.catch_up_reads.load(Ordering::Relaxed)
     }
 
-    /// A live receiver for one workspace's committed events. Delivers only
-    /// events published after this call; the caller catches up from
-    /// `events_after` first.
-    pub(super) fn feed(
+    #[cfg(test)]
+    pub(super) fn retained_feeds(&self) -> usize {
+        self.inner.feed.retained_workspaces()
+    }
+
+    /// Attaches a subscriber at `sequence` with its first catch-up page.
+    ///
+    /// Warm path: when the workspace ring already covers the cursor, both come
+    /// from memory and no store job runs; a ring exists only for a workspace
+    /// the store validated for an earlier subscriber. Cold path: one control
+    /// job validates the workspace, reads the page, and joins the ring before
+    /// any later commit can publish, so nothing is missed between the two.
+    /// Dropping the reply also releases the receiver if the caller has gone.
+    pub(super) async fn attach_feed(
         &self,
         workspace_id: WorkspaceId,
-    ) -> Option<tokio::sync::broadcast::Receiver<Arc<feed::PublishedEvent>>> {
-        self.inner.feed.subscribe(workspace_id)
+        sequence: u64,
+        limit: u16,
+    ) -> Result<FeedAttachment, SessionRuntimeError> {
+        if let Some((live, page)) = self.inner.feed.attach_warm(workspace_id, sequence, limit) {
+            return Ok(FeedAttachment { live, page });
+        }
+        let feed = Arc::clone(&self.inner.feed);
+        #[cfg(test)]
+        self.inner.catch_up_reads.fetch_add(1, Ordering::Relaxed);
+        self.call(Priority::Control, move |connection| {
+            ensure_workspace(connection, workspace_id)?;
+            let page = read_published_event_page(connection, workspace_id, sequence, limit)?;
+            let short = page.len() < usize::from(limit);
+            let live = feed
+                .attach_cold(workspace_id, &page, short)
+                .ok_or(SessionRuntimeError::Unavailable)?;
+            Ok(FeedAttachment { live, page })
+        })
+        .await
+    }
+
+    /// A catch-up page, from the ring when it covers `sequence` and from
+    /// SQLite otherwise.
+    pub(super) async fn published_events_after(
+        &self,
+        workspace_id: WorkspaceId,
+        sequence: u64,
+        limit: u16,
+    ) -> Result<Vec<Arc<feed::PublishedEvent>>, SessionRuntimeError> {
+        if let Some(page) = self.inner.feed.warm_page(workspace_id, sequence, limit) {
+            return Ok(page);
+        }
+        #[cfg(test)]
+        self.inner.catch_up_reads.fetch_add(1, Ordering::Relaxed);
+        self.call(Priority::Control, move |connection| {
+            read_published_events(connection, workspace_id, sequence, limit)
+        })
+        .await
     }
 
     pub(super) async fn call<T, F>(
@@ -377,6 +428,34 @@ impl Store {
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T, SessionRuntimeError> + Send + 'static,
     {
+        // Only the reply type is generic. Admission, queueing, and settlement
+        // run in one shared body so ~60 call sites do not each carry a copy
+        // of the hot path.
+        let (reply, response) = oneshot::channel();
+        let job: worker::DatabaseJob = Box::new(move |connection| {
+            let result = operation(connection);
+            // The worker settles this after the enclosing commit: the
+            // reply and the staged events wait for durability. A commit
+            // failure replaces the result so no caller is told a write
+            // landed when it did not.
+            worker::JobOutcome {
+                ok: result.is_ok(),
+                settle: Box::new(move |commit| {
+                    let _ = reply.send(commit.and(result));
+                }),
+            }
+        });
+        self.enqueue(priority, job).await?;
+        response
+            .await
+            .map_err(|_| SessionRuntimeError::Unavailable)?
+    }
+
+    async fn enqueue(
+        &self,
+        priority: Priority,
+        job: worker::DatabaseJob,
+    ) -> Result<(), SessionRuntimeError> {
         if self.inner.closing.load(Ordering::Acquire) {
             return Err(SessionRuntimeError::Unavailable);
         }
@@ -405,21 +484,8 @@ impl Store {
                     .map_err(|_| SessionRuntimeError::Unavailable)?,
             ),
         };
-        let (reply, response) = oneshot::channel();
         let message = WorkerMessage::Run {
-            job: Box::new(move |connection| {
-                let result = operation(connection);
-                // The worker settles this after the enclosing commit: the
-                // reply and the staged events wait for durability. A commit
-                // failure replaces the result so no caller is told a write
-                // landed when it did not.
-                worker::JobOutcome {
-                    ok: result.is_ok(),
-                    settle: Box::new(move |commit| {
-                        let _ = reply.send(commit.and(result));
-                    }),
-                }
-            }),
+            job,
             capacity_permit,
         };
         let sender = match priority {
@@ -445,9 +511,7 @@ impl Store {
             }
         }
         drop(admission);
-        response
-            .await
-            .map_err(|_| SessionRuntimeError::Unavailable)?
+        Ok(())
     }
 
     /// Stops the database worker without synchronously joining it from an
@@ -727,20 +791,6 @@ impl Store {
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         self.call(Priority::Control, move |connection| {
             read_events(connection, workspace_id, sequence, limit)
-        })
-        .await
-    }
-
-    pub(super) async fn published_events_after(
-        &self,
-        workspace_id: WorkspaceId,
-        sequence: u64,
-        limit: u16,
-    ) -> Result<Vec<Arc<feed::PublishedEvent>>, SessionRuntimeError> {
-        #[cfg(test)]
-        self.inner.catch_up_reads.fetch_add(1, Ordering::Relaxed);
-        self.call(Priority::Control, move |connection| {
-            read_published_events(connection, workspace_id, sequence, limit)
         })
         .await
     }
@@ -1323,12 +1373,9 @@ impl Store {
         .await
     }
 
-    /// The terminal outcome of one run, if it has reached one. Polled by
-    /// spawn futures awaiting their child run.
-    /// A settled run's outcome and estimated cost. The cost is `None` until
-    /// the run settles and stays `None` when spend was unmeasurable.
-    /// A settled run's outcome with the spend it is accountable for. Usage
-    /// and cost are `None` when unknown, never zero.
+    /// A settled run's outcome and its exact owned descendants' spend.
+    /// Later user prompts in a child session are separate runs and do not
+    /// enter this receipt. Missing usage or cost remains unknown.
     pub(super) async fn run_outcome(
         &self,
         run_id: RunId,
@@ -1351,42 +1398,136 @@ impl Store {
             }
         };
         let read = self.call(Priority::AwaitControl, move |connection| {
-            let (outcome, usage, cost) = connection
+            let (outcome, usage, _cost, session_id) = connection
                 .query_row(
-                    "SELECT outcome_json, usage_json, estimated_cost_usd_nanos FROM runs WHERE id = ?1",
+                    "SELECT outcome_json, usage_json, estimated_cost_usd_nanos, session_id
+                     FROM runs WHERE id = ?1",
                     [run_id.to_string()],
                     |row| {
                         Ok((
                             row.get::<_, Option<String>>(0)?,
                             row.get::<_, Option<String>>(1)?,
                             row.get::<_, Option<u64>>(2)?,
+                            row.get::<_, String>(3)?,
                         ))
                     },
                 )
                 .optional()
                 .map_err(|_| SessionRuntimeError::Persistence)?
                 .ok_or(SessionRuntimeError::RunNotFound)?;
-            let usage = usage
-                .as_deref()
-                .map(serde_json::from_str::<TokenUsage>)
-                .transpose()
+            let Some(encoded) = outcome else {
+                // A malformed live accounting row is already a hard read
+                // failure; do not wait for a hanging child to settle first.
+                if let Some(encoded) = usage {
+                    serde_json::from_str::<TokenUsage>(&encoded)
+                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                }
+                return Ok(None);
+            };
+            let outcome = serde_json::from_str::<RunOutcome>(&encoded)
                 .map_err(|_| SessionRuntimeError::Persistence)?;
-            outcome
-                .as_deref()
-                .map(|encoded| {
-                    serde_json::from_str(encoded)
-                        .map(|outcome| {
-                            (
-                                outcome,
-                                SpawnAgentSpend {
-                                    cost_usd_nanos: cost,
-                                    usage,
-                                },
+            let workspace_id: String = connection
+                .query_row(
+                    "SELECT workspace_id FROM sessions WHERE id = ?1",
+                    [session_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| SessionRuntimeError::Persistence)?;
+            // Child creation atomically stores its original user message at
+            // ordinal one; compaction retains that row. Follow owner run ids
+            // and this message's exact run, not all runs in a child session.
+            // Left joins keep missing identities visible as hard failures.
+            // Materialize the bounded workspace candidates once so recursion
+            // does not rescan every session for each owned run.
+            let mut statement = connection
+                .prepare_cached(
+                    "WITH RECURSIVE candidates AS MATERIALIZED (
+                         SELECT id, owner_run_id FROM sessions
+                         WHERE workspace_id = ?2 AND owner_run_id IS NOT NULL
+                     ), owned(run_id, depth) AS (
+                         VALUES (?1, 0)
+                         UNION ALL
+                         SELECT initial.id, owned.depth + 1
+                         FROM owned
+                         JOIN candidates child ON child.owner_run_id = owned.run_id
+                         LEFT JOIN messages first ON first.session_id = child.id
+                             AND first.ordinal = 1 AND first.role = 'user'
+                         LEFT JOIN runs initial ON initial.id = first.run_id
+                             AND initial.session_id = child.id
+                             AND initial.user_message_id = first.id
+                         WHERE owned.depth < ?3
+                         LIMIT ?4
+                     )
+                     SELECT r.id,
+                            r.outcome_json IS NOT NULL AND r.status IN
+                                ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted'),
+                            r.usage_json, r.estimated_cost_usd_nanos,
+                            r.status = 'cancelled' AND r.started_at_ms IS NULL
+                                AND NOT EXISTS(SELECT 1 FROM model_turns t WHERE t.run_id = r.id),
+                            owned.depth = ?3 AND EXISTS(
+                                SELECT 1 FROM candidates child
+                                WHERE child.owner_run_id = owned.run_id
                             )
-                        })
-                        .map_err(|_| SessionRuntimeError::Persistence)
-                })
-                .transpose()
+                     FROM owned LEFT JOIN runs r ON r.id = owned.run_id",
+                )
+                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let rows = statement
+                .query_map(
+                    params![
+                        run_id.to_string(),
+                        workspace_id,
+                        MAX_CHILD_DEPTH,
+                        usize::from(MAX_DESCENDANTS_PER_ROOT) + 2,
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, bool>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<u64>>(3)?,
+                            row.get::<_, Option<bool>>(4)?.unwrap_or(false),
+                            row.get::<_, bool>(5)?,
+                        ))
+                    },
+                )
+                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let mut spend = SpawnAgentSpend::NONE;
+            for (index, row) in rows.enumerate() {
+                let (id, settled, encoded_usage, cost, never_started, too_deep) =
+                    row.map_err(|_| SessionRuntimeError::Persistence)?;
+                if id.is_none()
+                    || !settled
+                    || too_deep
+                    || index > usize::from(MAX_DESCENDANTS_PER_ROOT)
+                {
+                    return Err(SessionRuntimeError::AccountingUnavailable);
+                }
+                let usage = match encoded_usage {
+                    Some(encoded) => Some(
+                        serde_json::from_str::<TokenUsage>(&encoded)
+                            .map_err(|_| SessionRuntimeError::Persistence)?,
+                    ),
+                    None if never_started => SpawnAgentSpend::NONE.usage,
+                    None => None,
+                };
+                spend.usage = match (spend.usage, usage) {
+                    (Some(total), Some(usage)) => Some(
+                        add_usage(total, usage)
+                            .ok_or(SessionRuntimeError::AccountingUnavailable)?,
+                    ),
+                    _ => None,
+                };
+                let cost = cost.or(never_started.then_some(0));
+                spend.cost_usd_nanos = match (spend.cost_usd_nanos, cost) {
+                    (Some(total), Some(cost)) => Some(
+                        total
+                            .checked_add(cost)
+                            .ok_or(SessionRuntimeError::AccountingUnavailable)?,
+                    ),
+                    _ => None,
+                };
+            }
+            Ok(Some((outcome, spend)))
         });
         #[cfg(test)]
         let read = async move {
@@ -1702,7 +1843,7 @@ mod tests {
             .await
             .unwrap();
         let (release, blocked) = hold_worker(&store).await;
-        let mut live = store.feed(workspace_id).unwrap();
+        let live = store.inner.feed.subscribe(workspace_id).unwrap();
 
         let mut jobs = Vec::new();
         for n in 0..3_u64 {
@@ -1749,7 +1890,7 @@ mod tests {
             assert_eq!(job.await.unwrap(), Err(SessionRuntimeError::Persistence));
         }
         assert!(
-            live.try_recv().is_err(),
+            live.try_recv(0).is_err(),
             "nothing from a failed group is published"
         );
     }

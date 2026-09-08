@@ -112,6 +112,12 @@ interactive "approve for session" uses, so `--allow-shell "cargo test"` covers
 steering message per stdin line and injects each at the run's next model/tool
 boundary; without it stdin is left alone.
 
+Use `qq run --profile <name>` to select a profile's tool catalog. Optional
+`policy.exposed_tools: ["read_file", "search"]` narrows it by intersection
+across configuration layers; an empty list exposes no tools. `--allow-tool`
+and `--allow-shell` grant held calls and cannot restore tools excluded from
+the catalog. See the [headless contract](docs/design/headless-contract.md).
+
 ## MCP Servers
 
 MCP servers are declared in configuration and their tools join the same

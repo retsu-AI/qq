@@ -128,7 +128,7 @@ pub type AuditFuture = Pin<Box<dyn Future<Output = AuditVerdict> + Send + 'stati
 /// `Unavailable`. The loop treats the verdict as advisory: revise at most
 /// `max_revisions` times, then complete.
 pub(crate) trait AuditHook: Send + Sync {
-    fn audit(&self, request: AuditRequest) -> AuditFuture;
+    fn audit(&self, request: AuditRequest, budget: super::ChildBudget) -> AuditFuture;
     fn acknowledge(&self);
     fn drain(&self) -> super::ChildDrainFuture;
 }

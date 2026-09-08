@@ -1790,7 +1790,7 @@ impl plan::CompiledAgentPlan {
                         && (audit_revisions == 0
                             || audit_revisions < plan.runtime.audit.max_revisions)
                         && audit_triggers.fires(plan.runtime.audit.mode)
-                        && budget.remaining(tokio::time::Instant::now()).is_ok()
+                        && let Ok(child_limits) = budget.child_budget(tokio::time::Instant::now())
                     {
                         let answer = assistant
                             .content()
@@ -1808,7 +1808,7 @@ impl plan::CompiledAgentPlan {
                                 actions: audit_actions.clone(),
                                 role: plan.runtime.audit.role,
                                 revision: audit_revisions,
-                            });
+                            }, child_limits);
                         let verdict = tokio::select! {
                             biased;
                             () = interrupt_requested(&mut steering, handled_interrupt) => None,
@@ -1888,6 +1888,10 @@ impl plan::CompiledAgentPlan {
                         messages.extend(queued);
                         for message_id in applied { yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) }; }
                         continue;
+                    }
+                    if let Some(kind) = budget.exceeded(tokio::time::Instant::now()) {
+                        yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                        return;
                     }
                     yield RuntimeEvent::Completed;
                     return;
@@ -2012,15 +2016,10 @@ impl plan::CompiledAgentPlan {
                     .into_iter()
                     .filter(|call| results[usize::from(call.call_ordinal - 1)].is_none())
                     .collect::<Vec<_>>();
-                // Children admitted this turn receive the parent's remaining
-                // budget as of now. A family the parent cannot afford refuses
-                // the spawn as a tool error naming it; the parent keeps working.
-                let child_limits = budget.remaining(tokio::time::Instant::now());
-
                 let execute_one = |call: RuntimeToolCall,
                                    output: Option<
                     tokio::sync::mpsc::Sender<String>,
-                >| {
+                >, child_limits: Result<runtime::ChildBudget, BudgetLimitKind>| {
                     let workspace = workspace.clone();
                     let file_state = Arc::clone(&file_state);
                     let cancelled = Arc::clone(&cancelled);
@@ -2090,14 +2089,14 @@ impl plan::CompiledAgentPlan {
                                                     ),
                                                     true,
                                                 ),
-                                                (Ok(limits), Ok(model)) => {
+                                                (Ok(child_budget), Ok(model)) => {
                                                     let outcome = spawner
                                                         .spawn(SpawnRequest {
                                                             call_id: call.id,
                                                             task: arguments.task,
                                                             model,
                                                             authority: arguments.authority,
-                                                            limits,
+                                                            budget: child_budget,
                                                             purpose: qq_protocol::SessionPurpose::Task,
                                                         })
                                                         .await;
@@ -2215,8 +2214,15 @@ impl plan::CompiledAgentPlan {
                 // order so side effects never interleave and every read is
                 // deterministically ordered against the mutations. Only a
                 // read child may overlap: a write child is a mutation.
+                // Finite spend cannot be granted independently to overlapping children.
+                // Unbounded and duration-only read fanout retains its concurrency.
+                let bounded_child_spend = limits.max_cost_usd_nanos.is_some()
+                    || limits.max_total_tokens.is_some()
+                    || limits.max_input_tokens.is_some()
+                    || limits.max_output_tokens.is_some();
                 let sequential = approved.iter().any(|call| {
-                    !matches!(
+                    (bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
+                    || !matches!(
                         approval::classify(call.effect, &call.name, &call.arguments),
                         approval::ToolClass::ReadOnly
                     )
@@ -2230,7 +2236,7 @@ impl plan::CompiledAgentPlan {
                         let mut call_id_holder = Some(call.clone());
                         let (delta_sender, mut deltas) =
                             tokio::sync::mpsc::channel::<String>(SHELL_OUTPUT_QUEUE_CAPACITY);
-                        let mut execution = Box::pin(execute_one(call, Some(delta_sender)));
+                        let mut execution = Box::pin(execute_one(call, Some(delta_sender), budget.child_budget(tokio::time::Instant::now())));
                         let mut output_closed = false;
                         let (call, result, child_spend) = loop {
                             let interrupt = interrupt_requested(&mut steering, handled_interrupt);
@@ -2307,8 +2313,9 @@ impl plan::CompiledAgentPlan {
                         }
                     }
                 } else {
+                    let child_limits = budget.child_budget(tokio::time::Instant::now());
                     let mut executions = futures_stream::iter(
-                        approved.into_iter().map(|call| execute_one(call, None)),
+                        approved.into_iter().map(|call| execute_one(call, None, child_limits)),
                     )
                         .buffer_unordered(MAX_PARALLEL_READS);
                     loop {
@@ -5887,10 +5894,10 @@ mod tests {
         // of the parent's per-run caps.
         let requests = spawner.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].limits.max_total_tokens, Some(850));
-        assert_eq!(requests[0].limits.max_input_tokens, Some(900));
-        assert_eq!(requests[0].limits.max_model_turns, None);
-        assert_eq!(requests[0].limits.max_duration_ms, None);
+        assert_eq!(requests[0].budget.limits.max_total_tokens, Some(850));
+        assert_eq!(requests[0].budget.limits.max_input_tokens, Some(900));
+        assert_eq!(requests[0].budget.limits.max_model_turns, None);
+        assert_eq!(requests[0].budget.limits.max_duration_ms, None);
         drop(requests);
 
         // Parent 150 + child 900 = 1_050 > 1_000: the child's tokens exhaust
@@ -6420,6 +6427,240 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_exposure_rejects_hidden_tools_before_full_approval() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.txt"), "before").unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![
+                    vec![(
+                        "edit_file",
+                        r#"{"path":"note.txt","old_string":"before","new_string":"after"}"#
+                            .to_owned(),
+                    )],
+                    Vec::new(),
+                ],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(
+                plan::AgentProfile::embedded(&runtime, workspace)
+                    .with_exposed_tools(vec!["read_file".to_owned(), "search".to_owned()]),
+            )
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let events = plan
+            .execute(
+                vec![Message::user("edit the note")],
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Full,
+                    grants: approval::SessionGrants {
+                        tools: ["edit_file".to_owned()].into_iter().collect(),
+                        shell_prefixes: Vec::new(),
+                    },
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed)),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::ToolCallDenied { .. }))
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests.iter() {
+            assert_eq!(tool_names(request), ["read_file", "search"]);
+        }
+        assert!(requests[1].messages().last().unwrap().content().iter().any(|block| matches!(block,
+            ContentBlock::ToolResult { content, is_error: true, .. } if content.contains("unknown tool")
+        )));
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("note.txt")).unwrap(),
+            "before"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_external_exposure_without_a_selector_is_fully_callable() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let host = WideHost::new(40);
+        let calls = Arc::clone(&host.calls);
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![vec![("ext__wide__tool07", "{}".to_owned())], Vec::new()],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap()
+        .with_tool_host(Arc::new(host));
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(
+                plan::AgentProfile::embedded(&runtime, workspace).with_exposed_tools(
+                    (0..40).map(|i| format!("ext__wide__tool{i:02}")).collect(),
+                ),
+            )
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let events = plan
+            .run(RunCommand::new("use tool seven"))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RunEvent::Completed)),
+            "{events:?}"
+        );
+        assert_eq!(plan.catalog().exposure(), catalog::Exposure::Full);
+        assert_eq!(calls.lock().unwrap().as_slice(), ["ext__wide__tool07"]);
+        for request in requests.lock().unwrap().iter() {
+            let names = tool_names(request);
+            assert_eq!(names.len(), 40);
+            assert!(names.iter().all(|name| name.starts_with("ext__wide__")));
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_exposure_preserves_catalog_schema_bounds() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let host = WideHost::new(2);
+        let calls = Arc::clone(&host.calls);
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![
+                    vec![
+                        ("ext__wide__tool01", "{}".to_owned()),
+                        ("ext__wide__tool00", "{}".to_owned()),
+                    ],
+                    Vec::new(),
+                ],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            let mut snapshot = plan::HostSnapshot::capture_blocking(Arc::new(host));
+            snapshot.catalog.tools[1].spec = qq_provider::ToolSpec::new(
+                "ext__wide__tool01",
+                "Oversized tool",
+                serde_json::json!({"description": "x".repeat(16 * 1024)}),
+            );
+            plan::CompiledAgentPlan::compile_blocking(
+                plan::AgentProfile::embedded(&runtime, workspace)
+                    .with_host(snapshot)
+                    .with_exposed_tools(vec![
+                        "ext__wide__tool00".to_owned(),
+                        "ext__wide__tool01".to_owned(),
+                    ]),
+            )
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            plan.catalog().names().collect::<Vec<_>>(),
+            ["ext__wide__tool00"]
+        );
+        assert_eq!(plan.catalog().excluded().len(), 1);
+        assert!(matches!(
+            plan.catalog().excluded()[0].reason,
+            catalog::ExclusionReason::SchemaTooLarge { bytes } if bytes > 16 * 1024
+        ));
+        let events = plan
+            .run(RunCommand::new("use both tools"))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RunEvent::Completed)),
+            "{events:?}"
+        );
+        assert_eq!(calls.lock().unwrap().as_slice(), ["ext__wide__tool00"]);
+        let requests = requests.lock().unwrap();
+        assert_eq!(tool_names(&requests[0]), ["ext__wide__tool00"]);
+        assert!(requests[1].messages().last().unwrap().content().iter().any(|block| matches!(block,
+            ContentBlock::ToolResult { content, is_error: true, .. } if content.contains("unknown tool")
+        )));
+    }
+
+    #[tokio::test]
+    async fn explicit_external_exposure_with_a_selector_remains_progressive() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let host = WideHost::new(40);
+        let calls = Arc::clone(&host.calls);
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![
+                    vec![
+                        (
+                            catalog::SELECT_TOOLS_TOOL,
+                            r#"{"query":"deploy service","limit":1}"#.to_owned(),
+                        ),
+                        ("ext__wide__tool07", "{}".to_owned()),
+                    ],
+                    Vec::new(),
+                ],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap()
+        .with_tool_host(Arc::new(host));
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            let mut names: Vec<_> = (0..40).map(|i| format!("ext__wide__tool{i:02}")).collect();
+            names.push(catalog::SELECT_TOOLS_TOOL.to_owned());
+            plan::CompiledAgentPlan::compile_blocking(
+                plan::AgentProfile::embedded(&runtime, workspace).with_exposed_tools(names),
+            )
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let events = plan
+            .run(RunCommand::new("use tool seven"))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RunEvent::Completed)),
+            "{events:?}"
+        );
+        assert_eq!(plan.catalog().exposure(), catalog::Exposure::Progressive);
+        assert_eq!(calls.lock().unwrap().as_slice(), ["ext__wide__tool07"]);
+        let requests = requests.lock().unwrap();
+        assert_eq!(tool_names(&requests[0]), [catalog::SELECT_TOOLS_TOOL]);
+        assert_eq!(
+            tool_names(&requests[1]),
+            [catalog::SELECT_TOOLS_TOOL, "ext__wide__tool07"]
+        );
     }
 
     #[tokio::test]

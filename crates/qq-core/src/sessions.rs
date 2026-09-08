@@ -5795,6 +5795,17 @@ fn read_published_events(
     limit: u16,
 ) -> Result<Vec<Arc<feed::PublishedEvent>>, SessionRuntimeError> {
     ensure_workspace(connection, workspace_id)?;
+    read_published_event_page(connection, workspace_id, after, limit)
+}
+
+/// Reads a page after workspace validation, including when attachment and
+/// catch-up share a store job.
+fn read_published_event_page(
+    connection: &mut Connection,
+    workspace_id: WorkspaceId,
+    after: u64,
+    limit: u16,
+) -> Result<Vec<Arc<feed::PublishedEvent>>, SessionRuntimeError> {
     let mut statement = connection
         .prepare_cached(
             "SELECT envelope_json FROM events
@@ -7341,6 +7352,8 @@ fn validate_model_selection(model: &ModelSelection) -> Result<(), SessionRuntime
 /// runtime's in-memory maps clean without extra plumbing: cancellation
 /// senders and pending approvals exist only for claimed (executing) runs and
 /// are removed when the run finishes, so a deletable session can have none.
+/// Owned history also stays until every owning ancestor run has settled: an
+/// ancestor may still need the descendant's spend for its child receipt.
 ///
 /// The session's rows in the `events` log are deliberately kept. Workspace
 /// cursors promise a gapless `previous + 1` sequence to subscribers (and the
@@ -7387,6 +7400,33 @@ fn delete_idle_session(
         || queued_prompts != 0
         || unfinished
     {
+        return Err(SessionRuntimeError::SessionActive);
+    }
+    let owner_active: bool = transaction
+        .query_row(
+            "WITH RECURSIVE owners(run_id, depth) AS (
+                 SELECT owner_run_id, 1 FROM sessions
+                 WHERE id = ?1 AND owner_run_id IS NOT NULL
+                 UNION ALL
+                 SELECT ancestor.owner_run_id, owners.depth + 1
+                 FROM owners JOIN runs owner ON owner.id = owners.run_id
+                 JOIN sessions ancestor ON ancestor.id = owner.session_id
+                 WHERE ancestor.owner_run_id IS NOT NULL AND owners.depth < ?2
+             )
+             SELECT EXISTS(
+                 SELECT 1 FROM owners
+                 LEFT JOIN runs owner ON owner.id = owners.run_id
+                 LEFT JOIN sessions ancestor ON ancestor.id = owner.session_id
+                 WHERE owner.id IS NULL OR ancestor.id IS NULL
+                     OR owner.status NOT IN
+                         ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted')
+                     OR (owners.depth = ?2 AND ancestor.owner_run_id IS NOT NULL)
+             )",
+            params![session_id.to_string(), MAX_CHILD_DEPTH],
+            |row| row.get(0),
+        )
+        .map_err(|_| SessionRuntimeError::Persistence)?;
+    if owner_active {
         return Err(SessionRuntimeError::SessionActive);
     }
     let parent_id = session_parent(transaction, session_id)?;
@@ -7443,12 +7483,12 @@ fn ensure_workspace(
     workspace_id: WorkspaceId,
 ) -> Result<(), SessionRuntimeError> {
     let found = connection
-        .query_row(
-            "SELECT 1 FROM workspaces WHERE id = ?1",
-            [workspace_id.to_string()],
-            |_| Ok(()),
-        )
-        .optional()
+        .prepare_cached("SELECT 1 FROM workspaces WHERE id = ?1")
+        .and_then(|mut statement| {
+            statement
+                .query_row([workspace_id.to_string()], |_| Ok(()))
+                .optional()
+        })
         .map_err(|_| SessionRuntimeError::Persistence)?;
     found.ok_or(SessionRuntimeError::WorkspaceNotFound)
 }
@@ -15683,6 +15723,169 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn unknown_workspace_subscription_churn_retains_no_feeds() {
+        let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
+        let before = harness.runtime.inner.store.retained_feeds();
+        for _ in 0..256 {
+            let workspace_id = WorkspaceId::generate().unwrap();
+            let mut events = harness
+                .runtime
+                .subscribe_published(SubscribeRequest {
+                    workspace_id,
+                    after: EventCursor {
+                        store_id: harness.runtime.inner.store.store_id(),
+                        workspace_id,
+                        sequence: 0,
+                    },
+                })
+                .unwrap();
+            assert_eq!(harness.runtime.inner.store.retained_feeds(), before);
+            assert_eq!(
+                events.next().await.unwrap().unwrap_err(),
+                SessionRuntimeError::WorkspaceNotFound
+            );
+            drop(events);
+            assert_eq!(harness.runtime.inner.store.retained_feeds(), before);
+        }
+        harness.runtime.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnected_subscribers_release_the_feed_and_replay_missed_commits() {
+        let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
+        assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+        let request = SubscribeRequest {
+            workspace_id: harness.workspace_id,
+            after: EventCursor {
+                store_id: harness.runtime.inner.store.store_id(),
+                workspace_id: harness.workspace_id,
+                sequence: 0,
+            },
+        };
+        let mut first = harness.runtime.subscribe_published(request).unwrap();
+        let mut second = harness.runtime.subscribe_published(request).unwrap();
+        assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+        let initial = first.next().await.unwrap().unwrap();
+        assert_eq!(second.next().await.unwrap().unwrap().json, initial.json);
+        assert_eq!(harness.runtime.inner.store.retained_feeds(), 1);
+        drop(first);
+        let created = create_session(&harness.runtime, harness.workspace_id, None).await;
+        let live = second.next().await.unwrap().unwrap();
+        assert_eq!(live.envelope.cursor, created.committed_through);
+        drop(second);
+        assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+
+        let missed = create_session(&harness.runtime, harness.workspace_id, None).await;
+        assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+        let mut restarted = harness.runtime.subscribe_published(request).unwrap();
+        assert_eq!(restarted.next().await.unwrap().unwrap().json, initial.json);
+        let newest = create_session(&harness.runtime, harness.workspace_id, None).await;
+        for cursor in [
+            created.committed_through,
+            missed.committed_through,
+            newest.committed_through,
+        ] {
+            assert_eq!(
+                restarted.next().await.unwrap().unwrap().envelope.cursor,
+                cursor
+            );
+        }
+        drop(restarted);
+        assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+        harness.runtime.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn canceled_feed_attachment_releases_queued_and_unreceived_replies() {
+        for cancel_before_reply in [true, false] {
+            let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
+            let (entered, waiting) = oneshot::channel();
+            let (release, blocked) = std::sync::mpsc::channel();
+            let store = harness.runtime.inner.store.clone();
+            let hold = tokio::spawn(async move {
+                store
+                    .call(Priority::Control, move |_| {
+                        let _ = entered.send(());
+                        blocked
+                            .recv_timeout(Duration::from_secs(5))
+                            .map_err(|_| SessionRuntimeError::Unavailable)
+                    })
+                    .await
+            });
+            waiting.await.unwrap();
+            let mut events = Some(
+                harness
+                    .runtime
+                    .subscribe_published(SubscribeRequest {
+                        workspace_id: harness.workspace_id,
+                        after: EventCursor {
+                            store_id: harness.runtime.inner.store.store_id(),
+                            workspace_id: harness.workspace_id,
+                            sequence: 0,
+                        },
+                    })
+                    .unwrap(),
+            );
+            assert!(events.as_mut().unwrap().next().now_or_never().is_none());
+            assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+            if cancel_before_reply {
+                drop(events.take());
+            }
+            release.send(()).unwrap();
+            hold.await.unwrap().unwrap();
+            // The FIFO control barrier also waits for the attachment reply.
+            harness
+                .runtime
+                .inner
+                .store
+                .call(Priority::Control, |_| Ok(()))
+                .await
+                .unwrap();
+            assert_eq!(
+                harness.runtime.inner.store.retained_feeds(),
+                usize::from(!cancel_before_reply)
+            );
+            drop(events);
+            assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+            harness.runtime.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_initial_replay_releases_its_feed() {
+        let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
+        harness
+            .runtime
+            .inner
+            .store
+            .call(Priority::Control, |connection| {
+                connection
+                    .execute("UPDATE events SET envelope_json = 'invalid'", [])
+                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut events = harness
+            .runtime
+            .subscribe_published(SubscribeRequest {
+                workspace_id: harness.workspace_id,
+                after: EventCursor {
+                    store_id: harness.runtime.inner.store.store_id(),
+                    workspace_id: harness.workspace_id,
+                    sequence: 0,
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            events.next().await.unwrap().unwrap_err(),
+            SessionRuntimeError::Persistence
+        );
+        assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+        harness.runtime.close().await.unwrap();
+    }
+
     /// D1: a subscriber that keeps up performs one catch-up read when it
     /// attaches and no store read per event afterwards; the live and replayed
     /// deliveries are byte-identical and the sequence is contiguous.
@@ -15770,6 +15973,113 @@ mod tests {
             }
         }
         let _ = run_id;
+        harness.runtime.shutdown().await.unwrap();
+    }
+
+    /// A reconnecting subscriber whose cursor is still inside the workspace
+    /// ring attaches and catches up from memory: no store job, byte-identical
+    /// events, contiguous sequence. A cursor the ring does not cover, or a
+    /// workspace with no ring, still reads SQLite.
+    #[tokio::test]
+    async fn a_warm_reconnect_replays_from_the_ring_without_a_store_read() {
+        let harness = scripted_runs_harness(ApprovalMode::Ask, vec![Vec::new()]).await;
+        let request = SubscribeRequest {
+            workspace_id: harness.workspace_id,
+            after: EventCursor {
+                store_id: harness.runtime.inner.store.store_id(),
+                workspace_id: harness.workspace_id,
+                sequence: 0,
+            },
+        };
+        // Cold attach: one store read validates the workspace and pages.
+        let mut anchor = harness.runtime.subscribe_published(request).unwrap();
+        let created = anchor.next().await.unwrap().unwrap();
+        assert_eq!(harness.runtime.inner.store.catch_up_reads(), 1);
+
+        // Sequence 0 predates the ring, so a second cold subscriber at the
+        // same cursor still goes to SQLite even though a ring now exists.
+        let mut cold = harness.runtime.subscribe_published(request).unwrap();
+        assert_eq!(cold.next().await.unwrap().unwrap().json, created.json);
+        assert_eq!(harness.runtime.inner.store.catch_up_reads(), 2);
+        drop(cold);
+
+        // The anchor's short page seeded the tail: a subscriber exactly at
+        // the tail attaches warm and observes the run entirely from memory.
+        let mut warm_at_tail = harness
+            .runtime
+            .subscribe_published(SubscribeRequest {
+                after: created.envelope.cursor,
+                ..request
+            })
+            .unwrap();
+        assert!(warm_at_tail.next().now_or_never().is_none());
+        assert_eq!(harness.runtime.inner.store.catch_up_reads(), 2);
+
+        submit_prompt(&harness, "hello").await;
+        let mut live = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), anchor.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let finished = matches!(event.envelope.event, SessionEvent::RunFinished { .. });
+            live.push(event);
+            if finished {
+                break;
+            }
+        }
+        assert!(live.len() >= 4, "{} events", live.len());
+        for expected in &live {
+            let observed = warm_at_tail.next().await.unwrap().unwrap();
+            assert_eq!(observed.json, expected.json);
+        }
+        assert_eq!(harness.runtime.inner.store.catch_up_reads(), 2);
+
+        // Reconnect from the middle of the run: the page comes from the ring.
+        let midpoint = live[1].envelope.cursor;
+        let mut reconnect = harness
+            .runtime
+            .subscribe_published(SubscribeRequest {
+                after: midpoint,
+                ..request
+            })
+            .unwrap();
+        for expected in &live[2..] {
+            let observed = reconnect.next().await.unwrap().unwrap();
+            assert_eq!(observed.envelope.cursor, expected.envelope.cursor);
+            assert_eq!(
+                observed.json, expected.json,
+                "ring bytes equal stored bytes"
+            );
+        }
+        assert!(reconnect.next().now_or_never().is_none());
+        assert_eq!(
+            harness.runtime.inner.store.catch_up_reads(),
+            2,
+            "warm reconnects must not read the store"
+        );
+
+        // The ring vouches only for cursors it covers.
+        let mut cold_again = harness.runtime.subscribe_published(request).unwrap();
+        assert_eq!(cold_again.next().await.unwrap().unwrap().json, created.json);
+        assert_eq!(harness.runtime.inner.store.catch_up_reads(), 3);
+
+        drop((anchor, warm_at_tail, reconnect, cold_again));
+        assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
+        // With no ring, the same cursor is cold once more.
+        let mut after_release = harness
+            .runtime
+            .subscribe_published(SubscribeRequest {
+                after: midpoint,
+                ..request
+            })
+            .unwrap();
+        assert_eq!(
+            after_release.next().await.unwrap().unwrap().envelope.cursor,
+            live[2].envelope.cursor
+        );
+        assert_eq!(harness.runtime.inner.store.catch_up_reads(), 4);
         harness.runtime.shutdown().await.unwrap();
     }
 
@@ -24894,7 +25204,6 @@ mod tests {
 
     /// Like `collect_through_finished`, with a deadline generous enough for
     /// tests that spawn real child processes.
-    #[cfg(unix)]
     async fn collect_through_finished_generously(
         events: &mut SessionEventStream,
     ) -> Vec<SessionEventEnvelope> {
@@ -28139,7 +28448,7 @@ mod tests {
                 task: "research".to_owned(),
                 model: None,
                 authority: qq_protocol::ChildAuthority::Read,
-                limits: RunLimits::default(),
+                budget: crate::runtime::ChildBudget::default(),
                 purpose: SessionPurpose::Task,
             },
         ));
@@ -28747,7 +29056,8 @@ mod tests {
                 ApprovalMode::Full,
             )
             .await;
-            let (applying, release) = crate::tools::hold_tool_apply(harness._directory.path());
+            let workspace = std::fs::canonicalize(harness._directory.path()).unwrap();
+            let (applying, release) = crate::tools::hold_tool_apply(&workspace);
             let parent_run =
                 submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
             tokio::time::timeout(Duration::from_secs(2), applying)
@@ -29160,17 +29470,18 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn unconfirmed_shell_exit_prevents_session_continuation() {
         let (mut harness, requests) = write_child_harness(
             Arc::new(StaticTextProvider),
-            vec![("shell", r#"{"command":"sleep 300"}"#.to_owned())],
+            vec![("shell", crate::tools::PANIC_SHELL_ARGUMENTS.to_owned())],
             None,
             ApprovalMode::Full,
         )
         .await;
-        let spawned = crate::tools::observe_shell_spawn(harness._directory.path(), true);
+        let workspace = std::fs::canonicalize(harness._directory.path()).unwrap();
+        let spawned = crate::tools::observe_shell_spawn(&workspace, true);
         let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "run a command").await;
         let pid = tokio::time::timeout(Duration::from_secs(2), spawned)
             .await
@@ -29199,14 +29510,7 @@ mod tests {
             "an unconfirmed reap must fail the session runtime closed"
         );
         assert_eq!(requests.lock().unwrap().len(), 1);
-        let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while rustix::process::test_kill_process(pid).is_ok() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the process guard must still send termination on panic");
+        crate::tools::assert_panicked_process_exits(pid).await;
     }
 
     #[tokio::test]
@@ -29544,6 +29848,7 @@ mod tests {
         inner: QueueLoader,
         max_depth: u16,
         write_children: bool,
+        pricing: Option<ModelPricing>,
     }
 
     impl RuntimeLoader for DepthLoader {
@@ -29561,6 +29866,7 @@ mod tests {
                 max_depth: self.max_depth,
                 write_children: self.write_children,
             };
+            let pricing = self.pricing.clone();
             Box::pin(async move {
                 Runtime::with_provider(provider, "test-model", 256)
                     .map(|runtime| {
@@ -29569,7 +29875,7 @@ mod tests {
                                 .with_spawn_model_routes(spawn_model_routes)
                                 .with_delegation(delegation),
                             &request.workspace,
-                            None,
+                            pricing,
                         )
                     })
                     .map_err(|error| RuntimeLoadError {
@@ -29594,6 +29900,7 @@ mod tests {
                 },
                 max_depth,
                 write_children: false,
+                pricing: None,
             }),
             max_active_runs,
         )
@@ -29611,6 +29918,457 @@ mod tests {
             )],
             turn: StdMutex::new(0),
         })
+    }
+
+    struct MeteredDelegationProvider {
+        inner: ScriptedRunProvider,
+        usage: Vec<Option<TokenUsage>>,
+        turn: AtomicUsize,
+    }
+
+    impl Provider for MeteredDelegationProvider {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+            let usage = self.usage[turn.min(self.usage.len() - 1)].map(provider_usage_of);
+            Box::pin(self.inner.stream(request).map(move |event| match event {
+                Ok(qq_provider::ProviderEvent::Completed { .. }) => {
+                    Ok(qq_provider::ProviderEvent::Completed { usage })
+                }
+                event => event,
+            }))
+        }
+    }
+
+    fn metered_delegation(
+        script: Vec<(&'static str, String)>,
+        usage: Vec<Option<TokenUsage>>,
+    ) -> Arc<dyn Provider> {
+        Arc::new(MeteredDelegationProvider {
+            inner: ScriptedRunProvider {
+                requests: Arc::new(StdMutex::new(Vec::new())),
+                script,
+                turn: StdMutex::new(0),
+            },
+            usage,
+            turn: AtomicUsize::new(0),
+        })
+    }
+
+    async fn nested_spend_harness(grandchild_usage: Option<TokenUsage>) -> SpawnHarness {
+        let parent = metered_delegation(
+            vec![
+                (
+                    "spawn_agent",
+                    r#"{"task":"survey","model":"test/child"}"#.to_owned(),
+                ),
+                (
+                    "spawn_agent",
+                    r#"{"task":"follow up","model":"test/later-child"}"#.to_owned(),
+                ),
+            ],
+            vec![Some(usage(1, 0))],
+        );
+        let child = metered_delegation(
+            vec![(
+                "spawn_agent",
+                r#"{"task":"look deeper","model":"test/grandchild"}"#.to_owned(),
+            )],
+            // A later user prompt in this same child session spends 900 tokens;
+            // it is not part of the original delegated run's receipt.
+            vec![Some(usage(1, 0)), Some(usage(1, 0)), Some(usage(900, 0))],
+        );
+        spawn_harness_with_loader(
+            Arc::new(DepthLoader {
+                inner: QueueLoader {
+                    routed: vec![
+                        ("test/child", child),
+                        (
+                            "test/grandchild",
+                            metered_delegation(Vec::new(), vec![grandchild_usage]),
+                        ),
+                        (
+                            "test/later-child",
+                            metered_delegation(Vec::new(), vec![Some(usage(10, 0))]),
+                        ),
+                    ],
+                    queue: StdMutex::new(vec![parent]),
+                },
+                max_depth: 2,
+                write_children: false,
+                pricing: Some(budget_pricing()),
+            }),
+            8,
+        )
+        .await
+    }
+
+    async fn submit_nested_budget(harness: &SpawnHarness, cost_bound: bool) -> RunId {
+        let receipt = harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id: harness.session_id,
+                    input: vec![InputPart::text("delegate within the budget")],
+                    limits: RunLimits {
+                        max_total_tokens: Some(100),
+                        max_cost_usd_nanos: cost_bound.then_some(100_000),
+                        ..RunLimits::default()
+                    },
+                    correlation: Correlation::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
+            panic!("expected queued root");
+        };
+        run_id
+    }
+
+    #[tokio::test]
+    async fn nested_spend_reduces_the_next_root_child_allowance() {
+        let mut harness = nested_spend_harness(Some(usage(60, 0))).await;
+        let root = submit_nested_budget(&harness, true).await;
+        let observed = collect_until_run_finished(&mut harness.events, root).await;
+        let later = observed
+            .iter()
+            .find_map(|event| match &event.event {
+                SessionEvent::PromptQueued { session, run, .. }
+                    if session.model.as_deref() == Some("test/later-child") =>
+                {
+                    Some(run)
+                }
+                _ => None,
+            })
+            .expect("the remaining budget can fund a later child");
+        let limits = later.limits.as_ref().unwrap();
+        // Two root turns, two child turns, and the 60-token grandchild.
+        assert_eq!(limits.max_total_tokens, Some(36));
+        assert_eq!(limits.max_cost_usd_nanos, Some(36_000));
+        assert!(matches!(
+            finished_outcome(&observed, root),
+            Some(RunOutcome::Completed)
+        ));
+        harness.runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn owned_spend_session_deletion_waits_for_the_root_receipt() {
+        let mut harness = nested_spend_harness(Some(usage(60, 0))).await;
+        let (delivered, release) = subagents::hold_child_delivery(harness.session_id);
+        let root = submit_nested_budget(&harness, true).await;
+        tokio::time::timeout(Duration::from_secs(2), delivered)
+            .await
+            .unwrap()
+            .unwrap();
+        let grandchild = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = harness.events.next().await.unwrap().unwrap();
+                if let SessionEvent::SessionCreated { session } = event.event
+                    && session.model.as_deref() == Some("test/grandchild")
+                {
+                    break session.id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let deletion = harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::DeleteSession {
+                    session_id: grandchild,
+                },
+            )
+            .await;
+        assert_eq!(deletion, Err(SessionRuntimeError::SessionActive));
+        release.send(()).unwrap();
+        collect_until_run_finished(&mut harness.events, root).await;
+        let deleted = harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::DeleteSession {
+                    session_id: grandchild,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(deleted.outcome, CommandOutcome::SessionDeleted { session_id } if session_id == grandchild)
+        );
+        harness.runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn owned_spend_session_deletion_checks_followup_owners_after_the_original_root_finished()
+    {
+        let parent = metered_delegation(
+            vec![(
+                "spawn_agent",
+                r#"{"task":"initial task","model":"test/child"}"#.to_owned(),
+            )],
+            vec![Some(usage(1, 0))],
+        );
+        let mut harness = depth_harness(
+            vec![
+                (
+                    "test/child",
+                    metered_delegation(Vec::new(), vec![Some(usage(1, 0))]),
+                ),
+                (
+                    "test/followup",
+                    metered_delegation(
+                        vec![(
+                            "spawn_agent",
+                            r#"{"task":"followup work","model":"test/grandchild"}"#.to_owned(),
+                        )],
+                        vec![Some(usage(1, 0))],
+                    ),
+                ),
+                (
+                    "test/grandchild",
+                    metered_delegation(Vec::new(), vec![Some(usage(10, 0))]),
+                ),
+            ],
+            vec![parent],
+            2,
+            8,
+        )
+        .await;
+        let root = submit_prompt_to(&harness.runtime, harness.session_id, "initial root").await;
+        let observed = collect_until_run_finished(&mut harness.events, root).await;
+        let child = observed
+            .iter()
+            .find_map(|event| match &event.event {
+                SessionEvent::SessionCreated { session }
+                    if session.parent_id == Some(harness.session_id) =>
+                {
+                    Some(session.id)
+                }
+                _ => None,
+            })
+            .unwrap();
+        harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SetSessionModel {
+                    session_id: child,
+                    model: ModelSelection {
+                        model: Some("test/followup".to_owned()),
+                        max_output_tokens: Some(256),
+                        organization: None,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let (delivered, release) = subagents::hold_child_delivery(child);
+        let followup = submit_prompt_to(&harness.runtime, child, "new unrelated task").await;
+        tokio::time::timeout(Duration::from_secs(2), delivered)
+            .await
+            .unwrap()
+            .unwrap();
+        let grandchild = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = harness.events.next().await.unwrap().unwrap();
+                if let SessionEvent::SessionCreated { session } = event.event
+                    && session.parent_id == Some(child)
+                {
+                    break session.id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            harness
+                .runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::DeleteSession {
+                        session_id: grandchild
+                    }
+                )
+                .await,
+            Err(SessionRuntimeError::SessionActive),
+        );
+        release.send(()).unwrap();
+        collect_until_run_finished(&mut harness.events, followup).await;
+        harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::DeleteSession {
+                    session_id: grandchild,
+                },
+            )
+            .await
+            .unwrap();
+        harness.runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn nested_unknown_spend_prevents_a_later_root_child() {
+        for cost_bound in [false, true] {
+            let mut harness = nested_spend_harness(None).await;
+            let root = submit_nested_budget(&harness, cost_bound).await;
+            let observed = collect_until_run_finished(&mut harness.events, root).await;
+            assert!(!observed.iter().any(|event| matches!(
+                &event.event,
+                SessionEvent::SessionCreated { session }
+                    if session.model.as_deref() == Some("test/later-child")
+            )));
+            assert_eq!(
+                exhaustion_of(&observed, root).limit,
+                if cost_bound {
+                    BudgetLimitKind::CostUnknown
+                } else {
+                    BudgetLimitKind::TokensUnknown
+                }
+            );
+            harness.runtime.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_spend_receipt_excludes_later_prompts_in_owned_sessions() {
+        let mut harness = nested_spend_harness(Some(usage(60, 0))).await;
+        let root = submit_nested_budget(&harness, true).await;
+        let observed = collect_until_run_finished(&mut harness.events, root).await;
+        let (session_id, delegated_run) = observed
+            .iter()
+            .find_map(|event| match &event.event {
+                SessionEvent::PromptQueued { session, run, .. }
+                    if session.model.as_deref() == Some("test/child") =>
+                {
+                    Some((session.id, run.id))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let followup = submit_prompt_to(&harness.runtime, session_id, "unrelated follow-up").await;
+        collect_until_run_finished(&mut harness.events, followup).await;
+        let (_, spend) = harness
+            .runtime
+            .inner
+            .store
+            .run_outcome(delegated_run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(spend.usage, Some(usage(62, 0)));
+        assert_eq!(spend.cost_usd_nanos, Some(62_000));
+        harness.runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn nested_spend_receipt_rejects_incomplete_or_overflowing_descendants() {
+        for corruption in ["missing_identity", "unfinished", "usage_overflow"] {
+            let mut harness = nested_spend_harness(Some(usage(60, 0))).await;
+            let root = submit_nested_budget(&harness, true).await;
+            let observed = collect_until_run_finished(&mut harness.events, root).await;
+            let grandchild = observed
+                .iter()
+                .find_map(|event| match &event.event {
+                    SessionEvent::PromptQueued { session, run, .. }
+                        if session.model.as_deref() == Some("test/grandchild") =>
+                    {
+                        Some(run.id)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            harness
+                .runtime
+                .inner
+                .store
+                .call(Priority::Control, move |connection| {
+                    let sql = match corruption {
+                        "missing_identity" => {
+                            "DELETE FROM messages WHERE run_id = ?1 AND ordinal = 1"
+                        }
+                        "unfinished" => {
+                            "UPDATE runs SET outcome_json = NULL, status = 'running' WHERE id = ?1"
+                        }
+                        "usage_overflow" => "UPDATE runs SET usage_json = ?2 WHERE id = ?1",
+                        _ => unreachable!(),
+                    };
+                    let changed = if corruption == "usage_overflow" {
+                        connection.execute(
+                            sql,
+                            params![
+                                grandchild.to_string(),
+                                serde_json::to_string(&usage(u64::MAX, 0)).unwrap()
+                            ],
+                        )
+                    } else {
+                        connection.execute(sql, [grandchild.to_string()])
+                    };
+                    changed
+                        .map(|_| ())
+                        .map_err(|_| SessionRuntimeError::Persistence)
+                })
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    harness.runtime.inner.store.run_outcome(root).await,
+                    Err(SessionRuntimeError::AccountingUnavailable)
+                ),
+                "{corruption}"
+            );
+            // Restore the simulated unfinished row before ordinary shutdown.
+            if corruption == "unfinished" {
+                harness.runtime.inner.store.call(Priority::Control, move |connection| {
+                    connection.execute(
+                        "UPDATE runs SET status = 'completed', outcome_json = ?2 WHERE id = ?1",
+                        params![grandchild.to_string(), serde_json::to_string(&RunOutcome::Completed).unwrap()],
+                    ).map(|_| ()).map_err(|_| SessionRuntimeError::Persistence)
+                }).await.unwrap();
+            }
+            harness.runtime.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_spend_receipt_distinguishes_never_started_from_unknown_cancelled_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("sessions.sqlite3"))
+            .await
+            .unwrap();
+        let (_, _, parent) = create_claimed_parent(&store, directory.path()).await;
+        let created = store
+            .create_child_run(
+                &parent,
+                ToolCallId::generate().unwrap(),
+                ChildAdmission {
+                    model: parent.model.clone(),
+                    task: "never starts".to_owned(),
+                    limits: RunLimits::default(),
+                    approval_mode: ApprovalMode::ReadOnly,
+                    purpose: SessionPurpose::Task,
+                },
+            )
+            .await
+            .unwrap();
+        store.cancel_child_run(created.run_id).await.unwrap();
+        assert_eq!(
+            store.run_outcome(created.run_id).await.unwrap(),
+            Some((RunOutcome::Cancelled, SpawnAgentSpend::NONE))
+        );
+        store
+            .finish_run(&parent, RunOutcome::Cancelled, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.run_outcome(parent.run_id).await.unwrap(),
+            Some((RunOutcome::Cancelled, SpawnAgentSpend::UNKNOWN))
+        );
+        store.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -30590,6 +31348,555 @@ mod tests {
                         message: error.to_string(),
                     })
             })
+        }
+    }
+
+    struct ChildBudgetLoader {
+        inner: QueueLoader,
+        write_children: bool,
+        audit: crate::runtime::AuditMode,
+    }
+
+    impl RuntimeLoader for ChildBudgetLoader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let provider = self.inner.next_provider(&request);
+            let write_children = self.write_children;
+            let audit = self.audit;
+            let mut pricing = budget_pricing();
+            if request.model.model.as_deref() == Some("test/child") {
+                pricing.input_usd_nanos_per_token = 2_000;
+                pricing.output_usd_nanos_per_token = 3_000;
+            }
+            Box::pin(async move {
+                Runtime::with_provider(provider, "test-model", 256)
+                    .map(|runtime| {
+                        loaded_runtime(
+                            runtime
+                                .with_delegation(qq_protocol::DelegationRoster {
+                                    roster: vec![qq_protocol::DelegationRosterEntry {
+                                        route: "test/child".to_owned(),
+                                        role: qq_protocol::DelegationRole::Balanced,
+                                        note: None,
+                                        context_window: None,
+                                        max_output_tokens: None,
+                                        relative_cost_permille: None,
+                                    }],
+                                    default_role: qq_protocol::DelegationRole::Balanced,
+                                    max_depth: 1,
+                                    write_children,
+                                })
+                                .with_audit(crate::runtime::AuditPolicy {
+                                    mode: audit,
+                                    max_revisions: 1,
+                                    role: qq_protocol::DelegationRole::Balanced,
+                                }),
+                            &request.workspace,
+                            Some(pricing),
+                        )
+                    })
+                    .map_err(|error| RuntimeLoadError {
+                        kind: RunFailureKind::Configuration,
+                        message: error.to_string(),
+                    })
+            })
+        }
+    }
+
+    struct UsageProvider {
+        inner: Arc<dyn Provider>,
+        usage: Option<TokenUsage>,
+    }
+
+    impl Provider for UsageProvider {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            let usage = self.usage.map(provider_usage_of);
+            Box::pin(self.inner.stream(request).map(move |event| match event {
+                Ok(qq_provider::ProviderEvent::Completed { .. }) => {
+                    Ok(qq_provider::ProviderEvent::Completed { usage })
+                }
+                event => event,
+            }))
+        }
+    }
+
+    async fn child_budget_harness(
+        parent: Arc<dyn Provider>,
+        child: Arc<dyn Provider>,
+        write_children: bool,
+        audit: crate::runtime::AuditMode,
+    ) -> SpawnHarness {
+        let directory = tempfile::tempdir().unwrap();
+        let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"))
+                .with_approval_reviewer(reviewer),
+            Arc::new(ChildBudgetLoader {
+                inner: QueueLoader {
+                    routed: vec![("test/child", child)],
+                    queue: StdMutex::new(vec![parent]),
+                },
+                write_children,
+                audit,
+            }),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created =
+            create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("expected session")
+        };
+        let events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+        SpawnHarness {
+            _directory: directory,
+            runtime,
+            workspace_id,
+            session_id,
+            events,
+        }
+    }
+
+    async fn submit_child_budget_prompt(harness: &SpawnHarness, limits: RunLimits) -> RunId {
+        let receipt = harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id: harness.session_id,
+                    input: vec![InputPart::text("delegate")],
+                    limits,
+                    correlation: Correlation::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
+            panic!("expected run")
+        };
+        run_id
+    }
+
+    #[tokio::test]
+    async fn sequential_children_receive_the_remaining_budget_after_prior_spend() {
+        let parent: Arc<dyn Provider> = Arc::new(UsageProvider {
+            inner: Arc::new(MultiSpawnProvider {
+                requests: Arc::new(StdMutex::new(Vec::new())),
+                spawns: 2,
+                arguments: |_| {
+                    r#"{"task":"research","model":"test/child","authority":"write"}"#.to_owned()
+                },
+                turn: StdMutex::new(0),
+            }),
+            usage: Some(usage(10, 5)),
+        });
+        let child: Arc<dyn Provider> = Arc::new(UsageProvider {
+            inner: Arc::new(StaticTextProvider),
+            usage: Some(usage(30, 10)),
+        });
+        let mut harness =
+            child_budget_harness(parent, child, true, crate::runtime::AuditMode::Off).await;
+        let run_id = submit_child_budget_prompt(
+            &harness,
+            RunLimits {
+                max_total_tokens: Some(200),
+                max_input_tokens: Some(150),
+                max_output_tokens: Some(100),
+                max_cost_usd_nanos: Some(300_000),
+                ..RunLimits::default()
+            },
+        )
+        .await;
+        let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+        harness.runtime.shutdown().await.unwrap();
+        let admitted: Vec<_> = observed
+            .iter()
+            .filter_map(|event| match &event.event {
+                SessionEvent::PromptQueued { session, run, .. }
+                    if session.parent_id == Some(harness.session_id) =>
+                {
+                    run.limits.as_deref()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(admitted.len(), 2);
+        assert_eq!(admitted[0].max_total_tokens, Some(185));
+        assert_eq!(admitted[0].max_cost_usd_nanos, Some(280_000));
+        assert_eq!(admitted[1].max_total_tokens, Some(145));
+        assert_eq!(admitted[1].max_input_tokens, Some(110));
+        assert_eq!(admitted[1].max_output_tokens, Some(85));
+        assert_eq!(admitted[1].max_cost_usd_nanos, Some(190_000));
+        assert_eq!(
+            finished_outcome(&observed, run_id),
+            Some(RunOutcome::Completed)
+        );
+    }
+
+    #[tokio::test]
+    async fn budgeted_read_children_refuse_exhausted_or_unknown_remainders() {
+        for (limits, child_usage, family) in [
+            (
+                RunLimits {
+                    max_total_tokens: Some(40),
+                    ..RunLimits::default()
+                },
+                Some(usage(30, 10)),
+                "total_tokens",
+            ),
+            (
+                RunLimits {
+                    max_input_tokens: Some(30),
+                    ..RunLimits::default()
+                },
+                Some(usage(30, 10)),
+                "input_tokens",
+            ),
+            (
+                RunLimits {
+                    max_output_tokens: Some(10),
+                    ..RunLimits::default()
+                },
+                Some(usage(30, 10)),
+                "output_tokens",
+            ),
+            (
+                RunLimits {
+                    max_cost_usd_nanos: Some(90_000),
+                    ..RunLimits::default()
+                },
+                Some(usage(30, 10)),
+                "cost",
+            ),
+            (
+                RunLimits {
+                    max_total_tokens: Some(100),
+                    ..RunLimits::default()
+                },
+                None,
+                "tokens_unknown",
+            ),
+            (
+                RunLimits {
+                    max_cost_usd_nanos: Some(100_000),
+                    ..RunLimits::default()
+                },
+                None,
+                "cost_unknown",
+            ),
+        ] {
+            for concurrency in [1, MAX_CONCURRENT_CHILDREN_PER_RUN] {
+                let parent: Arc<dyn Provider> = Arc::new(UsageProvider {
+                    inner: Arc::new(MultiSpawnProvider {
+                        requests: Arc::new(StdMutex::new(Vec::new())),
+                        spawns: 2,
+                        arguments: |_| r#"{"task":"research","model":"test/child"}"#.to_owned(),
+                        turn: StdMutex::new(0),
+                    }),
+                    usage: Some(usage(0, 0)),
+                });
+                let child: Arc<dyn Provider> = Arc::new(UsageProvider {
+                    inner: Arc::new(StaticTextProvider),
+                    usage: child_usage,
+                });
+                let mut harness =
+                    child_budget_harness(parent, child, false, crate::runtime::AuditMode::Off)
+                        .await;
+                let run_id = submit_child_budget_prompt(
+                    &harness,
+                    RunLimits {
+                        max_concurrent_children: Some(concurrency),
+                        ..limits
+                    },
+                )
+                .await;
+                let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+                harness.runtime.shutdown().await.unwrap();
+                let children = observed.iter().filter(|event| matches!(&event.event,
+                    SessionEvent::SessionCreated { session } if session.parent_id == Some(harness.session_id))).count();
+                assert_eq!(children, 1, "{family}, concurrency={concurrency}");
+                assert!(observed.iter().any(|event| matches!(&event.event,
+                    SessionEvent::ToolCallFinished { tool_call, .. } if tool_call.run_id == run_id && tool_call.is_error
+                        && tool_call.result.as_deref().is_some_and(|result| result.contains("cannot afford a sub-agent") && result.contains(family)))));
+                if child_usage.is_none() {
+                    assert_eq!(exhaustion_of(&observed, run_id).limit.as_str(), family);
+                } else {
+                    assert_eq!(
+                        finished_outcome(&observed, run_id),
+                        Some(RunOutcome::Completed),
+                        "exact spend leaves no allowance for another child but may complete"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn audits_inherit_remaining_limits_and_charge_inclusive_spend_once() {
+        let parent: Arc<dyn Provider> = Arc::new(UsageProvider {
+            inner: Arc::new(StaticTextProvider),
+            usage: Some(usage(10, 0)),
+        });
+        let auditor: Arc<dyn Provider> = Arc::new(UsageProvider {
+            inner: Arc::new(VerdictProvider {
+                reply: r#"{"verdict":"pass"}"#,
+                requests: Arc::new(StdMutex::new(Vec::new())),
+            }),
+            usage: Some(usage(5, 0)),
+        });
+        let mut harness =
+            child_budget_harness(parent, auditor, false, crate::runtime::AuditMode::Always).await;
+        let run_id = submit_child_budget_prompt(
+            &harness,
+            RunLimits {
+                max_total_tokens: Some(100),
+                max_cost_usd_nanos: Some(100_000),
+                ..RunLimits::default()
+            },
+        )
+        .await;
+        let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+        harness.runtime.shutdown().await.unwrap();
+        let admitted = observed
+            .iter()
+            .find_map(|event| match &event.event {
+                SessionEvent::PromptQueued { session, run, .. }
+                    if session.purpose == SessionPurpose::Audit =>
+                {
+                    Some(run)
+                }
+                _ => None,
+            })
+            .expect("auditor was admitted");
+        let limits = admitted
+            .limits
+            .as_deref()
+            .expect("auditor must inherit a budget");
+        assert_eq!(limits.max_total_tokens, Some(90));
+        assert_eq!(limits.max_cost_usd_nanos, Some(90_000));
+        let snapshot = harness
+            .runtime
+            .snapshot(SnapshotRequest {
+                workspace_id: harness.workspace_id,
+                focused_session_id: Some(harness.session_id),
+                include_sessions: Vec::new(),
+                session_limit: 8,
+                message_limit: 8,
+            })
+            .await
+            .unwrap();
+        let totals = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == harness.session_id)
+            .unwrap()
+            .accounting
+            .unwrap();
+        assert_eq!(totals.direct.usage, Some(usage(10, 0)));
+        assert_eq!(totals.direct.estimated_cost_usd_nanos, Some(10_000));
+        assert_eq!(totals.inclusive.usage, Some(usage(15, 0)));
+        assert_eq!(totals.inclusive.estimated_cost_usd_nanos, Some(20_000));
+        assert_eq!(
+            finished_outcome(&observed, run_id),
+            Some(RunOutcome::Completed)
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_overspend_and_unknown_spend_exhaust_the_parent() {
+        for (limits, auditor_usage, expected) in [
+            (
+                RunLimits {
+                    max_total_tokens: Some(100),
+                    ..RunLimits::default()
+                },
+                Some(usage(95, 0)),
+                BudgetLimitKind::TotalTokens,
+            ),
+            (
+                RunLimits {
+                    max_input_tokens: Some(100),
+                    ..RunLimits::default()
+                },
+                Some(usage(95, 0)),
+                BudgetLimitKind::InputTokens,
+            ),
+            (
+                RunLimits {
+                    max_output_tokens: Some(100),
+                    ..RunLimits::default()
+                },
+                Some(usage(0, 96)),
+                BudgetLimitKind::OutputTokens,
+            ),
+            (
+                RunLimits {
+                    max_cost_usd_nanos: Some(100_000),
+                    ..RunLimits::default()
+                },
+                Some(usage(45, 0)),
+                BudgetLimitKind::Cost,
+            ),
+            (
+                RunLimits {
+                    max_total_tokens: Some(100),
+                    ..RunLimits::default()
+                },
+                None,
+                BudgetLimitKind::TokensUnknown,
+            ),
+            (
+                RunLimits {
+                    max_cost_usd_nanos: Some(100_000),
+                    ..RunLimits::default()
+                },
+                None,
+                BudgetLimitKind::CostUnknown,
+            ),
+        ] {
+            let parent: Arc<dyn Provider> = Arc::new(UsageProvider {
+                inner: Arc::new(StaticTextProvider),
+                usage: Some(usage(10, 5)),
+            });
+            let auditor: Arc<dyn Provider> = Arc::new(UsageProvider {
+                inner: Arc::new(VerdictProvider {
+                    reply: r#"{"verdict":"pass"}"#,
+                    requests: Arc::new(StdMutex::new(Vec::new())),
+                }),
+                usage: auditor_usage,
+            });
+            let mut harness =
+                child_budget_harness(parent, auditor, false, crate::runtime::AuditMode::Always)
+                    .await;
+            let run_id = submit_child_budget_prompt(&harness, limits).await;
+            let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+            harness.runtime.shutdown().await.unwrap();
+            assert_eq!(exhaustion_of(&observed, run_id).limit, expected);
+            let (_, audits) = audit_events(&observed, run_id);
+            assert_eq!(
+                audits.len(),
+                1,
+                "the audit receipt is durable before exhaustion"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn child_duration_is_reduced_by_preflight_and_prior_children() {
+        struct HeldPreflight {
+            inner: ChildBudgetLoader,
+            first: AtomicBool,
+            entered: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+        }
+        impl RuntimeLoader for HeldPreflight {
+            fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+                let hold = request.model.model.as_deref() == Some("test/child")
+                    && !self.first.swap(true, Ordering::SeqCst);
+                let loaded = self.inner.load(request);
+                let entered = Arc::clone(&self.entered);
+                let release = Arc::clone(&self.release);
+                Box::pin(async move {
+                    if hold {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                    loaded.await
+                })
+            }
+        }
+        for expires_during_preflight in [false, true] {
+            let parent: Arc<dyn Provider> = Arc::new(UsageProvider {
+                inner: Arc::new(MultiSpawnProvider {
+                    requests: Arc::new(StdMutex::new(Vec::new())),
+                    spawns: 2,
+                    arguments: |_| r#"{"task":"research","model":"test/child"}"#.to_owned(),
+                    turn: StdMutex::new(0),
+                }),
+                usage: Some(usage(0, 0)),
+            });
+            let child: Arc<dyn Provider> = Arc::new(UsageProvider {
+                inner: Arc::new(StaticTextProvider),
+                usage: Some(usage(0, 0)),
+            });
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let mut harness = spawn_harness_with_loader(
+                Arc::new(HeldPreflight {
+                    inner: ChildBudgetLoader {
+                        inner: QueueLoader {
+                            routed: vec![("test/child", child)],
+                            queue: StdMutex::new(vec![parent]),
+                        },
+                        write_children: false,
+                        audit: crate::runtime::AuditMode::Off,
+                    },
+                    first: AtomicBool::new(false),
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                }),
+                8,
+            )
+            .await;
+            let run_id = submit_child_budget_prompt(
+                &harness,
+                RunLimits {
+                    max_total_tokens: Some(1000),
+                    max_duration_ms: Some(if expires_during_preflight { 500 } else { 5000 }),
+                    ..RunLimits::default()
+                },
+            )
+            .await;
+            tokio::time::timeout(Duration::from_secs(2), entered.notified())
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(if expires_during_preflight {
+                600
+            } else {
+                200
+            }))
+            .await;
+            release.notify_one();
+            let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+            harness.runtime.shutdown().await.unwrap();
+            let durations: Vec<_> = observed
+                .iter()
+                .filter_map(|event| match &event.event {
+                    SessionEvent::PromptQueued { session, run, .. }
+                        if session.parent_id == Some(harness.session_id) =>
+                    {
+                        run.limits
+                            .as_ref()
+                            .and_then(|limits| limits.max_duration_ms)
+                    }
+                    _ => None,
+                })
+                .collect();
+            if expires_during_preflight {
+                assert!(
+                    durations.is_empty(),
+                    "expired preparation must not create a child"
+                );
+                assert_eq!(
+                    exhaustion_of(&observed, run_id).limit,
+                    BudgetLimitKind::Duration
+                );
+                continue;
+            }
+            assert_eq!(durations.len(), 2);
+            assert!(
+                durations[0] <= 4800,
+                "preflight time cannot restart the child's duration: {durations:?}"
+            );
+            assert!(
+                durations[1] < durations[0],
+                "later children inherit the remaining clock: {durations:?}"
+            );
         }
     }
 

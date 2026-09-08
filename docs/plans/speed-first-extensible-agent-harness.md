@@ -10,11 +10,25 @@ service-gap gate. A follow-up source audit and peer review on 2026-09-04
 identified correctness gaps in shipped child, cache, feed, and context-source
 behavior. Both H23 ownership slices are implemented and locally validated on
 Linux, with focused latency/resource receipts under Phase 5a; native Windows
-teardown remains unqualified. **Next implementation slice: H24 remaining child
-budgets at each admission.**
+teardown remains unqualified. H24 remaining child budgets and owned-descendant
+accounting are implemented 2026-09-05; receipt under Phase 5a. H25 and H26 are
+implemented and correctness-validated on Linux on 2026-09-06; their receipt
+below retains the pending performance qualification. A fresh focused shell
+comparison passes its noise and regression gates. The corrected fan-out
+comparison and same-binary control both fail tail gates. The full version-4
+H0 comparison ran on 2026-09-07 and its four original failures are resolved
+by the feed hot-path redesign and release profile (receipt under Phase 5a);
+remaining tail-gate failures reproduce in the same-binary control and require
+a quiet-host acceptance run. Native Windows teardown passed in CI.
+**Active boundary: close Phase 5a qualification. Later-phase work is saved
+in isolated branches and paused until this phase is assessed.**
 H23–H26 precede Phase 6; H27–H28 join its early correctness work. Phases 6–9
 remain proposed, with H20 moved ahead of H18 and H19 conditional on decoder
-measurements.
+measurements. A hosting-boundary review on 2026-09-05 added the
+headless-contract tranche HC1–HC4 (Phase 5b), whose CLI and compilation work
+may run in a parallel worktree alongside Phase 6. HC3 adds opt-in runtime
+validation and repair before the mechanical split. Its design authority is
+[`docs/design/headless-contract.md`](../design/headless-contract.md).
 
 This plan defines how QQ becomes an extremely fast, lightweight, customizable
 agent harness that can serve as the backend for products such as a
@@ -49,8 +63,8 @@ projects:
 The compiled plan, backend protocol, and initial extension lanes have shipped.
 The remaining priorities, in order, are:
 
-1. Repair supervised-child ownership and budget admission, live credential
-   binding, and workspace-feed retention (H23–H26).
+1. Repair live credential binding and workspace-feed retention (H25–H26),
+   and retain H23's native Windows qualification gap.
 2. Finish control admission and the carried output-fairness gate (H20).
 3. Repair settlement, active-plan accounting, context-source admission and
    identity, and pack revalidation (behavioral H21, H27–H28, correctness H22).
@@ -84,6 +98,9 @@ It does not silently override the design documents.
 - [`run-snapshots.md`](./run-snapshots.md) owns reversible mutating-run state.
 - [`lsp-diagnostics.md`](./lsp-diagnostics.md) owns diagnostics integration and
   its MCP-first validation path.
+- [`docs/design/headless-contract.md`](../design/headless-contract.md) owns
+  the `qq run` JSONL/exit contract, the supervisor boundary, and the HC1–HC4
+  gap list implemented as Phase 5b here.
 
 Shipped plans (TUI rearchitecture and refinement, compaction, model-reviewed
 approvals, read-only sub-agents, provider rearchitecture, client parity) were
@@ -289,7 +306,7 @@ first-class capability.
 | Streaming text, reasoning, and tools | Yes | Yes | Yes | Yes | Yes |
 | Cancellation | Yes | Yes | Yes | Yes | Yes |
 | Active-run steering | Partial: queue or cancel | Yes | Partial | Yes | Queued at model boundary |
-| Structured output | No first-class contract | Yes | Yes | Provider-dependent | Yes |
+| Structured output | No first-class contract (HC3 proposed) | Yes | Yes | Provider-dependent | Yes |
 | Multimodal input | Text-only protocol | Images and media | Files and images | Images and vision | Native vision; SDK lacks images |
 | Bounded provider retries | Pre-stream only | Yes | Yes | Yes | Yes, with delivery certainty |
 | Durable sessions | SQLite authority | JSONL plus SQLite projection | SQLite; stronger V2 event store | Shipped synchronous JSONL | Checksummed framed event log |
@@ -1162,7 +1179,7 @@ The resulting work repairs existing contracts before further optimization:
 | H24 | Remaining child limits are captured once per tool turn and reused after earlier sequential children consume them. | Compute remaining cost, tokens, and duration at each sequential admission; reject an exhausted remainder. Test two children in one turn, including unknown spend. Record parallel-child reservation or permitted overshoot semantics explicitly without introducing a general scheduler. Owned by supervised-delegation D2. |
 | H25 | Same-file inline provider-secret changes can be discarded as equivalent plans. MCP registry keys also collapse differing inline bearer values before secrets are resolved. | Separate secret-free durable identity from live binding invalidation in both caches. Test same-path provider key/header rotation and two workspaces with differing inline MCP bearers; preserve active-run handles. Stored-credential rotation already works. Never hash or persist secrets to repair the key. |
 | H26 | Subscription allocates a retained workspace feed before validating workspace existence; rejected/disconnected arbitrary ids leave entries behind. | Validate before retaining feed state and bound or reclaim inactive entries, preserving attach-before-catch-up ordering. Test unknown-id churn, disconnect, and replay/live handoff. A standalone probe of unchanged `feed.rs` retained about 129 MiB after 4096 distinct subscribe/drop pairs with no surviving receivers; authenticated HTTP reachability was source-traced, not benchmarked. |
-| H27 | Same-key refresh removes the old generation before admission; active holders disappear from estimated-byte accounting, and a rejected replacement loses the old cache entry. | Account for superseded live generations and admit atomically. A probe with one entry and a 17682-byte budget retained two generations totaling 23651 estimated bytes. Test pinned same-key refresh, release/reclamation, and failed replacement preserving the prior generation. Runtime concurrency supplies an independent bound; this is a violated cache budget, not proof of unlimited runtime memory. |
+| H27 | Same-key refresh removes the old generation before admission; active holders disappear from estimated-byte accounting, and a rejected replacement loses the old cache entry. Equivalent-plan refresh can enlarge source evidence without admission; completed per-key compile guards remain retained. The request key also derives hashing/debug output over explicit configuration contents. | Account for superseded live generations and admit atomically, including equivalent-plan evidence growth and retained request keys. Reclaim completed per-key guards without allowing overlapping same-key compiles. Use private exact request equality with redacted diagnostics and no secret-content hashing. A probe with one entry and a 17682-byte budget retained two generations totaling 23651 estimated bytes. Test pinned same-key refresh, release/reclamation, failed replacement preserving the prior generation, source-evidence growth, and distinct-key churn. Runtime concurrency independently bounds active execution; it does not reclaim completed guards. |
 | H28 | A ninth context source, including a fail-closed source, is silently ignored. Source identity, version, budget, and failure policy are absent from the plan descriptor. | Reject excess registration with a typed capacity error before provider work; include immutable source descriptors in canonical plan identity with the required descriptor-version fixture update. Public-API probes reproduced both a skipped required source and equal digests for differing source identities/policies. |
 
 The review retained the single runtime, provider-owned retries, immutable plans,
@@ -1458,11 +1475,15 @@ credential-lease caching, MCP bounds, and provider prompt-cache determinism.
 | H21 | `RunIdentity`, `PersistenceFault`, one settlement path, `sessions.rs` split (D9) | H15–H17, H20 | `qq-core` |
 | H22 | Bundled cold-path and structural fixes: config/auth load, protocol boxing and limits, route tables, TUI index and tail | None | Per crate |
 | H23 | Supervised-child ownership across admission, overload, steering, and cleanup; implemented and validated on Linux, Windows qualification open | Supervised-delegation D4 | `qq-core` |
-| H24 | Recompute remaining child budgets at sequential admission; define parallel fanout semantics | Supervised-delegation D2 | `qq-core` |
+| H24 | Implemented: fresh child/audit admission, finite-spend serialization, owned-descendant receipts | Supervised-delegation D2 | `qq-core` |
 | H25 | Live provider/MCP credential binding invalidation without secret-bearing durable identities | H2, H7 | Root, auth, MCP wiring |
 | H26 | Bounded workspace-feed admission and lifecycle | H15 | `qq-core`, server fixtures |
 | H27 | Active-generation accounting and atomic cache refresh admission | H2 | Root |
 | H28 | Explicit context-source capacity rejection and immutable source identity | H8 | Core, protocol |
+| HC1 | Headless admission and plumbing: `--correlation`, exclusive `--session` resume, shared `u32` turn limits, model-less `config check` | H3, H26 | Root, config, core, protocol |
+| HC2 | Positive tool exposure through optional `policy.exposed_tools`; existing grants unchanged | H6, H13 | Config, core plan |
+| HC3 | Typed final output: `--output-schema`, bounded repair turns, `final_output` on `outcome` and `RunFinished` | H3, HC1 | Protocol, core, root |
+| HC4 | Headless golden fixtures per `PROTOCOL_VERSION` and compatibility statement | HC1–HC3 | Protocol tests, docs |
 | H10 | First real OS process-sandbox adapter | R6, platform threat model | Core tools, root |
 | H11 | Optional ACP/OpenAI compatibility facade | H4, real consumer | Adapter in existing surface owner |
 | H12 | Crash, load, security, quality, and performance qualification | All shipped tasks and required R milestones | Workspace-wide |
@@ -1765,7 +1786,499 @@ The earlier sample's elevated candidate tails did not recur; RSS p95 increased
 focused comparison, not the complete H0 suite. The carried H20 output-gap
 target of at most 20 ms is still unmet (candidate p95 29 ms). Native Windows
 teardown remains an explicit platform qualification gap. H24–H26 still precede
-Phase 6; H24 is the next implementation slice.
+Phase 6; the following receipt records H24's subsequent repair.
+
+#### H24 Receipt — 2026-09-05
+
+Implemented in `qq-core`, with the owning D2 contract and architecture updated:
+
+- Recompute cost and total/input/output-token allowance after each settled child.
+  A finite spend bound serializes a child-containing turn; unbounded and
+  duration-only read fanout keep their existing concurrency. Exhausted or unknown
+  remainders refuse the next child by the affected family. Observed provider
+  turns and reserved final responses may still overshoot their allowance.
+- Carry the parent's absolute deadline through preparation, admission queues,
+  and execution. Expired preflight creates no child; store creation already
+  accepted may commit after expiry and is then cancelled under its retained
+  owner. Cleanup may finish after the deadline.
+- Include exact owned descendant runs in child spend receipts, excluding later
+  user prompts in child sessions. Propagate unknown usage/cost independently;
+  fail closed on missing, incomplete, malformed, or overflowing accounting.
+  Preserve owned session history until every owning ancestor run settles.
+- Give auditors the same remaining allowance, recheck budget exhaustion before
+  parent completion, and record audit spend once in inclusive accounting.
+  Positive known remainders are required only for imposed families; no minimum
+  audit-cost prediction or general reservation scheduler was added.
+
+Regression coverage includes two same-turn children, finite read fanout at one
+and three configured child slots, all spend families, unknown/zero allowance,
+preflight duration expiry, nested descendant spend, follow-up exclusion,
+accounting corruption/overflow, owner-held deletion, and audit inheritance and
+charge-once exhaustion. The two H23 injected-panic fixtures now distinguish a
+terminated unreaped child from a live process using nonblocking wait on their
+exact owned PID, after asserting production reports unconfirmed cleanup. Normal
+successful-drain assertions are unchanged.
+
+Local Linux validation: workspace tests (1170 passed, 3 ignored), formatting,
+strict all-target/all-feature workspace Clippy, and workspace build pass. Tests
+used local loopback access with this host's NO_COLOR unset. Independent Spec and
+Standards reviews found no remaining implementation blocker. No wire protocol,
+descriptor, persistence schema, or dependency changes; one benchmark target was
+added using existing dependencies.
+
+Focused measurement: 30 alternating baseline/candidate pairs for each latency
+case, plus three pairs of a barrier-controlled read-overlap case. Baseline is
+`f0a1c2e`; candidate code is `79d3211`. Both use the same new
+`cargo bench -p qq-core --bench child_admission` fixture. Compiled plans and
+store setup are outside its timer; providers add no artificial latency. Release
+workers ran on the same Linux host/filesystem without concurrent review builds
+or tests. Values are nearest-rank median / p95 in milliseconds, except RSS in MiB.
+
+| Durable delegation case | Baseline | H24 |
+| --- | ---: | ---: |
+| Four unbounded read children | 145.60 / 154.51 | 147.05 / 171.95 |
+| Four read children with finite cost/token caps | 145.22 / 260.90 | 150.96 / 294.95 |
+| Child plus grandchild | 98.23 / 124.88 | 99.03 / 109.31 |
+
+Finite-spend fanout has one active child at a time, versus three at baseline;
+its median is 4.0% higher in this fixture. Real provider latency can increase
+the serialization cost. Ordinary unbounded read fanout retains three active
+children, and the barrier case confirms three overlapping descendant provider
+streams in both versions. Every sample verifies expected child count, depth,
+and inclusive spend. These new latency cases are descriptive measurements,
+not an established numerical regression gate or proof of speed improvement.
+
+| Existing default-path metric | Baseline | H24 |
+| --- | ---: | ---: |
+| Eight-stream completion | 272.80 / 292.07 | 269.95 / 298.37 |
+| Control call latency upper bound | 19.00 / 22.46 | 18.86 / 21.57 |
+| Cancellation to finished | 26.00 / 29.28 | 25.72 / 28.73 |
+| Maximum output service gap | 23.00 / 26.00 | 23.00 / 26.00 |
+| Eight-stream peak temporary RSS | 8.41 / 9.30 | 8.65 / 10.09 |
+| One-MiB shell-output completion | 222.65 / 509.77 | 219.79 / 469.56 |
+| Shell peak temporary RSS | 3.74 / 3.88 | 4.03 / 4.21 |
+
+The eight-stream comparison passes existing relative, absolute, and noise
+gates. All shell relative/absolute p95 checks pass, but the shell latency
+noise check fails: median absolute deviation is 50.49% / 57.08% of the baseline /
+candidate median, above the 50% gate. Both arms rose together from about 90 ms
+to 200–500 ms during measurement; subsequent host I/O pressure was high. This
+supports an interference hypothesis, not a code-regression conclusion. The
+original noisy series is retained and does not qualify shell latency.
+
+A bounded 60-second follow-up recorded 13 I/O-pressure snapshots and found no
+stable low-pressure interval (at most 5% stall); final some/full 10-second
+pressure was 29.21% / 27.46%. No repeat was run and no samples were discarded.
+Shell latency qualification remains open for a stable host; code, correctness,
+and streaming checks above are complete. Raw paired reports, binary hashes,
+pressure observations, and verification logs are retained locally under
+`target/qq-perf/h24-2026-09-05/` (untracked generated evidence).
+
+This is not complete H0 qualification. H20's at-most-20-ms output service-gap
+target remains unmet (candidate p95 26 ms), and H23 native Windows teardown
+remains unqualified. The subsequent H25–H26 receipt follows.
+
+#### H25–H26 Implementation And Qualification Receipt — 2026-09-06
+
+Production changes through `6d31ba0` implement both repairs. H25 separates
+secret-free durable identity from exact, redacted live provider/MCP bindings;
+old active plans keep their handles while same-path key/header/bearer changes
+compile new bindings. MCP eager connections start only after the second cache
+admission check. Configuration source evidence is captured before probes and
+reads, including permissions, explicit packs, and profile reloads, so a
+concurrent edit cannot certify an old snapshot as current. H27 still owns
+atomic replacement, retained-generation accounting, and key reclamation.
+
+H26 validates and attaches a workspace feed in one store job before catch-up.
+The receiver lease reclaims the feed after the final subscriber, including
+cancelled admission and failed reply delivery. Replay/lag transitions retain
+the lease and sequence deduplication; publishing into an inactive workspace
+does not allocate a feed.
+
+Independent architecture, correctness, and performance reviews found no
+remaining implementation blocker. Regression tests reproduce stale provider
+headers, duplicate eager MCP startup, pre-read source races, arbitrary-id
+feed retention, cancellation, and replay/live ordering. On the integrated
+production tree, the workspace suite passed **1194 tests, 3 ignored**;
+formatting, strict all-target/all-feature Clippy, and workspace build passed.
+These are local Linux checks, with no native Windows qualification claim.
+
+The focused release comparison used clean baseline production `b0a8ce2` and
+candidate `6d31ba0`, with exact copied worker hashes and source manifests.
+All 310 workers completed their correctness checks. Five cache-process pairs
+used 200 samples each; the remaining cases used 30 alternating process pairs.
+
+| Observation | Baseline | Candidate |
+| --- | ---: | ---: |
+| Cold `plan_for`, median of process medians | 208.192 µs | 203.533 µs |
+| Warm `plan_for`, median of process medians | 8.015 µs | 7.534 µs |
+| 4096 rejected subscriptions, median / p95 | 44.594 / 61.727 ms | 19.341 / 38.316 ms |
+| Retained RSS after churn, median | 135,016,448 B | 0 B (maximum 4096 B) |
+| Fresh attach/replay, 900 raw samples, median / p95 | 16.220 / 58.130 µs | 21.500 / 72.617 µs |
+| R4 eight-stream service gap, p95 | 35 ms | 28 ms |
+| Shell completion, median / p95 | 90.617 / 112.192 ms | 89.364 / 113.413 ms |
+
+Fresh attach/replay trades 14.487 µs at p95 for reclaimable ownership and has
+no separate numeric budget. All focused R4 relative, absolute, and noise
+gates passed, including shell latency; H20's stricter **≤20 ms** output-gap
+target remains unmet. This is not the full H0 qualification.
+
+The original fan-out comparison failed four relative gates: delivery p95 at
+1/8/32 subscribers increased 39.1%/29.7%/25.0%, and 8-subscriber acknowledgment
+increased 30.2%. Both arms also exceeded the 15 ms acknowledgment budget at
+32 subscribers. Those failures remain recorded; host variability does not
+waive them. Review found timed attachment assumptions and sequential terminal
+observation in the fixture. Commit `5b77fee` replaces them with a FIFO
+attachment barrier and concurrent observation, with two regression tests
+and all 47 xtask tests passing. H0 fixture version **4** and focused feed
+version **2** declare the measurement change. Both arms must be re-recorded
+with identical corrected fixtures. That comparison is now complete: 30
+interleaved A/B pairs and 30 same-binary A/A pairs, each worker contributing
+five raw samples per metric. All 120 workers passed correctness checks.
+
+| Corrected fan-out metric | Baseline p95 | Candidate p95 | A/B change | Same-binary A/A change |
+| --- | ---: | ---: | ---: | ---: |
+| Delivery, 1 subscriber | 6.904 ms | 6.975 ms | +1.02% | −27.39% |
+| Acknowledgment, 1 subscriber | 3.526 ms | 3.863 ms | +9.54% | −40.97% |
+| Delivery, 8 subscribers | 7.025 ms | 6.946 ms | −1.13% | −10.14% |
+| Acknowledgment, 8 subscribers | 3.801 ms | 4.859 ms | **+27.85%** | **+68.83%** |
+| Delivery, 32 subscribers | 6.478 ms | 8.177 ms | **+26.23%** | **+15.95%** |
+| Acknowledgment, 32 subscribers | 3.516 ms | 3.541 ms | +0.72% | **+35.33%** |
+
+The relative budget is 15%; bold values fail it. The corrected 32-subscriber
+acknowledgment passes its 15 ms absolute budget. A/B medians differ by
+−0.21% to +0.78%, and all MAD gates pass. The same-binary control failing
+both candidate tail failures establishes non-repeatable tail qualification
+in this recording; it neither waives the failures nor proves a production
+regression. No samples were removed. Full version-4 H0 baseline/candidate
+qualification and the native Windows teardown job remain required.
+
+H20's pre-change diagnostic baseline is captured separately (`91c32ca`,
+30 eight-stream and 30 controlled-saturation workers). Actual per-run output
+commit gap p95 is 37.624 ms. For each worker's largest gap, queued service
+has p95 31.171 ms; time between occupied store jobs has p95 0.045 ms and
+output reply-to-caller-resume p95 is 0.085 ms. Repeated preceding output
+commits dominate queue occupancy. These are instrumented attribution
+measurements, not shipping-build gates; their separately ranked percentiles
+must not be summed. They support H20 investigating bounded group formation
+under control pressure. The stricter ≤20 ms target remains owned by H20.
+
+#### Phase 5a Full H0 Comparison And Feed Hot-Path Receipt — 2026-09-07
+
+The full version-4 H0 comparison ran against pre-H23 baseline `cebd13b` with
+Phase 5a candidate `b5d94df` and failed four gates: minimal binary size
+56,091,752 B against the 56,000,000 B absolute limit; `cursor_replay_ns`
+p95 175.350 µs against 78.808 µs; fan-out delivery p95 at 1 and 32
+subscribers +26.6% and +43.9%. A bounded replay probe found no additional
+SQL, decoding, clones, or polls in the candidate, and both arms showed
+two-speed behavior within a single process, so the tail failures could not be
+attributed to H26. Symbol comparison of the two artifacts attributed most of
+the size growth to H23/H24 closures already on `main`, and found the shipped
+binary carried 12 MB of unstripped symbols with no release profile.
+
+Rather than widen budgets, the feed hot path was redesigned. The
+per-workspace `broadcast` channel is replaced by a bounded, sequence-indexed
+ring retained only while subscribed. A cursor the ring covers attaches and
+pages from memory with no store job; cold cursors validate and page from
+SQLite in one control job that joins the ring before any later commit. Live
+reads are cursor lookups, removing duplicate and gap handling. The ring is
+bounded by 1024 events and 256 KiB of retained encoding; a non-contiguous
+publish discards it rather than serve a hole. `Store::call` runs admission
+and settlement in one non-generic body behind a thin generic shim, and
+`ensure_workspace` uses the statement cache. The release profile now strips
+symbols and builds with one codegen unit and thin LTO. Fifteen feed and
+runtime regression tests cover warm and cold attach, tail seeding, lag
+redirection, byte and count eviction, contiguity, wake registration,
+last-subscriber release, and the drop/subscribe race.
+
+Deterministic results: minimal artifact 55,770,448 → 38,734,176 B (−30.5%),
+default artifact 67,845,536 → 45,479,728 B (−33.0%). The size budgets are
+tightened to 41,000,000 and 48,000,000 B so the reclaimed headroom cannot be
+spent silently. An in-process release probe of the exact `cursor_replay`
+shape (nine events, 2000 iterations) measured median 22.6 → 0.87 µs, p95
+38.2 → 1.7 µs, and 2001 → 1 store reads. In-process ring capacity change
+raised R4 peak temporary RSS by 2–4 MB before the byte bound; after it, all
+R4 RSS metrics are within +1%.
+
+Three full H0 recordings on the shared host (baseline, candidate, baseline)
+all produced fixture-version-4 reports with every correctness check passing.
+The `perf check` exit remains non-zero: the same-binary A/A pair failed five
+tail gates (all three fan-out acknowledgment tails, `long_stream`, and R4
+restart reconstruction) and each A/B pair failed two to four, with the set
+changing between runs and every failing metric showing identical medians and
+a 3.2/6.2 ms bimodal acknowledgment tail. Host I/O pressure `some avg10` was
+21–55% throughout. Candidate medians and p95 for `cursor_replay_ns`, all six
+fan-out metrics, and both original R4 RSS gates are at or below both
+baseline recordings. Tail qualification is therefore not repeatable on this
+host in this window, consistent with the earlier A/A finding; the failures
+are retained, not waived. The acceptance run must be repeated on a quiet
+host before the tranche is marked complete. The focused
+`feed_attach_replay` fixture subscribes from the workspace's initial cursor,
+which the ring never covers, so it measures the cold path on both arms and
+cannot gate the warm path; correcting that fixture is follow-up work.
+
+### Phase 5b — Headless Contract For Supervisors
+
+Status: proposed 2026-09-05. Design authority is
+[`docs/design/headless-contract.md`](../design/headless-contract.md), which
+records the current contract, the supervisor/QQ boundary, and the gaps this
+tranche closes. CLI parsing and schema compilation are cold-path work. HC1
+also changes startup ownership and shared limit types; HC3 adds opt-in core
+validation, repair turns, and durable output. Independent work may proceed in
+isolated worktrees alongside Phase 6, with coordinated integration through
+review. HC1 and HC2 are independent. HC3 follows HC1 and coordinates settlement
+and prompt identity with behavioral H21, H18, and H28; its behavioral changes
+land before the mechanical `sessions.rs` split. HC4 lands last and pins the whole.
+
+Motivation. A supervisor (batch runner, CI, evaluation harness, or hosted
+service) consumes `qq run` through argv, `QQ_CONFIG_CONTENT`, JSONL stdout,
+and the exit code. Today it must clamp `--max-turns` to `u16`, cannot stamp
+its own identifiers into QQ events, cannot resume a persisted session from
+the CLI, cannot narrow the tool catalog without editing configuration,
+receives the final answer as prose, and re-reads QQ source at every bump to
+confirm the record shapes. Each fix is generic: the same flags serve a
+developer scripting `qq run` locally and the Harbor evaluation adapter.
+
+Boundary rules for this tranche, restated from the design document:
+
+- no supervisor-only mode, no product vocabulary (tenant, release, ledger,
+  broker, billing) in flags, fields, or docs;
+- QQ acquires no new authority: no money, no isolation claims, no tenancy;
+- new JSONL fields are additive and optional; changed meaning or an expanded
+  shared limit range needs a `PROTOCOL_VERSION` bump and new fixtures; and
+- the default `qq run` path with none of the new flags preserves today's
+  application payload after normalizing run identity, timestamps, build
+  metadata, and declared version-field changes, checked by the HC4 fixtures.
+
+#### HC1 — Headless Plumbing
+
+Deliverables:
+
+- `--correlation KEY=VALUE` (repeatable) on `qq run`, validated through the
+  existing `Correlation::new` bounds (8 entries, 64/256-byte key/value,
+  2 KiB total), passed on `CreateSession`, and echoed as `correlation` in the
+  `trial` record. Duplicate keys and bound violations exit `2` before a
+  session exists.
+- `--session <SESSION_ID>` on `qq run`: establish exclusive ownership of the
+  store before constructing `SessionRuntime`, which performs recovery and
+  starts scheduling. A busy store exits `2` without opening the runtime or
+  altering active work. Then resolve the workspace, verify the session
+  belongs to it and is idle, and `SubmitPrompt` into it instead of
+  `CreateSession`. `--correlation` with `--session` is an argument error. A
+  running or missing session exits `2`. The `trial` record gains
+  `resumed: true`. Only after ownership is established may recovery mark
+  interrupted prior runs; resume never replays an uncertain side effect.
+  Combining `--session` with `--profile` follows the same rule as the server's
+  `SetSessionProfile`.
+- `--max-turns`, `RunLimits.max_model_turns`, the core turn counter, and the
+  `trial` record's `max_turns` widen together from `u16` to `u32`. The expanded
+  shared wire range requires a `PROTOCOL_VERSION` bump and compatibility
+  fixtures; this is not a CLI-only change.
+- `qq config check` accepts a document with no effective model. Model
+  selection is validated where it is consumed (`ask`, `run`, `serve`, TUI),
+  which already report `invalid_configuration`. `config show` prints `model:
+  <unset>`.
+
+Acceptance:
+
+- `qq run --correlation job=abc --correlation attempt=2` produces a `trial`
+  record and a workspace snapshot containing exactly those entries;
+  `--correlation` violating any bound exits `2` with no session row written.
+- `qq run --session <id>` against an idle persisted session appends a second
+  run to the same `session_id`, `trial.resumed == true`, and replay from
+  cursor 0 shows both runs in order; against a running session it exits `2`
+  and the running session is unaffected; against a foreign workspace's
+  session it exits `2`.
+- A two-process fixture holds a live run in a shared store while another
+  `qq run --session` attempts resume: the second exits `2` before recovery,
+  leaves the active run, preparing ownership, and events unchanged, and
+  cannot claim queued work. A crashed owner's store can be reopened and
+  recovered without replaying uncertain tools.
+- `--max-turns 70000` is accepted and enforced (fake provider, 70000 turns
+  not reached; a cap of 3 still settles `budget_exhausted` at turn 3).
+- `QQ_CONFIG_CONTENT='(version: 1)' qq config check` exits `0`;
+  `qq ask` under the same environment exits `2` with the existing "model must
+  be configured" message.
+- Historical limit records decode unchanged; boundary fixtures cover 65535,
+  65536, and 70000 with no counter truncation. The protocol version bumps for
+  the widened range; optional `trial` fields alone need no descriptor or
+  store-schema change. HC1 and HC3 may share a protocol bump only if their
+  wire changes integrate atomically; separate landings each retain their
+  required version and fixture changes.
+
+#### HC2 — Positive Tool Exposure
+
+Implementation receipt, 2026-09-06: `93ef6b8` adds the optional restriction
+without changing approval grants or the descriptor version. Configuration
+validates names and the 1024-name/duplicate bounds, intersects layers before
+trust-sensitive grants, and compilation intersects the result with the
+profile/pack catalog. An omitted selector makes admitted external tools
+directly callable under existing schema/catalog bounds.
+
+Genuine regression failures preceded the implementation. The local workspace
+suite passed 1207 tests (3 ignored), strict workspace Clippy, formatting, and
+workspace build. A subsequent independently requested oversized-tool
+execution regression passed separately, followed by strict core Clippy.
+Architecture and correctness reviewers reconciled namespace admission and
+typed catalog exclusions and closed their findings. The branch then rebased
+onto the Phase 5a fixture-version correction without production conflicts;
+combined integration and default-path H0 qualification remain pending.
+
+Compatibility interpretation: add `policy.exposed_tools` for catalog
+narrowing. Existing `policy.allow_tools` keeps its grant semantics and layer
+composition; managed `deny_tools` and `deny_shell_prefixes` keep filtering
+grants. Exposure does not grant execution authority, and grants cannot
+restore a tool excluded from the catalog.
+
+Deliverables:
+
+- Optional `policy.exposed_tools: [..]` in configuration. When present, the
+  effective catalog is the intersection of this list and the existing
+  profile/pack exposure. An absent field adds no restriction; an empty list
+  exposes no tools. Layers intersect (a narrower layer cannot widen),
+  matching `allowed_providers` composition. Existing managed grant denies
+  do not become catalog filters; profile/pack tool policy and the new explicit
+  exposure field own that behavior.
+- MCP names use the existing `mcp__<server>__<tool>` form; static built-ins
+  are named as today. `config check` validates exact static names and MCP
+  name syntax without requiring a model or discovering MCP tools. Plan
+  compilation validates discovered MCP-name membership among profile-admitted
+  servers before applying the exposure filter. Configured servers excluded
+  by the profile's MCP subset remain excluded without discovery. An unknown
+  namespace or missing member on an admitted server is a configuration error
+  before provider work. Known tools still pass ordinary schema/catalog bounds;
+  their existing typed exclusions remain visible and valid peers stay usable.
+- `qq run --profile <name>` is documented as the primary way a supervisor
+  selects a pre-compiled exposure; `--allow-tool` and `--allow-shell` keep
+  their existing grant semantics and are re-documented as *widening held
+  calls*, never as an allowlist.
+- The plan descriptor already digests the catalog; a change to the effective
+  exposure therefore changes its digest with no descriptor version change.
+  Different declarations that produce the same effective catalog need not
+  have different digests.
+
+Acceptance:
+
+- `exposed_tools: ["read_file", "search"]` under `--approval full` exposes
+  exactly two tools in the model request (fake provider asserts the schema
+  list); a call to `edit_file` returned by the fake provider is a tool error
+  ("unknown tool"), never an approval hold.
+- A global `exposed_tools` of five tools and a project `exposed_tools` of two
+  yield two; the project cannot re-add a globally excluded tool.
+- `exposed_tools: ["nonexistent"]` or malformed MCP names fail `config
+  check` naming the entry. A syntactically valid MCP name can pass model-less
+  `config check`; a name absent from the discovered catalog fails plan
+  compilation before provider work.
+- An absent `exposed_tools` preserves existing catalogs and grant behavior;
+  an empty list exposes no tools. Neither a grant nor a broader layer can
+  restore a tool excluded by profile/pack policy or an exposure intersection.
+- Approval matrix from H13 is unchanged for every exposed tool, including
+  existing `policy.allow_tools`, `policy.allow_shell_prefixes`, and managed
+  grant-deny fixtures.
+
+#### HC3 — Typed Final Output
+
+Deliverables:
+
+- `--output-schema <PATH>` on `qq run` (JSON Schema draft 2020-12 subset:
+  object/array/string/number/integer/boolean/null, `required`, `enum`,
+  `properties`, `items`, `additionalProperties: false`; anything else is
+  `invalid_configuration`). The schema is digested into the plan descriptor
+  (`DESCRIPTOR_VERSION` bump with fixture re-pin) and its text becomes part
+  of the system-prompt suffix so `RunPromptIdentity` reflects it.
+- Read and compile the schema once off Tokio workers into the immutable
+  plan. Bound the schema to 64 KiB, 32 nesting levels, and 4096 JSON values
+  (including enum values); reject excess before a session exists. Reject
+  all references, including `$ref`, and perform no network discovery or
+  external-reference fetches. Validation consumes the already bounded
+  assistant output. Each validation-error payload, including rendered
+  feedback or the durable result, is at most 8 KiB; the repair cap bounds
+  repeated feedback.
+- When present, the run's final assistant message must be a JSON document
+  satisfying the schema. On failure QQ appends a validation-error user turn
+  and retries up to `--output-repair-turns N` (0–8, default 2, counted against
+  all ordinary run budgets, including `max_model_turns`). The repair allowance
+  applies to the whole run and is not reset by audit revisions or steering.
+  Exhaustion settles `task_failed` with a typed
+  `final_output: { status: "invalid", errors: [..] }`.
+- `RunFinished` and the JSONL `outcome` gain an optional `final_output`
+  field: `{ status: "valid", value: <json> }`, `{ status: "invalid",
+  errors }`, or absent when no schema was given. Persist the result before
+  publishing `RunFinished`; replay reconstructs it unchanged. Protocol bump;
+  the server and client surface it without interpretation.
+- Validate the final answer after any audit revision, retaining D5's
+  existing bounded audit/revision lifecycle. Schema repairs cannot introduce
+  an additional audit loop. Cancellation and steering use the existing core
+  lifecycle; validation never turns an interrupted or exhausted run into a
+  successful typed result.
+- Providers with native structured-output support (OpenAI `response_format`,
+  Google `responseSchema`, Anthropic tool-forced JSON) may use it behind the
+  existing provider-neutral request; validation still runs in core because
+  provider guarantees are not uniform. No provider-name branch enters the
+  hot path; the capability is a compiled-plan field.
+
+Acceptance:
+
+- Fake provider returns valid JSON first try: `outcome.final_output.status
+  == "valid"`, exactly one model turn.
+- Fake provider returns prose then valid JSON: two turns, valid.
+- Fake provider returns prose three times with `--output-repair-turns 2`:
+  `task_failed`, `final_output.status == "invalid"`, three turns, exit `1`.
+- Repair turns count against `--max-turns`; `--max-turns 2` with two
+  failures settles `budget_exhausted`, not `task_failed`.
+- Token, cost, duration, and reserved final-response limits remain authoritative
+  during repair. Cancellation or steering during a repair request drains
+  through the ordinary ownership path; neither resets the repair allowance.
+- Audit revision followed by schema repair remains within both existing audit
+  bounds and the per-run repair bound; an invalid final answer cannot publish
+  a valid result. Replay retains the exact settled `final_output`, and a
+  persistence failure cannot publish it as durable.
+- An unsupported schema keyword or reference, schema byte/depth/node excess,
+  or repair count above 8 exits `2` before a session exists. Boundary fixtures
+  cover the accepted limits and error output remains at most 8 KiB.
+- Same prompt with and without a schema yields different
+  `AgentPlanDigest` and different `RunPromptIdentity`.
+- Golden `provider_encode` and `plan_compile` benches show no change on the
+  default (schema-less) path. Record enabled schema-compilation and validation
+  latency/allocation plus a deterministic repair trajectory before accepting
+  HC3; include the maximum schema and bounded error cases.
+
+#### HC4 — Golden Fixtures And Compatibility Statement
+
+Deliverables:
+
+- `crates/qq-protocol/tests/fixtures/headless/v<PROTOCOL_VERSION>/`
+  containing one `trial`, a representative `event` sequence (text, tool
+  call, child event, steering), and one `outcome` per status, generated by a
+  deterministic fake-provider run and checked in.
+- A test in the root package that runs `qq run --format jsonl` against the
+  fake provider and asserts byte equality with the fixtures after
+  normalizing ids, timestamps, `workspace_identity`, digests, and
+  `qq_version`/`qq_source_revision`. Each version's fixture asserts its exact
+  `protocol_version`; that field is not normalized within a version.
+- A test that decodes every fixture with `serde_json::Value` and asserts the
+  required-field set from `headless-contract.md` is present, so a supervisor
+  can copy the assertion.
+- The compatibility policy section of `headless-contract.md` is referenced
+  from `protocol.md` and `README.md`; `PROTOCOL_VERSION` bumps require a new
+  fixture directory and retain the previous one.
+
+Acceptance:
+
+- The fixture test fails when any record shape, field name, or `status`
+  string changes without a fixture update.
+- Across versions, the default-path fixture (no HC1–HC3 flags) preserves
+  application payload after the normalization above and declared version-field
+  changes. Assert those version changes separately and retain both fixture
+  versions; optional output fields remain absent without their flags.
+
+Phase 5b is complete when HC1–HC4 have their acceptance fixtures green,
+`headless-contract.md` has moved each gap row from "Intended" to "Shipped"
+with the commit, and the workspace gates pass. The default-path H0 regression
+gate remains required. HC3 additionally records its enabled compilation,
+validation, and repair measurements; the cold-path classification does not
+exempt opt-in runtime work from performance and resource acceptance.
+
 
 ### Phase 6 — Finish Fairness, Shrink Per-Run Work, And Consolidate
 
@@ -1798,7 +2311,8 @@ Deliverables:
 - `control_slots` admission and the removal of every `sleep(1 ms)` retry
   loop and store poll (D8);
 - `RunIdentity`, `EventContext` constructors, `RunSettlement`,
-  `PersistenceFault`, and the `sessions.rs` split as a separate commit (D9);
+  `PersistenceFault`, and the `sessions.rs` split as a separate commit after
+  HC3's behavioral changes (D9);
   and
 - the bundled fixes listed under H22.
 
@@ -1817,7 +2331,11 @@ Acceptance:
   the fake-provider stream-scaling ratio alone cannot qualify it. A documented
   no-change decision is acceptable when measurements show insufficient benefit;
 - active and superseded plan generations obey entry/byte limits; rejected
-  refresh leaves the previous cached generation intact;
+  refresh leaves the previous cached generation intact, including an
+  equivalent-plan refresh whose source evidence grows. Completed per-key
+  compile guards are reclaimed under distinct-key churn without admitting
+  concurrent same-key compiles; explicit configuration in request keys is
+  compared privately, redacted in diagnostics, and never hashed;
 - excess required context sources fail compilation explicitly, and changing
   source identity, version, budget, or fail policy changes the plan digest;
 - settling an already-settled run through any path is a no-op and every
@@ -2052,9 +2570,13 @@ The speed-first extensible backend is complete when:
 - product integrations remain clients of one durable QQ runtime.
 
 Until those conditions are met, the immediate implementation boundary is
-Phase 5a: H24 child budgets next, then H25–H26, with H23 native Windows
-qualification still open. Phase 6
+Phase 5a: qualify the implemented H25 live credential binding and H26
+workspace-feed lifecycle, with H23 native Windows qualification still open. Phase 6
 then starts with H20 and the early correctness repairs (behavioral H21,
 H27–H28, correctness H22), followed by H18, measured H19, and mechanical
-consolidation. Phase 5 shipped on 2026-09-04 with its output-service-gap gate
-still open. Plugin or marketplace work is not the next slice.
+consolidation. Independent Phase 5b (HC1–HC4) work may run in parallel
+worktrees from H26 onward. HC3's opt-in runtime changes coordinate with
+settlement and prompt identity and land before the mechanical split. Phase 5
+shipped on 2026-09-04 with its output-service-gap gate still open. Plugin or
+marketplace work is not the
+next slice.

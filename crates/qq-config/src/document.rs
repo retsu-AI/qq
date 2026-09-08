@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     marker::PhantomData,
-    path::PathBuf,
 };
 
 use ron::{Options, extensions::Extensions};
@@ -14,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     AgentProfileConfig, AuditConfig, AuditMode, AwsAuth, BedrockAuth, ConfigError, ConfigKey,
-    ConfigProvenance, ConfigSnapshot, Connection, DEFAULT_MAX_OUTPUT_TOKENS,
+    ConfigProvenance, ConfigSnapshot, ConfigSources, Connection, DEFAULT_MAX_OUTPUT_TOKENS,
     DEFAULT_MCP_CALL_TIMEOUT_SECONDS, DEFAULT_MCP_MAX_CONCURRENT_CALLS, DelegationConfig,
     DelegationEntry, DelegationRole, EffectivePolicy, HttpAccess, HttpCredential, InputModality,
     MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH, MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER,
@@ -442,6 +441,7 @@ impl GrantEntry {
 #[serde(default, deny_unknown_fields)]
 struct PolicyPatch {
     allowed_providers: Option<Vec<String>>,
+    exposed_tools: Option<Vec<String>>,
     denied_providers: Option<Vec<String>>,
     max_output_tokens: Option<u32>,
     require_https: Option<bool>,
@@ -971,6 +971,44 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
         origin: origin.clone(),
         message,
     };
+    if let Some(names) = &policy.exposed_tools {
+        if names.len() > 1024 {
+            return Err(invalid(
+                "policy field exposed_tools supports at most 1024 names".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for name in names {
+            if let Err(message) = validate_tool_grant_name(name) {
+                return Err(invalid(format!("policy field exposed_tools: {message}")));
+            }
+            // Configuration cannot depend on the runtime. A root contract
+            // test binds this fixed vocabulary to the actual static catalog.
+            if !matches!(
+                name.as_str(),
+                "read_file"
+                    | "list_dir"
+                    | "search"
+                    | "edit_file"
+                    | "write_file"
+                    | "shell"
+                    | "spawn_agent"
+                    | "search_history"
+                    | "select_tools"
+                    | "load_skill"
+            ) && !name.starts_with("mcp__")
+            {
+                return Err(invalid(format!(
+                    "policy field exposed_tools contains unknown tool {name:?}"
+                )));
+            }
+            if !unique.insert(name) {
+                return Err(invalid(format!(
+                    "policy field exposed_tools contains duplicate tool {name:?}"
+                )));
+            }
+        }
+    }
     for (field, values) in [
         ("allowed_providers", policy.allowed_providers.as_ref()),
         ("denied_providers", policy.denied_providers.as_ref()),
@@ -1251,6 +1289,23 @@ impl MergeState {
         );
         if document.max_output_tokens.is_present() {
             self.provenance.max_output_tokens = Some(source.clone());
+        }
+        // Narrowing exposure adds no authority, even when another field in
+        // this document still requires workspace trust.
+        if let Some(incoming) = document
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.exposed_tools.as_ref())
+        {
+            let incoming: BTreeSet<_> = incoming.iter().cloned().collect();
+            self.policy.exposed_tools = Some(match &self.policy.exposed_tools {
+                Some(current) => current
+                    .iter()
+                    .filter(|name| incoming.contains(*name))
+                    .cloned()
+                    .collect(),
+                None => incoming.into_iter().collect(),
+            });
         }
         if !sensitive {
             return;
@@ -1662,7 +1717,7 @@ impl MergeState {
     pub(super) fn finish(
         mut self,
         reports: Vec<SourceReport>,
-        probed_paths: Vec<PathBuf>,
+        sources: ConfigSources,
     ) -> Result<ConfigSnapshot, ConfigError> {
         // Packs contribute beneath the configuration: their MCP servers join
         // where the configuration declared none of that name, and their
@@ -1895,7 +1950,7 @@ impl MergeState {
             grants,
             reports,
             provenance: self.provenance,
-            probed_paths,
+            sources,
         })
     }
 }

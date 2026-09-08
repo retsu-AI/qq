@@ -105,6 +105,15 @@ thiserror.workspace = true
 tokio.workspace = true
 webbrowser.workspace = true
 
+[profile.release]
+# The shipped binary is size- and latency-gated (`benchmarks/perf`). Symbols
+# are stripped because panics print locations, not backtraces, in release;
+# one codegen unit with thin LTO lets LLVM inline across the store/feed hot
+# path and drop unreferenced monomorphs.
+strip = "symbols"
+codegen-units = 1
+lto = "thin"
+
 [features]
 # Feature manifests for the shipped binary. `default` is the full profile with
 # every supported provider family. The minimal embedding profile is

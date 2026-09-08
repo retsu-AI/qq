@@ -528,6 +528,16 @@ file users already edit — no hidden allowlist store, no second syntax.
 
 ### Workspace Grant Configuration
 
+Catalog exposure is configured separately with optional
+`policy.exposed_tools: ["read_file", "search"]`. Lists intersect across
+layers and with the selected profile/pack policy; absent adds no restriction
+and `[]` removes all tools. At most 1024 distinct exact names may appear in
+one declaration. Built-in names and MCP syntax are checked during config
+loading, and admitted MCP tool membership is checked during compilation.
+Restricting exposure grants no authority and needs no trust approval.
+Neither approval grants nor `--approval full` restore an excluded tool.
+Supervisors select the profile using `qq run --profile <name>`.
+
 Grants live in the `policy` section of the ordinary layered documents.
 Any non-remote source may declare the two grant shapes; the constraint
 fields stay managed-only:

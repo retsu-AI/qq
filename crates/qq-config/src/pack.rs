@@ -322,6 +322,7 @@ pub(crate) fn load_explicit(
     kind: SourceKind,
     probes: &mut Probes,
 ) -> Result<AgentPack, ConfigError> {
+    probes.record(directory);
     probes.record(&directory.join(PACK_MANIFEST_FILE));
     load_pack(directory, expected_id, kind)
 }

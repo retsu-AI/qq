@@ -42,3 +42,6 @@ opencode.json
 benchmarks/harbor/.venv/
 benchmarks/harbor/jobs/
 **/__pycache__/
+
+# Local-only configuration fragments (gateway hostnames, personal overrides)
+.qq/config.d/*-local.ron

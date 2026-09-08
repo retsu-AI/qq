@@ -246,18 +246,41 @@ pub(super) async fn spawn_child_run(
             },
         );
     }
+    let deadline = request.budget.deadline;
+    let deadline_cancel = cancel.clone();
     let _waiter = CancelChildWaiter(cancel);
     #[cfg(test)]
     let parent_session = parent.session_id;
     let owner_inner = Arc::clone(&inner);
     tokio::spawn(async move {
-        let outcome = AssertUnwindSafe(run_owned_child(
-            Arc::clone(&owner_inner),
-            parent,
-            budget,
-            request,
-            cancellation,
-        ))
+        let outcome = AssertUnwindSafe(async {
+            let mut execution = std::pin::pin!(run_owned_child(
+                Arc::clone(&owner_inner),
+                parent,
+                budget,
+                request,
+                cancellation,
+            ));
+            let expires = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                biased;
+                () = expires => {
+                    deadline_cancel.send_replace(true);
+                    // Cancellation retains the H23 owner through accepted
+                    // creation, started loader work, and execution teardown.
+                    let mut outcome = execution.await;
+                    outcome.content = "the sub-agent could not finish: its duration budget is spent".to_owned();
+                    outcome.is_error = true;
+                    outcome
+                }
+                outcome = &mut execution => outcome,
+            }
+        })
         .catch_unwind()
         .await;
         let outcome = match outcome {
@@ -320,7 +343,7 @@ async fn run_owned_child(
         task,
         model,
         authority,
-        limits: child_limits,
+        budget: child_budget,
         purpose,
     } = request;
     // Authority attenuates strictly: a read child is ReadOnly; a write child
@@ -473,6 +496,15 @@ async fn run_owned_child(
     if *inner.shutdown.borrow() || *inner.failed.borrow() {
         return spawn_error("the session runtime is shutting down");
     }
+    let child_limits = match child_budget.limits_at(tokio::time::Instant::now()) {
+        Ok(limits) => limits,
+        Err(kind) => {
+            return spawn_error(format!(
+                "the sub-agent cannot start: its {} budget is spent",
+                kind.as_str()
+            ));
+        }
+    };
     let created = match inner
         .store
         .create_child_run(
@@ -732,7 +764,11 @@ impl crate::runtime::AuditHook for SessionAuditHook {
         Box::pin(async move { tasks.drain().await })
     }
 
-    fn audit(&self, request: crate::runtime::AuditRequest) -> crate::runtime::AuditFuture {
+    fn audit(
+        &self,
+        request: crate::runtime::AuditRequest,
+        budget: crate::runtime::ChildBudget,
+    ) -> crate::runtime::AuditFuture {
         let inner = Arc::clone(&self.inner);
         let parent = self.parent.clone();
         let slots = Arc::clone(&self.slots);
@@ -771,7 +807,6 @@ impl crate::runtime::AuditHook for SessionAuditHook {
             // The audit child is admitted with the parent's remaining budget
             // like any child; the parent's meter already accounts for this
             // spend when the verdict returns.
-            let limits = RunLimits::default();
             let call_id = match ToolCallId::generate() {
                 Ok(call_id) => call_id,
                 Err(_) => {
@@ -796,7 +831,7 @@ impl crate::runtime::AuditHook for SessionAuditHook {
                     task: brief,
                     model,
                     authority: ChildAuthority::Read,
-                    limits,
+                    budget,
                     purpose: SessionPurpose::Audit,
                 },
             )

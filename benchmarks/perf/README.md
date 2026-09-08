@@ -8,6 +8,15 @@ directory. Capability-relative create-new file handles stay open for the full
 recording, so a concurrent path or symlink replacement cannot redirect either
 receipt. The fixture and its regression policy are source controlled.
 
+Fixture version 4 establishes live subscriber attachment with a FIFO store
+barrier and observes fan-out subscribers concurrently. Earlier fixtures used
+a timed readiness assumption and waited for each subscriber's terminal event
+sequentially, which mixed persistence latency into later delivery samples.
+Re-record both baseline and candidate with version 4; version 3 fan-out
+samples are retained as historical evidence and are not comparable to the
+corrected metric. The focused feed worker declares `feed_fixture_version: 2`
+and `h0_fixture_version: 4`.
+
 ## Record A Baseline
 
 ```sh

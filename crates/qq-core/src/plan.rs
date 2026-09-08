@@ -118,6 +118,7 @@ pub struct AgentProfile {
     credential_epoch: CredentialEpoch,
     profile_id: AgentProfileId,
     pack: Option<PackSelection>,
+    exposed_tools: Option<Vec<String>>,
     context_sources: Vec<Arc<dyn ContextSource>>,
     context_cache: Option<Arc<ContextCache>>,
 }
@@ -147,6 +148,7 @@ impl AgentProfile {
             credential_epoch: CredentialEpoch::NONE,
             profile_id: AgentProfileId::default(),
             pack: None,
+            exposed_tools: None,
             context_sources: Vec::new(),
             context_cache: None,
         }
@@ -177,6 +179,7 @@ impl AgentProfile {
             credential_epoch: CredentialEpoch::NONE,
             profile_id: AgentProfileId::default(),
             pack: None,
+            exposed_tools: None,
             context_sources: runtime
                 .context_sources
                 .iter()
@@ -207,6 +210,15 @@ impl AgentProfile {
     #[must_use]
     pub fn with_pack(mut self, pack: PackSelection) -> Self {
         self.pack = Some(pack);
+        self
+    }
+
+    /// Narrows catalog exposure to these exact names, intersected with the
+    /// selected pack's policy. An empty list exposes no tools and grants
+    /// cannot restore excluded tools. Names are checked during compilation.
+    #[must_use]
+    pub fn with_exposed_tools(mut self, tools: Vec<String>) -> Self {
+        self.exposed_tools = Some(tools);
         self
     }
 
@@ -281,6 +293,10 @@ impl AgentProfile {
 /// Why a profile could not be compiled into a plan.
 #[derive(Debug, Error)]
 pub enum PlanCompileError {
+    #[error(
+        "exposed tool {name:?} is not a known static tool or a member of the discovered catalog"
+    )]
+    UnknownExposedTool { name: String },
     #[error(transparent)]
     Runtime(#[from] RuntimeConfigError),
     #[error("workspace path must be absolute and canonical: {path}")]
@@ -389,6 +405,7 @@ impl CompiledAgentPlan {
             credential_epoch,
             profile_id,
             pack,
+            exposed_tools,
             context_sources,
             context_cache,
         } = profile;
@@ -527,6 +544,27 @@ impl CompiledAgentPlan {
                 effect: EffectClass::ReadOnly,
             });
         }
+        let exposed_tools =
+            exposed_tools.map(|names| names.into_iter().collect::<std::collections::BTreeSet<_>>());
+        if let Some(names) = &exposed_tools {
+            // Validate before either restriction removes tools. load_skill
+            // is known even when this workspace has no disclosed skills.
+            let known = static_tools
+                .iter()
+                .map(|tool| tool.spec.name())
+                .chain(std::iter::once("load_skill"))
+                .chain(
+                    contributions
+                        .iter()
+                        .flat_map(|host| host.catalog.tools.iter().map(|tool| tool.spec.name())),
+                )
+                .collect::<std::collections::BTreeSet<_>>();
+            for name in names {
+                if !known.contains(name.as_str()) {
+                    return Err(PlanCompileError::UnknownExposedTool { name: name.clone() });
+                }
+            }
+        }
         // A pack tool policy filters what the catalog exposes. Filtering the
         // inputs (rather than the compiled catalog) keeps every catalog
         // invariant intact and makes the digest reflect the policy. The
@@ -542,6 +580,15 @@ impl CompiledAgentPlan {
                     .catalog
                     .tools
                     .retain(|tool| selection.permits(tool.spec.name()));
+            }
+        }
+        if let Some(names) = &exposed_tools {
+            static_tools.retain(|tool| names.contains(tool.spec.name()));
+            for contribution in &mut contributions {
+                contribution
+                    .catalog
+                    .tools
+                    .retain(|tool| names.contains(tool.spec.name()));
             }
         }
         let catalog = ToolCatalog::compile(static_tools, contributions);
@@ -878,6 +925,76 @@ mod tests {
     use qq_protocol::PromptVersion;
 
     use super::{tests_support::*, *};
+
+    #[test]
+    fn explicit_exposure_narrows_the_catalog_and_empty_exposes_nothing() {
+        let workspace = canonical_temp();
+        let default = CompiledAgentPlan::compile_blocking(profile(workspace.path())).unwrap();
+        let narrow = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path())
+                .with_exposed_tools(vec!["read_file".to_owned(), "search".to_owned()]),
+        )
+        .unwrap();
+        assert_eq!(
+            narrow.catalog().names().collect::<Vec<_>>(),
+            ["read_file", "search"]
+        );
+        assert_ne!(default.digest(), narrow.digest());
+        let empty = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path()).with_exposed_tools(Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(empty.catalog().names().count(), 0);
+        assert_ne!(narrow.digest(), empty.digest());
+        let same = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path()).with_exposed_tools(vec![
+                "search".to_owned(),
+                "read_file".to_owned(),
+                "read_file".to_owned(),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(narrow.digest(), same.digest());
+    }
+
+    #[test]
+    fn unknown_exposed_names_fail_compilation_before_provider_work() {
+        let workspace = canonical_temp();
+        for name in ["missing", "mcp__server__missing"] {
+            let result = CompiledAgentPlan::compile_blocking(
+                profile(workspace.path()).with_exposed_tools(vec![name.to_owned()]),
+            );
+            assert!(
+                matches!(result, Err(PlanCompileError::UnknownExposedTool { name: rejected }) if rejected == name)
+            );
+        }
+    }
+
+    #[test]
+    fn exposed_skill_loader_follows_workspace_skill_availability() {
+        let workspace = canonical_temp();
+        let compile = || {
+            CompiledAgentPlan::compile_blocking(
+                profile(workspace.path())
+                    .with_exposed_tools(vec!["read_file".to_owned(), "load_skill".to_owned()]),
+            )
+            .unwrap()
+        };
+        let empty = compile();
+        assert_eq!(empty.catalog().names().collect::<Vec<_>>(), ["read_file"]);
+        let skill = workspace.path().join(".qq/skills/example/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(
+            skill,
+            "---\ndescription: Example guidance\n---\nBe brief.\n",
+        )
+        .unwrap();
+        let installed = compile();
+        assert_eq!(
+            installed.catalog().names().collect::<Vec<_>>(),
+            ["load_skill", "read_file"]
+        );
+    }
 
     /// A descriptor with fixed inputs, independent of the filesystem, so the
     /// golden digest below is stable across machines.
@@ -1342,6 +1459,16 @@ mod pack_tests {
             "policy filters session tools too"
         );
         assert!(names.contains(&"select_tools") && names.contains(&"load_skill"));
+        let intersected = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path())
+                .with_pack(selection())
+                .with_exposed_tools(vec!["read_file".to_owned(), "write_file".to_owned()]),
+        )
+        .unwrap();
+        assert_eq!(
+            intersected.catalog().names().collect::<Vec<_>>(),
+            ["read_file"]
+        );
         // Pack documents are indexed, disclosed, and provenance-labelled.
         let skills = plan.skills();
         assert_eq!(skills.len(), 2);

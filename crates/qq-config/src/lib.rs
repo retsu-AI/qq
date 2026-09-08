@@ -976,6 +976,7 @@ impl ModelRoute {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectivePolicy {
     allowed_providers: Option<Vec<String>>,
+    exposed_tools: Option<Vec<String>>,
     denied_providers: Vec<String>,
     max_output_tokens: Option<u32>,
     require_https: bool,
@@ -991,6 +992,7 @@ impl Default for EffectivePolicy {
     fn default() -> Self {
         Self {
             allowed_providers: None,
+            exposed_tools: None,
             denied_providers: Vec::new(),
             max_output_tokens: None,
             require_https: false,
@@ -1005,6 +1007,14 @@ impl Default for EffectivePolicy {
 }
 
 impl EffectivePolicy {
+    /// Exact catalog exposure, intersected across layers. Absence preserves
+    /// the existing catalog; an empty list exposes nothing. This grants no
+    /// execution authority.
+    #[must_use]
+    pub fn exposed_tools(&self) -> Option<&[String]> {
+        self.exposed_tools.as_deref()
+    }
+
     #[must_use]
     pub fn allowed_providers(&self) -> Option<&[String]> {
         self.allowed_providers.as_deref()
@@ -1406,7 +1416,29 @@ pub struct ConfigSnapshot {
     grants: PolicyGrants,
     reports: Vec<SourceReport>,
     provenance: ConfigProvenance,
-    probed_paths: Vec<PathBuf>,
+    sources: ConfigSources,
+}
+
+/// Shared filesystem evidence for one configuration load. Contains paths and
+/// metadata only, never source contents, credentials, or content hashes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConfigSources(Arc<loader::Probes>);
+
+impl ConfigSources {
+    /// Rechecks the locations inspected during loading without reading source
+    /// contents or repeating discovery. Evidence precedes the first probe/read;
+    /// metadata errors are never certified as current. Matching metadata is not
+    /// proof of identical content. Blocking: callers use a blocking context.
+    #[must_use]
+    pub fn is_current(&self) -> bool {
+        self.0.is_current()
+    }
+
+    /// Estimated retained heap for bounded caches that keep this evidence.
+    #[must_use]
+    pub fn estimated_bytes(&self) -> usize {
+        self.0.estimated_bytes()
+    }
 }
 
 /// Longest agent profile name in bytes. Mirrors the protocol's identifier
@@ -1795,7 +1827,14 @@ impl ConfigSnapshot {
     /// probe order and free of duplicates; it says nothing about content.
     #[must_use]
     pub fn probed_paths(&self) -> &[PathBuf] {
-        &self.probed_paths
+        self.sources.0.paths()
+    }
+
+    /// Filesystem observations retained for this load. Cloning the handle
+    /// shares immutable evidence independently of the configuration values.
+    #[must_use]
+    pub const fn sources(&self) -> &ConfigSources {
+        &self.sources
     }
 }
 

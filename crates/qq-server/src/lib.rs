@@ -2474,6 +2474,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropping_an_event_response_releases_its_stream_and_subscription_slot() {
+        struct DropSignal(tokio::sync::mpsc::Sender<()>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                // A failed test may have already dropped its receiver.
+                let _ = self.0.try_send(());
+            }
+        }
+
+        struct DropObservedHandler {
+            held: HeldSubscriptionHandler,
+            dropped: tokio::sync::mpsc::Sender<()>,
+        }
+
+        impl ServerHandler for DropObservedHandler {
+            fn subscribe(
+                &self,
+                request: SubscribeRequest,
+            ) -> Result<PublishedEventStream, ServerHandlerError> {
+                let mut events = self.held.subscribe(request)?;
+                let signal = DropSignal(self.dropped.clone());
+                Ok(Box::pin(stream! {
+                    let _signal = signal;
+                    while let Some(event) = events.next().await {
+                        yield event;
+                    }
+                }))
+            }
+        }
+
+        let directory = TestDirectory::new();
+        let workspace_id = WorkspaceId::generate().unwrap();
+        let session_id = SessionId::generate().unwrap();
+        let after = EventCursor {
+            store_id: StoreId::generate().unwrap(),
+            workspace_id,
+            sequence: 0,
+        };
+        let (dropped, mut drops) = tokio::sync::mpsc::channel(MAX_CONCURRENT_SUBSCRIPTIONS + 1);
+        let handler = Arc::new(DropObservedHandler {
+            held: HeldSubscriptionHandler {
+                event: SessionEventEnvelope {
+                    cursor: EventCursor {
+                        sequence: 1,
+                        ..after
+                    },
+                    session_id,
+                    run_id: None,
+                    caused_by: None,
+                    occurred_at_ms: 0,
+                    event: SessionEvent::SessionDeleted { session_id },
+                },
+            },
+            dropped,
+        });
+        let server = start_test_server(directory.paths(), handler).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let request = || {
+            client
+                .get(
+                    server
+                        .connection()
+                        .endpoint(&format!("/v1/workspaces/{workspace_id}/events")),
+                )
+                .bearer_auth(server.connection().expose_bearer_token())
+                .header("last-event-id", after.to_string())
+                .send()
+        };
+        let mut responses = Vec::new();
+        for _ in 0..MAX_CONCURRENT_SUBSCRIPTIONS {
+            let mut response = request().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(response.chunk().await.unwrap().is_some());
+            responses.push(response);
+        }
+        assert_eq!(
+            request().await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        drop(responses.pop());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), drops.recv())
+                .await
+                .unwrap(),
+            Some(())
+        );
+        let mut replacement = request().await.unwrap();
+        assert_eq!(replacement.status(), StatusCode::OK);
+        assert!(replacement.chunk().await.unwrap().is_some());
+        drop(replacement);
+        drop(responses);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for _ in 0..MAX_CONCURRENT_SUBSCRIPTIONS {
+                assert_eq!(drops.recv().await, Some(()));
+            }
+        })
+        .await
+        .unwrap();
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn shutdown_does_not_remove_replaced_metadata() {
         let directory = TestDirectory::new();
         let paths = directory.paths();

@@ -1,6 +1,6 @@
 use std::{future::Future, pin::Pin};
 
-use qq_protocol::{ChildAuthority, RunLimits, SessionPurpose, TokenUsage, ToolCallId};
+use qq_protocol::{ChildAuthority, SessionPurpose, TokenUsage, ToolCallId};
 
 /// The spend one spawned sub-agent reports back to its parent. Every field is
 /// `None` when unknown, never zero: the parent's meter turns an unknown into
@@ -60,7 +60,7 @@ pub(crate) struct SpawnRequest {
     pub(crate) authority: ChildAuthority,
     /// The parent's remaining budget at spawn time. The child is admitted
     /// with these bounds, never with the parent's original caps.
-    pub(crate) limits: RunLimits,
+    pub(crate) budget: super::ChildBudget,
     /// Why the child exists: an ordinary delegated task, or the parent's
     /// final-answer audit.
     pub(crate) purpose: SessionPurpose,

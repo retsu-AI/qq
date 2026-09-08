@@ -15,8 +15,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use qq_config::{AwsAuth, BedrockAuth, HttpCredential, ProviderAccess, ProviderAuth};
 use qq_core::plan::{CompiledAgentPlan, SourceFingerprint};
 use qq_protocol::{AgentPlanDigest, AgentProfileId, CredentialEpoch, ModelSelection};
+use qq_provider::SecretRef;
 use thiserror::Error;
 
 /// Hard admission bounds. Active generations count toward `max_bytes` and are
@@ -54,8 +56,110 @@ pub struct PlanKey {
 /// Everything a compile produced that the cache needs to keep beside the plan.
 pub struct CompiledGeneration {
     pub plan: Arc<CompiledAgentPlan>,
+    pub configuration_sources: Vec<qq_config::ConfigSources>,
     /// Paths whose state decided this compile; re-stat'd on every lookup.
     pub sources: Vec<SourceFingerprint>,
+    pub bindings: LiveBindings,
+}
+
+/// Equality of live configuration is distinct from durable plan identity.
+/// This root-only payload is neither hashed nor serialized; full endpoints,
+/// inline credentials, and header values must never enter diagnostics.
+#[derive(Default)]
+pub struct LiveBindings {
+    pub provider: Option<ProviderAccess>,
+    pub mcp: Option<Arc<crate::mcp::WiredMcpRegistry>>,
+}
+
+impl PartialEq for LiveBindings {
+    fn eq(&self, other: &Self) -> bool {
+        self.provider == other.provider
+            && match (&self.mcp, &other.mcp) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for LiveBindings {}
+
+impl std::fmt::Debug for LiveBindings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LiveBindings(<redacted>)")
+    }
+}
+
+impl CompiledGeneration {
+    fn estimated_bytes(&self) -> usize {
+        let secret_bytes = |secret: &SecretRef| match secret {
+            SecretRef::Env(name) | SecretRef::Stored(name) => name.len(),
+            SecretRef::Value(value) => value.expose_secret().len(),
+        };
+        let bedrock_bytes = |region: &Option<String>, auth: &BedrockAuth| {
+            region.as_ref().map_or(0, String::len)
+                + match auth {
+                    BedrockAuth::Aws(AwsAuth::DefaultChain) => 0,
+                    BedrockAuth::Aws(AwsAuth::Profile(profile)) => profile.len(),
+                    BedrockAuth::ApiKey(secret) => secret_bytes(secret),
+                }
+        };
+        let binding_heap = match &self.bindings.provider {
+            None => 0,
+            Some(ProviderAccess::Http(access)) => {
+                let auth = match access.auth() {
+                    HttpCredential::Configured(auth) => match auth {
+                        ProviderAuth::NoAuth => 0,
+                        ProviderAuth::ApiKey(secret) | ProviderAuth::Bearer(secret) => {
+                            secret_bytes(secret)
+                        }
+                        ProviderAuth::Header(name, secret) => name.len() + secret_bytes(secret),
+                    },
+                    HttpCredential::ApiKey { explicit, .. } => {
+                        explicit.as_ref().map_or(0, secret_bytes)
+                    }
+                    HttpCredential::OpenAiCodex { profile } => {
+                        profile.as_ref().map_or(0, String::len)
+                    }
+                    HttpCredential::XAi { api_key, profile } => {
+                        api_key.as_ref().map_or(0, secret_bytes)
+                            + profile.as_ref().map_or(0, String::len)
+                    }
+                };
+                access.endpoint().len()
+                    + auth
+                    + access
+                        .headers()
+                        .iter()
+                        .map(|(name, value)| {
+                            // Estimated B-tree node overhead plus each owned string.
+                            std::mem::size_of::<(String, qq_config::StaticHeaderValue)>()
+                                + 3 * std::mem::size_of::<usize>()
+                                + name.len()
+                                + value.expose_value().len()
+                        })
+                        .sum::<usize>()
+            }
+            Some(
+                ProviderAccess::AmazonBedrock { region, auth }
+                | ProviderAccess::AmazonBedrockMantle { region, auth, .. },
+            ) => bedrock_bytes(region, auth),
+        };
+        self.plan
+            .estimated_bytes()
+            .saturating_add(std::mem::size_of::<LiveBindings>())
+            .saturating_add(binding_heap)
+            .saturating_add(
+                self.configuration_sources.capacity()
+                    * std::mem::size_of::<qq_config::ConfigSources>(),
+            )
+            .saturating_add(
+                self.configuration_sources
+                    .iter()
+                    .map(qq_config::ConfigSources::estimated_bytes)
+                    .sum::<usize>(),
+            )
+    }
 }
 
 #[derive(Debug, Error)]
@@ -84,7 +188,8 @@ pub enum PlanLookup {
     /// Every recorded source fingerprint still matched.
     Hit,
     /// A source changed, but the recompiled plan had the same digest and
-    /// epoch; the existing generation was kept and its fingerprints refreshed.
+    /// epoch and live bindings; the existing generation was kept and its
+    /// fingerprints refreshed.
     Revalidated,
     /// A new generation was compiled and published.
     Compiled,
@@ -171,6 +276,11 @@ impl PlanCache {
                     .sources
                     .iter()
                     .all(SourceFingerprint::is_current)
+                    && slot
+                        .generation
+                        .configuration_sources
+                        .iter()
+                        .all(qq_config::ConfigSources::is_current)
                     && slot.generation.plan.hosts_are_current();
                 if current {
                     let slot = state
@@ -202,10 +312,14 @@ impl PlanCache {
                 .slots
                 .remove(index)
                 .expect("a located slot must exist");
-            if slot.digest == digest && slot.epoch == epoch {
+            if slot.digest == digest
+                && slot.epoch == epoch
+                && slot.generation.bindings == generation.bindings
+            {
                 // Same behavior, same credentials: keep the live generation
                 // that active runs may hold and only refresh what we watch.
                 slot.generation.sources = generation.sources;
+                slot.generation.configuration_sources = generation.configuration_sources;
                 let plan = Arc::clone(&slot.generation.plan);
                 state.slots.push_back(slot);
                 return Ok((plan, PlanLookup::Revalidated));
@@ -214,7 +328,7 @@ impl PlanCache {
             // keep their own `Arc` until they settle.
         }
 
-        let requested_bytes = generation.plan.estimated_bytes();
+        let requested_bytes = generation.estimated_bytes();
         admit(&mut state, self.inner.limits, requested_bytes)?;
         let plan = Arc::clone(&generation.plan);
         state.slots.push_back(Slot {
@@ -252,7 +366,7 @@ impl PlanCache {
             state
                 .slots
                 .iter()
-                .map(|slot| slot.generation.plan.estimated_bytes())
+                .map(|slot| slot.generation.estimated_bytes())
                 .sum()
         })
     }
@@ -270,7 +384,7 @@ fn admit<E>(
         let used_bytes: usize = state
             .slots
             .iter()
-            .map(|slot| slot.generation.plan.estimated_bytes())
+            .map(|slot| slot.generation.estimated_bytes())
             .sum();
         let fits = state.slots.len() < limits.max_entries
             && used_bytes.saturating_add(requested_bytes) <= limits.max_bytes;
@@ -345,7 +459,12 @@ mod tests {
         ))
         .unwrap();
         let sources = plan.instruction_sources().to_vec();
-        CompiledGeneration { plan, sources }
+        CompiledGeneration {
+            plan,
+            sources,
+            configuration_sources: Vec::new(),
+            bindings: LiveBindings::default(),
+        }
     }
 
     fn canonical_temp() -> tempfile::TempDir {
@@ -520,7 +639,7 @@ mod tests {
     fn byte_limit_bounds_admission_like_the_entry_limit() {
         let directory = canonical_temp();
         let probe = compile(directory.path(), "a");
-        let one_plan = probe.plan.estimated_bytes();
+        let one_plan = probe.estimated_bytes();
         drop(probe);
         let cache = PlanCache::new(PlanCacheLimits {
             max_entries: usize::MAX,

@@ -671,13 +671,14 @@ impl SessionRuntime {
     /// the store persisted so a transport can forward it without
     /// re-serializing.
     ///
-    /// Delivery has two phases. Catch-up reads pages from SQLite until it is
-    /// caught up to the live feed; then events arrive from the per-workspace
-    /// broadcast with no store access. A subscriber that falls more than the
-    /// feed capacity behind is redirected to catch-up from its last cursor,
-    /// so the sequence it observes is contiguous and complete whatever the
-    /// pace. SQLite is authoritative throughout: nothing is delivered live
-    /// that was not already committed.
+    /// Delivery has two phases. Catch-up reads pages until the subscriber is
+    /// current: from the workspace ring when it still covers the cursor
+    /// (warm reconnect), otherwise from SQLite. Then events are read from the
+    /// ring by cursor with no store access. A subscriber that falls more than
+    /// the ring capacity behind is redirected to catch-up from its last
+    /// cursor, so the sequence it observes is contiguous and complete
+    /// whatever the pace. SQLite is authoritative throughout: nothing is
+    /// published to the ring that was not already committed.
     pub fn subscribe_published(
         &self,
         request: SubscribeRequest,
@@ -697,27 +698,31 @@ impl SessionRuntime {
         let workspace_id = request.workspace_id;
         Ok(Box::pin(stream! {
             let mut after = request.after.sequence;
-            loop {
-                // Attach to the live feed before catching up so no commit can
-                // land between the last catch-up page and the first live
-                // receive. Anything already at or below `after` when it
-                // arrives live is a duplicate of the catch-up and is skipped.
-                let Some(mut live) = store.feed(workspace_id) else {
-                    yield Err(SessionRuntimeError::Unavailable);
+            let attachment = match store.attach_feed(workspace_id, after, MAX_REPLAY_EVENTS).await {
+                Ok(attachment) => attachment,
+                Err(error) => {
+                    yield Err(error);
                     return;
-                };
+                }
+            };
+            let live = attachment.live;
+            let mut first_page = Some(attachment.page);
+            loop {
                 loop {
-                    let page = match store
-                        .published_events_after(workspace_id, after, MAX_REPLAY_EVENTS)
-                        .await
-                    {
-                        Ok(page) => page,
-                        Err(error) => {
-                            yield Err(error);
-                            return;
-                        }
+                    let page = match first_page.take() {
+                        Some(page) => page,
+                        None => match store
+                            .published_events_after(workspace_id, after, MAX_REPLAY_EVENTS)
+                            .await
+                        {
+                            Ok(page) => page,
+                            Err(error) => {
+                                yield Err(error);
+                                return;
+                            }
+                        },
                     };
-                    // A short page is the end of the durable backlog: one read
+                    // A short page is the end of the backlog: one read
                     // suffices for a subscriber that is nearly caught up.
                     let caught_up = page.len() < usize::from(MAX_REPLAY_EVENTS);
                     for event in page {
@@ -738,25 +743,18 @@ impl SessionRuntime {
                             }
                             continue;
                         }
-                        received = live.recv() => received,
+                        received = live.recv(after) => received,
                     };
                     match received {
                         Ok(event) => {
-                            let sequence = event.envelope.cursor.sequence;
-                            if sequence <= after {
-                                continue;
-                            }
-                            if sequence != after + 1 {
-                                // A gap means the feed was subscribed after
-                                // a commit the catch-up did not see; fall
-                                // back to the store for the missing range.
-                                break;
-                            }
-                            after = sequence;
+                            // Reads are by cursor, so this is exactly
+                            // `after + 1`: no duplicate or gap handling.
+                            after = event.envelope.cursor.sequence;
                             yield Ok(event);
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                        // Recover the missing range from the authoritative log.
+                        Err(feed::RecvError::Behind) => break,
+                        Err(feed::RecvError::Closed) => return,
                     }
                 }
             }
@@ -995,7 +993,7 @@ pub enum SessionRuntimeError {
     WorkspaceLimitReached,
     #[error("session was not found")]
     SessionNotFound,
-    #[error("session has an active run")]
+    #[error("session or an owning run is active")]
     SessionActive,
     #[error("workspace session limit reached")]
     SessionLimitReached,

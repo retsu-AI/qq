@@ -19,7 +19,7 @@ use cap_std::{
     fs::{Dir, File as CapFile, OpenOptions as CapOpenOptions},
 };
 use clap::{Args, Subcommand, ValueEnum};
-use futures_util::{StreamExt, future::join_all, stream};
+use futures_util::{FutureExt, StreamExt, future::join_all, stream};
 use qq_client::SessionClient;
 use qq_core::{
     LoadedRuntime, PublishedEventStream, Runtime, RuntimeLoadError, RuntimeLoadFuture,
@@ -52,7 +52,7 @@ use tokio::{
 };
 
 const REPORT_SCHEMA_VERSION: u16 = 1;
-const FIXTURE_VERSION: u16 = 3;
+const FIXTURE_VERSION: u16 = 4;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(45);
 const METADATA_PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
@@ -83,6 +83,26 @@ enum PerfCommand {
     /// Internal isolated R4 qualification worker.
     #[command(hide = true)]
     R4Worker(R4WorkerArgs),
+    /// Internal isolated workspace-feed lifecycle worker.
+    #[command(hide = true)]
+    FeedWorker(FeedWorkerArgs),
+}
+
+#[derive(Debug, Args)]
+struct FeedWorkerArgs {
+    #[arg(long, value_enum)]
+    case: FeedCase,
+    /// Replay samples; fan-out retains its existing five-to-twenty sample cap.
+    #[arg(long, default_value_t = 30)]
+    samples: u16,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum FeedCase {
+    Churn,
+    AttachReplay,
+    FanOut,
 }
 
 #[derive(Debug, Args)]
@@ -418,6 +438,7 @@ pub async fn run(args: PerfArgs) -> Result<(), PerfError> {
         PerfCommand::Check(args) => check_reports(args),
         PerfCommand::LoadWorker(args) => run_load_worker(args).await,
         PerfCommand::R4Worker(args) => run_r4_worker(args).await,
+        PerfCommand::FeedWorker(args) => run_feed_worker(args).await,
     }
 }
 
@@ -2432,6 +2453,47 @@ async fn wait_for_run(
     .await?
 }
 
+async fn wait_for_subscribers(
+    streams: &mut [SessionEventStream],
+    run_id: RunId,
+) -> Result<(Instant, bool), PerfError> {
+    let mut slowest: Option<Instant> = None;
+    let mut sequences = Vec::with_capacity(streams.len());
+    let completed = join_all(
+        streams
+            .iter_mut()
+            .map(|stream| wait_for_run(stream, run_id)),
+    )
+    .await;
+    for result in completed {
+        let (outcome, cursor, first_text) = result?;
+        if !matches!(outcome, RunOutcome::Completed) {
+            return Err(PerfError::Fixture(
+                "fan-out text run did not complete".to_owned(),
+            ));
+        }
+        let first_text = first_text
+            .ok_or_else(|| PerfError::Fixture("fan-out run produced no text event".to_owned()))?;
+        slowest = Some(slowest.map_or(first_text, |seen| seen.max(first_text)));
+        sequences.push(cursor.sequence);
+    }
+    let identical = sequences.iter().all(|sequence| *sequence == sequences[0]);
+    Ok((slowest.expect("at least one subscriber"), identical))
+}
+
+fn poll_idle_subscriber(stream: &mut SessionEventStream) -> Result<(), PerfError> {
+    match stream.next().now_or_never() {
+        Some(Some(Err(error))) => Err(fixture_error("attach subscriber")(error)),
+        Some(Some(Ok(_))) => Err(PerfError::Fixture(
+            "fan-out subscriber saw an event before the run".to_owned(),
+        )),
+        Some(None) => Err(PerfError::Fixture(
+            "fan-out subscriber ended before the run".to_owned(),
+        )),
+        None => Ok(()),
+    }
+}
+
 fn prompt_run_id(receipt: &CommandReceipt) -> Result<RunId, PerfError> {
     match receipt.outcome {
         CommandOutcome::PromptQueued { run_id, .. } => Ok(run_id),
@@ -3688,6 +3750,151 @@ async fn retry_amplification_workloads(
     finish_runtime_fixture(&fixture, "shut down amplification runtime", operation).await
 }
 
+async fn feed_churn_workload(
+    subscriptions: u16,
+) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>), PerfError> {
+    let fixture = RuntimeFixture::open(ProviderMode::Hanging).await?;
+    let operation = async {
+        let requests = (0..subscriptions)
+            .map(|_| {
+                let workspace_id = WorkspaceId::generate()
+                    .map_err(fixture_error("generate unknown workspace"))?;
+                Ok(SubscribeRequest {
+                    workspace_id,
+                    after: EventCursor {
+                        workspace_id,
+                        ..fixture.initial_cursor
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, PerfError>>()?;
+        let rss_before = current_rss()?;
+        let started = Instant::now();
+        with_timeout("unknown workspace subscription churn", async {
+            for request in requests {
+                let mut events = fixture
+                    .runtime
+                    .subscribe_published(request)
+                    .map_err(fixture_error("create unknown-workspace stream"))?;
+                if !matches!(
+                    events.next().await,
+                    Some(Err(qq_core::SessionRuntimeError::WorkspaceNotFound))
+                ) {
+                    return Err(PerfError::Fixture(
+                        "unknown workspace was not rejected".to_owned(),
+                    ));
+                }
+            }
+            Ok(())
+        })
+        .await??;
+        let elapsed = elapsed_ns(started);
+        let rss_after = current_rss()?;
+        Ok((
+            vec![
+                MetricResult::scalar(
+                    format!("feed_unknown_{subscriptions}_subscriptions_ns"),
+                    "ns",
+                    "public subscribe_published through WorkspaceNotFound and stream drop for every distinct unknown id; request generation excluded",
+                    elapsed,
+                )?,
+                MetricResult::scalar(
+                    format!("feed_unknown_{subscriptions}_retained_rss_bytes"),
+                    "bytes",
+                    "VmRSS after every rejected stream is dropped minus VmRSS before churn, with the same runtime still open; allocator retention included",
+                    rss_after.saturating_sub(rss_before),
+                )?,
+            ],
+            vec![CorrectnessCheck {
+                name: "unknown_workspace_subscriptions_rejected".to_owned(),
+                passed: true,
+                detail: format!("all {subscriptions} unknown ids returned WorkspaceNotFound"),
+            }],
+        ))
+    }
+    .await;
+    finish_runtime_fixture(&fixture, "shut down subscription churn runtime", operation).await
+}
+
+async fn feed_attach_replay_workload(
+    samples: u16,
+) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>), PerfError> {
+    let fixture = RuntimeFixture::open(ProviderMode::Hanging).await?;
+    let operation = async {
+        let (_, target) = fixture.create_session(ApprovalMode::ReadOnly).await?;
+        let mut latencies = Vec::with_capacity(usize::from(samples));
+        let mut expected = None;
+        for _ in 0..samples {
+            let started = Instant::now();
+            let mut events = fixture
+                .runtime
+                .subscribe_published(SubscribeRequest {
+                    workspace_id: fixture.workspace_id,
+                    after: fixture.initial_cursor,
+                })
+                .map_err(fixture_error("attach replay subscriber"))?;
+            let event = with_timeout("read attachment replay", events.next())
+                .await?
+                .ok_or_else(|| PerfError::Fixture("attachment replay ended early".to_owned()))?
+                .map_err(fixture_error("read attachment replay"))?;
+            if event.envelope.cursor != target
+                || !matches!(event.envelope.event, SessionEvent::SessionCreated { .. })
+                || expected.as_ref().is_some_and(|json| *json != event.json)
+            {
+                return Err(PerfError::Fixture("attachment replay changed".to_owned()));
+            }
+            expected = Some(Arc::clone(&event.json));
+            drop(events);
+            latencies.push(elapsed_ns(started));
+        }
+        Ok((
+            vec![MetricResult::measured(
+                "feed_attach_replay_and_drop_ns",
+                "ns",
+                "public subscribe_published through one committed SessionCreated replay and stream drop, with no other active subscription",
+                latencies,
+            )?],
+            vec![CorrectnessCheck {
+                name: "feed_attachment_replay_identical".to_owned(),
+                passed: true,
+                detail: format!("all {samples} attachments returned the same committed cursor and JSON"),
+            }],
+        ))
+    }
+    .await;
+    finish_runtime_fixture(&fixture, "shut down attachment replay runtime", operation).await
+}
+
+async fn run_feed_worker(args: FeedWorkerArgs) -> Result<(), PerfError> {
+    if cfg!(debug_assertions) {
+        return Err(PerfError::DebugWorker);
+    }
+    if env::consts::OS != "linux" {
+        return Err(PerfError::UnsupportedHost(env::consts::OS));
+    }
+    if args.samples == 0 || args.samples > 1_000 {
+        return Err(PerfError::Fixture(
+            "feed samples must be 1..=1000".to_owned(),
+        ));
+    }
+    let (metrics, checks) = match args.case {
+        FeedCase::Churn => feed_churn_workload(4_096).await?,
+        FeedCase::AttachReplay => feed_attach_replay_workload(args.samples).await?,
+        FeedCase::FanOut => subscriber_fan_out_workloads(args.samples).await?,
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "feed_fixture_version": 2,
+            "h0_fixture_version": FIXTURE_VERSION,
+            "case": args.case,
+            "metrics": metrics,
+            "checks": checks,
+        })
+    );
+    Ok(())
+}
+
 /// Subscriber fan-out: with 1, 8, and 32 subscribers attached to one
 /// workspace, the time from the provider's first delta to that event's
 /// committed observation by the slowest subscriber, and the command
@@ -3716,21 +3923,26 @@ async fn subscriber_fan_out_workloads(
                 let mut streams = Vec::with_capacity(subscribers);
                 for _ in 0..subscribers {
                     let mut stream = fixture.subscribe(cursor)?;
-                    // Drive the stream until its catch-up read finds the
-                    // backlog empty and it parks on the live feed. Nothing is
-                    // committed yet, so the poll times out without an item.
-                    match tokio::time::timeout(Duration::from_millis(20), stream.next()).await {
-                        Ok(Some(Err(error))) => {
-                            return Err(fixture_error("attach subscriber")(error));
-                        }
-                        Ok(Some(Ok(_))) => {
-                            return Err(PerfError::Fixture(
-                                "fan-out subscriber saw an event before the run".to_owned(),
-                            ));
-                        }
-                        Ok(None) | Err(_) => {}
-                    }
+                    poll_idle_subscriber(&mut stream)?;
                     streams.push(stream);
+                }
+                // The first poll enqueues each attachment before yielding.
+                // A later job on the same FIFO lane proves those reads
+                // finished; the second poll consumes their ready replies.
+                with_timeout(
+                    "confirm fan-out attachment",
+                    fixture.runtime.snapshot(SnapshotRequest {
+                        workspace_id: fixture.workspace_id,
+                        focused_session_id: Some(session_id),
+                        include_sessions: Vec::new(),
+                        session_limit: 1,
+                        message_limit: 8,
+                    }),
+                )
+                .await?
+                .map_err(fixture_error("confirm fan-out attachment"))?;
+                for stream in &mut streams {
+                    poll_idle_subscriber(stream)?;
                 }
                 let started = Instant::now();
                 let receipt = session_command(
@@ -3751,23 +3963,8 @@ async fn subscriber_fan_out_workloads(
                 let run_id = prompt_run_id(&receipt)?;
                 let _ = receive_mark(&mut fixture.marks, ProviderMarkKind::Entered).await?;
                 let delta = receive_mark(&mut fixture.marks, ProviderMarkKind::FirstDelta).await?;
-                let mut slowest: Option<Instant> = None;
-                let mut sequences = Vec::with_capacity(subscribers);
-                for stream in &mut streams {
-                    let (outcome, cursor, first_text) = wait_for_run(stream, run_id).await?;
-                    if !matches!(outcome, RunOutcome::Completed) {
-                        return Err(PerfError::Fixture(
-                            "fan-out text run did not complete".to_owned(),
-                        ));
-                    }
-                    let first_text = first_text.ok_or_else(|| {
-                        PerfError::Fixture("fan-out run produced no text event".to_owned())
-                    })?;
-                    slowest = Some(slowest.map_or(first_text, |seen| seen.max(first_text)));
-                    sequences.push(cursor.sequence);
-                }
-                identical &= sequences.iter().all(|sequence| *sequence == sequences[0]);
-                let slowest = slowest.expect("at least one subscriber");
+                let (slowest, converged) = wait_for_subscribers(&mut streams, run_id).await?;
+                identical &= converged;
                 deliveries.push(duration_ns(slowest.duration_since(delta)));
             }
             Ok((
@@ -3776,7 +3973,7 @@ async fn subscriber_fan_out_workloads(
                         format!("fan_out_{subscribers}_subscribers_delta_to_slowest_observer_ns"),
                         "ns",
                         format!(
-                            "fake provider first semantic delta to TextAppended observed by the slowest of {subscribers} live subscribers on one workspace"
+                            "fake provider first semantic delta to TextAppended observed concurrently by the slowest of {subscribers} live subscribers on one workspace"
                         ),
                         deliveries,
                     )?,
@@ -5191,6 +5388,102 @@ mod tests {
         for check in &checks {
             assert!(check.passed, "{}", check.detail);
         }
+    }
+
+    #[test]
+    fn fan_out_rejects_closed_or_failed_subscribers_before_timing() {
+        let mut closed: SessionEventStream = Box::pin(stream::empty());
+        assert!(poll_idle_subscriber(&mut closed).is_err());
+        let mut failed: SessionEventStream = Box::pin(stream::iter([Err(
+            qq_core::SessionRuntimeError::Unavailable,
+        )]));
+        assert!(poll_idle_subscriber(&mut failed).is_err());
+    }
+
+    #[tokio::test]
+    async fn fan_out_observers_receive_text_before_any_waits_for_terminal() {
+        let fixture = RuntimeFixture::open(ProviderMode::Text {
+            total_bytes: 4,
+            chunk_bytes: 4,
+            delay: Duration::ZERO,
+            chunk_delay: Duration::ZERO,
+        })
+        .await
+        .unwrap();
+        let (session_id, cursor) = fixture
+            .create_session(ApprovalMode::ReadOnly)
+            .await
+            .unwrap();
+        let mut events = fixture.subscribe(cursor).unwrap();
+        let receipt = session_command(
+            "submit fan-out observation regression",
+            &fixture.runtime,
+            generate_id("fan-out observation regression").unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![qq_protocol::InputPart::text("emit four bytes")],
+                limits: qq_protocol::RunLimits::default(),
+                correlation: qq_protocol::Correlation::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let run_id = prompt_run_id(&receipt).unwrap();
+        let mut first_text = None;
+        let terminal = loop {
+            let event = events.next().await.unwrap().unwrap();
+            if event.run_id != Some(run_id) {
+                continue;
+            }
+            match event.event {
+                SessionEvent::TextAppended { .. } => first_text = Some(event),
+                SessionEvent::RunFinished { .. } => break event,
+                _ => {}
+            }
+        };
+        finish_runtime_fixture(&fixture, "close fan-out observation runtime", Ok(()))
+            .await
+            .unwrap();
+
+        let text_observed = Arc::new(AtomicUsize::new(0));
+        let before_terminal = Arc::new(tokio::sync::Barrier::new(2));
+        let mut streams: Vec<SessionEventStream> = (0..2)
+            .map(|_| {
+                let first_text = first_text.clone().unwrap();
+                let terminal = terminal.clone();
+                let observed = Arc::clone(&text_observed);
+                let barrier = Arc::clone(&before_terminal);
+                Box::pin(async_stream::stream! {
+                    yield Ok(first_text);
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    barrier.wait().await;
+                    yield Ok(terminal);
+                }) as SessionEventStream
+            })
+            .collect();
+        let mut observed = Box::pin(wait_for_subscribers(&mut streams, run_id));
+        let progress = futures_util::poll!(observed.as_mut());
+        assert_eq!(
+            text_observed.load(Ordering::SeqCst),
+            2,
+            "every subscriber must receive text while terminal delivery is held"
+        );
+        let result = match progress {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => observed.await,
+        };
+        assert!(result.unwrap().1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn feed_lifecycle_fixtures_reject_unknown_ids_and_replay_committed_bytes() {
+        let (churn, checks) = feed_churn_workload(8).await.unwrap();
+        assert_eq!(churn.len(), 2);
+        assert!(checks.iter().all(|check| check.passed));
+        let (replay, checks) = feed_attach_replay_workload(3).await.unwrap();
+        assert_eq!(replay[0].samples.len(), 3);
+        assert!(checks.iter().all(|check| check.passed));
     }
 
     #[test]
