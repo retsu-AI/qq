@@ -687,25 +687,14 @@ impl HistorySearcher for SessionHistorySearcher {
         let session_id = self.session_id;
         let run_id = self.run_id;
         Box::pin(async move {
-            for _ in 0..HISTORY_SEARCH_RETRIES {
-                match inner
-                    .store
-                    .search_history(session_id, run_id, query.clone(), limit)
-                    .await
-                {
-                    Ok(matches) => return Ok(matches),
-                    Err(SessionRuntimeError::Overloaded) => {
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                    }
-                    Err(error) => return Err(format!("history search failed: {error}")),
-                }
-            }
-            Err("history search failed: the session store stayed overloaded".to_owned())
+            inner
+                .store
+                .search_history(session_id, run_id, query, limit)
+                .await
+                .map_err(|error| format!("history search failed: {error}"))
         })
     }
 }
-
-const HISTORY_SEARCH_RETRIES: usize = 64;
 
 /// Audits a root run's candidate answer by spawning a read-only child marked
 /// `purpose: audit` at the configured roster role. The child inherits every

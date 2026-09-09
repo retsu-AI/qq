@@ -16,7 +16,7 @@ may append a **request** row; only root changes a request's status.
 
 | ADR | Reserved for | Reserved by | Status |
 | --- | --- | --- | --- |
-| 0011 | Wake-driven control admission | speed-first H20 | Reserved |
+| 0011 | Shared commit discipline across store lanes (was: wake-driven control admission) | speed-first H20 | Written (`d05e474` follow-up) |
 | 0012 | Structural settlement and teardown-before-terminal | speed-first H21 | Reserved |
 | 0013 | Context-source identity in the plan descriptor | speed-first H28 | Reserved |
 | 0014 | Typed final output contract | speed-first HC3 | Reserved |

@@ -540,27 +540,20 @@ pub(super) async fn execute_run(
         }
         match plan {
             context::ContextPlan::Send { .. } => {
-                let started = loop {
-                    if *inner.failed.borrow() {
-                        finish_prepared_run(
-                            &inner,
-                            &claimed,
-                            &prepared.audit,
-                            internal_failure("session runtime failed before run start"),
-                        )
-                        .await;
-                        return;
-                    }
-                    let result = inner
-                        .store
-                        .start_reserved_run(&claimed, prepared.audit.clone())
-                        .await;
-                    if matches!(result, Err(SessionRuntimeError::Overloaded)) {
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                        continue;
-                    }
-                    break result;
-                };
+                if *inner.failed.borrow() {
+                    finish_prepared_run(
+                        &inner,
+                        &claimed,
+                        &prepared.audit,
+                        internal_failure("session runtime failed before run start"),
+                    )
+                    .await;
+                    return;
+                }
+                let started = inner
+                    .store
+                    .start_reserved_run(&claimed, prepared.audit.clone())
+                    .await;
                 let started = match started {
                     Ok(Some(started)) => started,
                     Ok(None) => {
@@ -588,19 +581,18 @@ pub(super) async fn execute_run(
                     max_output_tokens: Some(prepared.audit.resolved_model.max_output_tokens),
                     organization: prepared.audit.resolved_model.organization.clone(),
                 };
-                let cancelled =
-                    match cancellation_requested_with_retry(&inner, claimed.run_id).await {
-                        Ok(cancelled) => cancelled || *cancellation.borrow(),
-                        Err(error) => {
-                            finish_run(
-                                &inner,
-                                &claimed,
-                                persistence_failure("failed to re-read run cancellation", &error),
-                            )
-                            .await;
-                            return;
-                        }
-                    };
+                let cancelled = match cancellation_requested(&inner, claimed.run_id).await {
+                    Ok(cancelled) => cancelled || *cancellation.borrow(),
+                    Err(error) => {
+                        finish_run(
+                            &inner,
+                            &claimed,
+                            persistence_failure("failed to re-read run cancellation", &error),
+                        )
+                        .await;
+                        return;
+                    }
+                };
                 if *inner.failed.borrow() {
                     prepared.tool_cancellation.store(true, Ordering::Release);
                     finish_run(
@@ -666,27 +658,20 @@ async fn run_auto_compaction(
     cancellation: &mut watch::Receiver<bool>,
     resources: &RunResources,
 ) -> bool {
-    let messages = loop {
-        if *inner.failed.borrow() {
-            finish_prepared_run(
-                inner,
-                original,
-                &original_audit,
-                internal_failure("session runtime failed before automatic compaction"),
-            )
-            .await;
-            return false;
-        }
-        let result = inner
-            .store
-            .load_auto_compaction_messages(original.session_id)
-            .await;
-        if matches!(result, Err(SessionRuntimeError::Overloaded)) {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-            continue;
-        }
-        break result;
-    };
+    if *inner.failed.borrow() {
+        finish_prepared_run(
+            inner,
+            original,
+            &original_audit,
+            internal_failure("session runtime failed before automatic compaction"),
+        )
+        .await;
+        return false;
+    }
+    let messages = inner
+        .store
+        .load_auto_compaction_messages(original.session_id)
+        .await;
     let messages = match messages {
         Ok(messages) => messages,
         Err(error) => {
@@ -761,27 +746,20 @@ async fn run_auto_compaction(
         .await;
         return false;
     }
-    let started = loop {
-        if *inner.failed.borrow() {
-            finish_prepared_run(
-                inner,
-                original,
-                &original_audit,
-                internal_failure("session runtime failed before automatic compaction start"),
-            )
-            .await;
-            return false;
-        }
-        let result = inner
-            .store
-            .start_auto_compaction(original, prepared.audit.clone())
-            .await;
-        if matches!(result, Err(SessionRuntimeError::Overloaded)) {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-            continue;
-        }
-        break result;
-    };
+    if *inner.failed.borrow() {
+        finish_prepared_run(
+            inner,
+            original,
+            &original_audit,
+            internal_failure("session runtime failed before automatic compaction start"),
+        )
+        .await;
+        return false;
+    }
+    let started = inner
+        .store
+        .start_auto_compaction(original, prepared.audit.clone())
+        .await;
     let (mut compaction, started) = match started {
         Ok(Some(started)) => started,
         Ok(None) => {
@@ -821,7 +799,7 @@ async fn run_auto_compaction(
         max_output_tokens: Some(prepared.audit.resolved_model.max_output_tokens),
         organization: prepared.audit.resolved_model.organization.clone(),
     };
-    let cancelled = match cancellation_requested_with_retry(inner, compaction.run_id).await {
+    let cancelled = match cancellation_requested(inner, compaction.run_id).await {
         Ok(cancelled) => cancelled,
         Err(error) => {
             let outcome = persistence_failure("failed to re-read compaction cancellation", &error);
@@ -856,17 +834,10 @@ async fn run_auto_compaction(
     if *inner.failed.borrow() {
         return false;
     }
-    let committed = loop {
-        let result = inner
-            .store
-            .compaction_committed(original.session_id, compaction_run_id)
-            .await;
-        if matches!(result, Err(SessionRuntimeError::Overloaded)) {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-            continue;
-        }
-        break result;
-    };
+    let committed = inner
+        .store
+        .compaction_committed(original.session_id, compaction_run_id)
+        .await;
     let compacted = match committed {
         Ok(compacted) => compacted,
         Err(error) => {
@@ -880,60 +851,48 @@ async fn run_auto_compaction(
             return false;
         }
     };
-    loop {
-        match inner.store.reload_reserved_messages(original).await {
-            Ok(Some((messages, attempted))) => {
-                original.messages = messages;
-                original.context_compaction_attempted = attempted;
-                if compacted {
-                    original.context_overflow_basis = None;
-                    original.context_occupancy = None;
-                }
-                return true;
+    match inner.store.reload_reserved_messages(original).await {
+        Ok(Some((messages, attempted))) => {
+            original.messages = messages;
+            original.context_compaction_attempted = attempted;
+            if compacted {
+                original.context_overflow_basis = None;
+                original.context_occupancy = None;
             }
-            Ok(None) => {
-                clear_run_registration(inner, original.run_id);
-                return false;
-            }
-            Err(SessionRuntimeError::Overloaded) => {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            Err(error) => {
-                finish_prepared_run(
-                    inner,
-                    original,
-                    &original_audit,
-                    persistence_failure(
-                        "failed to reload the reserved prompt after automatic compaction",
-                        &error,
-                    ),
-                )
-                .await;
-                return false;
-            }
+            true
+        }
+        Ok(None) => {
+            clear_run_registration(inner, original.run_id);
+            false
+        }
+        Err(error) => {
+            finish_prepared_run(
+                inner,
+                original,
+                &original_audit,
+                persistence_failure(
+                    "failed to reload the reserved prompt after automatic compaction",
+                    &error,
+                ),
+            )
+            .await;
+            false
         }
     }
 }
 
-async fn cancellation_requested_with_retry(
+async fn cancellation_requested(
     inner: &SessionRuntimeInner,
     run_id: RunId,
 ) -> Result<bool, SessionRuntimeError> {
-    loop {
-        if *inner.failed.borrow() {
-            return Err(SessionRuntimeError::Unavailable);
-        }
-        let result = inner.store.cancellation_requested(run_id).await;
-        if *inner.failed.borrow() {
-            return Err(SessionRuntimeError::Unavailable);
-        }
-        match result {
-            Err(SessionRuntimeError::Overloaded) => {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            result => return result,
-        }
+    if *inner.failed.borrow() {
+        return Err(SessionRuntimeError::Unavailable);
     }
+    let result = inner.store.cancellation_requested(run_id).await;
+    if *inner.failed.borrow() {
+        return Err(SessionRuntimeError::Unavailable);
+    }
+    result
 }
 
 async fn finish_reserved_run(
@@ -941,29 +900,18 @@ async fn finish_reserved_run(
     claimed: &ClaimedRun,
     outcome: RunOutcome,
 ) {
-    loop {
-        match inner
-            .store
-            .finish_reserved_run(claimed, outcome.clone())
-            .await
-        {
-            Ok(events) => {
-                for event in events {
-                    inner.notify(event.cursor);
-                }
-                inner
-                    .settlements
-                    .send_modify(|generation| *generation = generation.wrapping_add(1));
-                clear_run_registration(inner, claimed.run_id);
-                return;
+    match inner.store.finish_reserved_run(claimed, outcome).await {
+        Ok(events) => {
+            for event in events {
+                inner.notify(event.cursor);
             }
-            Err(SessionRuntimeError::Overloaded) => {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            Err(_) => {
-                inner.failed.send_replace(true);
-                return;
-            }
+            inner
+                .settlements
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
+            clear_run_registration(inner, claimed.run_id);
+        }
+        Err(_) => {
+            inner.failed.send_replace(true);
         }
     }
 }
@@ -981,37 +929,30 @@ async fn finish_prepared_run(
     audit: &PreparedRunAudit,
     outcome: RunOutcome,
 ) {
-    loop {
-        match inner
-            .store
-            .finish_prepared_run(claimed, audit.clone(), outcome.clone())
-            .await
-        {
-            Ok(events) => {
-                for event in events {
-                    inner.notify(event.cursor);
-                }
-                inner
-                    .settlements
-                    .send_modify(|generation| *generation = generation.wrapping_add(1));
-                clear_run_registration(inner, claimed.run_id);
-                return;
+    match inner
+        .store
+        .finish_prepared_run(claimed, audit.clone(), outcome)
+        .await
+    {
+        Ok(events) => {
+            for event in events {
+                inner.notify(event.cursor);
             }
-            Err(SessionRuntimeError::Overloaded) => {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            Err(error) => {
-                // A trigger or storage failure on one descriptor/identity column
-                // must still terminally settle the queued run without pretending
-                // the failed audit write was durable.
-                finish_reserved_run(
-                    inner,
-                    claimed,
-                    persistence_failure("failed to persist prepared run state", &error),
-                )
-                .await;
-                return;
-            }
+            inner
+                .settlements
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
+            clear_run_registration(inner, claimed.run_id);
+        }
+        Err(error) => {
+            // A trigger or storage failure on one descriptor/identity column
+            // must still terminally settle the queued run without pretending
+            // the failed audit write was durable.
+            finish_reserved_run(
+                inner,
+                claimed,
+                persistence_failure("failed to persist prepared run state", &error),
+            )
+            .await;
         }
     }
 }
@@ -2447,29 +2388,18 @@ async fn finish_run_accounted(
     outcome: RunOutcome,
     accounting: Option<RunAccounting>,
 ) {
-    loop {
-        match inner
-            .store
-            .finish_run(claimed, outcome.clone(), accounting.clone())
-            .await
-        {
-            Ok(events) => {
-                for event in events {
-                    inner.notify(event.cursor);
-                }
-                inner
-                    .settlements
-                    .send_modify(|generation| *generation = generation.wrapping_add(1));
-                clear_run_registration(inner, claimed.run_id);
-                return;
+    match inner.store.finish_run(claimed, outcome, accounting).await {
+        Ok(events) => {
+            for event in events {
+                inner.notify(event.cursor);
             }
-            Err(SessionRuntimeError::Overloaded) => {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            Err(_) => {
-                inner.failed.send_replace(true);
-                return;
-            }
+            inner
+                .settlements
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
+            clear_run_registration(inner, claimed.run_id);
+        }
+        Err(_) => {
+            inner.failed.send_replace(true);
         }
     }
 }
