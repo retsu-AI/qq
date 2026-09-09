@@ -11,6 +11,13 @@ baseline constraints.
 Read `docs/design/architecture.md` before changing system boundaries. It
 records the initial direction, not a license to pre-build deferred features.
 
+Documentation is organized in `docs/README.md`: `design/` for the system as
+built, `adr/` for decisions, `plans/` for what is next, `plans/progress/` for
+what is in flight, `runbooks/` for procedures. Before starting or reviewing a
+unit of work, read `docs/plans/workflow.md`; it defines slices, ledgers,
+review, and escalation. Record progress in the plan's ledger every session and
+reserve ADR numbers in `docs/plans/progress/root.md`.
+
 ## Repository Map
 
 - `src/`: binary, CLI, runtime composition, and authenticated model discovery.

@@ -401,8 +401,9 @@ spend is charged and acknowledged exactly once. Parent continuation and terminal
 settlement await child and local-tool drain. Audit steering uses the same
 boundary. Native Windows teardown tests are added but remain unqualified on
 Windows; remote MCP effects and detached processes remain uncertain. See the
-[H23 slice 2 receipt](speed-first-extensible-agent-harness.md#h23-slice-2-receipt--2026-09-04)
-for validation and latency/resource results. H24 remaining-budget admission is
+[Phase 5a row](speed-first-extensible-agent-harness.md#completed-phases) in
+the backend plan (full receipt in Git history at `f0a1c2e`) for validation
+and latency/resource results. H24 remaining-budget admission is
 repaired separately by D2's 2026-09-05 follow-up.
 
 Reviewer widening. `ReviewRequest` gains bounded `arguments` (16 KiB),

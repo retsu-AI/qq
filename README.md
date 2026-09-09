@@ -5,8 +5,8 @@ Running `qq` with no subcommand opens the interactive TUI against a
 user-scoped background server (`qq serve` runs one in the foreground).
 Agents read, search, and edit workspace files, run shell commands, and
 call MCP tools — every mutating action gated by an approval policy.
-Design documentation lives in `docs/` (`design/` for decisions,
-`plans/` for proposals).
+Documentation lives in `docs/` (`design/` for the system as built, `adr/`
+for decisions, `plans/` for what is next; see `docs/README.md`).
 
 ## Quick Start
 
