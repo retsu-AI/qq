@@ -5,6 +5,7 @@ use std::process::ExitCode;
 mod eval;
 mod perf;
 mod providers;
+mod release;
 
 #[tokio::main]
 async fn main() -> ExitCode {

@@ -4,8 +4,18 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+/// `<crate version> (<short sha> <commit date>)`; see `build.rs`.
+pub const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("QQ_BUILD_REVISION"),
+    " ",
+    env!("QQ_BUILD_DATE"),
+    ")"
+);
+
 #[derive(Debug, Parser)]
-#[command(name = "qq", version, about = "Build and run AI agents")]
+#[command(name = "qq", version = VERSION, about = "Build and run AI agents")]
 pub struct Cli {
     /// Override the configured provider/model route.
     #[arg(long, global = true, value_name = "PROVIDER/MODEL")]
@@ -244,6 +254,25 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn version_names_the_crate_version_and_the_source_revision() {
+        let error = Cli::try_parse_from(["qq", "--version"]).unwrap_err();
+        let rendered = error.to_string();
+        let expected = format!("qq {}", env!("CARGO_PKG_VERSION"));
+        assert!(rendered.starts_with(&expected), "{rendered:?}");
+        // `(<sha> <date>)`, both non-empty; `unknown` is the tarball fallback.
+        let suffix = rendered[expected.len()..].trim();
+        let inner = suffix
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("{rendered:?}"));
+        let mut parts = inner.split(' ');
+        let sha = parts.next().unwrap();
+        let date = parts.next().unwrap();
+        assert!(parts.next().is_none(), "{rendered:?}");
+        assert!(!sha.is_empty() && !date.is_empty(), "{rendered:?}");
+    }
 
     #[test]
     fn parses_ask_command_and_global_overrides() {
