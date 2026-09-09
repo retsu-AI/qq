@@ -10780,7 +10780,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overloaded_prepared_rejection_retries_and_keeps_priced_accounting_known_zero() {
+    async fn saturated_prepared_rejection_settles_and_keeps_priced_accounting_known_zero() {
         struct PricedTinyContextLoader {
             provider_calls: Arc<AtomicUsize>,
         }
@@ -10856,7 +10856,9 @@ mod tests {
         let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
             panic!("unexpected receipt")
         };
-        store::fail_prepared_settlements(run_id, [SessionRuntimeError::Overloaded]);
+        // Saturate the control lane before the supervisor settles the policy
+        // rejection: settlement waits for capacity instead of spinning.
+        let saturated = saturate_control_lane(&runtime).await;
         let mut events = runtime
             .subscribe(SubscribeRequest {
                 workspace_id,
@@ -10864,6 +10866,8 @@ mod tests {
             })
             .unwrap();
         runtime.request_schedule();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        saturated.release().await;
         let observed = collect_until(&mut events, finished_for(run_id)).await;
 
         assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
@@ -15376,6 +15380,69 @@ mod tests {
         assert_eq!(prompt_title("\0\u{1b}\u{202e}\u{2066}"), "New session");
     }
 
+    /// Blocks the store worker on one job and fills every control-lane slot
+    /// behind it. The returned guard owns the queued filler calls; releasing
+    /// the worker drains them. Fresh `Priority::Control` calls are refused
+    /// while the guard is held.
+    struct SaturatedControlLane {
+        release: std::sync::mpsc::Sender<()>,
+        blocked: tokio::task::JoinHandle<Result<(), SessionRuntimeError>>,
+        fillers: Vec<tokio::task::JoinHandle<Result<(), SessionRuntimeError>>>,
+    }
+
+    impl SaturatedControlLane {
+        async fn release(self) {
+            self.release.send(()).unwrap();
+            self.blocked.await.unwrap().unwrap();
+            for filler in self.fillers {
+                filler.await.unwrap().unwrap();
+            }
+        }
+    }
+
+    async fn saturate_control_lane(runtime: &SessionRuntime) -> SaturatedControlLane {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let blocked_store = runtime.inner.store.clone();
+        let blocked = tokio::spawn(async move {
+            blocked_store
+                .call(Priority::Control, move |_| {
+                    let _ = entered_tx.send(());
+                    release_rx
+                        .recv()
+                        .map_err(|_| SessionRuntimeError::Unavailable)
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        // Other work may already hold control slots; fill whatever remains.
+        let mut fillers = Vec::new();
+        for _ in 0..store::CONTROL_QUEUE_CAPACITY {
+            let store = runtime.inner.store.clone();
+            let mut call = Box::pin(async move { store.call(Priority::Control, |_| Ok(())).await });
+            // Polling once takes the permit and enqueues the job synchronously,
+            // or is refused because the lane is already full.
+            match futures_util::poll!(call.as_mut()) {
+                std::task::Poll::Pending => fillers.push(tokio::spawn(call)),
+                std::task::Poll::Ready(Err(SessionRuntimeError::Overloaded)) => break,
+                std::task::Poll::Ready(other) => panic!("unexpected filler result: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            runtime
+                .inner
+                .store
+                .call(Priority::Control, |_| Ok(()))
+                .await,
+            Err(SessionRuntimeError::Overloaded)
+        ));
+        SaturatedControlLane {
+            release,
+            blocked,
+            fillers,
+        }
+    }
+
     async fn resolve_workspace(
         runtime: &SessionRuntime,
         path: &std::path::Path,
@@ -17066,7 +17133,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overloaded_reserved_reload_retries_after_auto_compaction() {
+    async fn saturated_reserved_reload_waits_after_auto_compaction() {
         let mut harness = auto_compact_harness(vec![
             AutoCompactScript::Text(over_threshold_output()),
             AutoCompactScript::Text(valid_summary("the summary")),
@@ -17094,8 +17161,10 @@ mod tests {
         let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
             panic!("unexpected receipt")
         };
-        store::fail_reserved_reloads(run_id, [SessionRuntimeError::Overloaded]);
+        let saturated = saturate_control_lane(&harness.runtime).await;
         harness.runtime.request_schedule();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        saturated.release().await;
         let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
 
         assert!(
@@ -21704,7 +21773,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overloaded_cancellation_read_and_start_retry_without_failing_the_runtime() {
+    async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime() {
         let directory = tempfile::tempdir().unwrap();
         let provider_calls = Arc::new(AtomicUsize::new(0));
         let runtime = SessionRuntime::open(
@@ -21737,8 +21806,10 @@ mod tests {
         let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
             panic!("unexpected receipt")
         };
-        store::fail_cancellation_reads(run_id, [SessionRuntimeError::Overloaded]);
-        store::fail_reserved_starts(run_id, [SessionRuntimeError::Overloaded]);
+        // Hold the worker on the cancellation read and saturate the control
+        // lane behind it. The supervisor's reserved start must wait for a
+        // capacity wake rather than be told to retry or fail the run.
+        let (read_entered, release_read) = store::hold_cancellation_read(run_id);
         let mut events = runtime
             .subscribe(SubscribeRequest {
                 workspace_id,
@@ -21746,6 +21817,24 @@ mod tests {
             })
             .unwrap();
         runtime.request_schedule();
+        tokio::time::timeout(Duration::from_secs(2), read_entered)
+            .await
+            .unwrap()
+            .unwrap();
+        let saturated = saturate_control_lane(&runtime).await;
+        release_read.send(()).unwrap();
+        // The start attempt is now queued behind a full lane and cannot make
+        // progress until capacity returns.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(matches!(
+            runtime
+                .inner
+                .store
+                .call(Priority::Control, |_| Ok(()))
+                .await,
+            Err(SessionRuntimeError::Overloaded)
+        ));
+        saturated.release().await;
         let observed = collect_until(&mut events, finished_for(run_id)).await;
 
         assert!(observed.iter().any(|event| matches!(
@@ -21914,7 +22003,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overloaded_start_cannot_race_past_a_sibling_runtime_failure() {
+    async fn held_start_cannot_race_past_a_sibling_runtime_failure() {
         let directory = tempfile::tempdir().unwrap();
         let provider_calls = Arc::new(AtomicUsize::new(0));
         let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
@@ -21984,7 +22073,7 @@ mod tests {
         else {
             panic!("unexpected receipt")
         };
-        let (start_entered, release_start) = store::hold_overloaded_reserved_start(retrying_run);
+        let (start_entered, release_start) = store::hold_failing_reserved_start(retrying_run);
         let (read_entered, release_read) = store::hold_cancellation_read(failing_run);
         store::fail_cancellation_reads(failing_run, [SessionRuntimeError::Persistence]);
         store::fail_reserved_settlements(failing_run, [SessionRuntimeError::Persistence]);

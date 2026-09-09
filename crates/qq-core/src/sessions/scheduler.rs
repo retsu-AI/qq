@@ -81,7 +81,7 @@ pub(super) async fn schedule_runs(
                         if resources.drain().await.is_err() {
                             task_inner.failed.send_replace(true);
                         } else {
-                            settle_panicked_execution_with_retry(&task_inner, &panic_claimed).await;
+                            settle_panicked_execution(&task_inner, &panic_claimed).await;
                         }
                     }
                     drop(permit);
@@ -111,7 +111,7 @@ async fn supervise_reserved_run(
         Err(_) => false,
     };
     if !registered {
-        settle_unstartable_reservation_with_retry(
+        settle_unstartable_reservation(
             &inner,
             &claimed,
             internal_failure("run cancellation registry is unavailable"),
@@ -127,34 +127,25 @@ async fn supervise_reserved_run(
     if claimed.cancel_requested {
         cancel.send_replace(true);
     } else {
-        loop {
-            match inner.store.cancellation_requested(claimed.run_id).await {
-                Ok(true) => {
-                    cancel.send_replace(true);
-                    break;
-                }
-                Ok(false) => break,
-                Err(SessionRuntimeError::Overloaded) => {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-                Err(error) => {
-                    settle_unstartable_reservation_with_retry(
-                        &inner,
-                        &claimed,
-                        persistence_failure(
-                            "failed to read reserved-run cancellation state",
-                            &error,
-                        ),
-                        false,
-                    )
-                    .await;
-                    return;
-                }
+        match inner.store.cancellation_requested(claimed.run_id).await {
+            Ok(true) => {
+                cancel.send_replace(true);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                settle_unstartable_reservation(
+                    &inner,
+                    &claimed,
+                    persistence_failure("failed to read reserved-run cancellation state", &error),
+                    false,
+                )
+                .await;
+                return;
             }
         }
     }
     if *inner.failed.borrow() {
-        settle_unstartable_reservation_with_retry(
+        settle_unstartable_reservation(
             &inner,
             &claimed,
             internal_failure("session runtime failed before run preparation"),
@@ -166,7 +157,7 @@ async fn supervise_reserved_run(
     execute_run(inner, claimed, cancel_receiver, resources).await;
 }
 
-async fn settle_unstartable_reservation_with_retry(
+async fn settle_unstartable_reservation(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
     outcome: RunOutcome,
@@ -175,25 +166,14 @@ async fn settle_unstartable_reservation_with_retry(
     if fail_runtime {
         inner.failed.send_replace(true);
     }
-    loop {
-        match inner
-            .store
-            .finish_reserved_run(claimed, outcome.clone())
-            .await
-        {
-            Ok(events) => {
-                for event in events {
-                    inner.notify(event.cursor);
-                }
-                break;
+    match inner.store.finish_reserved_run(claimed, outcome).await {
+        Ok(events) => {
+            for event in events {
+                inner.notify(event.cursor);
             }
-            Err(SessionRuntimeError::Overloaded) => {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            Err(_) => {
-                inner.failed.send_replace(true);
-                break;
-            }
+        }
+        Err(_) => {
+            inner.failed.send_replace(true);
         }
     }
     if let Ok(mut cancellations) = inner.cancellations.lock() {
@@ -208,37 +188,30 @@ async fn settle_unstartable_reservation_with_retry(
         .send_modify(|generation| *generation = generation.wrapping_add(1));
 }
 
-async fn settle_panicked_execution_with_retry(inner: &SessionRuntimeInner, claimed: &ClaimedRun) {
-    loop {
-        match inner
-            .store
-            .settle_panicked_execution(
-                claimed,
-                internal_failure("agent run task panicked; committed work was preserved"),
-            )
-            .await
-        {
-            Ok(settlement) => {
-                for event in settlement.events {
-                    inner.notify(event.cursor);
-                }
-                if let Ok(mut cancellations) = inner.cancellations.lock() {
-                    for run_id in &settlement.run_ids {
-                        cancellations.remove(run_id);
-                    }
-                }
-                for run_id in settlement.run_ids {
-                    inner.clear_run_approvals(run_id);
-                }
-                break;
+async fn settle_panicked_execution(inner: &SessionRuntimeInner, claimed: &ClaimedRun) {
+    match inner
+        .store
+        .settle_panicked_execution(
+            claimed,
+            internal_failure("agent run task panicked; committed work was preserved"),
+        )
+        .await
+    {
+        Ok(settlement) => {
+            for event in settlement.events {
+                inner.notify(event.cursor);
             }
-            Err(SessionRuntimeError::Overloaded) => {
-                tokio::time::sleep(Duration::from_millis(1)).await;
+            if let Ok(mut cancellations) = inner.cancellations.lock() {
+                for run_id in &settlement.run_ids {
+                    cancellations.remove(run_id);
+                }
             }
-            Err(_) => {
-                inner.failed.send_replace(true);
-                break;
+            for run_id in settlement.run_ids {
+                inner.clear_run_approvals(run_id);
             }
+        }
+        Err(_) => {
+            inner.failed.send_replace(true);
         }
     }
 }

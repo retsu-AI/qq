@@ -17,7 +17,7 @@ mod worker;
 #[cfg(test)]
 pub(super) use schema::{has_column, open_database};
 
-const CONTROL_QUEUE_CAPACITY: usize = 256;
+pub(super) const CONTROL_QUEUE_CAPACITY: usize = 256;
 const OUTPUT_QUEUE_CAPACITY: usize = 1024;
 const CONTROL_BURST_LIMIT: usize = 4;
 
@@ -48,14 +48,7 @@ static RESERVED_SETTLEMENT_FAILURES: Mutex<Vec<(RunId, SessionRuntimeError)>> =
     Mutex::new(Vec::new());
 
 #[cfg(test)]
-static PREPARED_SETTLEMENT_FAILURES: Mutex<Vec<(RunId, SessionRuntimeError)>> =
-    Mutex::new(Vec::new());
-
-#[cfg(test)]
 static RESERVED_RELOAD_FAILURES: Mutex<Vec<(RunId, SessionRuntimeError)>> = Mutex::new(Vec::new());
-
-#[cfg(test)]
-static RESERVED_START_FAILURES: Mutex<Vec<(RunId, SessionRuntimeError)>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 struct CancellationReadHook {
@@ -125,16 +118,19 @@ pub(super) fn hold_outcome_read(
     (entered_rx, release, attempted_rx)
 }
 
+/// Holds a reserved-run start attempt and then fails it, so a test can
+/// order a sibling's fatal settlement against a start that is still in
+/// flight. `Overloaded` cannot be produced here any more (lifecycle store
+/// calls wait for admission), so the held attempt fails with `Persistence`.
 #[cfg(test)]
-struct ReservedStartOverloadHook {
+struct ReservedStartHoldHook {
     run_id: RunId,
     entered: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
 }
 
 #[cfg(test)]
-static RESERVED_START_OVERLOAD_HOOKS: Mutex<Vec<ReservedStartOverloadHook>> =
-    Mutex::new(Vec::new());
+static RESERVED_START_HOLD_HOOKS: Mutex<Vec<ReservedStartHoldHook>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 pub(super) fn fail_cancellation_reads(
@@ -159,33 +155,11 @@ pub(super) fn fail_reserved_settlements(
 }
 
 #[cfg(test)]
-pub(super) fn fail_prepared_settlements(
-    run_id: RunId,
-    failures: impl IntoIterator<Item = SessionRuntimeError>,
-) {
-    PREPARED_SETTLEMENT_FAILURES
-        .lock()
-        .unwrap()
-        .extend(failures.into_iter().map(|failure| (run_id, failure)));
-}
-
-#[cfg(test)]
 pub(super) fn fail_reserved_reloads(
     run_id: RunId,
     failures: impl IntoIterator<Item = SessionRuntimeError>,
 ) {
     RESERVED_RELOAD_FAILURES
-        .lock()
-        .unwrap()
-        .extend(failures.into_iter().map(|failure| (run_id, failure)));
-}
-
-#[cfg(test)]
-pub(super) fn fail_reserved_starts(
-    run_id: RunId,
-    failures: impl IntoIterator<Item = SessionRuntimeError>,
-) {
-    RESERVED_START_FAILURES
         .lock()
         .unwrap()
         .extend(failures.into_iter().map(|failure| (run_id, failure)));
@@ -209,15 +183,15 @@ pub(super) fn hold_cancellation_read(
 }
 
 #[cfg(test)]
-pub(super) fn hold_overloaded_reserved_start(
+pub(super) fn hold_failing_reserved_start(
     run_id: RunId,
 ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
     let (entered, entered_rx) = oneshot::channel();
     let (release, release_rx) = oneshot::channel();
-    RESERVED_START_OVERLOAD_HOOKS
+    RESERVED_START_HOLD_HOOKS
         .lock()
         .unwrap()
-        .push(ReservedStartOverloadHook {
+        .push(ReservedStartHoldHook {
             run_id,
             entered,
             release: release_rx,
@@ -233,8 +207,8 @@ fn take_cancellation_read_hook(run_id: RunId) -> Option<CancellationReadHook> {
 }
 
 #[cfg(test)]
-fn take_reserved_start_overload_hook(run_id: RunId) -> Option<ReservedStartOverloadHook> {
-    let mut hooks = RESERVED_START_OVERLOAD_HOOKS.lock().unwrap();
+fn take_reserved_start_hold_hook(run_id: RunId) -> Option<ReservedStartHoldHook> {
+    let mut hooks = RESERVED_START_HOLD_HOOKS.lock().unwrap();
     let index = hooks.iter().position(|hook| hook.run_id == run_id)?;
     Some(hooks.remove(index))
 }
@@ -803,7 +777,7 @@ impl Store {
         depth: u16,
     ) -> Result<Option<ClaimedRun>, SessionRuntimeError> {
         let store_id = self.store_id;
-        self.call(Priority::Control, move |connection| {
+        self.call(Priority::AwaitControl, move |connection| {
             reserve_next_run(connection, store_id, depth)
         })
         .await
@@ -846,7 +820,7 @@ impl Store {
         if let Some(failure) = take_targeted_failure(&CANCELLATION_READ_FAILURES, run_id) {
             return Err(failure);
         }
-        self.call(Priority::Control, move |connection| {
+        self.call(Priority::AwaitControl, move |connection| {
             connection
                 .query_row(
                     "SELECT cancel_requested FROM runs WHERE id = ?1",
@@ -866,18 +840,14 @@ impl Store {
         audit: PreparedRunAudit,
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         #[cfg(test)]
-        if let Some(hook) = take_reserved_start_overload_hook(claimed.run_id) {
+        if let Some(hook) = take_reserved_start_hold_hook(claimed.run_id) {
             let _ = hook.entered.send(());
             let _ = hook.release.await;
-            return Err(SessionRuntimeError::Overloaded);
-        }
-        #[cfg(test)]
-        if let Some(failure) = take_targeted_failure(&RESERVED_START_FAILURES, claimed.run_id) {
-            return Err(failure);
+            return Err(SessionRuntimeError::Persistence);
         }
         let store_id = self.store_id;
         let claimed = claimed.clone();
-        self.call(Priority::Control, move |connection| {
+        self.call(Priority::AwaitControl, move |connection| {
             start_reserved_run(connection, store_id, &claimed, &audit)
         })
         .await
@@ -890,7 +860,7 @@ impl Store {
     ) -> Result<Option<(ClaimedRun, SessionEventEnvelope)>, SessionRuntimeError> {
         let store_id = self.store_id;
         let original = original.clone();
-        self.call(Priority::Control, move |connection| {
+        self.call(Priority::AwaitControl, move |connection| {
             start_auto_compaction(connection, store_id, &original, &audit)
         })
         .await
@@ -900,7 +870,7 @@ impl Store {
         &self,
         session_id: SessionId,
     ) -> Result<Vec<Message>, SessionRuntimeError> {
-        self.call(Priority::Control, move |connection| {
+        self.call(Priority::AwaitControl, move |connection| {
             load_auto_compaction_messages(connection, session_id)
         })
         .await
@@ -915,7 +885,7 @@ impl Store {
             return Err(failure);
         }
         let claimed = claimed.clone();
-        self.call(Priority::Control, move |connection| {
+        self.call(Priority::AwaitControl, move |connection| {
             reload_reserved_messages(connection, &claimed)
         })
         .await
@@ -930,7 +900,7 @@ impl Store {
         query: String,
         limit: usize,
     ) -> Result<Vec<HistoryMatch>, SessionRuntimeError> {
-        self.call(Priority::Control, move |connection| {
+        self.call(Priority::AwaitControl, move |connection| {
             let transaction = connection
                 .transaction()
                 .map_err(|_| SessionRuntimeError::Persistence)?;
@@ -944,7 +914,7 @@ impl Store {
         session_id: SessionId,
         run_id: RunId,
     ) -> Result<bool, SessionRuntimeError> {
-        self.call(Priority::Control, move |connection| {
+        self.call(Priority::AwaitControl, move |connection| {
             connection
                 .query_row(
                     "SELECT EXISTS(
@@ -971,7 +941,7 @@ impl Store {
         }
         let store_id = self.store_id;
         let claimed = claimed.clone();
-        self.call(Priority::Control, move |connection| {
+        self.call(Priority::AwaitControl, move |connection| {
             finish_reserved_run(connection, store_id, &claimed, outcome)
         })
         .await
@@ -983,14 +953,9 @@ impl Store {
         audit: PreparedRunAudit,
         outcome: RunOutcome,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
-        #[cfg(test)]
-        if let Some(failure) = take_targeted_failure(&PREPARED_SETTLEMENT_FAILURES, claimed.run_id)
-        {
-            return Err(failure);
-        }
         let store_id = self.store_id;
         let claimed = claimed.clone();
-        self.call(Priority::Control, move |connection| {
+        self.call(Priority::AwaitControl, move |connection| {
             finish_prepared_run(connection, store_id, &claimed, &audit, outcome)
         })
         .await
@@ -1003,7 +968,7 @@ impl Store {
     ) -> Result<PanickedExecutionSettlement, SessionRuntimeError> {
         let store_id = self.store_id;
         let original = original.clone();
-        self.call(Priority::Control, move |connection| {
+        self.call(Priority::AwaitControl, move |connection| {
             settle_panicked_execution(connection, store_id, &original, outcome)
         })
         .await
@@ -1097,7 +1062,7 @@ impl Store {
         let claimed = claimed.clone();
         let identity = serde_json::to_string(identity.as_ref())
             .map_err(|_| SessionRuntimeError::Persistence)?;
-        self.call(Priority::Control, move |connection| {
+        self.call(Priority::AwaitControl, move |connection| {
             let changed = connection
                 .execute(
                     "UPDATE runs
@@ -1336,7 +1301,7 @@ impl Store {
         claimed: &ClaimedRun,
     ) -> Result<(Option<String>, Vec<RecentAction>), SessionRuntimeError> {
         let claimed = claimed.clone();
-        self.call(Priority::Control, move |connection| {
+        self.call(Priority::AwaitControl, move |connection| {
             load_review_context(connection, &claimed)
         })
         .await
@@ -1551,7 +1516,7 @@ impl Store {
         &self,
         run_id: RunId,
     ) -> Result<String, SessionRuntimeError> {
-        self.call(Priority::Control, move |connection| {
+        self.call(Priority::AwaitControl, move |connection| {
             let final_turn_message = connection
                 .query_row(
                     "SELECT m.id
@@ -1982,6 +1947,74 @@ mod tests {
 
         release_tx.send(()).unwrap();
         blocked.await.unwrap().unwrap();
+    }
+
+    /// Run-lifecycle store calls (cancellation reads, reserved starts,
+    /// settlements, compaction, history search) are issued by the runtime on
+    /// behalf of already-admitted work. Under control-lane saturation they
+    /// wait for a capacity wake instead of being told to retry; only new
+    /// client commands keep the immediate `Overloaded` rejection.
+    #[tokio::test]
+    async fn lifecycle_store_calls_wait_for_capacity_while_client_commands_are_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("sessions.sqlite3"))
+            .await
+            .unwrap();
+        let (release, blocked) = hold_worker(&store).await;
+        let mut queued = Vec::new();
+        for _ in 0..CONTROL_QUEUE_CAPACITY {
+            let mut call = Box::pin(store.call(Priority::Control, |_| Ok(())));
+            assert!(futures_util::poll!(call.as_mut()).is_pending());
+            queued.push(call);
+        }
+        // A client command is admission-rejected immediately.
+        assert!(matches!(
+            store
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::CancelRun {
+                        run_id: RunId::generate().unwrap(),
+                    },
+                )
+                .await,
+            Err(SessionRuntimeError::Overloaded)
+        ));
+        // Every lifecycle read or settlement waits instead.
+        let run_id = RunId::generate().unwrap();
+        let session_id = SessionId::generate().unwrap();
+        let mut cancellation = Box::pin(store.cancellation_requested(run_id));
+        let mut search =
+            Box::pin(store.search_history(session_id, run_id, "anything".to_owned(), 4));
+        let mut reload = Box::pin(store.load_auto_compaction_messages(session_id));
+        assert!(futures_util::poll!(cancellation.as_mut()).is_pending());
+        assert!(futures_util::poll!(search.as_mut()).is_pending());
+        assert!(futures_util::poll!(reload.as_mut()).is_pending());
+        release.send(()).unwrap();
+        // Once capacity returns they run and fail on their own terms (the
+        // run and session do not exist), never with `Overloaded`.
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), cancellation)
+                .await
+                .unwrap(),
+            Err(SessionRuntimeError::RunNotFound)
+        );
+        assert!(!matches!(
+            tokio::time::timeout(Duration::from_secs(2), search)
+                .await
+                .unwrap(),
+            Err(SessionRuntimeError::Overloaded)
+        ));
+        assert!(!matches!(
+            tokio::time::timeout(Duration::from_secs(2), reload)
+                .await
+                .unwrap(),
+            Err(SessionRuntimeError::Overloaded)
+        ));
+        for call in queued {
+            call.await.unwrap();
+        }
+        blocked.await.unwrap().unwrap();
+        store.close().await.unwrap();
     }
 
     #[tokio::test]
