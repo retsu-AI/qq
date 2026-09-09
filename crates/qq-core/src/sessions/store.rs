@@ -402,6 +402,56 @@ impl Store {
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T, SessionRuntimeError> + Send + 'static,
     {
+        self.call_with(priority, worker::Joins::Never, operation)
+            .await
+    }
+
+    /// A control-lane job that writes. When the worker is forming an output
+    /// group, a waiting write joins it as a savepoint and settles on the
+    /// group's commit instead of paying its own fsync; the reply still waits
+    /// for durability. Reads never join: they must observe a committed
+    /// state, not a group in progress.
+    pub(super) async fn call_write<T, F>(
+        &self,
+        priority: Priority,
+        operation: F,
+    ) -> Result<T, SessionRuntimeError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, SessionRuntimeError> + Send + 'static,
+    {
+        debug_assert!(!matches!(priority, Priority::Output));
+        self.call_with(priority, worker::Joins::OutputGroup, operation)
+            .await
+    }
+
+    /// A control-lane read issued by the scheduler rather than a waiting
+    /// client. It never joins a group and never cuts one short; see
+    /// [`worker::Joins::AfterGroup`].
+    pub(super) async fn call_after_group<T, F>(
+        &self,
+        priority: Priority,
+        operation: F,
+    ) -> Result<T, SessionRuntimeError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, SessionRuntimeError> + Send + 'static,
+    {
+        debug_assert!(!matches!(priority, Priority::Output));
+        self.call_with(priority, worker::Joins::AfterGroup, operation)
+            .await
+    }
+
+    async fn call_with<T, F>(
+        &self,
+        priority: Priority,
+        joins: worker::Joins,
+        operation: F,
+    ) -> Result<T, SessionRuntimeError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, SessionRuntimeError> + Send + 'static,
+    {
         // Only the reply type is generic. Admission, queueing, and settlement
         // run in one shared body so ~60 call sites do not each carry a copy
         // of the hot path.
@@ -419,7 +469,7 @@ impl Store {
                 }),
             }
         });
-        self.enqueue(priority, job).await?;
+        self.enqueue(priority, joins, job).await?;
         response
             .await
             .map_err(|_| SessionRuntimeError::Unavailable)?
@@ -428,6 +478,7 @@ impl Store {
     async fn enqueue(
         &self,
         priority: Priority,
+        joins: worker::Joins,
         job: worker::DatabaseJob,
     ) -> Result<(), SessionRuntimeError> {
         if self.inner.closing.load(Ordering::Acquire) {
@@ -460,6 +511,7 @@ impl Store {
         };
         let message = WorkerMessage::Run {
             job,
+            joins,
             capacity_permit,
         };
         let sender = match priority {
@@ -534,7 +586,7 @@ impl Store {
         &self,
     ) -> Result<Vec<EventCursor>, SessionRuntimeError> {
         let store_id = self.store_id;
-        self.call(Priority::Control, move |connection| {
+        self.call_write(Priority::Control, move |connection| {
             recover_interrupted_runs(connection, store_id)
         })
         .await
@@ -612,7 +664,7 @@ impl Store {
             }
             _ => None,
         };
-        self.call(Priority::Control, move |connection| {
+        self.call_write(Priority::Control, move |connection| {
             let applied = execute_command(
                 connection,
                 store_id,
@@ -652,7 +704,7 @@ impl Store {
         }
         let store_id = self.store_id;
         let command_id = CommandId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
-        self.call(Priority::AwaitControl, move |connection| {
+        self.call_write(Priority::AwaitControl, move |connection| {
             execute_command(
                 connection,
                 store_id,
@@ -683,7 +735,7 @@ impl Store {
         #[cfg(test)]
         let parent_session = parent.session_id;
         let created = self
-            .call(Priority::Control, move |connection| {
+            .call_write(Priority::Control, move |connection| {
                 create_child_run(connection, store_id, parent, admission)
             })
             .await;
@@ -777,7 +829,7 @@ impl Store {
         depth: u16,
     ) -> Result<Option<ClaimedRun>, SessionRuntimeError> {
         let store_id = self.store_id;
-        self.call(Priority::AwaitControl, move |connection| {
+        self.call_after_group(Priority::AwaitControl, move |connection| {
             reserve_next_run(connection, store_id, depth)
         })
         .await
@@ -847,7 +899,7 @@ impl Store {
         }
         let store_id = self.store_id;
         let claimed = claimed.clone();
-        self.call(Priority::AwaitControl, move |connection| {
+        self.call_write(Priority::AwaitControl, move |connection| {
             start_reserved_run(connection, store_id, &claimed, &audit)
         })
         .await
@@ -860,7 +912,7 @@ impl Store {
     ) -> Result<Option<(ClaimedRun, SessionEventEnvelope)>, SessionRuntimeError> {
         let store_id = self.store_id;
         let original = original.clone();
-        self.call(Priority::AwaitControl, move |connection| {
+        self.call_write(Priority::AwaitControl, move |connection| {
             start_auto_compaction(connection, store_id, &original, &audit)
         })
         .await
@@ -941,7 +993,7 @@ impl Store {
         }
         let store_id = self.store_id;
         let claimed = claimed.clone();
-        self.call(Priority::AwaitControl, move |connection| {
+        self.call_write(Priority::AwaitControl, move |connection| {
             finish_reserved_run(connection, store_id, &claimed, outcome)
         })
         .await
@@ -955,7 +1007,7 @@ impl Store {
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let claimed = claimed.clone();
-        self.call(Priority::AwaitControl, move |connection| {
+        self.call_write(Priority::AwaitControl, move |connection| {
             finish_prepared_run(connection, store_id, &claimed, &audit, outcome)
         })
         .await
@@ -968,7 +1020,7 @@ impl Store {
     ) -> Result<PanickedExecutionSettlement, SessionRuntimeError> {
         let store_id = self.store_id;
         let original = original.clone();
-        self.call(Priority::AwaitControl, move |connection| {
+        self.call_write(Priority::AwaitControl, move |connection| {
             settle_panicked_execution(connection, store_id, &original, outcome)
         })
         .await
@@ -1062,7 +1114,7 @@ impl Store {
         let claimed = claimed.clone();
         let identity = serde_json::to_string(identity.as_ref())
             .map_err(|_| SessionRuntimeError::Persistence)?;
-        self.call(Priority::AwaitControl, move |connection| {
+        self.call_write(Priority::AwaitControl, move |connection| {
             let changed = connection
                 .execute(
                     "UPDATE runs
@@ -1664,6 +1716,7 @@ mod tests {
     fn control_message(job: impl FnOnce(&mut Connection) + Send + 'static) -> WorkerMessage {
         WorkerMessage::Run {
             job: raw_job(job),
+            joins: worker::Joins::Never,
             capacity_permit: None,
         }
     }
@@ -1780,6 +1833,110 @@ mod tests {
             [1, 2, 3, 5, 6],
             "the failed job's row is gone, the rest are durable"
         );
+    }
+
+    /// H20: a control *write* that is waiting when an output group forms
+    /// joins that group as a savepoint and settles on the group's single
+    /// commit, so an acknowledgement and the streamed output share one fsync.
+    /// A control *read* keeps its own immediate path and never joins.
+    #[tokio::test]
+    async fn a_waiting_control_write_joins_the_output_group_and_a_read_does_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("sessions.sqlite3"))
+            .await
+            .unwrap();
+        store
+            .call(Priority::Control, |connection| {
+                connection
+                    .execute_batch("CREATE TABLE scratch(n INTEGER PRIMARY KEY)")
+                    .map_err(|_| SessionRuntimeError::Persistence)
+            })
+            .await
+            .unwrap();
+        // Hold the worker inside an *output* job so the group is already
+        // forming when the control write and read arrive.
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let blocked_store = store.clone();
+        let blocked = tokio::spawn(async move {
+            blocked_store
+                .call(Priority::Output, move |connection| {
+                    let unit = begin_unit(connection)?;
+                    unit.execute("INSERT INTO scratch(n) VALUES (?1)", [1_i64])
+                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    unit.commit()
+                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    let _ = entered_tx.send(());
+                    release_rx
+                        .recv()
+                        .map_err(|_| SessionRuntimeError::Unavailable)
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        let mut outputs = Vec::new();
+        for n in 2_i64..=2 {
+            let store = store.clone();
+            outputs.push(tokio::spawn(async move {
+                store
+                    .call(Priority::Output, move |connection| {
+                        let unit = begin_unit(connection)?;
+                        unit.execute("INSERT INTO scratch(n) VALUES (?1)", [n])
+                            .map_err(|_| SessionRuntimeError::Persistence)?;
+                        unit.commit()
+                            .map_err(|_| SessionRuntimeError::Persistence)?;
+                        Ok(())
+                    })
+                    .await
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let write_store = store.clone();
+        let write = tokio::spawn(async move {
+            write_store
+                .call_write(Priority::Control, |connection| {
+                    let unit = begin_unit(connection)?;
+                    // Joined the group: the unit is a savepoint and the
+                    // connection is mid-transaction.
+                    let joined = matches!(unit, Unit::Savepoint(_));
+                    unit.execute("INSERT INTO scratch(n) VALUES (?1)", [10_i64])
+                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    unit.commit()
+                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    Ok(joined && !connection.is_autocommit())
+                })
+                .await
+        });
+        let read_store = store.clone();
+        let read = tokio::spawn(async move {
+            read_store
+                .call(Priority::Control, |connection| {
+                    // A read never runs inside someone else's group.
+                    Ok(connection.is_autocommit())
+                })
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        release.send(()).unwrap();
+        blocked.await.unwrap().unwrap();
+
+        for output in outputs {
+            output.await.unwrap().unwrap();
+        }
+        assert!(
+            write.await.unwrap().unwrap(),
+            "the control write must join the group"
+        );
+        assert!(
+            read.await.unwrap().unwrap(),
+            "the control read must run alone"
+        );
+        let rows = store
+            .call(Priority::Control, |connection| Ok(scratch_rows(connection)))
+            .await
+            .unwrap();
+        assert_eq!(rows, [1, 2, 10]);
+        store.close().await.unwrap();
     }
 
     /// D2: when the group's outer commit fails, every job in it is told
@@ -2113,6 +2270,7 @@ mod tests {
                 .output
                 .try_send(WorkerMessage::Run {
                     job: raw_job(|_| {}),
+                    joins: worker::Joins::Never,
                     capacity_permit: Some(permit),
                 })
                 .unwrap();
@@ -2173,6 +2331,7 @@ mod tests {
                 job: raw_job(move |_| {
                     let _ = observed_tx.send(output_controls.load(Ordering::SeqCst));
                 }),
+                joins: worker::Joins::Never,
                 capacity_permit: Some(permit),
             })
             .unwrap();
