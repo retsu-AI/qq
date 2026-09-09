@@ -595,20 +595,35 @@ This ordering makes persisted state authoritative and allows clients to resume
 an event stream without losing output. Each completed model turn also commits
 the run's cumulative usage and estimated cost.
 
-The store worker serves two bounded lanes. Control jobs (commands, claims,
-snapshots, catch-up reads) each run in their own transaction and reply as soon
-as it commits, so an acknowledgement never waits behind streamed output.
-Output jobs (text, reasoning, tool output, turn commits) are group-committed:
-when the worker dequeues one it opens a single transaction, runs that job and
-every output job already queued behind it (at most `OUTPUT_GROUP_LIMIT = 16`,
-and stopping early when a control job is waiting) each inside a savepoint,
-commits once, and only then publishes their events and replies to every
-caller. A failing job rolls back its own savepoint and its siblings are
-unaffected; a failing outer commit fails every job in the group with
-`Persistence` and publishes nothing. Eight concurrent streams therefore cost
-one fsync per service round instead of eight, at `synchronous=FULL`
-throughout. Operation code is identical in both modes: every mutation begins a
-`Unit` that is a transaction when alone and a savepoint inside a group.
+The store worker serves two bounded lanes with one commit discipline: every
+write that is queued when a transaction is open joins it as a savepoint and
+settles on that transaction's single commit. Output jobs (text, reasoning,
+tool output, turn commits) and control writes (commands, child creation and
+cancellation, run starts, settlements, prompt identity, recovery) are grouped
+this way, at most `OUTPUT_GROUP_LIMIT = 16` per commit, waiting control writes
+taken before more output so an acknowledgement is never starved by a stream.
+Control reads a client waits on (snapshots, replay pages, cancellation reads)
+run alone in their own transaction and close a forming group, so they are
+answered right after that commit and never observe uncommitted state. The
+scheduler's claim read (`reserve_next_run_at_depth`) also runs alone but does
+not cut a group short: it is a wakeup, not a waiting client, and closing every
+group for it would cost a full fsync per stream per round. At most one read is
+held per group and no further control message is dequeued once one is, so the
+control lane stays FIFO. A failing job rolls back its own savepoint and its
+siblings are unaffected; a failing outer commit fails every job in the group
+with `Persistence` and publishes nothing. Eight concurrent streams and the
+commands that start, steer, and settle them therefore share one fsync per
+service round, at `synchronous=FULL` throughout. Operation code is identical
+in both modes: every mutation begins a `Unit` that is a transaction when alone
+and a savepoint inside a group.
+
+Control-lane admission has two modes. A new client command takes a
+`control_slots` permit with `try_acquire` and is refused with `Overloaded`
+when the lane is full, so a saturated store is visible at the boundary. Store
+calls the runtime makes on behalf of already-admitted work (cancellation
+reads, reserved starts, compaction, settlements, history search, the
+scheduler's claim) wait for a permit instead: they are never told to retry,
+and there is no polling loop in the runtime.
 
 Command acknowledgement is bounded work independent of history. The active
 run's activity is a `runs.activity` column written in the same transaction as

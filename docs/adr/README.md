@@ -22,7 +22,7 @@ written.
 | 0008 | [Feature-gate the Bedrock family inside `qq-provider`](0008-feature-gated-bedrock.md) | Accepted |
 | 0009 | [QQ ends at the headless contract; supervisors own hosting](0009-headless-hosting-boundary.md) | Accepted |
 | 0010 | [Ship a stripped, thin-LTO release profile and tighten size budgets](0010-release-profile.md) | Accepted |
-| 0011 | Wake-driven control admission | Reserved: H20 |
+| 0011 | [One commit discipline for both store lanes; wakeups do not close groups](0011-shared-commit-across-lanes.md) | Accepted |
 | 0012 | Structural settlement (`RunSettlement`, teardown before terminal publication) | Reserved: H21 |
 | 0013 | Context-source identity in the plan descriptor | Reserved: H28 |
 | 0014 | Typed final output contract | Reserved: HC3 |

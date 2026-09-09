@@ -4,13 +4,13 @@
 
 | | |
 | --- | --- |
-| Now | Phase 6 — H20 wake-driven control admission, then behavioral H21, H27, H28, correctness H22 |
+| Now | Phase 6 — H20 in review (`ab6de6f`, `d05e474`); next behavioral H21, then H27, H28, correctness H22 |
 | Next | Phase 6 continued (H18, measured H19, mechanical H21 split, structural H22); Phase 5b HC1/HC3/HC4 in parallel worktrees |
-| Open gates carried | Eight-stream output service gap ≤20 ms (H20); Phase 5a full H0 tail acceptance on a quiet host; native Windows teardown beyond the targeted CI job |
-| Last closed | Phase 5a feed hot-path redesign and release profile, 2026-09-07 (`893e582`); HC2 positive tool exposure, 2026-09-06 (`893e582`, squashed from `93ef6b8`) |
+| Open gates carried | Eight-stream output service gap ≤20 ms at p95 (median met by H20; executable budget stays 50 ms until a quiet-host p95); Phase 5a full H0 tail acceptance on a quiet host; native Windows teardown beyond the targeted CI job |
+| Last closed | H20 implementation, 2026-09-09 (`d05e474`, ADR-0011); Phase 5a feed hot-path redesign and release profile, 2026-09-07 (`893e582`) |
 | Versions | `PROTOCOL_VERSION` 16, `CAPABILITIES_VERSION` 1, `DESCRIPTOR_VERSION` 5, store schema 25, H0 fixture version 4 |
 
-Updated 2026-09-08. The `Now` row is authoritative for what is being worked;
+Updated 2026-09-09. The `Now` row is authoritative for what is being worked;
 update it in the same PR that ships or reprioritizes work.
 
 This plan defines how QQ becomes an extremely fast, lightweight, customizable
@@ -298,28 +298,33 @@ digest equals the full digest (guards persisted `RunPromptIdentity`).
 Benchmark before: add `provider_encode` (one MiB plus 32 schemas, counting
 allocator) in `qq-provider`; rerun `provider_compiler` and `plan_compile`.
 
-### D8 — Wake-Driven Control Admission (H20)
+### D8 — Control Admission And Shared Commit (H20, implemented)
 
-Problem: thirteen sites in `sessions/execution.rs`, `sessions/scheduler.rs`,
-and `sessions/subagents.rs` loop on `sleep(1 ms)` after `Overloaded` from the
-control lane; MCP cancellation (`qq-mcp`), the embedded host, and the shell
-tool poll every 50 ms. The store already has `control_slots` and
-`output_slots` semaphores (H23), but ordinary control admission still uses
-`try_acquire` and returns `Overloaded` on saturation.
+Status: implemented 2026-09-09 (`ab6de6f`, `d05e474`); design authority is
+[ADR-0011](../adr/0011-shared-commit-across-lanes.md) and
+`architecture.md` § Persistence. Retained here only for the acceptance list.
 
-Design: control callers await a permit so `try_send` cannot be full;
-`Overloaded` remains only for explicit admission rejection. Delete the
-thirteen loops. Sub-agent completion subscribes to the existing `settlements`
-watch; MCP and shell cancellation use a watch. H20's pre-change attribution
-baseline (recorded in the `893e582` squash) shows queued service p95 31 ms dominating the 37.6 ms
-output commit gap, with dequeue and reply latency under 0.1 ms; the work is
-bounded group formation under control pressure, not scheduler wake latency.
+As written, D8 assumed the eight-stream output gap was scheduler wake latency
+from thirteen `sleep(1 ms)` overload loops. Deleting the loops and making
+runtime-issued store calls wait for a `control_slots` permit
+(`Priority::AwaitControl`) was correct and shipped first, but a worker probe
+showed the gap is fsync-bound: one commit per output group plus one fsync per
+interleaved control write, with the scheduler's claim read cutting almost
+every group to one job. The fix is `worker::Joins`: control writes join a
+forming group as savepoints and settle on its commit; client reads run alone
+and close the group; the scheduler's claim runs after the group without
+closing it. Persist-before-publish and control-lane FIFO order are unchanged.
 
-Gates: cancellation ≤100 ms with 256 queued control jobs; command
-acknowledgement tail; the carried eight-stream output service gap ≤20 ms, after
-which the executable budget tightens from 50 ms to 20 ms. Tests: 256
-concurrent control calls complete without spinning; cancellation latency under
-load; no site polls the store.
+Result (30 interleaved pairs, med / p95): gap 24 / 28 → 20 / 33 ms with 27
+of 30 samples at 18–22 ms; completion 284 / 310 → 210 / 228 ms; control
+latency 19.7 / 24.2 → 15.9 / 18.4 ms. The median meets the 20 ms target;
+the p95 tail is bimodal and not reproduced by a same-binary A/A control.
+
+Remaining acceptance: qualify p95 ≤20 ms on a quiet host, then tighten the
+executable budget from 50 ms to 20 ms. The 50 ms cancellation polls in
+`qq-mcp`, `hosts/embedded.rs`, and `tools/shell.rs` poll an `Arc<AtomicBool>`
+and do not touch the store; converting them to a `Notify` changes the public
+`ExternalToolHost::call` signature and moves to H22.
 
 ### D9 — Store Identity, Settlement, And Error Consolidation (H21)
 
@@ -384,8 +389,11 @@ Cold-path and structural items; none shipped yet except where noted.
   `TurnMode` and `StreamEnd` enums; one bounded UTF-8 read for six copies;
   serialize the descriptor once at compile; gate file-state eviction on a
   counter; borrow when persisting model turns.
-- `qq-mcp`: release the call permit before awaiting the connect mutex.
-  (`ToolSpec` sharing by `Arc` shipped in Phase 4.)
+- `qq-mcp`, `hosts/embedded.rs`, `tools/shell.rs`: replace the three 50 ms
+  cancellation polls of the run's `Arc<AtomicBool>` with a shared `Notify`
+  (changes `ExternalToolHost::call`; moved here from H20). `qq-mcp`: release
+  the call permit before awaiting the connect mutex. (`ToolSpec` sharing by
+  `Arc` shipped in Phase 4.)
 - `qq-protocol`: box `SessionSummary` in the summary-carrying event variants
   (wire-neutral); one hash newtype macro for the two identical 32-byte hash
   types; move client body limits into `limits.rs`.
@@ -475,8 +483,8 @@ imported in Phase 1.
 | H25 | Done | Live provider/MCP credential binding invalidation without secret-bearing identity | H2, H7 | Root, auth, MCP |
 | H26 | Done | Bounded workspace-feed admission and lifecycle; feed ring | H15 | `qq-core`, server |
 | HC2 | Done | Positive tool exposure via optional `policy.exposed_tools` | H6, H13 | Config, core plan |
-| **H20** | **Next** | Wake-driven control admission; polling loops removed; ≤20 ms output-fairness gate (D8) | H16, H23–H26 | `qq-core` |
-| H21 | Open | `RunIdentity`, `PersistenceFault`, one settlement path; then the `sessions.rs` split (D9) | H15–H17, H20 | `qq-core` |
+| H20 | In review | Lifecycle store calls wait for admission (13 loops deleted); control writes share the output group commit; scheduler claim no longer closes groups (D8, ADR-0011). Gap median 20 ms; p95 qualification open | H16, H23–H26 | `qq-core` |
+| **H21** | **Next** | `RunIdentity`, `PersistenceFault`, one settlement path; then the `sessions.rs` split (D9) | H15–H17, H20 | `qq-core` |
 | H27 | Partly open | Same-key refresh drops the old generation before admission; superseded active generations are absent from byte accounting; a rejected replacement loses the old entry; equivalent-plan refresh can grow source evidence without admission; completed per-key compile guards are retained. Pinned-generation LRU and admission already exist and are tested | H2 | Root |
 | H28 | Open | A ninth context source is silently ignored (`lib.rs`); source identity, version, budget, and fail policy are absent from the descriptor | H8 | Core, protocol |
 | H22 | Open | Bundled cold-path and structural fixes (list above) | — | Per crate |
@@ -563,11 +571,12 @@ workspace gates and default-path H0 regression gate pass.
 
 ### Phase 6 — Finish Fairness, Shrink Per-Run Work, And Consolidate
 
-Status: active from 2026-09-08. Order: H20; then behavioral H21 (settlement
-interface), H27, H28, and the correctness items of H22 (`notify` deletion,
-stored-kind pruning, MCP permit ordering); then H18; then H19 after its
-decoder baseline; then the mechanical H21 split and remaining structural H22
-items as separate commits.
+Status: active from 2026-09-08. H20 implemented 2026-09-09 (`ab6de6f`,
+`d05e474`; ADR-0011), in review with its p95 qualification open. Order from
+here: behavioral H21 (settlement interface), H27, H28, and the correctness
+items of H22 (`notify` deletion, stored-kind pruning, MCP permit ordering);
+then H18; then H19 after its decoder baseline; then the mechanical H21 split
+and remaining structural H22 items as separate commits.
 
 Benchmarks to record before each change:
 
@@ -585,10 +594,11 @@ Benchmarks to record before each change:
 Acceptance:
 
 - cancellation is at most 100 ms with 256 queued control jobs and no site
-  polls the store;
+  polls the store (met: 23 / 27 ms med / p95; zero `sleep(1 ms)` loops);
 - the eight-stream output service gap is at most 20 ms under mixed
-  control/output load with no relaxation of cancellation or durability; once
-  qualified, tighten its executable budget from 50 ms to 20 ms;
+  control/output load with no relaxation of cancellation or durability
+  (median met at 20 ms; p95 33 ms with a non-repeatable tail — qualify on a
+  quiet host, then tighten the executable budget from 50 ms to 20 ms);
 - settling an already-settled run through any path is a no-op; every
   `PersistenceFault` variant is reachable in tests; successful teardown is a
   structural prerequisite of terminal publication;
