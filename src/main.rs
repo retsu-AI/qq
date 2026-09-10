@@ -44,7 +44,10 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
     match cli.command {
         Some(cli::Command::Ask { prompt }) => ask(prompt, &overrides).await?,
         Some(cli::Command::Run(args)) => return Ok(headless_run(args, &overrides).await),
-        Some(cli::Command::Serve { bind }) => serve(bind).await?,
+        Some(cli::Command::Serve {
+            bind,
+            allow_origins,
+        }) => serve(bind, &allow_origins).await?,
         Some(cli::Command::Config { command }) => config_command(command, &overrides)?,
         Some(cli::Command::Auth { command }) => {
             run_blocking_command(move || auth_command(command)).await?
@@ -301,10 +304,11 @@ async fn prepare_headless(
     Ok((handler.sessions().clone(), options))
 }
 
-async fn serve(bind: std::net::SocketAddr) -> Result<(), Box<dyn Error>> {
+async fn serve(bind: std::net::SocketAddr, allow_origins: &[String]) -> Result<(), Box<dyn Error>> {
     let options = server::ServerOptions::for_user()?
         .with_bind_address(bind)
-        .with_version(cli::BUILD_VERSION);
+        .with_version(cli::BUILD_VERSION)
+        .with_allowed_origins(server::AllowedOrigins::new(allow_origins)?);
     match server::reserve(options).await? {
         server::ReserveOutcome::Existing(connection) => {
             println!("qq server already running at {}", connection.address());

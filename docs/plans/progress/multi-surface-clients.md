@@ -11,7 +11,7 @@ dated entries appended below, newest last.
 | W3 | Multi-server client model | Planned | | Needs W1, W2, S1 |
 | S1 | Stable `ServerId`; protocol 17 | In review | [#14](https://github.com/retsu-AI/qq/pull/14) | Reuses the store id as the server identity |
 | S2 | Client enrollment | Planned | | ADR-0015; second review required |
-| S3 | CORS | Planned | | |
+| S3 | CORS | In review | `feat/multi-surface-s3-cors` | Hand-rolled; `--allow-origin` until S6 |
 | S4 | Remote exposure with TLS | Planned | | ADR-0016; rustls root request |
 | S5 | Workspace catalog | Planned | | |
 | S6 | `server` configuration | Planned | | |
@@ -73,3 +73,17 @@ allow those headers in preflight.
 ### 2026-09-10 — stacked PRs opened
 
 Plan #13 → S1 #14 → W1 #15. Next slices start from W1's head in a new worktree.
+
+#### S3 receipt — 2026-09-10
+Commit(s): see branch `feat/multi-surface-s3-cors` (stacked on W1 #15).
+Tests: 2 added (`cors::origins_are_validated_and_normalized`;
+`cors_is_absent_by_default_and_exact_origin_when_configured` covering
+default-off, preflight on the SSE route with PNA, decorated 200/401, foreign
+origin request/preflight, plain request) plus CLI parse; workspace green.
+Gates: none named; the layer is one header lookup when the list is empty.
+Deviations: `qq serve --allow-origin` added now as the minimum surface for
+the tracer bullet; S6 moves it into `config.ron`. Origins must be `https`
+except loopback, mirroring `ServerConnection`.
+Docs: `docs/design/protocol.md` § Cross-Origin Access,
+`docs/design/architecture.md` (`qq-server` paragraph).
+Open: none.

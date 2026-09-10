@@ -181,6 +181,31 @@ credential can never be sent in plaintext off the machine. Remote credential
 issuance (enrollment) is a separate route set; today only the loopback token
 exists.
 
+### Cross-Origin Access
+
+A browser page served from another origin may call the API only when the
+operator lists that origin (`qq serve --allow-origin https://app.example`).
+The list is exact (`scheme://host[:port]`, lowercased; `https` required
+except for loopback hosts) and bounded at 32 entries. With an empty list the
+server emits no CORS headers and a browser refuses the response.
+
+For a listed origin the server:
+
+- answers a preflight (`OPTIONS` with `Access-Control-Request-Method`) with
+  `204`, `Access-Control-Allow-Methods: GET, POST`,
+  `Access-Control-Allow-Headers: authorization, content-type, last-event-id`,
+  `Access-Control-Max-Age: 600`, and
+  `Access-Control-Allow-Private-Network: true` when the browser asked, before
+  authentication runs (a preflight carries no credential);
+- adds `Access-Control-Allow-Origin: <origin>` and `Vary: origin` to every
+  other response, including `401`, so the page can read the failure.
+
+A preflight from an unlisted origin is `403`; any other request from one is
+served normally without CORS headers. `Access-Control-Allow-Credentials` is
+never sent: the credential travels in `Authorization`, not in a cookie.
+Browser `EventSource` cannot set `Authorization` or `Last-Event-ID`, so
+browser clients stream `GET …/events` through `fetch`.
+
 ### Error Responses
 
 Failed HTTP requests return JSON:

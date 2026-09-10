@@ -28,6 +28,10 @@ use axum::{
 use directories::ProjectDirs;
 use futures_util::StreamExt;
 use qq_core::PublishedEventStream;
+
+mod cors;
+
+pub use cors::{AllowedOriginError, AllowedOrigins, MAX_ALLOWED_ORIGINS, MAX_ORIGIN_BYTES};
 use qq_protocol::{
     AgentProfileSummary, ApprovalMode, BudgetLimitKind, CAPABILITIES_VERSION, CapabilitiesRequest,
     CommandReceipt, CommandRequest, DelegationCapabilities, DelegationRoster, EventCapabilities,
@@ -193,17 +197,20 @@ pub struct ServerOptions {
     paths: ServerPaths,
     bind_address: SocketAddr,
     version: String,
+    allowed_origins: AllowedOrigins,
 }
 
 impl ServerOptions {
-    /// Creates options using the default ephemeral IPv4 loopback address and
-    /// this crate's version as the reported server version.
+    /// Creates options using the default ephemeral IPv4 loopback address,
+    /// this crate's version as the reported server version, and no
+    /// cross-origin access.
     #[must_use]
     pub fn new(paths: ServerPaths) -> Self {
         Self {
             paths,
             bind_address: DEFAULT_BIND_ADDRESS,
             version: env!("CARGO_PKG_VERSION").to_owned(),
+            allowed_origins: AllowedOrigins::default(),
         }
     }
 
@@ -216,6 +223,19 @@ impl ServerOptions {
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = version.into();
         self
+    }
+
+    /// Permits browser pages from these exact origins to call the API. Empty
+    /// (the default) adds no CORS headers at all.
+    #[must_use]
+    pub fn with_allowed_origins(mut self, allowed_origins: AllowedOrigins) -> Self {
+        self.allowed_origins = allowed_origins;
+        self
+    }
+
+    #[must_use]
+    pub fn allowed_origins(&self) -> &AllowedOrigins {
+        &self.allowed_origins
     }
 
     /// Creates options for the current user's state directory.
@@ -434,6 +454,7 @@ pub struct ServerReservation {
     address: SocketAddr,
     bearer_token: String,
     version: String,
+    allowed_origins: AllowedOrigins,
     guard: InstanceGuard,
 }
 
@@ -469,6 +490,7 @@ impl ServerReservation {
             address,
             bearer_token,
             version,
+            allowed_origins,
             mut guard,
         } = self;
         let connection = ServerConnection::new(
@@ -485,7 +507,7 @@ impl ServerReservation {
         .map_err(map_connection_error)?;
         write_metadata_atomically(&guard.paths, &MetadataFile::new(&connection))?;
         guard.connection = Some(connection.clone());
-        let app = router(handler, connection.clone());
+        let app = router(handler, connection.clone(), allowed_origins);
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         let task = tokio::spawn(async move {
             let serve_result = axum::serve(listener, app)
@@ -652,6 +674,7 @@ pub async fn reserve(options: ServerOptions) -> Result<ReserveOutcome, ServerErr
         address,
         bearer_token,
         version: options.version,
+        allowed_origins: options.allowed_origins,
         guard,
     })))
 }
@@ -664,7 +687,11 @@ struct AppState {
     subscriptions: Arc<Semaphore>,
 }
 
-fn router(handler: Arc<dyn ServerHandler>, connection: ServerConnection) -> Router {
+fn router(
+    handler: Arc<dyn ServerHandler>,
+    connection: ServerConnection,
+    allowed_origins: AllowedOrigins,
+) -> Router {
     let state = AppState {
         handler,
         connection,
@@ -697,6 +724,11 @@ fn router(handler: Arc<dyn ServerHandler>, connection: ServerConnection) -> Rout
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
+        // Outermost so a preflight is answered before the fallbacks and before
+        // authentication; every other request passes straight through.
+        .layer(middleware::from_fn(move |request, next| {
+            cors::apply(allowed_origins.clone(), request, next)
+        }))
         .with_state(state)
 }
 
@@ -1844,6 +1876,147 @@ mod tests {
             StartOutcome::Started(handle) => handle,
             StartOutcome::Existing(_) => panic!("test unexpectedly found an existing server"),
         }
+    }
+
+    #[tokio::test]
+    async fn cors_is_absent_by_default_and_exact_origin_when_configured() {
+        use reqwest::header::{
+            ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+            ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_HEADERS,
+            ACCESS_CONTROL_REQUEST_METHOD, ORIGIN, VARY,
+        };
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let app_origin = "https://app.example.com";
+
+        // Default: no allow list, no CORS headers, preflight is just a 405.
+        let directory = TestDirectory::new();
+        let server = start_test_server(directory.paths(), unavailable_handler()).await;
+        let health = server.connection().endpoint("/v1/health");
+        let response = http
+            .get(&health)
+            .header(ORIGIN, app_origin)
+            .bearer_auth(server.connection().expose_bearer_token())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+        let preflight = http
+            .request(reqwest::Method::OPTIONS, &health)
+            .header(ORIGIN, app_origin)
+            .header(ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(preflight.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert!(
+            preflight
+                .headers()
+                .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+        server.shutdown().await.unwrap();
+
+        // Configured: exact origin echoed, preflight answered before auth.
+        let directory = TestDirectory::new();
+        let options = ServerOptions::new(directory.paths())
+            .with_allowed_origins(AllowedOrigins::new([app_origin]).unwrap());
+        let StartOutcome::Started(server) = start(unavailable_handler(), test_identity(), options)
+            .await
+            .unwrap()
+        else {
+            panic!("test unexpectedly found an existing server");
+        };
+        let events = server.connection().endpoint(&format!(
+            "/v1/workspaces/{}/events",
+            WorkspaceId::from_bytes([2; 16])
+        ));
+
+        let preflight = http
+            .request(reqwest::Method::OPTIONS, &events)
+            .header(ORIGIN, app_origin)
+            .header(ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .header(
+                ACCESS_CONTROL_REQUEST_HEADERS,
+                "authorization, last-event-id",
+            )
+            .header("access-control-request-private-network", "true")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(preflight.status(), StatusCode::NO_CONTENT);
+        let headers = preflight.headers();
+        assert_eq!(headers[ACCESS_CONTROL_ALLOW_ORIGIN], app_origin);
+        assert_eq!(headers[ACCESS_CONTROL_ALLOW_METHODS], "GET, POST");
+        assert_eq!(
+            headers[ACCESS_CONTROL_ALLOW_HEADERS],
+            "authorization, content-type, last-event-id"
+        );
+        assert_eq!(headers["access-control-allow-private-network"], "true");
+        assert!(headers.get_all(VARY).iter().any(|value| value == "origin"));
+
+        // An actual cross-origin request: allowed origin decorated, still
+        // authenticated, and a 401 carries the CORS headers so the page can
+        // read the failure.
+        let response = http
+            .get(server.connection().endpoint("/v1/health"))
+            .header(ORIGIN, app_origin)
+            .bearer_auth(server.connection().expose_bearer_token())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[ACCESS_CONTROL_ALLOW_ORIGIN], app_origin);
+        let unauthorized = http
+            .get(server.connection().endpoint("/v1/health"))
+            .header(ORIGIN, app_origin)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            unauthorized.headers()[ACCESS_CONTROL_ALLOW_ORIGIN],
+            app_origin
+        );
+
+        // A foreign origin gets nothing: no headers on a request, 403 on a
+        // preflight. Same-origin or non-browser requests are untouched.
+        let foreign = http
+            .get(server.connection().endpoint("/v1/health"))
+            .header(ORIGIN, "https://evil.example.com")
+            .bearer_auth(server.connection().expose_bearer_token())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::OK);
+        assert!(foreign.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+        let foreign_preflight = http
+            .request(reqwest::Method::OPTIONS, &events)
+            .header(ORIGIN, "https://evil.example.com")
+            .header(ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(foreign_preflight.status(), StatusCode::FORBIDDEN);
+        assert!(
+            foreign_preflight
+                .headers()
+                .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+        let plain = http
+            .get(server.connection().endpoint("/v1/health"))
+            .bearer_auth(server.connection().expose_bearer_token())
+            .send()
+            .await
+            .unwrap();
+        assert!(plain.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+        server.shutdown().await.unwrap();
     }
 
     #[tokio::test]
