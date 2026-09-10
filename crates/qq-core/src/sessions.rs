@@ -61,6 +61,7 @@ pub use runtime::{
     SpawnModelValidationFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority,
     WorkspaceGrantSeed,
 };
+pub use store::STORE_SCHEMA_VERSION;
 
 use approvals::ConcludedApproval;
 #[cfg(test)]

@@ -14,6 +14,8 @@ use worker::WorkerMessage;
 mod schema;
 mod worker;
 
+pub use schema::STORE_SCHEMA_VERSION;
+
 #[cfg(test)]
 pub(super) use schema::{has_column, open_database};
 

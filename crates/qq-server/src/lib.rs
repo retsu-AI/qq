@@ -190,16 +190,30 @@ impl ServerPaths {
 pub struct ServerOptions {
     paths: ServerPaths,
     bind_address: SocketAddr,
+    version: String,
 }
 
 impl ServerOptions {
-    /// Creates options using the default ephemeral IPv4 loopback address.
+    /// Creates options using the default ephemeral IPv4 loopback address and
+    /// this crate's version as the reported server version.
     #[must_use]
     pub fn new(paths: ServerPaths) -> Self {
         Self {
             paths,
             bind_address: DEFAULT_BIND_ADDRESS,
+            version: env!("CARGO_PKG_VERSION").to_owned(),
         }
+    }
+
+    /// Overrides the version reported by `/v1/health`, the discovery file, and
+    /// capabilities. The binary passes its build string (version plus source
+    /// revision) so a client can tell two servers of the same version apart.
+    /// Must be non-empty, at most 256 bytes, and printable ASCII without
+    /// spaces; anything else is rejected at start as `InvalidVersion`.
+    #[must_use]
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = version.into();
+        self
     }
 
     /// Creates options for the current user's state directory.
@@ -492,6 +506,11 @@ pub async fn reserve(options: ServerOptions) -> Result<ReserveOutcome, ServerErr
     if !options.bind_address.ip().is_loopback() {
         return Err(ServerError::NonLoopbackBind(options.bind_address));
     }
+    // Checked before the lock is taken so a bad version never claims the
+    // instance and then fails as generic metadata corruption.
+    if !valid_process_version(&options.version) {
+        return Err(ServerError::InvalidVersion(options.version));
+    }
 
     ensure_private_directory(&options.paths.directory)?;
     let lock = open_private_lock_file(&options.paths.lock_file)?;
@@ -526,7 +545,7 @@ pub async fn reserve(options: ServerOptions) -> Result<ReserveOutcome, ServerErr
         generate_bearer_token()?,
         ServerInfo {
             protocol_version: PROTOCOL_VERSION,
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version: options.version,
             pid: std::process::id(),
         },
     )
@@ -1584,6 +1603,8 @@ pub enum ServerError {
     MetadataVersionMismatch { expected: u16, found: u16 },
     #[error("server protocol version {found} does not match client version {expected}")]
     ProtocolMismatch { expected: u16, found: u16 },
+    #[error("server version {0:?} must be 1..=256 bytes of printable ASCII without spaces")]
+    InvalidVersion(String),
     #[error("secure random bytes are unavailable")]
     RandomnessUnavailable,
     #[error("could not bind local server at {address}")]
@@ -1774,6 +1795,50 @@ mod tests {
         assert_eq!(missing_route.status(), StatusCode::NOT_FOUND);
 
         server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reported_version_is_the_caller_supplied_build_string() {
+        let directory = TestDirectory::new();
+        let options =
+            ServerOptions::new(directory.paths()).with_version("0.0.1+abc1234.2026-09-09");
+        let server = match start(unavailable_handler(), options).await.unwrap() {
+            StartOutcome::Started(handle) => handle,
+            StartOutcome::Existing(_) => panic!("test unexpectedly found an existing server"),
+        };
+        assert_eq!(
+            server.connection().server_info().version,
+            "0.0.1+abc1234.2026-09-09"
+        );
+        // The discovery file carries the same string, so a second process
+        // sees the running server's build, not its own.
+        let metadata = read_metadata_file(&directory.paths()).unwrap().unwrap();
+        assert_eq!(metadata.version, "0.0.1+abc1234.2026-09-09");
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let info = http
+            .get(server.connection().endpoint("/v1/health"))
+            .bearer_auth(server.connection().expose_bearer_token())
+            .send()
+            .await
+            .unwrap()
+            .json::<ServerInfo>()
+            .await
+            .unwrap();
+        assert_eq!(info.version, "0.0.1+abc1234.2026-09-09");
+        server.shutdown().await.unwrap();
+
+        for bad in ["", "0.0.1 (abc1234 2026-09-09)", &"x".repeat(257)] {
+            let directory = TestDirectory::new();
+            let options = ServerOptions::new(directory.paths()).with_version(bad);
+            match reserve(options).await {
+                Err(ServerError::InvalidVersion(found)) => assert_eq!(found, bad),
+                other => panic!("{bad:?}: {other:?}"),
+            }
+            assert!(
+                !directory.paths().lock_file.exists(),
+                "{bad:?} claimed the lock"
+            );
+        }
     }
 
     #[tokio::test]
