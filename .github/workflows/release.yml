@@ -1,0 +1,173 @@
+name: Release
+
+# Publishes prebuilt `qq` binaries when a `vX.Y.Z` tag is pushed. Cut the tag
+# with `cargo xtask release X.Y.Z`; see docs/runbooks/release.md.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: tag matches workspace version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          manifest="$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f && /^version *= *"/{gsub(/.*= *"|".*/,""); print; exit}' Cargo.toml)"
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::tag v$tag does not match [workspace.package] version = \"$manifest\"; cut releases with 'cargo xtask release'"
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-15
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      # The build script embeds the revision into `qq --version`. Export it so
+      # the value does not depend on the checkout's git state.
+      - name: Record source revision
+        shell: bash
+        run: |
+          echo "QQ_GIT_SHA=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+          echo "QQ_GIT_DATE=$(git log -1 --format=%cs)" >> "$GITHUB_ENV"
+
+      - name: Add target
+        shell: bash
+        run: rustup target add ${{ matrix.target }}
+
+      # aws-lc-sys compiles C; point cc-rs at musl-gcc so its objects are
+      # built against musl headers rather than the host glibc.
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        shell: bash
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+          target="${{ matrix.target }}"
+          echo "CC_${target//-/_}=musl-gcc" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked --bin qq --target ${{ matrix.target }}
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/qq"
+          [ "$RUNNER_OS" = Windows ] && bin="$bin.exe"
+          out="$("$bin" --version)"
+          echo "$out"
+          case "$out" in
+            "qq ${{ needs.verify.outputs.version }} ($QQ_GIT_SHA $QQ_GIT_DATE)") ;;
+            *) echo "::error::unexpected --version output: $out"; exit 1 ;;
+          esac
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="qq-v${{ needs.verify.outputs.version }}-${{ matrix.target }}"
+          stage="dist/$name"
+          mkdir -p "$stage"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp "target/${{ matrix.target }}/release/qq.exe" "$stage/"
+          else
+            cp "target/${{ matrix.target }}/release/qq" "$stage/"
+          fi
+          cp LICENSE README.md "$stage/"
+          cd dist
+          if [ "${{ matrix.archive }}" = zip ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+            asset="$name.zip"
+          else
+            tar czf "$name.tar.gz" "$name"
+            asset="$name.tar.gz"
+          fi
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
+          rm -r "$name"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.asset }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish GitHub release
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Combine checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          cat ./*.sha256 > SHA256SUMS
+          rm ./*.sha256
+          ls -la
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "qq v${{ needs.verify.outputs.version }}" \
+            --generate-notes \
+            --verify-tag \
+            dist/*

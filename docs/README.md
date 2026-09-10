@@ -54,6 +54,8 @@ evidence.
   procedure, focused fixtures, same-binary control, host conditions.
 - [`windows-ci.md`](runbooks/windows-ci.md) — the targeted Windows job and how
   to extend it.
+- [`release.md`](runbooks/release.md) — `cargo xtask release`, the tag-driven
+  release workflow, targets, and `qq --version`.
 
 ## Conventions
 

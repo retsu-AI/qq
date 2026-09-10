@@ -28,6 +28,13 @@ Run `cargo bench -p qq-provider --bench provider_compiler` when provider
 compilation changes, and the focused fixtures in
 [`perf-recording.md`](./perf-recording.md) when a slice names a gate.
 
+## `qq --version`
+
+`build.rs` embeds the checked-out short SHA and commit date, with a `-dirty`
+suffix when the tree has uncommitted changes, so a binary can always be traced
+to its source. Cargo reruns the script when `HEAD` moves. See
+[`release.md`](./release.md) for how releases pin this value.
+
 ## Test environment notes
 
 - Workspace tests bind loopback listeners for the HTTP/SSE server and the

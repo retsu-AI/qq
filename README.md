@@ -8,6 +8,15 @@ call MCP tools — every mutating action gated by an approval policy.
 Documentation lives in `docs/` (`design/` for the system as built, `adr/`
 for decisions, `plans/` for what is next; see `docs/README.md`).
 
+## Install
+
+Prebuilt binaries for Linux (x86_64, aarch64; static musl), macOS (Apple
+silicon, Intel), and Windows (x86_64) are attached to each
+[GitHub release](https://github.com/retsu-AI/qq/releases) with a `SHA256SUMS`
+file. Unpack the archive and put `qq` on your `PATH`; `qq --version` prints the
+version with the source revision it was built from. To build from source
+instead, use `cargo build --release` with the pinned toolchain.
+
 ## Quick Start
 
 Set `OPENAI_API_KEY` and `QQ_MODEL`, then stream one response:

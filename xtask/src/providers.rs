@@ -222,6 +222,8 @@ enum Task {
     Eval(Box<crate::eval::EvalArgs>),
     /// Record and compare deterministic local performance baselines.
     Perf(crate::perf::PerfArgs),
+    /// Bump the workspace version, commit `chore(release): vX.Y.Z`, and tag it.
+    Release(crate::release::ReleaseArgs),
 }
 
 #[derive(Debug, Args)]
@@ -420,6 +422,8 @@ enum XtaskError {
     Eval(#[from] crate::eval::EvalError),
     #[error(transparent)]
     Perf(#[from] crate::perf::PerfError),
+    #[error(transparent)]
+    Release(#[from] crate::release::ReleaseError),
     #[error("choose one or more --provider values or --all, but not both")]
     InvalidSelection,
     #[error("live provider checks require {LIVE_OPT_IN}=1")]
@@ -458,6 +462,7 @@ async fn try_run(cli: Cli) -> Result<(), XtaskError> {
         },
         Task::Eval(args) => crate::eval::run(*args).await.map_err(Into::into),
         Task::Perf(args) => crate::perf::run(args).await.map_err(Into::into),
+        Task::Release(args) => crate::release::run(args).await.map_err(Into::into),
     }
 }
 
