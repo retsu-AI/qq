@@ -6,12 +6,12 @@ dated entries appended below, newest last.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| W1 | Transport-agnostic `qq-client`; `wasm32` build | In review | [#15](https://github.com/retsu-AI/qq/pull/15) | `native`/`wasm` features; `ServerConnection` |
-| W2 | Extract reducer into `qq-client::state` | Planned | | Needs W1 |
+| W1 | Transport-agnostic `qq-client`; `wasm32` build | Done | [#15](https://github.com/retsu-AI/qq/pull/15) `5080f85` | `native`/`wasm` features; `ServerConnection` |
+| W2 | Extract reducer into `qq-client::state` | In progress | `feat/multi-surface-w2-client-state` | |
 | W3 | Multi-server client model | Planned | | Needs W1, W2, S1 |
-| S1 | Stable `ServerId`; protocol 17 | In review | [#14](https://github.com/retsu-AI/qq/pull/14) | Reuses the store id as the server identity |
-| S2 | Client enrollment | Planned | | ADR-0015; second review required |
-| S3 | CORS | In review | `feat/multi-surface-s3-cors` | Hand-rolled; `--allow-origin` until S6 |
+| S1 | Stable `ServerId`; protocol 17 | Done | [#14](https://github.com/retsu-AI/qq/pull/14) `fff4ec8` | Reuses the store id as the server identity |
+| S2 | Client enrollment | Planned | | ADR-0015 drafting; second review required |
+| S3 | CORS | Done | [#16](https://github.com/retsu-AI/qq/pull/16) `2d485f8` | Hand-rolled; `--allow-origin` until S6 |
 | S4 | Remote exposure with TLS | Planned | | ADR-0016; rustls root request |
 | S5 | Workspace catalog | Planned | | |
 | S6 | `server` configuration | Planned | | |
@@ -34,7 +34,7 @@ dependency. Decision #6 (browser credential storage) appended.
 Shipped: none. In progress: W1, S1 (same worktree `../qq-msc`). Blocked: none.
 
 #### S1 receipt — 2026-09-10
-Commit(s): see branch `feat/multi-surface-clients-plan`.
+Commit(s): `fff4ec8` (#14).
 Tests: 6 added (`qq-protocol` display-name/well-formed, `qq-server` identity in
 health/metadata/discovery, foreign-identity metadata retained, reservation
 publishes nothing); workspace green, fmt and clippy clean.
@@ -50,7 +50,7 @@ Open: display-name configuration lands with S6; hostname fallback reads
 `HOSTNAME`/`COMPUTERNAME`/`HOST` then `/etc/hostname`.
 
 #### W1 receipt — 2026-09-10
-Commit(s): see branch `feat/multi-surface-clients-plan`.
+Commit(s): `5080f85` (#15).
 Tests: 2 added in `qq-protocol` (`ServerConnection` grammar and redaction);
 the 5 decoder/cursor tests moved to a transport-neutral module that compiles
 under `wasm-bindgen-test`; workspace green, fmt and clippy clean;
@@ -75,7 +75,7 @@ allow those headers in preflight.
 Plan #13 → S1 #14 → W1 #15. Next slices start from W1's head in a new worktree.
 
 #### S3 receipt — 2026-09-10
-Commit(s): see branch `feat/multi-surface-s3-cors` (stacked on W1 #15).
+Commit(s): `2d485f8` (#16).
 Tests: 2 added (`cors::origins_are_validated_and_normalized`;
 `cors_is_absent_by_default_and_exact_origin_when_configured` covering
 default-off, preflight on the SSE route with PNA, decorated 200/401, foreign
@@ -87,3 +87,13 @@ except loopback, mirroring `ServerConnection`.
 Docs: `docs/design/protocol.md` § Cross-Origin Access,
 `docs/design/architecture.md` (`qq-server` paragraph).
 Open: none.
+
+### 2026-09-10 — phase A merged
+
+Plan (#13 `0d9f709`), S1 (#14 `fff4ec8`), W1 (#15 `5080f85`), S3 (#16
+`2d485f8`) merged to `main` in stack order after a rebase over #10–#12
+(`ServerReservation` now carries the caller-supplied build version into
+`start`; `valid_process_version` exported from `qq-protocol`).
+
+Shipped: S1, W1, S3. In progress: W2 (`../qq-msc`); ADR-0015 draft for S2.
+Blocked: none. TB gate needs W2 and S2.
