@@ -14,6 +14,19 @@ pub const VERSION: &str = concat!(
     ")"
 );
 
+/// The same information as [`VERSION`] without whitespace, as semver build
+/// metadata: `<crate version>+<short sha>.<commit date>`. This is what the
+/// server reports in `/v1/health`, the discovery file, and capabilities, so a
+/// TUI and a long-running server built from different commits are
+/// distinguishable even when their protocol versions agree.
+pub const BUILD_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "+",
+    env!("QQ_BUILD_REVISION"),
+    ".",
+    env!("QQ_BUILD_DATE")
+);
+
 #[derive(Debug, Parser)]
 #[command(name = "qq", version = VERSION, about = "Build and run AI agents")]
 pub struct Cli {
@@ -82,6 +95,9 @@ pub enum Command {
 
     /// Trust the sensitive operations in current project configuration.
     Trust,
+
+    /// Print the version with the compatibility contracts this build speaks.
+    Version,
 }
 
 #[derive(Debug, Args)]
@@ -272,6 +288,19 @@ mod tests {
         let date = parts.next().unwrap();
         assert!(parts.next().is_none(), "{rendered:?}");
         assert!(!sha.is_empty() && !date.is_empty(), "{rendered:?}");
+    }
+
+    #[test]
+    fn build_version_is_wire_safe_and_carries_the_same_revision() {
+        assert!(BUILD_VERSION.bytes().all(|byte| byte.is_ascii_graphic()));
+        let (version, metadata) = BUILD_VERSION.split_once('+').unwrap();
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        let (sha, date) = metadata.split_once('.').unwrap();
+        assert!(VERSION.contains(sha) && VERSION.ends_with(&format!("{date})")));
+        assert!(matches!(
+            Cli::try_parse_from(["qq", "version"]).unwrap().command,
+            Some(Command::Version)
+        ));
     }
 
     #[test]

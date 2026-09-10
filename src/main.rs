@@ -51,10 +51,25 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         }
         Some(cli::Command::Org { command }) => organization_command(command)?,
         Some(cli::Command::Trust) => trust_command(&overrides)?,
+        Some(cli::Command::Version) => print!("{}", version_report()),
         None => interactive(&overrides).await?,
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// The product version plus the compatibility contracts this build speaks.
+/// The contracts, not the product version, decide whether a client can talk
+/// to a server or open a store; see `docs/runbooks/release.md`.
+fn version_report() -> String {
+    format!(
+        "qq {}\nprotocol {}, capabilities {}, descriptor {}, store schema {}\n",
+        cli::VERSION,
+        qq_protocol::PROTOCOL_VERSION,
+        qq_protocol::CAPABILITIES_VERSION,
+        qq_core::plan::DESCRIPTOR_VERSION,
+        qq_core::STORE_SCHEMA_VERSION,
+    )
 }
 
 #[derive(Clone, Debug, Default)]
@@ -287,7 +302,9 @@ async fn prepare_headless(
 }
 
 async fn serve(bind: std::net::SocketAddr) -> Result<(), Box<dyn Error>> {
-    let options = server::ServerOptions::for_user()?.with_bind_address(bind);
+    let options = server::ServerOptions::for_user()?
+        .with_bind_address(bind)
+        .with_version(cli::BUILD_VERSION);
     match server::reserve(options).await? {
         server::ReserveOutcome::Existing(connection) => {
             println!("qq server already running at {}", connection.address());
@@ -403,7 +420,8 @@ async fn interactive(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
         let model = model.clone();
         async move {
             let options = server::ServerOptions::for_user()
-                .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?;
+                .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?
+                .with_version(cli::BUILD_VERSION);
             let (connection, create_initial_session) = match server::reserve(options)
                 .await
                 .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?
@@ -1037,6 +1055,23 @@ async fn run_blocking_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_report_names_every_compatibility_contract() {
+        let report = version_report();
+        let mut lines = report.lines();
+        assert_eq!(lines.next(), Some(format!("qq {}", cli::VERSION).as_str()));
+        let contracts = lines.next().unwrap();
+        for expected in [
+            format!("protocol {}", qq_protocol::PROTOCOL_VERSION),
+            format!("capabilities {}", qq_protocol::CAPABILITIES_VERSION),
+            format!("descriptor {}", qq_core::plan::DESCRIPTOR_VERSION),
+            format!("store schema {}", qq_core::STORE_SCHEMA_VERSION),
+        ] {
+            assert!(contracts.contains(&expected), "{report:?}");
+        }
+        assert_eq!(lines.next(), None);
+    }
 
     #[tokio::test]
     async fn blocking_command_can_drop_its_http_runtime() {

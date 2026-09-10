@@ -5,6 +5,10 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::sessions::SessionRuntimeError;
 
+/// Current session store schema, stored as `metadata.schema_version`. Bump it
+/// with every migration step appended to `open_database`.
+pub const STORE_SCHEMA_VERSION: u16 = 25;
+
 pub(in crate::sessions) fn open_database(
     path: &PathBuf,
 ) -> Result<(Connection, StoreId), SessionRuntimeError> {
@@ -718,6 +722,18 @@ pub(in crate::sessions) fn open_database(
             .map_err(|_| SessionRuntimeError::Persistence)?;
     }
     validate_fast_path_schema(&connection)?;
+    debug_assert_eq!(
+        connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .as_deref(),
+        Some(STORE_SCHEMA_VERSION.to_string().as_str()),
+        "the last migration step must write STORE_SCHEMA_VERSION"
+    );
     let stored = connection
         .query_row(
             "SELECT value FROM metadata WHERE key = 'store_id'",

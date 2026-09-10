@@ -836,6 +836,17 @@ PTY, cannot be expressed cleanly through HTTP and SSE.
 JSON is the initial wire format. Binary serialization should replace it only
 after profiling demonstrates that serialization or bandwidth is material.
 
+Compatibility is decided by integer contract versions, not by the product
+version. `PROTOCOL_VERSION` must match exactly between client and server; the
+server checks it when it reads its own discovery file and the client checks it
+against `/v1/health` before attaching. `CAPABILITIES_VERSION`,
+`DESCRIPTOR_VERSION`, and the store schema version pin the other persisted or
+negotiated shapes. The workspace has one product version shared by every crate
+(none is published); the binary embeds its source revision and passes the
+result to the server as `<version>+<sha>.<date>`, so `/v1/health`, the
+discovery file, and capabilities identify the exact build a long-running
+server came from. `qq version` prints the product version and every contract.
+
 ## Persistence
 
 SQLite is the initial and default store. It provides fast local durability,
