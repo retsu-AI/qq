@@ -536,6 +536,13 @@ impl SessionRuntime {
         Ok(runtime)
     }
 
+    /// The durable identity of the store this runtime owns. Every cursor it
+    /// issues carries this value; a server advertises it as its identity.
+    #[must_use]
+    pub fn store_id(&self) -> StoreId {
+        self.inner.store.store_id()
+    }
+
     pub async fn command(
         &self,
         command_id: CommandId,

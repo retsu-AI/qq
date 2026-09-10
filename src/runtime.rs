@@ -36,7 +36,7 @@ use qq_provider::{
 };
 use qq_server::{
     CommandFuture, DelegationFuture, ModelsFuture, ProfilesFuture, ServerHandler,
-    ServerHandlerError, SnapshotFuture, WorkspaceToolsFuture,
+    ServerHandlerError, ServerIdentity, SnapshotFuture, WorkspaceToolsFuture,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -1680,6 +1680,13 @@ impl RuntimeHandler {
         &self.durable
     }
 
+    /// The identity the HTTP server advertises for this runtime: the store's
+    /// durable id plus a display label (configured, else the host name).
+    #[must_use]
+    pub fn server_identity(&self, display_name: Option<&str>) -> ServerIdentity {
+        ServerIdentity::new(self.durable.store_id(), display_name)
+    }
+
     /// Gracefully stops the durable runtime after its serving adapter has
     /// stopped accepting new requests.
     pub async fn shutdown(&self) -> Result<(), RuntimeHandlerError> {
@@ -2525,6 +2532,7 @@ mod tests {
 
         let server = match qq_server::start(
             handler.clone(),
+            handler.server_identity(None),
             ServerOptions::new(ServerPaths::new(fixture.path("server"))),
         )
         .await
@@ -2655,6 +2663,7 @@ mod tests {
         });
         let server = match qq_server::start(
             handler.clone(),
+            handler.server_identity(None),
             ServerOptions::new(ServerPaths::new(fixture.path("server"))),
         )
         .await
@@ -2893,6 +2902,7 @@ mod tests {
         });
         let server = match qq_server::start(
             handler.clone(),
+            handler.server_identity(None),
             ServerOptions::new(ServerPaths::new(fixture.path("server"))),
         )
         .await

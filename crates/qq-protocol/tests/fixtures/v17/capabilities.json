@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "protocol_version": 16,
+  "protocol_version": 17,
   "server_version": "0.1.0",
   "input_parts": [
     "text",

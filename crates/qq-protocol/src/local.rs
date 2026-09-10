@@ -39,7 +39,7 @@ impl LocalServerConnection {
                 found: server_info.protocol_version,
             });
         }
-        if server_info.pid == 0 || !valid_process_version(&server_info.version) {
+        if !server_info.is_well_formed() {
             return Err(LocalConnectionError::InvalidServerInfo);
         }
         Ok(Self {
@@ -111,12 +111,6 @@ pub enum LocalConnectionError {
     ProtocolMismatch { expected: u16, found: u16 },
 }
 
-fn valid_process_version(version: &str) -> bool {
-    !version.is_empty()
-        && version.len() <= 256
-        && version.bytes().all(|byte| byte.is_ascii_graphic())
-}
-
 fn constant_time_eq(candidate: &[u8], expected: &[u8]) -> bool {
     let mut difference = candidate.len() ^ expected.len();
     for (index, expected_byte) in expected.iter().enumerate() {
@@ -129,6 +123,7 @@ fn constant_time_eq(candidate: &[u8], expected: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StoreId;
 
     #[test]
     fn local_connection_redacts_its_bearer_token() {
@@ -140,6 +135,8 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 version: "0.1.0".to_owned(),
                 pid: 1,
+                server_id: StoreId::from_bytes([9; 16]),
+                display_name: "devbox".to_owned(),
             },
         )
         .unwrap();
@@ -155,6 +152,8 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             version: "0.1.0".to_owned(),
             pid: 1,
+            server_id: StoreId::from_bytes([9; 16]),
+            display_name: "devbox".to_owned(),
         };
         let token = || "a".repeat(TOKEN_HEX_BYTES);
 
@@ -183,6 +182,18 @@ mod tests {
                 token(),
                 ServerInfo {
                     pid: 0,
+                    ..valid_info()
+                },
+            )
+            .unwrap_err(),
+            LocalConnectionError::InvalidServerInfo
+        );
+        assert_eq!(
+            LocalServerConnection::new(
+                "127.0.0.1:1234".parse().unwrap(),
+                token(),
+                ServerInfo {
+                    display_name: "bad\u{7}name".to_owned(),
                     ..valid_info()
                 },
             )

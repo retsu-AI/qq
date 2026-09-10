@@ -3124,7 +3124,7 @@ mod tests {
                 "type": "trial",
                 "qq_version": "0.1.0",
                 "qq_source_revision": "abc123",
-                "protocol_version": 16,
+                "protocol_version": 17,
                 "model": {"model": "test/fixed", "max_output_tokens": 4096},
                 "context_window": 128000,
                 "pricing_provenance": "fixture",

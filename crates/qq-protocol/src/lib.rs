@@ -52,7 +52,7 @@ pub use sessions::{
     WorkspaceSnapshot, WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 16;
+pub const PROTOCOL_VERSION: u16 = 17;
 
 /// Slash commands owned by interactive clients rather than the shared
 /// runtime. Keeping this vocabulary in the transport-neutral protocol avoids
@@ -178,9 +178,139 @@ pub enum RunFailureKind {
 /// Version information returned by the server health endpoint. Tolerates
 /// unknown fields so an older client can read a newer server's answer and
 /// report the version skew instead of a decode failure.
+///
+/// `server_id` is the durable identity of the store this server owns: it
+/// survives restarts, endpoint changes, and token rotation, and it is the
+/// same value every `EventCursor` from this server carries. Clients key a
+/// saved server profile by it, never by address. `display_name` is a
+/// human label (configured, else the host name) and carries no identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerInfo {
     pub protocol_version: u16,
     pub version: String,
     pub pid: u32,
+    pub server_id: StoreId,
+    pub display_name: String,
+}
+
+/// Longest `ServerInfo.display_name` a server may advertise, in bytes.
+pub const MAX_DISPLAY_NAME_BYTES: usize = 64;
+
+impl ServerInfo {
+    /// Whether every field satisfies the wire invariants: a nonzero pid, a
+    /// printable bounded version, and a printable bounded display name.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.pid != 0
+            && valid_process_version(&self.version)
+            && valid_display_name(&self.display_name)
+    }
+}
+
+/// Whether `version` may be advertised in `ServerInfo.version`: 1..=256 bytes
+/// of printable ASCII without spaces.
+#[must_use]
+pub fn valid_process_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 256
+        && version.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+pub(crate) fn valid_display_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_DISPLAY_NAME_BYTES
+        && !name.chars().any(char::is_control)
+        && name.trim() == name
+}
+
+/// Reduces an arbitrary host or configured label to a valid display name,
+/// or `None` when nothing printable remains.
+#[must_use]
+pub fn sanitize_display_name(candidate: &str) -> Option<String> {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut name = String::with_capacity(trimmed.len().min(MAX_DISPLAY_NAME_BYTES));
+    for character in trimmed.chars() {
+        if character.is_control() {
+            continue;
+        }
+        if name.len() + character.len_utf8() > MAX_DISPLAY_NAME_BYTES {
+            break;
+        }
+        name.push(character);
+    }
+    let name = name.trim_end().to_owned();
+    valid_display_name(&name).then_some(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_names_are_bounded_printable_and_trimmed() {
+        assert_eq!(
+            sanitize_display_name("  build-box.local \n"),
+            Some("build-box.local".to_owned())
+        );
+        assert_eq!(
+            sanitize_display_name("bad\u{7}name\u{1b}[0m"),
+            Some("badname[0m".to_owned())
+        );
+        assert_eq!(sanitize_display_name("   "), None);
+        assert_eq!(sanitize_display_name("\u{7}\u{8}"), None);
+
+        let long = "x".repeat(MAX_DISPLAY_NAME_BYTES + 10);
+        let clamped = sanitize_display_name(&long).unwrap();
+        assert_eq!(clamped.len(), MAX_DISPLAY_NAME_BYTES);
+
+        // A multi-byte character that would straddle the bound is dropped whole.
+        let mixed = format!("{}é", "x".repeat(MAX_DISPLAY_NAME_BYTES - 1));
+        assert_eq!(
+            sanitize_display_name(&mixed),
+            Some("x".repeat(MAX_DISPLAY_NAME_BYTES - 1))
+        );
+    }
+
+    #[test]
+    fn server_info_well_formed_checks_every_field() {
+        let info = ServerInfo {
+            protocol_version: PROTOCOL_VERSION,
+            version: "0.1.0".to_owned(),
+            pid: 1,
+            server_id: StoreId::from_bytes([1; 16]),
+            display_name: "devbox".to_owned(),
+        };
+        assert!(info.is_well_formed());
+        assert!(
+            !ServerInfo {
+                pid: 0,
+                ..info.clone()
+            }
+            .is_well_formed()
+        );
+        assert!(
+            !ServerInfo {
+                version: "has space".to_owned(),
+                ..info.clone()
+            }
+            .is_well_formed()
+        );
+        assert!(
+            !ServerInfo {
+                display_name: String::new(),
+                ..info.clone()
+            }
+            .is_well_formed()
+        );
+        assert!(
+            !ServerInfo {
+                display_name: " padded".to_owned(),
+                ..info
+            }
+            .is_well_formed()
+        );
+    }
 }

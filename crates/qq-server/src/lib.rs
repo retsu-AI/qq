@@ -36,8 +36,9 @@ use qq_protocol::{
     MAX_INPUT_PARTS, MAX_INPUT_TEXT_BYTES, MAX_MODEL_BYTES, MAX_ORGANIZATION_BYTES,
     MAX_REQUEST_BYTES, MAX_WORKSPACE_BYTES, ModelCatalogRequest, ModelDescriptor, PROTOCOL_VERSION,
     ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind, SnapshotRequest,
-    SteeringCapabilities, SubscribeRequest, ToolCapabilities, WorkspaceId, WorkspaceSnapshot,
-    WorkspaceToolCapabilities, validate_input,
+    SteeringCapabilities, StoreId, SubscribeRequest, ToolCapabilities, WorkspaceId,
+    WorkspaceSnapshot, WorkspaceToolCapabilities, sanitize_display_name, valid_process_version,
+    validate_input,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -47,7 +48,8 @@ use tokio::{
     task::JoinHandle,
 };
 
-const METADATA_FORMAT_VERSION: u16 = 1;
+const METADATA_FORMAT_VERSION: u16 = 2;
+const DEFAULT_DISPLAY_NAME: &str = "qq";
 const METADATA_FILE_NAME: &str = "server.ron";
 const LOCK_FILE_NAME: &str = "server.lock";
 const DEFAULT_BIND_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
@@ -241,6 +243,59 @@ impl ServerOptions {
 
 pub type ServerConnection = LocalServerConnection;
 
+/// The durable identity a started server advertises in `ServerInfo`.
+///
+/// `server_id` is the store's identity so it matches every cursor the server
+/// issues; it is known only after the runtime opens, which is why the
+/// reservation carries no connection until `start`. `display_name` is a
+/// bounded printable label with no identity meaning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerIdentity {
+    server_id: StoreId,
+    display_name: String,
+}
+
+impl ServerIdentity {
+    /// Labels the server with `display_name`, falling back to the host name
+    /// and then to a fixed label when the candidate has nothing printable.
+    #[must_use]
+    pub fn new(server_id: StoreId, display_name: Option<&str>) -> Self {
+        let display_name = display_name
+            .and_then(sanitize_display_name)
+            .or_else(host_display_name)
+            .unwrap_or_else(|| DEFAULT_DISPLAY_NAME.to_owned());
+        Self {
+            server_id,
+            display_name,
+        }
+    }
+
+    #[must_use]
+    pub const fn server_id(&self) -> StoreId {
+        self.server_id
+    }
+
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        &self.display_name
+    }
+}
+
+fn host_display_name() -> Option<String> {
+    // `rustix::system::uname` is unavailable without another feature; the
+    // environment names every major platform exports are sufficient for a
+    // label that carries no identity.
+    ["HOSTNAME", "COMPUTERNAME", "HOST"]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .find_map(|value| sanitize_display_name(&value))
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .and_then(|value| sanitize_display_name(&value))
+        })
+}
+
 fn generate_bearer_token() -> Result<String, ServerError> {
     let mut random = [0_u8; TOKEN_BYTES];
     getrandom::fill(&mut random).map_err(|_| ServerError::RandomnessUnavailable)?;
@@ -262,6 +317,8 @@ struct MetadataFile {
     pid: u32,
     protocol_version: u16,
     version: String,
+    server_id: StoreId,
+    display_name: String,
     token: String,
 }
 
@@ -273,6 +330,8 @@ impl MetadataFile {
             pid: connection.server_info().pid,
             protocol_version: connection.server_info().protocol_version,
             version: connection.server_info().version.clone(),
+            server_id: connection.server_info().server_id,
+            display_name: connection.server_info().display_name.clone(),
             token: connection.expose_bearer_token().to_owned(),
         }
     }
@@ -290,9 +349,6 @@ impl MetadataFile {
                 found: self.protocol_version,
             });
         }
-        if self.pid == 0 || !valid_process_version(&self.version) {
-            return Err(ServerError::MetadataCorrupt);
-        }
         let address = self
             .address
             .parse::<SocketAddr>()
@@ -301,6 +357,8 @@ impl MetadataFile {
             return Err(ServerError::MetadataCorrupt);
         }
 
+        // `LocalServerConnection::new` validates the process metadata and the
+        // display name; a corrupt file maps to `MetadataCorrupt` below.
         LocalServerConnection::new(
             address,
             self.token,
@@ -308,6 +366,8 @@ impl MetadataFile {
                 protocol_version: self.protocol_version,
                 version: self.version,
                 pid: self.pid,
+                server_id: self.server_id,
+                display_name: self.display_name,
             },
         )
         .map_err(map_connection_error)
@@ -319,6 +379,7 @@ impl MetadataFile {
             && self.pid == connection.server_info().pid
             && self.protocol_version == connection.server_info().protocol_version
             && self.version == connection.server_info().version
+            && self.server_id == connection.server_info().server_id
             && constant_time_eq(
                 self.token.as_bytes(),
                 connection.expose_bearer_token().as_bytes(),
@@ -370,7 +431,9 @@ pub enum ReserveOutcome {
 /// durable runtime against the same store.
 pub struct ServerReservation {
     listener: TcpListener,
-    connection: ServerConnection,
+    address: SocketAddr,
+    bearer_token: String,
+    version: String,
     guard: InstanceGuard,
 }
 
@@ -378,20 +441,50 @@ impl fmt::Debug for ServerReservation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ServerReservation")
-            .field("connection", &self.connection)
+            .field("address", &self.address)
+            .field("bearer_token", &"[REDACTED]")
             .finish_non_exhaustive()
     }
 }
 
 impl ServerReservation {
-    /// Starts serving with the handler constructed after ownership was won.
+    /// The bound listener address, known before the runtime opens.
     #[must_use]
-    pub fn start(self, handler: Arc<dyn ServerHandler>) -> ServerHandle {
+    pub const fn address(&self) -> SocketAddr {
+        self.address
+    }
+
+    /// Starts serving with the handler constructed after ownership was won.
+    /// The identity comes from that handler's store, so the advertised
+    /// `server_id` matches every cursor the server will issue. Publishing the
+    /// discovery metadata here, not at reservation, keeps a losing starter
+    /// from attaching to a server that has no identity yet.
+    pub fn start(
+        self,
+        handler: Arc<dyn ServerHandler>,
+        identity: ServerIdentity,
+    ) -> Result<ServerHandle, ServerError> {
         let Self {
             listener,
-            connection,
+            address,
+            bearer_token,
+            version,
             mut guard,
         } = self;
+        let connection = ServerConnection::new(
+            address,
+            bearer_token,
+            ServerInfo {
+                protocol_version: PROTOCOL_VERSION,
+                version,
+                pid: std::process::id(),
+                server_id: identity.server_id,
+                display_name: identity.display_name,
+            },
+        )
+        .map_err(map_connection_error)?;
+        write_metadata_atomically(&guard.paths, &MetadataFile::new(&connection))?;
+        guard.connection = Some(connection.clone());
         let app = router(handler, connection.clone());
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -404,11 +497,11 @@ impl ServerReservation {
             let cleanup_result = guard.cleanup();
             serve_result.and(cleanup_result)
         });
-        ServerHandle {
+        Ok(ServerHandle {
             connection,
             shutdown: Some(shutdown_sender),
             task: Some(task),
-        }
+        })
     }
 }
 
@@ -486,14 +579,17 @@ impl Drop for ServerHandle {
     }
 }
 
-/// Starts the server or returns the authenticated connection for the existing instance.
+/// Starts the server or returns the authenticated connection for the existing
+/// instance. Callers that must open their runtime after winning ownership use
+/// `reserve` and `ServerReservation::start` instead.
 pub async fn start(
     handler: Arc<dyn ServerHandler>,
+    identity: ServerIdentity,
     options: ServerOptions,
 ) -> Result<StartOutcome, ServerError> {
     match reserve(options).await? {
         ReserveOutcome::Reserved(reservation) => {
-            Ok(StartOutcome::Started(reservation.start(handler)))
+            Ok(StartOutcome::Started(reservation.start(handler, identity)?))
         }
         ReserveOutcome::Existing(connection) => Ok(StartOutcome::Existing(connection)),
     }
@@ -540,28 +636,22 @@ pub async fn reserve(options: ServerOptions) -> Result<ReserveOutcome, ServerErr
         address: options.bind_address,
         source,
     })?;
-    let connection = ServerConnection::new(
-        address,
-        generate_bearer_token()?,
-        ServerInfo {
-            protocol_version: PROTOCOL_VERSION,
-            version: options.version,
-            pid: std::process::id(),
-        },
-    )
-    .map_err(map_connection_error)?;
-    let metadata = MetadataFile::new(&connection);
-    write_metadata_atomically(&options.paths, &metadata)?;
+    if !address.ip().is_loopback() || address.port() == 0 {
+        return Err(ServerError::NonLoopbackBind(address));
+    }
+    let bearer_token = generate_bearer_token()?;
 
     let guard = InstanceGuard {
         _lock: lock,
         paths: options.paths,
-        connection: connection.clone(),
+        connection: None,
         cleaned: false,
     };
     Ok(ReserveOutcome::Reserved(Box::new(ServerReservation {
         listener,
-        connection,
+        address,
+        bearer_token,
+        version: options.version,
         guard,
     })))
 }
@@ -1105,12 +1195,6 @@ fn constant_time_eq(candidate: &[u8], expected: &[u8]) -> bool {
     difference == 0
 }
 
-fn valid_process_version(version: &str) -> bool {
-    !version.is_empty()
-        && version.len() <= 256
-        && version.bytes().all(|byte| byte.is_ascii_graphic())
-}
-
 fn map_connection_error(error: LocalConnectionError) -> ServerError {
     match error {
         LocalConnectionError::ProtocolMismatch { expected, found } => {
@@ -1125,7 +1209,9 @@ fn map_connection_error(error: LocalConnectionError) -> ServerError {
 struct InstanceGuard {
     _lock: File,
     paths: ServerPaths,
-    connection: ServerConnection,
+    /// Set once `start` has published metadata; an unstarted reservation
+    /// owns no metadata file to remove.
+    connection: Option<ServerConnection>,
     cleaned: bool,
 }
 
@@ -1136,10 +1222,13 @@ impl InstanceGuard {
         }
         self.cleaned = true;
 
+        let Some(connection) = self.connection.as_ref() else {
+            return Ok(());
+        };
         let Some(metadata) = read_metadata_file(&self.paths)? else {
             return Ok(());
         };
-        if !metadata.belongs_to(&self.connection) {
+        if !metadata.belongs_to(connection) {
             return Ok(());
         }
         fs::remove_file(&self.paths.metadata_file).map_err(|source| ServerError::StateIo {
@@ -1347,7 +1436,7 @@ async fn probe_health(
             found: info.protocol_version,
         });
     }
-    if info.pid == 0 || !valid_process_version(&info.version) {
+    if !info.is_well_formed() {
         return Err(HealthProbeError::Unavailable);
     }
     Ok(info)
@@ -1685,6 +1774,10 @@ mod tests {
         Arc::new(UnavailableHandler)
     }
 
+    fn test_identity() -> ServerIdentity {
+        ServerIdentity::new(StoreId::from_bytes([0xAA; 16]), Some("test-host"))
+    }
+
     struct HeldSubscriptionHandler {
         event: SessionEventEnvelope,
     }
@@ -1744,7 +1837,10 @@ mod tests {
         paths: ServerPaths,
         handler: Arc<dyn ServerHandler>,
     ) -> ServerHandle {
-        match start(handler, ServerOptions::new(paths)).await.unwrap() {
+        match start(handler, test_identity(), ServerOptions::new(paths))
+            .await
+            .unwrap()
+        {
             StartOutcome::Started(handle) => handle,
             StartOutcome::Existing(_) => panic!("test unexpectedly found an existing server"),
         }
@@ -1802,7 +1898,10 @@ mod tests {
         let directory = TestDirectory::new();
         let options =
             ServerOptions::new(directory.paths()).with_version("0.0.1+abc1234.2026-09-09");
-        let server = match start(unavailable_handler(), options).await.unwrap() {
+        let server = match start(unavailable_handler(), test_identity(), options)
+            .await
+            .unwrap()
+        {
             StartOutcome::Started(handle) => handle,
             StartOutcome::Existing(_) => panic!("test unexpectedly found an existing server"),
         };
@@ -2302,8 +2401,12 @@ mod tests {
         let handler = unavailable_handler();
 
         let (left, right) = tokio::join!(
-            start(Arc::clone(&handler), ServerOptions::new(paths.clone())),
-            start(handler, ServerOptions::new(paths)),
+            start(
+                Arc::clone(&handler),
+                test_identity(),
+                ServerOptions::new(paths.clone())
+            ),
+            start(handler, test_identity(), ServerOptions::new(paths)),
         );
 
         let mut started = None;
@@ -2333,7 +2436,9 @@ mod tests {
         let handler = unavailable_handler();
         let server = start_test_server(paths.clone(), Arc::clone(&handler)).await;
 
-        let outcome = start(handler, ServerOptions::new(paths)).await.unwrap();
+        let outcome = start(handler, test_identity(), ServerOptions::new(paths))
+            .await
+            .unwrap();
         let StartOutcome::Existing(existing) = outcome else {
             panic!("second start should report the existing server");
         };
@@ -2382,6 +2487,8 @@ mod tests {
             ServerInfo {
                 protocol_version: PROTOCOL_VERSION,
                 version: "stale".to_owned(),
+                server_id: StoreId::from_bytes([0xAA; 16]),
+                display_name: "test-host".to_owned(),
                 pid: 42,
             },
         )
@@ -2415,6 +2522,8 @@ mod tests {
             pid: 42,
             protocol_version: PROTOCOL_VERSION + 1,
             version: "future".to_owned(),
+            server_id: StoreId::from_bytes([0xAA; 16]),
+            display_name: "test-host".to_owned(),
             token: "c".repeat(TOKEN_HEX_BYTES),
         };
         metadata.format_version = METADATA_FORMAT_VERSION + 1;
@@ -2439,7 +2548,9 @@ mod tests {
             }) if expected == PROTOCOL_VERSION && found == PROTOCOL_VERSION + 1
         ));
         let handler = unavailable_handler();
-        let error = start(handler, ServerOptions::new(paths)).await.unwrap_err();
+        let error = start(handler, test_identity(), ServerOptions::new(paths))
+            .await
+            .unwrap_err();
         assert!(matches!(
             error,
             ServerError::ProtocolMismatch {
@@ -2450,20 +2561,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_a_reservation_cleans_metadata_and_releases_ownership() {
+    async fn dropping_a_reservation_publishes_nothing_and_releases_ownership() {
         let directory = TestDirectory::new();
         let paths = directory.paths();
         let outcome = reserve(ServerOptions::new(paths.clone())).await.unwrap();
         let ReserveOutcome::Reserved(reservation) = outcome else {
             panic!("test unexpectedly found an existing server");
         };
-        assert!(paths.metadata_file().is_file());
+        // Metadata carries the server identity, which only the started
+        // runtime knows; a bare reservation must not advertise itself.
+        assert!(!paths.metadata_file().exists());
+        assert!(reservation.address().ip().is_loopback());
+        assert_ne!(reservation.address().port(), 0);
 
         drop(reservation);
 
         assert!(!paths.metadata_file().exists());
         let lock = open_private_lock_file(paths.lock_file()).unwrap();
         lock.try_lock().unwrap();
+    }
+
+    #[tokio::test]
+    async fn started_server_advertises_its_identity_in_health_metadata_and_discovery() {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let outcome = reserve(ServerOptions::new(paths.clone())).await.unwrap();
+        let ReserveOutcome::Reserved(reservation) = outcome else {
+            panic!("test unexpectedly found an existing server");
+        };
+        let identity = ServerIdentity::new(StoreId::from_bytes([0x5A; 16]), Some(" my box \u{7}"));
+        assert_eq!(identity.display_name(), "my box");
+        let server = reservation
+            .start(unavailable_handler(), identity.clone())
+            .unwrap();
+
+        let info = server.connection().server_info();
+        assert_eq!(info.server_id, StoreId::from_bytes([0x5A; 16]));
+        assert_eq!(info.display_name, "my box");
+
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let health: ServerInfo = http
+            .get(server.connection().endpoint("/v1/health"))
+            .bearer_auth(server.connection().expose_bearer_token())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(health, *info);
+
+        let discovered = discover_with_paths(&paths).await.unwrap().unwrap();
+        assert_eq!(discovered.server_info().server_id, identity.server_id());
+        assert_eq!(discovered, *server.connection());
+
+        server.shutdown().await.unwrap();
+        assert!(!paths.metadata_file().exists());
+    }
+
+    #[tokio::test]
+    async fn metadata_from_another_identity_is_not_removed_at_shutdown() {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let server = start_test_server(paths.clone(), unavailable_handler()).await;
+        let mut metadata = MetadataFile::new(server.connection());
+        metadata.server_id = StoreId::from_bytes([0x11; 16]);
+        write_metadata_atomically(&paths, &metadata).unwrap();
+
+        server.shutdown().await.unwrap();
+
+        let remaining = read_metadata_file(&paths).unwrap().unwrap();
+        assert_eq!(remaining.server_id, StoreId::from_bytes([0x11; 16]));
+    }
+
+    #[test]
+    fn identity_display_name_falls_back_to_a_printable_label() {
+        let identity = ServerIdentity::new(StoreId::from_bytes([1; 16]), Some("\u{7}\u{8}"));
+        assert!(qq_protocol::sanitize_display_name(identity.display_name()).is_some());
+        let named = ServerIdentity::new(StoreId::from_bytes([1; 16]), Some("home-server"));
+        assert_eq!(named.display_name(), "home-server");
     }
 
     #[tokio::test]
@@ -2657,6 +2833,8 @@ mod tests {
             ServerInfo {
                 protocol_version: PROTOCOL_VERSION,
                 version: "replacement".to_owned(),
+                server_id: StoreId::from_bytes([0xAA; 16]),
+                display_name: "test-host".to_owned(),
                 pid: 43,
             },
         )
@@ -2677,6 +2855,8 @@ mod tests {
             ServerInfo {
                 protocol_version: PROTOCOL_VERSION,
                 version: "test".to_owned(),
+                server_id: StoreId::from_bytes([0xAA; 16]),
+                display_name: "test-host".to_owned(),
                 pid: 1,
             },
         )
@@ -2696,7 +2876,7 @@ mod tests {
         let options =
             ServerOptions::new(directory.paths()).with_bind_address("0.0.0.0:0".parse().unwrap());
 
-        let error = start(handler, options).await.unwrap_err();
+        let error = start(handler, test_identity(), options).await.unwrap_err();
 
         assert!(matches!(error, ServerError::NonLoopbackBind(_)));
     }
@@ -2737,7 +2917,7 @@ mod tests {
         .unwrap();
         let handler = unavailable_handler();
         assert!(matches!(
-            start(handler, ServerOptions::new(insecure_paths))
+            start(handler, test_identity(), ServerOptions::new(insecure_paths))
                 .await
                 .unwrap_err(),
             ServerError::InsecurePermissions { .. }
@@ -2750,7 +2930,7 @@ mod tests {
         symlink(&target, symlink_paths.directory()).unwrap();
         let handler = unavailable_handler();
         assert!(matches!(
-            start(handler, ServerOptions::new(symlink_paths))
+            start(handler, test_identity(), ServerOptions::new(symlink_paths))
                 .await
                 .unwrap_err(),
             ServerError::InsecureStatePath(_)

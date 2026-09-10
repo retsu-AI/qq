@@ -46,7 +46,7 @@ Related documents:
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 16
+PROTOCOL_VERSION = 17
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -117,8 +117,13 @@ and audit work: `SessionSummary.approval_mode` gained `supervised`,
 `RunSnapshot.audit` records how a run's final answer was audited, and the
 `run_audit_started` and `run_audit_completed` events were added (see
 [Final-answer audit](#final-answer-audit)). Older clients reject the new event
-tags and failure kind. Golden fixtures moved to
-`crates/qq-protocol/tests/fixtures/v16/`.
+tags and failure kind. Version 17 added the server's durable identity to
+`ServerInfo`: `server_id` (the store id every cursor from that server carries)
+and a bounded printable `display_name`. A client keys a saved server profile
+by `server_id`, never by address, and can confirm that a cursor belongs to the
+server it is talking to before replaying it. Older clients tolerate the new
+fields on decode but their discovery metadata format is rejected. Golden
+fixtures live under `crates/qq-protocol/tests/fixtures/v17/`.
 
 Clients and servers must agree on this value.
 
@@ -148,7 +153,10 @@ real bottleneck.
 ### Authentication
 
 The server generates a random bearer token at startup and writes it, with the
-bind address and process metadata, to a private per-user file (`server.ron`).
+bind address, process metadata, and server identity, to a private per-user
+file (`server.ron`, format version 2). The file is published only once the
+runtime has opened and the identity is known; an unstarted reservation holds
+the instance lock and listener but advertises nothing.
 The binary discovers the running instance through `qq-server` and passes a
 redacted `LocalServerConnection` capability to `qq-client`, which attaches with:
 
@@ -291,11 +299,18 @@ Response `ServerInfo`:
 
 ```json
 {
-  "protocol_version": 16,
+  "protocol_version": 17,
   "version": "0.1.0",
-  "pid": 12345
+  "pid": 12345,
+  "server_id": "0123456789abcdef0123456789abcdef",
+  "display_name": "build-box"
 }
 ```
+
+`server_id` is the store identity (`EventCursor.store_id`); it survives
+restarts, endpoint changes, and token rotation. `display_name` is at most 64
+bytes, printable, trimmed, and carries no identity; the server uses a
+configured label, else the host name, else `qq`.
 
 `ServerInfo` tolerates unknown fields so a client built against an older
 revision still reads a newer server's answer and reports the mismatch.

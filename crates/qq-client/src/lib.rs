@@ -658,7 +658,9 @@ mod tests {
     async fn start_test_server(handler: Arc<dyn ServerHandler>) -> (TempDir, ServerHandle) {
         let directory = tempfile::tempdir().unwrap();
         let paths = ServerPaths::new(directory.path().join("state"));
-        let server = match qq_server::start(handler, ServerOptions::new(paths))
+        let identity =
+            qq_server::ServerIdentity::new(StoreId::from_bytes([0xAA; 16]), Some("test"));
+        let server = match qq_server::start(handler, identity, ServerOptions::new(paths))
             .await
             .unwrap()
         {
@@ -759,6 +761,8 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 version: "test".to_owned(),
                 pid: 1,
+                server_id: StoreId::from_bytes([0xAA; 16]),
+                display_name: "test".to_owned(),
             },
         )
         .unwrap();
