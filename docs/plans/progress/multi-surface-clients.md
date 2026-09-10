@@ -9,7 +9,7 @@ dated entries appended below, newest last.
 | W1 | Transport-agnostic `qq-client`; `wasm32` build | In progress | `feat/multi-surface-clients-plan` | 2026-09-10 |
 | W2 | Extract reducer into `qq-client::state` | Planned | | Needs W1 |
 | W3 | Multi-server client model | Planned | | Needs W1, W2, S1 |
-| S1 | Stable `ServerId`; protocol 17 | In progress | `feat/multi-surface-clients-plan` | 2026-09-10 |
+| S1 | Stable `ServerId`; protocol 17 | In review | `feat/multi-surface-clients-plan` | Reuses the store id as the server identity |
 | S2 | Client enrollment | Planned | | ADR-0015; second review required |
 | S3 | CORS | Planned | | |
 | S4 | Remote exposure with TLS | Planned | | ADR-0016; rustls root request |
@@ -32,3 +32,19 @@ reserved in `root.md`; root requests filed for `architecture.md`,
 dependency. Decision #6 (browser credential storage) appended.
 
 Shipped: none. In progress: W1, S1 (same worktree `../qq-msc`). Blocked: none.
+
+#### S1 receipt — 2026-09-10
+Commit(s): see branch `feat/multi-surface-clients-plan`.
+Tests: 6 added (`qq-protocol` display-name/well-formed, `qq-server` identity in
+health/metadata/discovery, foreign-identity metadata retained, reservation
+publishes nothing); workspace green, fmt and clippy clean.
+Gates: none named.
+Deviations: the server identity *is* the store id rather than a second
+generated id — one durable identity, already carried by every cursor, so a
+client can verify a cursor belongs to a profile with no extra call. Discovery
+metadata is now written at `start` (format 2), not at `reserve`, because the
+identity is known only after the runtime opens.
+Docs: `docs/design/protocol.md` (v17, health, authentication),
+`docs/design/architecture.md` (reservation paragraph).
+Open: display-name configuration lands with S6; hostname fallback reads
+`HOSTNAME`/`COMPUTERNAME`/`HOST` then `/etc/hostname`.

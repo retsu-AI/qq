@@ -2764,7 +2764,9 @@ mod tests {
         // Version 15 added `approval_mode` on summaries. Version 16 added
         // output continuation: `run_output_truncated`, `MessageSnapshot.
         // truncated`, and the `provider_output_truncated` failure kind.
-        assert_eq!(crate::PROTOCOL_VERSION, 16);
+        // Version 17 added the durable `server_id` and `display_name` to
+        // `ServerInfo` so clients can key a server profile by identity.
+        assert_eq!(crate::PROTOCOL_VERSION, 17);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

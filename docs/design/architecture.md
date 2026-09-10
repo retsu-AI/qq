@@ -53,8 +53,10 @@ An embedded or standalone server must reserve the user-scoped instance lock
 before opening `SessionRuntime`. Runtime construction performs crash recovery
 and starts scheduling immediately; constructing it before ownership is known
 would let a losing startup race mutate or claim work from the winning server's
-store. Dropping an unstarted reservation removes its metadata and releases the
-lock.
+store. The server's advertised identity is the store's durable id, so the
+reservation publishes its discovery metadata only at `start`, once the
+runtime is open; dropping an unstarted reservation releases the lock and
+leaves no metadata behind.
 
 ## Repository Layout
 

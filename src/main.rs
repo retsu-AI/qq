@@ -312,10 +312,17 @@ async fn serve(bind: std::net::SocketAddr) -> Result<(), Box<dyn Error>> {
         server::ReserveOutcome::Reserved(reservation) => {
             let handler =
                 Arc::new(runtime::RuntimeHandler::open(runtime::RuntimeFactory::system()?).await?);
-            let embedded = EmbeddedRuntime {
-                server: reservation.start(handler.clone()),
-                handler,
+            let identity = handler.server_identity(None);
+            let server = match reservation.start(handler.clone(), identity) {
+                Ok(server) => server,
+                Err(error) => {
+                    // The runtime opened but never served; settle it so the
+                    // store closes cleanly before reporting the failure.
+                    let _ = handler.shutdown().await;
+                    return Err(error.into());
+                }
             };
+            let embedded = EmbeddedRuntime { server, handler };
             println!(
                 "qq server listening at {}",
                 embedded.server.connection().address()
@@ -433,7 +440,14 @@ async fn interactive(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
                             .await
                             .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?,
                     );
-                    let server = reservation.start(handler.clone());
+                    let identity = handler.server_identity(None);
+                    let server = match reservation.start(handler.clone(), identity) {
+                        Ok(server) => server,
+                        Err(error) => {
+                            let _ = handler.shutdown().await;
+                            return Err(qq_tui::ClientFailure::new(error.to_string()));
+                        }
+                    };
                     let connection = server.connection().clone();
                     // The receiver only drops when the TUI already exited.
                     let _ = embedded_tx.send(EmbeddedRuntime { server, handler });

@@ -3234,6 +3234,7 @@ async fn http_pipeline_workloads(
             Arc::new(RuntimeServerHandler {
                 runtime: fixture.runtime.clone(),
             }),
+            qq_server::ServerIdentity::new(fixture.runtime.store_id(), Some("perf")),
             ServerOptions::new(ServerPaths::new(fixture._directory.path().join("server"))),
         ),
     )
