@@ -20,14 +20,21 @@ may append a **request** row; only root changes a request's status.
 | 0012 | Structural settlement and teardown-before-terminal | speed-first H21 | Reserved |
 | 0013 | Context-source identity in the plan descriptor | speed-first H28 | Reserved |
 | 0014 | Typed final output contract | speed-first HC3 | Reserved |
+| 0015 | Remote client authentication: pairing-code enrollment, per-client credentials | multi-surface S2 | Reserved |
+| 0016 | Remote exposure: loopback default, TLS required off loopback, `tailscale serve` front | multi-surface S4 | Reserved |
+| 0017 | Client UI stack: Rust/WASM, framework chosen by the W1 spike | multi-surface W1/U1 | Reserved |
+| 0018 | `apps/` as a separate Cargo workspace | multi-surface U1 | Reserved |
 
-Next free number: 0015. Reserve here before opening a PR that adds an ADR.
+Next free number: 0019. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
 | Date | From | File(s) | Request | Status |
 | --- | --- | --- | --- | --- |
-| | | | | |
+| 2026-09-10 | multi-surface W1 | `.github/workflows/*`, `rust-toolchain.toml` | Add `wasm32-unknown-unknown` target and a `cargo build -p qq-client --target wasm32-unknown-unknown --no-default-features --features wasm` job | Open |
+| 2026-09-10 | multi-surface S4 | root `Cargo.toml`, `Cargo.lock` | Add `rustls`-based TLS acceptor for `qq-server` (one bump) | Open |
+| 2026-09-10 | multi-surface plan | `docs/design/architecture.md` § Intentionally Deferred, § Local And Remote Networking, repository map; `docs/design/product.md` non-goals and open decisions | Remove web/mobile deferral; record remote exposure and enrollment once S2/S4 ship | Open |
+| 2026-09-10 | multi-surface plan | `docs/plans/README.md` | Plan row and priority entry (done in the plan PR; confirm) | Open |
 
 Shared files: root `Cargo.toml` and `Cargo.lock` version bumps,
 `rust-toolchain.toml`, `flake.nix`, `.github/workflows/*`,

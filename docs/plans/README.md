@@ -23,6 +23,7 @@ system boundaries and [`workflow.md`](./workflow.md) before starting a slice.
 | [`speed-first-extensible-agent-harness.md`](./speed-first-extensible-agent-harness.md) | Backend plan: compiled plan, protocol, extension lanes, hot path, perf gates; Phases 5a–9 and HC1–HC4 |
 | [`terminal-bench-readiness.md`](./terminal-bench-readiness.md) | Harness reliability and Terminal-Bench program; R6–R8 open |
 | [`supervised-delegation.md`](./supervised-delegation.md) | Continuation, roster, supervised children, audit; D6b open |
+| [`multi-surface-clients.md`](./multi-surface-clients.md) | Web, desktop, and mobile clients over many headless servers; client-core W1–W3, server readiness S1–S6, then U/D/M |
 | [`run-snapshots.md`](./run-snapshots.md) | Proposed: reversible mutating-run state |
 | [`lsp-diagnostics.md`](./lsp-diagnostics.md) | Proposed: diagnostics integration |
 | [`templates/`](./templates/) | Slice header, pre-flight, receipt, PR body; review checklist |
@@ -38,6 +39,7 @@ system boundaries and [`workflow.md`](./workflow.md) before starting a slice.
 | 4 | R6 tool tournament and terminal; R7 sub-agent economics; R8 remaining warm-path candidates | `terminal-bench-readiness.md` | Evaluation-gated; R6 feeds H10 |
 | 5 | Phase 7 — H10 process sandbox | `speed-first-…` | Gated on R6 and a platform threat model |
 | 6 | Phase 8 — H11 product adapters; Phase 9 — H12 qualification | `speed-first-…` | H11 needs a real consumer; H12 closes the story |
+| 3a | Multi-surface Phases 1–2 — W1, S1 first, then W2, S2, S3; tracer bullet before Phase 3 | `multi-surface-clients.md` | Touches `qq-client`, `qq-server`, and `qq-tui` extraction, not the store hot path; can run in a parallel worktree beside Phase 6 |
 | — | Phase 5a quiet-host H0 tail acceptance; full Windows run | `speed-first-…` | Implemented; tails not repeatable on the shared host; retained, not waived |
 | — | Run snapshots, LSP diagnostics | proposed plans | No scheduled slice |
 
@@ -48,6 +50,7 @@ system boundaries and [`workflow.md`](./workflow.md) before starting a slice.
 | Compiled plan, protocol contract, extension lanes, store/provider hot path, perf gates and budgets, headless-contract sequencing (HC1–HC4) | `speed-first-extensible-agent-harness.md` |
 | Tool-contract ablations, terminal, sub-agent economics, Terminal-Bench evaluation program, remaining warm-path candidates | `terminal-bench-readiness.md` |
 | Continuation on truncation, delegation roster, supervised write children, final-answer audit, paired evaluation | `supervised-delegation.md` |
+| Web, desktop, mobile clients; remote server readiness (identity, enrollment, CORS, TLS, workspace catalog) | `multi-surface-clients.md` |
 | Reversible mutating-run state | `run-snapshots.md` |
 | Diagnostics integration | `lsp-diagnostics.md` |
 | Reference audit of Codex, OpenCode, Pi, fx, and the Hermes boundary | [`../design/harness-audit-2026-08.md`](../design/harness-audit-2026-08.md) (research, not a plan) |
