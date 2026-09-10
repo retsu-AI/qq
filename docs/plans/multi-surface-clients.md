@@ -163,7 +163,7 @@ before and after per `docs/runbooks/perf-recording.md`).
   `qq_client::state`; the TUI keeps rendering-only state.
 - The `terminal_safe_character` dependency becomes a caller-supplied text
   sanitizer.
-- A fixture-replay test feeds every `tests/fixtures/v16/*.json` event through
+- A fixture-replay test feeds every `tests/fixtures/v17/*.json` event through
   the reducer and compares the projection to a checked-in golden; the test
   runs natively and on `wasm32`.
 - TUI behavior tests pass unchanged.

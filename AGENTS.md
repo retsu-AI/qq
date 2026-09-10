@@ -22,7 +22,8 @@ reserve ADR numbers in `docs/plans/progress/root.md`.
 
 - `src/`: binary, CLI, runtime composition, and authenticated model discovery.
 - `crates/qq-auth/`: provider OAuth flows and credential storage.
-- `crates/qq-client/`: HTTP/SSE client, reconnect/replay, and TUI client port.
+- `crates/qq-client/`: HTTP/SSE client, reconnect/replay, client port, and the
+  shared session state/reducer (`state`).
 - `crates/qq-config/`: layered configuration, policy, and provider presets.
 - `crates/qq-core/`: agent runtime, sessions, tools, and persistence behavior.
 - `crates/qq-mcp/`: MCP client transport and tool discovery.
@@ -30,7 +31,7 @@ reserve ADR numbers in `docs/plans/progress/root.md`.
 - `crates/qq-protocol/`: shared commands, events, identifiers, and wire types.
 - `crates/qq-reasoning/`: shared reasoning event vocabulary.
 - `crates/qq-server/`: HTTP/SSE server and local-instance discovery.
-- `crates/qq-tui/`: terminal UI and client-side state.
+- `crates/qq-tui/`: terminal UI and terminal-only client state.
 - `xtask/`: repository automation; invoke it with `cargo xtask`. Releases are
   cut with `cargo xtask release X.Y.Z` in a PR, then `cargo xtask release
   --tag` on the merged `main` (see `docs/runbooks/release.md`).

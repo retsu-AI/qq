@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::Group;
+use qq_client::state::Group;
 
 pub(super) fn session_line(app: &App, session_id: SessionId, width: usize, prefix: &str) -> Line {
     let session = &app.sessions[&session_id].summary;

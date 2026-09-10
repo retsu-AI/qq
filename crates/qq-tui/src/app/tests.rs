@@ -1,8 +1,12 @@
 use crossterm::event::MouseEvent;
+use qq_client::state::{
+    LIVE_TAIL_BYTES, MAX_LIVE_TOOL_OUTPUT_BYTES, SNAPSHOT_MESSAGE_LIMIT, WARM_BODY_LIMIT,
+};
 use qq_protocol::{
-    MessageId, MessageRole, MessageSnapshot, MessageState, RunActivity, RunId, RunOutcome,
-    RunSnapshot, RunStatus, SessionEvent, SessionStatus, SessionSummary, TextChannel, TokenUsage,
-    ToolCallId, ToolCallState, WorkspaceGrantOutcome,
+    MessageId, MessageRole, MessageSnapshot, MessageState, ModelDescriptor, RunActivity, RunId,
+    RunOutcome, RunSnapshot, RunStatus, SessionEvent, SessionSnapshot, SessionStatus,
+    SessionSummary, SnapshotRequest, TextChannel, TokenUsage, ToolCallId, ToolCallState,
+    WorkspaceGrantOutcome,
 };
 
 use super::*;
@@ -11,7 +15,6 @@ use crate::{
     effect::{Effect, Effects},
     fixtures,
     input::SessionConfirm,
-    model::{LIVE_TAIL_BYTES, MAX_LIVE_TOOL_OUTPUT_BYTES},
     viewport::View,
 };
 
@@ -109,7 +112,7 @@ fn approval_prompt_captures_keys_and_sends_the_decision() {
         state: ToolCallState::AwaitingApproval,
         ..fixtures::tool_call(id(7, ToolCallId::from_bytes), session_id, "write_file")
     };
-    app.upsert_tool_call(tool_call.clone());
+    app.sessions.upsert_tool_call(tool_call.clone());
     assert_eq!(
         app.pending_approval().map(|call| call.id),
         Some(tool_call.id)
@@ -171,7 +174,7 @@ fn approve_for_session_grants_shell_commands_as_prefixes() {
     let initial = snapshot();
     let session_id = initial.focused.as_ref().unwrap().summary.id;
     app.apply_snapshot(initial);
-    app.upsert_tool_call(ToolCallSnapshot {
+    app.sessions.upsert_tool_call(ToolCallSnapshot {
         run_id: id(4, RunId::from_bytes),
         call_ordinal: 1,
         provider_call_id: "call_0".to_owned(),
@@ -203,7 +206,7 @@ fn approve_for_workspace_sends_the_decision_and_surfaces_the_promotion() {
     let initial = snapshot();
     let session_id = initial.focused.as_ref().unwrap().summary.id;
     app.apply_snapshot(initial);
-    app.upsert_tool_call(ToolCallSnapshot {
+    app.sessions.upsert_tool_call(ToolCallSnapshot {
         run_id: id(4, RunId::from_bytes),
         call_ordinal: 1,
         provider_call_id: "call_0".to_owned(),
@@ -1743,7 +1746,7 @@ fn focused_transcript_retains_only_the_snapshot_window() {
     assert_eq!(retained.len(), usize::from(SNAPSHOT_MESSAGE_LIMIT));
     assert_eq!(retained.first().unwrap().output, "4");
 
-    app.push_message(MessageSnapshot {
+    app.sessions.push_message(MessageSnapshot {
         run_id,
         turn_ordinal: 0,
         created_at_ms: u64::MAX,
@@ -1775,7 +1778,7 @@ fn mid_run_queued_prompts_stay_after_the_streaming_runs_turn_messages() {
         ..fixtures::message(id(byte, MessageId::from_bytes), session_id, output)
     };
 
-    app.push_message(message(
+    app.sessions.push_message(message(
         6,
         streaming_run,
         0,
@@ -1783,7 +1786,7 @@ fn mid_run_queued_prompts_stay_after_the_streaming_runs_turn_messages() {
         MessageState::Complete,
         "prompt one",
     ));
-    app.push_message(message(
+    app.sessions.push_message(message(
         7,
         streaming_run,
         1,
@@ -1793,7 +1796,7 @@ fn mid_run_queued_prompts_stay_after_the_streaming_runs_turn_messages() {
     ));
     // A prompt queued mid-run arrives before the run's later per-turn
     // messages...
-    app.push_message(message(
+    app.sessions.push_message(message(
         8,
         queued_run,
         0,
@@ -1801,7 +1804,7 @@ fn mid_run_queued_prompts_stay_after_the_streaming_runs_turn_messages() {
         MessageState::Queued,
         "queued prompt",
     ));
-    app.push_message(message(
+    app.sessions.push_message(message(
         9,
         streaming_run,
         2,
@@ -2910,7 +2913,17 @@ fn the_reducer_returns_notices_and_attention_as_effects_instead_of_mutating_them
         )
     };
 
-    let effects = app.reduce_event(&envelope);
+    let effects = app.sessions.reduce_event(
+        &envelope,
+        qq_client::state::ReduceContext {
+            focused: app.focused(),
+            attentive: false,
+            workspace_id: app.workspace_id,
+            capabilities: None,
+            models: &app.models,
+            caused_by_me: false,
+        },
+    );
 
     // Pure: the reducer changed the model but left notice state alone.
     assert_eq!(
@@ -2918,15 +2931,26 @@ fn the_reducer_returns_notices_and_attention_as_effects_instead_of_mutating_them
         SessionStatus::Idle
     );
     assert_eq!(app.visible_status(), None);
-    let effects: Vec<Effect> = effects.into_iter().collect();
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::Notice { session: Some(id), level: NoticeLevel::Error, text }
+        qq_client::state::StateEffect::Notice { session: Some(id), level: NoticeLevel::Error, text }
             if *id == session_id && text == "provider exploded"
     )));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        qq_client::state::StateEffect::Attention(Attention::RunFinished { .. })
+    )));
+
+    // The app applies the notice to its status line and passes attention on
+    // to the loop.
+    let effects = app.reduce_event(&envelope);
+    assert!(matches!(
+        app.visible_status(),
+        Some((text, NoticeLevel::Error)) if text == "provider exploded"
+    ));
     assert!(
         effects
-            .iter()
+            .into_iter()
             .any(|effect| matches!(effect, Effect::Attention(Attention::RunFinished { .. })))
     );
 }

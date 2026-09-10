@@ -21,9 +21,9 @@ pub(super) fn attention_body(app: &App, width: usize) -> Vec<Line> {
             continue;
         };
         let (glyph, style, label) = match need {
-            crate::model::Need::Approval => ("◇", warning(), "needs approval"),
-            crate::model::Need::Failed => ("✕", failure(), "failed"),
-            crate::model::Need::FinishedUnread => ("●", success(), "finished"),
+            qq_client::state::Need::Approval => ("◇", warning(), "needs approval"),
+            qq_client::state::Need::Failed => ("✕", failure(), "failed"),
+            qq_client::state::Need::FinishedUnread => ("●", success(), "finished"),
         };
         let mut line = Line::styled(format!("  {glyph} "), style);
         line.push(&view.summary.title, normal().bold());
@@ -33,7 +33,7 @@ pub(super) fn attention_body(app: &App, width: usize) -> Vec<Line> {
         }
         lines.push(truncate_line(line, width));
         let detail: Option<(String, Style)> = match need {
-            crate::model::Need::Approval => view
+            qq_client::state::Need::Approval => view
                 .tool_calls
                 .as_ref()
                 .and_then(|calls| {
@@ -52,13 +52,13 @@ pub(super) fn attention_body(app: &App, width: usize) -> Vec<Line> {
                         .as_ref()
                         .map(|tool| (tool.clone(), normal()))
                 }),
-            crate::model::Need::Failed => match &view.summary.last_outcome {
+            qq_client::state::Need::Failed => match &view.summary.last_outcome {
                 Some(qq_protocol::RunOutcome::Failed { failure }) => {
                     Some((failure.message.clone(), failure_style()))
                 }
                 _ => None,
             },
-            crate::model::Need::FinishedUnread => {
+            qq_client::state::Need::FinishedUnread => {
                 (!view.live.tail.is_empty()).then(|| (view.live.tail.clone(), muted()))
             }
         };
