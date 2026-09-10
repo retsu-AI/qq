@@ -6,10 +6,10 @@ dated entries appended below, newest last.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| W1 | Transport-agnostic `qq-client`; `wasm32` build | In review | `feat/multi-surface-clients-plan` | `native`/`wasm` features; `ServerConnection` |
+| W1 | Transport-agnostic `qq-client`; `wasm32` build | In review | [#15](https://github.com/retsu-AI/qq/pull/15) | `native`/`wasm` features; `ServerConnection` |
 | W2 | Extract reducer into `qq-client::state` | Planned | | Needs W1 |
 | W3 | Multi-server client model | Planned | | Needs W1, W2, S1 |
-| S1 | Stable `ServerId`; protocol 17 | In review | `feat/multi-surface-clients-plan` | Reuses the store id as the server identity |
+| S1 | Stable `ServerId`; protocol 17 | In review | [#14](https://github.com/retsu-AI/qq/pull/14) | Reuses the store id as the server identity |
 | S2 | Client enrollment | Planned | | ADR-0015; second review required |
 | S3 | CORS | Planned | | |
 | S4 | Remote exposure with TLS | Planned | | ADR-0016; rustls root request |
@@ -69,3 +69,7 @@ Docs: `docs/design/architecture.md` (`qq-client` paragraph),
 Open: browser `EventSource` cannot set `Authorization`/`Last-Event-ID`;
 `qq-client` uses `fetch` streaming so this is not blocking, but S3 must
 allow those headers in preflight.
+
+### 2026-09-10 — stacked PRs opened
+
+Plan #13 → S1 #14 → W1 #15. Next slices start from W1's head in a new worktree.
