@@ -7,34 +7,40 @@ combined `SHA256SUMS`, and notes generated from the merged PR titles.
 
 ## Procedure
 
-1. Be on an up-to-date, clean `main` whose CI is green.
+`main` only accepts pull requests, and merging rewrites commit SHAs, so a
+release is a bump PR followed by a tag on the merged result.
+
+1. From an up-to-date, clean `main`, create a branch and bump. The version
+   must be plain `MAJOR.MINOR.PATCH` and greater than the current one.
 
    ```sh
    git switch main && git pull --ff-only
-   git status --short   # must print nothing
-   ```
-
-2. Bump, commit, and tag in one step. The version must be plain
-   `MAJOR.MINOR.PATCH` and greater than the current one.
-
-   ```sh
+   git switch -c chore/release-0.2.0
    cargo xtask release 0.2.0
+   git push -u origin chore/release-0.2.0
    ```
 
    This rewrites `[workspace.package] version` in `Cargo.toml` (every crate
-   inherits it), refreshes `Cargo.lock`, commits `chore(release): v0.2.0`,
-   and creates the annotated tag `v0.2.0`. It refuses a dirty worktree or an
-   existing tag. Use `--no-commit` to inspect the bump first.
+   inherits it), refreshes `Cargo.lock`, and commits `chore(release): v0.2.0`.
+   It refuses a dirty worktree. Use `--no-commit` to inspect the bump first.
 
-3. Push the commit and the tag together.
+2. Open a PR titled `chore(release): v0.2.0` and merge it once CI is green.
+
+3. Tag the merged `main` and push the tag.
 
    ```sh
-   git push origin main --follow-tags
+   git switch main && git pull --ff-only
+   cargo xtask release --tag
+   git push origin v0.2.0
    ```
 
+   `--tag` reads the version from the manifest and refuses to run unless the
+   tree is clean, `HEAD` equals `origin/main`, and the tag does not exist yet.
+
 4. Watch the `Release` workflow. The first job fails fast if the tag does not
-   match the manifest version, so a hand-made tag on the wrong commit never
-   produces a release. The publish job runs only after every target builds.
+   match the manifest version or its commit is not on `main`, so a tag made
+   on the wrong commit never produces a release. The publish job runs only
+   after every target builds.
 
 ## Versioning
 
@@ -102,7 +108,12 @@ at the time of writing; on a private plan the `ubuntu-24.04-arm` and
 
 - **Tag pushed, workflow failed.** Fix on `main`, then cut the next patch
   version; do not move or reuse a tag that has been pushed.
-- **Wrong version committed locally, not pushed.** `git reset --hard HEAD~1
-  && git tag -d vX.Y.Z`, then rerun `cargo xtask release`.
+- **Tag pushed at a commit that is not on `main`** (for example the bump was
+  tagged before its PR merged). The `verify` job fails and nothing is
+  published. Delete the tag with `git push --delete origin vX.Y.Z && git tag
+  -d vX.Y.Z`, merge the PR, then `cargo xtask release --tag` on the merged
+  `main`. A tag that has never produced a release may be reused this way.
+- **Wrong version committed locally, not pushed.** `git reset --hard HEAD~1`,
+  then rerun `cargo xtask release`.
 - **Release published with a bad binary.** Mark it as a pre-release or delete
   it in the GitHub UI, then release the fix as the next patch version.

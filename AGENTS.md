@@ -32,7 +32,8 @@ reserve ADR numbers in `docs/plans/progress/root.md`.
 - `crates/qq-server/`: HTTP/SSE server and local-instance discovery.
 - `crates/qq-tui/`: terminal UI and client-side state.
 - `xtask/`: repository automation; invoke it with `cargo xtask`. Releases are
-  cut with `cargo xtask release X.Y.Z` (see `docs/runbooks/release.md`).
+  cut with `cargo xtask release X.Y.Z` in a PR, then `cargo xtask release
+  --tag` on the merged `main` (see `docs/runbooks/release.md`).
 
 Keep dependencies pointed toward the narrow protocol and provider interfaces.
 The root package is the composition root and translates external configuration

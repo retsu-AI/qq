@@ -1,9 +1,12 @@
-//! `cargo xtask release X.Y.Z`: bump the workspace version, commit, and tag.
+//! `cargo xtask release`: bump the workspace version, then tag the merged
+//! result.
 //!
-//! The release workflow (`.github/workflows/release.yml`) refuses a `vX.Y.Z`
-//! tag whose version differs from `[workspace.package] version`, so the bump
-//! and the tag are produced together here. Nothing is pushed; the caller
-//! reviews and pushes `main --follow-tags`.
+//! `main` only accepts pull requests and merges rewrite commit SHAs, so a
+//! release is two steps: `cargo xtask release X.Y.Z` commits the bump on the
+//! current branch for a PR, and `cargo xtask release --tag` on the merged
+//! `main` creates `vX.Y.Z` from the manifest. The release workflow refuses a
+//! tag whose version differs from the manifest or whose commit is not on
+//! `main`. Nothing is pushed here.
 
 use std::{
     env, fmt, io,
@@ -17,11 +20,16 @@ use thiserror::Error;
 #[derive(Debug, Args)]
 pub struct ReleaseArgs {
     /// Version to release, e.g. `0.2.0`. Must be greater than the current
-    /// workspace version.
-    version: String,
-    /// Update `Cargo.toml` and `Cargo.lock` but do not commit or tag.
-    #[arg(long)]
+    /// workspace version. Bumps and commits on the current branch.
+    #[arg(required_unless_present = "tag", conflicts_with = "tag")]
+    version: Option<String>,
+    /// Update `Cargo.toml` and `Cargo.lock` but do not commit.
+    #[arg(long, conflicts_with = "tag")]
     no_commit: bool,
+    /// Tag the checked-out `main` with the manifest version. Run after the
+    /// bump PR has merged and `main` is pulled.
+    #[arg(long)]
+    tag: bool,
 }
 
 #[derive(Debug, Error)]
@@ -53,6 +61,12 @@ pub enum ReleaseError {
     DirtyWorktree,
     #[error("tag v{0} already exists")]
     TagExists(Version),
+    #[error(
+        "--tag must run on main at origin/main (HEAD is {head}, origin/main is {origin}); pull first"
+    )]
+    NotAtOriginMain { head: String, origin: String },
+    #[error("cannot resolve {0}; fetch origin first")]
+    Unresolvable(&'static str),
     #[error("failed to launch `{program}`")]
     Launch {
         program: &'static str,
@@ -108,9 +122,6 @@ pub async fn run(args: ReleaseArgs) -> Result<(), ReleaseError> {
 }
 
 fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
-    let requested = Version::parse(&args.version)
-        .ok_or_else(|| ReleaseError::InvalidVersion(args.version.clone()))?;
-
     let root = env::current_dir().map_err(|source| ReleaseError::Read {
         path: PathBuf::from("."),
         source,
@@ -119,28 +130,27 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
     if !manifest_path.is_file() {
         return Err(ReleaseError::NotRepositoryRoot(root));
     }
+    let manifest =
+        std::fs::read_to_string(&manifest_path).map_err(|source| ReleaseError::Read {
+            path: manifest_path.clone(),
+            source,
+        })?;
+
+    if args.tag {
+        return tag_main(&root, &manifest);
+    }
+
+    let requested_text = args.version.as_deref().unwrap_or_default();
+    let requested = Version::parse(requested_text)
+        .ok_or_else(|| ReleaseError::InvalidVersion(requested_text.to_owned()))?;
 
     if !args.no_commit {
         let status = git(&root, &["diff", "--quiet", "HEAD", "--"], Stdio::inherit())?;
         if !status.success() {
             return Err(ReleaseError::DirtyWorktree);
         }
-        let tag = format!("v{requested}");
-        let status = git(
-            &root,
-            &["rev-parse", "-q", "--verify", &format!("refs/tags/{tag}")],
-            Stdio::null(),
-        )?;
-        if status.success() {
-            return Err(ReleaseError::TagExists(requested));
-        }
     }
 
-    let manifest =
-        std::fs::read_to_string(&manifest_path).map_err(|source| ReleaseError::Read {
-            path: manifest_path.clone(),
-            source,
-        })?;
     let (updated, current) = bump_workspace_version(&manifest, requested)?;
     if requested <= current {
         return Err(ReleaseError::NotGreater { requested, current });
@@ -167,19 +177,63 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
     )?
     .success_or("git", "add")?;
     git(&root, &["commit", "-q", "-m", &message], Stdio::inherit())?.success_or("git", "commit")?;
-    let tag = format!("v{requested}");
-    git(
-        &root,
-        &["tag", "-a", &tag, "-m", &message],
-        Stdio::inherit(),
-    )?
-    .success_or("git", "tag")?;
 
-    println!("released {current} -> {requested}");
+    println!("bumped {current} -> {requested}");
     println!("  commit: {message}");
-    println!("  tag:    {tag}");
-    println!("push with: git push origin main --follow-tags");
+    println!("next: push this branch, open a PR titled \"{message}\", merge it, then");
+    println!("      git switch main && git pull --ff-only && cargo xtask release --tag");
     Ok(())
+}
+
+/// Creates `vX.Y.Z` from the manifest version on a clean `main` that matches
+/// `origin/main`, so the tag always names a commit the release workflow will
+/// find on the default branch.
+fn tag_main(root: &Path, manifest: &str) -> Result<(), ReleaseError> {
+    let status = git(root, &["diff", "--quiet", "HEAD", "--"], Stdio::inherit())?;
+    if !status.success() {
+        return Err(ReleaseError::DirtyWorktree);
+    }
+    let head =
+        git_output(root, &["rev-parse", "HEAD"]).ok_or(ReleaseError::Unresolvable("HEAD"))?;
+    let origin = git_output(root, &["rev-parse", "origin/main"])
+        .ok_or(ReleaseError::Unresolvable("origin/main"))?;
+    if head != origin {
+        return Err(ReleaseError::NotAtOriginMain {
+            head: head[..7.min(head.len())].to_owned(),
+            origin: origin[..7.min(origin.len())].to_owned(),
+        });
+    }
+
+    let (_, current) = bump_workspace_version(manifest, Version::parse("0.0.0").unwrap())?;
+    let tag = format!("v{current}");
+    let status = git(
+        root,
+        &["rev-parse", "-q", "--verify", &format!("refs/tags/{tag}")],
+        Stdio::null(),
+    )?;
+    if status.success() {
+        return Err(ReleaseError::TagExists(current));
+    }
+    let message = format!("chore(release): {tag}");
+    git(root, &["tag", "-a", &tag, "-m", &message], Stdio::inherit())?.success_or("git", "tag")?;
+
+    println!("tagged {tag} at {}", &head[..7.min(head.len())]);
+    println!("push with: git push origin {tag}");
+    Ok(())
+}
+
+fn git_output(root: &Path, args: &[&str]) -> Option<String> {
+    let output = ProcessCommand::new("git")
+        .args(args)
+        .current_dir(root)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    (!text.is_empty()).then_some(text)
 }
 
 /// Rewrites the `version` line inside `[workspace.package]` and returns the

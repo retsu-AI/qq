@@ -1,7 +1,8 @@
 name: Release
 
-# Publishes prebuilt `qq` binaries when a `vX.Y.Z` tag is pushed. Cut the tag
-# with `cargo xtask release X.Y.Z`; see docs/runbooks/release.md.
+# Publishes prebuilt `qq` binaries when a `vX.Y.Z` tag is pushed. Merge the
+# `cargo xtask release X.Y.Z` bump PR, then tag the merged main with
+# `cargo xtask release --tag`; see docs/runbooks/release.md.
 
 on:
   push:
@@ -15,17 +16,23 @@ env:
 
 jobs:
   verify:
-    name: tag matches workspace version
+    name: tag matches workspace version and is on main
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - id: version
         shell: bash
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::v$tag points at ${GITHUB_SHA::7}, which is not on main; merge the release PR first, then run 'cargo xtask release --tag'"
+            exit 1
+          fi
           manifest="$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f && /^version *= *"/{gsub(/.*= *"|".*/,""); print; exit}' Cargo.toml)"
           if [ "$tag" != "$manifest" ]; then
             echo "::error::tag v$tag does not match [workspace.package] version = \"$manifest\"; cut releases with 'cargo xtask release'"
