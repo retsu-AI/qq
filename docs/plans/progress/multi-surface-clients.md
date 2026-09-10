@@ -6,10 +6,10 @@ dated entries appended below, newest last.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| W1 | Transport-agnostic `qq-client`; `wasm32` build | In progress | `feat/multi-surface-clients-plan` | 2026-09-10 |
+| W1 | Transport-agnostic `qq-client`; `wasm32` build | In review | [#15](https://github.com/retsu-AI/qq/pull/15) | `native`/`wasm` features; `ServerConnection` |
 | W2 | Extract reducer into `qq-client::state` | Planned | | Needs W1 |
 | W3 | Multi-server client model | Planned | | Needs W1, W2, S1 |
-| S1 | Stable `ServerId`; protocol 17 | In review | `feat/multi-surface-clients-plan` | Reuses the store id as the server identity |
+| S1 | Stable `ServerId`; protocol 17 | In review | [#14](https://github.com/retsu-AI/qq/pull/14) | Reuses the store id as the server identity |
 | S2 | Client enrollment | Planned | | ADR-0015; second review required |
 | S3 | CORS | Planned | | |
 | S4 | Remote exposure with TLS | Planned | | ADR-0016; rustls root request |
@@ -48,3 +48,28 @@ Docs: `docs/design/protocol.md` (v17, health, authentication),
 `docs/design/architecture.md` (reservation paragraph).
 Open: display-name configuration lands with S6; hostname fallback reads
 `HOSTNAME`/`COMPUTERNAME`/`HOST` then `/etc/hostname`.
+
+#### W1 receipt — 2026-09-10
+Commit(s): see branch `feat/multi-surface-clients-plan`.
+Tests: 2 added in `qq-protocol` (`ServerConnection` grammar and redaction);
+the 5 decoder/cursor tests moved to a transport-neutral module that compiles
+under `wasm-bindgen-test`; workspace green, fmt and clippy clean;
+`cargo build -p qq-client --target wasm32-unknown-unknown --no-default-features --features wasm`
+produces a 410 KiB debug rlib; `--tests` compiles for the target.
+Gates: none named.
+Deviations: kept one `reqwest` surface for both transports (its wasm backend
+is `fetch`) rather than a second HTTP client; timers go through a 30-line
+`time` module (Tokio vs `gloo-timers`). The ADR-0017 framework spike is not
+part of this slice: W1 proves the client compiles for the browser, the spike
+chooses what renders on top of it. `wasm32-unknown-unknown` added to
+`rust-toolchain.toml` and a `client-wasm` CI job (root request, done here
+because the slice cannot be verified without it).
+Docs: `docs/design/architecture.md` (`qq-client` paragraph),
+`docs/design/protocol.md` (authentication: `ServerConnection` rules).
+Open: browser `EventSource` cannot set `Authorization`/`Last-Event-ID`;
+`qq-client` uses `fetch` streaming so this is not blocking, but S3 must
+allow those headers in preflight.
+
+### 2026-09-10 — stacked PRs opened
+
+Plan #13 → S1 #14 → W1 #15. Next slices start from W1's head in a new worktree.

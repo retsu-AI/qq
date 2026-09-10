@@ -158,7 +158,8 @@ file (`server.ron`, format version 2). The file is published only once the
 runtime has opened and the identity is known; an unstarted reservation holds
 the instance lock and listener but advertises nothing.
 The binary discovers the running instance through `qq-server` and passes a
-redacted `LocalServerConnection` capability to `qq-client`, which attaches with:
+redacted `LocalServerConnection` capability, converted to the transport-neutral
+`ServerConnection`, to `qq-client`, which attaches with:
 
 ```http
 Authorization: Bearer <token>
@@ -172,6 +173,13 @@ Missing or incorrect credentials receive `401` with:
 
 Token comparison is constant-time. Metadata and tokens must never be logged in
 full by clients or servers.
+
+A `ServerConnection` names a server by `scheme://host[:port]` with no path,
+userinfo, query, or fragment. Plain `http` is accepted only for loopback hosts
+(`localhost`, `127.0.0.0/8`, `::1`); every other host must be `https`, so a
+credential can never be sent in plaintext off the machine. Remote credential
+issuance (enrollment) is a separate route set; today only the loopback token
+exists.
 
 ### Error Responses
 

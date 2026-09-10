@@ -6,17 +6,35 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = ["native"]
+# Tokio-driven transport: request timeouts, the interactive `TuiClient`
+# loop, and the durable `observer`. The default for every in-tree consumer.
+native = ["dep:tokio", "reqwest/rustls"]
+# Browser transport over the platform `fetch` API. The HTTP client, SSE
+# decoder, cursor validation, and `ClientPort` types compile; timeouts are
+# the browser's and the reconnect loops are the embedding app's.
+wasm = ["qq-protocol/wasm", "dep:wasm-bindgen-futures", "dep:gloo-timers"]
+
 [dependencies]
 async-stream.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 qq-protocol.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, default-features = false, features = ["json", "stream"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, optional = true }
 
-[dev-dependencies]
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-timers = { version = "0.3", features = ["futures"], optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 qq-server.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

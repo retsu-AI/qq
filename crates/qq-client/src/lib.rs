@@ -1,4 +1,11 @@
-//! Authenticated HTTP/SSE client for the local QQ server.
+//! Authenticated HTTP/SSE client for QQ servers: the local loopback instance
+//! or a remote one reached over TLS.
+//!
+//! The crate has two transports selected by cargo feature. `native` (default)
+//! drives `reqwest` on Tokio and ships the interactive `TuiClient` loop and
+//! the durable `observer`. `wasm` drives the browser's `fetch` through the
+//! same `reqwest` surface; the decoder, cursor validation, and `ClientPort`
+//! vocabulary are identical, and the embedding app owns its own loop.
 
 #![forbid(unsafe_code)]
 
@@ -9,22 +16,43 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use qq_protocol::{
     AgentProfileId, ApprovalDecision, CapabilitiesRequest, CommandId, CommandReceipt,
-    CommandRequest, Correlation, EventCursor, InputPart, LocalServerConnection, MAX_EVENT_BYTES,
-    MAX_REQUEST_BYTES, ModelCatalogRequest, ModelDescriptor, RunId, RunLimits, ServerCapabilities,
-    SessionCommand, SessionEventEnvelope, SessionId, SnapshotRequest, ToolCallId, WorkspaceId,
-    WorkspaceSnapshot,
+    CommandRequest, Correlation, EventCursor, InputPart, MAX_EVENT_BYTES, MAX_REQUEST_BYTES,
+    ModelCatalogRequest, ModelDescriptor, RunId, RunLimits, ServerCapabilities, SessionCommand,
+    SessionEventEnvelope, SessionId, SnapshotRequest, ToolCallId, WorkspaceId, WorkspaceSnapshot,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
 use serde::{Deserialize, de::DeserializeOwned};
 use thiserror::Error;
 
+#[cfg(not(any(feature = "native", all(feature = "wasm", target_arch = "wasm32"))))]
+compile_error!(
+    "qq-client needs a transport: enable `native` (default) on native targets or `wasm` on wasm32"
+);
+
+#[cfg(feature = "native")]
 mod interactive;
+#[cfg(feature = "native")]
 pub mod observer;
 mod port;
+mod time;
 
+#[cfg(feature = "native")]
 pub use interactive::TuiClient;
 pub use port::{ClientFailure, ClientPort, ClientRequest, ClientUpdate, ConnectionState};
 
+/// Marker for values that must cross threads on native targets. Browser
+/// WebAssembly is single-threaded and its futures are `!Send`, so the bound
+/// is dropped there without changing any public signature.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSend: Send {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + ?Sized> MaybeSend for T {}
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSend {}
+#[cfg(target_arch = "wasm32")]
+impl<T: ?Sized> MaybeSend for T {}
+
+#[cfg(not(target_arch = "wasm32"))]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const SSE_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,15 +64,20 @@ const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MODEL_CATALOG_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CAPABILITIES_BYTES: usize = 256 * 1024;
 
-/// Authenticated coordinates discovered from private local metadata.
-pub type Connection = LocalServerConnection;
+/// Authenticated coordinates for the server a client attaches to. A local
+/// `LocalServerConnection` converts losslessly with `into()`.
+pub type Connection = qq_protocol::ServerConnection;
 
 fn fresh_command_id() -> Result<CommandId, ClientError> {
     CommandId::generate().map_err(|_| ClientError::Unavailable)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub type SessionEventStream =
     Pin<Box<dyn Stream<Item = Result<SessionEventEnvelope, ClientError>> + Send + 'static>>;
+#[cfg(target_arch = "wasm32")]
+pub type SessionEventStream =
+    Pin<Box<dyn Stream<Item = Result<SessionEventEnvelope, ClientError>> + 'static>>;
 
 #[derive(Clone)]
 pub struct SessionClient {
@@ -53,14 +86,15 @@ pub struct SessionClient {
 }
 
 impl SessionClient {
-    pub fn new(connection: Connection) -> Result<Self, ClientError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| ClientError::Unavailable)?;
+    pub fn new(connection: impl Into<Connection>) -> Result<Self, ClientError> {
+        let connection = connection.into();
+        let http = http_client()?;
         Ok(Self { connection, http })
+    }
+
+    #[must_use]
+    pub fn connection(&self) -> &Connection {
+        &self.connection
     }
 
     pub async fn command(
@@ -229,7 +263,7 @@ impl SessionClient {
         let endpoint = self
             .connection
             .endpoint(&format!("/v1/workspaces/{workspace_id}/events"));
-        let response = tokio::time::timeout(
+        let response = time::timeout(
             SSE_HEADER_TIMEOUT,
             authorize(&self.connection, self.http.get(endpoint))
                 .header(ACCEPT, "text/event-stream")
@@ -253,7 +287,7 @@ impl SessionClient {
             let mut decoder = SseDecoder::<SessionEventEnvelope>::default();
             let mut sequence = after.sequence;
             loop {
-                let chunk = match tokio::time::timeout(SSE_IDLE_TIMEOUT, chunks.next()).await {
+                let chunk = match time::timeout(SSE_IDLE_TIMEOUT, chunks.next()).await {
                     Ok(Some(chunk)) => chunk,
                     Ok(None) => break,
                     Err(_) => {
@@ -354,10 +388,11 @@ impl SessionClient {
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json")
         .body(body)
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await
-        .map_err(|_| ClientError::Unavailable)?;
+        .send();
+        let response = time::timeout(REQUEST_TIMEOUT, response)
+            .await
+            .map_err(|_| ClientError::Unavailable)?
+            .map_err(|_| ClientError::Unavailable)?;
         let status = response.status().as_u16();
         if response
             .content_length()
@@ -415,7 +450,26 @@ fn server_response_error(status: u16, body: &[u8]) -> ClientError {
 }
 
 fn authorize(connection: &Connection, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    request.bearer_auth(connection.expose_bearer_token())
+    request.bearer_auth(connection.expose_credential())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn http_client() -> Result<reqwest::Client, ClientError> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| ClientError::Unavailable)
+}
+
+/// The browser owns connection setup, proxies, and redirects; `reqwest`'s
+/// wasm builder exposes none of them and `CONNECT_TIMEOUT` is meaningless.
+#[cfg(target_arch = "wasm32")]
+fn http_client() -> Result<reqwest::Client, ClientError> {
+    reqwest::Client::builder()
+        .build()
+        .map_err(|_| ClientError::Unavailable)
 }
 
 async fn read_response_bounded(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, ()> {
@@ -571,7 +625,7 @@ where
 /// Sanitized HTTP and SSE failures.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ClientError {
-    #[error("local server is unavailable")]
+    #[error("server is unavailable")]
     Unavailable,
     #[error("request cannot be encoded")]
     InvalidRequestEncoding,
@@ -583,29 +637,29 @@ pub enum ClientError {
     InvalidWorkspacePath,
     #[error("server returned an invalid event cursor")]
     InvalidCursor,
-    #[error("local server returned HTTP status {status}")]
+    #[error("server returned HTTP status {status}")]
     ServerResponse { status: u16 },
-    #[error("local server rejected the request ({status}): {message}")]
+    #[error("server rejected the request ({status}): {message}")]
     ServerMessage { status: u16, message: String },
-    #[error("local server returned an unexpected content type")]
+    #[error("server returned an unexpected content type")]
     UnexpectedContentType,
-    #[error("local server stream failed")]
+    #[error("server stream failed")]
     StreamTransport,
-    #[error("local server returned malformed SSE")]
+    #[error("server returned malformed SSE")]
     MalformedSse,
-    #[error("local server returned a malformed event")]
+    #[error("server returned a malformed event")]
     MalformedEvent,
-    #[error("local server event exceeds the wire size limit")]
+    #[error("server event exceeds the wire size limit")]
     EventTooLarge,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use std::sync::{Arc, Mutex};
 
     use qq_protocol::{
-        CommandOutcome, EventCursor, ModelSelection, PROTOCOL_VERSION, ServerInfo, SessionId,
-        StoreId,
+        CommandOutcome, EventCursor, LocalServerConnection, ModelSelection, PROTOCOL_VERSION,
+        ServerInfo, SessionId, StoreId,
     };
     use qq_server::{
         CommandFuture, ModelsFuture, ServerHandle, ServerHandler, ServerOptions, ServerPaths,
@@ -781,6 +835,17 @@ mod tests {
         assert_eq!(error, ClientError::ResponseTooLarge);
         raw_server.await.unwrap();
     }
+}
+
+/// Decoder and cursor tests that hold on every transport. They run under
+/// `cargo test` natively and under `wasm-bindgen-test` on `wasm32`.
+#[cfg(test)]
+mod decode_tests {
+    use qq_protocol::StoreId;
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
+    use super::*;
 
     #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
     #[serde(rename_all = "snake_case", tag = "type")]

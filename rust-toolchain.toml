@@ -8,6 +8,7 @@ components = [
   "rust-src",
   "rustfmt",
 ]
-# Static evaluation binary uploaded into Terminal-Bench task containers; see
-# benchmarks/harbor/README.md.
-targets = ["x86_64-unknown-linux-musl"]
+# `x86_64-unknown-linux-musl`: static evaluation binary uploaded into
+# Terminal-Bench task containers; see benchmarks/harbor/README.md.
+# `wasm32-unknown-unknown`: `qq-client --features wasm` for browser clients.
+targets = ["x86_64-unknown-linux-musl", "wasm32-unknown-unknown"]

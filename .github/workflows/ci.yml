@@ -25,6 +25,22 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
+  client-wasm:
+    name: qq-client on wasm32
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: client-wasm
+      # The browser transport: library plus the transport-neutral decoder
+      # tests. The `wasm32-unknown-unknown` target comes from rust-toolchain.toml.
+      - name: Build
+        run: cargo build --locked -p qq-client --target wasm32-unknown-unknown --no-default-features --features wasm
+      - name: Test build
+        run: cargo check --locked -p qq-client --target wasm32-unknown-unknown --no-default-features --features wasm --tests
+
   windows-teardown:
     name: native Windows shell teardown
     runs-on: windows-latest
