@@ -159,7 +159,8 @@ xtask/
   the server and client adapters. It does not depend on an HTTP client or
   server framework.
 - `qq-server` contains the Axum adapter, HTTP/SSE route wiring, bearer-token
-  authentication, and private local-instance discovery metadata.
+  authentication, an exact-origin CORS layer that is inert until configured,
+  and private local-instance discovery metadata.
 - `qq-tui` contains terminal rendering, input handling, and client-side state.
   It communicates through `qq-client` and the protocol and does not depend
   directly on `qq-core` or application configuration. Rendering is retained:

@@ -73,6 +73,11 @@ pub enum Command {
         /// Loopback address to bind. Port 0 selects an available port.
         #[arg(long, default_value = "127.0.0.1:0")]
         bind: SocketAddr,
+        /// Browser origin (`https://host[:port]`, or `http://` for loopback)
+        /// permitted to call the API cross-origin. Repeatable. Without it the
+        /// server sends no CORS headers.
+        #[arg(long = "allow-origin", value_name = "ORIGIN")]
+        allow_origins: Vec<String>,
     },
 
     /// Inspect and validate effective configuration.
@@ -392,7 +397,21 @@ mod tests {
         assert!(Cli::try_parse_from(["qq"]).unwrap().command.is_none());
         assert!(matches!(
             Cli::try_parse_from(["qq", "serve"]).unwrap().command,
-            Some(Command::Serve { bind }) if bind == "127.0.0.1:0".parse().unwrap()
+            Some(Command::Serve { bind, allow_origins })
+                if bind == "127.0.0.1:0".parse().unwrap() && allow_origins.is_empty()
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "qq",
+                "serve",
+                "--allow-origin",
+                "https://app.example.com",
+                "--allow-origin",
+                "http://localhost:5173",
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Serve { allow_origins, .. }) if allow_origins.len() == 2
         ));
     }
 
