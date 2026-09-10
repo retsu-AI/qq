@@ -2922,7 +2922,7 @@ mod tests {
             .grant_pending_trust(&request)
             .unwrap();
         let mut tui = qq_client::TuiClient::start(
-            server.connection().clone(),
+            server.connection().to_server_connection(),
             fixture.path("work"),
             ModelSelection {
                 model: Some("custom/test-model".to_owned()),

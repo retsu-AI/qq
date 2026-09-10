@@ -132,7 +132,12 @@ xtask/
 - `qq-auth` contains provider-side OAuth flows, credential storage, keyring
   integration, and resolution of provider-neutral secret references.
 - `qq-client` contains the authenticated HTTP/SSE client, bounded decoding,
-  reconnect/replay behavior, and the session client port used by the TUI.
+  reconnect/replay behavior, and the session client port used by the TUI. It
+  attaches to a `qq_protocol::ServerConnection` (loopback `http` or remote
+  `https`; plaintext off loopback is unconstructible) and has two transports
+  behind cargo features: `native` (default; Tokio, `TuiClient`, `observer`)
+  and `wasm` (browser `fetch`; decoder, cursor validation, and `ClientPort`
+  only). The transport-neutral decoder tests compile for both.
 - `qq-config` contains layered configuration, built-in provider/model presets,
   managed policy, remote organization documents, and config provenance. It
   returns config-owned TUI values; the root translates them into `qq-tui`

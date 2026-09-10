@@ -29,7 +29,10 @@ pub use limits::{
     MAX_EVENT_BYTES, MAX_MODEL_BYTES, MAX_ORGANIZATION_BYTES, MAX_REQUEST_BYTES,
     MAX_WORKSPACE_BYTES,
 };
-pub use local::{LocalConnectionError, LocalServerConnection};
+pub use local::{
+    LocalConnectionError, LocalServerConnection, MAX_BASE_URL_BYTES, MAX_CREDENTIAL_BYTES,
+    ServerConnection, ServerConnectionError,
+};
 pub use plan::{
     AgentPlanDigest, AgentProfileId, AgentProfileIdError, CredentialEpoch, MAX_PROFILE_ID_BYTES,
     RunPlanIdentity,

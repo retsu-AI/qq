@@ -1,2 +1,7 @@
 [alias]
 xtask = "run --package xtask --"
+
+# `qq-client --features wasm` for the browser: `getrandom` selects its entropy
+# backend with a cfg rather than a feature alone.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

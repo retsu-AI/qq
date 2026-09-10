@@ -31,7 +31,7 @@ Next free number: 0019. Reserve here before opening a PR that adds an ADR.
 
 | Date | From | File(s) | Request | Status |
 | --- | --- | --- | --- | --- |
-| 2026-09-10 | multi-surface W1 | `.github/workflows/*`, `rust-toolchain.toml` | Add `wasm32-unknown-unknown` target and a `cargo build -p qq-client --target wasm32-unknown-unknown --no-default-features --features wasm` job | Open |
+| 2026-09-10 | multi-surface W1 | `.github/workflows/ci.yml`, `rust-toolchain.toml`, `.cargo/config.toml` | Add `wasm32-unknown-unknown` target, `getrandom_backend="wasm_js"` cfg for that target, and a `client-wasm` job | Done in the W1 PR; confirm |
 | 2026-09-10 | multi-surface S4 | root `Cargo.toml`, `Cargo.lock` | Add `rustls`-based TLS acceptor for `qq-server` (one bump) | Open |
 | 2026-09-10 | multi-surface plan | `docs/design/architecture.md` § Intentionally Deferred, § Local And Remote Networking, repository map; `docs/design/product.md` non-goals and open decisions | Remove web/mobile deferral; record remote exposure and enrollment once S2/S4 ship | Open |
 | 2026-09-10 | multi-surface plan | `docs/plans/README.md` | Plan row and priority entry (done in the plan PR; confirm) | Open |

@@ -455,12 +455,18 @@ async fn interactive(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
                 }
             };
             client::TuiClient::start(
-                connection,
+                connection.into(),
                 workspace,
                 configured_model,
                 model,
                 create_initial_session,
-                || async { server::discover().await.ok().flatten() },
+                || async {
+                    server::discover()
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(client::Connection::from)
+                },
             )
             .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))
         }
