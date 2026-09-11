@@ -11,10 +11,10 @@ use super::PlanCompileError;
 /// Version of the descriptor's canonical encoding. Bump it whenever a field is
 /// added, removed, renamed, or its normalization changes, so historical digests
 /// are never compared against a different encoding.
-pub const DESCRIPTOR_VERSION: u16 = 5;
+pub const DESCRIPTOR_VERSION: u16 = 6;
 
 /// Domain separator prepended to the canonical bytes before hashing.
-const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v5\0";
+const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v6\0";
 
 /// Where a credential comes from, without its value. Two plans that read the
 /// same environment variable or stored credential name share a reference and
@@ -195,6 +195,57 @@ pub struct AgentPlanDescriptor {
     /// application order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provenance: Vec<String>,
+    /// Registered pre-turn context sources in registration order, with the
+    /// budget the runtime actually enforces (version 6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_sources: Vec<ContextSourceDescriptor>,
+}
+
+/// One registered context source: its identity, the clamped budget the
+/// runtime enforces, and what happens when it fails. No source content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSourceDescriptor {
+    pub name: String,
+    pub version: String,
+    pub budget: ContextBudgetDescriptor,
+    pub fail_policy: FailPolicyDescriptor,
+}
+
+/// Fixed-width mirror of [`crate::ContextBudget`] so the canonical encoding
+/// does not depend on the platform's `usize`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextBudgetDescriptor {
+    pub max_bytes: u64,
+    pub max_items: u32,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailPolicyDescriptor {
+    Open,
+    Closed,
+}
+
+impl From<&crate::context_source::RegisteredSource> for ContextSourceDescriptor {
+    fn from(registered: &crate::context_source::RegisteredSource) -> Self {
+        let budget = registered.budget;
+        Self {
+            name: registered.source.name().to_owned(),
+            version: registered.source.version().to_owned(),
+            budget: ContextBudgetDescriptor {
+                max_bytes: budget.max_bytes as u64,
+                max_items: u32::try_from(budget.max_items).unwrap_or(u32::MAX),
+                timeout_ms: u64::try_from(budget.timeout.as_millis()).unwrap_or(u64::MAX),
+            },
+            fail_policy: match registered.source.fail_policy() {
+                crate::FailPolicy::Open => FailPolicyDescriptor::Open,
+                crate::FailPolicy::Closed => FailPolicyDescriptor::Closed,
+            },
+        }
+    }
 }
 
 impl AgentPlanDescriptor {

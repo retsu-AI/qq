@@ -340,8 +340,9 @@ and static header *names*, the resolved model, workspace root, prompt version,
 instruction hash and source, the tool catalog (digest, exposure, admitted
 names, host generations, typed exclusions), the skill index, the selected pack
 (identifier, version, manifest digest, persona hash, tool policy), spawn
-routes, configuration grants, MCP server declarations, and configuration
-source labels. Retry is the provider's alone (`qq_provider::AttemptPolicy`)
+routes, configuration grants, MCP server declarations, configuration
+source labels, and every registered context source (name, version, the
+clamped budget the runtime enforces, fail policy). Retry is the provider's alone (`qq_provider::AttemptPolicy`)
 and is not part of the plan. `AgentPlanDigest` is the SHA-256 of a domain-tagged compact JSON
 encoding in declaration order (`DESCRIPTOR_VERSION` pins the encoding). Secret
 values, secret hashes, live handles, and the credential epoch never enter the
@@ -368,11 +369,17 @@ identical digest, epoch, and live bindings keep the live generation, otherwise t
 generation is published atomically for later runs while active runs keep the
 `Arc` they were admitted with. A failed recompile returns the configuration
 error to the triggering run and leaves the previous generation cached. The
-cache has hard entry and estimated-byte bounds, evicts least-recently-used
-inactive generations, never evicts a generation an active run holds, fails
-admission explicitly when pinned generations exhaust the bound, compiles one
-generation per key at a time under refresh storms, and refuses loads after
-shutdown.
+cache has hard entry and estimated-byte bounds that cover live slots, their
+recorded source evidence, and superseded generations a run still holds; it
+admits a replacement (or the growth of an equivalent plan's evidence) before
+displacing the previous generation, so a rejected refresh leaves the cache
+exactly as it was; evicts least-recently-used inactive generations; never
+evicts a generation an active run holds; fails admission explicitly when
+pinned generations exhaust the bound; compiles one generation per key at a
+time under refresh storms and reclaims the guard when the load finishes; and
+refuses loads after shutdown. Cache keys carry the inline configuration
+document as an exactly compared, never hashed value whose `Debug` output is
+redacted.
 
 A run's `RunPlanIdentity` — the selected profile, descriptor version, digest,
 and credential epoch — is written in the same statement that moves the run to
@@ -477,8 +484,10 @@ error rather than degrading.
 ### Context Sources
 
 A `ContextSource` supplies pre-turn context the runtime does not own (memory,
-retrieval, project state). Sources are attached to the profile, bounded to
-eight per plan, and fetched after guidance and before the first provider
+retrieval, project state). Sources are attached to the profile; at most eight
+compile into one plan and a ninth fails compilation with the typed
+`PlanCompileError::TooManyContextSources` before any provider work. They are
+fetched after guidance and before the first provider
 request under a clamped `ContextBudget` (at most 64 KiB, 64 items, 10 s) with
 a bounded LRU `ContextCache` keyed by source and query. Each fetch settles with
 a `ContextSourceOutcome` (`Fetched`, `FetchedTruncated`, `Cached`,
@@ -662,7 +671,11 @@ grouped query. A claimed run carries the cancellation flag, session file
 hashes, and pending steering out of the claim transaction, so claim to first
 provider request is two store hops (claim, then `RunStarted`), and context
 assembly runs a fixed number of session-scoped queries rather than one per
-message and per turn. Workspace path canonicalization runs on a blocking
+message and per turn. Assembly stubs read-only tool results older than the
+last four model turns; a result is prunable when its `tool_calls.effect`
+column (the catalog effect class the call was admitted under, schema 26) is
+`read_only`, with rows recorded before that column falling back to the
+built-in read-only names. Workspace path canonicalization runs on a blocking
 thread before the command reaches the store worker.
 
 Caller budgets are core-owned. `submit_prompt.limits` carries a versioned

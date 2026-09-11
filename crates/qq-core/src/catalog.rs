@@ -72,6 +72,28 @@ pub enum EffectClass {
     External,
 }
 
+impl EffectClass {
+    /// The stored spelling, identical to the serde encoding.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Mutating => "mutating",
+            Self::Shell => "shell",
+            Self::External => "external",
+        }
+    }
+
+    pub(crate) fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "read_only" => Some(Self::ReadOnly),
+            "mutating" => Some(Self::Mutating),
+            "shell" => Some(Self::Shell),
+            "external" => Some(Self::External),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ToolEntry {
     pub(crate) spec: ToolSpec,

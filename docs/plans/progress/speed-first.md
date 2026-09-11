@@ -9,10 +9,10 @@ dated entries appended below, newest last.
 | 5a-accept | Full version-4 H0 comparison on a quiet host | Planned | | Baseline `1c08cef`, candidate `main`. Prior recordings on the shared host: A/A fails the same tail gates as A/B; retained, not waived |
 | 5a-windows | Full native Windows workspace run | Planned | | Targeted `windows-teardown` CI job passes; full qualification not claimed |
 | H20 | Wake-driven control admission; delete 13 `sleep(1 ms)` loops; ≤20 ms output gap | In review | `perf/h20-control-admission` (`ab6de6f`, `d05e474`) | Gap median 24 → 20 ms, p95 28 → 33 ms (bimodal tail, 27/30 samples ≤22 ms). Executable budget stays 50 ms until p95 qualifies. ADR-0011 |
-| H21.1 | Behavioral settlement: `RunIdentity`, `RunSettlement`, `PersistenceFault`, teardown-before-terminal structural | Planned | | After H20. ADR-0012 reserved |
-| H27 | Superseded-generation accounting, atomic refresh admission, guard reclamation | Planned | | Pinned LRU and admission already exist (`src/plan.rs`) |
-| H28 | Typed context-source capacity error; sources in descriptor | Planned | | `DESCRIPTOR_VERSION` bump. ADR-0013 reserved |
-| H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | Planned | | |
+| H21.1 | Behavioral settlement: `RunIdentity`, `RunSettlement`, `PersistenceFault`, teardown-before-terminal structural | In progress | `feat/speed-first-phase-5b-6` (`a67b186`, `83647e0`) | Parts a+b shipped on branch; part c (`settle_run` null guard, `TeardownComplete` token, ADR-0012) not started |
+| H27 | Superseded-generation accounting, atomic refresh admission, guard reclamation | In review | `feat/speed-first-phase-5b-6` | Pinned LRU and admission already existed (`src/plan.rs`) |
+| H28 | Typed context-source capacity error; sources in descriptor | In review | `feat/speed-first-phase-5b-6` | `DESCRIPTOR_VERSION` 5 → 6. ADR-0013 |
+| H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | In review | `feat/speed-first-phase-5b-6` | Store schema 25 → 26 (`tool_calls.effect`). MCP permit ordering was already correct |
 | H18 | `Arc<Vec<Message>>`, prompt prefix, `RawValue` schemas | Planned | | Add `provider_encode` bench first |
 | H19 | SSE framing, conditional | Planned | | Add `sse_decode` bench first; no-change decision acceptable |
 | H21.2 | Mechanical `sessions.rs` split | Planned | | After HC3 behavioral changes; separate commit |
@@ -230,3 +230,77 @@ is deferred to H22 with a note rather than folded into H20.
 Evidence: `target/qq-perf/h20-2026-09-09/` (untracked): baseline and
 candidate worker binaries by SHA, `ab2-*.jsonl`, `aa-*.jsonl`, pressure
 snapshots, and `summarize.py`.
+
+### 2026-09-11 — Phase 5b/6 completion branch opened
+
+Branch `feat/speed-first-phase-5b-6` from `66ad201`. One branch, one commit
+per slice, in this order: H27, H28, H22.1, H21.1, HC1, HC3, HC4, H18, H19,
+H21.2, H22.2. Versions at start: protocol 17 (the plan said 16; corrected
+below), capabilities 1, descriptor 5, schema 25, H0 fixture 4.
+
+#### H27 receipt
+
+`src/plan.rs` only. `PlanKey` no longer derives `Hash` or `Debug`; the
+single-flight map is a linear `Vec` keyed by exact comparison, and `Debug`
+redacts the inline document. Superseded generations a run still holds move to
+`State::superseded` and count toward both limits until released. A replacement
+is admitted before the old slot is removed (unpinned predecessor excluded from
+the count, pinned one included), so a `Capacity` rejection leaves the previous
+generation served. An equivalent-plan refresh admits only the growth of its
+evidence, which now includes `sources`. Compile guards are removed when the
+last holder finishes. Tests +5 (`plan_key_debug_redacts_inline_configuration`,
+`same_key_refresh_keeps_a_pinned_predecessor_in_the_accounting`,
+`rejected_replacement_keeps_the_previous_generation`,
+`equivalent_refresh_admits_grown_source_evidence`,
+`completed_compile_guards_are_reclaimed_under_distinct_key_churn`); root crate
+109 passed. Cold path only; no gate.
+
+#### H28 receipt
+
+`DESCRIPTOR_VERSION` 5 → 6; golden digest re-pinned
+(`63c411dc…c504`). `AgentPlanDescriptor.context_sources` lists name,
+version, clamped budget (fixed-width), fail policy. `compile_blocking`
+returns `PlanCompileError::TooManyContextSources` for a ninth source;
+`Runtime::with_context_source` no longer drops. Tests +2 plus seven digest
+mutation rows; qq-core 448 passed. ADR-0013 written. No protocol or schema
+change.
+
+#### H22.1 receipt
+
+`notify(` sites 37 → 10: streaming, lifecycle, approval, and grant-promotion
+writes no longer call the workspace watch (the feed publishes after commit);
+the remaining calls are settlement, command, recovery, and child cancellation
+— the paths `subagents.rs` waits on. `ConcludedApproval::Denied` lost its
+event payload. Stored-kind pruning: `tool_calls.effect` (schema 26) records
+the catalog effect class at admission; context assembly prunes by that class
+and falls back to the built-in read-only names for pre-26 rows. MCP permit
+ordering (connect before `permits.acquire`) was already in place. Tests +3
+(`assembly_pruning_decides_from_the_stored_effect_class_not_the_tool_name`,
+`admitted_tool_calls_store_their_effect_class`,
+`version_twenty_six_migration_adds_the_tool_call_effect_and_keeps_history_unknown`);
+workspace suite green, fmt, strict Clippy.
+
+#### H21.1 receipt (partial)
+
+Part a (`a67b186`): `SessionRuntimeError::Persistence(PersistenceFault)` with
+`Sqlite(code) | Codec | Constraint`; `From<rusqlite::Error>` and
+`From<serde_json::Error>` replace ~590 `map_err(|_| Persistence)` sites;
+invariant checks use `CONSTRAINT`/`CODEC`. Test
+`every_persistence_fault_variant_is_reachable` covers all three variants
+(trigger `RAISE(ABORT)`, undecodable `limits_json`, `PRAGMA query_only`).
+Part b (`83647e0`): `RunIdentity` (Copy) inside `ClaimedRun`; 21
+identity-only store operations take it by value, so per-event
+`ClaimedRun` clones in `store.rs` drop 25 → 4; 50 `EventContext` literals
+become `for_run` / `for_run_ids` / `for_session` / `.uncaused()`.
+Both parts: qq-core 452 passed, workspace green, fmt, strict Clippy.
+
+**Remaining for H21.1 (part c, not started):** one `settle_run` replacing
+`finalize_run` / `complete_run_in_transaction` /
+`finish_queued_run_with_outcome` with a pre-read `outcome_json IS NULL`
+no-op guard (`complete_run_in_transaction` at `sessions.rs` still lacks it —
+the latent double settle); `RunSettlement { identity, outcome, accounting,
+audit }`; `TeardownComplete` token returned by `RunResources::stop`/`drain`
+and required by `Store::settle_run` so terminal publication cannot compile
+without a drained execution (46 `stop(..).is_err()` sites in
+`execution.rs`); regression tests `settling_a_settled_run_is_a_no_op_on_every_path`
+and the compaction double-marker case; ADR-0012 (reserved in `root.md`).

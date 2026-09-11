@@ -250,7 +250,7 @@ pub(super) async fn spawn_child_run(
     let deadline_cancel = cancel.clone();
     let _waiter = CancelChildWaiter(cancel);
     #[cfg(test)]
-    let parent_session = parent.session_id;
+    let parent_session = parent.identity.session_id;
     let owner_inner = Arc::clone(&inner);
     tokio::spawn(async move {
         let outcome = AssertUnwindSafe(async {
@@ -536,10 +536,10 @@ async fn run_owned_child(
         inner: Arc::clone(&inner),
         run_id: Some(run_id),
     };
-    inner.notify(committed_through);
     // The run cannot start until scheduling below, so subscribing after the
     // atomic commit and before that signal cannot miss its completion.
-    let Ok(mut wakeup) = inner.subscribe(parent.workspace_id, committed_through.sequence) else {
+    let Ok(mut wakeup) = inner.subscribe(parent.identity.workspace_id, committed_through.sequence)
+    else {
         return spawn_error("the sub-agent could not be awaited");
     };
     drop(lifecycle);

@@ -596,18 +596,15 @@ impl Store {
 
     pub(super) async fn unfinished_run_ids(&self) -> Result<Vec<RunId>, SessionRuntimeError> {
         self.call(Priority::Control, |connection| {
-            let mut statement = connection
-                .prepare(
-                    "SELECT id FROM runs
+            let mut statement = connection.prepare(
+                "SELECT id FROM runs
                      WHERE status IN ('queued', 'running')
                      ORDER BY created_at_ms, id",
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            )?;
             statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|_| SessionRuntimeError::Persistence)?
+                .query_map([], |row| row.get::<_, String>(0))?
                 .map(|row| {
-                    let run = row.map_err(|_| SessionRuntimeError::Persistence)?;
+                    let run = row?;
                     parse_id(&run)
                 })
                 .collect()
@@ -701,7 +698,7 @@ impl Store {
             let mut failures = CHILD_CANCELLATION_FAILURES.lock().unwrap();
             if let Some(index) = failures.iter().position(|run| *run == run_id) {
                 failures.remove(index);
-                return Err(SessionRuntimeError::Persistence);
+                return Err(SessionRuntimeError::CONSTRAINT);
             }
         }
         let store_id = self.store_id;
@@ -727,9 +724,9 @@ impl Store {
     ) -> Result<CreatedChildRun, SessionRuntimeError> {
         let store_id = self.store_id;
         let parent = ChildRunParent {
-            workspace_id: parent.workspace_id,
-            session_id: parent.session_id,
-            run_id: parent.run_id,
+            workspace_id: parent.identity.workspace_id,
+            session_id: parent.identity.session_id,
+            run_id: parent.identity.run_id,
             tool_call_id: Some(call_id),
             depth: parent.depth,
             root_run_id: parent.root_run_id,
@@ -769,8 +766,7 @@ impl Store {
                     [workspace_id.to_string()],
                     |row| row.get(0),
                 )
-                .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?
+                .optional()?
                 .ok_or(SessionRuntimeError::WorkspaceNotFound)
         })
         .await
@@ -856,7 +852,7 @@ impl Store {
         };
         let audit = test_prepared_audit(&claimed);
         if self.start_reserved_run(&claimed, audit).await?.is_none() {
-            return Err(SessionRuntimeError::Persistence);
+            return Err(SessionRuntimeError::CONSTRAINT);
         }
         Ok(Some(claimed))
     }
@@ -881,8 +877,7 @@ impl Store {
                     [run_id.to_string()],
                     |row| row.get(0),
                 )
-                .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?
+                .optional()?
                 .ok_or(SessionRuntimeError::RunNotFound)
         })
         .await
@@ -894,15 +889,15 @@ impl Store {
         audit: PreparedRunAudit,
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         #[cfg(test)]
-        if let Some(hook) = take_reserved_start_hold_hook(claimed.run_id) {
+        if let Some(hook) = take_reserved_start_hold_hook(claimed.identity.run_id) {
             let _ = hook.entered.send(());
             let _ = hook.release.await;
-            return Err(SessionRuntimeError::Persistence);
+            return Err(SessionRuntimeError::CONSTRAINT);
         }
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call_write(Priority::AwaitControl, move |connection| {
-            start_reserved_run(connection, store_id, &claimed, &audit)
+            start_reserved_run(connection, store_id, identity, &audit)
         })
         .await
     }
@@ -935,12 +930,14 @@ impl Store {
         claimed: &ClaimedRun,
     ) -> Result<Option<(Vec<Message>, bool)>, SessionRuntimeError> {
         #[cfg(test)]
-        if let Some(failure) = take_targeted_failure(&RESERVED_RELOAD_FAILURES, claimed.run_id) {
+        if let Some(failure) =
+            take_targeted_failure(&RESERVED_RELOAD_FAILURES, claimed.identity.run_id)
+        {
             return Err(failure);
         }
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::AwaitControl, move |connection| {
-            reload_reserved_messages(connection, &claimed)
+            reload_reserved_messages(connection, identity)
         })
         .await
     }
@@ -955,9 +952,7 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<HistoryMatch>, SessionRuntimeError> {
         self.call(Priority::AwaitControl, move |connection| {
-            let transaction = connection
-                .transaction()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let transaction = connection.transaction()?;
             search_session_history(&transaction, session_id, calling_run, &query, limit)
         })
         .await
@@ -978,7 +973,7 @@ impl Store {
                     params![session_id.to_string(), run_id.to_string()],
                     |row| row.get(0),
                 )
-                .map_err(|_| SessionRuntimeError::Persistence)
+                .map_err(|_| SessionRuntimeError::CODEC)
         })
         .await
     }
@@ -989,14 +984,15 @@ impl Store {
         outcome: RunOutcome,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         #[cfg(test)]
-        if let Some(failure) = take_targeted_failure(&RESERVED_SETTLEMENT_FAILURES, claimed.run_id)
+        if let Some(failure) =
+            take_targeted_failure(&RESERVED_SETTLEMENT_FAILURES, claimed.identity.run_id)
         {
             return Err(failure);
         }
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call_write(Priority::AwaitControl, move |connection| {
-            finish_reserved_run(connection, store_id, &claimed, outcome)
+            finish_reserved_run(connection, store_id, identity, outcome)
         })
         .await
     }
@@ -1008,9 +1004,9 @@ impl Store {
         outcome: RunOutcome,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call_write(Priority::AwaitControl, move |connection| {
-            finish_prepared_run(connection, store_id, &claimed, &audit, outcome)
+            finish_prepared_run(connection, store_id, identity, &audit, outcome)
         })
         .await
     }
@@ -1040,12 +1036,12 @@ impl Store {
         text: String,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
             begin_assistant_message(
                 connection,
                 store_id,
-                &claimed,
+                identity,
                 message_id,
                 turn_ordinal,
                 channel,
@@ -1063,9 +1059,9 @@ impl Store {
         text: String,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            append_text(connection, store_id, &claimed, message_id, channel, text)
+            append_text(connection, store_id, identity, message_id, channel, text)
         })
         .await
     }
@@ -1099,9 +1095,9 @@ impl Store {
         activity: RunActivity,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            append_run_activity(connection, store_id, &claimed, activity)
+            append_run_activity(connection, store_id, identity, activity)
         })
         .await
     }
@@ -1114,24 +1110,21 @@ impl Store {
         identity: Arc<RunPromptIdentity>,
     ) -> Result<(), SessionRuntimeError> {
         let claimed = claimed.clone();
-        let identity = serde_json::to_string(identity.as_ref())
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        let identity = serde_json::to_string(identity.as_ref())?;
         self.call_write(Priority::AwaitControl, move |connection| {
-            let changed = connection
-                .execute(
-                    "UPDATE runs
+            let changed = connection.execute(
+                "UPDATE runs
                      SET prompt_identity_json = ?3
                      WHERE id = ?1 AND session_id = ?2 AND status = 'running'
                        AND prompt_identity_json IS NULL",
-                    params![
-                        claimed.run_id.to_string(),
-                        claimed.session_id.to_string(),
-                        identity,
-                    ],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                params![
+                    claimed.identity.run_id.to_string(),
+                    claimed.identity.session_id.to_string(),
+                    identity,
+                ],
+            )?;
             if changed != 1 {
-                return Err(SessionRuntimeError::Persistence);
+                return Err(SessionRuntimeError::CONSTRAINT);
             }
             Ok(())
         })
@@ -1145,9 +1138,9 @@ impl Store {
         turn_ordinal: u16,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            apply_steering_message(connection, store_id, &claimed, message_id, turn_ordinal)
+            apply_steering_message(connection, store_id, identity, message_id, turn_ordinal)
         })
         .await
     }
@@ -1158,9 +1151,9 @@ impl Store {
         turn_ordinal: u16,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            record_run_interrupted(connection, store_id, &claimed, turn_ordinal)
+            record_run_interrupted(connection, store_id, identity, turn_ordinal)
         })
         .await
     }
@@ -1174,9 +1167,9 @@ impl Store {
         continuation: u16,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            record_run_output_truncated(connection, store_id, &claimed, turn_ordinal, continuation)
+            record_run_output_truncated(connection, store_id, identity, turn_ordinal, continuation)
         })
         .await
     }
@@ -1191,9 +1184,9 @@ impl Store {
         reasoning: ReasoningEvent,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            append_reasoning(connection, store_id, &claimed, reasoning)
+            append_reasoning(connection, store_id, identity, reasoning)
         })
         .await
     }
@@ -1204,9 +1197,9 @@ impl Store {
         tool_call_id: ToolCallId,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            start_tool_call(connection, store_id, &claimed, tool_call_id)
+            start_tool_call(connection, store_id, identity, tool_call_id)
         })
         .await
     }
@@ -1221,9 +1214,9 @@ impl Store {
         chunk: String,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            append_tool_call_output(connection, store_id, &claimed, tool_call_id, chunk)
+            append_tool_call_output(connection, store_id, identity, tool_call_id, chunk)
         })
         .await
     }
@@ -1238,12 +1231,12 @@ impl Store {
         display: Option<ToolCallDisplay>,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
             finish_tool_call(
                 connection,
                 store_id,
-                &claimed,
+                identity,
                 tool_call_id,
                 result,
                 is_error,
@@ -1271,9 +1264,9 @@ impl Store {
         message: String,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            deny_tool_call(connection, store_id, &claimed, tool_call_id, &message)
+            deny_tool_call(connection, store_id, identity, tool_call_id, &message)
         })
         .await
     }
@@ -1286,9 +1279,9 @@ impl Store {
         edit: Option<EditPreview>,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            request_tool_approval(connection, store_id, &claimed, tool_call_id, shell, edit)
+            request_tool_approval(connection, store_id, identity, tool_call_id, shell, edit)
         })
         .await
     }
@@ -1300,9 +1293,9 @@ impl Store {
         timed_out: bool,
     ) -> Result<ConcludedApproval, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            conclude_tool_approval(connection, store_id, &claimed, tool_call_id, timed_out)
+            conclude_tool_approval(connection, store_id, identity, tool_call_id, timed_out)
         })
         .await
     }
@@ -1313,9 +1306,9 @@ impl Store {
         tool_call_id: ToolCallId,
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            resolve_approval_by_reviewer(connection, store_id, &claimed, tool_call_id)
+            resolve_approval_by_reviewer(connection, store_id, identity, tool_call_id)
         })
         .await
     }
@@ -1327,9 +1320,9 @@ impl Store {
         record: AuditRecord,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            record_run_audit(connection, store_id, &claimed, record)
+            record_run_audit(connection, store_id, identity, record)
         })
         .await
     }
@@ -1342,9 +1335,9 @@ impl Store {
         message: String,
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            deny_approval_by_reviewer(connection, store_id, &claimed, tool_call_id, &message)
+            deny_approval_by_reviewer(connection, store_id, identity, tool_call_id, &message)
         })
         .await
     }
@@ -1354,9 +1347,9 @@ impl Store {
         &self,
         claimed: &ClaimedRun,
     ) -> Result<(Option<String>, Vec<RecentAction>), SessionRuntimeError> {
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::AwaitControl, move |connection| {
-            load_review_context(connection, &claimed)
+            load_review_context(connection, identity)
         })
         .await
     }
@@ -1432,26 +1425,26 @@ impl Store {
                     },
                 )
                 .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?
+                ?
                 .ok_or(SessionRuntimeError::RunNotFound)?;
             let Some(encoded) = outcome else {
                 // A malformed live accounting row is already a hard read
                 // failure; do not wait for a hanging child to settle first.
                 if let Some(encoded) = usage {
                     serde_json::from_str::<TokenUsage>(&encoded)
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                        ?;
                 }
                 return Ok(None);
             };
             let outcome = serde_json::from_str::<RunOutcome>(&encoded)
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                ?;
             let workspace_id: String = connection
                 .query_row(
                     "SELECT workspace_id FROM sessions WHERE id = ?1",
                     [session_id],
                     |row| row.get(0),
                 )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                ?;
             // Child creation atomically stores its original user message at
             // ordinal one; compaction retains that row. Follow owner run ids
             // and this message's exact run, not all runs in a child session.
@@ -1489,7 +1482,7 @@ impl Store {
                             )
                      FROM owned LEFT JOIN runs r ON r.id = owned.run_id",
                 )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                ?;
             let rows = statement
                 .query_map(
                     params![
@@ -1509,11 +1502,11 @@ impl Store {
                         ))
                     },
                 )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                ?;
             let mut spend = SpawnAgentSpend::NONE;
             for (index, row) in rows.enumerate() {
                 let (id, settled, encoded_usage, cost, never_started, too_deep) =
-                    row.map_err(|_| SessionRuntimeError::Persistence)?;
+                    row?;
                 if id.is_none()
                     || !settled
                     || too_deep
@@ -1524,7 +1517,7 @@ impl Store {
                 let usage = match encoded_usage {
                     Some(encoded) => Some(
                         serde_json::from_str::<TokenUsage>(&encoded)
-                            .map_err(|_| SessionRuntimeError::Persistence)?,
+                            ?,
                     ),
                     None if never_started => SpawnAgentSpend::NONE.usage,
                     None => None,
@@ -1586,8 +1579,7 @@ impl Store {
                     [run_id.to_string()],
                     |row| row.get::<_, Option<String>>(0),
                 )
-                .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                .optional()?;
             let message_id = match final_turn_message {
                 Some(message_id) => message_id,
                 None => connection
@@ -1598,8 +1590,7 @@ impl Store {
                         [run_id.to_string()],
                         |row| row.get::<_, String>(0),
                     )
-                    .optional()
-                    .map_err(|_| SessionRuntimeError::Persistence)?,
+                    .optional()?,
             };
             let Some(message_id) = message_id else {
                 return Ok(String::new());
@@ -1669,11 +1660,11 @@ pub(super) fn begin_unit(connection: &mut Connection) -> Result<Unit<'_>, Sessio
         connection
             .transaction()
             .map(Unit::Transaction)
-            .map_err(|_| SessionRuntimeError::Persistence)
+            .map_err(|_| SessionRuntimeError::CONSTRAINT)
     } else {
         rusqlite::Savepoint::new(connection)
             .map(Unit::Savepoint)
-            .map_err(|_| SessionRuntimeError::Persistence)
+            .map_err(|_| SessionRuntimeError::CONSTRAINT)
     }
 }
 
@@ -1687,11 +1678,11 @@ pub(super) fn begin_immediate_unit(
         connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map(Unit::Transaction)
-            .map_err(|_| SessionRuntimeError::Persistence)
+            .map_err(|_| SessionRuntimeError::CONSTRAINT)
     } else {
         rusqlite::Savepoint::new(connection)
             .map(Unit::Savepoint)
-            .map_err(|_| SessionRuntimeError::Persistence)
+            .map_err(|_| SessionRuntimeError::CONSTRAINT)
     }
 }
 
@@ -1771,7 +1762,7 @@ mod tests {
             .call(Priority::Control, |connection| {
                 connection
                     .execute_batch("CREATE TABLE scratch(n INTEGER PRIMARY KEY)")
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CONSTRAINT)
             })
             .await
             .unwrap();
@@ -1788,15 +1779,13 @@ mod tests {
                         let unit = begin_unit(connection)?;
                         // Inside a group every unit is a savepoint.
                         assert!(matches!(unit, Unit::Savepoint(_)));
-                        unit.execute("INSERT INTO scratch(n) VALUES (?1)", [n])
-                            .map_err(|_| SessionRuntimeError::Persistence)?;
+                        unit.execute("INSERT INTO scratch(n) VALUES (?1)", [n])?;
                         if n == 4 {
                             // Dropping the unit uncommitted rolls this
                             // savepoint back; the group continues.
                             return Err(SessionRuntimeError::OutputTooLarge);
                         }
-                        unit.commit()
-                            .map_err(|_| SessionRuntimeError::Persistence)?;
+                        unit.commit()?;
                         // Autocommit is still off: the group owns the commit.
                         if !connection.is_autocommit() {
                             commits.fetch_add(1, Ordering::SeqCst);
@@ -1851,7 +1840,7 @@ mod tests {
             .call(Priority::Control, |connection| {
                 connection
                     .execute_batch("CREATE TABLE scratch(n INTEGER PRIMARY KEY)")
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CONSTRAINT)
             })
             .await
             .unwrap();
@@ -1864,10 +1853,8 @@ mod tests {
             blocked_store
                 .call(Priority::Output, move |connection| {
                     let unit = begin_unit(connection)?;
-                    unit.execute("INSERT INTO scratch(n) VALUES (?1)", [1_i64])
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
-                    unit.commit()
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    unit.execute("INSERT INTO scratch(n) VALUES (?1)", [1_i64])?;
+                    unit.commit()?;
                     let _ = entered_tx.send(());
                     release_rx
                         .recv()
@@ -1883,10 +1870,8 @@ mod tests {
                 store
                     .call(Priority::Output, move |connection| {
                         let unit = begin_unit(connection)?;
-                        unit.execute("INSERT INTO scratch(n) VALUES (?1)", [n])
-                            .map_err(|_| SessionRuntimeError::Persistence)?;
-                        unit.commit()
-                            .map_err(|_| SessionRuntimeError::Persistence)?;
+                        unit.execute("INSERT INTO scratch(n) VALUES (?1)", [n])?;
+                        unit.commit()?;
                         Ok(())
                     })
                     .await
@@ -1901,10 +1886,8 @@ mod tests {
                     // Joined the group: the unit is a savepoint and the
                     // connection is mid-transaction.
                     let joined = matches!(unit, Unit::Savepoint(_));
-                    unit.execute("INSERT INTO scratch(n) VALUES (?1)", [10_i64])
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
-                    unit.commit()
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    unit.execute("INSERT INTO scratch(n) VALUES (?1)", [10_i64])?;
+                    unit.commit()?;
                     Ok(joined && !connection.is_autocommit())
                 })
                 .await
@@ -1962,7 +1945,7 @@ mod tests {
                                  DEFERRABLE INITIALLY DEFERRED
                          );",
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CONSTRAINT)
             })
             .await
             .unwrap();
@@ -1997,11 +1980,9 @@ mod tests {
                             json: Arc::from("{}"),
                         }));
                         if n == 2 {
-                            unit.execute("INSERT INTO child(parent_id) VALUES (999)", [])
-                                .map_err(|_| SessionRuntimeError::Persistence)?;
+                            unit.execute("INSERT INTO child(parent_id) VALUES (999)", [])?;
                         }
-                        unit.commit()
-                            .map_err(|_| SessionRuntimeError::Persistence)?;
+                        unit.commit()?;
                         Ok(())
                     })
                     .await
@@ -2011,7 +1992,7 @@ mod tests {
         release.send(()).unwrap();
         blocked.await.unwrap().unwrap();
         for job in jobs {
-            assert_eq!(job.await.unwrap(), Err(SessionRuntimeError::Persistence));
+            assert_eq!(job.await.unwrap(), Err(SessionRuntimeError::CONSTRAINT));
         }
         assert!(
             live.try_recv(0).is_err(),
@@ -2037,8 +2018,7 @@ mod tests {
                 store
                     .call(Priority::Output, move |connection| {
                         let unit = begin_unit(connection)?;
-                        unit.commit()
-                            .map_err(|_| SessionRuntimeError::Persistence)?;
+                        unit.commit()?;
                         order.lock().unwrap().push(format!("output {n}"));
                         Ok(())
                     })

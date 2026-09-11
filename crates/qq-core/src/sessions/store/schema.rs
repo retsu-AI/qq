@@ -3,22 +3,22 @@ use std::path::PathBuf;
 use qq_protocol::StoreId;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
-use crate::sessions::SessionRuntimeError;
+use crate::sessions::{PersistenceFault, SessionRuntimeError};
 
 /// Current session store schema, stored as `metadata.schema_version`. Bump it
 /// with every migration step appended to `open_database`.
-pub const STORE_SCHEMA_VERSION: u16 = 25;
+pub const STORE_SCHEMA_VERSION: u16 = 26;
 
 pub(in crate::sessions) fn open_database(
     path: &PathBuf,
 ) -> Result<(Connection, StoreId), SessionRuntimeError> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err(SessionRuntimeError::Persistence);
+            return Err(SessionRuntimeError::CONSTRAINT);
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(SessionRuntimeError::Persistence),
+        Err(_) => return Err(SessionRuntimeError::CONSTRAINT),
     }
     let mut connection = Connection::open_with_flags(
         path,
@@ -26,19 +26,20 @@ pub(in crate::sessions) fn open_database(
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     // Hot statements on the output lane are prepared once per connection.
     connection.set_prepared_statement_cache_capacity(128);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|_| {
+            SessionRuntimeError::Persistence(PersistenceFault::Sqlite(
+                rusqlite::ffi::ErrorCode::CannotOpen,
+            ))
+        })?;
     }
-    connection
-        .execute_batch(
-            "PRAGMA journal_mode = WAL;
+    connection.execute_batch(
+        "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = FULL;
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;
@@ -146,46 +147,34 @@ pub(in crate::sessions) fn open_database(
                  ON messages(session_id, ordinal);
              CREATE INDEX IF NOT EXISTS pending_workspace_grant_promotions_fifo
                  ON pending_workspace_grant_promotions(created_at_ms, command_id);",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let schema_version = connection
         .query_row(
             "SELECT value FROM metadata WHERE key = 'schema_version'",
             [],
             |row| row.get::<_, String>(0),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .optional()?;
     match schema_version.as_deref() {
         None => {
-            let transaction = connection
-                .transaction()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let transaction = connection.transaction()?;
             create_tool_tables(&transaction)?;
             create_grant_table(&transaction)?;
             create_session_files_table(&transaction)?;
             create_session_compactions_table(&transaction)?;
-            transaction
-                .execute(
-                    "INSERT INTO metadata(key, value) VALUES ('schema_version', '10')",
-                    [],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
-            transaction
-                .commit()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.execute(
+                "INSERT INTO metadata(key, value) VALUES ('schema_version', '10')",
+                [],
+            )?;
+            transaction.commit()?;
         }
         Some("1") => {
-            let transaction = connection
-                .transaction()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let transaction = connection.transaction()?;
             if !has_column(&transaction, "runs", "cancel_requested")? {
-                transaction
-                    .execute(
-                        "ALTER TABLE runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0",
-                        [],
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                transaction.execute(
+                    "ALTER TABLE runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
             }
             for statement in [
                 "ALTER TABLE sessions ADD COLUMN estimated_cost_usd_nanos INTEGER NOT NULL DEFAULT 0",
@@ -194,13 +183,9 @@ pub(in crate::sessions) fn open_database(
                 "ALTER TABLE runs ADD COLUMN usage_json TEXT",
                 "ALTER TABLE runs ADD COLUMN estimated_cost_usd_nanos INTEGER",
             ] {
-                transaction
-                    .execute(statement, [])
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                transaction.execute(statement, [])?;
             }
-            transaction
-                .execute("UPDATE sessions SET cost_known = 0", [])
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.execute("UPDATE sessions SET cost_known = 0", [])?;
             create_tool_tables(&transaction)?;
             create_grant_table(&transaction)?;
             create_session_files_table(&transaction)?;
@@ -209,26 +194,18 @@ pub(in crate::sessions) fn open_database(
             add_runs_kind_column(&transaction)?;
             add_runs_context_tokens_column(&transaction)?;
             add_runs_auto_compaction_column(&transaction)?;
-            transaction
-                .execute(
-                    "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
-                    [],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
-            transaction
-                .commit()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.execute(
+                "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
+                [],
+            )?;
+            transaction.commit()?;
         }
         Some("2") => {
-            let transaction = connection
-                .transaction()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
-            transaction
-                .execute(
-                    "ALTER TABLE sessions ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'ask'",
-                    [],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let transaction = connection.transaction()?;
+            transaction.execute(
+                "ALTER TABLE sessions ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'ask'",
+                [],
+            )?;
             create_tool_tables(&transaction)?;
             create_grant_table(&transaction)?;
             create_session_files_table(&transaction)?;
@@ -237,28 +214,20 @@ pub(in crate::sessions) fn open_database(
             add_runs_kind_column(&transaction)?;
             add_runs_context_tokens_column(&transaction)?;
             add_runs_auto_compaction_column(&transaction)?;
-            transaction
-                .execute(
-                    "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
-                    [],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
-            transaction
-                .commit()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.execute(
+                "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
+                [],
+            )?;
+            transaction.commit()?;
         }
         Some("3") => {
-            let transaction = connection
-                .transaction()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let transaction = connection.transaction()?;
             for statement in [
                 "ALTER TABLE sessions ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'ask'",
                 "ALTER TABLE tool_calls ADD COLUMN approval_resolution TEXT",
                 "ALTER TABLE tool_calls ADD COLUMN resolved_at_ms INTEGER",
             ] {
-                transaction
-                    .execute(statement, [])
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                transaction.execute(statement, [])?;
             }
             create_grant_table(&transaction)?;
             create_session_files_table(&transaction)?;
@@ -268,20 +237,14 @@ pub(in crate::sessions) fn open_database(
             add_runs_kind_column(&transaction)?;
             add_runs_context_tokens_column(&transaction)?;
             add_runs_auto_compaction_column(&transaction)?;
-            transaction
-                .execute(
-                    "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
-                    [],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
-            transaction
-                .commit()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.execute(
+                "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
+                [],
+            )?;
+            transaction.commit()?;
         }
         Some("4") => {
-            let transaction = connection
-                .transaction()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let transaction = connection.transaction()?;
             create_session_files_table(&transaction)?;
             add_messages_turn_ordinal_column(&transaction)?;
             add_tool_calls_display_column(&transaction)?;
@@ -289,109 +252,75 @@ pub(in crate::sessions) fn open_database(
             add_runs_kind_column(&transaction)?;
             add_runs_context_tokens_column(&transaction)?;
             add_runs_auto_compaction_column(&transaction)?;
-            transaction
-                .execute(
-                    "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
-                    [],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
-            transaction
-                .commit()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.execute(
+                "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
+                [],
+            )?;
+            transaction.commit()?;
         }
         Some("5") => {
-            let transaction = connection
-                .transaction()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let transaction = connection.transaction()?;
             add_messages_turn_ordinal_column(&transaction)?;
             add_tool_calls_display_column(&transaction)?;
             create_session_compactions_table(&transaction)?;
             add_runs_kind_column(&transaction)?;
             add_runs_context_tokens_column(&transaction)?;
             add_runs_auto_compaction_column(&transaction)?;
-            transaction
-                .execute(
-                    "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
-                    [],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
-            transaction
-                .commit()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.execute(
+                "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
+                [],
+            )?;
+            transaction.commit()?;
         }
         Some("6") => {
-            let transaction = connection
-                .transaction()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let transaction = connection.transaction()?;
             add_tool_calls_display_column(&transaction)?;
             create_session_compactions_table(&transaction)?;
             add_runs_kind_column(&transaction)?;
             add_runs_context_tokens_column(&transaction)?;
             add_runs_auto_compaction_column(&transaction)?;
-            transaction
-                .execute(
-                    "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
-                    [],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
-            transaction
-                .commit()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.execute(
+                "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
+                [],
+            )?;
+            transaction.commit()?;
         }
         Some("7") => {
-            let transaction = connection
-                .transaction()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let transaction = connection.transaction()?;
             create_session_compactions_table(&transaction)?;
             add_runs_kind_column(&transaction)?;
             add_runs_context_tokens_column(&transaction)?;
             add_runs_auto_compaction_column(&transaction)?;
-            transaction
-                .execute(
-                    "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
-                    [],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
-            transaction
-                .commit()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.execute(
+                "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
+                [],
+            )?;
+            transaction.commit()?;
         }
         Some("8") => {
-            let transaction = connection
-                .transaction()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let transaction = connection.transaction()?;
             add_runs_context_tokens_column(&transaction)?;
             add_runs_auto_compaction_column(&transaction)?;
-            transaction
-                .execute(
-                    "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
-                    [],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
-            transaction
-                .commit()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.execute(
+                "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
+                [],
+            )?;
+            transaction.commit()?;
         }
         Some("9") => {
-            let transaction = connection
-                .transaction()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let transaction = connection.transaction()?;
             add_runs_auto_compaction_column(&transaction)?;
-            transaction
-                .execute(
-                    "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
-                    [],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
-            transaction
-                .commit()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.execute(
+                "UPDATE metadata SET value = '10' WHERE key = 'schema_version'",
+                [],
+            )?;
+            transaction.commit()?;
         }
         Some(
             "10" | "11" | "12" | "13" | "14" | "15" | "16" | "17" | "18" | "19" | "20" | "21"
-            | "22" | "23" | "24" | "25",
+            | "22" | "23" | "24" | "25" | "26",
         ) => {}
-        Some(_) => return Err(SessionRuntimeError::Persistence),
+        Some(_) => return Err(SessionRuntimeError::CONSTRAINT),
     }
     if !matches!(
         schema_version.as_deref(),
@@ -410,21 +339,16 @@ pub(in crate::sessions) fn open_database(
                 | "23"
                 | "24"
                 | "25"
+                | "26"
         )
     ) {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        let transaction = connection.transaction()?;
         add_sessions_context_tokens_column(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '11' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '11' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
     if !matches!(
         schema_version.as_deref(),
@@ -442,21 +366,16 @@ pub(in crate::sessions) fn open_database(
                 | "23"
                 | "24"
                 | "25"
+                | "26"
         )
     ) {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        let transaction = connection.transaction()?;
         add_sessions_owner_run_id_column(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '12' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '12' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
     if !matches!(
         schema_version.as_deref(),
@@ -473,255 +392,200 @@ pub(in crate::sessions) fn open_database(
                 | "23"
                 | "24"
                 | "25"
+                | "26"
         )
     ) {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        let transaction = connection.transaction()?;
         add_runs_prompt_identity_column(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '13' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '13' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
     if !matches!(
         schema_version.as_deref(),
-        Some("14" | "15" | "16" | "17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25")
+        Some(
+            "14" | "15"
+                | "16"
+                | "17"
+                | "18"
+                | "19"
+                | "20"
+                | "21"
+                | "22"
+                | "23"
+                | "24"
+                | "25"
+                | "26"
+        )
     ) {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        let transaction = connection.transaction()?;
         add_model_turn_audit_columns(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '14' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '14' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
     validate_model_turn_audit_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("15" | "16" | "17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25")
+        Some("15" | "16" | "17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26")
     ) {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        let transaction = connection.transaction()?;
         add_linear_streaming_storage(&transaction)?;
         validate_linear_streaming_schema(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '15' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '15' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     } else if column_shape(
         &connection,
         "pending_workspace_grant_promotions",
         "command_id",
     )? != ("TEXT".to_owned(), true, None, 1)
     {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        let transaction = connection.transaction()?;
         normalize_promotion_outbox(&transaction)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.commit()?;
     }
     validate_linear_streaming_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("16" | "17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25")
+        Some("16" | "17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26")
     ) {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        let transaction = connection.transaction()?;
         add_runs_resolved_model_column(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '16' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '16' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
     if !has_column(&connection, "runs", "resolved_model_json")? {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     if !matches!(
         schema_version.as_deref(),
-        Some("17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25")
+        Some("17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26")
     ) {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        let transaction = connection.transaction()?;
         add_preparing_run_storage(&transaction)?;
         validate_preparing_run_schema(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '17' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '17' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
     validate_preparing_run_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("18" | "19" | "20" | "21" | "22" | "23" | "24" | "25")
+        Some("18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26")
     ) {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        let transaction = connection.transaction()?;
         add_context_occupancy_storage(&transaction)?;
         validate_context_occupancy_schema(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '18' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '18' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
     validate_context_occupancy_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("19" | "20" | "21" | "22" | "23" | "24" | "25")
+        Some("19" | "20" | "21" | "22" | "23" | "24" | "25" | "26")
     ) {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        let transaction = connection.transaction()?;
         add_run_limits_storage(&transaction)?;
         validate_run_limits_schema(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '19' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '19' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
     validate_run_limits_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("20" | "21" | "22" | "23" | "24" | "25")
+        Some("20" | "21" | "22" | "23" | "24" | "25" | "26")
     ) {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        let transaction = connection.transaction()?;
         add_sessions_spawned_by_tool_call_column(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '20' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '20' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
     if !matches!(
         schema_version.as_deref(),
-        Some("21" | "22" | "23" | "24" | "25")
+        Some("21" | "22" | "23" | "24" | "25" | "26")
     ) {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        let transaction = connection.transaction()?;
         add_contract_columns(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '21' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '21' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
-    if !matches!(schema_version.as_deref(), Some("22" | "23" | "24" | "25")) {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+    if !matches!(
+        schema_version.as_deref(),
+        Some("22" | "23" | "24" | "25" | "26")
+    ) {
+        let transaction = connection.transaction()?;
         add_output_truncation_columns(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '22' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '22' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
     validate_output_truncation_schema(&connection)?;
-    if !matches!(schema_version.as_deref(), Some("23" | "24" | "25")) {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+    if !matches!(schema_version.as_deref(), Some("23" | "24" | "25" | "26")) {
+        let transaction = connection.transaction()?;
         add_session_depth_columns(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '23' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '23' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
     validate_session_depth_schema(&connection)?;
-    if !matches!(schema_version.as_deref(), Some("24" | "25")) {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+    if !matches!(schema_version.as_deref(), Some("24" | "25" | "26")) {
+        let transaction = connection.transaction()?;
         add_audit_columns(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '24' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '24' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
     validate_audit_schema(&connection)?;
-    if schema_version.as_deref() != Some("25") {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+    if !matches!(schema_version.as_deref(), Some("25" | "26")) {
+        let transaction = connection.transaction()?;
         add_fast_path_columns(&transaction)?;
-        transaction
-            .execute(
-                "UPDATE metadata SET value = '25' WHERE key = 'schema_version'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        transaction
-            .commit()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '25' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
     validate_fast_path_schema(&connection)?;
+    if schema_version.as_deref() != Some("26") {
+        let transaction = connection.transaction()?;
+        add_tool_call_effect_column(&transaction)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '26' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
+    }
+    validate_tool_call_effect_schema(&connection)?;
     debug_assert_eq!(
         connection
             .query_row(
@@ -740,20 +604,15 @@ pub(in crate::sessions) fn open_database(
             [],
             |row| row.get::<_, String>(0),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .optional()?;
     let store_id = match stored {
-        Some(value) => value
-            .parse()
-            .map_err(|_| SessionRuntimeError::Persistence)?,
+        Some(value) => value.parse().map_err(|_| SessionRuntimeError::CODEC)?,
         None => {
             let id = StoreId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
-            connection
-                .execute(
-                    "INSERT INTO metadata(key, value) VALUES ('store_id', ?1)",
-                    [id.to_string()],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES ('store_id', ?1)",
+                [id.to_string()],
+            )?;
             id
         }
     };
@@ -762,9 +621,7 @@ pub(in crate::sessions) fn open_database(
 
 fn add_run_limits_storage(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "runs", "limits_json")? {
-        connection
-            .execute("ALTER TABLE runs ADD COLUMN limits_json TEXT", [])
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute("ALTER TABLE runs ADD COLUMN limits_json TEXT", [])?;
     }
     Ok(())
 }
@@ -773,31 +630,27 @@ fn add_run_limits_storage(connection: &Connection) -> Result<(), SessionRuntimeE
 /// must never be reinterpreted under current defaults.
 fn validate_run_limits_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if column_shape(connection, "runs", "limits_json")? != ("TEXT".to_owned(), false, None, 0) {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     Ok(())
 }
 
 fn add_context_occupancy_storage(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "sessions", "context_occupancy_json")? {
-        connection
-            .execute(
-                "ALTER TABLE sessions ADD COLUMN context_occupancy_json TEXT",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute(
+            "ALTER TABLE sessions ADD COLUMN context_occupancy_json TEXT",
+            [],
+        )?;
     }
     if !has_column(
         connection,
         "sessions",
         "pending_context_overflow_basis_json",
     )? {
-        connection
-            .execute(
-                "ALTER TABLE sessions ADD COLUMN pending_context_overflow_basis_json TEXT",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute(
+            "ALTER TABLE sessions ADD COLUMN pending_context_overflow_basis_json TEXT",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -806,7 +659,7 @@ fn validate_context_occupancy_schema(connection: &Connection) -> Result<(), Sess
     if column_shape(connection, "sessions", "context_occupancy_json")?
         != ("TEXT".to_owned(), false, None, 0)
     {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     if column_shape(
         connection,
@@ -814,48 +667,39 @@ fn validate_context_occupancy_schema(connection: &Connection) -> Result<(), Sess
         "pending_context_overflow_basis_json",
     )? != ("TEXT".to_owned(), false, None, 0)
     {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     Ok(())
 }
 
 fn add_preparing_run_storage(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "sessions", "preparing_run_id")? {
-        connection
-            .execute("ALTER TABLE sessions ADD COLUMN preparing_run_id TEXT", [])
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute("ALTER TABLE sessions ADD COLUMN preparing_run_id TEXT", [])?;
     }
     if !has_column(
         connection,
         "sessions",
         "pending_context_overflow_model_json",
     )? {
-        connection
-            .execute(
-                "ALTER TABLE sessions ADD COLUMN pending_context_overflow_model_json TEXT",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute(
+            "ALTER TABLE sessions ADD COLUMN pending_context_overflow_model_json TEXT",
+            [],
+        )?;
     }
     if !has_column(connection, "runs", "context_compaction_attempted")? {
-        connection
-            .execute(
-                "ALTER TABLE runs ADD COLUMN context_compaction_attempted INTEGER NOT NULL DEFAULT 0",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN context_compaction_attempted INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     if !has_column(connection, "runs", "auto_compaction_for_run_id")? {
-        connection
-            .execute(
-                "ALTER TABLE runs ADD COLUMN auto_compaction_for_run_id TEXT",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN auto_compaction_for_run_id TEXT",
+            [],
+        )?;
     }
-    connection
-        .execute(
-            "UPDATE runs AS compaction
+    connection.execute(
+        "UPDATE runs AS compaction
              SET auto_compaction_for_run_id = (
                  SELECT queued.id
                  FROM runs queued
@@ -874,28 +718,25 @@ fn add_preparing_run_storage(connection: &Connection) -> Result<(), SessionRunti
                    WHERE session.id = compaction.session_id
                      AND session.active_run_id = compaction.id
                )",
-            [],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    connection
-        .execute(
-            "UPDATE runs
+        [],
+    )?;
+    connection.execute(
+        "UPDATE runs
              SET context_compaction_attempted = 1
              WHERE id IN (
                  SELECT auto_compaction_for_run_id
                  FROM runs
                  WHERE auto_compaction_for_run_id IS NOT NULL
              )",
-            [],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        [],
+    )?;
     Ok(())
 }
 
 fn validate_preparing_run_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
     let preparing = column_shape(connection, "sessions", "preparing_run_id")?;
     if preparing != ("TEXT".to_owned(), false, None, 0) {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     let overflow = column_shape(
         connection,
@@ -903,15 +744,15 @@ fn validate_preparing_run_schema(connection: &Connection) -> Result<(), SessionR
         "pending_context_overflow_model_json",
     )?;
     if overflow != ("TEXT".to_owned(), false, None, 0) {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     let attempted = column_shape(connection, "runs", "context_compaction_attempted")?;
     if attempted != ("INTEGER".to_owned(), true, Some("0".to_owned()), 0) {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     let owner = column_shape(connection, "runs", "auto_compaction_for_run_id")?;
     if owner != ("TEXT".to_owned(), false, None, 0) {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     Ok(())
 }
@@ -921,9 +762,7 @@ fn column_shape(
     table: &str,
     column: &str,
 ) -> Result<(String, bool, Option<String>, u8), SessionRuntimeError> {
-    let mut statement = connection
-        .prepare(&format!("PRAGMA table_info({table})"))
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
     statement
         .query_map([], |row| {
             Ok((
@@ -933,33 +772,29 @@ fn column_shape(
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, u8>(5)?,
             ))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        })?
         .find_map(|row| match row {
             Ok((name, ty, not_null, default_value, primary_key)) if name == column => {
                 Some(Ok((ty, not_null, default_value, primary_key)))
             }
             Ok(_) => None,
-            Err(_) => Some(Err(SessionRuntimeError::Persistence)),
+            Err(_) => Some(Err(SessionRuntimeError::CONSTRAINT)),
         })
-        .unwrap_or(Err(SessionRuntimeError::Persistence))
+        .unwrap_or(Err(SessionRuntimeError::CONSTRAINT))
 }
 
 /// Existing runs remain explicitly unknown: no current configuration is
 /// guessed for historical work.
 fn add_runs_resolved_model_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "runs", "resolved_model_json")? {
-        connection
-            .execute("ALTER TABLE runs ADD COLUMN resolved_model_json TEXT", [])
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute("ALTER TABLE runs ADD COLUMN resolved_model_json TEXT", [])?;
     }
     Ok(())
 }
 
 fn add_linear_streaming_storage(connection: &Connection) -> Result<(), SessionRuntimeError> {
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS message_chunks (
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS message_chunks (
                  message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
                  channel TEXT NOT NULL CHECK(channel IN ('output', 'refusal')),
                  chunk_ordinal INTEGER NOT NULL CHECK(chunk_ordinal > 0),
@@ -973,20 +808,15 @@ fn add_linear_streaming_storage(connection: &Connection) -> Result<(), SessionRu
              );
              CREATE INDEX IF NOT EXISTS pending_workspace_grant_promotions_fifo
                  ON pending_workspace_grant_promotions(created_at_ms, command_id);",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     if !has_column(connection, "runs", "context_base_bytes")? {
-        connection
-            .execute("ALTER TABLE runs ADD COLUMN context_base_bytes INTEGER", [])
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute("ALTER TABLE runs ADD COLUMN context_base_bytes INTEGER", [])?;
     }
     if !has_column(connection, "runs", "context_increment_bytes")? {
-        connection
-            .execute(
-                "ALTER TABLE runs ADD COLUMN context_increment_bytes INTEGER NOT NULL DEFAULT 0",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN context_increment_bytes INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     normalize_promotion_outbox(connection)?;
     Ok(())
@@ -1004,7 +834,7 @@ fn normalize_promotion_outbox(connection: &Connection) -> Result<(), SessionRunt
         return Ok(());
     }
     if command_id != ("TEXT".to_owned(), false, None, 1) {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     connection
         .execute_batch(
@@ -1022,7 +852,7 @@ fn normalize_promotion_outbox(connection: &Connection) -> Result<(), SessionRunt
              CREATE INDEX IF NOT EXISTS pending_workspace_grant_promotions_fifo
                  ON pending_workspace_grant_promotions(created_at_ms, command_id);",
         )
-        .map_err(|_| SessionRuntimeError::Persistence)
+        .map_err(|_| SessionRuntimeError::CONSTRAINT)
 }
 
 fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
@@ -1038,12 +868,10 @@ fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), Sessi
         ("pending_workspace_grant_promotions", "promotion_json"),
     ] {
         if !has_column(connection, table, column)? {
-            return Err(SessionRuntimeError::Persistence);
+            return Err(SessionRuntimeError::CONSTRAINT);
         }
     }
-    let mut columns = connection
-        .prepare("PRAGMA table_info(message_chunks)")
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let mut columns = connection.prepare("PRAGMA table_info(message_chunks)")?;
     let columns = columns
         .query_map([], |row| {
             Ok((
@@ -1052,10 +880,8 @@ fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), Sessi
                 row.get::<_, bool>(3)?,
                 row.get::<_, u8>(5)?,
             ))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     let expected = [
         ("message_id", "TEXT", true, 1_u8),
         ("channel", "TEXT", true, 2_u8),
@@ -1070,11 +896,9 @@ fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), Sessi
                 (name.as_str(), ty.as_str(), *not_null, *primary_key) != expected
             })
     {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
-    let mut run_columns = connection
-        .prepare("PRAGMA table_info(runs)")
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let mut run_columns = connection.prepare("PRAGMA table_info(runs)")?;
     let run_columns = run_columns
         .query_map([], |row| {
             Ok((
@@ -1084,8 +908,7 @@ fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), Sessi
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, u8>(5)?,
             ))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        })?
         .filter_map(|column| match column {
             Ok(column)
                 if matches!(
@@ -1098,8 +921,7 @@ fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), Sessi
             Ok(_) => None,
             Err(error) => Some(Err(error)),
         })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .collect::<Result<Vec<_>, _>>()?;
     let expected_run_columns = [
         ("context_base_bytes", "INTEGER", false, None, 0_u8),
         ("context_increment_bytes", "INTEGER", true, Some("0"), 0_u8),
@@ -1117,11 +939,9 @@ fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), Sessi
             },
         )
     {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
-    let mut foreign_keys = connection
-        .prepare("PRAGMA foreign_key_list(message_chunks)")
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let mut foreign_keys = connection.prepare("PRAGMA foreign_key_list(message_chunks)")?;
     let foreign_keys = foreign_keys
         .query_map([], |row| {
             Ok((
@@ -1130,10 +950,8 @@ fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), Sessi
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(6)?,
             ))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     if foreign_keys
         != [(
             "messages".to_owned(),
@@ -1142,15 +960,13 @@ fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), Sessi
             "CASCADE".to_owned(),
         )]
     {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
-    let schema_sql: String = connection
-        .query_row(
-            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'message_chunks'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let schema_sql: String = connection.query_row(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'message_chunks'",
+        [],
+        |row| row.get(0),
+    )?;
     let schema_sql = schema_sql
         .split_ascii_whitespace()
         .collect::<Vec<_>>()
@@ -1159,11 +975,10 @@ fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), Sessi
     if !schema_sql.contains("check(channel in ('output', 'refusal'))")
         || !schema_sql.contains("check(chunk_ordinal > 0)")
     {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
-    let mut promotion_columns = connection
-        .prepare("PRAGMA table_info(pending_workspace_grant_promotions)")
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let mut promotion_columns =
+        connection.prepare("PRAGMA table_info(pending_workspace_grant_promotions)")?;
     let promotion_columns = promotion_columns
         .query_map([], |row| {
             Ok((
@@ -1172,10 +987,8 @@ fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), Sessi
                 row.get::<_, bool>(3)?,
                 row.get::<_, u8>(5)?,
             ))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     let expected_promotion_columns = [
         ("command_id", "TEXT", true, 1_u8),
         ("created_at_ms", "INTEGER", true, 0_u8),
@@ -1189,21 +1002,19 @@ fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), Sessi
                 (name.as_str(), ty.as_str(), *not_null, *primary_key) != expected
             })
     {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
-    let promotion_index: bool = connection
-        .query_row(
-            "SELECT EXISTS(
+    let promotion_index: bool = connection.query_row(
+        "SELECT EXISTS(
                  SELECT 1 FROM sqlite_schema
                  WHERE type = 'index'
                    AND name = 'pending_workspace_grant_promotions_fifo'
              )",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        [],
+        |row| row.get(0),
+    )?;
     if !promotion_index {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     Ok(())
 }
@@ -1244,13 +1055,12 @@ fn create_tool_tables(connection: &Connection) -> Result<(), SessionRuntimeError
              CREATE INDEX tool_calls_run_ordinal
                  ON tool_calls(run_id, turn_ordinal, call_ordinal);",
         )
-        .map_err(|_| SessionRuntimeError::Persistence)
+        .map_err(|_| SessionRuntimeError::CONSTRAINT)
 }
 
 fn add_model_turn_audit_columns(connection: &Connection) -> Result<(), SessionRuntimeError> {
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS model_turns (
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS model_turns (
                  run_id TEXT NOT NULL REFERENCES runs(id),
                  turn_ordinal INTEGER NOT NULL,
                  assistant_content_json TEXT NOT NULL,
@@ -1260,8 +1070,7 @@ fn add_model_turn_audit_columns(connection: &Connection) -> Result<(), SessionRu
                  completed_at_ms INTEGER,
                  PRIMARY KEY(run_id, turn_ordinal)
              );",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     for (column, declaration) in [
         ("model_json", "TEXT"),
         ("usage_json", "TEXT"),
@@ -1269,12 +1078,10 @@ fn add_model_turn_audit_columns(connection: &Connection) -> Result<(), SessionRu
         ("completed_at_ms", "INTEGER"),
     ] {
         if !has_column(connection, "model_turns", column)? {
-            connection
-                .execute(
-                    &format!("ALTER TABLE model_turns ADD COLUMN {column} {declaration}"),
-                    [],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            connection.execute(
+                &format!("ALTER TABLE model_turns ADD COLUMN {column} {declaration}"),
+                [],
+            )?;
         }
     }
     Ok(())
@@ -1291,7 +1098,7 @@ fn validate_model_turn_audit_schema(connection: &Connection) -> Result<(), Sessi
         "completed_at_ms",
     ] {
         if !has_column(connection, "model_turns", column)? {
-            return Err(SessionRuntimeError::Persistence);
+            return Err(SessionRuntimeError::CONSTRAINT);
         }
     }
     Ok(())
@@ -1302,12 +1109,10 @@ fn validate_model_turn_audit_schema(connection: &Connection) -> Result<(), Sessi
 /// run's calls grouped after it.
 fn add_messages_turn_ordinal_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "messages", "turn_ordinal")? {
-        connection
-            .execute(
-                "ALTER TABLE messages ADD COLUMN turn_ordinal INTEGER NOT NULL DEFAULT 0",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute(
+            "ALTER TABLE messages ADD COLUMN turn_ordinal INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -1317,9 +1122,7 @@ fn add_messages_turn_ordinal_column(connection: &Connection) -> Result<(), Sessi
 /// render from their bounded result string alone.
 fn add_tool_calls_display_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "tool_calls", "display_json")? {
-        connection
-            .execute("ALTER TABLE tool_calls ADD COLUMN display_json TEXT", [])
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute("ALTER TABLE tool_calls ADD COLUMN display_json TEXT", [])?;
     }
     Ok(())
 }
@@ -1335,7 +1138,7 @@ fn create_grant_table(connection: &Connection) -> Result<(), SessionRuntimeError
                  UNIQUE(session_id, kind, value)
              );",
         )
-        .map_err(|_| SessionRuntimeError::Persistence)
+        .map_err(|_| SessionRuntimeError::CONSTRAINT)
 }
 
 fn create_session_files_table(connection: &Connection) -> Result<(), SessionRuntimeError> {
@@ -1349,7 +1152,7 @@ fn create_session_files_table(connection: &Connection) -> Result<(), SessionRunt
                  UNIQUE(session_id, path)
              );",
         )
-        .map_err(|_| SessionRuntimeError::Persistence)
+        .map_err(|_| SessionRuntimeError::CONSTRAINT)
 }
 
 /// One committed compaction: the structured summary and the message-ordinal
@@ -1370,19 +1173,17 @@ fn create_session_compactions_table(connection: &Connection) -> Result<(), Sessi
              CREATE INDEX session_compactions_session
                  ON session_compactions(session_id, created_at_ms DESC);",
         )
-        .map_err(|_| SessionRuntimeError::Persistence)
+        .map_err(|_| SessionRuntimeError::CONSTRAINT)
 }
 
 /// Adds `runs.kind` for stores created before internal compaction runs.
 /// Existing rows keep 'prompt'.
 fn add_runs_kind_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "runs", "kind")? {
-        connection
-            .execute(
-                "ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'prompt'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'prompt'",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -1392,9 +1193,7 @@ fn add_runs_kind_column(connection: &Connection) -> Result<(), SessionRuntimeErr
 /// billing usage. Existing rows keep NULL: clients fall back to the sum.
 fn add_runs_context_tokens_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "runs", "context_tokens")? {
-        connection
-            .execute("ALTER TABLE runs ADD COLUMN context_tokens INTEGER", [])
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute("ALTER TABLE runs ADD COLUMN context_tokens INTEGER", [])?;
     }
     Ok(())
 }
@@ -1404,9 +1203,7 @@ fn add_runs_context_tokens_column(connection: &Connection) -> Result<(), Session
 /// reports usage.
 fn add_sessions_context_tokens_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "sessions", "context_tokens")? {
-        connection
-            .execute("ALTER TABLE sessions ADD COLUMN context_tokens INTEGER", [])
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute("ALTER TABLE sessions ADD COLUMN context_tokens INTEGER", [])?;
     }
     Ok(())
 }
@@ -1417,12 +1214,10 @@ fn add_sessions_spawned_by_tool_call_column(
     connection: &Connection,
 ) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "sessions", "spawned_by_tool_call_id")? {
-        connection
-            .execute(
-                "ALTER TABLE sessions ADD COLUMN spawned_by_tool_call_id TEXT",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute(
+            "ALTER TABLE sessions ADD COLUMN spawned_by_tool_call_id TEXT",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -1446,12 +1241,10 @@ fn add_contract_columns(connection: &Connection) -> Result<(), SessionRuntimeErr
     ];
     for (table, column, kind) in COLUMNS {
         if !has_column(connection, table, column)? {
-            connection
-                .execute(
-                    &format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"),
-                    [],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            connection.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"),
+                [],
+            )?;
         }
     }
     Ok(())
@@ -1462,12 +1255,10 @@ fn add_contract_columns(connection: &Connection) -> Result<(), SessionRuntimeErr
 fn add_output_truncation_columns(connection: &Connection) -> Result<(), SessionRuntimeError> {
     for (table, column) in OUTPUT_TRUNCATION_COLUMNS {
         if !has_column(connection, table, column)? {
-            connection
-                .execute(
-                    &format!("ALTER TABLE {table} ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"),
-                    [],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            connection.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"),
+                [],
+            )?;
         }
     }
     Ok(())
@@ -1484,7 +1275,7 @@ fn validate_output_truncation_schema(connection: &Connection) -> Result<(), Sess
         if column_shape(connection, table, column)?
             != ("INTEGER".to_owned(), true, Some("0".to_owned()), 0)
         {
-            return Err(SessionRuntimeError::Persistence);
+            return Err(SessionRuntimeError::CONSTRAINT);
         }
     }
     Ok(())
@@ -1494,9 +1285,7 @@ fn validate_output_truncation_schema(connection: &Connection) -> Result<(), Sess
 /// sessions and historical rows remain unowned (NULL).
 fn add_sessions_owner_run_id_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "sessions", "owner_run_id")? {
-        connection
-            .execute("ALTER TABLE sessions ADD COLUMN owner_run_id TEXT", [])
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute("ALTER TABLE sessions ADD COLUMN owner_run_id TEXT", [])?;
     }
     Ok(())
 }
@@ -1506,12 +1295,10 @@ fn add_sessions_owner_run_id_column(connection: &Connection) -> Result<(), Sessi
 /// a context threshold; 0 (every existing row) is a user-requested run.
 fn add_runs_auto_compaction_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "runs", "auto_compaction")? {
-        connection
-            .execute(
-                "ALTER TABLE runs ADD COLUMN auto_compaction INTEGER NOT NULL DEFAULT 0",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN auto_compaction INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -1521,9 +1308,7 @@ fn add_runs_auto_compaction_column(connection: &Connection) -> Result<(), Sessio
 /// current prompt after the fact.
 fn add_runs_prompt_identity_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "runs", "prompt_identity_json")? {
-        connection
-            .execute("ALTER TABLE runs ADD COLUMN prompt_identity_json TEXT", [])
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute("ALTER TABLE runs ADD COLUMN prompt_identity_json TEXT", [])?;
     }
     Ok(())
 }
@@ -1533,14 +1318,10 @@ pub(in crate::sessions) fn has_column(
     table: &str,
     column: &str,
 ) -> Result<bool, SessionRuntimeError> {
-    let mut statement = connection
-        .prepare(&format!("PRAGMA table_info({table})"))
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = statement
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(columns.iter().any(|candidate| candidate == column))
 }
 
@@ -1551,36 +1332,30 @@ pub(in crate::sessions) fn has_column(
 /// one; deeper history does not exist.
 fn add_session_depth_columns(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "sessions", "depth")? {
-        connection
-            .execute(
-                "ALTER TABLE sessions ADD COLUMN depth INTEGER NOT NULL DEFAULT 0",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute(
+            "ALTER TABLE sessions ADD COLUMN depth INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     if !has_column(connection, "sessions", "root_run_id")? {
-        connection
-            .execute("ALTER TABLE sessions ADD COLUMN root_run_id TEXT", [])
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute("ALTER TABLE sessions ADD COLUMN root_run_id TEXT", [])?;
     }
-    connection
-        .execute(
-            "UPDATE sessions SET depth = 1, root_run_id = owner_run_id
+    connection.execute(
+        "UPDATE sessions SET depth = 1, root_run_id = owner_run_id
              WHERE owner_run_id IS NOT NULL AND root_run_id IS NULL",
-            [],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        [],
+    )?;
     Ok(())
 }
 
 fn validate_session_depth_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
     let depth = column_shape(connection, "sessions", "depth")?;
     if depth != ("INTEGER".to_owned(), true, Some("0".to_owned()), 0) {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     let root = column_shape(connection, "sessions", "root_run_id")?;
     if root != ("TEXT".to_owned(), false, None, 0) {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     Ok(())
 }
@@ -1590,17 +1365,13 @@ fn validate_session_depth_schema(connection: &Connection) -> Result<(), SessionR
 /// audit, which is what they were.
 fn add_audit_columns(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "sessions", "purpose")? {
-        connection
-            .execute(
-                "ALTER TABLE sessions ADD COLUMN purpose TEXT NOT NULL DEFAULT 'task'",
-                [],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute(
+            "ALTER TABLE sessions ADD COLUMN purpose TEXT NOT NULL DEFAULT 'task'",
+            [],
+        )?;
     }
     if !has_column(connection, "runs", "audit_json")? {
-        connection
-            .execute("ALTER TABLE runs ADD COLUMN audit_json TEXT", [])
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute("ALTER TABLE runs ADD COLUMN audit_json TEXT", [])?;
     }
     Ok(())
 }
@@ -1609,10 +1380,10 @@ fn validate_audit_schema(connection: &Connection) -> Result<(), SessionRuntimeEr
     if column_shape(connection, "sessions", "purpose")?
         != ("TEXT".to_owned(), true, Some("'task'".to_owned()), 0)
     {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     if column_shape(connection, "runs", "audit_json")? != ("TEXT".to_owned(), false, None, 0) {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     Ok(())
 }
@@ -1627,23 +1398,53 @@ fn validate_audit_schema(connection: &Connection) -> Result<(), SessionRuntimeEr
 /// `COUNT(*)` over `commands`; it is backfilled from the table once.
 fn add_fast_path_columns(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if !has_column(connection, "runs", "activity")? {
-        connection
-            .execute("ALTER TABLE runs ADD COLUMN activity TEXT", [])
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        connection.execute("ALTER TABLE runs ADD COLUMN activity TEXT", [])?;
     }
-    connection
-        .execute(
-            "INSERT OR REPLACE INTO metadata(key, value)
+    connection.execute(
+        "INSERT OR REPLACE INTO metadata(key, value)
              VALUES ('command_count', (SELECT COUNT(*) FROM commands))",
-            [],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        [],
+    )?;
     Ok(())
+}
+
+/// Schema 26: `tool_calls.effect` is the catalog effect class the call was
+/// admitted with (`read_only`, `mutating`, `shell`, `external`), so context
+/// assembly decides what it may prune from the stored kind rather than from
+/// the tool name. Null for calls recorded before this version; assembly falls
+/// back to the built-in read-only names for those rows.
+fn add_tool_call_effect_column(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    // Every store created since schema 10 has the table; the guard keeps the
+    // migration a no-op on partial historical stores that never recorded a
+    // tool call (test fixtures), where there is nothing to annotate.
+    if has_table(connection, "tool_calls")? && !has_column(connection, "tool_calls", "effect")? {
+        connection.execute("ALTER TABLE tool_calls ADD COLUMN effect TEXT", [])?;
+    }
+    Ok(())
+}
+
+fn validate_tool_call_effect_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    if has_table(connection, "tool_calls")?
+        && column_shape(connection, "tool_calls", "effect")? != ("TEXT".to_owned(), false, None, 0)
+    {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    Ok(())
+}
+
+fn has_table(connection: &Connection, table: &str) -> Result<bool, SessionRuntimeError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| SessionRuntimeError::CONSTRAINT)
 }
 
 fn validate_fast_path_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
     if column_shape(connection, "runs", "activity")? != ("TEXT".to_owned(), false, None, 0) {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     let counted: Option<String> = connection
         .query_row(
@@ -1651,10 +1452,9 @@ fn validate_fast_path_schema(connection: &Connection) -> Result<(), SessionRunti
             [],
             |row| row.get(0),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .optional()?;
     if counted.is_none() {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     Ok(())
 }

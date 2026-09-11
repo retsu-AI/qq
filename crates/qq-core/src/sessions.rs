@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
@@ -38,6 +38,7 @@ use crate::{
     GateDecision, PreparedRequestWeight, PreparedStaticPrefix, RunCapabilities, Runtime,
     RuntimeEvent, RuntimeToolCall, SpawnAgentFuture, SpawnAgentOutcome, SpawnAgentSpend,
     SpawnRequest, SubagentSpawner, ToolGate, ToolGateFuture, approval,
+    catalog::EffectClass,
     runtime::{HistoryMatch, HistorySearchFuture, HistorySearcher, excerpt_around},
     workspace::{FileState, FileStateUpdate},
 };
@@ -54,7 +55,7 @@ mod subagents;
 pub use feed::PublishedEvent;
 pub use runtime::{
     ApprovalReviewer, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime,
-    MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS,
+    MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS, PersistenceFault,
     PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest,
     ReviewSpend, ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadRequest,
     RuntimeLoader, SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions,
@@ -136,8 +137,9 @@ const RUNTIME_NOTICE_PREAMBLE: &str = "[QQ runtime notice; not a user instructio
 const RUNTIME_NOTICE_GUIDANCE: &str = "Continue from the committed history above. Do not \
     automatically retry tool calls whose result says execution was interrupted.";
 /// Read-only built-in tools whose results context assembly may replace with
-/// stubs: the agent can re-derive them on demand. Mutating, shell, and MCP
-/// results are never pruned — their outputs are not re-derivable.
+/// stubs when the call predates the stored effect class (schema 26): the
+/// agent can re-derive them on demand. Calls with a stored effect prune by
+/// that class instead; mutating, shell, and external results are never pruned.
 const PRUNABLE_READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_dir", "search", "search_history"];
 /// Prefixes the latest compaction summary when assembly replays it as the
 /// conversation's opening message.
@@ -229,7 +231,7 @@ fn parse_run_kind(value: &str) -> Result<RunKind, SessionRuntimeError> {
     match value {
         "prompt" => Ok(RunKind::Prompt),
         "compaction" => Ok(RunKind::Compaction),
-        _ => Err(SessionRuntimeError::Persistence),
+        _ => Err(SessionRuntimeError::CODEC),
     }
 }
 
@@ -272,33 +274,27 @@ fn encode_correlation(correlation: &Correlation) -> Result<Option<String>, Sessi
     }
     serde_json::to_string(correlation)
         .map(Some)
-        .map_err(|_| SessionRuntimeError::Persistence)
+        .map_err(|_| SessionRuntimeError::CODEC)
 }
 
 fn parse_correlation(encoded: Option<&str>) -> Result<Correlation, SessionRuntimeError> {
     match encoded {
         None => Ok(Correlation::default()),
-        Some(encoded) => {
-            serde_json::from_str(encoded).map_err(|_| SessionRuntimeError::Persistence)
-        }
+        Some(encoded) => serde_json::from_str(encoded).map_err(|_| SessionRuntimeError::CODEC),
     }
 }
 
 fn parse_profile(encoded: Option<&str>) -> Result<AgentProfileId, SessionRuntimeError> {
     match encoded {
         None => Ok(AgentProfileId::default()),
-        Some(encoded) => encoded
-            .parse()
-            .map_err(|_| SessionRuntimeError::Persistence),
+        Some(encoded) => encoded.parse().map_err(|_| SessionRuntimeError::CODEC),
     }
 }
 
 fn parse_input_parts(encoded: Option<&str>) -> Result<Vec<InputPart>, SessionRuntimeError> {
     match encoded {
         None => Ok(Vec::new()),
-        Some(encoded) => {
-            serde_json::from_str(encoded).map_err(|_| SessionRuntimeError::Persistence)
-        }
+        Some(encoded) => serde_json::from_str(encoded).map_err(|_| SessionRuntimeError::CODEC),
     }
 }
 
@@ -307,16 +303,17 @@ fn parse_input_parts(encoded: Option<&str>) -> Result<Vec<InputPart>, SessionRun
 fn parse_run_limits(encoded: Option<&str>) -> Result<RunLimits, SessionRuntimeError> {
     match encoded {
         None => Ok(RunLimits::default()),
-        Some(encoded) => {
-            serde_json::from_str(encoded).map_err(|_| SessionRuntimeError::Persistence)
-        }
+        Some(encoded) => serde_json::from_str(encoded).map_err(|_| SessionRuntimeError::CODEC),
     }
 }
 
-#[derive(Clone)]
-struct ClaimedRun {
+/// The durable identity of one claimed run: everything a store write needs
+/// to scope an event or settle a row, and nothing that costs to copy. Store
+/// wrappers take this by value instead of cloning the whole claim (with its
+/// transcript and model selections) per streamed event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunIdentity {
     workspace_id: WorkspaceId,
-    workspace: String,
     session_id: SessionId,
     run_id: RunId,
     command_id: CommandId,
@@ -324,6 +321,12 @@ struct ClaimedRun {
     /// Whether the run belongs to a child (sub-agent) session. Guaranteed by
     /// the claim query's parent filter.
     child: bool,
+}
+
+#[derive(Clone)]
+struct ClaimedRun {
+    identity: RunIdentity,
+    workspace: String,
     /// Nesting depth of the run's session: 0 for a root, 1 for a child. A
     /// run may spawn only while `depth < effective_max_depth`.
     depth: u16,
@@ -375,13 +378,8 @@ impl ClaimedRun {
     /// of up to 4 MiB for every active execution task.
     fn panic_settlement_claim(&self) -> Self {
         Self {
-            workspace_id: self.workspace_id,
+            identity: self.identity,
             workspace: String::new(),
-            session_id: self.session_id,
-            run_id: self.run_id,
-            command_id: self.command_id,
-            kind: self.kind,
-            child: self.child,
             user_initiated: self.user_initiated,
             literal_slash: self.literal_slash,
             session_model: self.session_model.clone(),
@@ -732,7 +730,7 @@ fn create_child_run(
     let limits_json = if limits.is_empty() {
         None
     } else {
-        Some(serde_json::to_string(&limits).map_err(|_| SessionRuntimeError::Persistence)?)
+        Some(serde_json::to_string(&limits)?)
     };
     let task = task.trim().to_owned();
     if task.is_empty() {
@@ -752,29 +750,24 @@ fn create_child_run(
             params![parent_session_id.to_string(), parent_run_id.to_string()],
             |row| row.get::<_, String>(0),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        .optional()?
         .ok_or(SessionRuntimeError::RunNotFound)?;
     if parse_id::<WorkspaceId>(&parent_workspace)? != workspace_id {
         return Err(SessionRuntimeError::ParentWorkspaceMismatch);
     }
-    let session_count: u32 = transaction
-        .query_row(
-            "SELECT COUNT(*) FROM sessions WHERE workspace_id = ?1",
-            [workspace_id.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let session_count: u32 = transaction.query_row(
+        "SELECT COUNT(*) FROM sessions WHERE workspace_id = ?1",
+        [workspace_id.to_string()],
+        |row| row.get(0),
+    )?;
     if session_count >= MAX_SESSIONS_PER_WORKSPACE {
         return Err(SessionRuntimeError::SessionLimitReached);
     }
-    let descendants: u32 = transaction
-        .query_row(
-            "SELECT COUNT(*) FROM sessions WHERE root_run_id = ?1",
-            [root_run_id.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let descendants: u32 = transaction.query_row(
+        "SELECT COUNT(*) FROM sessions WHERE root_run_id = ?1",
+        [root_run_id.to_string()],
+        |row| row.get(0),
+    )?;
     if descendants >= u32::from(MAX_DESCENDANTS_PER_ROOT) {
         return Err(SessionRuntimeError::DescendantLimitReached);
     }
@@ -813,50 +806,46 @@ fn create_child_run(
                 purpose.as_str(),
             ],
         )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    transaction
-        .execute(
-            "INSERT INTO runs(
+        ?;
+    transaction.execute(
+        "INSERT INTO runs(
                 id, session_id, command_id, user_message_id, assistant_message_id,
                 status, created_at_ms, limits_json
              ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7)",
-            params![
-                run_id.to_string(),
-                session_id.to_string(),
-                command_id.to_string(),
-                user_message_id.to_string(),
-                assistant_message_id.to_string(),
-                now,
-                limits_json,
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    transaction
-        .execute(
-            "INSERT INTO messages(
+        params![
+            run_id.to_string(),
+            session_id.to_string(),
+            command_id.to_string(),
+            user_message_id.to_string(),
+            assistant_message_id.to_string(),
+            now,
+            limits_json,
+        ],
+    )?;
+    transaction.execute(
+        "INSERT INTO messages(
                 id, session_id, run_id, ordinal, role, state, output, created_at_ms
              ) VALUES (?1, ?2, ?3, 1, 'user', 'queued', ?4, ?5)",
-            params![
-                user_message_id.to_string(),
-                session_id.to_string(),
-                run_id.to_string(),
-                task,
-                now,
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            user_message_id.to_string(),
+            session_id.to_string(),
+            run_id.to_string(),
+            task,
+            now,
+        ],
+    )?;
 
     let session = load_session_summary(&transaction, session_id)?;
     let created = append_event(
         &transaction,
-        EventContext {
+        EventContext::for_run_ids(
             store_id,
             workspace_id,
             session_id,
-            run_id: Some(run_id),
-            caused_by: Some(command_id),
-            occurred_at_ms: now,
-        },
+            run_id,
+            Some(command_id),
+            now,
+        ),
         SessionEvent::SessionCreated {
             session: session.clone(),
         },
@@ -865,14 +854,14 @@ fn create_child_run(
     let run = load_run(&transaction, run_id)?;
     let queued = append_event(
         &transaction,
-        EventContext {
+        EventContext::for_run_ids(
             store_id,
             workspace_id,
             session_id,
-            run_id: Some(run_id),
-            caused_by: Some(command_id),
-            occurred_at_ms: now,
-        },
+            run_id,
+            Some(command_id),
+            now,
+        ),
         SessionEvent::PromptQueued {
             session,
             message,
@@ -886,14 +875,14 @@ fn create_child_run(
     let committed_through = if purpose == SessionPurpose::Audit {
         append_event(
             &transaction,
-            EventContext {
+            EventContext::for_run_ids(
                 store_id,
                 workspace_id,
-                session_id: parent_session_id,
-                run_id: Some(parent_run_id),
-                caused_by: Some(command_id),
-                occurred_at_ms: now,
-            },
+                parent_session_id,
+                parent_run_id,
+                Some(command_id),
+                now,
+            ),
             SessionEvent::RunAuditStarted {
                 run_id: parent_run_id,
                 audit_session_id: session_id,
@@ -903,9 +892,7 @@ fn create_child_run(
     } else {
         queued.cursor
     };
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     debug_assert_eq!(created.cursor.sequence + 1, queued.cursor.sequence);
     Ok(CreatedChildRun {
         session_id,
@@ -925,22 +912,19 @@ fn execute_command(
     canonical_workspace: Option<Result<String, SessionRuntimeError>>,
     seed: &WorkspaceGrantSeed,
 ) -> Result<AppliedCommand, SessionRuntimeError> {
-    let request_json =
-        serde_json::to_string(&command).map_err(|_| SessionRuntimeError::Persistence)?;
+    let request_json = serde_json::to_string(&command)?;
     if let Some((stored_request, stored_receipt)) = connection
         .query_row(
             "SELECT request_json, receipt_json FROM commands WHERE id = ?1",
             [command_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        .optional()?
     {
         if stored_request != request_json {
             return Err(SessionRuntimeError::IdempotencyConflict);
         }
-        let receipt =
-            serde_json::from_str(&stored_receipt).map_err(|_| SessionRuntimeError::Persistence)?;
+        let receipt = serde_json::from_str(&stored_receipt)?;
         return Ok(AppliedCommand {
             receipt,
             schedule: false,
@@ -951,26 +935,23 @@ fn execute_command(
                 }
                 _ => Vec::new(),
             },
-            grant_promotion_pending: connection
-                .query_row(
-                    "SELECT EXISTS(
+            grant_promotion_pending: connection.query_row(
+                "SELECT EXISTS(
                          SELECT 1 FROM pending_workspace_grant_promotions
                          WHERE command_id = ?1
                      )",
-                    [command_id.to_string()],
-                    |row| row.get(0),
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?,
+                [command_id.to_string()],
+                |row| row.get(0),
+            )?,
         });
     }
     // The counter is maintained beside every insert (schema 25) so the bound
     // costs one row read instead of a table scan per command.
     let command_count: u32 = connection
         .prepare_cached("SELECT value FROM metadata WHERE key = 'command_count'")
-        .and_then(|mut statement| statement.query_row([], |row| row.get::<_, String>(0)))
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        .and_then(|mut statement| statement.query_row([], |row| row.get::<_, String>(0)))?
         .parse()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .map_err(|_| SessionRuntimeError::CODEC)?;
     if command_count >= MAX_COMMANDS {
         return Err(SessionRuntimeError::CommandLimitReached);
     }
@@ -989,25 +970,22 @@ fn execute_command(
                     [path],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
                 )
-                .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                .optional()?;
             let (workspace_id, sequence) = match existing {
                 Some((id, sequence)) => (parse_id(&id)?, sequence),
                 None => {
-                    let workspace_count: u32 = transaction
-                        .query_row("SELECT COUNT(*) FROM workspaces", [], |row| row.get(0))
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    let workspace_count: u32 =
+                        transaction
+                            .query_row("SELECT COUNT(*) FROM workspaces", [], |row| row.get(0))?;
                     if workspace_count >= MAX_WORKSPACES {
                         return Err(SessionRuntimeError::WorkspaceLimitReached);
                     }
                     let workspace_id =
                         WorkspaceId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
-                    transaction
-                        .execute(
-                            "INSERT INTO workspaces(id, path, next_sequence) VALUES (?1, ?2, 0)",
-                            params![workspace_id.to_string(), path],
-                        )
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    transaction.execute(
+                        "INSERT INTO workspaces(id, path, next_sequence) VALUES (?1, ?2, 0)",
+                        params![workspace_id.to_string(), path],
+                    )?;
                     (workspace_id, 0)
                 }
             };
@@ -1035,13 +1013,11 @@ fn execute_command(
             validate_model_selection(&model)?;
             let correlation_json = encode_correlation(&correlation)?;
             ensure_workspace(&transaction, workspace_id)?;
-            let session_count: u32 = transaction
-                .query_row(
-                    "SELECT COUNT(*) FROM sessions WHERE workspace_id = ?1",
-                    [workspace_id.to_string()],
-                    |row| row.get(0),
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let session_count: u32 = transaction.query_row(
+                "SELECT COUNT(*) FROM sessions WHERE workspace_id = ?1",
+                [workspace_id.to_string()],
+                |row| row.get(0),
+            )?;
             if session_count >= MAX_SESSIONS_PER_WORKSPACE {
                 return Err(SessionRuntimeError::SessionLimitReached);
             }
@@ -1063,8 +1039,7 @@ fn execute_command(
                             ))
                         },
                     )
-                    .optional()
-                    .map_err(|_| SessionRuntimeError::Persistence)?
+                    .optional()?
                     .ok_or(SessionRuntimeError::SessionNotFound)?;
                 if parse_id::<WorkspaceId>(&parent_workspace)? != workspace_id {
                     return Err(SessionRuntimeError::ParentWorkspaceMismatch);
@@ -1099,19 +1074,18 @@ fn execute_command(
                         root_run_id,
                     ],
                 )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                ?;
             insert_seed_grants(&transaction, session_id, seed, now)?;
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
-                EventContext {
+                EventContext::for_session(
                     store_id,
                     workspace_id,
                     session_id,
-                    run_id: None,
-                    caused_by: Some(command_id),
-                    occurred_at_ms: now,
-                },
+                    Some(command_id),
+                    now,
+                ),
                 SessionEvent::SessionCreated { session: summary },
             )?;
             (
@@ -1144,8 +1118,7 @@ fn execute_command(
             }
             validate_run_limits(&limits)?;
             let correlation_json = encode_correlation(&correlation)?;
-            let input_json =
-                serde_json::to_string(&input).map_err(|_| SessionRuntimeError::Persistence)?;
+            let input_json = serde_json::to_string(&input)?;
             // The transcript row carries the rendered text: text parts
             // verbatim, attachments as `@path` placeholders. Slash escaping
             // applies to the rendered text exactly as it did to the string.
@@ -1165,8 +1138,7 @@ fn execute_command(
                         ))
                     },
                 )
-                .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?
+                .optional()?
                 .ok_or(SessionRuntimeError::SessionNotFound)?;
             if queued >= MAX_PENDING_PROMPTS {
                 return Err(SessionRuntimeError::QueueFull);
@@ -1185,57 +1157,51 @@ fn execute_command(
             // the current turn's message as the run advances.
             let assistant_message_id =
                 MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
-            let ordinal: u64 = transaction
-                .query_row(
-                    "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM messages WHERE session_id = ?1",
-                    [session_id.to_string()],
-                    |row| row.get(0),
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let ordinal: u64 = transaction.query_row(
+                "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM messages WHERE session_id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )?;
             // Limits are persisted with the run row so a restart enforces the
             // bound the caller accepted, never a later default. An empty
             // set stores NULL, matching historical unlimited runs.
             let limits_json = if limits.is_empty() {
                 None
             } else {
-                Some(serde_json::to_string(&limits).map_err(|_| SessionRuntimeError::Persistence)?)
+                Some(serde_json::to_string(&limits)?)
             };
-            transaction
-                .execute(
-                    "INSERT INTO runs(
+            transaction.execute(
+                "INSERT INTO runs(
                         id, session_id, command_id, user_message_id, assistant_message_id,
                         status, created_at_ms, limits_json, input_json, correlation_json
                      ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9)",
-                    params![
-                        run_id.to_string(),
-                        session_id.to_string(),
-                        command_id.to_string(),
-                        message_id.to_string(),
-                        assistant_message_id.to_string(),
-                        now,
-                        limits_json,
-                        input_json,
-                        correlation_json,
-                    ],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
-            transaction
-                .execute(
-                    "INSERT INTO messages(
+                params![
+                    run_id.to_string(),
+                    session_id.to_string(),
+                    command_id.to_string(),
+                    message_id.to_string(),
+                    assistant_message_id.to_string(),
+                    now,
+                    limits_json,
+                    input_json,
+                    correlation_json,
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO messages(
                         id, session_id, run_id, ordinal, role, state, output, created_at_ms,
                         input_json
                      ) VALUES (?1, ?2, ?3, ?4, 'user', 'queued', ?5, ?6, ?7)",
-                    params![
-                        message_id.to_string(),
-                        session_id.to_string(),
-                        run_id.to_string(),
-                        ordinal,
-                        prompt,
-                        now,
-                        input_json,
-                    ],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                params![
+                    message_id.to_string(),
+                    session_id.to_string(),
+                    run_id.to_string(),
+                    ordinal,
+                    prompt,
+                    now,
+                    input_json,
+                ],
+            )?;
             let next_queued = queued + 1;
             let next_title = if ordinal == 1 {
                 prompt_title(&prompt)
@@ -1250,20 +1216,20 @@ fn execute_command(
                      WHERE id = ?1",
                     params![session_id.to_string(), next_title, next_queued, now],
                 )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                ?;
             let summary = load_session_summary(&transaction, session_id)?;
             let message = load_message(&transaction, message_id)?;
             let run = load_run(&transaction, run_id)?;
             let event = append_event(
                 &transaction,
-                EventContext {
+                EventContext::for_run_ids(
                     store_id,
                     workspace_id,
                     session_id,
-                    run_id: Some(run_id),
-                    caused_by: Some(command_id),
-                    occurred_at_ms: now,
-                },
+                    run_id,
+                    Some(command_id),
+                    now,
+                ),
                 SessionEvent::PromptQueued {
                     session: summary,
                     message,
@@ -1312,14 +1278,12 @@ fn execute_command(
                         ))
                     },
                 )
-                .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?
+                .optional()?
                 .ok_or(SessionRuntimeError::RunNotFound)?;
             let session_id = parse_id(&session_id)?;
             let workspace_id = session_workspace(&transaction, session_id)?;
             if let Some(outcome) = stored_outcome {
-                let outcome =
-                    serde_json::from_str(&outcome).map_err(|_| SessionRuntimeError::Persistence)?;
+                let outcome = serde_json::from_str(&outcome)?;
                 let sequence = workspace_sequence(&transaction, workspace_id)?;
                 (
                     CommandReceipt {
@@ -1340,57 +1304,50 @@ fn execute_command(
                 if status != "running" || parse_run_kind(&kind)? != RunKind::Prompt {
                     return Err(SessionRuntimeError::RunNotSteerable);
                 }
-                let pending: u16 = transaction
-                    .query_row(
-                        "SELECT COUNT(*) FROM messages
+                let pending: u16 = transaction.query_row(
+                    "SELECT COUNT(*) FROM messages
                          WHERE run_id = ?1 AND steering = 1 AND state = 'queued'",
-                        [run_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                    [run_id.to_string()],
+                    |row| row.get(0),
+                )?;
                 if pending >= crate::runtime::MAX_PENDING_STEERING {
                     return Err(SessionRuntimeError::SteeringQueueFull);
                 }
                 let message_id =
                     MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
-                let ordinal: u64 = transaction
-                    .query_row(
-                        "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM messages WHERE session_id = ?1",
-                        [session_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
-                let input_json =
-                    serde_json::to_string(&input).map_err(|_| SessionRuntimeError::Persistence)?;
+                let ordinal: u64 = transaction.query_row(
+                    "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM messages WHERE session_id = ?1",
+                    [session_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                let input_json = serde_json::to_string(&input)?;
                 let text = crate::input::render_text(&input).trim().to_owned();
-                transaction
-                    .execute(
-                        "INSERT INTO messages(
+                transaction.execute(
+                    "INSERT INTO messages(
                             id, session_id, run_id, ordinal, role, state, output, created_at_ms,
                             input_json, steering
                          ) VALUES (?1, ?2, ?3, ?4, 'user', 'queued', ?5, ?6, ?7, 1)",
-                        params![
-                            message_id.to_string(),
-                            session_id.to_string(),
-                            run_id.to_string(),
-                            ordinal,
-                            text,
-                            now,
-                            input_json,
-                        ],
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                    params![
+                        message_id.to_string(),
+                        session_id.to_string(),
+                        run_id.to_string(),
+                        ordinal,
+                        text,
+                        now,
+                        input_json,
+                    ],
+                )?;
                 let message = load_message(&transaction, message_id)?;
                 let event = append_event(
                     &transaction,
-                    EventContext {
+                    EventContext::for_run_ids(
                         store_id,
                         workspace_id,
                         session_id,
-                        run_id: Some(run_id),
-                        caused_by: Some(command_id),
-                        occurred_at_ms: now,
-                    },
+                        run_id,
+                        Some(command_id),
+                        now,
+                    ),
                     SessionEvent::SteeringQueued { run_id, message },
                 )?;
                 (
@@ -1416,14 +1373,12 @@ fn execute_command(
                         ))
                     },
                 )
-                .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?
+                .optional()?
                 .ok_or(SessionRuntimeError::RunNotFound)?;
             let session_id = parse_id(&session_id)?;
             let workspace_id = session_workspace(&transaction, session_id)?;
             if let Some(outcome) = stored_outcome {
-                let outcome =
-                    serde_json::from_str(&outcome).map_err(|_| SessionRuntimeError::Persistence)?;
+                let outcome = serde_json::from_str(&outcome)?;
                 let sequence = workspace_sequence(&transaction, workspace_id)?;
                 (
                     CommandReceipt {
@@ -1438,23 +1393,21 @@ fn execute_command(
                     false,
                 )
             } else {
-                transaction
-                    .execute(
-                        "UPDATE runs SET cancel_requested = 1 WHERE id = ?1",
-                        [run_id.to_string()],
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                transaction.execute(
+                    "UPDATE runs SET cancel_requested = 1 WHERE id = ?1",
+                    [run_id.to_string()],
+                )?;
                 let summary = load_session_summary(&transaction, session_id)?;
                 let requested = append_event(
                     &transaction,
-                    EventContext {
+                    EventContext::for_run_ids(
                         store_id,
                         workspace_id,
                         session_id,
-                        run_id: Some(run_id),
-                        caused_by: Some(command_id),
-                        occurred_at_ms: now,
-                    },
+                        run_id,
+                        Some(command_id),
+                        now,
+                    ),
                     SessionEvent::CancellationRequested {
                         session: summary,
                         run_id,
@@ -1534,8 +1487,7 @@ fn execute_command(
                         ))
                     },
                 )
-                .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?
+                .optional()?
                 .ok_or(SessionRuntimeError::ToolCallNotFound)?;
             if parse_id::<RunId>(&call_run)? != run_id {
                 return Err(SessionRuntimeError::ToolCallNotFound);
@@ -1546,7 +1498,7 @@ fn execute_command(
                     [run_id.to_string()],
                     |row| row.get::<_, String>(0),
                 )
-                .map_err(|_| SessionRuntimeError::Persistence)
+                .map_err(|_| SessionRuntimeError::CONSTRAINT)
                 .and_then(|session| parse_id(&session))?;
             let workspace_id = session_workspace(&transaction, session_id)?;
             if let Some(resolution) = resolution {
@@ -1587,19 +1539,17 @@ fn execute_command(
                     ApprovalDecision::ApproveOnce
                     | ApprovalDecision::ApproveForSession { .. }
                     | ApprovalDecision::ApproveForWorkspace { .. } => {
-                        transaction
-                            .execute(
-                                "UPDATE tool_calls
+                        transaction.execute(
+                            "UPDATE tool_calls
                                  SET state = 'requested', approval_resolution = ?2,
                                      resolved_at_ms = ?3
                                  WHERE id = ?1 AND state = 'awaiting_approval'",
-                                params![
-                                    tool_call_id.to_string(),
-                                    approval_resolution_str(resolution),
-                                    now,
-                                ],
-                            )
-                            .map_err(|_| SessionRuntimeError::Persistence)?;
+                            params![
+                                tool_call_id.to_string(),
+                                approval_resolution_str(resolution),
+                                now,
+                            ],
+                        )?;
                     }
                     ApprovalDecision::Deny => {
                         reserve_tool_result_capacity(
@@ -1609,21 +1559,19 @@ fn execute_command(
                             approval::USER_DENIED_RESULT,
                             first_result_in_turn,
                         )?;
-                        transaction
-                            .execute(
-                                "UPDATE tool_calls
+                        transaction.execute(
+                            "UPDATE tool_calls
                                  SET state = 'denied', result = ?2, is_error = 1,
                                      approval_resolution = ?3, resolved_at_ms = ?4,
                                      finished_at_ms = ?4
                                  WHERE id = ?1 AND state = 'awaiting_approval'",
-                                params![
-                                    tool_call_id.to_string(),
-                                    approval::USER_DENIED_RESULT,
-                                    approval_resolution_str(resolution),
-                                    now,
-                                ],
-                            )
-                            .map_err(|_| SessionRuntimeError::Persistence)?;
+                            params![
+                                tool_call_id.to_string(),
+                                approval::USER_DENIED_RESULT,
+                                approval_resolution_str(resolution),
+                                now,
+                            ],
+                        )?;
                     }
                 }
                 // Approve-for-workspace records the same session grant as
@@ -1640,33 +1588,27 @@ fn execute_command(
                     if value.is_empty() || value.len() > MAX_GRANT_BYTES {
                         return Err(SessionRuntimeError::InvalidApprovalGrant);
                     }
-                    let grant_count: u32 = transaction
-                        .query_row(
-                            "SELECT COUNT(*) FROM session_grants WHERE session_id = ?1",
-                            [session_id.to_string()],
-                            |row| row.get(0),
-                        )
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    let grant_count: u32 = transaction.query_row(
+                        "SELECT COUNT(*) FROM session_grants WHERE session_id = ?1",
+                        [session_id.to_string()],
+                        |row| row.get(0),
+                    )?;
                     if grant_count >= MAX_SESSION_GRANTS {
                         return Err(SessionRuntimeError::InvalidApprovalGrant);
                     }
-                    transaction
-                        .execute(
-                            "INSERT OR IGNORE INTO session_grants(
+                    transaction.execute(
+                        "INSERT OR IGNORE INTO session_grants(
                                  session_id, kind, value, created_at_ms
                              ) VALUES (?1, ?2, ?3, ?4)",
-                            params![session_id.to_string(), kind, value, now],
-                        )
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                        params![session_id.to_string(), kind, value, now],
+                    )?;
                 }
                 if let ApprovalDecision::ApproveForWorkspace { grant } = &decision {
-                    let workspace_path: String = transaction
-                        .query_row(
-                            "SELECT path FROM workspaces WHERE id = ?1",
-                            [workspace_id.to_string()],
-                            |row| row.get(0),
-                        )
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    let workspace_path: String = transaction.query_row(
+                        "SELECT path FROM workspaces WHERE id = ?1",
+                        [workspace_id.to_string()],
+                        |row| row.get(0),
+                    )?;
                     let promotion = PendingGrantPromotion {
                         workspace_id,
                         workspace_path,
@@ -1675,39 +1617,34 @@ fn execute_command(
                         command_id,
                         grant: grant.clone(),
                     };
-                    let pending_count: u32 = transaction
-                        .query_row(
-                            "SELECT COUNT(*) FROM pending_workspace_grant_promotions",
-                            [],
-                            |row| row.get(0),
-                        )
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    let pending_count: u32 = transaction.query_row(
+                        "SELECT COUNT(*) FROM pending_workspace_grant_promotions",
+                        [],
+                        |row| row.get(0),
+                    )?;
                     if pending_count >= MAX_PENDING_GRANT_PROMOTIONS {
                         return Err(SessionRuntimeError::Overloaded);
                     }
-                    let promotion_json = serde_json::to_string(&promotion)
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
-                    transaction
-                        .execute(
-                            "INSERT INTO pending_workspace_grant_promotions(
+                    let promotion_json = serde_json::to_string(&promotion)?;
+                    transaction.execute(
+                        "INSERT INTO pending_workspace_grant_promotions(
                                  command_id, created_at_ms, promotion_json
                              ) VALUES (?1, ?2, ?3)",
-                            params![command_id.to_string(), now, promotion_json],
-                        )
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                        params![command_id.to_string(), now, promotion_json],
+                    )?;
                     grant_promotion_pending = true;
                 }
                 let tool_call = load_tool_call(&transaction, tool_call_id)?;
                 let event = append_event(
                     &transaction,
-                    EventContext {
+                    EventContext::for_run_ids(
                         store_id,
                         workspace_id,
                         session_id,
-                        run_id: Some(run_id),
-                        caused_by: Some(command_id),
-                        occurred_at_ms: now,
-                    },
+                        run_id,
+                        Some(command_id),
+                        now,
+                    ),
                     SessionEvent::ToolApprovalResolved {
                         tool_call,
                         resolution,
@@ -1732,35 +1669,30 @@ fn execute_command(
             // granted at spawn time. A client may lower it further but never
             // raise it: the parent's policy, not the client's, bounds what a
             // child can do to the workspace.
-            let (owned, current): (bool, String) = transaction
-                .query_row(
-                    "SELECT owner_run_id IS NOT NULL, approval_mode FROM sessions WHERE id = ?1",
-                    [session_id.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let (owned, current): (bool, String) = transaction.query_row(
+                "SELECT owner_run_id IS NOT NULL, approval_mode FROM sessions WHERE id = ?1",
+                [session_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
             if owned && approval_rank(mode) > approval_rank(parse_approval_mode(&current)?) {
                 return Err(SessionRuntimeError::ChildAuthorityEscalation);
             }
-            transaction
-                .execute(
-                    "UPDATE sessions SET approval_mode = ?2, updated_at_ms = ?3 WHERE id = ?1",
-                    params![session_id.to_string(), approval_mode_str(mode), now],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.execute(
+                "UPDATE sessions SET approval_mode = ?2, updated_at_ms = ?3 WHERE id = ?1",
+                params![session_id.to_string(), approval_mode_str(mode), now],
+            )?;
             // The mode is read when each approval is evaluated, so it applies
             // to the next held call; the summary carries it to every client.
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
-                EventContext {
+                EventContext::for_session(
                     store_id,
                     workspace_id,
                     session_id,
-                    run_id: None,
-                    caused_by: Some(command_id),
-                    occurred_at_ms: now,
-                },
+                    Some(command_id),
+                    now,
+                ),
                 SessionEvent::SessionUpdated { session: summary },
             )?;
             (
@@ -1775,9 +1707,8 @@ fn execute_command(
         SessionCommand::SetSessionModel { session_id, model } => {
             validate_model_selection(&model)?;
             let workspace_id = session_workspace(&transaction, session_id)?;
-            transaction
-                .execute(
-                    "UPDATE sessions
+            transaction.execute(
+                "UPDATE sessions
                      SET context_tokens = CASE
                              WHEN model IS ?2 THEN context_tokens ELSE NULL
                          END,
@@ -1789,29 +1720,27 @@ fn execute_command(
                          model = ?2, max_output_tokens = ?3, organization = ?4,
                          updated_at_ms = ?5
                      WHERE id = ?1",
-                    params![
-                        session_id.to_string(),
-                        &model.model,
-                        model.max_output_tokens,
-                        &model.organization,
-                        now,
-                    ],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                params![
+                    session_id.to_string(),
+                    &model.model,
+                    model.max_output_tokens,
+                    &model.organization,
+                    now,
+                ],
+            )?;
             // The new selection is read at claim time (`claim_next_run`), so
             // it applies to the next run; an executing run keeps the
             // `ClaimedRun` model it started with.
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
-                EventContext {
+                EventContext::for_session(
                     store_id,
                     workspace_id,
                     session_id,
-                    run_id: None,
-                    caused_by: Some(command_id),
-                    occurred_at_ms: now,
-                },
+                    Some(command_id),
+                    now,
+                ),
                 SessionEvent::SessionUpdated { session: summary },
             )?;
             (
@@ -1828,27 +1757,24 @@ fn execute_command(
             profile,
         } => {
             let workspace_id = session_workspace(&transaction, session_id)?;
-            transaction
-                .execute(
-                    "UPDATE sessions SET profile = ?2, updated_at_ms = ?3 WHERE id = ?1",
-                    params![
-                        session_id.to_string(),
-                        (!profile.is_default()).then(|| profile.as_str().to_owned()),
-                        now,
-                    ],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.execute(
+                "UPDATE sessions SET profile = ?2, updated_at_ms = ?3 WHERE id = ?1",
+                params![
+                    session_id.to_string(),
+                    (!profile.is_default()).then(|| profile.as_str().to_owned()),
+                    now,
+                ],
+            )?;
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
-                EventContext {
+                EventContext::for_session(
                     store_id,
                     workspace_id,
                     session_id,
-                    run_id: None,
-                    caused_by: Some(command_id),
-                    occurred_at_ms: now,
-                },
+                    Some(command_id),
+                    now,
+                ),
                 SessionEvent::SessionUpdated { session: summary },
             )?;
             (
@@ -1887,9 +1813,8 @@ fn execute_command(
             // Idle sessions that never received a message: the residue left
             // by creating sessions without prompting them. Anything with a
             // run row (even a cancelled one) is history worth keeping.
-            let mut statement = transaction
-                .prepare(
-                    "SELECT id FROM sessions
+            let mut statement = transaction.prepare(
+                "SELECT id FROM sessions
                      WHERE workspace_id = ?1 AND status = 'idle'
                        AND active_run_id IS NULL AND preparing_run_id IS NULL
                        AND queued_prompts = 0
@@ -1900,13 +1825,10 @@ fn execute_command(
                            SELECT 1 FROM runs WHERE runs.session_id = sessions.id
                        )
                      ORDER BY rowid",
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            )?;
             let victims = statement
-                .query_map([workspace_id.to_string()], |row| row.get::<_, String>(0))
-                .map_err(|_| SessionRuntimeError::Persistence)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                .query_map([workspace_id.to_string()], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
             drop(statement);
             let mut cursor = EventCursor {
                 store_id,
@@ -1953,8 +1875,7 @@ fn execute_command(
                     [session_id.to_string()],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
-                .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?
+                .optional()?
                 .ok_or(SessionRuntimeError::SessionNotFound)?;
             // Compaction is valid only while the session is idle: a running
             // run keeps the context it started with, and a queued prompt
@@ -1969,44 +1890,40 @@ fn execute_command(
                 MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
             let assistant_message_id =
                 MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
-            transaction
-                .execute(
-                    "INSERT INTO runs(
+            transaction.execute(
+                "INSERT INTO runs(
                         id, session_id, command_id, user_message_id, assistant_message_id,
                         status, kind, created_at_ms
                      ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', 'compaction', ?6)",
-                    params![
-                        run_id.to_string(),
-                        session_id.to_string(),
-                        command_id.to_string(),
-                        user_message_id.to_string(),
-                        assistant_message_id.to_string(),
-                        now,
-                    ],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                params![
+                    run_id.to_string(),
+                    session_id.to_string(),
+                    command_id.to_string(),
+                    user_message_id.to_string(),
+                    assistant_message_id.to_string(),
+                    now,
+                ],
+            )?;
             // The internal run flows through the ordinary queue accounting so
             // claiming it decrements like any prompt.
-            transaction
-                .execute(
-                    "UPDATE sessions
+            transaction.execute(
+                "UPDATE sessions
                      SET status = 'queued', queued_prompts = queued_prompts + 1,
                          updated_at_ms = ?2
                      WHERE id = ?1",
-                    params![session_id.to_string(), now],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                params![session_id.to_string(), now],
+            )?;
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
-                EventContext {
+                EventContext::for_run_ids(
                     store_id,
                     workspace_id,
                     session_id,
-                    run_id: Some(run_id),
-                    caused_by: Some(command_id),
-                    occurred_at_ms: now,
-                },
+                    run_id,
+                    Some(command_id),
+                    now,
+                ),
                 SessionEvent::SessionUpdated { session: summary },
             )?;
             (
@@ -2032,8 +1949,7 @@ fn execute_command(
                     [session_id.to_string()],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
-                .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?
+                .optional()?
                 .ok_or(SessionRuntimeError::SessionNotFound)?;
             // Same idle requirement as compaction: an active run keeps the
             // assembly it started with, and a queued prompt must not race the
@@ -2041,50 +1957,43 @@ fn execute_command(
             if status != "idle" || active_run.is_some() || preparing_run.is_some() || queued > 0 {
                 return Err(SessionRuntimeError::SessionActive);
             }
-            let removed = transaction
-                .execute(
-                    "DELETE FROM session_compactions
+            let removed = transaction.execute(
+                "DELETE FROM session_compactions
                      WHERE session_id = ?1 AND rowid = (
                          SELECT MAX(rowid) FROM session_compactions WHERE session_id = ?1
                      )",
-                    [session_id.to_string()],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                [session_id.to_string()],
+            )?;
             if removed != 1 {
                 return Err(SessionRuntimeError::NoCompactionToRollBack);
             }
-            let remaining: u16 = transaction
-                .query_row(
-                    "SELECT COUNT(*) FROM session_compactions WHERE session_id = ?1",
-                    [session_id.to_string()],
-                    |row| row.get(0),
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let remaining: u16 = transaction.query_row(
+                "SELECT COUNT(*) FROM session_compactions WHERE session_id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )?;
             // The assembly changed under the meter: the last measured turn
             // saw the discarded summary, so the session is unknown until the
             // next prompt turn measures the restored context.
-            transaction
-                .execute(
-                    "UPDATE sessions
+            transaction.execute(
+                "UPDATE sessions
                      SET context_tokens = NULL,
                          context_occupancy_json = NULL,
                          pending_context_overflow_basis_json = NULL,
                          updated_at_ms = ?2
                      WHERE id = ?1",
-                    params![session_id.to_string(), now],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                params![session_id.to_string(), now],
+            )?;
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
-                EventContext {
+                EventContext::for_session(
                     store_id,
                     workspace_id,
                     session_id,
-                    run_id: None,
-                    caused_by: Some(command_id),
-                    occurred_at_ms: now,
-                },
+                    Some(command_id),
+                    now,
+                ),
                 SessionEvent::SessionCompactionRolledBack {
                     session: summary,
                     remaining,
@@ -2103,24 +2012,18 @@ fn execute_command(
             )
         }
     };
-    let receipt_json =
-        serde_json::to_string(&receipt).map_err(|_| SessionRuntimeError::Persistence)?;
-    transaction
-        .execute(
-            "INSERT INTO commands(id, request_json, receipt_json) VALUES (?1, ?2, ?3)",
-            params![command_id.to_string(), request_json, receipt_json],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let receipt_json = serde_json::to_string(&receipt)?;
+    transaction.execute(
+        "INSERT INTO commands(id, request_json, receipt_json) VALUES (?1, ?2, ?3)",
+        params![command_id.to_string(), request_json, receipt_json],
+    )?;
     transaction
         .prepare_cached(
             "UPDATE metadata SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
              WHERE key = 'command_count'",
         )
-        .and_then(|mut statement| statement.execute([]))
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .and_then(|mut statement| statement.execute([]))?;
+    transaction.commit()?;
     Ok(AppliedCommand {
         receipt,
         schedule,
@@ -2140,13 +2043,11 @@ fn reserve_next_run(
     // NORMAL keeps this transaction consistent and process-crash durable while
     // allowing an OS/power loss to discard only the recoverable pointer. FULL
     // is restored before any authoritative start or terminal transaction.
-    connection
-        .pragma_update(None, "synchronous", "NORMAL")
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
     let reserved = reserve_next_run_recoverable(connection, store_id, depth);
     let restored = connection
         .pragma_update(None, "synchronous", "FULL")
-        .map_err(|_| SessionRuntimeError::Persistence);
+        .map_err(|_| SessionRuntimeError::CONSTRAINT);
     match (reserved, restored) {
         (_, Err(error)) => Err(error),
         (result, Ok(())) => result,
@@ -2210,8 +2111,7 @@ fn reserve_next_run_recoverable(
                 ))
             },
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .optional()?;
     let Some((
         run,
         session,
@@ -2242,7 +2142,7 @@ fn reserve_next_run_recoverable(
     let purpose = match purpose.as_str() {
         "task" => SessionPurpose::Task,
         "audit" => SessionPurpose::Audit,
-        _ => return Err(SessionRuntimeError::Persistence),
+        _ => return Err(SessionRuntimeError::CONSTRAINT),
     };
     let limits = parse_run_limits(limits_json.as_deref())?;
     let input = parse_input_parts(input_json.as_deref())?;
@@ -2258,8 +2158,7 @@ fn reserve_next_run_recoverable(
     let user_message_id = parse_id::<MessageId>(&user_message)?;
     let (user_initiated, literal_slash) = match command_request {
         Some(request) => {
-            let request = serde_json::from_str::<SessionCommand>(&request)
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let request = serde_json::from_str::<SessionCommand>(&request)?;
             let literal_slash = matches!(
                 &request,
                 SessionCommand::SubmitPrompt { input, .. }
@@ -2276,32 +2175,26 @@ fn reserve_next_run_recoverable(
         max_output_tokens: max_tokens,
         organization,
     };
-    let reserved = transaction
-        .execute(
-            "UPDATE sessions SET preparing_run_id = ?2
+    let reserved = transaction.execute(
+        "UPDATE sessions SET preparing_run_id = ?2
              WHERE id = ?1 AND active_run_id IS NULL AND preparing_run_id IS NULL",
-            params![session, run],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![session, run],
+    )?;
     if reserved != 1 {
         return Ok(None);
     }
     let (messages, context_rewritten) = match kind {
         RunKind::Prompt => {
-            let user_ordinal: u64 = transaction
-                .query_row(
-                    "SELECT ordinal FROM messages WHERE id = ?1",
-                    [user_message_id.to_string()],
-                    |row| row.get(0),
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
-            let prompt: String = transaction
-                .query_row(
-                    "SELECT output FROM messages WHERE id = ?1 AND state = 'queued'",
-                    [user_message_id.to_string()],
-                    |row| row.get(0),
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let user_ordinal: u64 = transaction.query_row(
+                "SELECT ordinal FROM messages WHERE id = ?1",
+                [user_message_id.to_string()],
+                |row| row.get(0),
+            )?;
+            let prompt: String = transaction.query_row(
+                "SELECT output FROM messages WHERE id = ?1 AND state = 'queued'",
+                [user_message_id.to_string()],
+                |row| row.get(0),
+            )?;
             let (mut context, context_rewritten) = load_model_context_with_rewrite_status(
                 &transaction,
                 session_id,
@@ -2376,7 +2269,7 @@ fn reserve_next_run_recoverable(
                     clear_context_overflow,
                 ],
             )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+            ?;
     }
     // Everything the executor reads before its first provider request rides
     // the claim transaction, so claim-to-send is two store hops: this one and
@@ -2384,17 +2277,17 @@ fn reserve_next_run_recoverable(
     let cancel_requested = run_cancel_requested(&transaction, run_id)?;
     let file_state = session_file_state_rows(&transaction, session_id)?;
     let pending_steering = pending_steering_rows(&transaction, run_id)?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(Some(ClaimedRun {
-        workspace_id,
+        identity: RunIdentity {
+            workspace_id,
+            session_id,
+            run_id,
+            command_id,
+            kind,
+            child: depth > 0,
+        },
         workspace: workspace_path,
-        session_id,
-        run_id,
-        command_id,
-        kind,
-        child: depth > 0,
         user_initiated,
         literal_slash,
         session_model: model.clone(),
@@ -2430,89 +2323,71 @@ fn prepared_context_bytes(weight: PreparedRequestWeight) -> Result<i64, SessionR
 fn start_reserved_run(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     audit: &PreparedRunAudit,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
-    let prompt_identity = serde_json::to_string(audit.prompt_identity.as_ref())
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let resolved_model = serde_json::to_string(audit.resolved_model.as_ref())
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let plan_identity = serde_json::to_string(&audit.plan_identity)
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let prompt_identity = serde_json::to_string(audit.prompt_identity.as_ref())?;
+    let resolved_model = serde_json::to_string(audit.resolved_model.as_ref())?;
+    let plan_identity = serde_json::to_string(&audit.plan_identity)?;
     let context_base_bytes = prepared_context_bytes(audit.weight)?;
     let now = now_ms();
     let transaction = store::begin_unit(connection)?;
     // Plan identity and its descriptor are fixed in the same statement that
     // starts the run: a later configuration or credential refresh compiles a
     // new plan for later runs and never touches this row.
-    let run_started = transaction
-        .execute(
-            "UPDATE runs
+    let run_started = transaction.execute(
+        "UPDATE runs
              SET status = 'running', started_at_ms = ?3,
                  prompt_identity_json = ?4, resolved_model_json = ?5,
                  context_base_bytes = ?6, context_increment_bytes = 0,
                  plan_identity_json = ?7, plan_descriptor_json = ?8
              WHERE id = ?1 AND session_id = ?2 AND status = 'queued'
                AND outcome_json IS NULL AND cancel_requested = 0",
-            params![
-                claimed.run_id.to_string(),
-                claimed.session_id.to_string(),
-                now,
-                prompt_identity,
-                resolved_model,
-                context_base_bytes,
-                plan_identity,
-                audit.plan_descriptor_json.as_ref(),
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            identity.run_id.to_string(),
+            identity.session_id.to_string(),
+            now,
+            prompt_identity,
+            resolved_model,
+            context_base_bytes,
+            plan_identity,
+            audit.plan_descriptor_json.as_ref(),
+        ],
+    )?;
     if run_started != 1 {
         return Ok(None);
     }
-    let session_started = transaction
-        .execute(
-            "UPDATE sessions
+    let session_started = transaction.execute(
+        "UPDATE sessions
              SET active_run_id = ?2, preparing_run_id = NULL, status = 'running',
                  queued_prompts = queued_prompts - 1, updated_at_ms = ?3
              WHERE id = ?1 AND active_run_id IS NULL AND preparing_run_id = ?2
                AND queued_prompts > 0",
-            params![
-                claimed.session_id.to_string(),
-                claimed.run_id.to_string(),
-                now,
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            identity.session_id.to_string(),
+            identity.run_id.to_string(),
+            now,
+        ],
+    )?;
     if session_started != 1 {
         return Ok(None);
     }
-    transaction
-        .execute(
-            "UPDATE messages SET state = 'complete'
+    transaction.execute(
+        "UPDATE messages SET state = 'complete'
              WHERE run_id = ?1 AND role = 'user' AND state = 'queued'",
-            [claimed.run_id.to_string()],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let summary = load_session_summary(&transaction, claimed.session_id)?;
+        [identity.run_id.to_string()],
+    )?;
+    let summary = load_session_summary(&transaction, identity.session_id)?;
     let started = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: None,
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now).uncaused(),
         SessionEvent::RunStarted {
             session: summary,
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             plan: Some(Box::new(audit.plan_identity.clone())),
         },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(Some(started))
 }
 
@@ -2527,41 +2402,39 @@ fn start_auto_compaction(
     let user_message_id = MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
     let assistant_message_id =
         MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
-    let prompt_identity = serde_json::to_string(audit.prompt_identity.as_ref())
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let resolved_model = serde_json::to_string(audit.resolved_model.as_ref())
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let plan_identity = serde_json::to_string(&audit.plan_identity)
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let prompt_identity = serde_json::to_string(audit.prompt_identity.as_ref())?;
+    let resolved_model = serde_json::to_string(audit.resolved_model.as_ref())?;
+    let plan_identity = serde_json::to_string(&audit.plan_identity)?;
     let context_base_bytes = prepared_context_bytes(audit.weight)?;
     let now = now_ms();
     let transaction = store::begin_unit(connection)?;
-    let attempted = transaction
-        .execute(
-            "UPDATE runs SET context_compaction_attempted = 1
+    let attempted = transaction.execute(
+        "UPDATE runs SET context_compaction_attempted = 1
              WHERE id = ?1 AND session_id = ?2 AND status = 'queued'
                AND outcome_json IS NULL AND cancel_requested = 0
                AND context_compaction_attempted = 0",
-            params![original.run_id.to_string(), original.session_id.to_string()],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            original.identity.run_id.to_string(),
+            original.identity.session_id.to_string()
+        ],
+    )?;
     if attempted != 1 {
         return Ok(None);
     }
-    let reservation_valid: bool = transaction
-        .query_row(
-            "SELECT active_run_id IS NULL AND preparing_run_id = ?2
+    let reservation_valid: bool = transaction.query_row(
+        "SELECT active_run_id IS NULL AND preparing_run_id = ?2
              FROM sessions WHERE id = ?1",
-            params![original.session_id.to_string(), original.run_id.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            original.identity.session_id.to_string(),
+            original.identity.run_id.to_string()
+        ],
+        |row| row.get(0),
+    )?;
     if !reservation_valid {
         return Ok(None);
     }
-    transaction
-        .execute(
-            "INSERT INTO runs(
+    transaction.execute(
+        "INSERT INTO runs(
                  id, session_id, command_id, user_message_id, assistant_message_id,
                  status, kind, auto_compaction, auto_compaction_for_run_id,
                  prompt_identity_json,
@@ -2571,66 +2444,63 @@ fn start_auto_compaction(
                  ?1, ?2, ?3, ?4, ?5, 'running', 'compaction', 1, ?6, ?7,
                  ?8, ?9, 0, ?10, ?10, ?11, ?12
              )",
-            params![
-                run_id.to_string(),
-                original.session_id.to_string(),
-                command_id.to_string(),
-                user_message_id.to_string(),
-                assistant_message_id.to_string(),
-                original.run_id.to_string(),
-                prompt_identity,
-                resolved_model,
-                context_base_bytes,
-                now,
-                plan_identity,
-                audit.plan_descriptor_json.as_ref(),
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let session_started = transaction
-        .execute(
-            "UPDATE sessions SET active_run_id = ?2, status = 'running', updated_at_ms = ?3
+        params![
+            run_id.to_string(),
+            original.identity.session_id.to_string(),
+            command_id.to_string(),
+            user_message_id.to_string(),
+            assistant_message_id.to_string(),
+            original.identity.run_id.to_string(),
+            prompt_identity,
+            resolved_model,
+            context_base_bytes,
+            now,
+            plan_identity,
+            audit.plan_descriptor_json.as_ref(),
+        ],
+    )?;
+    let session_started = transaction.execute(
+        "UPDATE sessions SET active_run_id = ?2, status = 'running', updated_at_ms = ?3
              WHERE id = ?1 AND active_run_id IS NULL AND preparing_run_id = ?4",
-            params![
-                original.session_id.to_string(),
-                run_id.to_string(),
-                now,
-                original.run_id.to_string(),
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            original.identity.session_id.to_string(),
+            run_id.to_string(),
+            now,
+            original.identity.run_id.to_string(),
+        ],
+    )?;
     if session_started != 1 {
         return Ok(None);
     }
-    let summary = load_session_summary(&transaction, original.session_id)?;
+    let summary = load_session_summary(&transaction, original.identity.session_id)?;
     let started = append_event(
         &transaction,
-        EventContext {
+        EventContext::for_run_ids(
             store_id,
-            workspace_id: original.workspace_id,
-            session_id: original.session_id,
-            run_id: Some(run_id),
-            caused_by: None,
-            occurred_at_ms: now,
-        },
+            original.identity.workspace_id,
+            original.identity.session_id,
+            run_id,
+            None,
+            now,
+        ),
         SessionEvent::RunStarted {
             session: summary,
             run_id,
             plan: Some(Box::new(audit.plan_identity.clone())),
         },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(Some((
         ClaimedRun {
-            workspace_id: original.workspace_id,
+            identity: RunIdentity {
+                workspace_id: original.identity.workspace_id,
+                session_id: original.identity.session_id,
+                run_id,
+                command_id,
+                kind: RunKind::Compaction,
+                child: original.identity.child,
+            },
             workspace: original.workspace.clone(),
-            session_id: original.session_id,
-            run_id,
-            command_id,
-            kind: RunKind::Compaction,
-            child: original.child,
             user_initiated: false,
             literal_slash: false,
             session_model: original.session_model.clone(),
@@ -2666,15 +2536,13 @@ fn load_auto_compaction_messages(
         &transaction,
         session_id,
     )?));
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(messages)
 }
 
 fn reload_reserved_messages(
     connection: &mut Connection,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
 ) -> Result<Option<(Vec<Message>, bool)>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let row = transaction
@@ -2683,7 +2551,7 @@ fn reload_reserved_messages(
                     r.user_message_id, s.preparing_run_id, s.active_run_id
              FROM runs r JOIN sessions s ON s.id = r.session_id
              WHERE r.id = ?1 AND r.session_id = ?2",
-            params![claimed.run_id.to_string(), claimed.session_id.to_string()],
+            params![identity.run_id.to_string(), identity.session_id.to_string()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -2695,41 +2563,34 @@ fn reload_reserved_messages(
                 ))
             },
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .optional()?;
     let Some((status, cancelled, attempted, user_message_id, preparing, active)) = row else {
         return Ok(None);
     };
     if status != "queued"
         || cancelled
-        || preparing.as_deref() != Some(claimed.run_id.to_string().as_str())
+        || preparing.as_deref() != Some(identity.run_id.to_string().as_str())
         || active.is_some()
     {
         return Ok(None);
     }
-    let user_ordinal: u64 = transaction
-        .query_row(
-            "SELECT ordinal FROM messages WHERE id = ?1",
-            [user_message_id.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let prompt: String = transaction
-        .query_row(
-            "SELECT output FROM messages WHERE id = ?1 AND state = 'queued'",
-            [user_message_id.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let user_ordinal: u64 = transaction.query_row(
+        "SELECT ordinal FROM messages WHERE id = ?1",
+        [user_message_id.as_str()],
+        |row| row.get(0),
+    )?;
+    let prompt: String = transaction.query_row(
+        "SELECT output FROM messages WHERE id = ?1 AND state = 'queued'",
+        [user_message_id.as_str()],
+        |row| row.get(0),
+    )?;
     let mut messages = load_model_context(
         &transaction,
-        claimed.session_id,
+        identity.session_id,
         user_ordinal.saturating_sub(1),
     )?;
     messages.push(Message::user(prompt));
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(Some((messages, attempted)))
 }
 
@@ -2741,92 +2602,70 @@ fn reload_reserved_messages(
 fn begin_assistant_message(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     message_id: MessageId,
     turn_ordinal: u16,
     channel: TextChannel,
     text: &str,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     if text.is_empty() {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     let transaction = store::begin_unit(connection)?;
-    reserve_context_capacity(&transaction, claimed.run_id, text.len())?;
+    reserve_context_capacity(&transaction, identity.run_id, text.len())?;
     let now = now_ms();
-    let ordinal: u64 = transaction
-        .query_row(
-            "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM messages WHERE session_id = ?1",
-            [claimed.session_id.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    transaction
-        .execute(
-            "INSERT INTO messages(
+    let ordinal: u64 = transaction.query_row(
+        "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM messages WHERE session_id = ?1",
+        [identity.session_id.to_string()],
+        |row| row.get(0),
+    )?;
+    transaction.execute(
+        "INSERT INTO messages(
                 id, session_id, run_id, ordinal, turn_ordinal, role, state, created_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, 'assistant', 'streaming', ?6)",
-            params![
-                message_id.to_string(),
-                claimed.session_id.to_string(),
-                claimed.run_id.to_string(),
-                ordinal,
-                turn_ordinal,
-                now,
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    transaction
-        .execute(
-            "UPDATE runs SET assistant_message_id = ?2 WHERE id = ?1",
-            params![claimed.run_id.to_string(), message_id.to_string()],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            message_id.to_string(),
+            identity.session_id.to_string(),
+            identity.run_id.to_string(),
+            ordinal,
+            turn_ordinal,
+            now,
+        ],
+    )?;
+    transaction.execute(
+        "UPDATE runs SET assistant_message_id = ?2 WHERE id = ?1",
+        params![identity.run_id.to_string(), message_id.to_string()],
+    )?;
     let message = load_message(&transaction, message_id)?;
     let started = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::AssistantMessageStarted { message },
     )?;
     insert_message_chunk(&transaction, message_id, channel, text)?;
     let appended = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::TextAppended {
             message_id,
             channel,
             text: text.to_owned(),
         },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(vec![started, appended])
 }
 
 fn append_text(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     message_id: MessageId,
     channel: TextChannel,
     text: String,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     if text.is_empty() {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     let transaction = store::begin_unit(connection)?;
     let streaming = transaction
@@ -2835,32 +2674,22 @@ fn append_text(
             statement
                 .query_row([message_id.to_string()], |_| Ok(()))
                 .optional()
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?;
     if streaming.is_none() {
         return Err(SessionRuntimeError::Unavailable);
     }
-    reserve_context_capacity(&transaction, claimed.run_id, text.len())?;
+    reserve_context_capacity(&transaction, identity.run_id, text.len())?;
     insert_message_chunk(&transaction, message_id, channel, &text)?;
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now_ms(),
-        },
+        EventContext::for_run(store_id, identity, now_ms()),
         SessionEvent::TextAppended {
             message_id,
             channel,
             text,
         },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(event)
 }
 
@@ -2880,8 +2709,9 @@ fn insert_message_chunk(
              SELECT ?1, ?2, COALESCE(MAX(chunk_ordinal), 0) + 1, ?3
              FROM message_chunks WHERE message_id = ?1 AND channel = ?2",
         )
-        .and_then(|mut statement| statement.execute(params![message_id.to_string(), channel, text]))
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .and_then(|mut statement| {
+            statement.execute(params![message_id.to_string(), channel, text])
+        })?;
     Ok(())
 }
 
@@ -2904,28 +2734,25 @@ fn persist_model_turn(
         truncated,
     } = turn;
     if message.role() != Role::Assistant {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     let content = message
         .content()
         .iter()
         .map(PersistedContentBlock::from)
         .collect::<Vec<_>>();
-    let content_json =
-        serde_json::to_string(&content).map_err(|_| SessionRuntimeError::Persistence)?;
-    let model_json =
-        serde_json::to_string(&claimed.model).map_err(|_| SessionRuntimeError::Persistence)?;
+    let content_json = serde_json::to_string(&content)?;
+    let model_json = serde_json::to_string(&claimed.model)?;
     let usage_json = usage
         .map(|usage| serde_json::to_string(&usage))
-        .transpose()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .transpose()?;
     let turn_cost = estimated_cost_usd_nanos
         .map(i64::try_from)
         .transpose()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .map_err(|_| SessionRuntimeError::CODEC)?;
     let now = now_ms();
     let transaction = store::begin_unit(connection)?;
-    let persisted_calls = if claimed.kind == RunKind::Prompt {
+    let persisted_calls = if claimed.identity.kind == RunKind::Prompt {
         calls.as_slice()
     } else {
         &[]
@@ -2947,58 +2774,47 @@ fn persist_model_turn(
     let non_text_bytes =
         usize::try_from(full_message_bytes.saturating_sub(already_reserved_text_bytes))
             .map_err(|_| SessionRuntimeError::OutputTooLarge)?;
-    reserve_context_capacity(&transaction, claimed.run_id, non_text_bytes)?;
+    reserve_context_capacity(&transaction, claimed.identity.run_id, non_text_bytes)?;
     // Completing the turn's message in the same transaction as the turn row
     // keeps message state and turn persistence atomic: after a crash, a
     // streaming message always identifies exactly the turn that never
     // committed, and recovery interrupts only that message.
     if let Some(message_id) = turn_message {
-        let updated = transaction
-            .execute(
-                "UPDATE messages SET state = 'complete', truncated = ?3
+        let updated = transaction.execute(
+            "UPDATE messages SET state = 'complete', truncated = ?3
                  WHERE id = ?1 AND run_id = ?2 AND state = 'streaming'",
-                params![
-                    message_id.to_string(),
-                    claimed.run_id.to_string(),
-                    truncated
-                ],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+            params![
+                message_id.to_string(),
+                claimed.identity.run_id.to_string(),
+                truncated
+            ],
+        )?;
         if updated != 1 {
             return Err(SessionRuntimeError::Unavailable);
         }
     }
-    transaction
-        .execute(
-            "INSERT INTO model_turns(
+    transaction.execute(
+        "INSERT INTO model_turns(
                  run_id, turn_ordinal, assistant_content_json, model_json,
                  usage_json, estimated_cost_usd_nanos, completed_at_ms, truncated
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                claimed.run_id.to_string(),
-                turn_ordinal,
-                content_json,
-                model_json,
-                usage_json,
-                turn_cost,
-                now,
-                truncated,
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            claimed.identity.run_id.to_string(),
+            turn_ordinal,
+            content_json,
+            model_json,
+            usage_json,
+            turn_cost,
+            now,
+            truncated,
+        ],
+    )?;
     let mut events = Vec::with_capacity(persisted_calls.len().saturating_add(3));
     events.push(append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, claimed.identity, now),
         SessionEvent::ModelTurnCompleted {
-            run_id: claimed.run_id,
+            run_id: claimed.identity.run_id,
             turn_ordinal: *turn_ordinal,
             model: claimed.model.clone(),
             usage: *usage,
@@ -3006,35 +2822,27 @@ fn persist_model_turn(
         },
     )?);
     for call in persisted_calls {
-        transaction
-            .execute(
-                "INSERT INTO tool_calls(
+        transaction.execute(
+            "INSERT INTO tool_calls(
                      id, run_id, turn_ordinal, call_ordinal, provider_call_id, name,
-                     arguments_json, state, requested_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'requested', ?8)",
-                params![
-                    call.id.to_string(),
-                    claimed.run_id.to_string(),
-                    call.turn_ordinal,
-                    call.call_ordinal,
-                    call.provider_call_id,
-                    call.name,
-                    call.arguments,
-                    now,
-                ],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+                     arguments_json, state, requested_at_ms, effect
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'requested', ?8, ?9)",
+            params![
+                call.id.to_string(),
+                claimed.identity.run_id.to_string(),
+                call.turn_ordinal,
+                call.call_ordinal,
+                call.provider_call_id,
+                call.name,
+                call.arguments,
+                now,
+                call.effect.as_str(),
+            ],
+        )?;
         let tool_call = load_tool_call(&transaction, call.id)?;
         events.push(append_event(
             &transaction,
-            EventContext {
-                store_id,
-                workspace_id: claimed.workspace_id,
-                session_id: claimed.session_id,
-                run_id: Some(claimed.run_id),
-                caused_by: Some(claimed.command_id),
-                occurred_at_ms: now,
-            },
+            EventContext::for_run(store_id, claimed.identity, now),
             SessionEvent::ToolCallRequested { tool_call },
         )?);
     }
@@ -3042,8 +2850,7 @@ fn persist_model_turn(
         .as_ref()
         .and_then(|accounting| accounting.usage)
         .map(|usage| serde_json::to_string(&usage))
-        .transpose()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .transpose()?;
     let estimated_cost_usd_nanos = accounting
         .as_ref()
         .and_then(|accounting| accounting.estimated_cost_usd_nanos)
@@ -3051,118 +2858,85 @@ fn persist_model_turn(
     let occupancy_basis_json = occupancy_basis
         .as_ref()
         .map(serde_json::to_string)
-        .transpose()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .transpose()?;
     // Persist-before-publish like every other event. A missing provider value
     // clears the previous turn's audit value instead of leaving stale data.
-    transaction
-        .execute(
-            "UPDATE runs
+    transaction.execute(
+        "UPDATE runs
              SET context_tokens = ?2, usage_json = ?3, estimated_cost_usd_nanos = ?4
              WHERE id = ?1",
-            params![
-                claimed.run_id.to_string(),
-                context_tokens,
-                usage_json,
-                estimated_cost_usd_nanos,
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            claimed.identity.run_id.to_string(),
+            context_tokens,
+            usage_json,
+            estimated_cost_usd_nanos,
+        ],
+    )?;
     if let Some(context_tokens) = context_tokens {
         events.push(append_event(
             &transaction,
-            EventContext {
-                store_id,
-                workspace_id: claimed.workspace_id,
-                session_id: claimed.session_id,
-                run_id: Some(claimed.run_id),
-                caused_by: Some(claimed.command_id),
-                occurred_at_ms: now,
-            },
+            EventContext::for_run(store_id, claimed.identity, now),
             SessionEvent::RunContextUpdated {
-                run_id: claimed.run_id,
+                run_id: claimed.identity.run_id,
                 context_tokens: *context_tokens,
             },
         )?);
     }
-    let session_context_updated = if claimed.kind == RunKind::Prompt {
-        transaction
-            .execute(
-                "UPDATE sessions
+    let session_context_updated = if claimed.identity.kind == RunKind::Prompt {
+        transaction.execute(
+            "UPDATE sessions
                  SET context_tokens = ?2, context_occupancy_json = ?4
                  WHERE id = ?1 AND model IS ?3
                        AND max_output_tokens IS ?5 AND organization IS ?6",
-                params![
-                    claimed.session_id.to_string(),
-                    context_tokens,
-                    &claimed.session_model.model,
-                    occupancy_basis_json,
-                    claimed.session_model.max_output_tokens,
-                    &claimed.session_model.organization,
-                ],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?
-            == 1
+            params![
+                claimed.identity.session_id.to_string(),
+                context_tokens,
+                &claimed.session_model.model,
+                occupancy_basis_json,
+                claimed.session_model.max_output_tokens,
+                &claimed.session_model.organization,
+            ],
+        )? == 1
     } else {
         false
     };
     if session_context_updated {
         events.push(append_event(
             &transaction,
-            EventContext {
-                store_id,
-                workspace_id: claimed.workspace_id,
-                session_id: claimed.session_id,
-                run_id: Some(claimed.run_id),
-                caused_by: Some(claimed.command_id),
-                occurred_at_ms: now,
-            },
+            EventContext::for_run(store_id, claimed.identity, now),
             SessionEvent::SessionContextUpdated {
-                run_id: claimed.run_id,
+                run_id: claimed.identity.run_id,
                 context_tokens: *context_tokens,
             },
         )?);
     }
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(events)
 }
 
 fn start_tool_call(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
-    let updated = transaction
-        .execute(
-            "UPDATE tool_calls SET state = 'running', started_at_ms = ?2
+    let updated = transaction.execute(
+        "UPDATE tool_calls SET state = 'running', started_at_ms = ?2
              WHERE id = ?1 AND run_id = ?3 AND state = 'requested'",
-            params![tool_call_id.to_string(), now, claimed.run_id.to_string()],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![tool_call_id.to_string(), now, identity.run_id.to_string()],
+    )?;
     if updated != 1 {
         return Err(SessionRuntimeError::Unavailable);
     }
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolCallStarted { tool_call },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(event)
 }
 
@@ -3173,44 +2947,33 @@ fn start_tool_call(
 fn apply_steering_message(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     message_id: MessageId,
     turn_ordinal: u16,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    let changed = transaction
-        .execute(
-            "UPDATE messages SET state = 'complete', turn_ordinal = ?3
+    let changed = transaction.execute(
+        "UPDATE messages SET state = 'complete', turn_ordinal = ?3
              WHERE id = ?1 AND run_id = ?2 AND steering = 1 AND state = 'queued'",
-            params![
-                message_id.to_string(),
-                claimed.run_id.to_string(),
-                turn_ordinal
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            message_id.to_string(),
+            identity.run_id.to_string(),
+            turn_ordinal
+        ],
+    )?;
     if changed != 1 {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now_ms(),
-        },
+        EventContext::for_run(store_id, identity, now_ms()),
         SessionEvent::SteeringApplied {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             message_id,
             turn_ordinal,
         },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(event)
 }
 
@@ -3220,67 +2983,45 @@ fn apply_steering_message(
 fn record_run_interrupted(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     turn_ordinal: u16,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
     let mut events = Vec::new();
-    let mut statement = transaction
-        .prepare(
-            "SELECT id FROM tool_calls
+    let mut statement = transaction.prepare(
+        "SELECT id FROM tool_calls
              WHERE run_id = ?1 AND state IN ('requested', 'awaiting_approval', 'running')
              ORDER BY turn_ordinal, call_ordinal",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let ids = statement
-        .query_map([claimed.run_id.to_string()], |row| row.get::<_, String>(0))
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .query_map([identity.run_id.to_string()], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     for id in ids {
         let id = parse_id::<ToolCallId>(&id)?;
-        transaction
-            .execute(
-                "UPDATE tool_calls
+        transaction.execute(
+            "UPDATE tool_calls
                  SET state = 'interrupted', result = ?2, is_error = 1, finished_at_ms = ?3
                  WHERE id = ?1",
-                params![id.to_string(), INTERRUPTED_TOOL_RESULT, now],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+            params![id.to_string(), INTERRUPTED_TOOL_RESULT, now],
+        )?;
         let tool_call = load_tool_call(&transaction, id)?;
         events.push(append_event(
             &transaction,
-            EventContext {
-                store_id,
-                workspace_id: claimed.workspace_id,
-                session_id: claimed.session_id,
-                run_id: Some(claimed.run_id),
-                caused_by: Some(claimed.command_id),
-                occurred_at_ms: now,
-            },
+            EventContext::for_run(store_id, identity, now),
             SessionEvent::ToolCallFinished { tool_call },
         )?);
     }
     events.push(append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::RunInterrupted {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             turn_ordinal,
         },
     )?);
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(events)
 }
 
@@ -3290,40 +3031,28 @@ fn record_run_interrupted(
 fn record_run_audit(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     record: AuditRecord,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
-    let audit_json =
-        serde_json::to_string(&record).map_err(|_| SessionRuntimeError::Persistence)?;
-    let updated = transaction
-        .execute(
-            "UPDATE runs SET audit_json = ?2 WHERE id = ?1 AND status = 'running'",
-            params![claimed.run_id.to_string(), audit_json],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let audit_json = serde_json::to_string(&record)?;
+    let updated = transaction.execute(
+        "UPDATE runs SET audit_json = ?2 WHERE id = ?1 AND status = 'running'",
+        params![identity.run_id.to_string(), audit_json],
+    )?;
     if updated != 1 {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CODEC);
     }
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::RunAuditCompleted {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             audit: record,
         },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(event)
 }
 
@@ -3334,40 +3063,29 @@ fn record_run_audit(
 fn record_run_output_truncated(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     turn_ordinal: u16,
     continuation: u16,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
-    let updated = transaction
-        .execute(
-            "UPDATE runs SET output_continuations = ?2 WHERE id = ?1 AND status = 'running'",
-            params![claimed.run_id.to_string(), continuation],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let updated = transaction.execute(
+        "UPDATE runs SET output_continuations = ?2 WHERE id = ?1 AND status = 'running'",
+        params![identity.run_id.to_string(), continuation],
+    )?;
     if updated != 1 {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::RunOutputTruncated {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             turn_ordinal,
             continuation,
         },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(event)
 }
 
@@ -3376,42 +3094,29 @@ fn record_run_output_truncated(
 fn supersede_pending_steering(
     transaction: &Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     now: u64,
     events: &mut Vec<SessionEventEnvelope>,
 ) -> Result<(), SessionRuntimeError> {
-    let mut statement = transaction
-        .prepare(
-            "SELECT id FROM messages
+    let mut statement = transaction.prepare(
+        "SELECT id FROM messages
              WHERE run_id = ?1 AND steering = 1 AND state = 'queued' ORDER BY ordinal",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let ids = statement
-        .query_map([claimed.run_id.to_string()], |row| row.get::<_, String>(0))
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .query_map([identity.run_id.to_string()], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     for id in ids {
         let message_id = parse_id::<MessageId>(&id)?;
-        transaction
-            .execute(
-                "UPDATE messages SET state = 'cancelled' WHERE id = ?1",
-                [message_id.to_string()],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE messages SET state = 'cancelled' WHERE id = ?1",
+            [message_id.to_string()],
+        )?;
         events.push(append_event(
             transaction,
-            EventContext {
-                store_id,
-                workspace_id: claimed.workspace_id,
-                session_id: claimed.session_id,
-                run_id: Some(claimed.run_id),
-                caused_by: Some(claimed.command_id),
-                occurred_at_ms: now,
-            },
+            EventContext::for_run(store_id, identity, now),
             SessionEvent::SteeringSuperseded {
-                run_id: claimed.run_id,
+                run_id: identity.run_id,
                 message_id,
             },
         )?);
@@ -3424,7 +3129,7 @@ fn supersede_pending_steering(
 fn append_run_activity(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     activity: RunActivity,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
@@ -3437,84 +3142,64 @@ fn append_run_activity(
         )
         .and_then(|mut statement| {
             statement.execute(params![
-                claimed.run_id.to_string(),
-                claimed.session_id.to_string(),
+                identity.run_id.to_string(),
+                identity.session_id.to_string(),
                 run_activity_column(activity),
             ])
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?;
     if running != 1 {
         return Err(SessionRuntimeError::Unavailable);
     }
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now_ms(),
-        },
+        EventContext::for_run(store_id, identity, now_ms()),
         SessionEvent::RunActivityChanged {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             activity,
         },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(event)
 }
 
 fn append_reasoning(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     reasoning: ReasoningEvent,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let running = transaction
         .query_row(
             "SELECT 1 FROM runs WHERE id = ?1 AND session_id = ?2 AND status = 'running'",
-            params![claimed.run_id.to_string(), claimed.session_id.to_string()],
+            params![identity.run_id.to_string(), identity.session_id.to_string()],
             |_| Ok(()),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .optional()?;
     if running.is_none() {
         return Err(SessionRuntimeError::Unavailable);
     }
     let event = match reasoning {
         ReasoningEvent::Started { kind } => SessionEvent::ReasoningStarted {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             kind,
         },
         ReasoningEvent::Delta { kind, text } => SessionEvent::ReasoningDelta {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             kind,
             text,
         },
         ReasoningEvent::Completed { kind } => SessionEvent::ReasoningCompleted {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             kind,
         },
     };
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now_ms(),
-        },
+        EventContext::for_run(store_id, identity, now_ms()),
         event,
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(event)
 }
 
@@ -3524,7 +3209,7 @@ fn append_reasoning(
 fn append_tool_call_output(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
     chunk: String,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
@@ -3532,32 +3217,22 @@ fn append_tool_call_output(
     let running = transaction
         .query_row(
             "SELECT 1 FROM tool_calls WHERE id = ?1 AND run_id = ?2 AND state = 'running'",
-            params![tool_call_id.to_string(), claimed.run_id.to_string()],
+            params![tool_call_id.to_string(), identity.run_id.to_string()],
             |_| Ok(()),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .optional()?;
     if running.is_none() {
         return Err(SessionRuntimeError::ToolCallNotFound);
     }
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now_ms(),
-        },
+        EventContext::for_run(store_id, identity, now_ms()),
         SessionEvent::ToolCallOutputDelta {
             tool_call_id,
             chunk,
         },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(event)
 }
 
@@ -3568,7 +3243,7 @@ fn append_tool_call_output(
 fn finish_tool_call(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
     result: String,
     is_error: bool,
@@ -3587,67 +3262,51 @@ fn finish_tool_call(
                     )
              FROM tool_calls current
              WHERE current.id = ?1 AND current.run_id = ?2 AND current.state = 'running'",
-            params![tool_call_id.to_string(), claimed.run_id.to_string()],
+            params![tool_call_id.to_string(), identity.run_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        .optional()?
         .ok_or(SessionRuntimeError::ToolCallNotFound)?;
     // The display payload is deliberately absent from the capacity check: it
     // never enters model context, so it cannot crowd the context budget. The
     // provider call id does enter the next ToolResult block and is counted.
     reserve_tool_result_capacity(
         &transaction,
-        claimed.run_id,
+        identity.run_id,
         &provider_call_id,
         &result,
         first_result_in_turn,
     )?;
     let now = now_ms();
     let state = if is_error { "failed" } else { "completed" };
-    let display_json = display
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let updated = transaction
-        .execute(
-            "UPDATE tool_calls
+    let display_json = display.as_ref().map(serde_json::to_string).transpose()?;
+    let updated = transaction.execute(
+        "UPDATE tool_calls
              SET state = ?2, result = ?3, is_error = ?4, finished_at_ms = ?5, display_json = ?7
              WHERE id = ?1 AND run_id = ?6 AND state = 'running'",
-            params![
-                tool_call_id.to_string(),
-                state,
-                result,
-                is_error,
-                now,
-                claimed.run_id.to_string(),
-                display_json,
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            tool_call_id.to_string(),
+            state,
+            result,
+            is_error,
+            now,
+            identity.run_id.to_string(),
+            display_json,
+        ],
+    )?;
     if updated != 1 {
         return Err(SessionRuntimeError::Unavailable);
     }
     if let Some(update) = file_state {
-        record_session_file(&transaction, claimed.session_id, &update, now)?;
+        record_session_file(&transaction, identity.session_id, &update, now)?;
     }
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolCallFinished { tool_call },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(event)
 }
 
@@ -3660,26 +3319,22 @@ fn record_session_file(
     update: &FileStateUpdate,
     now: u64,
 ) -> Result<(), SessionRuntimeError> {
-    transaction
-        .execute(
-            "INSERT INTO session_files(session_id, path, content_hash, updated_at_ms)
+    transaction.execute(
+        "INSERT INTO session_files(session_id, path, content_hash, updated_at_ms)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(session_id, path) DO UPDATE
              SET content_hash = excluded.content_hash,
                  updated_at_ms = excluded.updated_at_ms",
-            params![session_id.to_string(), update.path, update.hash, now],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    transaction
-        .execute(
-            "DELETE FROM session_files
+        params![session_id.to_string(), update.path, update.hash, now],
+    )?;
+    transaction.execute(
+        "DELETE FROM session_files
              WHERE session_id = ?1 AND rowid NOT IN (
                  SELECT rowid FROM session_files WHERE session_id = ?1
                  ORDER BY updated_at_ms DESC, rowid DESC LIMIT ?2
              )",
-            params![session_id.to_string(), MAX_SESSION_FILES],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![session_id.to_string(), MAX_SESSION_FILES],
+    )?;
     Ok(())
 }
 
@@ -3710,14 +3365,12 @@ fn insert_seed_grants(
             break;
         }
         remaining -= 1;
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO session_grants(
+        transaction.execute(
+            "INSERT OR IGNORE INTO session_grants(
                      session_id, kind, value, created_at_ms
                  ) VALUES (?1, ?2, ?3, ?4)",
-                params![session_id.to_string(), kind, value, now],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+            params![session_id.to_string(), kind, value, now],
+        )?;
     }
     Ok(())
 }
@@ -3732,20 +3385,16 @@ fn load_approval_policy(
             [session_id.to_string()],
             |row| row.get::<_, String>(0),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        .optional()?
         .ok_or(SessionRuntimeError::SessionNotFound)?;
     let mode = parse_approval_mode(&mode)?;
-    let mut statement = connection
-        .prepare("SELECT kind, value FROM session_grants WHERE session_id = ?1")
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let mut statement =
+        connection.prepare("SELECT kind, value FROM session_grants WHERE session_id = ?1")?;
     let rows = statement
         .query_map([session_id.to_string()], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     let mut grants = approval::SessionGrants::default();
     for (kind, value) in rows {
         match kind.as_str() {
@@ -3753,7 +3402,7 @@ fn load_approval_policy(
                 grants.tools.insert(value);
             }
             "shell_prefix" => grants.shell_prefixes.push(value),
-            _ => return Err(SessionRuntimeError::Persistence),
+            _ => return Err(SessionRuntimeError::CONSTRAINT),
         }
     }
     Ok((mode, grants))
@@ -3762,7 +3411,7 @@ fn load_approval_policy(
 fn deny_tool_call(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
     message: &str,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
@@ -3778,95 +3427,72 @@ fn deny_tool_call(
                     )
              FROM tool_calls current
              WHERE current.id = ?1 AND current.run_id = ?2 AND current.state = 'requested'",
-            params![tool_call_id.to_string(), claimed.run_id.to_string()],
+            params![tool_call_id.to_string(), identity.run_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        .optional()?
         .ok_or(SessionRuntimeError::ToolCallNotFound)?;
     reserve_tool_result_capacity(
         &transaction,
-        claimed.run_id,
+        identity.run_id,
         &provider_call_id,
         message,
         first_result_in_turn,
     )?;
     let now = now_ms();
-    let updated = transaction
-        .execute(
-            "UPDATE tool_calls
+    let updated = transaction.execute(
+        "UPDATE tool_calls
              SET state = 'denied', result = ?2, is_error = 1, finished_at_ms = ?3
              WHERE id = ?1 AND run_id = ?4 AND state = 'requested'",
-            params![
-                tool_call_id.to_string(),
-                message,
-                now,
-                claimed.run_id.to_string(),
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            tool_call_id.to_string(),
+            message,
+            now,
+            identity.run_id.to_string(),
+        ],
+    )?;
     if updated != 1 {
         return Err(SessionRuntimeError::Unavailable);
     }
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolCallFinished { tool_call },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(event)
 }
 
 fn request_tool_approval(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
     shell: Option<ShellCommandPreview>,
     edit: Option<EditPreview>,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
-    let updated = transaction
-        .execute(
-            "UPDATE tool_calls SET state = 'awaiting_approval'
+    let updated = transaction.execute(
+        "UPDATE tool_calls SET state = 'awaiting_approval'
              WHERE id = ?1 AND run_id = ?2 AND state = 'requested'",
-            params![tool_call_id.to_string(), claimed.run_id.to_string()],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![tool_call_id.to_string(), identity.run_id.to_string()],
+    )?;
     if updated != 1 {
         return Err(SessionRuntimeError::Unavailable);
     }
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolApprovalRequested {
             tool_call,
             shell,
             edit,
         },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(event)
 }
 
@@ -3878,47 +3504,36 @@ fn request_tool_approval(
 fn resolve_approval_by_reviewer(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
-    let updated = transaction
-        .execute(
-            "UPDATE tool_calls
+    let updated = transaction.execute(
+        "UPDATE tool_calls
              SET state = 'requested', approval_resolution = ?2, resolved_at_ms = ?3
              WHERE id = ?1 AND run_id = ?4 AND state = 'awaiting_approval'
                AND approval_resolution IS NULL",
-            params![
-                tool_call_id.to_string(),
-                approval_resolution_str(ApprovalResolution::ApprovedByReviewer),
-                now,
-                claimed.run_id.to_string(),
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            tool_call_id.to_string(),
+            approval_resolution_str(ApprovalResolution::ApprovedByReviewer),
+            now,
+            identity.run_id.to_string(),
+        ],
+    )?;
     if updated != 1 {
         return Ok(None);
     }
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::ApprovedByReviewer,
         },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(Some(event))
 }
 
@@ -3928,7 +3543,7 @@ fn resolve_approval_by_reviewer(
 fn deny_approval_by_reviewer(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
     message: &str,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
@@ -3944,7 +3559,7 @@ fn deny_approval_by_reviewer(
                           AND previous.result IS NOT NULL
                     )
              FROM tool_calls current WHERE current.id = ?1 AND current.run_id = ?2",
-            params![tool_call_id.to_string(), claimed.run_id.to_string()],
+            params![tool_call_id.to_string(), identity.run_id.to_string()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -3954,8 +3569,7 @@ fn deny_approval_by_reviewer(
                 ))
             },
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        .optional()?
     else {
         return Err(SessionRuntimeError::ToolCallNotFound);
     };
@@ -3964,44 +3578,33 @@ fn deny_approval_by_reviewer(
     }
     reserve_tool_result_capacity(
         &transaction,
-        claimed.run_id,
+        identity.run_id,
         &provider_call_id,
         message,
         first_result_in_turn,
     )?;
-    transaction
-        .execute(
-            "UPDATE tool_calls
+    transaction.execute(
+        "UPDATE tool_calls
              SET state = 'denied', result = ?2, is_error = 1,
                  approval_resolution = ?3, resolved_at_ms = ?4, finished_at_ms = ?4
              WHERE id = ?1 AND state = 'awaiting_approval'",
-            params![
-                tool_call_id.to_string(),
-                message,
-                approval_resolution_str(ApprovalResolution::DeniedByReviewer),
-                now,
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            tool_call_id.to_string(),
+            message,
+            approval_resolution_str(ApprovalResolution::DeniedByReviewer),
+            now,
+        ],
+    )?;
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::DeniedByReviewer,
         },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(Some(event))
 }
 
@@ -4010,37 +3613,35 @@ fn deny_approval_by_reviewer(
 /// calls by name and path. Bounded; never results or model text.
 fn load_review_context(
     connection: &Connection,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
 ) -> Result<(Option<String>, Vec<RecentAction>), SessionRuntimeError> {
-    let task_brief = if claimed.child {
+    let task_brief = if identity.child {
         connection
             .query_row(
                 "SELECT m.output FROM messages m JOIN runs r ON r.user_message_id = m.id
                  WHERE r.id = ?1",
-                [claimed.run_id.to_string()],
+                [identity.run_id.to_string()],
                 |row| row.get::<_, String>(0),
             )
-            .optional()
-            .map_err(|_| SessionRuntimeError::Persistence)?
+            .optional()?
             .map(|brief| truncate_utf8(brief, MAX_REVIEW_BRIEF_BYTES))
     } else {
         None
     };
-    let mut statement = connection
-        .prepare(
-            "SELECT name, arguments_json FROM tool_calls
+    let mut statement = connection.prepare(
+        "SELECT name, arguments_json FROM tool_calls
              WHERE run_id = ?1 AND result IS NOT NULL
              ORDER BY turn_ordinal DESC, call_ordinal DESC LIMIT ?2",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let mut recent = statement
         .query_map(
-            params![claimed.run_id.to_string(), MAX_REVIEW_RECENT_ACTIONS as i64],
+            params![
+                identity.run_id.to_string(),
+                MAX_REVIEW_RECENT_ACTIONS as i64
+            ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        )?
+        .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .map(|(tool, arguments)| RecentAction {
             path: serde_json::from_str::<serde_json::Value>(&arguments)
@@ -4062,7 +3663,7 @@ fn load_review_context(
 fn conclude_tool_approval(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
     timed_out: bool,
 ) -> Result<ConcludedApproval, SessionRuntimeError> {
@@ -4079,7 +3680,7 @@ fn conclude_tool_approval(
                     )
              FROM tool_calls current
              WHERE current.id = ?1 AND current.run_id = ?2",
-            params![tool_call_id.to_string(), claimed.run_id.to_string()],
+            params![tool_call_id.to_string(), identity.run_id.to_string()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -4090,8 +3691,7 @@ fn conclude_tool_approval(
                 ))
             },
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        .optional()?
         .ok_or(SessionRuntimeError::ToolCallNotFound)?;
     if let Some(resolution) = resolution {
         // A client resolution won the race; its transaction already
@@ -4105,7 +3705,6 @@ fn conclude_tool_approval(
             | ApprovalResolution::DeniedTimeout
             | ApprovalResolution::DeniedByReviewer => Ok(ConcludedApproval::Denied {
                 message: result.unwrap_or_else(|| approval::USER_DENIED_RESULT.to_owned()),
-                event: None,
             }),
         };
     }
@@ -4114,48 +3713,36 @@ fn conclude_tool_approval(
     }
     reserve_tool_result_capacity(
         &transaction,
-        claimed.run_id,
+        identity.run_id,
         &provider_call_id,
         approval::TIMEOUT_DENIED_RESULT,
         first_result_in_turn,
     )?;
     let now = now_ms();
-    transaction
-        .execute(
-            "UPDATE tool_calls
+    transaction.execute(
+        "UPDATE tool_calls
              SET state = 'denied', result = ?2, is_error = 1,
                  approval_resolution = 'denied_timeout', resolved_at_ms = ?3,
                  finished_at_ms = ?3
              WHERE id = ?1 AND state = 'awaiting_approval'",
-            params![
-                tool_call_id.to_string(),
-                approval::TIMEOUT_DENIED_RESULT,
-                now,
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            tool_call_id.to_string(),
+            approval::TIMEOUT_DENIED_RESULT,
+            now,
+        ],
+    )?;
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
-    let event = append_event(
+    append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: None,
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now).uncaused(),
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::DeniedTimeout,
         },
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(ConcludedApproval::Denied {
         message: approval::TIMEOUT_DENIED_RESULT.to_owned(),
-        event: Some(Box::new(event)),
     })
 }
 
@@ -4171,16 +3758,14 @@ fn next_grant_promotion(
             [],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .optional()?;
     let Some((command_id, promotion)) = row else {
         return Ok(None);
     };
     let row_command_id = parse_id::<CommandId>(&command_id)?;
-    let promotion = serde_json::from_str::<PendingGrantPromotion>(&promotion)
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let promotion = serde_json::from_str::<PendingGrantPromotion>(&promotion)?;
     if promotion.command_id != row_command_id {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CODEC);
     }
     Ok(Some(promotion))
 }
@@ -4198,16 +3783,14 @@ fn settle_grant_promotion(
         outcome => outcome,
     };
     let transaction = store::begin_immediate_unit(connection)?;
-    let pending: bool = transaction
-        .query_row(
-            "SELECT EXISTS(
+    let pending: bool = transaction.query_row(
+        "SELECT EXISTS(
                  SELECT 1 FROM pending_workspace_grant_promotions
                  WHERE command_id = ?1
              )",
-            [promotion.command_id.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        [promotion.command_id.to_string()],
+        |row| row.get(0),
+    )?;
     if !pending {
         return Ok(None);
     }
@@ -4215,31 +3798,27 @@ fn settle_grant_promotion(
     // publishable even when the session was deleted in the meantime.
     let event = append_event(
         &transaction,
-        EventContext {
+        EventContext::for_run_ids(
             store_id,
-            workspace_id: promotion.workspace_id,
-            session_id: promotion.session_id,
-            run_id: Some(promotion.run_id),
-            caused_by: Some(promotion.command_id),
-            occurred_at_ms: now_ms(),
-        },
+            promotion.workspace_id,
+            promotion.session_id,
+            promotion.run_id,
+            Some(promotion.command_id),
+            now_ms(),
+        ),
         SessionEvent::WorkspaceGrantPromoted {
             grant: promotion.grant.clone(),
             outcome,
         },
     )?;
-    let deleted = transaction
-        .execute(
-            "DELETE FROM pending_workspace_grant_promotions WHERE command_id = ?1",
-            [promotion.command_id.to_string()],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let deleted = transaction.execute(
+        "DELETE FROM pending_workspace_grant_promotions WHERE command_id = ?1",
+        [promotion.command_id.to_string()],
+    )?;
     if deleted != 1 {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(Some(event))
 }
 
@@ -4285,8 +3864,7 @@ fn reserve_context_capacity(
         )
         .and_then(|mut statement| {
             statement.execute(params![run_id.to_string(), additional, maximum])
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?;
     if updated == 1 {
         return Ok(());
     }
@@ -4297,8 +3875,7 @@ fn reserve_context_capacity(
             [run_id.to_string()],
             |row| row.get(0),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        .optional()?
         .unwrap_or(false);
     if active {
         Err(SessionRuntimeError::OutputTooLarge)
@@ -4322,14 +3899,13 @@ fn append_parent_session_update(
     let session = load_session_summary(transaction, parent_id)?;
     events.push(append_event(
         transaction,
-        EventContext {
+        EventContext::for_session(
             store_id,
             workspace_id,
-            session_id: parent_id,
-            run_id: None,
-            caused_by: Some(caused_by),
+            parent_id,
+            Some(caused_by),
             occurred_at_ms,
-        },
+        ),
         SessionEvent::SessionUpdated { session },
     )?);
     Ok(())
@@ -4344,7 +3920,13 @@ fn complete_run(
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let mut events = Vec::new();
-    supersede_pending_steering(&transaction, store_id, claimed, now_ms(), &mut events)?;
+    supersede_pending_steering(
+        &transaction,
+        store_id,
+        claimed.identity,
+        now_ms(),
+        &mut events,
+    )?;
     events.push(finalize_run(
         &transaction,
         store_id,
@@ -4355,15 +3937,13 @@ fn complete_run(
     append_parent_session_update(
         &transaction,
         store_id,
-        claimed.workspace_id,
-        claimed.session_id,
-        claimed.command_id,
+        claimed.identity.workspace_id,
+        claimed.identity.session_id,
+        claimed.identity.command_id,
         now_ms(),
         &mut events,
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(events)
 }
 
@@ -4382,7 +3962,8 @@ fn complete_compaction(
     let transaction = store::begin_unit(connection)?;
     // A cancel that raced the summarizer's completion wins: the run settles
     // cancelled and no marker is committed.
-    let mut outcome = cancellation_wins(&transaction, claimed.run_id, RunOutcome::Completed)?;
+    let mut outcome =
+        cancellation_wins(&transaction, claimed.identity.run_id, RunOutcome::Completed)?;
     if matches!(outcome, RunOutcome::Completed)
         && let Err(reason) = validate_compaction_summary(&summary)
     {
@@ -4396,40 +3977,36 @@ fn complete_compaction(
     let mut events = Vec::with_capacity(2);
     if matches!(outcome, RunOutcome::Completed) {
         let now = now_ms();
-        let before_bytes = assembled_context_bytes(&transaction, claimed.session_id)?;
+        let before_bytes = assembled_context_bytes(&transaction, claimed.identity.session_id)?;
         // The cutoff covers exactly the span the summary replaced: the
         // messages assembly showed the summarizer. A prompt still queued
         // behind an auto-compaction has an ordinal but was not summarized —
         // it must stay after the marker so its run still sends it.
-        let cutoff_ordinal: u64 = transaction
-            .query_row(
-                "SELECT COALESCE(MAX(ordinal), 0) FROM messages
+        let cutoff_ordinal: u64 = transaction.query_row(
+            "SELECT COALESCE(MAX(ordinal), 0) FROM messages
                  WHERE session_id = ?1 AND state IN ('complete', 'interrupted')",
-                [claimed.session_id.to_string()],
-                |row| row.get(0),
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+            [claimed.identity.session_id.to_string()],
+            |row| row.get(0),
+        )?;
         // Insert the candidate marker, then measure the assembly it
         // produces. A summary that does not shrink the assembly is rejected
         // and the row removed within this transaction, so the prior usable
         // compaction stays authoritative.
-        transaction
-            .execute(
-                "INSERT INTO session_compactions(
+        transaction.execute(
+            "INSERT INTO session_compactions(
                      session_id, run_id, summary, cutoff_ordinal,
                      before_bytes, after_bytes, created_at_ms
                  ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
-                params![
-                    claimed.session_id.to_string(),
-                    claimed.run_id.to_string(),
-                    summary,
-                    cutoff_ordinal,
-                    u64::try_from(before_bytes).unwrap_or(u64::MAX),
-                    now,
-                ],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
-        let after_bytes = assembled_context_bytes(&transaction, claimed.session_id)?;
+            params![
+                claimed.identity.session_id.to_string(),
+                claimed.identity.run_id.to_string(),
+                summary,
+                cutoff_ordinal,
+                u64::try_from(before_bytes).unwrap_or(u64::MAX),
+                now,
+            ],
+        )?;
+        let after_bytes = assembled_context_bytes(&transaction, claimed.identity.session_id)?;
         // Shrinkage is the point of compaction. A short transcript is the one
         // exception: the structured summary's fixed framing can exceed it,
         // yet compacting it is still correct when the provider reported
@@ -4437,12 +4014,13 @@ fn complete_compaction(
         // assembly is rejected outright.
         let shrinkage_required = before_bytes > COMPACTION_SHRINKAGE_FLOOR_BYTES;
         if shrinkage_required && after_bytes >= before_bytes {
-            transaction
-                .execute(
-                    "DELETE FROM session_compactions WHERE session_id = ?1 AND run_id = ?2",
-                    params![claimed.session_id.to_string(), claimed.run_id.to_string()],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.execute(
+                "DELETE FROM session_compactions WHERE session_id = ?1 AND run_id = ?2",
+                params![
+                    claimed.identity.session_id.to_string(),
+                    claimed.identity.run_id.to_string()
+                ],
+            )?;
             let failed = RunOutcome::Failed {
                 failure: RunFailure {
                     kind: RunFailureKind::Policy,
@@ -4463,53 +4041,48 @@ fn complete_compaction(
             append_parent_session_update(
                 &transaction,
                 store_id,
-                claimed.workspace_id,
-                claimed.session_id,
-                claimed.command_id,
+                claimed.identity.workspace_id,
+                claimed.identity.session_id,
+                claimed.identity.command_id,
                 now_ms(),
                 &mut events,
             )?;
-            transaction
-                .commit()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            transaction.commit()?;
             return Ok(events);
         }
-        transaction
-            .execute(
-                "UPDATE session_compactions SET after_bytes = ?3
+        transaction.execute(
+            "UPDATE session_compactions SET after_bytes = ?3
                  WHERE session_id = ?1 AND run_id = ?2",
-                params![
-                    claimed.session_id.to_string(),
-                    claimed.run_id.to_string(),
-                    u64::try_from(after_bytes).unwrap_or(u64::MAX),
-                ],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+            params![
+                claimed.identity.session_id.to_string(),
+                claimed.identity.run_id.to_string(),
+                u64::try_from(after_bytes).unwrap_or(u64::MAX),
+            ],
+        )?;
         // Bounded history, newest rows kept; no eager deletion beyond it so
         // a future rollback command can restore the previous compaction.
-        transaction
-            .execute(
-                "DELETE FROM session_compactions
+        transaction.execute(
+            "DELETE FROM session_compactions
                  WHERE session_id = ?1 AND rowid NOT IN (
                      SELECT rowid FROM session_compactions WHERE session_id = ?1
                      ORDER BY rowid DESC LIMIT ?2
                  )",
-                params![claimed.session_id.to_string(), COMPACTION_HISTORY_ROWS],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+            params![
+                claimed.identity.session_id.to_string(),
+                COMPACTION_HISTORY_ROWS
+            ],
+        )?;
         // The compaction request measured the context that was just
         // replaced, not the summary now occupying the session. Keep the
         // session unknown until its next prompt turn reports exact usage.
-        transaction
-            .execute(
-                "UPDATE sessions
+        transaction.execute(
+            "UPDATE sessions
                  SET context_tokens = NULL,
                      context_occupancy_json = NULL,
                      pending_context_overflow_basis_json = NULL
                  WHERE id = ?1",
-                [claimed.session_id.to_string()],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+            [claimed.identity.session_id.to_string()],
+        )?;
         events.push(finalize_run(
             &transaction,
             store_id,
@@ -4517,17 +4090,10 @@ fn complete_compaction(
             outcome,
             accounting,
         )?);
-        let session = load_session_summary(&transaction, claimed.session_id)?;
+        let session = load_session_summary(&transaction, claimed.identity.session_id)?;
         events.push(append_event(
             &transaction,
-            EventContext {
-                store_id,
-                workspace_id: claimed.workspace_id,
-                session_id: claimed.session_id,
-                run_id: Some(claimed.run_id),
-                caused_by: Some(claimed.command_id),
-                occurred_at_ms: now,
-            },
+            EventContext::for_run(store_id, claimed.identity, now),
             SessionEvent::SessionCompacted {
                 session,
                 summary: Some(truncate_utf8(summary, MAX_EVENT_SUMMARY_BYTES)),
@@ -4547,15 +4113,13 @@ fn complete_compaction(
     append_parent_session_update(
         &transaction,
         store_id,
-        claimed.workspace_id,
-        claimed.session_id,
-        claimed.command_id,
+        claimed.identity.workspace_id,
+        claimed.identity.session_id,
+        claimed.identity.command_id,
         now_ms(),
         &mut events,
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(events)
 }
 
@@ -4569,24 +4133,19 @@ fn finalize_run(
     accounting: Option<RunAccounting>,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let now = now_ms();
-    let outcome = cancellation_wins(transaction, claimed.run_id, outcome)?;
+    let outcome = cancellation_wins(transaction, claimed.identity.run_id, outcome)?;
     interrupt_active_tool_calls(
         transaction,
         store_id,
-        claimed,
+        claimed.identity,
         &outcome,
-        Some(claimed.command_id),
+        Some(claimed.identity.command_id),
         now,
     )?;
     let (run_status, message_state) = outcome_states(&outcome);
-    let outcome_json =
-        serde_json::to_string(&outcome).map_err(|_| SessionRuntimeError::Persistence)?;
+    let outcome_json = serde_json::to_string(&outcome)?;
     let usage = accounting.as_ref().and_then(|accounting| accounting.usage);
-    let usage_json = usage
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let usage_json = usage.as_ref().map(serde_json::to_string).transpose()?;
     let cost = accounting
         .as_ref()
         .and_then(|accounting| accounting.estimated_cost_usd_nanos)
@@ -4597,7 +4156,7 @@ fn finalize_run(
     let saw_turn = accounting
         .as_ref()
         .is_some_and(|accounting| accounting.saw_turn);
-    let pending_context_overflow_basis = if claimed.kind == RunKind::Prompt
+    let pending_context_overflow_basis = if claimed.identity.kind == RunKind::Prompt
         && matches!(
             &outcome,
             RunOutcome::Failed {
@@ -4610,18 +4169,15 @@ fn finalize_run(
         accounting
             .as_ref()
             .map(|accounting| serde_json::to_string(&accounting.request_basis))
-            .transpose()
-            .map_err(|_| SessionRuntimeError::Persistence)?
+            .transpose()?
     } else {
         None
     };
-    let (current_cost, current_cost_known) = transaction
-        .query_row(
-            "SELECT estimated_cost_usd_nanos, cost_known FROM sessions WHERE id = ?1",
-            [claimed.session_id.to_string()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let (current_cost, current_cost_known) = transaction.query_row(
+        "SELECT estimated_cost_usd_nanos, cost_known FROM sessions WHERE id = ?1",
+        [claimed.identity.session_id.to_string()],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+    )?;
     let (next_cost, next_cost_known) = if saw_turn {
         match cost.and_then(|cost| current_cost.checked_add(cost)) {
             Some(cost) if current_cost_known => (cost, true),
@@ -4633,36 +4189,31 @@ fn finalize_run(
     // Terminal accounting owns the final per-turn figure only when a model
     // turn completed. No completed turn preserves an earlier committed value;
     // an unmeasured completed turn explicitly clears it.
-    transaction
-        .execute(
-            "UPDATE runs
+    transaction.execute(
+        "UPDATE runs
              SET status = ?2, outcome_json = ?3, finished_at_ms = ?4,
                  usage_json = ?5, estimated_cost_usd_nanos = ?6,
                  context_tokens = CASE WHEN ?8 THEN ?7 ELSE context_tokens END
              WHERE id = ?1 AND outcome_json IS NULL",
-            params![
-                claimed.run_id.to_string(),
-                run_status,
-                outcome_json,
-                now,
-                usage_json,
-                cost,
-                reported_context_tokens,
-                saw_turn,
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let context_tokens = run_context_tokens(transaction, claimed.run_id)?;
-    transaction
-        .execute(
-            "UPDATE messages SET state = ?2
+        params![
+            claimed.identity.run_id.to_string(),
+            run_status,
+            outcome_json,
+            now,
+            usage_json,
+            cost,
+            reported_context_tokens,
+            saw_turn,
+        ],
+    )?;
+    let context_tokens = run_context_tokens(transaction, claimed.identity.run_id)?;
+    transaction.execute(
+        "UPDATE messages SET state = ?2
              WHERE run_id = ?1 AND role = 'assistant' AND state = 'streaming'",
-            params![claimed.run_id.to_string(), message_state],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    transaction
-        .execute(
-            "UPDATE sessions
+        params![claimed.identity.run_id.to_string(), message_state],
+    )?;
+    transaction.execute(
+        "UPDATE sessions
              SET active_run_id = NULL,
                   status = CASE WHEN queued_prompts > 0 THEN 'queued' ELSE 'idle' END,
                   estimated_cost_usd_nanos = ?4,
@@ -4677,34 +4228,26 @@ fn finalize_run(
                   ),
                   updated_at_ms = ?2
              WHERE id = ?1 AND active_run_id = ?3",
-            params![
-                claimed.session_id.to_string(),
-                now,
-                claimed.run_id.to_string(),
-                next_cost,
-                next_cost_known,
-                claimed.kind == RunKind::Prompt,
-                saw_turn,
-                reported_context_tokens,
-                &claimed.model.model,
-                pending_context_overflow_basis,
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let summary = load_session_summary(transaction, claimed.session_id)?;
+        params![
+            claimed.identity.session_id.to_string(),
+            now,
+            claimed.identity.run_id.to_string(),
+            next_cost,
+            next_cost_known,
+            claimed.identity.kind == RunKind::Prompt,
+            saw_turn,
+            reported_context_tokens,
+            &claimed.model.model,
+            pending_context_overflow_basis,
+        ],
+    )?;
+    let summary = load_session_summary(transaction, claimed.identity.session_id)?;
     append_event(
         transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, claimed.identity, now),
         SessionEvent::RunFinished {
             session: summary,
-            run_id: claimed.run_id,
+            run_id: claimed.identity.run_id,
             outcome,
             usage,
             context_tokens,
@@ -4724,7 +4267,7 @@ fn run_context_tokens(
             [run_id.to_string()],
             |row| row.get(0),
         )
-        .map_err(|_| SessionRuntimeError::Persistence)
+        .map_err(|_| SessionRuntimeError::CODEC)
 }
 
 fn finish_queued_run(
@@ -4757,28 +4300,22 @@ fn finish_queued_run_with_outcome(
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let outcome = cancellation_wins(transaction, run_id, outcome)?;
     let (run_status, message_state) = outcome_states(&outcome);
-    let outcome_json =
-        serde_json::to_string(&outcome).map_err(|_| SessionRuntimeError::Persistence)?;
-    let settled = transaction
-        .execute(
-            "UPDATE runs
+    let outcome_json = serde_json::to_string(&outcome)?;
+    let settled = transaction.execute(
+        "UPDATE runs
              SET status = ?2, outcome_json = ?3, finished_at_ms = ?4
              WHERE id = ?1 AND status = 'queued'",
-            params![run_id.to_string(), run_status, outcome_json, now],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![run_id.to_string(), run_status, outcome_json, now],
+    )?;
     if settled != 1 {
         return Err(SessionRuntimeError::Unavailable);
     }
-    transaction
-        .execute(
-            "UPDATE messages SET state = ?2 WHERE run_id = ?1 AND state = 'queued'",
-            params![run_id.to_string(), message_state],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    transaction
-        .execute(
-            "UPDATE sessions
+    transaction.execute(
+        "UPDATE messages SET state = ?2 WHERE run_id = ?1 AND state = 'queued'",
+        params![run_id.to_string(), message_state],
+    )?;
+    transaction.execute(
+        "UPDATE sessions
              SET queued_prompts = queued_prompts - 1,
                  preparing_run_id = CASE
                      WHEN preparing_run_id = ?3 THEN NULL
@@ -4791,20 +4328,12 @@ fn finish_queued_run_with_outcome(
                  END,
                  updated_at_ms = ?2
              WHERE id = ?1",
-            params![session_id.to_string(), now, run_id.to_string()],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![session_id.to_string(), now, run_id.to_string()],
+    )?;
     let summary = load_session_summary(transaction, session_id)?;
     append_event(
         transaction,
-        EventContext {
-            store_id,
-            workspace_id,
-            session_id,
-            run_id: Some(run_id),
-            caused_by: None,
-            occurred_at_ms: now,
-        },
+        EventContext::for_run_ids(store_id, workspace_id, session_id, run_id, None, now),
         SessionEvent::RunFinished {
             session: summary,
             run_id,
@@ -4819,18 +4348,17 @@ fn finish_queued_run_with_outcome(
 fn finish_reserved_run(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     outcome: RunOutcome,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let state = transaction
         .query_row(
             "SELECT status, outcome_json FROM runs WHERE id = ?1 AND session_id = ?2",
-            params![claimed.run_id.to_string(), claimed.session_id.to_string()],
+            params![identity.run_id.to_string(), identity.session_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .optional()?;
     let Some((status, stored_outcome)) = state else {
         return Ok(Vec::new());
     };
@@ -4843,48 +4371,43 @@ fn finish_reserved_run(
     let mut events = vec![finish_queued_run_with_outcome(
         &transaction,
         store_id,
-        claimed.workspace_id,
-        claimed.session_id,
-        claimed.run_id,
+        identity.workspace_id,
+        identity.session_id,
+        identity.run_id,
         outcome,
         now_ms(),
     )?];
     append_parent_session_update(
         &transaction,
         store_id,
-        claimed.workspace_id,
-        claimed.session_id,
-        claimed.command_id,
+        identity.workspace_id,
+        identity.session_id,
+        identity.command_id,
         now_ms(),
         &mut events,
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(events)
 }
 
 fn finish_prepared_run(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     audit: &PreparedRunAudit,
     outcome: RunOutcome,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
-    let prompt_identity = serde_json::to_string(audit.prompt_identity.as_ref())
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let resolved_model = serde_json::to_string(audit.resolved_model.as_ref())
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let prompt_identity = serde_json::to_string(audit.prompt_identity.as_ref())?;
+    let resolved_model = serde_json::to_string(audit.resolved_model.as_ref())?;
     let context_base_bytes = prepared_context_bytes(audit.weight)?;
     let transaction = store::begin_unit(connection)?;
     let state = transaction
         .query_row(
             "SELECT status, outcome_json FROM runs WHERE id = ?1 AND session_id = ?2",
-            params![claimed.run_id.to_string(), claimed.session_id.to_string()],
+            params![identity.run_id.to_string(), identity.session_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .optional()?;
     let Some((status, stored_outcome)) = state else {
         return Ok(Vec::new());
     };
@@ -4894,46 +4417,42 @@ fn finish_prepared_run(
     if status != "queued" {
         return Err(SessionRuntimeError::Unavailable);
     }
-    let recorded = transaction
-        .execute(
-            "UPDATE runs
+    let recorded = transaction.execute(
+        "UPDATE runs
              SET prompt_identity_json = ?3, resolved_model_json = ?4,
                  context_base_bytes = ?5, context_increment_bytes = 0
              WHERE id = ?1 AND session_id = ?2 AND status = 'queued'
                AND outcome_json IS NULL",
-            params![
-                claimed.run_id.to_string(),
-                claimed.session_id.to_string(),
-                prompt_identity,
-                resolved_model,
-                context_base_bytes,
-            ],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![
+            identity.run_id.to_string(),
+            identity.session_id.to_string(),
+            prompt_identity,
+            resolved_model,
+            context_base_bytes,
+        ],
+    )?;
     if recorded != 1 {
         return Err(SessionRuntimeError::Unavailable);
     }
     let mut events = vec![finish_queued_run_with_outcome(
         &transaction,
         store_id,
-        claimed.workspace_id,
-        claimed.session_id,
-        claimed.run_id,
+        identity.workspace_id,
+        identity.session_id,
+        identity.run_id,
         outcome,
         now_ms(),
     )?];
     append_parent_session_update(
         &transaction,
         store_id,
-        claimed.workspace_id,
-        claimed.session_id,
-        claimed.command_id,
+        identity.workspace_id,
+        identity.session_id,
+        identity.command_id,
         now_ms(),
         &mut events,
     )?;
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(events)
 }
 
@@ -4956,7 +4475,7 @@ fn settle_panicked_execution(
     let session_state = transaction
         .query_row(
             "SELECT active_run_id, preparing_run_id FROM sessions WHERE id = ?1",
-            [original.session_id.to_string()],
+            [original.identity.session_id.to_string()],
             |row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
@@ -4964,35 +4483,33 @@ fn settle_panicked_execution(
                 ))
             },
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .optional()?;
     let Some((active_run, _preparing_run)) = session_state else {
         return Ok(PanickedExecutionSettlement {
             events: Vec::new(),
             run_ids: Vec::new(),
         });
     };
-    let original_id = original.run_id.to_string();
+    let original_id = original.identity.run_id.to_string();
     let original_state = transaction
         .query_row(
             "SELECT status, outcome_json
              FROM runs WHERE id = ?1 AND session_id = ?2",
-            params![original_id, original.session_id.to_string()],
+            params![original_id, original.identity.session_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .optional()?;
     let mut events = Vec::with_capacity(3);
     // Cleanup ownership is independent of whether this transaction emits a
     // new terminal event: a concurrent cancel may already have settled the
     // original while its task still owns the in-memory registration.
-    let mut run_ids = vec![original.run_id];
+    let mut run_ids = vec![original.identity.run_id];
     if let Some(active_run) = active_run {
         let active = transaction
             .query_row(
                 "SELECT command_id, kind, auto_compaction_for_run_id, status, outcome_json
                  FROM runs WHERE id = ?1 AND session_id = ?2",
-                params![active_run, original.session_id.to_string()],
+                params![active_run, original.identity.session_id.to_string()],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -5003,8 +4520,7 @@ fn settle_panicked_execution(
                     ))
                 },
             )
-            .optional()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+            .optional()?;
         if let Some((command_id, kind, auto_compaction_for_run_id, status, stored_outcome)) = active
             && (active_run == original_id
                 || auto_compaction_for_run_id.as_deref() == Some(original_id.as_str()))
@@ -5013,13 +4529,15 @@ fn settle_panicked_execution(
         {
             let active_run_id: RunId = parse_id(&active_run)?;
             let active_claim = ClaimedRun {
-                workspace_id: original.workspace_id,
+                identity: RunIdentity {
+                    workspace_id: original.identity.workspace_id,
+                    session_id: original.identity.session_id,
+                    run_id: active_run_id,
+                    command_id: parse_id(&command_id)?,
+                    kind: parse_run_kind(&kind)?,
+                    child: original.identity.child,
+                },
                 workspace: String::new(),
-                session_id: original.session_id,
-                run_id: active_run_id,
-                command_id: parse_id(&command_id)?,
-                kind: parse_run_kind(&kind)?,
-                child: original.child,
                 user_initiated: false,
                 literal_slash: false,
                 session_model: original.session_model.clone(),
@@ -5057,9 +4575,9 @@ fn settle_panicked_execution(
         events.push(finish_queued_run_with_outcome(
             &transaction,
             store_id,
-            original.workspace_id,
-            original.session_id,
-            original.run_id,
+            original.identity.workspace_id,
+            original.identity.session_id,
+            original.identity.run_id,
             outcome,
             now_ms(),
         )?);
@@ -5068,16 +4586,14 @@ fn settle_panicked_execution(
         append_parent_session_update(
             &transaction,
             store_id,
-            original.workspace_id,
-            original.session_id,
-            original.command_id,
+            original.identity.workspace_id,
+            original.identity.session_id,
+            original.identity.command_id,
             now_ms(),
             &mut events,
         )?;
     }
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(PanickedExecutionSettlement { events, run_ids })
 }
 
@@ -5094,9 +4610,8 @@ fn owned_running_run_ids(
     connection: &Connection,
     owner_run_id: RunId,
 ) -> Result<Vec<RunId>, SessionRuntimeError> {
-    let mut statement = connection
-        .prepare(
-            "WITH RECURSIVE owned(session_id, level) AS (
+    let mut statement = connection.prepare(
+        "WITH RECURSIVE owned(session_id, level) AS (
                  SELECT id, 1 FROM sessions WHERE owner_run_id = ?1
                  UNION ALL
                  SELECT child.id, owned.level + 1
@@ -5115,15 +4630,13 @@ fn owned_running_run_ids(
                    OR r.status = 'cancelled'
                )
              ORDER BY r.created_at_ms, r.rowid",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     statement
         .query_map(params![owner_run_id.to_string(), MAX_CHILD_DEPTH], |row| {
             row.get::<_, String>(0)
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        })?
         .map(|row| {
-            let run = row.map_err(|_| SessionRuntimeError::Persistence)?;
+            let run = row?;
             parse_id(&run)
         })
         .collect()
@@ -5146,8 +4659,7 @@ fn cancellation_signal_run_ids(
             [cancelled_run_id.to_string()],
             |row| row.get::<_, String>(0),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .optional()?;
     if let Some(auto_compaction) = auto_compaction {
         let run_id = parse_id(&auto_compaction)?;
         if !run_ids.contains(&run_id) {
@@ -5168,12 +4680,11 @@ fn cancel_owned_child_runs(
     command_id: CommandId,
     now: u64,
 ) -> Result<OwnedChildCancellations, SessionRuntimeError> {
-    let mut statement = transaction
-        .prepare(
-            // The whole subtree: sessions this run owns, sessions their runs
-            // own, and so on to the depth ceiling. Cancelling a parent must
-            // settle every descendant, not only the first generation.
-            "WITH RECURSIVE owned(session_id, level) AS (
+    let mut statement = transaction.prepare(
+        // The whole subtree: sessions this run owns, sessions their runs
+        // own, and so on to the depth ceiling. Cancelling a parent must
+        // settle every descendant, not only the first generation.
+        "WITH RECURSIVE owned(session_id, level) AS (
                  SELECT id, 1 FROM sessions WHERE owner_run_id = ?1
                  UNION ALL
                  SELECT child.id, owned.level + 1
@@ -5188,8 +4699,7 @@ fn cancel_owned_child_runs(
              JOIN runs r ON r.session_id = child.id
              WHERE r.status IN ('queued', 'running')
              ORDER BY owned.level, r.created_at_ms, r.rowid",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let owned = statement
         .query_map(params![owner_run_id.to_string(), MAX_CHILD_DEPTH], |row| {
             Ok((
@@ -5199,10 +4709,8 @@ fn cancel_owned_child_runs(
                 row.get::<_, String>(3)?,
                 row.get::<_, bool>(4)?,
             ))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
 
     let mut committed_through = None;
@@ -5212,23 +4720,21 @@ fn cancel_owned_child_runs(
         let run_id: RunId = parse_id(&run)?;
         let session_id: SessionId = parse_id(&session)?;
         let workspace_id: WorkspaceId = parse_id(&workspace)?;
-        transaction
-            .execute(
-                "UPDATE runs SET cancel_requested = 1 WHERE id = ?1",
-                [run_id.to_string()],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(
+            "UPDATE runs SET cancel_requested = 1 WHERE id = ?1",
+            [run_id.to_string()],
+        )?;
         let summary = load_session_summary(transaction, session_id)?;
         let requested = append_event(
             transaction,
-            EventContext {
+            EventContext::for_run_ids(
                 store_id,
                 workspace_id,
                 session_id,
-                run_id: Some(run_id),
-                caused_by: Some(command_id),
-                occurred_at_ms: now,
-            },
+                run_id,
+                Some(command_id),
+                now,
+            ),
             SessionEvent::CancellationRequested {
                 session: summary,
                 run_id,
@@ -5281,29 +4787,26 @@ fn cascade_auto_compaction_cancel(
             [session_id.to_string()],
             |row| row.get::<_, String>(0),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .optional()?;
     let Some(compaction_run) = compaction_run else {
         return Ok(None);
     };
     let compaction_run: RunId = parse_id(&compaction_run)?;
-    transaction
-        .execute(
-            "UPDATE runs SET cancel_requested = 1 WHERE id = ?1",
-            [compaction_run.to_string()],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.execute(
+        "UPDATE runs SET cancel_requested = 1 WHERE id = ?1",
+        [compaction_run.to_string()],
+    )?;
     let summary = load_session_summary(transaction, session_id)?;
     let event = append_event(
         transaction,
-        EventContext {
+        EventContext::for_run_ids(
             store_id,
             workspace_id,
             session_id,
-            run_id: Some(compaction_run),
-            caused_by: Some(command_id),
-            occurred_at_ms: now,
-        },
+            compaction_run,
+            Some(command_id),
+            now,
+        ),
         SessionEvent::CancellationRequested {
             session: summary,
             run_id: compaction_run,
@@ -5322,28 +4825,24 @@ fn recover_interrupted_runs(
     // queued row eligible again. The per-prompt compaction-attempt marker is
     // deliberately retained: once a compaction start committed, recovery
     // must not spend a second attempt.
-    transaction
-        .execute(
-            "UPDATE sessions SET preparing_run_id = NULL
+    transaction.execute(
+        "UPDATE sessions SET preparing_run_id = NULL
              WHERE preparing_run_id IS NOT NULL",
-            [],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        [],
+    )?;
     // A spawned child can be durably queued while its owner was running when
     // the process stopped. Settle it before recovering running rows: once the
     // owner is marked interrupted its session no longer advertises an active
     // run, but the explicit owner id still proves this child has no waiter.
-    let mut statement = transaction
-        .prepare(
-            "SELECT child_run.id, child.id, child.workspace_id
+    let mut statement = transaction.prepare(
+        "SELECT child_run.id, child.id, child.workspace_id
              FROM runs child_run
              JOIN sessions child ON child.id = child_run.session_id
              JOIN runs owner ON owner.id = child.owner_run_id
              WHERE child_run.status = 'queued'
                AND owner.status IN ('running', 'completed', 'cancelled', 'failed', 'interrupted')
              ORDER BY child_run.created_at_ms, child_run.rowid",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let abandoned_children = statement
         .query_map([], |row| {
             Ok((
@@ -5351,10 +4850,8 @@ fn recover_interrupted_runs(
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
             ))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     let mut cursors = Vec::with_capacity(abandoned_children.len());
     let recovery_started_at = now_ms();
@@ -5369,13 +4866,11 @@ fn recover_interrupted_runs(
         )?;
         cursors.push(event.cursor);
     }
-    let mut statement = transaction
-        .prepare(
-            "SELECT r.id, r.session_id, s.workspace_id
+    let mut statement = transaction.prepare(
+        "SELECT r.id, r.session_id, s.workspace_id
              FROM runs r JOIN sessions s ON s.id = r.session_id
              WHERE r.status = 'running'",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let rows = statement
         .query_map([], |row| {
             Ok((
@@ -5383,10 +4878,8 @@ fn recover_interrupted_runs(
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
             ))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     cursors.reserve(rows.len());
     for (run, session, workspace) in rows {
@@ -5394,17 +4887,15 @@ fn recover_interrupted_runs(
         let session_id = parse_id(&session)?;
         let workspace_id = parse_id(&workspace)?;
         let claimed = ClaimedRun {
-            workspace_id,
+            identity: RunIdentity {
+                workspace_id,
+                session_id,
+                run_id,
+                command_id: CommandId::from_bytes([0; 16]),
+                kind: RunKind::Prompt,
+                child: false,
+            },
             workspace: String::new(),
-            session_id,
-            run_id,
-            command_id: CommandId::from_bytes([0; 16]),
-            // Recovery settles the run row generically; a crashed compaction
-            // committed no marker, so interrupting it leaves nothing behind
-            // and the command can simply be retried. `child` is likewise
-            // irrelevant here: recovery never runs the tool loop.
-            kind: RunKind::Prompt,
-            child: false,
             user_initiated: false,
             literal_slash: false,
             session_model: ModelSelection::default(),
@@ -5428,9 +4919,7 @@ fn recover_interrupted_runs(
             complete_run_in_transaction(&transaction, store_id, &claimed, RunOutcome::Interrupted)?;
         cursors.push(event.cursor);
     }
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(cursors)
 }
 
@@ -5441,53 +4930,44 @@ fn complete_run_in_transaction(
     outcome: RunOutcome,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let now = now_ms();
-    let outcome = cancellation_wins(transaction, claimed.run_id, outcome)?;
-    interrupt_active_tool_calls(transaction, store_id, claimed, &outcome, None, now)?;
+    let outcome = cancellation_wins(transaction, claimed.identity.run_id, outcome)?;
+    interrupt_active_tool_calls(transaction, store_id, claimed.identity, &outcome, None, now)?;
     let (run_status, message_state) = outcome_states(&outcome);
-    let outcome_json =
-        serde_json::to_string(&outcome).map_err(|_| SessionRuntimeError::Persistence)?;
-    transaction
-        .execute(
-            "UPDATE runs SET status = ?2, outcome_json = ?3, finished_at_ms = ?4 WHERE id = ?1",
-            params![claimed.run_id.to_string(), run_status, outcome_json, now],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    transaction
-        .execute(
-            "UPDATE messages SET state = ?2
+    let outcome_json = serde_json::to_string(&outcome)?;
+    transaction.execute(
+        "UPDATE runs SET status = ?2, outcome_json = ?3, finished_at_ms = ?4 WHERE id = ?1",
+        params![
+            claimed.identity.run_id.to_string(),
+            run_status,
+            outcome_json,
+            now
+        ],
+    )?;
+    transaction.execute(
+        "UPDATE messages SET state = ?2
              WHERE run_id = ?1 AND role = 'assistant' AND state = 'streaming'",
-            params![claimed.run_id.to_string(), message_state],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    transaction
-        .execute(
-            "UPDATE sessions
+        params![claimed.identity.run_id.to_string(), message_state],
+    )?;
+    transaction.execute(
+        "UPDATE sessions
              SET active_run_id = NULL,
                  status = CASE WHEN queued_prompts > 0 THEN 'queued' ELSE 'idle' END,
                  updated_at_ms = ?2
              WHERE id = ?1",
-            params![claimed.session_id.to_string(), now],
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let summary = load_session_summary(transaction, claimed.session_id)?;
+        params![claimed.identity.session_id.to_string(), now],
+    )?;
+    let summary = load_session_summary(transaction, claimed.identity.session_id)?;
     append_event(
         transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: None,
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, claimed.identity, now).uncaused(),
         SessionEvent::RunFinished {
             session: summary,
-            run_id: claimed.run_id,
+            run_id: claimed.identity.run_id,
             outcome,
             // Recovery knows no summed usage, but the run row keeps the last
             // committed turn's context occupancy.
             usage: None,
-            context_tokens: run_context_tokens(transaction, claimed.run_id)?,
+            context_tokens: run_context_tokens(transaction, claimed.identity.run_id)?,
         },
     )
 }
@@ -5495,29 +4975,25 @@ fn complete_run_in_transaction(
 fn interrupt_active_tool_calls(
     transaction: &Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     outcome: &RunOutcome,
     caused_by: Option<CommandId>,
     now: u64,
 ) -> Result<(), SessionRuntimeError> {
-    let mut statement = transaction
-        .prepare(
-            "SELECT id, state = 'running' FROM tool_calls
+    let mut statement = transaction.prepare(
+        "SELECT id, state = 'running' FROM tool_calls
              WHERE run_id = ?1 AND state IN ('requested', 'awaiting_approval', 'running')
              ORDER BY turn_ordinal, call_ordinal",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let ids = statement
-        .query_map([claimed.run_id.to_string()], |row| {
+        .query_map([identity.run_id.to_string()], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     let not_executed_result = match outcome {
         RunOutcome::Completed if ids.is_empty() => return Ok(()),
-        RunOutcome::Completed => return Err(SessionRuntimeError::Persistence),
+        RunOutcome::Completed => return Err(SessionRuntimeError::CONSTRAINT),
         RunOutcome::Cancelled => "Tool execution did not start before the run was cancelled.",
         RunOutcome::Interrupted => "Tool execution did not start before the run was interrupted.",
         RunOutcome::BudgetExhausted { .. } => {
@@ -5532,25 +5008,23 @@ fn interrupt_active_tool_calls(
         } else {
             not_executed_result
         };
-        transaction
-            .execute(
-                "UPDATE tool_calls
+        transaction.execute(
+            "UPDATE tool_calls
                  SET state = 'interrupted', result = ?2, is_error = 1, finished_at_ms = ?3
                  WHERE id = ?1 AND state IN ('requested', 'awaiting_approval', 'running')",
-                params![id.to_string(), result, now],
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+            params![id.to_string(), result, now],
+        )?;
         let tool_call = load_tool_call(transaction, id)?;
         append_event(
             transaction,
-            EventContext {
+            EventContext::for_run_ids(
                 store_id,
-                workspace_id: claimed.workspace_id,
-                session_id: claimed.session_id,
-                run_id: Some(claimed.run_id),
+                identity.workspace_id,
+                identity.session_id,
+                identity.run_id,
                 caused_by,
-                occurred_at_ms: now,
-            },
+                now,
+            ),
             SessionEvent::ToolCallFinished { tool_call },
         )?;
     }
@@ -5565,13 +5039,11 @@ fn cancellation_wins(
     if matches!(outcome, RunOutcome::Cancelled) {
         return Ok(outcome);
     }
-    let requested = transaction
-        .query_row(
-            "SELECT cancel_requested FROM runs WHERE id = ?1",
-            [run_id.to_string()],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let requested = transaction.query_row(
+        "SELECT cancel_requested FROM runs WHERE id = ?1",
+        [run_id.to_string()],
+        |row| row.get::<_, bool>(0),
+    )?;
     Ok(if requested {
         RunOutcome::Cancelled
     } else {
@@ -5601,15 +5073,12 @@ fn load_snapshot(
             [request.workspace_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        .optional()?
         .ok_or(SessionRuntimeError::WorkspaceNotFound)?;
-    let mut statement = transaction
-        .prepare(
-            "SELECT id FROM sessions WHERE workspace_id = ?1
+    let mut statement = transaction.prepare(
+        "SELECT id FROM sessions WHERE workspace_id = ?1
              ORDER BY updated_at_ms DESC, rowid DESC LIMIT ?2",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let ids = statement
         .query_map(
             params![
@@ -5617,10 +5086,8 @@ fn load_snapshot(
                 u64::from(request.session_limit) + 1
             ],
             |row| row.get::<_, String>(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     let has_older_sessions = ids.len() > usize::from(request.session_limit);
     // One grouped pass over the workspace's runs supplies every summary's
@@ -5664,9 +5131,7 @@ fn load_snapshot(
             Err(error) => return Err(error),
         }
     }
-    transaction
-        .commit()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    transaction.commit()?;
     Ok(WorkspaceSnapshot {
         cursor: EventCursor {
             store_id,
@@ -5693,21 +5158,17 @@ fn load_session_snapshot(
     // Messages order by run first, then by ordinal within the run, so a
     // prompt queued while a run streams does not interleave with that run's
     // later per-turn messages (which receive higher session ordinals).
-    let mut statement = transaction
-        .prepare(
-            "SELECT m.id FROM messages m JOIN runs r ON r.id = m.run_id
+    let mut statement = transaction.prepare(
+        "SELECT m.id FROM messages m JOIN runs r ON r.id = m.run_id
              WHERE m.session_id = ?1 AND NOT (m.role = 'assistant' AND m.state = 'queued')
              ORDER BY r.created_at_ms DESC, r.rowid DESC, m.ordinal DESC LIMIT ?2",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let mut message_ids = statement
         .query_map(
             params![session_id.to_string(), u64::from(message_limit) + 1],
             |row| row.get::<_, String>(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     let has_older_messages = message_ids.len() > usize::from(message_limit);
     message_ids.truncate(usize::from(message_limit));
@@ -5716,33 +5177,27 @@ fn load_session_snapshot(
     for id in message_ids {
         messages.push(load_message(transaction, parse_id(&id)?)?);
     }
-    let mut statement = transaction
-        .prepare(
-            "SELECT id FROM runs WHERE session_id = ?1
+    let mut statement = transaction.prepare(
+        "SELECT id FROM runs WHERE session_id = ?1
              ORDER BY created_at_ms DESC, rowid DESC LIMIT ?2",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let mut run_ids = statement
         .query_map(params![session_id.to_string(), message_limit], |row| {
             row.get::<_, String>(0)
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     run_ids.reverse();
     let mut runs = Vec::with_capacity(run_ids.len());
     for id in run_ids {
         runs.push(load_run(transaction, parse_id(&id)?)?);
     }
-    let mut statement = transaction
-        .prepare(
-            "SELECT t.id FROM tool_calls t JOIN runs r ON r.id = t.run_id
+    let mut statement = transaction.prepare(
+        "SELECT t.id FROM tool_calls t JOIN runs r ON r.id = t.run_id
              WHERE r.session_id = ?1
              ORDER BY r.created_at_ms DESC, t.turn_ordinal DESC, t.call_ordinal DESC
              LIMIT ?2",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let mut tool_call_ids = statement
         .query_map(
             params![
@@ -5750,10 +5205,8 @@ fn load_session_snapshot(
                 u64::try_from(MAX_SNAPSHOT_TOOL_CALLS + 1).expect("snapshot bound fits u64")
             ],
             |row| row.get::<_, String>(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     let has_older_tool_calls = tool_call_ids.len() > MAX_SNAPSHOT_TOOL_CALLS;
     tool_call_ids.truncate(MAX_SNAPSHOT_TOOL_CALLS);
@@ -5807,22 +5260,18 @@ fn read_published_event_page(
     after: u64,
     limit: u16,
 ) -> Result<Vec<Arc<feed::PublishedEvent>>, SessionRuntimeError> {
-    let mut statement = connection
-        .prepare_cached(
-            "SELECT envelope_json FROM events
+    let mut statement = connection.prepare_cached(
+        "SELECT envelope_json FROM events
              WHERE workspace_id = ?1 AND sequence > ?2
              ORDER BY sequence LIMIT ?3",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     statement
         .query_map(params![workspace_id.to_string(), after, limit], |row| {
             row.get::<_, String>(0)
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        })?
         .map(|row| {
-            let encoded = row.map_err(|_| SessionRuntimeError::Persistence)?;
-            let envelope =
-                serde_json::from_str(&encoded).map_err(|_| SessionRuntimeError::Persistence)?;
+            let encoded = row?;
+            let envelope = serde_json::from_str(&encoded)?;
             Ok(Arc::new(feed::PublishedEvent {
                 envelope,
                 json: Arc::from(encoded),
@@ -5841,8 +5290,7 @@ fn run_cancel_requested(
             statement
                 .query_row([run_id.to_string()], |row| row.get(0))
                 .optional()
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        })?
         .ok_or(SessionRuntimeError::RunNotFound)
 }
 
@@ -5851,34 +5299,28 @@ fn session_file_state_rows(
     session_id: SessionId,
 ) -> Result<Vec<(String, String)>, SessionRuntimeError> {
     let mut statement = connection
-        .prepare_cached("SELECT path, content_hash FROM session_files WHERE session_id = ?1")
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .prepare_cached("SELECT path, content_hash FROM session_files WHERE session_id = ?1")?;
     statement
         .query_map([session_id.to_string()], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        })?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)
+        .map_err(|_| SessionRuntimeError::CONSTRAINT)
 }
 
 fn pending_steering_rows(
     connection: &Connection,
     run_id: RunId,
 ) -> Result<Vec<crate::runtime::SteeringMessage>, SessionRuntimeError> {
-    let mut statement = connection
-        .prepare_cached(
-            "SELECT id, output FROM messages
+    let mut statement = connection.prepare_cached(
+        "SELECT id, output FROM messages
              WHERE run_id = ?1 AND steering = 1 AND state = 'queued' ORDER BY ordinal",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let rows = statement
         .query_map([run_id.to_string()], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     rows.into_iter()
         .map(|(id, text)| {
             Ok(crate::runtime::SteeringMessage {
@@ -5899,6 +5341,66 @@ struct EventContext {
     occurred_at_ms: u64,
 }
 
+impl EventContext {
+    /// An event scoped to a run and caused by the command that queued it.
+    const fn for_run(store_id: StoreId, identity: RunIdentity, occurred_at_ms: u64) -> Self {
+        Self {
+            store_id,
+            workspace_id: identity.workspace_id,
+            session_id: identity.session_id,
+            run_id: Some(identity.run_id),
+            caused_by: Some(identity.command_id),
+            occurred_at_ms,
+        }
+    }
+
+    /// An event scoped to a run by explicit ids: cascades and settlements of
+    /// rows other than the claimed run.
+    const fn for_run_ids(
+        store_id: StoreId,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+        run_id: RunId,
+        caused_by: Option<CommandId>,
+        occurred_at_ms: u64,
+    ) -> Self {
+        Self {
+            store_id,
+            workspace_id,
+            session_id,
+            run_id: Some(run_id),
+            caused_by,
+            occurred_at_ms,
+        }
+    }
+
+    /// A session-level event with no run.
+    const fn for_session(
+        store_id: StoreId,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+        caused_by: Option<CommandId>,
+        occurred_at_ms: u64,
+    ) -> Self {
+        Self {
+            store_id,
+            workspace_id,
+            session_id,
+            run_id: None,
+            caused_by,
+            occurred_at_ms,
+        }
+    }
+
+    /// The same context with no causing command (recovery, timeouts).
+    const fn uncaused(self) -> Self {
+        Self {
+            caused_by: None,
+            ..self
+        }
+    }
+}
+
 fn append_event(
     transaction: &Connection,
     context: EventContext,
@@ -5911,8 +5413,7 @@ fn append_event(
         )
         .and_then(|mut statement| {
             statement.query_row([context.workspace_id.to_string()], |row| row.get(0))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?;
     let envelope = SessionEventEnvelope {
         cursor: EventCursor {
             store_id: context.store_id,
@@ -5925,7 +5426,7 @@ fn append_event(
         occurred_at_ms: context.occurred_at_ms,
         event,
     };
-    let encoded = serde_json::to_string(&envelope).map_err(|_| SessionRuntimeError::Persistence)?;
+    let encoded = serde_json::to_string(&envelope)?;
     if encoded.len() > MAX_PERSISTED_EVENT_BYTES {
         return Err(SessionRuntimeError::EventTooLarge);
     }
@@ -5939,8 +5440,7 @@ fn append_event(
                 sequence,
                 encoded.as_str()
             ])
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?;
     // The encoding is kept, not dropped: after commit the worker publishes
     // it to live subscribers and the server writes it to the wire as-is.
     feed::stage(Arc::new(feed::PublishedEvent {
@@ -5960,8 +5460,7 @@ fn session_parent(
             [session_id.to_string()],
             |row| row.get::<_, Option<String>>(0),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        .optional()?
         .ok_or(SessionRuntimeError::SessionNotFound)?
         .as_deref()
         .map(parse_id)
@@ -6083,34 +5582,29 @@ fn load_accounting_folds(
     // time: never a sum of cached child inclusives, which could double count
     // or go stale. The depth bound is the runtime's, so a store touched by a
     // deeper future build still reads back the same tree this build runs.
-    let mut statement = connection
-        .prepare_cached(ACCOUNTING_ROWS_SQL)
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let rows = statement
-        .query_map(
-            params![
-                root.map(|root| root.to_string()),
-                workspace_id.to_string(),
-                MAX_CHILD_DEPTH
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<u64>>(4)?,
-                    row.get::<_, bool>(5)?,
-                    row.get::<_, Option<u64>>(6)?,
-                ))
-            },
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let mut statement = connection.prepare_cached(ACCOUNTING_ROWS_SQL)?;
+    let rows = statement.query_map(
+        params![
+            root.map(|root| root.to_string()),
+            workspace_id.to_string(),
+            MAX_CHILD_DEPTH
+        ],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<u64>>(4)?,
+                row.get::<_, bool>(5)?,
+                row.get::<_, Option<u64>>(6)?,
+            ))
+        },
+    )?;
 
     let mut folds: HashMap<String, SessionAccountingFold> = HashMap::new();
     for row in rows {
-        let (session_id, owner_id, status, encoded_usage, cost, saw_turn, started_at_ms) =
-            row.map_err(|_| SessionRuntimeError::Persistence)?;
+        let (session_id, owner_id, status, encoded_usage, cost, saw_turn, started_at_ms) = row?;
         let fold = folds.entry(session_id.clone()).or_default();
         let SessionAccountingFold { direct, inclusive } = fold;
         let Some(encoded_usage) = encoded_usage else {
@@ -6196,8 +5690,7 @@ fn load_session_summary_with_accounting(
                 ))
             },
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        .optional()?
         .ok_or(SessionRuntimeError::SessionNotFound)
         .and_then(
             |(
@@ -6242,7 +5735,7 @@ fn load_session_summary_with_accounting(
                     purpose: match purpose.as_str() {
                         "task" => SessionPurpose::Task,
                         "audit" => SessionPurpose::Audit,
-                        _ => return Err(SessionRuntimeError::Persistence),
+                        _ => return Err(SessionRuntimeError::CODEC),
                     },
                     title,
                     status: parse_session_status(&status)?,
@@ -6260,8 +5753,7 @@ fn load_session_summary_with_accounting(
                     last_outcome: last_outcome
                         .as_deref()
                         .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|_| SessionRuntimeError::Persistence)?,
+                        .transpose()?,
                 })
             },
         )
@@ -6281,7 +5773,7 @@ fn parse_run_activity(column: &str) -> Result<RunActivity, SessionRuntimeError> 
         "reasoning" => Ok(RunActivity::Reasoning),
         "generating_response" => Ok(RunActivity::GeneratingResponse),
         "preparing_tool_call" => Ok(RunActivity::PreparingToolCall),
-        _ => Err(SessionRuntimeError::Persistence),
+        _ => Err(SessionRuntimeError::CODEC),
     }
 }
 
@@ -6290,28 +5782,26 @@ fn load_message(
     message_id: MessageId,
 ) -> Result<MessageSnapshot, SessionRuntimeError> {
     let (session, run, turn_ordinal, role, state, output, refusal, created, steering, truncated) =
-        connection
-            .query_row(
-                "SELECT session_id, run_id, turn_ordinal, role, state, output, refusal,
+        connection.query_row(
+            "SELECT session_id, run_id, turn_ordinal, role, state, output, refusal,
                         created_at_ms, steering, truncated
                  FROM messages WHERE id = ?1",
-                [message_id.to_string()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, u16>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, u64>(7)?,
-                        row.get::<_, bool>(8)?,
-                        row.get::<_, bool>(9)?,
-                    ))
-                },
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+            [message_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u16>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, u64>(7)?,
+                    row.get::<_, bool>(8)?,
+                    row.get::<_, bool>(9)?,
+                ))
+            },
+        )?;
     let (output, refusal) = load_message_text(connection, message_id, output, refusal)?;
     Ok(MessageSnapshot {
         id: message_id,
@@ -6334,19 +5824,15 @@ fn load_message_text(
     mut output: String,
     mut refusal: String,
 ) -> Result<(String, String), SessionRuntimeError> {
-    let mut statement = connection
-        .prepare(
-            "SELECT channel, text FROM message_chunks
+    let mut statement = connection.prepare(
+        "SELECT channel, text FROM message_chunks
              WHERE message_id = ?1 ORDER BY channel, chunk_ordinal",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let chunks = statement
         .query_map([message_id.to_string()], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     let (output_bytes, refusal_bytes) = chunks.iter().fold(
         (0_usize, 0_usize),
         |(output_bytes, refusal_bytes), (channel, text)| match channel.as_str() {
@@ -6356,7 +5842,7 @@ fn load_message_text(
         },
     );
     if output_bytes == usize::MAX || refusal_bytes == usize::MAX {
-        return Err(SessionRuntimeError::Persistence);
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     output.reserve(output_bytes);
     refusal.reserve(refusal_bytes);
@@ -6364,7 +5850,7 @@ fn load_message_text(
         match channel.as_str() {
             "output" => output.push_str(&text),
             "refusal" => refusal.push_str(&text),
-            _ => return Err(SessionRuntimeError::Persistence),
+            _ => return Err(SessionRuntimeError::CONSTRAINT),
         }
     }
     Ok((output, refusal))
@@ -6482,9 +5968,8 @@ fn load_model_context_with_rewrite_status(
         status: String,
         outcome_json: Option<String>,
     }
-    let mut statement = transaction
-        .prepare_cached(
-            "SELECT m.run_id, m.output, r.status, r.outcome_json,
+    let mut statement = transaction.prepare_cached(
+        "SELECT m.run_id, m.output, r.status, r.outcome_json,
                     (SELECT group_concat(c.text, '') FROM (
                          SELECT text FROM message_chunks
                          WHERE message_id = m.id AND channel = 'output'
@@ -6495,8 +5980,7 @@ fn load_model_context_with_rewrite_status(
                AND m.role = 'user' AND m.steering = 0
                AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
              ORDER BY m.ordinal",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let prompts = statement
         .query_map(params![session, through_ordinal, cutoff_ordinal], |row| {
             let mut text = row.get::<_, String>(1)?;
@@ -6509,35 +5993,28 @@ fn load_model_context_with_rewrite_status(
                 status: row.get(2)?,
                 outcome_json: row.get(3)?,
             })
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
 
     // Every committed turn for the session's runs, grouped by run.
     let mut turns: HashMap<String, Vec<(u16, String, bool)>> = HashMap::new();
-    let mut statement = transaction
-        .prepare_cached(
-            "SELECT t.run_id, t.turn_ordinal, t.assistant_content_json, t.truncated
+    let mut statement = transaction.prepare_cached(
+        "SELECT t.run_id, t.turn_ordinal, t.assistant_content_json, t.truncated
              FROM model_turns t JOIN runs r ON r.id = t.run_id
              WHERE r.session_id = ?1
              ORDER BY t.run_id, t.turn_ordinal",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let rows = statement
-        .query_map([&session], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, u16>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, bool>(3)?,
-            ))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
+    let rows = statement.query_map([&session], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, u16>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, bool>(3)?,
+        ))
+    })?;
     for row in rows {
-        let (run_id, ordinal, content, truncated) =
-            row.map_err(|_| SessionRuntimeError::Persistence)?;
+        let (run_id, ordinal, content, truncated) = row?;
         turns
             .entry(run_id)
             .or_default()
@@ -6545,56 +6022,55 @@ fn load_model_context_with_rewrite_status(
     }
     drop(statement);
 
-    // Every recorded tool result, keyed by run and provider call id.
-    let mut results: HashMap<String, HashMap<String, (String, bool)>> = HashMap::new();
-    let mut statement = transaction
-        .prepare_cached(
-            "SELECT c.run_id, c.provider_call_id, c.result, c.is_error
+    // Every recorded tool result, keyed by run and provider call id, with the
+    // effect class the call was admitted under (absent for rows written
+    // before schema 26).
+    let mut results: HashMap<String, HashMap<String, RecordedResult>> = HashMap::new();
+    let mut statement = transaction.prepare_cached(
+        "SELECT c.run_id, c.provider_call_id, c.result, c.is_error, c.effect
              FROM tool_calls c JOIN runs r ON r.id = c.run_id
              WHERE r.session_id = ?1 AND c.result IS NOT NULL",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let rows = statement
-        .query_map([&session], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, bool>(3)?,
-            ))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
+    let rows = statement.query_map([&session], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, bool>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+    let mut prunable = HashSet::new();
     for row in rows {
-        let (run_id, call_id, content, is_error) =
-            row.map_err(|_| SessionRuntimeError::Persistence)?;
+        let (run_id, call_id, content, is_error, effect) = row?;
+        let effect = effect.as_deref().and_then(EffectClass::from_stored);
+        if effect == Some(EffectClass::ReadOnly) {
+            prunable.insert(call_id.clone());
+        }
         results
             .entry(run_id)
             .or_default()
-            .insert(call_id, (content, is_error));
+            .insert(call_id, RecordedResult { content, is_error });
     }
     drop(statement);
 
     // Applied steering, per run, in the order it was applied. Each carries
     // the ordinal of the turn whose request first included it.
     let mut steering: HashMap<String, std::collections::VecDeque<(u16, String)>> = HashMap::new();
-    let mut statement = transaction
-        .prepare_cached(
-            "SELECT run_id, turn_ordinal, output FROM messages
+    let mut statement = transaction.prepare_cached(
+        "SELECT run_id, turn_ordinal, output FROM messages
              WHERE session_id = ?1 AND steering = 1 AND state = 'complete'
              ORDER BY run_id, turn_ordinal, ordinal",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let rows = statement
-        .query_map([&session], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, u16>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
+    let rows = statement.query_map([&session], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, u16>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
     for row in rows {
-        let (run_id, ordinal, text) = row.map_err(|_| SessionRuntimeError::Persistence)?;
+        let (run_id, ordinal, text) = row?;
         steering
             .entry(run_id)
             .or_default()
@@ -6637,18 +6113,21 @@ fn load_model_context_with_rewrite_status(
             prompt.status.as_str(),
             "cancelled" | "failed" | "interrupted"
         ) {
-            let outcome_json = prompt
-                .outcome_json
-                .ok_or(SessionRuntimeError::Persistence)?;
-            let outcome: RunOutcome = serde_json::from_str(&outcome_json)
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let outcome_json = prompt.outcome_json.ok_or(SessionRuntimeError::CODEC)?;
+            let outcome: RunOutcome = serde_json::from_str(&outcome_json)?;
             if let Some(notice) = runtime_notice(&outcome) {
                 context.push(Message::user(notice));
             }
         }
     }
-    let context_rewritten = prune_stale_tool_results(&mut context);
+    let context_rewritten = prune_stale_tool_results(&mut context, &prunable);
     Ok((context, context_rewritten))
+}
+
+/// One stored tool result as context assembly reads it.
+struct RecordedResult {
+    content: String,
+    is_error: bool,
 }
 
 /// Assistant rows from stores that predate `model_turns`: one query per such
@@ -6658,9 +6137,8 @@ fn append_legacy_run_messages(
     run_id: RunId,
     context: &mut Vec<Message>,
 ) -> Result<(), SessionRuntimeError> {
-    let mut statement = connection
-        .prepare_cached(
-            "SELECT m.output, m.refusal,
+    let mut statement = connection.prepare_cached(
+        "SELECT m.output, m.refusal,
                     (SELECT group_concat(c.text, '') FROM (
                          SELECT text FROM message_chunks
                          WHERE message_id = m.id AND channel = 'output'
@@ -6674,23 +6152,20 @@ fn append_legacy_run_messages(
              FROM messages m
              WHERE m.run_id = ?1 AND m.role = 'assistant' AND m.state = 'complete'
              ORDER BY m.turn_ordinal, m.ordinal",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
-    let rows = statement
-        .query_map([run_id.to_string()], |row| {
-            let mut output = row.get::<_, String>(0)?;
-            let mut refusal = row.get::<_, String>(1)?;
-            if let Some(chunks) = row.get::<_, Option<String>>(2)? {
-                output.push_str(&chunks);
-            }
-            if let Some(chunks) = row.get::<_, Option<String>>(3)? {
-                refusal.push_str(&chunks);
-            }
-            Ok((output, refusal))
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
+    let rows = statement.query_map([run_id.to_string()], |row| {
+        let mut output = row.get::<_, String>(0)?;
+        let mut refusal = row.get::<_, String>(1)?;
+        if let Some(chunks) = row.get::<_, Option<String>>(2)? {
+            output.push_str(&chunks);
+        }
+        if let Some(chunks) = row.get::<_, Option<String>>(3)? {
+            refusal.push_str(&chunks);
+        }
+        Ok((output, refusal))
+    })?;
     for row in rows {
-        let (output, refusal) = row.map_err(|_| SessionRuntimeError::Persistence)?;
+        let (output, refusal) = row?;
         let content = if output.is_empty() { refusal } else { output };
         if !content.trim().is_empty() {
             context.push(Message::assistant(content));
@@ -6739,16 +6214,18 @@ fn latest_compaction(
             },
         )
         .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)
+        .map_err(|_| SessionRuntimeError::CODEC)
 }
 
 /// Replaces read-only tool results older than the recency window with
-/// one-line stubs. Only the built-in read-only tools are prunable — their
-/// results are re-derivable on demand; mutating, shell, and MCP outputs are
-/// not. The window keeps the last [`CONTEXT_PRUNE_KEEP_TURNS`] model turns
-/// (assistant messages) verbatim. `is_error` is preserved so an error result
-/// stays an error stub.
-fn prune_stale_tool_results(context: &mut [Message]) -> bool {
+/// one-line stubs. A result is prunable when the call was admitted with the
+/// `read_only` effect class (`prunable` holds those provider call ids from the
+/// store) — its output is re-derivable on demand; mutating, shell, and
+/// external outputs are not. Rows recorded before the effect was stored fall
+/// back to the built-in read-only names. The window keeps the last
+/// [`CONTEXT_PRUNE_KEEP_TURNS`] model turns (assistant messages) verbatim.
+/// `is_error` is preserved so an error result stays an error stub.
+fn prune_stale_tool_results(context: &mut [Message], prunable: &HashSet<String>) -> bool {
     let assistant_positions = context
         .iter()
         .enumerate()
@@ -6781,7 +6258,7 @@ fn prune_stale_tool_results(context: &mut [Message]) -> bool {
     for message in &mut context[..window_start] {
         let needs_pruning = message.content().iter().any(|block| {
             matches!(block, ContentBlock::ToolResult { call_id, content, .. }
-                if prunable_stub(&calls, call_id, content).is_some())
+                if prunable_stub(&calls, prunable, call_id, content).is_some())
         });
         if !needs_pruning {
             continue;
@@ -6794,7 +6271,7 @@ fn prune_stale_tool_results(context: &mut [Message]) -> bool {
                     call_id,
                     content,
                     is_error,
-                } => match prunable_stub(&calls, call_id, content) {
+                } => match prunable_stub(&calls, prunable, call_id, content) {
                     Some(stub) => ContentBlock::ToolResult {
                         call_id: call_id.clone(),
                         content: stub,
@@ -6816,11 +6293,12 @@ fn prune_stale_tool_results(context: &mut [Message]) -> bool {
 /// than the stub would be).
 fn prunable_stub(
     calls: &HashMap<String, (String, String)>,
+    prunable: &HashSet<String>,
     call_id: &str,
     content: &str,
 ) -> Option<String> {
     let (name, arguments) = calls.get(call_id)?;
-    if !PRUNABLE_READ_ONLY_TOOLS.contains(&name.as_str()) {
+    if !prunable.contains(call_id) && !PRUNABLE_READ_ONLY_TOOLS.contains(&name.as_str()) {
         return None;
     }
     let mut arguments = arguments.clone();
@@ -6872,14 +6350,12 @@ fn search_session_history(
 ) -> Result<Vec<HistoryMatch>, SessionRuntimeError> {
     let needle = query.to_lowercase();
     let mut matches = Vec::new();
-    let mut statement = transaction
-        .prepare(
-            "SELECT id, ordinal, run_id FROM messages
+    let mut statement = transaction.prepare(
+        "SELECT id, ordinal, run_id FROM messages
              WHERE session_id = ?1 AND role = 'user' AND run_id != ?2
                AND state IN ('complete', 'cancelled', 'failed', 'interrupted')
              ORDER BY ordinal",
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    )?;
     let prompts = statement
         .query_map(
             params![session_id.to_string(), calling_run.to_string()],
@@ -6890,10 +6366,8 @@ fn search_session_history(
                     row.get::<_, String>(2)?,
                 ))
             },
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
 
     let record = |matches: &mut Vec<HistoryMatch>, citation: String, text: &str| {
@@ -6917,26 +6391,21 @@ fn search_session_history(
             &prompt.output,
         );
         let run_id: RunId = parse_id(&run_id)?;
-        let mut statement = transaction
-            .prepare(
-                "SELECT turn_ordinal, assistant_content_json FROM model_turns
+        let mut statement = transaction.prepare(
+            "SELECT turn_ordinal, assistant_content_json FROM model_turns
                  WHERE run_id = ?1 ORDER BY turn_ordinal",
-            )
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        )?;
         let turns = statement
             .query_map([run_id.to_string()], |row| {
                 Ok((row.get::<_, u16>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|_| SessionRuntimeError::Persistence)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
         for (turn_ordinal, content_json) in turns {
             if matches.len() >= limit {
                 break;
             }
-            let content = serde_json::from_str::<Vec<PersistedContentBlock>>(&content_json)
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let content = serde_json::from_str::<Vec<PersistedContentBlock>>(&content_json)?;
             for block in content {
                 match ContentBlock::from(block) {
                     ContentBlock::Text { text } => record(
@@ -6954,13 +6423,11 @@ fn search_session_history(
                     ContentBlock::ToolResult { .. } => {}
                 }
             }
-            let mut statement = transaction
-                .prepare(
-                    "SELECT name, call_ordinal, result FROM tool_calls
+            let mut statement = transaction.prepare(
+                "SELECT name, call_ordinal, result FROM tool_calls
                      WHERE run_id = ?1 AND turn_ordinal = ?2 AND result IS NOT NULL
                      ORDER BY call_ordinal",
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            )?;
             let results = statement
                 .query_map(params![run_id.to_string(), turn_ordinal], |row| {
                     Ok((
@@ -6968,10 +6435,8 @@ fn search_session_history(
                         row.get::<_, u16>(1)?,
                         row.get::<_, String>(2)?,
                     ))
-                })
-                .map_err(|_| SessionRuntimeError::Persistence)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
             drop(statement);
             for (name, call_ordinal, result) in results {
                 record(
@@ -6996,9 +6461,8 @@ fn assembled_context_bytes(
     session_id: SessionId,
 ) -> Result<usize, SessionRuntimeError> {
     let context = load_model_context(transaction, session_id, u64::MAX)?;
-    let streaming_bytes: u64 = transaction
-        .query_row(
-            "SELECT
+    let streaming_bytes: u64 = transaction.query_row(
+        "SELECT
                  (SELECT COALESCE(SUM(
                       length(CAST(output AS BLOB)) + length(CAST(refusal AS BLOB))
                   ), 0) FROM messages WHERE session_id = ?1 AND state = 'streaming')
@@ -7007,10 +6471,9 @@ fn assembled_context_bytes(
                   FROM message_chunks c
                   JOIN messages m ON m.id = c.message_id
                   WHERE m.session_id = ?1 AND m.state = 'streaming')",
-            [session_id.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        [session_id.to_string()],
+        |row| row.get(0),
+    )?;
     Ok(context_bytes(&context)
         .saturating_add(usize::try_from(streaming_bytes).unwrap_or(usize::MAX)))
 }
@@ -7022,14 +6485,11 @@ fn compaction_instruction(
     connection: &Connection,
     session_id: SessionId,
 ) -> Result<String, SessionRuntimeError> {
-    let mut statement = connection
-        .prepare("SELECT path FROM session_files WHERE session_id = ?1 ORDER BY path")
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+    let mut statement =
+        connection.prepare("SELECT path FROM session_files WHERE session_id = ?1 ORDER BY path")?;
     let paths = statement
-        .query_map([session_id.to_string()], |row| row.get::<_, String>(0))
-        .map_err(|_| SessionRuntimeError::Persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        .query_map([session_id.to_string()], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
     let mut instruction = String::from(COMPACTION_INSTRUCTION);
     instruction.push_str("\n\nFiles touched (seeded from the session file-state table):\n");
     if paths.is_empty() {
@@ -7064,7 +6524,7 @@ fn compaction_instruction(
 /// and the continuation notice after a truncated turn.
 fn append_run_turns(
     turns: Vec<(u16, String, bool)>,
-    mut recorded: HashMap<String, (String, bool)>,
+    mut recorded: HashMap<String, RecordedResult>,
     mut steering: std::collections::VecDeque<(u16, String)>,
     context: &mut Vec<Message>,
 ) -> Result<(), SessionRuntimeError> {
@@ -7077,8 +6537,7 @@ fn append_run_turns(
             context.push(Message::user(text));
         }
         let content: Vec<ContentBlock> =
-            serde_json::from_str::<Vec<PersistedContentBlock>>(&content_json)
-                .map_err(|_| SessionRuntimeError::Persistence)?
+            serde_json::from_str::<Vec<PersistedContentBlock>>(&content_json)?
                 .into_iter()
                 .map(ContentBlock::from)
                 .collect();
@@ -7090,7 +6549,7 @@ fn append_run_turns(
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::ToolCall { id, .. } => Some(match recorded.remove(id) {
-                    Some((content, is_error)) => ContentBlock::ToolResult {
+                    Some(RecordedResult { content, is_error }) => ContentBlock::ToolResult {
                         call_id: id.clone(),
                         content,
                         is_error,
@@ -7151,7 +6610,7 @@ fn load_tool_call(
                 ))
             },
         )
-        .map_err(|_| SessionRuntimeError::Persistence)
+        .map_err(|_| SessionRuntimeError::CONSTRAINT)
         .and_then(
             |(
                 session,
@@ -7178,11 +6637,7 @@ fn load_tool_call(
                     state: parse_tool_call_state(&state)?,
                     result,
                     is_error,
-                    display: display
-                        .as_deref()
-                        .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|_| SessionRuntimeError::Persistence)?,
+                    display: display.as_deref().map(serde_json::from_str).transpose()?,
                 })
             },
         )
@@ -7214,7 +6669,7 @@ fn load_run(connection: &Connection, run_id: RunId) -> Result<RunSnapshot, Sessi
                 ))
             },
         )
-        .map_err(|_| SessionRuntimeError::Persistence)
+        .map_err(|_| SessionRuntimeError::CONSTRAINT)
         .and_then(
             |(
                 session,
@@ -7234,35 +6689,24 @@ fn load_run(connection: &Connection, run_id: RunId) -> Result<RunSnapshot, Sessi
                     id: run_id,
                     session_id: parse_id(&session)?,
                     status: parse_run_status(&status)?,
-                    outcome: outcome
-                        .as_deref()
-                        .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|_| SessionRuntimeError::Persistence)?,
+                    outcome: outcome.as_deref().map(serde_json::from_str).transpose()?,
                     prompt_identity: prompt_identity
                         .as_deref()
                         .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|_| SessionRuntimeError::Persistence)?
+                        .transpose()?
                         .map(Box::new),
                     resolved_model: resolved_model
                         .as_deref()
                         .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|_| SessionRuntimeError::Persistence)?
+                        .transpose()?
                         .map(Box::new),
                     plan: plan_identity
                         .as_deref()
                         .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|_| SessionRuntimeError::Persistence)?
+                        .transpose()?
                         .map(Box::new),
                     correlation: parse_correlation(correlation.as_deref())?,
-                    usage: usage
-                        .as_deref()
-                        .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|_| SessionRuntimeError::Persistence)?,
+                    usage: usage.as_deref().map(serde_json::from_str).transpose()?,
                     context_tokens,
                     estimated_cost_usd_nanos: cost,
                     limits: {
@@ -7272,8 +6716,7 @@ fn load_run(connection: &Connection, run_id: RunId) -> Result<RunSnapshot, Sessi
                     audit: audit
                         .as_deref()
                         .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|_| SessionRuntimeError::Persistence)?
+                        .transpose()?
                         .map(Box::new),
                 })
             },
@@ -7391,8 +6834,7 @@ fn delete_idle_session(
                 ))
             },
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        .optional()?
         .ok_or(SessionRuntimeError::SessionNotFound)?;
     let (status, active_run, preparing_run, queued_prompts, unfinished) = state;
     if status != "idle"
@@ -7403,9 +6845,8 @@ fn delete_idle_session(
     {
         return Err(SessionRuntimeError::SessionActive);
     }
-    let owner_active: bool = transaction
-        .query_row(
-            "WITH RECURSIVE owners(run_id, depth) AS (
+    let owner_active: bool = transaction.query_row(
+        "WITH RECURSIVE owners(run_id, depth) AS (
                  SELECT owner_run_id, 1 FROM sessions
                  WHERE id = ?1 AND owner_run_id IS NOT NULL
                  UNION ALL
@@ -7423,10 +6864,9 @@ fn delete_idle_session(
                          ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted')
                      OR (owners.depth = ?2 AND ancestor.owner_run_id IS NOT NULL)
              )",
-            params![session_id.to_string(), MAX_CHILD_DEPTH],
-            |row| row.get(0),
-        )
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        params![session_id.to_string(), MAX_CHILD_DEPTH],
+        |row| row.get(0),
+    )?;
     if owner_active {
         return Err(SessionRuntimeError::SessionActive);
     }
@@ -7445,20 +6885,11 @@ fn delete_idle_session(
         "DELETE FROM session_compactions WHERE session_id = ?1",
         "DELETE FROM sessions WHERE id = ?1",
     ] {
-        transaction
-            .execute(statement, [&session])
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        transaction.execute(statement, [&session])?;
     }
     let deleted = append_event(
         transaction,
-        EventContext {
-            store_id,
-            workspace_id,
-            session_id,
-            run_id: None,
-            caused_by: Some(command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_session(store_id, workspace_id, session_id, Some(command_id), now),
         SessionEvent::SessionDeleted { session_id },
     )?;
     let Some(parent_id) = parent_id else {
@@ -7467,14 +6898,7 @@ fn delete_idle_session(
     let session = load_session_summary(transaction, parent_id)?;
     append_event(
         transaction,
-        EventContext {
-            store_id,
-            workspace_id,
-            session_id: parent_id,
-            run_id: None,
-            caused_by: Some(command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_session(store_id, workspace_id, parent_id, Some(command_id), now),
         SessionEvent::SessionUpdated { session },
     )
 }
@@ -7489,8 +6913,7 @@ fn ensure_workspace(
             statement
                 .query_row([workspace_id.to_string()], |_| Ok(()))
                 .optional()
-        })
-        .map_err(|_| SessionRuntimeError::Persistence)?;
+        })?;
     found.ok_or(SessionRuntimeError::WorkspaceNotFound)
 }
 
@@ -7504,8 +6927,7 @@ fn session_workspace(
             [session_id.to_string()],
             |row| row.get::<_, String>(0),
         )
-        .optional()
-        .map_err(|_| SessionRuntimeError::Persistence)?
+        .optional()?
         .ok_or(SessionRuntimeError::SessionNotFound)?;
     parse_id(&workspace)
 }
@@ -7520,14 +6942,14 @@ fn workspace_sequence(
             [workspace_id.to_string()],
             |row| row.get(0),
         )
-        .map_err(|_| SessionRuntimeError::Persistence)
+        .map_err(|_| SessionRuntimeError::CODEC)
 }
 
 fn parse_id<T>(value: &str) -> Result<T, SessionRuntimeError>
 where
     T: std::str::FromStr,
 {
-    value.parse().map_err(|_| SessionRuntimeError::Persistence)
+    value.parse().map_err(|_| SessionRuntimeError::CODEC)
 }
 
 fn parse_session_status(value: &str) -> Result<SessionStatus, SessionRuntimeError> {
@@ -7535,7 +6957,7 @@ fn parse_session_status(value: &str) -> Result<SessionStatus, SessionRuntimeErro
         "idle" => Ok(SessionStatus::Idle),
         "queued" => Ok(SessionStatus::Queued),
         "running" => Ok(SessionStatus::Running),
-        _ => Err(SessionRuntimeError::Persistence),
+        _ => Err(SessionRuntimeError::CODEC),
     }
 }
 
@@ -7548,7 +6970,7 @@ fn parse_run_status(value: &str) -> Result<RunStatus, SessionRuntimeError> {
         "failed" => Ok(RunStatus::Failed),
         "interrupted" => Ok(RunStatus::Interrupted),
         "budget_exhausted" => Ok(RunStatus::BudgetExhausted),
-        _ => Err(SessionRuntimeError::Persistence),
+        _ => Err(SessionRuntimeError::CONSTRAINT),
     }
 }
 
@@ -7556,7 +6978,7 @@ fn parse_message_role(value: &str) -> Result<MessageRole, SessionRuntimeError> {
     match value {
         "user" => Ok(MessageRole::User),
         "assistant" => Ok(MessageRole::Assistant),
-        _ => Err(SessionRuntimeError::Persistence),
+        _ => Err(SessionRuntimeError::CODEC),
     }
 }
 
@@ -7568,7 +6990,7 @@ fn parse_message_state(value: &str) -> Result<MessageState, SessionRuntimeError>
         "cancelled" => Ok(MessageState::Cancelled),
         "failed" => Ok(MessageState::Failed),
         "interrupted" => Ok(MessageState::Interrupted),
-        _ => Err(SessionRuntimeError::Persistence),
+        _ => Err(SessionRuntimeError::CONSTRAINT),
     }
 }
 
@@ -7589,7 +7011,7 @@ fn parse_approval_mode(value: &str) -> Result<ApprovalMode, SessionRuntimeError>
         "ask" => Ok(ApprovalMode::Ask),
         "auto" => Ok(ApprovalMode::Auto),
         "full" => Ok(ApprovalMode::Full),
-        _ => Err(SessionRuntimeError::Persistence),
+        _ => Err(SessionRuntimeError::CONSTRAINT),
     }
 }
 
@@ -7628,7 +7050,7 @@ fn parse_approval_resolution(value: &str) -> Result<ApprovalResolution, SessionR
         "denied" => Ok(ApprovalResolution::Denied),
         "denied_timeout" => Ok(ApprovalResolution::DeniedTimeout),
         "denied_by_reviewer" => Ok(ApprovalResolution::DeniedByReviewer),
-        _ => Err(SessionRuntimeError::Persistence),
+        _ => Err(SessionRuntimeError::CONSTRAINT),
     }
 }
 
@@ -7641,7 +7063,7 @@ fn parse_tool_call_state(value: &str) -> Result<ToolCallState, SessionRuntimeErr
         "failed" => Ok(ToolCallState::Failed),
         "denied" => Ok(ToolCallState::Denied),
         "interrupted" => Ok(ToolCallState::Interrupted),
-        _ => Err(SessionRuntimeError::Persistence),
+        _ => Err(SessionRuntimeError::CONSTRAINT),
     }
 }
 
@@ -10025,7 +9447,7 @@ mod tests {
                         [run_id.to_string()],
                         |row| row.get(0),
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CODEC)
             })
             .await
             .unwrap();
@@ -10122,16 +9544,14 @@ mod tests {
             .await
             .unwrap()
             .call(Priority::Control, move |connection| {
-                let mut statement = connection
-                    .prepare("SELECT path, content_hash FROM session_files WHERE session_id = ?1")
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                let mut statement = connection.prepare(
+                    "SELECT path, content_hash FROM session_files WHERE session_id = ?1",
+                )?;
                 let rows = statement
                     .query_map([session_id.to_string()], |row| {
                         Ok((row.get(0)?, row.get(1)?))
-                    })
-                    .map_err(|_| SessionRuntimeError::Persistence)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(rows)
             })
             .await
@@ -11716,7 +11136,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(
             !connection
@@ -11843,7 +11263,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "tool_calls", "display_json").unwrap());
         let (turn_ordinal, output, state) = connection
@@ -11911,7 +11331,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         let (display_json, result) = connection
             .query_row(
@@ -11970,7 +11390,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "runs", "kind").unwrap());
         assert_eq!(
@@ -12035,7 +11455,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "sessions", "context_tokens").unwrap());
         assert!(has_column(&connection, "sessions", "owner_run_id").unwrap());
@@ -12123,7 +11543,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "sessions", "owner_run_id").unwrap());
         assert_eq!(
@@ -12179,7 +11599,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "runs", "prompt_identity_json").unwrap());
         assert_eq!(
@@ -12223,7 +11643,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         for column in [
             "model_json",
@@ -12290,7 +11710,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "message_chunks", "chunk_ordinal").unwrap());
         assert!(has_column(&connection, "message_chunks", "text").unwrap());
@@ -12364,7 +11784,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         let command_id_not_null: bool = connection
             .query_row(
@@ -12403,7 +11823,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "message_chunks", "text").unwrap());
         assert!(has_column(&connection, "runs", "context_base_bytes").unwrap());
@@ -12473,7 +11893,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "runs", "resolved_model_json").unwrap());
         assert_eq!(
@@ -12565,7 +11985,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         let preparing_shape: (String, bool, Option<String>) = connection
             .query_row(
@@ -12688,7 +12108,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         let occupancy_shape: (String, bool, Option<String>) = connection
             .query_row(
@@ -12751,7 +12171,7 @@ mod tests {
 
             assert!(matches!(
                 open_database(&path),
-                Err(SessionRuntimeError::Persistence)
+                Err(SessionRuntimeError::CONSTRAINT)
             ));
         }
     }
@@ -12794,7 +12214,7 @@ mod tests {
                         |row| row.get::<_, String>(0),
                     )
                     .unwrap(),
-                "25"
+                "26"
             );
         }
     }
@@ -12833,7 +12253,7 @@ mod tests {
 
         assert!(matches!(
             open_database(&path),
-            Err(SessionRuntimeError::Persistence)
+            Err(SessionRuntimeError::CONSTRAINT)
         ));
         let connection = Connection::open(path).unwrap();
         assert_eq!(
@@ -12915,7 +12335,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         // A historical child keeps its parent run but has no recorded call:
         // the summary says so explicitly instead of inventing one.
@@ -12997,7 +12417,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert_eq!(
             connection
@@ -13023,6 +12443,116 @@ mod tests {
         let summary = load_session_summary(&connection, session_id).unwrap();
         assert_eq!(summary.active_run_id, Some(run_id));
         assert_eq!(summary.activity, None);
+    }
+
+    /// Every `PersistenceFault` variant is reachable from a real store fault:
+    /// a `RAISE(ABORT)` trigger is a constraint, a row that no longer decodes
+    /// is a codec fault, and a read-only database keeps its SQLite code.
+    #[tokio::test]
+    async fn every_persistence_fault_variant_is_reachable() {
+        let (directory, store, claimed) = claimed_store_fixture().await;
+        // Constraint: a trigger rejects the write.
+        store
+            .call(Priority::Control, |connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER reject_activity BEFORE UPDATE OF activity ON runs
+                     BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let constraint = store
+            .append_run_activity(&claimed, RunActivity::WaitingForProvider)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            constraint,
+            SessionRuntimeError::Persistence(PersistenceFault::Constraint)
+        );
+        assert!(constraint.to_string().contains("invariant"), "{constraint}");
+        // Codec: the run's limits no longer decode.
+        store
+            .call(Priority::Control, |connection| {
+                connection.execute_batch(
+                    "DROP TRIGGER reject_activity;
+                     UPDATE runs SET limits_json = 'not json';",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            parse_run_limits(Some("not json")).unwrap_err(),
+            SessionRuntimeError::Persistence(PersistenceFault::Codec)
+        );
+        // Sqlite: the connection is read-only, so a write keeps the code.
+        let read_only = store
+            .call(Priority::Control, |connection| {
+                connection.execute_batch("PRAGMA query_only = 1")?;
+                let error = connection
+                    .execute("UPDATE runs SET activity = 'x'", [])
+                    .map(|_| ())
+                    .map_err(SessionRuntimeError::from);
+                connection.execute_batch("PRAGMA query_only = 0")?;
+                Ok(error)
+            })
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            read_only,
+            SessionRuntimeError::Persistence(PersistenceFault::Sqlite(
+                rusqlite::ffi::ErrorCode::ReadOnly
+            ))
+        );
+        store.close().await.unwrap();
+        drop(directory);
+    }
+
+    #[test]
+    fn version_twenty_six_migration_adds_the_tool_call_effect_and_keeps_history_unknown() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let (connection, _) = open_database(&path).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO workspaces(id, path) VALUES ('w', '/v25-effect');
+                 INSERT INTO sessions(id, workspace_id, title, status, created_at_ms,
+                                      updated_at_ms)
+                 VALUES ('s', 'w', 'Old', 'idle', 1, 1);
+                 INSERT INTO runs(id, session_id, command_id, user_message_id,
+                                  assistant_message_id, status, created_at_ms)
+                 VALUES ('r', 's', 'cmd', 'u', 'a', 'completed', 1);
+                 INSERT INTO tool_calls(id, run_id, turn_ordinal, call_ordinal,
+                                        provider_call_id, name, arguments_json, state,
+                                        result, requested_at_ms)
+                 VALUES ('c', 'r', 1, 1, 'p1', 'read_file', '{}', 'completed', 'x', 1);
+                 UPDATE metadata SET value = '25' WHERE key = 'schema_version';
+                 ALTER TABLE tool_calls DROP COLUMN effect;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let (connection, _) = open_database(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "26"
+        );
+        // A historical call has no recorded effect: assembly falls back to
+        // the name rather than guessing a class for it.
+        let effect: Option<String> = connection
+            .query_row("SELECT effect FROM tool_calls WHERE id = 'c'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(effect, None);
     }
 
     /// D6: activity is a column written with its event, and the summary reads
@@ -13057,24 +12587,19 @@ mod tests {
             .inner
             .store
             .call(Priority::Control, move |connection| {
-                let column: Option<String> = connection
-                    .query_row(
-                        "SELECT activity FROM runs WHERE id = ?1",
-                        [run_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                let column: Option<String> = connection.query_row(
+                    "SELECT activity FROM runs WHERE id = ?1",
+                    [run_id.to_string()],
+                    |row| row.get(0),
+                )?;
                 let summary = load_session_summary(connection, session_id)?;
-                let counted: String = connection
-                    .query_row(
-                        "SELECT value FROM metadata WHERE key = 'command_count'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
-                let journaled: u32 = connection
-                    .query_row("SELECT COUNT(*) FROM commands", [], |row| row.get(0))
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                let counted: String = connection.query_row(
+                    "SELECT value FROM metadata WHERE key = 'command_count'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let journaled: u32 =
+                    connection.query_row("SELECT COUNT(*) FROM commands", [], |row| row.get(0))?;
                 Ok((column, summary, counted, journaled))
             })
             .await
@@ -13155,7 +12680,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         let message = load_message(&connection, message_id).unwrap();
         assert!(!message.truncated);
@@ -13242,7 +12767,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         let shape: (String, bool, Option<String>) = connection
             .query_row(
@@ -13267,7 +12792,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             load_run(&connection, run_id),
-            Err(SessionRuntimeError::Persistence)
+            Err(SessionRuntimeError::CODEC)
         ));
         connection
             .execute("ALTER TABLE runs DROP COLUMN limits_json", [])
@@ -13281,7 +12806,7 @@ mod tests {
         drop(connection);
         assert!(matches!(
             open_database(&path),
-            Err(SessionRuntimeError::Persistence)
+            Err(SessionRuntimeError::CONSTRAINT)
         ));
     }
 
@@ -13324,7 +12849,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
     }
 
@@ -13350,7 +12875,7 @@ mod tests {
 
         assert!(matches!(
             open_database(&path),
-            Err(SessionRuntimeError::Persistence)
+            Err(SessionRuntimeError::CONSTRAINT)
         ));
     }
 
@@ -13387,7 +12912,7 @@ mod tests {
 
         assert!(matches!(
             open_database(&path),
-            Err(SessionRuntimeError::Persistence)
+            Err(SessionRuntimeError::CONSTRAINT)
         ));
         let connection = Connection::open(path).unwrap();
         assert_eq!(
@@ -13479,7 +13004,7 @@ mod tests {
 
             assert!(matches!(
                 open_database(&path),
-                Err(SessionRuntimeError::Persistence)
+                Err(SessionRuntimeError::CONSTRAINT)
             ));
         }
     }
@@ -13504,7 +13029,7 @@ mod tests {
 
         assert!(matches!(
             open_database(&path),
-            Err(SessionRuntimeError::Persistence)
+            Err(SessionRuntimeError::CONSTRAINT)
         ));
         let connection = Connection::open(path).unwrap();
         assert_eq!(
@@ -13531,7 +13056,7 @@ mod tests {
 
         assert!(matches!(
             open_database(&path),
-            Err(SessionRuntimeError::Persistence)
+            Err(SessionRuntimeError::CONSTRAINT)
         ));
     }
 
@@ -13550,7 +13075,7 @@ mod tests {
 
         assert!(matches!(
             open_database(&path),
-            Err(SessionRuntimeError::Persistence)
+            Err(SessionRuntimeError::CONSTRAINT)
         ));
     }
 
@@ -14064,7 +13589,7 @@ mod tests {
 
         assert_eq!(
             open_database(&path).unwrap_err(),
-            SessionRuntimeError::Persistence
+            SessionRuntimeError::CONSTRAINT
         );
     }
 
@@ -14097,7 +13622,7 @@ mod tests {
         ];
         let before = context_bytes(&context);
 
-        assert!(prune_stale_tool_results(&mut context));
+        assert!(prune_stale_tool_results(&mut context, &HashSet::new()));
 
         let results = context
             .iter()
@@ -14129,6 +13654,131 @@ mod tests {
         // Inside the window everything stays verbatim.
         assert!(results[3].1.starts_with("yyy"));
         assert!(context_bytes(&context) < before);
+    }
+
+    #[test]
+    fn assembly_pruning_decides_from_the_stored_effect_class_not_the_tool_name() {
+        let call = |id: &str, name: &str| ContentBlock::ToolCall {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            arguments: serde_json::json!({"q": "x"}),
+        };
+        let result = |id: &str| ContentBlock::ToolResult {
+            call_id: id.to_owned(),
+            content: "y".repeat(500),
+            is_error: false,
+        };
+        let mut context = vec![
+            Message::user("start"),
+            // An external read-only tool: prunable only because the store
+            // recorded its effect as read_only.
+            Message::new(Role::Assistant, vec![call("c1", "mcp__docs__lookup")]),
+            Message::tool_results(vec![result("c1")]),
+            // A built-in read-only name without a stored effect (a row from
+            // before schema 26) still prunes through the name fallback.
+            Message::new(Role::Assistant, vec![call("c2", "read_file")]),
+            Message::tool_results(vec![result("c2")]),
+            // An external tool without a read-only effect is never pruned.
+            Message::new(Role::Assistant, vec![call("c3", "mcp__docs__write")]),
+            Message::tool_results(vec![result("c3")]),
+            Message::assistant("a"),
+            Message::assistant("b"),
+            Message::assistant("c"),
+            Message::assistant("d"),
+        ];
+        let prunable = HashSet::from(["c1".to_owned()]);
+        assert!(prune_stale_tool_results(&mut context, &prunable));
+        let results = context
+            .iter()
+            .flat_map(Message::content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult {
+                    call_id, content, ..
+                } => Some((call_id.as_str(), content.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(results[0].1.starts_with("[pruned: mcp__docs__lookup"));
+        assert!(
+            results[1].1.starts_with("[pruned: read_file"),
+            "legacy name fallback"
+        );
+        assert!(
+            results[2].1.starts_with("yyy"),
+            "an external non-read-only result stays"
+        );
+    }
+
+    #[tokio::test]
+    async fn admitted_tool_calls_store_their_effect_class() {
+        let (_directory, store, claimed) = claimed_store_fixture().await;
+        let runtime_call =
+            |ordinal: u16, provider_id: &str, name: &str, effect: EffectClass| RuntimeToolCall {
+                id: ToolCallId::from_bytes([ordinal as u8; 16]),
+                turn_ordinal: 1,
+                call_ordinal: ordinal,
+                provider_call_id: provider_id.to_owned(),
+                name: name.to_owned(),
+                arguments: "{}".to_owned(),
+                effect,
+                rejection: None,
+            };
+        store
+            .persist_model_turn(
+                &claimed,
+                ModelTurnCommit {
+                    turn_ordinal: 1,
+                    message: Message::new(
+                        Role::Assistant,
+                        vec![
+                            ContentBlock::ToolCall {
+                                id: "p1".to_owned(),
+                                name: "read_file".to_owned(),
+                                arguments: serde_json::json!({}),
+                            },
+                            ContentBlock::ToolCall {
+                                id: "p2".to_owned(),
+                                name: "shell".to_owned(),
+                                arguments: serde_json::json!({}),
+                            },
+                        ],
+                    ),
+                    calls: vec![
+                        runtime_call(1, "p1", "read_file", EffectClass::ReadOnly),
+                        runtime_call(2, "p2", "shell", EffectClass::Shell),
+                    ],
+                    turn_message: None,
+                    context_tokens: None,
+                    occupancy_basis: None,
+                    usage: None,
+                    estimated_cost_usd_nanos: None,
+                    accounting: None,
+                    truncated: false,
+                },
+            )
+            .await
+            .unwrap();
+        let stored = store
+            .call(Priority::Control, |connection| {
+                connection
+                    .prepare(
+                        "SELECT provider_call_id, effect FROM tool_calls ORDER BY call_ordinal",
+                    )?
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| SessionRuntimeError::CONSTRAINT)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            stored,
+            vec![
+                ("p1".to_owned(), Some("read_only".to_owned())),
+                ("p2".to_owned(), Some("shell".to_owned())),
+            ]
+        );
     }
 
     #[test]
@@ -14340,13 +13990,15 @@ mod tests {
             )
             .unwrap();
         let claimed = ClaimedRun {
-            workspace_id,
+            identity: RunIdentity {
+                workspace_id,
+                session_id,
+                run_id,
+                command_id,
+                kind: RunKind::Prompt,
+                child: false,
+            },
             workspace: "/w".to_owned(),
-            session_id,
-            run_id,
-            command_id,
-            kind: RunKind::Prompt,
-            child: false,
             user_initiated: true,
             literal_slash: false,
             session_model: ModelSelection::default(),
@@ -14387,7 +14039,7 @@ mod tests {
             DenialCapacityPath::Policy => deny_tool_call(
                 connection,
                 store_id,
-                claimed,
+                claimed.identity,
                 tool_call_id,
                 approval::POLICY_DENIED_RESULT,
             )
@@ -14397,7 +14049,7 @@ mod tests {
                 store_id,
                 CommandId::from_bytes([8; 16]),
                 SessionCommand::RespondToolApproval {
-                    run_id: claimed.run_id,
+                    run_id: claimed.identity.run_id,
                     tool_call_id,
                     decision: ApprovalDecision::Deny,
                 },
@@ -14406,7 +14058,7 @@ mod tests {
             )
             .map(|_| ()),
             DenialCapacityPath::Timeout => {
-                conclude_tool_approval(connection, store_id, claimed, tool_call_id, true)
+                conclude_tool_approval(connection, store_id, claimed.identity, tool_call_id, true)
                     .map(|_| ())
             }
         }
@@ -14457,7 +14109,7 @@ mod tests {
             apply_denial_capacity_path(&mut connection, store_id, &claimed, tool_call_id, path)
                 .unwrap();
             let (increment, state, result, events, commands) =
-                denial_capacity_state(&connection, claimed.run_id, tool_call_id);
+                denial_capacity_state(&connection, claimed.identity.run_id, tool_call_id);
             assert_eq!(increment, u64::try_from(result_bytes).unwrap());
             assert_eq!(state, "denied");
             assert_eq!(result.as_deref(), Some(path.result()));
@@ -14481,7 +14133,7 @@ mod tests {
                 SessionRuntimeError::OutputTooLarge
             );
             assert_eq!(
-                denial_capacity_state(&connection, claimed.run_id, tool_call_id),
+                denial_capacity_state(&connection, claimed.identity.run_id, tool_call_id),
                 (0, path.initial_state().to_owned(), None, 0, 0)
             );
         }
@@ -14605,7 +14257,12 @@ mod tests {
     #[tokio::test]
     async fn session_summaries_carry_the_latest_run_activity_while_running() {
         let (_directory, store, claimed) = claimed_store_fixture().await;
-        let request = SnapshotRequest::new(claimed.workspace_id, Some(claimed.session_id), 4, 4);
+        let request = SnapshotRequest::new(
+            claimed.identity.workspace_id,
+            Some(claimed.identity.session_id),
+            4,
+            4,
+        );
         let idle = store.snapshot(request.clone()).await.unwrap();
         assert_eq!(idle.focused.unwrap().summary.activity, None);
 
@@ -14619,7 +14276,7 @@ mod tests {
             .unwrap();
         let live = store.snapshot(request).await.unwrap();
         let summary = live.focused.unwrap().summary;
-        assert_eq!(summary.active_run_id, Some(claimed.run_id));
+        assert_eq!(summary.active_run_id, Some(claimed.identity.run_id));
         assert_eq!(summary.activity, Some(RunActivity::GeneratingResponse));
         assert!(
             live.sessions
@@ -14661,7 +14318,7 @@ mod tests {
             .command(
                 CommandId::generate().unwrap(),
                 SessionCommand::SubmitPrompt {
-                    session_id: claimed.session_id,
+                    session_id: claimed.identity.session_id,
                     input: vec![InputPart::text("continue".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
@@ -14701,7 +14358,7 @@ mod tests {
             .command(
                 CommandId::generate().unwrap(),
                 SessionCommand::SubmitPrompt {
-                    session_id: claimed.session_id,
+                    session_id: claimed.identity.session_id,
                     input: vec![InputPart::text("continue".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
@@ -14709,19 +14366,17 @@ mod tests {
             )
             .await
             .unwrap();
-        let session_id = claimed.session_id;
+        let session_id = claimed.identity.session_id;
         store
             .call(Priority::Control, move |connection| {
-                connection
-                    .execute(
-                        "UPDATE sessions
+                connection.execute(
+                    "UPDATE sessions
                          SET context_tokens = 100,
                              context_occupancy_json = '{not-json',
                              pending_context_overflow_basis_json = '{also-not-json'
                          WHERE id = ?1",
-                        [session_id.to_string()],
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                    [session_id.to_string()],
+                )?;
                 Ok(())
             })
             .await
@@ -14748,7 +14403,7 @@ mod tests {
                             ))
                         },
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CONSTRAINT)
             })
             .await
             .unwrap();
@@ -14798,14 +14453,12 @@ mod tests {
                 .saturating_add(u64::from(one_over));
             store
                 .call(Priority::Control, move |connection| {
-                    connection
-                        .execute(
-                            "UPDATE runs
+                    connection.execute(
+                        "UPDATE runs
                              SET context_base_bytes = ?2, context_increment_bytes = 0
                              WHERE id = ?1",
-                            params![claimed.run_id.to_string(), context_base],
-                        )
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                        params![claimed.identity.run_id.to_string(), context_base],
+                    )?;
                     Ok(())
                 })
                 .await
@@ -14851,10 +14504,10 @@ mod tests {
                                     m.state
                              FROM runs r JOIN messages m ON m.id = ?2
                              WHERE r.id = ?1",
-                            params![claimed.run_id.to_string(), message_id.to_string()],
+                            params![claimed.identity.run_id.to_string(), message_id.to_string()],
                             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                         )
-                        .map_err(|_| SessionRuntimeError::Persistence)
+                        .map_err(|_| SessionRuntimeError::CODEC)
                 })
                 .await
                 .unwrap();
@@ -14876,39 +14529,30 @@ mod tests {
     ) -> (u64, u64, u64, u64, u64) {
         store
             .call(Priority::Control, move |connection| {
-                let increment = connection
-                    .query_row(
-                        "SELECT context_increment_bytes FROM runs WHERE id = ?1",
-                        [run_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
-                let assistant_messages = connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM messages
+                let increment = connection.query_row(
+                    "SELECT context_increment_bytes FROM runs WHERE id = ?1",
+                    [run_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                let assistant_messages = connection.query_row(
+                    "SELECT COUNT(*) FROM messages
                          WHERE run_id = ?1 AND role = 'assistant'",
-                        [run_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
-                let chunks = connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM message_chunks c
+                    [run_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                let chunks = connection.query_row(
+                    "SELECT COUNT(*) FROM message_chunks c
                          JOIN messages m ON m.id = c.message_id WHERE m.run_id = ?1",
-                        [run_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
-                let turns = connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM model_turns WHERE run_id = ?1",
-                        [run_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
-                let events = connection
-                    .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                    [run_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                let turns = connection.query_row(
+                    "SELECT COUNT(*) FROM model_turns WHERE run_id = ?1",
+                    [run_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                let events =
+                    connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
                 Ok((increment, assistant_messages, chunks, turns, events))
             })
             .await
@@ -14925,12 +14569,12 @@ mod tests {
                BEGIN SELECT RAISE(ABORT, 'injected event failure'); END;"#,
         ] {
             let (_directory, store, claimed) = claimed_store_fixture().await;
-            let before = streaming_transaction_state(&store, claimed.run_id).await;
+            let before = streaming_transaction_state(&store, claimed.identity.run_id).await;
             store
                 .call(Priority::Control, move |connection| {
                     connection
                         .execute_batch(trigger)
-                        .map_err(|_| SessionRuntimeError::Persistence)
+                        .map_err(|_| SessionRuntimeError::CONSTRAINT)
                 })
                 .await
                 .unwrap();
@@ -14946,10 +14590,10 @@ mod tests {
                     )
                     .await
                     .unwrap_err(),
-                SessionRuntimeError::Persistence
+                SessionRuntimeError::CONSTRAINT
             );
             assert_eq!(
-                streaming_transaction_state(&store, claimed.run_id).await,
+                streaming_transaction_state(&store, claimed.identity.run_id).await,
                 before
             );
             store.close().await.unwrap();
@@ -14977,12 +14621,12 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let before = streaming_transaction_state(&store, claimed.run_id).await;
+            let before = streaming_transaction_state(&store, claimed.identity.run_id).await;
             store
                 .call(Priority::Control, move |connection| {
                     connection
                         .execute_batch(trigger)
-                        .map_err(|_| SessionRuntimeError::Persistence)
+                        .map_err(|_| SessionRuntimeError::CONSTRAINT)
                 })
                 .await
                 .unwrap();
@@ -15023,28 +14667,24 @@ mod tests {
                     )
                     .await
                     .unwrap_err(),
-                SessionRuntimeError::Persistence
+                SessionRuntimeError::CONSTRAINT
             );
             assert_eq!(
-                streaming_transaction_state(&store, claimed.run_id).await,
+                streaming_transaction_state(&store, claimed.identity.run_id).await,
                 before
             );
             let (message_state, tool_calls): (String, u64) = store
                 .call(Priority::Control, move |connection| {
-                    let message_state = connection
-                        .query_row(
-                            "SELECT state FROM messages WHERE id = ?1",
-                            [message_id.to_string()],
-                            |row| row.get(0),
-                        )
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
-                    let tool_calls = connection
-                        .query_row(
-                            "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1",
-                            [claimed.run_id.to_string()],
-                            |row| row.get(0),
-                        )
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    let message_state = connection.query_row(
+                        "SELECT state FROM messages WHERE id = ?1",
+                        [message_id.to_string()],
+                        |row| row.get(0),
+                    )?;
+                    let tool_calls = connection.query_row(
+                        "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1",
+                        [claimed.identity.run_id.to_string()],
+                        |row| row.get(0),
+                    )?;
                     Ok((message_state, tool_calls))
                 })
                 .await
@@ -15095,8 +14735,8 @@ mod tests {
             };
             expected.push_str(text);
         }
-        let workspace_id = claimed.workspace_id;
-        let session_id = claimed.session_id;
+        let workspace_id = claimed.identity.workspace_id;
+        let session_id = claimed.identity.session_id;
         store.close().await.unwrap();
         drop(store);
 
@@ -15184,27 +14824,22 @@ mod tests {
             .begin_assistant_message(&claimed, message_id, 1, TextChannel::Output, "x".to_owned())
             .await
             .unwrap();
-        let run_id = claimed.run_id;
+        let run_id = claimed.identity.run_id;
         let before = store
             .call(Priority::Control, move |connection| {
-                connection
-                    .execute(
-                        "UPDATE runs SET context_base_bytes = ?2,
+                connection.execute(
+                    "UPDATE runs SET context_base_bytes = ?2,
                                          context_increment_bytes = 1
                          WHERE id = ?1",
-                        params![run_id.to_string(), MAX_CONTEXT_BYTES - 1],
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
-                let chunks = connection
-                    .query_row("SELECT COUNT(*) FROM message_chunks", [], |row| {
+                    params![run_id.to_string(), MAX_CONTEXT_BYTES - 1],
+                )?;
+                let chunks =
+                    connection.query_row("SELECT COUNT(*) FROM message_chunks", [], |row| {
                         row.get::<_, u64>(0)
-                    })
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
-                let events = connection
-                    .query_row("SELECT COUNT(*) FROM events", [], |row| {
-                        row.get::<_, u64>(0)
-                    })
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                    })?;
+                let events = connection.query_row("SELECT COUNT(*) FROM events", [], |row| {
+                    row.get::<_, u64>(0)
+                })?;
                 Ok((chunks, events))
             })
             .await
@@ -15220,23 +14855,18 @@ mod tests {
 
         let after = store
             .call(Priority::Control, move |connection| {
-                let increment = connection
-                    .query_row(
-                        "SELECT context_increment_bytes FROM runs WHERE id = ?1",
-                        [run_id.to_string()],
-                        |row| row.get::<_, u64>(0),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
-                let chunks = connection
-                    .query_row("SELECT COUNT(*) FROM message_chunks", [], |row| {
+                let increment = connection.query_row(
+                    "SELECT context_increment_bytes FROM runs WHERE id = ?1",
+                    [run_id.to_string()],
+                    |row| row.get::<_, u64>(0),
+                )?;
+                let chunks =
+                    connection.query_row("SELECT COUNT(*) FROM message_chunks", [], |row| {
                         row.get::<_, u64>(0)
-                    })
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
-                let events = connection
-                    .query_row("SELECT COUNT(*) FROM events", [], |row| {
-                        row.get::<_, u64>(0)
-                    })
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                    })?;
+                let events = connection.query_row("SELECT COUNT(*) FROM events", [], |row| {
+                    row.get::<_, u64>(0)
+                })?;
                 Ok((increment, chunks, events))
             })
             .await
@@ -15514,23 +15144,19 @@ mod tests {
                 .map_or(0, |compaction| compaction.cutoff_ordinal);
             // SQLite integers are i64; `u64::MAX` means "everything".
             let through_ordinal = through_ordinal.min(u64::try_from(i64::MAX).unwrap_or(u64::MAX));
-            let mut statement = transaction
-                .prepare(
-                    "SELECT id FROM messages
+            let mut statement = transaction.prepare(
+                "SELECT id FROM messages
                      WHERE session_id = ?1 AND ordinal <= ?2 AND ordinal > ?3
                        AND role = 'user' AND steering = 0
                        AND state IN ('complete', 'cancelled', 'failed', 'interrupted')
                      ORDER BY ordinal",
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            )?;
             let message_ids = statement
                 .query_map(
                     params![session_id.to_string(), through_ordinal, cutoff_ordinal],
                     |row| row.get::<_, String>(0),
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
             drop(statement);
 
             let mut context = Vec::new();
@@ -15543,31 +15169,27 @@ mod tests {
             for id in message_ids {
                 let snapshot = load_message(transaction, parse_id(&id)?)?;
                 if snapshot.role != MessageRole::User {
-                    return Err(SessionRuntimeError::Persistence);
+                    return Err(SessionRuntimeError::CODEC);
                 }
                 context.push(Message::user(snapshot.output));
                 // Reconstruct each run immediately after its prompt rather than
                 // following message-row ordinals. Follow-up prompts can be queued
                 // while the prior run is active, so its later committed output still
                 // belongs before the follow-up in model context.
-                let status: String = transaction
-                    .query_row(
-                        "SELECT status FROM runs WHERE id = ?1",
-                        [snapshot.run_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                let status: String = transaction.query_row(
+                    "SELECT status FROM runs WHERE id = ?1",
+                    [snapshot.run_id.to_string()],
+                    |row| row.get(0),
+                )?;
                 if matches!(
                     status.as_str(),
                     "completed" | "cancelled" | "failed" | "interrupted" | "running"
                 ) {
-                    let has_turns: bool = transaction
-                        .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM model_turns WHERE run_id = ?1)",
-                            [snapshot.run_id.to_string()],
-                            |row| row.get(0),
-                        )
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    let has_turns: bool = transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM model_turns WHERE run_id = ?1)",
+                        [snapshot.run_id.to_string()],
+                        |row| row.get(0),
+                    )?;
                     if has_turns {
                         reference_append_run_turns(transaction, snapshot.run_id, &mut context)?;
                     } else {
@@ -15579,21 +15201,20 @@ mod tests {
                     }
                 }
                 if matches!(status.as_str(), "cancelled" | "failed" | "interrupted") {
-                    let outcome_json: String = transaction
-                        .query_row(
-                            "SELECT outcome_json FROM runs WHERE id = ?1",
-                            [snapshot.run_id.to_string()],
-                            |row| row.get(0),
-                        )
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
-                    let outcome: RunOutcome = serde_json::from_str(&outcome_json)
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    let outcome_json: String = transaction.query_row(
+                        "SELECT outcome_json FROM runs WHERE id = ?1",
+                        [snapshot.run_id.to_string()],
+                        |row| row.get(0),
+                    )?;
+                    let outcome: RunOutcome = serde_json::from_str(&outcome_json)?;
                     if let Some(notice) = runtime_notice(&outcome) {
                         context.push(Message::user(notice));
                     }
                 }
             }
-            let context_rewritten = prune_stale_tool_results(&mut context);
+            // The reference predates the stored effect column and prunes by
+            // name alone; the differential fixtures use built-in tools only.
+            let context_rewritten = prune_stale_tool_results(&mut context, &HashSet::new());
             Ok((context, context_rewritten))
         }
         fn reference_append_legacy_run_messages(
@@ -15601,18 +15222,14 @@ mod tests {
             run_id: RunId,
             context: &mut Vec<Message>,
         ) -> Result<(), SessionRuntimeError> {
-            let mut statement = connection
-                .prepare(
-                    "SELECT id FROM messages
+            let mut statement = connection.prepare(
+                "SELECT id FROM messages
                      WHERE run_id = ?1 AND role = 'assistant' AND state = 'complete'
                      ORDER BY turn_ordinal, ordinal",
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            )?;
             let message_ids = statement
-                .query_map([run_id.to_string()], |row| row.get::<_, String>(0))
-                .map_err(|_| SessionRuntimeError::Persistence)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                .query_map([run_id.to_string()], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
             drop(statement);
             for message_id in message_ids {
                 let message = load_message(connection, parse_id(&message_id)?)?;
@@ -15632,12 +15249,10 @@ mod tests {
             run_id: RunId,
             context: &mut Vec<Message>,
         ) -> Result<(), SessionRuntimeError> {
-            let mut statement = transaction
-                .prepare(
-                    "SELECT turn_ordinal, assistant_content_json, truncated FROM model_turns
+            let mut statement = transaction.prepare(
+                "SELECT turn_ordinal, assistant_content_json, truncated FROM model_turns
                      WHERE run_id = ?1 ORDER BY turn_ordinal",
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            )?;
             let turns = statement
                 .query_map([run_id.to_string()], |row| {
                     Ok((
@@ -15645,28 +15260,22 @@ mod tests {
                         row.get::<_, String>(1)?,
                         row.get::<_, bool>(2)?,
                     ))
-                })
-                .map_err(|_| SessionRuntimeError::Persistence)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
             drop(statement);
             // Applied steering carries the ordinal of the turn whose request first
             // included it; it is replayed as a user message immediately before that
             // turn, after the preceding turn's tool results.
-            let mut statement = transaction
-                .prepare(
-                    "SELECT turn_ordinal, output FROM messages
+            let mut statement = transaction.prepare(
+                "SELECT turn_ordinal, output FROM messages
                      WHERE run_id = ?1 AND steering = 1 AND state = 'complete'
                      ORDER BY turn_ordinal, ordinal",
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            )?;
             let mut steering = statement
                 .query_map([run_id.to_string()], |row| {
                     Ok((row.get::<_, u16>(0)?, row.get::<_, String>(1)?))
-                })
-                .map_err(|_| SessionRuntimeError::Persistence)?
-                .collect::<Result<std::collections::VecDeque<_>, _>>()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                })?
+                .collect::<Result<std::collections::VecDeque<_>, _>>()?;
             drop(statement);
             for (turn_ordinal, content_json, truncated) in turns {
                 while steering
@@ -15677,29 +15286,24 @@ mod tests {
                     context.push(Message::user(text));
                 }
                 let content: Vec<ContentBlock> =
-                    serde_json::from_str::<Vec<PersistedContentBlock>>(&content_json)
-                        .map_err(|_| SessionRuntimeError::Persistence)?
+                    serde_json::from_str::<Vec<PersistedContentBlock>>(&content_json)?
                         .into_iter()
                         .map(ContentBlock::from)
                         .collect();
 
-                let mut statement = transaction
-                    .prepare(
-                        "SELECT provider_call_id, result, is_error FROM tool_calls
+                let mut statement = transaction.prepare(
+                    "SELECT provider_call_id, result, is_error FROM tool_calls
                          WHERE run_id = ?1 AND turn_ordinal = ?2 AND result IS NOT NULL
                          ORDER BY call_ordinal",
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                )?;
                 let mut recorded = statement
                     .query_map(params![run_id.to_string(), turn_ordinal], |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             (row.get::<_, String>(1)?, row.get::<_, bool>(2)?),
                         ))
-                    })
-                    .map_err(|_| SessionRuntimeError::Persistence)?
-                    .collect::<Result<HashMap<String, (String, bool)>, _>>()
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                    })?
+                    .collect::<Result<HashMap<String, (String, bool)>, _>>()?;
                 drop(statement);
                 // Emit exactly one result per ToolCall block, in block order.
                 // A block without a recorded result (a crash between the
@@ -15928,9 +15532,7 @@ mod tests {
             .inner
             .store
             .call(Priority::Control, |connection| {
-                connection
-                    .execute("UPDATE events SET envelope_json = 'invalid'", [])
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                connection.execute("UPDATE events SET envelope_json = 'invalid'", [])?;
                 Ok(())
             })
             .await
@@ -15948,7 +15550,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             events.next().await.unwrap().unwrap_err(),
-            SessionRuntimeError::Persistence
+            SessionRuntimeError::CODEC
         );
         assert_eq!(harness.runtime.inner.store.retained_feeds(), 0);
         harness.runtime.close().await.unwrap();
@@ -17214,7 +16816,7 @@ mod tests {
         let CommandOutcome::PromptQueued { run_id, .. } = queued.receipt.outcome else {
             panic!("unexpected receipt")
         };
-        store::fail_reserved_reloads(run_id, [SessionRuntimeError::Persistence]);
+        store::fail_reserved_reloads(run_id, [SessionRuntimeError::CONSTRAINT]);
         harness.runtime.request_schedule();
         let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
 
@@ -18841,7 +18443,7 @@ mod tests {
                         [session_id.to_string()],
                         |row| row.get::<_, Option<String>>(0),
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CODEC)
             })
             .await
             .unwrap();
@@ -20160,7 +19762,7 @@ mod tests {
                         [run_id.to_string()],
                         |row| row.get(0),
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CODEC)
             })
             .await
             .unwrap();
@@ -21923,7 +21525,7 @@ mod tests {
         else {
             panic!("unexpected receipt")
         };
-        store::fail_cancellation_reads(first_run, [SessionRuntimeError::Persistence]);
+        store::fail_cancellation_reads(first_run, [SessionRuntimeError::CONSTRAINT]);
         let (second_read, release_second) = store::hold_cancellation_read(second_run);
         let mut events = runtime
             .subscribe(SubscribeRequest {
@@ -22076,8 +21678,8 @@ mod tests {
         };
         let (start_entered, release_start) = store::hold_failing_reserved_start(retrying_run);
         let (read_entered, release_read) = store::hold_cancellation_read(failing_run);
-        store::fail_cancellation_reads(failing_run, [SessionRuntimeError::Persistence]);
-        store::fail_reserved_settlements(failing_run, [SessionRuntimeError::Persistence]);
+        store::fail_cancellation_reads(failing_run, [SessionRuntimeError::CONSTRAINT]);
+        store::fail_reserved_settlements(failing_run, [SessionRuntimeError::CONSTRAINT]);
         runtime.request_schedule();
         tokio::time::timeout(Duration::from_secs(1), start_entered)
             .await
@@ -22220,8 +21822,8 @@ mod tests {
         let (_initial_read, release_initial_read) = store::hold_cancellation_read(started_run);
         let (post_start_read, release_post_start_read) = store::hold_cancellation_read(started_run);
         let (failing_read, release_failing_read) = store::hold_cancellation_read(failing_run);
-        store::fail_cancellation_reads(failing_run, [SessionRuntimeError::Persistence]);
-        store::fail_reserved_settlements(failing_run, [SessionRuntimeError::Persistence]);
+        store::fail_cancellation_reads(failing_run, [SessionRuntimeError::CONSTRAINT]);
+        store::fail_reserved_settlements(failing_run, [SessionRuntimeError::CONSTRAINT]);
         release_initial_read.send(()).unwrap();
         runtime.request_schedule();
         tokio::time::timeout(Duration::from_secs(1), post_start_read)
@@ -22376,7 +21978,7 @@ mod tests {
                         [session_id.to_string()],
                         |row| row.get(0),
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CODEC)
             })
             .await
             .unwrap();
@@ -22435,18 +22037,16 @@ mod tests {
             .inner
             .store
             .call(Priority::Control, move |connection| {
-                connection
-                    .execute(
-                        "UPDATE runs SET context_compaction_attempted = 1 WHERE id = ?1",
-                        [run_id.to_string()],
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                connection.execute(
+                    "UPDATE runs SET context_compaction_attempted = 1 WHERE id = ?1",
+                    [run_id.to_string()],
+                )?;
                 Ok(())
             })
             .await
             .unwrap();
-        store::fail_cancellation_reads(run_id, [SessionRuntimeError::Persistence]);
-        store::fail_reserved_settlements(run_id, [SessionRuntimeError::Persistence]);
+        store::fail_cancellation_reads(run_id, [SessionRuntimeError::CONSTRAINT]);
+        store::fail_reserved_settlements(run_id, [SessionRuntimeError::CONSTRAINT]);
         runtime.request_schedule();
         let mut failed = runtime.inner.failed.subscribe();
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -22471,7 +22071,7 @@ mod tests {
                         [run_id.to_string()],
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CODEC)
             })
             .await
             .unwrap();
@@ -22518,7 +22118,7 @@ mod tests {
                         [run_id.to_string()],
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CODEC)
             })
             .await
             .unwrap();
@@ -22665,12 +22265,12 @@ mod tests {
             .unwrap();
 
         let claimed = store.reserve_next_run(false).await.unwrap().unwrap();
-        assert_eq!(claimed.run_id, run_id);
+        assert_eq!(claimed.identity.run_id, run_id);
         let synchronous = store
             .call(Priority::Control, |connection| {
                 connection
                     .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CONSTRAINT)
             })
             .await
             .unwrap();
@@ -22747,36 +22347,31 @@ mod tests {
         };
         store
             .call(Priority::Control, move |connection| {
-                let deleted = connection
-                    .execute(
-                        "DELETE FROM messages WHERE run_id = ?1 AND role = 'user'",
-                        [second_run_id.to_string()],
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                let deleted = connection.execute(
+                    "DELETE FROM messages WHERE run_id = ?1 AND role = 'user'",
+                    [second_run_id.to_string()],
+                )?;
                 if deleted == 1 {
                     Ok(())
                 } else {
-                    Err(SessionRuntimeError::Persistence)
+                    Err(SessionRuntimeError::CONSTRAINT)
                 }
             })
             .await
             .unwrap();
         assert_eq!(
             store.reserve_next_run(false).await.err(),
-            Some(SessionRuntimeError::Persistence)
+            Some(SessionRuntimeError::CODEC)
         );
         let (synchronous, preparing): (i64, Option<String>) = store
             .call(Priority::Control, move |connection| {
-                let synchronous = connection
-                    .pragma_query_value(None, "synchronous", |row| row.get(0))
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
-                let preparing = connection
-                    .query_row(
-                        "SELECT preparing_run_id FROM sessions WHERE id = ?1",
-                        [session_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                let synchronous =
+                    connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+                let preparing = connection.query_row(
+                    "SELECT preparing_run_id FROM sessions WHERE id = ?1",
+                    [session_id.to_string()],
+                    |row| row.get(0),
+                )?;
                 Ok((synchronous, preparing))
             })
             .await
@@ -22889,21 +22484,19 @@ mod tests {
         let (active, newer, session_state) = store
             .call(Priority::Control, move |connection| {
                 Ok((
-                    load_run(connection, compaction.run_id)?,
+                    load_run(connection, compaction.identity.run_id)?,
                     load_run(connection, new_id)?,
-                    connection
-                        .query_row(
-                            "SELECT active_run_id, preparing_run_id
+                    connection.query_row(
+                        "SELECT active_run_id, preparing_run_id
                              FROM sessions WHERE id = ?1",
-                            [session_id.to_string()],
-                            |row| {
-                                Ok((
-                                    row.get::<_, Option<String>>(0)?,
-                                    row.get::<_, Option<String>>(1)?,
-                                ))
-                            },
-                        )
-                        .map_err(|_| SessionRuntimeError::Persistence)?,
+                        [session_id.to_string()],
+                        |row| {
+                            Ok((
+                                row.get::<_, Option<String>>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                            ))
+                        },
+                    )?,
                 ))
             })
             .await
@@ -22912,7 +22505,10 @@ mod tests {
         assert_eq!(active.outcome, None);
         assert_eq!(newer.status, RunStatus::Queued);
         assert_eq!(newer.outcome, None);
-        assert_eq!(session_state.0, Some(compaction.run_id.to_string()));
+        assert_eq!(
+            session_state.0,
+            Some(compaction.identity.run_id.to_string())
+        );
         assert_eq!(session_state.1, Some(new_id.to_string()));
 
         store
@@ -22993,14 +22589,12 @@ mod tests {
         let pending = serde_json::to_string(&legacy_model).unwrap();
         store
             .call(Priority::Control, move |connection| {
-                connection
-                    .execute(
-                        "UPDATE sessions
+                connection.execute(
+                    "UPDATE sessions
                          SET pending_context_overflow_model_json = ?2
                          WHERE id = ?1",
-                        params![session_id.to_string(), pending],
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                    params![session_id.to_string(), pending],
+                )?;
                 Ok(())
             })
             .await
@@ -23036,7 +22630,7 @@ mod tests {
                 run_id: finished,
                 outcome: RunOutcome::Interrupted,
                 ..
-            } if finished == compaction.run_id
+            } if finished == compaction.identity.run_id
         )));
         assert!(
             observed.iter().any(|event| matches!(
@@ -23081,7 +22675,7 @@ mod tests {
                             ))
                         },
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CODEC)
             })
             .await
             .unwrap();
@@ -23206,7 +22800,7 @@ mod tests {
                 run_id: finished,
                 outcome: RunOutcome::Interrupted,
                 ..
-            } if finished == compaction.run_id
+            } if finished == compaction.identity.run_id
         )));
         assert!(observed.iter().any(|event| matches!(
             event.event,
@@ -23235,10 +22829,10 @@ mod tests {
                                 auto.auto_compaction_for_run_id
                          FROM runs original JOIN runs auto ON auto.id = ?2
                          WHERE original.id = ?1",
-                        params![run_id.to_string(), compaction.run_id.to_string()],
+                        params![run_id.to_string(), compaction.identity.run_id.to_string()],
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CODEC)
             })
             .await
             .unwrap();
@@ -23586,7 +23180,7 @@ mod tests {
                         [session_id.to_string()],
                         |row| row.get(0),
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CODEC)
             })
             .await
             .unwrap();
@@ -24454,14 +24048,12 @@ mod tests {
         let promotion_json = serde_json::to_string(&promotion).unwrap();
         store
             .call(Priority::Control, move |connection| {
-                connection
-                    .execute(
-                        "INSERT INTO pending_workspace_grant_promotions(
+                connection.execute(
+                    "INSERT INTO pending_workspace_grant_promotions(
                              command_id, created_at_ms, promotion_json
                          ) VALUES (?1, 1, ?2)",
-                        params![row_command_id.to_string(), promotion_json],
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                    params![row_command_id.to_string(), promotion_json],
+                )?;
                 Ok(())
             })
             .await
@@ -24469,7 +24061,7 @@ mod tests {
 
         assert_eq!(
             store.next_grant_promotion().await.unwrap_err(),
-            SessionRuntimeError::Persistence
+            SessionRuntimeError::CODEC
         );
         store.close().await.unwrap();
     }
@@ -24496,7 +24088,7 @@ mod tests {
                          BEFORE INSERT ON pending_workspace_grant_promotions
                          BEGIN SELECT RAISE(ABORT, 'injected outbox failure'); END;",
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CONSTRAINT)
             })
             .await
             .unwrap();
@@ -24517,7 +24109,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(error, SessionRuntimeError::Persistence);
+        assert_eq!(error, SessionRuntimeError::CONSTRAINT);
 
         let session_id = harness.session_id;
         let tool_call_id = tool_call.id;
@@ -24526,34 +24118,26 @@ mod tests {
             .inner
             .store
             .call(Priority::Control, move |connection| {
-                let call = connection
-                    .query_row(
-                        "SELECT state, approval_resolution FROM tool_calls WHERE id = ?1",
-                        [tool_call_id.to_string()],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
-                let grants: u32 = connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM session_grants WHERE session_id = ?1",
-                        [session_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
-                let commands: u32 = connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM commands WHERE id = ?1",
-                        [command_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
-                let pending: u32 = connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM pending_workspace_grant_promotions",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                let call = connection.query_row(
+                    "SELECT state, approval_resolution FROM tool_calls WHERE id = ?1",
+                    [tool_call_id.to_string()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )?;
+                let grants: u32 = connection.query_row(
+                    "SELECT COUNT(*) FROM session_grants WHERE session_id = ?1",
+                    [session_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                let commands: u32 = connection.query_row(
+                    "SELECT COUNT(*) FROM commands WHERE id = ?1",
+                    [command_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                let pending: u32 = connection.query_row(
+                    "SELECT COUNT(*) FROM pending_workspace_grant_promotions",
+                    [],
+                    |row| row.get(0),
+                )?;
                 Ok((call, grants, commands, pending))
             })
             .await
@@ -24731,7 +24315,7 @@ mod tests {
                          WHEN NEW.envelope_json LIKE '%workspace_grant_promoted%'
                          BEGIN SELECT RAISE(ABORT, 'injected promotion failure'); END;",
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CODEC)
             })
             .await
             .unwrap();
@@ -24757,7 +24341,7 @@ mod tests {
                         [],
                         |row| row.get(0),
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CODEC)
             })
             .await
             .unwrap();
@@ -24774,7 +24358,7 @@ mod tests {
                 connection
                     .execute("DROP TRIGGER reject_grant_promotion_event", [])
                     .map(|_| ())
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CONSTRAINT)
             })
             .await
             .unwrap();
@@ -24822,7 +24406,7 @@ mod tests {
                         [],
                         |row| row.get(0),
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CODEC)
             })
             .await
             .unwrap();
@@ -26088,7 +25672,7 @@ mod tests {
                 Ok(_) => panic!("symlinked database was accepted"),
                 Err(error) => error,
             };
-        assert_eq!(error, SessionRuntimeError::Persistence);
+        assert_eq!(error, SessionRuntimeError::CONSTRAINT);
         assert_eq!(std::fs::read(victim).unwrap(), b"untouched");
     }
 
@@ -27116,7 +26700,7 @@ mod tests {
                              SELECT RAISE(ABORT, 'injected child run failure');
                          END;",
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CONSTRAINT)
             })
             .await
             .unwrap();
@@ -27179,12 +26763,12 @@ mod tests {
                         connection,
                         store_id,
                         ChildRunParent {
-                            workspace_id: create_parent.workspace_id,
-                            session_id: create_parent.session_id,
-                            run_id: create_parent.run_id,
+                            workspace_id: create_parent.identity.workspace_id,
+                            session_id: create_parent.identity.session_id,
+                            run_id: create_parent.identity.run_id,
                             tool_call_id: None,
                             depth: 0,
-                            root_run_id: create_parent.run_id,
+                            root_run_id: create_parent.identity.run_id,
                         },
                         ChildAdmission {
                             model: ModelSelection {
@@ -27222,7 +26806,7 @@ mod tests {
             .command(
                 CommandId::generate().unwrap(),
                 SessionCommand::CancelRun {
-                    run_id: parent.run_id,
+                    run_id: parent.identity.run_id,
                 },
             )
             .await
@@ -27249,7 +26833,7 @@ mod tests {
             .command(
                 CommandId::generate().unwrap(),
                 SessionCommand::CancelRun {
-                    run_id: cancelling_parent.run_id,
+                    run_id: cancelling_parent.identity.run_id,
                 },
             )
             .await
@@ -27305,11 +26889,11 @@ mod tests {
             .await
             .unwrap();
         let claimed_child = store.claim_next_run(true).await.unwrap().unwrap();
-        assert_eq!(claimed_child.run_id, child.run_id);
+        assert_eq!(claimed_child.identity.run_id, child.run_id);
 
         let command_id = CommandId::generate().unwrap();
         let command = SessionCommand::CancelRun {
-            run_id: parent.run_id,
+            run_id: parent.identity.run_id,
         };
         let first = store.command(command_id, command.clone()).await.unwrap();
         let replay = store.command(command_id, command).await.unwrap();
@@ -27401,7 +26985,7 @@ mod tests {
                 run_id,
                 outcome: RunOutcome::Interrupted,
                 ..
-            } if *run_id == parent.run_id
+            } if *run_id == parent.identity.run_id
         )));
         assert!(requests.lock().unwrap().is_empty());
         let snapshot = runtime
@@ -28484,17 +28068,19 @@ mod tests {
         };
         let parent_run = RunId::generate().unwrap();
         let parent = ClaimedRun {
-            workspace_id,
+            identity: RunIdentity {
+                workspace_id,
+                session_id,
+                run_id: parent_run,
+                command_id: CommandId::generate().unwrap(),
+                kind: RunKind::Prompt,
+                child: false,
+            },
             workspace: std::fs::canonicalize(directory.path())
                 .unwrap()
                 .to_str()
                 .unwrap()
                 .to_owned(),
-            session_id,
-            run_id: parent_run,
-            command_id: CommandId::generate().unwrap(),
-            kind: RunKind::Prompt,
-            child: false,
             user_initiated: true,
             literal_slash: false,
             session_model: ModelSelection {
@@ -29643,12 +29229,10 @@ mod tests {
             .inner
             .store
             .call(Priority::Control, move |connection| {
-                connection
-                    .execute(
-                        "UPDATE runs SET usage_json = 'invalid-json' WHERE id = ?1",
-                        [child_run.to_string()],
-                    )
-                    .map_err(|_| SessionRuntimeError::Persistence)?;
+                connection.execute(
+                    "UPDATE runs SET usage_json = 'invalid-json' WHERE id = ?1",
+                    [child_run.to_string()],
+                )?;
                 Ok(())
             })
             .await
@@ -30400,7 +29984,7 @@ mod tests {
                     };
                     changed
                         .map(|_| ())
-                        .map_err(|_| SessionRuntimeError::Persistence)
+                        .map_err(|_| SessionRuntimeError::CONSTRAINT)
                 })
                 .await
                 .unwrap();
@@ -30417,7 +30001,7 @@ mod tests {
                     connection.execute(
                         "UPDATE runs SET status = 'completed', outcome_json = ?2 WHERE id = ?1",
                         params![grandchild.to_string(), serde_json::to_string(&RunOutcome::Completed).unwrap()],
-                    ).map(|_| ()).map_err(|_| SessionRuntimeError::Persistence)
+                    ).map(|_| ()).map_err(|_| SessionRuntimeError::CODEC)
                 }).await.unwrap();
             }
             harness.runtime.shutdown().await.unwrap();
@@ -30455,7 +30039,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            store.run_outcome(parent.run_id).await.unwrap(),
+            store.run_outcome(parent.identity.run_id).await.unwrap(),
             Some((RunOutcome::Cancelled, SpawnAgentSpend::UNKNOWN))
         );
         store.close().await.unwrap();
