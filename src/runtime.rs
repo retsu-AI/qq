@@ -1900,7 +1900,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::AccountingUnavailable
         | SessionRuntimeError::ShutdownTimedOut
         | SessionRuntimeError::Unavailable
-        | SessionRuntimeError::Persistence => ServerHandlerError::Internal,
+        | SessionRuntimeError::Persistence(_) => ServerHandlerError::Internal,
     }
 }
 

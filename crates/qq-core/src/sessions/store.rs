@@ -596,18 +596,15 @@ impl Store {
 
     pub(super) async fn unfinished_run_ids(&self) -> Result<Vec<RunId>, SessionRuntimeError> {
         self.call(Priority::Control, |connection| {
-            let mut statement = connection
-                .prepare(
-                    "SELECT id FROM runs
+            let mut statement = connection.prepare(
+                "SELECT id FROM runs
                      WHERE status IN ('queued', 'running')
                      ORDER BY created_at_ms, id",
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            )?;
             statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|_| SessionRuntimeError::Persistence)?
+                .query_map([], |row| row.get::<_, String>(0))?
                 .map(|row| {
-                    let run = row.map_err(|_| SessionRuntimeError::Persistence)?;
+                    let run = row?;
                     parse_id(&run)
                 })
                 .collect()
@@ -701,7 +698,7 @@ impl Store {
             let mut failures = CHILD_CANCELLATION_FAILURES.lock().unwrap();
             if let Some(index) = failures.iter().position(|run| *run == run_id) {
                 failures.remove(index);
-                return Err(SessionRuntimeError::Persistence);
+                return Err(SessionRuntimeError::CONSTRAINT);
             }
         }
         let store_id = self.store_id;
@@ -769,8 +766,7 @@ impl Store {
                     [workspace_id.to_string()],
                     |row| row.get(0),
                 )
-                .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?
+                .optional()?
                 .ok_or(SessionRuntimeError::WorkspaceNotFound)
         })
         .await
@@ -856,7 +852,7 @@ impl Store {
         };
         let audit = test_prepared_audit(&claimed);
         if self.start_reserved_run(&claimed, audit).await?.is_none() {
-            return Err(SessionRuntimeError::Persistence);
+            return Err(SessionRuntimeError::CONSTRAINT);
         }
         Ok(Some(claimed))
     }
@@ -881,8 +877,7 @@ impl Store {
                     [run_id.to_string()],
                     |row| row.get(0),
                 )
-                .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?
+                .optional()?
                 .ok_or(SessionRuntimeError::RunNotFound)
         })
         .await
@@ -897,7 +892,7 @@ impl Store {
         if let Some(hook) = take_reserved_start_hold_hook(claimed.run_id) {
             let _ = hook.entered.send(());
             let _ = hook.release.await;
-            return Err(SessionRuntimeError::Persistence);
+            return Err(SessionRuntimeError::CONSTRAINT);
         }
         let store_id = self.store_id;
         let claimed = claimed.clone();
@@ -955,9 +950,7 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<HistoryMatch>, SessionRuntimeError> {
         self.call(Priority::AwaitControl, move |connection| {
-            let transaction = connection
-                .transaction()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+            let transaction = connection.transaction()?;
             search_session_history(&transaction, session_id, calling_run, &query, limit)
         })
         .await
@@ -978,7 +971,7 @@ impl Store {
                     params![session_id.to_string(), run_id.to_string()],
                     |row| row.get(0),
                 )
-                .map_err(|_| SessionRuntimeError::Persistence)
+                .map_err(|_| SessionRuntimeError::CODEC)
         })
         .await
     }
@@ -1114,24 +1107,21 @@ impl Store {
         identity: Arc<RunPromptIdentity>,
     ) -> Result<(), SessionRuntimeError> {
         let claimed = claimed.clone();
-        let identity = serde_json::to_string(identity.as_ref())
-            .map_err(|_| SessionRuntimeError::Persistence)?;
+        let identity = serde_json::to_string(identity.as_ref())?;
         self.call_write(Priority::AwaitControl, move |connection| {
-            let changed = connection
-                .execute(
-                    "UPDATE runs
+            let changed = connection.execute(
+                "UPDATE runs
                      SET prompt_identity_json = ?3
                      WHERE id = ?1 AND session_id = ?2 AND status = 'running'
                        AND prompt_identity_json IS NULL",
-                    params![
-                        claimed.run_id.to_string(),
-                        claimed.session_id.to_string(),
-                        identity,
-                    ],
-                )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                params![
+                    claimed.run_id.to_string(),
+                    claimed.session_id.to_string(),
+                    identity,
+                ],
+            )?;
             if changed != 1 {
-                return Err(SessionRuntimeError::Persistence);
+                return Err(SessionRuntimeError::CONSTRAINT);
             }
             Ok(())
         })
@@ -1432,26 +1422,26 @@ impl Store {
                     },
                 )
                 .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?
+                ?
                 .ok_or(SessionRuntimeError::RunNotFound)?;
             let Some(encoded) = outcome else {
                 // A malformed live accounting row is already a hard read
                 // failure; do not wait for a hanging child to settle first.
                 if let Some(encoded) = usage {
                     serde_json::from_str::<TokenUsage>(&encoded)
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                        ?;
                 }
                 return Ok(None);
             };
             let outcome = serde_json::from_str::<RunOutcome>(&encoded)
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                ?;
             let workspace_id: String = connection
                 .query_row(
                     "SELECT workspace_id FROM sessions WHERE id = ?1",
                     [session_id],
                     |row| row.get(0),
                 )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                ?;
             // Child creation atomically stores its original user message at
             // ordinal one; compaction retains that row. Follow owner run ids
             // and this message's exact run, not all runs in a child session.
@@ -1489,7 +1479,7 @@ impl Store {
                             )
                      FROM owned LEFT JOIN runs r ON r.id = owned.run_id",
                 )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                ?;
             let rows = statement
                 .query_map(
                     params![
@@ -1509,11 +1499,11 @@ impl Store {
                         ))
                     },
                 )
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                ?;
             let mut spend = SpawnAgentSpend::NONE;
             for (index, row) in rows.enumerate() {
                 let (id, settled, encoded_usage, cost, never_started, too_deep) =
-                    row.map_err(|_| SessionRuntimeError::Persistence)?;
+                    row?;
                 if id.is_none()
                     || !settled
                     || too_deep
@@ -1524,7 +1514,7 @@ impl Store {
                 let usage = match encoded_usage {
                     Some(encoded) => Some(
                         serde_json::from_str::<TokenUsage>(&encoded)
-                            .map_err(|_| SessionRuntimeError::Persistence)?,
+                            ?,
                     ),
                     None if never_started => SpawnAgentSpend::NONE.usage,
                     None => None,
@@ -1586,8 +1576,7 @@ impl Store {
                     [run_id.to_string()],
                     |row| row.get::<_, Option<String>>(0),
                 )
-                .optional()
-                .map_err(|_| SessionRuntimeError::Persistence)?;
+                .optional()?;
             let message_id = match final_turn_message {
                 Some(message_id) => message_id,
                 None => connection
@@ -1598,8 +1587,7 @@ impl Store {
                         [run_id.to_string()],
                         |row| row.get::<_, String>(0),
                     )
-                    .optional()
-                    .map_err(|_| SessionRuntimeError::Persistence)?,
+                    .optional()?,
             };
             let Some(message_id) = message_id else {
                 return Ok(String::new());
@@ -1669,11 +1657,11 @@ pub(super) fn begin_unit(connection: &mut Connection) -> Result<Unit<'_>, Sessio
         connection
             .transaction()
             .map(Unit::Transaction)
-            .map_err(|_| SessionRuntimeError::Persistence)
+            .map_err(|_| SessionRuntimeError::CONSTRAINT)
     } else {
         rusqlite::Savepoint::new(connection)
             .map(Unit::Savepoint)
-            .map_err(|_| SessionRuntimeError::Persistence)
+            .map_err(|_| SessionRuntimeError::CONSTRAINT)
     }
 }
 
@@ -1687,11 +1675,11 @@ pub(super) fn begin_immediate_unit(
         connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map(Unit::Transaction)
-            .map_err(|_| SessionRuntimeError::Persistence)
+            .map_err(|_| SessionRuntimeError::CONSTRAINT)
     } else {
         rusqlite::Savepoint::new(connection)
             .map(Unit::Savepoint)
-            .map_err(|_| SessionRuntimeError::Persistence)
+            .map_err(|_| SessionRuntimeError::CONSTRAINT)
     }
 }
 
@@ -1771,7 +1759,7 @@ mod tests {
             .call(Priority::Control, |connection| {
                 connection
                     .execute_batch("CREATE TABLE scratch(n INTEGER PRIMARY KEY)")
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CONSTRAINT)
             })
             .await
             .unwrap();
@@ -1788,15 +1776,13 @@ mod tests {
                         let unit = begin_unit(connection)?;
                         // Inside a group every unit is a savepoint.
                         assert!(matches!(unit, Unit::Savepoint(_)));
-                        unit.execute("INSERT INTO scratch(n) VALUES (?1)", [n])
-                            .map_err(|_| SessionRuntimeError::Persistence)?;
+                        unit.execute("INSERT INTO scratch(n) VALUES (?1)", [n])?;
                         if n == 4 {
                             // Dropping the unit uncommitted rolls this
                             // savepoint back; the group continues.
                             return Err(SessionRuntimeError::OutputTooLarge);
                         }
-                        unit.commit()
-                            .map_err(|_| SessionRuntimeError::Persistence)?;
+                        unit.commit()?;
                         // Autocommit is still off: the group owns the commit.
                         if !connection.is_autocommit() {
                             commits.fetch_add(1, Ordering::SeqCst);
@@ -1851,7 +1837,7 @@ mod tests {
             .call(Priority::Control, |connection| {
                 connection
                     .execute_batch("CREATE TABLE scratch(n INTEGER PRIMARY KEY)")
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CONSTRAINT)
             })
             .await
             .unwrap();
@@ -1864,10 +1850,8 @@ mod tests {
             blocked_store
                 .call(Priority::Output, move |connection| {
                     let unit = begin_unit(connection)?;
-                    unit.execute("INSERT INTO scratch(n) VALUES (?1)", [1_i64])
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
-                    unit.commit()
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    unit.execute("INSERT INTO scratch(n) VALUES (?1)", [1_i64])?;
+                    unit.commit()?;
                     let _ = entered_tx.send(());
                     release_rx
                         .recv()
@@ -1883,10 +1867,8 @@ mod tests {
                 store
                     .call(Priority::Output, move |connection| {
                         let unit = begin_unit(connection)?;
-                        unit.execute("INSERT INTO scratch(n) VALUES (?1)", [n])
-                            .map_err(|_| SessionRuntimeError::Persistence)?;
-                        unit.commit()
-                            .map_err(|_| SessionRuntimeError::Persistence)?;
+                        unit.execute("INSERT INTO scratch(n) VALUES (?1)", [n])?;
+                        unit.commit()?;
                         Ok(())
                     })
                     .await
@@ -1901,10 +1883,8 @@ mod tests {
                     // Joined the group: the unit is a savepoint and the
                     // connection is mid-transaction.
                     let joined = matches!(unit, Unit::Savepoint(_));
-                    unit.execute("INSERT INTO scratch(n) VALUES (?1)", [10_i64])
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
-                    unit.commit()
-                        .map_err(|_| SessionRuntimeError::Persistence)?;
+                    unit.execute("INSERT INTO scratch(n) VALUES (?1)", [10_i64])?;
+                    unit.commit()?;
                     Ok(joined && !connection.is_autocommit())
                 })
                 .await
@@ -1962,7 +1942,7 @@ mod tests {
                                  DEFERRABLE INITIALLY DEFERRED
                          );",
                     )
-                    .map_err(|_| SessionRuntimeError::Persistence)
+                    .map_err(|_| SessionRuntimeError::CONSTRAINT)
             })
             .await
             .unwrap();
@@ -1997,11 +1977,9 @@ mod tests {
                             json: Arc::from("{}"),
                         }));
                         if n == 2 {
-                            unit.execute("INSERT INTO child(parent_id) VALUES (999)", [])
-                                .map_err(|_| SessionRuntimeError::Persistence)?;
+                            unit.execute("INSERT INTO child(parent_id) VALUES (999)", [])?;
                         }
-                        unit.commit()
-                            .map_err(|_| SessionRuntimeError::Persistence)?;
+                        unit.commit()?;
                         Ok(())
                     })
                     .await
@@ -2011,7 +1989,7 @@ mod tests {
         release.send(()).unwrap();
         blocked.await.unwrap().unwrap();
         for job in jobs {
-            assert_eq!(job.await.unwrap(), Err(SessionRuntimeError::Persistence));
+            assert_eq!(job.await.unwrap(), Err(SessionRuntimeError::CONSTRAINT));
         }
         assert!(
             live.try_recv(0).is_err(),
@@ -2037,8 +2015,7 @@ mod tests {
                 store
                     .call(Priority::Output, move |connection| {
                         let unit = begin_unit(connection)?;
-                        unit.commit()
-                            .map_err(|_| SessionRuntimeError::Persistence)?;
+                        unit.commit()?;
                         order.lock().unwrap().push(format!("output {n}"));
                         Ok(())
                     })

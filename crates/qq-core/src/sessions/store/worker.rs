@@ -324,7 +324,7 @@ fn run_output_group(
             // The job's own error was already captured in its reply; the
             // settle closure carries it and ignores this `Ok`.
             (true, false) => (outcome.settle)(Ok(())),
-            (false, _) => (outcome.settle)(Err(SessionRuntimeError::Persistence)),
+            (false, _) => (outcome.settle)(Err(SessionRuntimeError::CONSTRAINT)),
         }
     }
     if let Some(read) = deferred_read {

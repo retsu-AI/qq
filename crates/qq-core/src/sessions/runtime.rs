@@ -1050,6 +1050,65 @@ pub enum SessionRuntimeError {
     ShutdownTimedOut,
     #[error("session runtime is unavailable")]
     Unavailable,
-    #[error("session persistence failed")]
-    Persistence,
+    #[error("session persistence failed: {0}")]
+    Persistence(PersistenceFault),
+}
+
+/// Why a store operation failed. SQLite errors keep their result code so an
+/// operator can tell a busy or read-only database from a corrupt row; codec
+/// faults are rows that no longer decode; constraint faults are store
+/// invariants the code itself checks (a settled run losing its outcome, a
+/// missing parent) or `CHECK`/`UNIQUE`/foreign-key violations.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum PersistenceFault {
+    #[error("sqlite reported {0:?}")]
+    Sqlite(rusqlite::ffi::ErrorCode),
+    #[error("a stored row failed to decode")]
+    Codec,
+    #[error("a store invariant was violated")]
+    Constraint,
+}
+
+impl SessionRuntimeError {
+    /// A store invariant the code checks itself did not hold.
+    pub(crate) const CONSTRAINT: Self = Self::Persistence(PersistenceFault::Constraint);
+    /// A stored row that no longer decodes into its type.
+    pub(crate) const CODEC: Self = Self::Persistence(PersistenceFault::Codec);
+}
+
+impl From<rusqlite::Error> for SessionRuntimeError {
+    fn from(error: rusqlite::Error) -> Self {
+        use rusqlite::Error;
+        Self::Persistence(match error {
+            Error::SqliteFailure(failure, _) => match failure.code {
+                rusqlite::ffi::ErrorCode::ConstraintViolation => PersistenceFault::Constraint,
+                code => PersistenceFault::Sqlite(code),
+            },
+            Error::QueryReturnedNoRows
+            | Error::InvalidColumnIndex(_)
+            | Error::InvalidColumnName(_)
+            | Error::InvalidColumnType(..)
+            | Error::FromSqlConversionFailure(..)
+            | Error::IntegralValueOutOfRange(..)
+            | Error::Utf8Error(_)
+            | Error::NulError(_)
+            | Error::InvalidParameterName(_)
+            | Error::InvalidPath(_)
+            | Error::InvalidQuery
+            | Error::MultipleStatement
+            | Error::InvalidParameterCount(..)
+            | Error::StatementChangedRows(_)
+            | Error::ToSqlConversionFailure(_)
+            | Error::InvalidDatabaseIndex(_)
+            | Error::ExecuteReturnedResults
+            | Error::SqlInputError { .. } => PersistenceFault::Codec,
+            _ => PersistenceFault::Sqlite(rusqlite::ffi::ErrorCode::Unknown),
+        })
+    }
+}
+
+impl From<serde_json::Error> for SessionRuntimeError {
+    fn from(_: serde_json::Error) -> Self {
+        Self::CODEC
+    }
 }

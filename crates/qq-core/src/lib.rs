@@ -65,10 +65,10 @@ pub use sessions::{
     MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN, MAX_DELEGATION_ROSTER,
     MAX_DESCENDANTS_PER_ROOT, MAX_PENDING_PROMPTS, MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES,
     MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN,
-    PublishedEvent, PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin,
-    ReviewRequest, ReviewSpend, ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture,
-    RuntimeLoadRequest, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime,
-    SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture,
+    PersistenceFault, PublishedEvent, PublishedEventStream, RecentAction, ReviewDecision,
+    ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend, ReviewVerdict, RuntimeLoadError,
+    RuntimeLoadFuture, RuntimeLoadRequest, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream,
+    SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture,
     WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 pub use workspace::skills::{MAX_INDEXED_SKILLS, MAX_SKILL_DESCRIPTION_BYTES};
