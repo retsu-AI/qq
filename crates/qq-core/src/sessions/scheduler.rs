@@ -69,7 +69,7 @@ pub(super) async fn schedule_runs(
                 tokio::spawn(async move {
                     let resources = RunResources::default();
                     #[cfg(test)]
-                    let resources = resources.for_test_run(claimed.run_id);
+                    let resources = resources.for_test_run(claimed.identity.run_id);
                     let execution = AssertUnwindSafe(supervise_reserved_run(
                         Arc::clone(&task_inner),
                         claimed,
@@ -105,7 +105,7 @@ async fn supervise_reserved_run(
     let (cancel, cancel_receiver) = watch::channel(false);
     let registered = match inner.cancellations.lock() {
         Ok(mut cancellations) => {
-            cancellations.insert(claimed.run_id, cancel.clone());
+            cancellations.insert(claimed.identity.run_id, cancel.clone());
             true
         }
         Err(_) => false,
@@ -127,7 +127,11 @@ async fn supervise_reserved_run(
     if claimed.cancel_requested {
         cancel.send_replace(true);
     } else {
-        match inner.store.cancellation_requested(claimed.run_id).await {
+        match inner
+            .store
+            .cancellation_requested(claimed.identity.run_id)
+            .await
+        {
             Ok(true) => {
                 cancel.send_replace(true);
             }
@@ -177,12 +181,12 @@ async fn settle_unstartable_reservation(
         }
     }
     if let Ok(mut cancellations) = inner.cancellations.lock() {
-        cancellations.remove(&claimed.run_id);
+        cancellations.remove(&claimed.identity.run_id);
     }
     if let Ok(mut steering) = inner.steering.lock() {
-        steering.remove(&claimed.run_id);
+        steering.remove(&claimed.identity.run_id);
     }
-    inner.clear_run_approvals(claimed.run_id);
+    inner.clear_run_approvals(claimed.identity.run_id);
     inner
         .settlements
         .send_modify(|generation| *generation = generation.wrapping_add(1));

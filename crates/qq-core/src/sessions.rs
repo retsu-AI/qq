@@ -307,10 +307,13 @@ fn parse_run_limits(encoded: Option<&str>) -> Result<RunLimits, SessionRuntimeEr
     }
 }
 
-#[derive(Clone)]
-struct ClaimedRun {
+/// The durable identity of one claimed run: everything a store write needs
+/// to scope an event or settle a row, and nothing that costs to copy. Store
+/// wrappers take this by value instead of cloning the whole claim (with its
+/// transcript and model selections) per streamed event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunIdentity {
     workspace_id: WorkspaceId,
-    workspace: String,
     session_id: SessionId,
     run_id: RunId,
     command_id: CommandId,
@@ -318,6 +321,12 @@ struct ClaimedRun {
     /// Whether the run belongs to a child (sub-agent) session. Guaranteed by
     /// the claim query's parent filter.
     child: bool,
+}
+
+#[derive(Clone)]
+struct ClaimedRun {
+    identity: RunIdentity,
+    workspace: String,
     /// Nesting depth of the run's session: 0 for a root, 1 for a child. A
     /// run may spawn only while `depth < effective_max_depth`.
     depth: u16,
@@ -369,13 +378,8 @@ impl ClaimedRun {
     /// of up to 4 MiB for every active execution task.
     fn panic_settlement_claim(&self) -> Self {
         Self {
-            workspace_id: self.workspace_id,
+            identity: self.identity,
             workspace: String::new(),
-            session_id: self.session_id,
-            run_id: self.run_id,
-            command_id: self.command_id,
-            kind: self.kind,
-            child: self.child,
             user_initiated: self.user_initiated,
             literal_slash: self.literal_slash,
             session_model: self.session_model.clone(),
@@ -834,14 +838,14 @@ fn create_child_run(
     let session = load_session_summary(&transaction, session_id)?;
     let created = append_event(
         &transaction,
-        EventContext {
+        EventContext::for_run_ids(
             store_id,
             workspace_id,
             session_id,
-            run_id: Some(run_id),
-            caused_by: Some(command_id),
-            occurred_at_ms: now,
-        },
+            run_id,
+            Some(command_id),
+            now,
+        ),
         SessionEvent::SessionCreated {
             session: session.clone(),
         },
@@ -850,14 +854,14 @@ fn create_child_run(
     let run = load_run(&transaction, run_id)?;
     let queued = append_event(
         &transaction,
-        EventContext {
+        EventContext::for_run_ids(
             store_id,
             workspace_id,
             session_id,
-            run_id: Some(run_id),
-            caused_by: Some(command_id),
-            occurred_at_ms: now,
-        },
+            run_id,
+            Some(command_id),
+            now,
+        ),
         SessionEvent::PromptQueued {
             session,
             message,
@@ -871,14 +875,14 @@ fn create_child_run(
     let committed_through = if purpose == SessionPurpose::Audit {
         append_event(
             &transaction,
-            EventContext {
+            EventContext::for_run_ids(
                 store_id,
                 workspace_id,
-                session_id: parent_session_id,
-                run_id: Some(parent_run_id),
-                caused_by: Some(command_id),
-                occurred_at_ms: now,
-            },
+                parent_session_id,
+                parent_run_id,
+                Some(command_id),
+                now,
+            ),
             SessionEvent::RunAuditStarted {
                 run_id: parent_run_id,
                 audit_session_id: session_id,
@@ -1075,14 +1079,13 @@ fn execute_command(
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
-                EventContext {
+                EventContext::for_session(
                     store_id,
                     workspace_id,
                     session_id,
-                    run_id: None,
-                    caused_by: Some(command_id),
-                    occurred_at_ms: now,
-                },
+                    Some(command_id),
+                    now,
+                ),
                 SessionEvent::SessionCreated { session: summary },
             )?;
             (
@@ -1219,14 +1222,14 @@ fn execute_command(
             let run = load_run(&transaction, run_id)?;
             let event = append_event(
                 &transaction,
-                EventContext {
+                EventContext::for_run_ids(
                     store_id,
                     workspace_id,
                     session_id,
-                    run_id: Some(run_id),
-                    caused_by: Some(command_id),
-                    occurred_at_ms: now,
-                },
+                    run_id,
+                    Some(command_id),
+                    now,
+                ),
                 SessionEvent::PromptQueued {
                     session: summary,
                     message,
@@ -1337,14 +1340,14 @@ fn execute_command(
                 let message = load_message(&transaction, message_id)?;
                 let event = append_event(
                     &transaction,
-                    EventContext {
+                    EventContext::for_run_ids(
                         store_id,
                         workspace_id,
                         session_id,
-                        run_id: Some(run_id),
-                        caused_by: Some(command_id),
-                        occurred_at_ms: now,
-                    },
+                        run_id,
+                        Some(command_id),
+                        now,
+                    ),
                     SessionEvent::SteeringQueued { run_id, message },
                 )?;
                 (
@@ -1397,14 +1400,14 @@ fn execute_command(
                 let summary = load_session_summary(&transaction, session_id)?;
                 let requested = append_event(
                     &transaction,
-                    EventContext {
+                    EventContext::for_run_ids(
                         store_id,
                         workspace_id,
                         session_id,
-                        run_id: Some(run_id),
-                        caused_by: Some(command_id),
-                        occurred_at_ms: now,
-                    },
+                        run_id,
+                        Some(command_id),
+                        now,
+                    ),
                     SessionEvent::CancellationRequested {
                         session: summary,
                         run_id,
@@ -1634,14 +1637,14 @@ fn execute_command(
                 let tool_call = load_tool_call(&transaction, tool_call_id)?;
                 let event = append_event(
                     &transaction,
-                    EventContext {
+                    EventContext::for_run_ids(
                         store_id,
                         workspace_id,
                         session_id,
-                        run_id: Some(run_id),
-                        caused_by: Some(command_id),
-                        occurred_at_ms: now,
-                    },
+                        run_id,
+                        Some(command_id),
+                        now,
+                    ),
                     SessionEvent::ToolApprovalResolved {
                         tool_call,
                         resolution,
@@ -1683,14 +1686,13 @@ fn execute_command(
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
-                EventContext {
+                EventContext::for_session(
                     store_id,
                     workspace_id,
                     session_id,
-                    run_id: None,
-                    caused_by: Some(command_id),
-                    occurred_at_ms: now,
-                },
+                    Some(command_id),
+                    now,
+                ),
                 SessionEvent::SessionUpdated { session: summary },
             )?;
             (
@@ -1732,14 +1734,13 @@ fn execute_command(
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
-                EventContext {
+                EventContext::for_session(
                     store_id,
                     workspace_id,
                     session_id,
-                    run_id: None,
-                    caused_by: Some(command_id),
-                    occurred_at_ms: now,
-                },
+                    Some(command_id),
+                    now,
+                ),
                 SessionEvent::SessionUpdated { session: summary },
             )?;
             (
@@ -1767,14 +1768,13 @@ fn execute_command(
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
-                EventContext {
+                EventContext::for_session(
                     store_id,
                     workspace_id,
                     session_id,
-                    run_id: None,
-                    caused_by: Some(command_id),
-                    occurred_at_ms: now,
-                },
+                    Some(command_id),
+                    now,
+                ),
                 SessionEvent::SessionUpdated { session: summary },
             )?;
             (
@@ -1916,14 +1916,14 @@ fn execute_command(
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
-                EventContext {
+                EventContext::for_run_ids(
                     store_id,
                     workspace_id,
                     session_id,
-                    run_id: Some(run_id),
-                    caused_by: Some(command_id),
-                    occurred_at_ms: now,
-                },
+                    run_id,
+                    Some(command_id),
+                    now,
+                ),
                 SessionEvent::SessionUpdated { session: summary },
             )?;
             (
@@ -1987,14 +1987,13 @@ fn execute_command(
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
-                EventContext {
+                EventContext::for_session(
                     store_id,
                     workspace_id,
                     session_id,
-                    run_id: None,
-                    caused_by: Some(command_id),
-                    occurred_at_ms: now,
-                },
+                    Some(command_id),
+                    now,
+                ),
                 SessionEvent::SessionCompactionRolledBack {
                     session: summary,
                     remaining,
@@ -2280,13 +2279,15 @@ fn reserve_next_run_recoverable(
     let pending_steering = pending_steering_rows(&transaction, run_id)?;
     transaction.commit()?;
     Ok(Some(ClaimedRun {
-        workspace_id,
+        identity: RunIdentity {
+            workspace_id,
+            session_id,
+            run_id,
+            command_id,
+            kind,
+            child: depth > 0,
+        },
         workspace: workspace_path,
-        session_id,
-        run_id,
-        command_id,
-        kind,
-        child: depth > 0,
         user_initiated,
         literal_slash,
         session_model: model.clone(),
@@ -2322,7 +2323,7 @@ fn prepared_context_bytes(weight: PreparedRequestWeight) -> Result<i64, SessionR
 fn start_reserved_run(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     audit: &PreparedRunAudit,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let prompt_identity = serde_json::to_string(audit.prompt_identity.as_ref())?;
@@ -2343,8 +2344,8 @@ fn start_reserved_run(
              WHERE id = ?1 AND session_id = ?2 AND status = 'queued'
                AND outcome_json IS NULL AND cancel_requested = 0",
         params![
-            claimed.run_id.to_string(),
-            claimed.session_id.to_string(),
+            identity.run_id.to_string(),
+            identity.session_id.to_string(),
             now,
             prompt_identity,
             resolved_model,
@@ -2363,8 +2364,8 @@ fn start_reserved_run(
              WHERE id = ?1 AND active_run_id IS NULL AND preparing_run_id = ?2
                AND queued_prompts > 0",
         params![
-            claimed.session_id.to_string(),
-            claimed.run_id.to_string(),
+            identity.session_id.to_string(),
+            identity.run_id.to_string(),
             now,
         ],
     )?;
@@ -2374,22 +2375,15 @@ fn start_reserved_run(
     transaction.execute(
         "UPDATE messages SET state = 'complete'
              WHERE run_id = ?1 AND role = 'user' AND state = 'queued'",
-        [claimed.run_id.to_string()],
+        [identity.run_id.to_string()],
     )?;
-    let summary = load_session_summary(&transaction, claimed.session_id)?;
+    let summary = load_session_summary(&transaction, identity.session_id)?;
     let started = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: None,
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now).uncaused(),
         SessionEvent::RunStarted {
             session: summary,
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             plan: Some(Box::new(audit.plan_identity.clone())),
         },
     )?;
@@ -2419,7 +2413,10 @@ fn start_auto_compaction(
              WHERE id = ?1 AND session_id = ?2 AND status = 'queued'
                AND outcome_json IS NULL AND cancel_requested = 0
                AND context_compaction_attempted = 0",
-        params![original.run_id.to_string(), original.session_id.to_string()],
+        params![
+            original.identity.run_id.to_string(),
+            original.identity.session_id.to_string()
+        ],
     )?;
     if attempted != 1 {
         return Ok(None);
@@ -2427,7 +2424,10 @@ fn start_auto_compaction(
     let reservation_valid: bool = transaction.query_row(
         "SELECT active_run_id IS NULL AND preparing_run_id = ?2
              FROM sessions WHERE id = ?1",
-        params![original.session_id.to_string(), original.run_id.to_string()],
+        params![
+            original.identity.session_id.to_string(),
+            original.identity.run_id.to_string()
+        ],
         |row| row.get(0),
     )?;
     if !reservation_valid {
@@ -2446,11 +2446,11 @@ fn start_auto_compaction(
              )",
         params![
             run_id.to_string(),
-            original.session_id.to_string(),
+            original.identity.session_id.to_string(),
             command_id.to_string(),
             user_message_id.to_string(),
             assistant_message_id.to_string(),
-            original.run_id.to_string(),
+            original.identity.run_id.to_string(),
             prompt_identity,
             resolved_model,
             context_base_bytes,
@@ -2463,26 +2463,26 @@ fn start_auto_compaction(
         "UPDATE sessions SET active_run_id = ?2, status = 'running', updated_at_ms = ?3
              WHERE id = ?1 AND active_run_id IS NULL AND preparing_run_id = ?4",
         params![
-            original.session_id.to_string(),
+            original.identity.session_id.to_string(),
             run_id.to_string(),
             now,
-            original.run_id.to_string(),
+            original.identity.run_id.to_string(),
         ],
     )?;
     if session_started != 1 {
         return Ok(None);
     }
-    let summary = load_session_summary(&transaction, original.session_id)?;
+    let summary = load_session_summary(&transaction, original.identity.session_id)?;
     let started = append_event(
         &transaction,
-        EventContext {
+        EventContext::for_run_ids(
             store_id,
-            workspace_id: original.workspace_id,
-            session_id: original.session_id,
-            run_id: Some(run_id),
-            caused_by: None,
-            occurred_at_ms: now,
-        },
+            original.identity.workspace_id,
+            original.identity.session_id,
+            run_id,
+            None,
+            now,
+        ),
         SessionEvent::RunStarted {
             session: summary,
             run_id,
@@ -2492,13 +2492,15 @@ fn start_auto_compaction(
     transaction.commit()?;
     Ok(Some((
         ClaimedRun {
-            workspace_id: original.workspace_id,
+            identity: RunIdentity {
+                workspace_id: original.identity.workspace_id,
+                session_id: original.identity.session_id,
+                run_id,
+                command_id,
+                kind: RunKind::Compaction,
+                child: original.identity.child,
+            },
             workspace: original.workspace.clone(),
-            session_id: original.session_id,
-            run_id,
-            command_id,
-            kind: RunKind::Compaction,
-            child: original.child,
             user_initiated: false,
             literal_slash: false,
             session_model: original.session_model.clone(),
@@ -2540,7 +2542,7 @@ fn load_auto_compaction_messages(
 
 fn reload_reserved_messages(
     connection: &mut Connection,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
 ) -> Result<Option<(Vec<Message>, bool)>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let row = transaction
@@ -2549,7 +2551,7 @@ fn reload_reserved_messages(
                     r.user_message_id, s.preparing_run_id, s.active_run_id
              FROM runs r JOIN sessions s ON s.id = r.session_id
              WHERE r.id = ?1 AND r.session_id = ?2",
-            params![claimed.run_id.to_string(), claimed.session_id.to_string()],
+            params![identity.run_id.to_string(), identity.session_id.to_string()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -2567,7 +2569,7 @@ fn reload_reserved_messages(
     };
     if status != "queued"
         || cancelled
-        || preparing.as_deref() != Some(claimed.run_id.to_string().as_str())
+        || preparing.as_deref() != Some(identity.run_id.to_string().as_str())
         || active.is_some()
     {
         return Ok(None);
@@ -2584,7 +2586,7 @@ fn reload_reserved_messages(
     )?;
     let mut messages = load_model_context(
         &transaction,
-        claimed.session_id,
+        identity.session_id,
         user_ordinal.saturating_sub(1),
     )?;
     messages.push(Message::user(prompt));
@@ -2600,7 +2602,7 @@ fn reload_reserved_messages(
 fn begin_assistant_message(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     message_id: MessageId,
     turn_ordinal: u16,
     channel: TextChannel,
@@ -2610,11 +2612,11 @@ fn begin_assistant_message(
         return Err(SessionRuntimeError::CONSTRAINT);
     }
     let transaction = store::begin_unit(connection)?;
-    reserve_context_capacity(&transaction, claimed.run_id, text.len())?;
+    reserve_context_capacity(&transaction, identity.run_id, text.len())?;
     let now = now_ms();
     let ordinal: u64 = transaction.query_row(
         "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM messages WHERE session_id = ?1",
-        [claimed.session_id.to_string()],
+        [identity.session_id.to_string()],
         |row| row.get(0),
     )?;
     transaction.execute(
@@ -2623,8 +2625,8 @@ fn begin_assistant_message(
              ) VALUES (?1, ?2, ?3, ?4, ?5, 'assistant', 'streaming', ?6)",
         params![
             message_id.to_string(),
-            claimed.session_id.to_string(),
-            claimed.run_id.to_string(),
+            identity.session_id.to_string(),
+            identity.run_id.to_string(),
             ordinal,
             turn_ordinal,
             now,
@@ -2632,32 +2634,18 @@ fn begin_assistant_message(
     )?;
     transaction.execute(
         "UPDATE runs SET assistant_message_id = ?2 WHERE id = ?1",
-        params![claimed.run_id.to_string(), message_id.to_string()],
+        params![identity.run_id.to_string(), message_id.to_string()],
     )?;
     let message = load_message(&transaction, message_id)?;
     let started = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::AssistantMessageStarted { message },
     )?;
     insert_message_chunk(&transaction, message_id, channel, text)?;
     let appended = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::TextAppended {
             message_id,
             channel,
@@ -2671,7 +2659,7 @@ fn begin_assistant_message(
 fn append_text(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     message_id: MessageId,
     channel: TextChannel,
     text: String,
@@ -2690,18 +2678,11 @@ fn append_text(
     if streaming.is_none() {
         return Err(SessionRuntimeError::Unavailable);
     }
-    reserve_context_capacity(&transaction, claimed.run_id, text.len())?;
+    reserve_context_capacity(&transaction, identity.run_id, text.len())?;
     insert_message_chunk(&transaction, message_id, channel, &text)?;
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now_ms(),
-        },
+        EventContext::for_run(store_id, identity, now_ms()),
         SessionEvent::TextAppended {
             message_id,
             channel,
@@ -2771,7 +2752,7 @@ fn persist_model_turn(
         .map_err(|_| SessionRuntimeError::CODEC)?;
     let now = now_ms();
     let transaction = store::begin_unit(connection)?;
-    let persisted_calls = if claimed.kind == RunKind::Prompt {
+    let persisted_calls = if claimed.identity.kind == RunKind::Prompt {
         calls.as_slice()
     } else {
         &[]
@@ -2793,7 +2774,7 @@ fn persist_model_turn(
     let non_text_bytes =
         usize::try_from(full_message_bytes.saturating_sub(already_reserved_text_bytes))
             .map_err(|_| SessionRuntimeError::OutputTooLarge)?;
-    reserve_context_capacity(&transaction, claimed.run_id, non_text_bytes)?;
+    reserve_context_capacity(&transaction, claimed.identity.run_id, non_text_bytes)?;
     // Completing the turn's message in the same transaction as the turn row
     // keeps message state and turn persistence atomic: after a crash, a
     // streaming message always identifies exactly the turn that never
@@ -2804,7 +2785,7 @@ fn persist_model_turn(
                  WHERE id = ?1 AND run_id = ?2 AND state = 'streaming'",
             params![
                 message_id.to_string(),
-                claimed.run_id.to_string(),
+                claimed.identity.run_id.to_string(),
                 truncated
             ],
         )?;
@@ -2818,7 +2799,7 @@ fn persist_model_turn(
                  usage_json, estimated_cost_usd_nanos, completed_at_ms, truncated
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
-            claimed.run_id.to_string(),
+            claimed.identity.run_id.to_string(),
             turn_ordinal,
             content_json,
             model_json,
@@ -2831,16 +2812,9 @@ fn persist_model_turn(
     let mut events = Vec::with_capacity(persisted_calls.len().saturating_add(3));
     events.push(append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, claimed.identity, now),
         SessionEvent::ModelTurnCompleted {
-            run_id: claimed.run_id,
+            run_id: claimed.identity.run_id,
             turn_ordinal: *turn_ordinal,
             model: claimed.model.clone(),
             usage: *usage,
@@ -2855,7 +2829,7 @@ fn persist_model_turn(
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'requested', ?8, ?9)",
             params![
                 call.id.to_string(),
-                claimed.run_id.to_string(),
+                claimed.identity.run_id.to_string(),
                 call.turn_ordinal,
                 call.call_ordinal,
                 call.provider_call_id,
@@ -2868,14 +2842,7 @@ fn persist_model_turn(
         let tool_call = load_tool_call(&transaction, call.id)?;
         events.push(append_event(
             &transaction,
-            EventContext {
-                store_id,
-                workspace_id: claimed.workspace_id,
-                session_id: claimed.session_id,
-                run_id: Some(claimed.run_id),
-                caused_by: Some(claimed.command_id),
-                occurred_at_ms: now,
-            },
+            EventContext::for_run(store_id, claimed.identity, now),
             SessionEvent::ToolCallRequested { tool_call },
         )?);
     }
@@ -2899,7 +2866,7 @@ fn persist_model_turn(
              SET context_tokens = ?2, usage_json = ?3, estimated_cost_usd_nanos = ?4
              WHERE id = ?1",
         params![
-            claimed.run_id.to_string(),
+            claimed.identity.run_id.to_string(),
             context_tokens,
             usage_json,
             estimated_cost_usd_nanos,
@@ -2908,28 +2875,21 @@ fn persist_model_turn(
     if let Some(context_tokens) = context_tokens {
         events.push(append_event(
             &transaction,
-            EventContext {
-                store_id,
-                workspace_id: claimed.workspace_id,
-                session_id: claimed.session_id,
-                run_id: Some(claimed.run_id),
-                caused_by: Some(claimed.command_id),
-                occurred_at_ms: now,
-            },
+            EventContext::for_run(store_id, claimed.identity, now),
             SessionEvent::RunContextUpdated {
-                run_id: claimed.run_id,
+                run_id: claimed.identity.run_id,
                 context_tokens: *context_tokens,
             },
         )?);
     }
-    let session_context_updated = if claimed.kind == RunKind::Prompt {
+    let session_context_updated = if claimed.identity.kind == RunKind::Prompt {
         transaction.execute(
             "UPDATE sessions
                  SET context_tokens = ?2, context_occupancy_json = ?4
                  WHERE id = ?1 AND model IS ?3
                        AND max_output_tokens IS ?5 AND organization IS ?6",
             params![
-                claimed.session_id.to_string(),
+                claimed.identity.session_id.to_string(),
                 context_tokens,
                 &claimed.session_model.model,
                 occupancy_basis_json,
@@ -2943,16 +2903,9 @@ fn persist_model_turn(
     if session_context_updated {
         events.push(append_event(
             &transaction,
-            EventContext {
-                store_id,
-                workspace_id: claimed.workspace_id,
-                session_id: claimed.session_id,
-                run_id: Some(claimed.run_id),
-                caused_by: Some(claimed.command_id),
-                occurred_at_ms: now,
-            },
+            EventContext::for_run(store_id, claimed.identity, now),
             SessionEvent::SessionContextUpdated {
-                run_id: claimed.run_id,
+                run_id: claimed.identity.run_id,
                 context_tokens: *context_tokens,
             },
         )?);
@@ -2964,7 +2917,7 @@ fn persist_model_turn(
 fn start_tool_call(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
@@ -2972,7 +2925,7 @@ fn start_tool_call(
     let updated = transaction.execute(
         "UPDATE tool_calls SET state = 'running', started_at_ms = ?2
              WHERE id = ?1 AND run_id = ?3 AND state = 'requested'",
-        params![tool_call_id.to_string(), now, claimed.run_id.to_string()],
+        params![tool_call_id.to_string(), now, identity.run_id.to_string()],
     )?;
     if updated != 1 {
         return Err(SessionRuntimeError::Unavailable);
@@ -2980,14 +2933,7 @@ fn start_tool_call(
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolCallStarted { tool_call },
     )?;
     transaction.commit()?;
@@ -3001,7 +2947,7 @@ fn start_tool_call(
 fn apply_steering_message(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     message_id: MessageId,
     turn_ordinal: u16,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
@@ -3011,7 +2957,7 @@ fn apply_steering_message(
              WHERE id = ?1 AND run_id = ?2 AND steering = 1 AND state = 'queued'",
         params![
             message_id.to_string(),
-            claimed.run_id.to_string(),
+            identity.run_id.to_string(),
             turn_ordinal
         ],
     )?;
@@ -3020,16 +2966,9 @@ fn apply_steering_message(
     }
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now_ms(),
-        },
+        EventContext::for_run(store_id, identity, now_ms()),
         SessionEvent::SteeringApplied {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             message_id,
             turn_ordinal,
         },
@@ -3044,7 +2983,7 @@ fn apply_steering_message(
 fn record_run_interrupted(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     turn_ordinal: u16,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
@@ -3056,7 +2995,7 @@ fn record_run_interrupted(
              ORDER BY turn_ordinal, call_ordinal",
     )?;
     let ids = statement
-        .query_map([claimed.run_id.to_string()], |row| row.get::<_, String>(0))?
+        .query_map([identity.run_id.to_string()], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     for id in ids {
@@ -3070,29 +3009,15 @@ fn record_run_interrupted(
         let tool_call = load_tool_call(&transaction, id)?;
         events.push(append_event(
             &transaction,
-            EventContext {
-                store_id,
-                workspace_id: claimed.workspace_id,
-                session_id: claimed.session_id,
-                run_id: Some(claimed.run_id),
-                caused_by: Some(claimed.command_id),
-                occurred_at_ms: now,
-            },
+            EventContext::for_run(store_id, identity, now),
             SessionEvent::ToolCallFinished { tool_call },
         )?);
     }
     events.push(append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::RunInterrupted {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             turn_ordinal,
         },
     )?);
@@ -3106,7 +3031,7 @@ fn record_run_interrupted(
 fn record_run_audit(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     record: AuditRecord,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
@@ -3114,23 +3039,16 @@ fn record_run_audit(
     let audit_json = serde_json::to_string(&record)?;
     let updated = transaction.execute(
         "UPDATE runs SET audit_json = ?2 WHERE id = ?1 AND status = 'running'",
-        params![claimed.run_id.to_string(), audit_json],
+        params![identity.run_id.to_string(), audit_json],
     )?;
     if updated != 1 {
         return Err(SessionRuntimeError::CODEC);
     }
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::RunAuditCompleted {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             audit: record,
         },
     )?;
@@ -3145,7 +3063,7 @@ fn record_run_audit(
 fn record_run_output_truncated(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     turn_ordinal: u16,
     continuation: u16,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
@@ -3153,23 +3071,16 @@ fn record_run_output_truncated(
     let now = now_ms();
     let updated = transaction.execute(
         "UPDATE runs SET output_continuations = ?2 WHERE id = ?1 AND status = 'running'",
-        params![claimed.run_id.to_string(), continuation],
+        params![identity.run_id.to_string(), continuation],
     )?;
     if updated != 1 {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::RunOutputTruncated {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             turn_ordinal,
             continuation,
         },
@@ -3183,7 +3094,7 @@ fn record_run_output_truncated(
 fn supersede_pending_steering(
     transaction: &Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     now: u64,
     events: &mut Vec<SessionEventEnvelope>,
 ) -> Result<(), SessionRuntimeError> {
@@ -3192,7 +3103,7 @@ fn supersede_pending_steering(
              WHERE run_id = ?1 AND steering = 1 AND state = 'queued' ORDER BY ordinal",
     )?;
     let ids = statement
-        .query_map([claimed.run_id.to_string()], |row| row.get::<_, String>(0))?
+        .query_map([identity.run_id.to_string()], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     for id in ids {
@@ -3203,16 +3114,9 @@ fn supersede_pending_steering(
         )?;
         events.push(append_event(
             transaction,
-            EventContext {
-                store_id,
-                workspace_id: claimed.workspace_id,
-                session_id: claimed.session_id,
-                run_id: Some(claimed.run_id),
-                caused_by: Some(claimed.command_id),
-                occurred_at_ms: now,
-            },
+            EventContext::for_run(store_id, identity, now),
             SessionEvent::SteeringSuperseded {
-                run_id: claimed.run_id,
+                run_id: identity.run_id,
                 message_id,
             },
         )?);
@@ -3225,7 +3129,7 @@ fn supersede_pending_steering(
 fn append_run_activity(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     activity: RunActivity,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
@@ -3238,8 +3142,8 @@ fn append_run_activity(
         )
         .and_then(|mut statement| {
             statement.execute(params![
-                claimed.run_id.to_string(),
-                claimed.session_id.to_string(),
+                identity.run_id.to_string(),
+                identity.session_id.to_string(),
                 run_activity_column(activity),
             ])
         })?;
@@ -3248,16 +3152,9 @@ fn append_run_activity(
     }
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now_ms(),
-        },
+        EventContext::for_run(store_id, identity, now_ms()),
         SessionEvent::RunActivityChanged {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             activity,
         },
     )?;
@@ -3268,14 +3165,14 @@ fn append_run_activity(
 fn append_reasoning(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     reasoning: ReasoningEvent,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let running = transaction
         .query_row(
             "SELECT 1 FROM runs WHERE id = ?1 AND session_id = ?2 AND status = 'running'",
-            params![claimed.run_id.to_string(), claimed.session_id.to_string()],
+            params![identity.run_id.to_string(), identity.session_id.to_string()],
             |_| Ok(()),
         )
         .optional()?;
@@ -3284,29 +3181,22 @@ fn append_reasoning(
     }
     let event = match reasoning {
         ReasoningEvent::Started { kind } => SessionEvent::ReasoningStarted {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             kind,
         },
         ReasoningEvent::Delta { kind, text } => SessionEvent::ReasoningDelta {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             kind,
             text,
         },
         ReasoningEvent::Completed { kind } => SessionEvent::ReasoningCompleted {
-            run_id: claimed.run_id,
+            run_id: identity.run_id,
             kind,
         },
     };
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now_ms(),
-        },
+        EventContext::for_run(store_id, identity, now_ms()),
         event,
     )?;
     transaction.commit()?;
@@ -3319,7 +3209,7 @@ fn append_reasoning(
 fn append_tool_call_output(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
     chunk: String,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
@@ -3327,7 +3217,7 @@ fn append_tool_call_output(
     let running = transaction
         .query_row(
             "SELECT 1 FROM tool_calls WHERE id = ?1 AND run_id = ?2 AND state = 'running'",
-            params![tool_call_id.to_string(), claimed.run_id.to_string()],
+            params![tool_call_id.to_string(), identity.run_id.to_string()],
             |_| Ok(()),
         )
         .optional()?;
@@ -3336,14 +3226,7 @@ fn append_tool_call_output(
     }
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now_ms(),
-        },
+        EventContext::for_run(store_id, identity, now_ms()),
         SessionEvent::ToolCallOutputDelta {
             tool_call_id,
             chunk,
@@ -3360,7 +3243,7 @@ fn append_tool_call_output(
 fn finish_tool_call(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
     result: String,
     is_error: bool,
@@ -3379,7 +3262,7 @@ fn finish_tool_call(
                     )
              FROM tool_calls current
              WHERE current.id = ?1 AND current.run_id = ?2 AND current.state = 'running'",
-            params![tool_call_id.to_string(), claimed.run_id.to_string()],
+            params![tool_call_id.to_string(), identity.run_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
         )
         .optional()?
@@ -3389,7 +3272,7 @@ fn finish_tool_call(
     // provider call id does enter the next ToolResult block and is counted.
     reserve_tool_result_capacity(
         &transaction,
-        claimed.run_id,
+        identity.run_id,
         &provider_call_id,
         &result,
         first_result_in_turn,
@@ -3407,7 +3290,7 @@ fn finish_tool_call(
             result,
             is_error,
             now,
-            claimed.run_id.to_string(),
+            identity.run_id.to_string(),
             display_json,
         ],
     )?;
@@ -3415,19 +3298,12 @@ fn finish_tool_call(
         return Err(SessionRuntimeError::Unavailable);
     }
     if let Some(update) = file_state {
-        record_session_file(&transaction, claimed.session_id, &update, now)?;
+        record_session_file(&transaction, identity.session_id, &update, now)?;
     }
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolCallFinished { tool_call },
     )?;
     transaction.commit()?;
@@ -3535,7 +3411,7 @@ fn load_approval_policy(
 fn deny_tool_call(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
     message: &str,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
@@ -3551,14 +3427,14 @@ fn deny_tool_call(
                     )
              FROM tool_calls current
              WHERE current.id = ?1 AND current.run_id = ?2 AND current.state = 'requested'",
-            params![tool_call_id.to_string(), claimed.run_id.to_string()],
+            params![tool_call_id.to_string(), identity.run_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
         )
         .optional()?
         .ok_or(SessionRuntimeError::ToolCallNotFound)?;
     reserve_tool_result_capacity(
         &transaction,
-        claimed.run_id,
+        identity.run_id,
         &provider_call_id,
         message,
         first_result_in_turn,
@@ -3572,7 +3448,7 @@ fn deny_tool_call(
             tool_call_id.to_string(),
             message,
             now,
-            claimed.run_id.to_string(),
+            identity.run_id.to_string(),
         ],
     )?;
     if updated != 1 {
@@ -3581,14 +3457,7 @@ fn deny_tool_call(
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolCallFinished { tool_call },
     )?;
     transaction.commit()?;
@@ -3598,7 +3467,7 @@ fn deny_tool_call(
 fn request_tool_approval(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
     shell: Option<ShellCommandPreview>,
     edit: Option<EditPreview>,
@@ -3608,7 +3477,7 @@ fn request_tool_approval(
     let updated = transaction.execute(
         "UPDATE tool_calls SET state = 'awaiting_approval'
              WHERE id = ?1 AND run_id = ?2 AND state = 'requested'",
-        params![tool_call_id.to_string(), claimed.run_id.to_string()],
+        params![tool_call_id.to_string(), identity.run_id.to_string()],
     )?;
     if updated != 1 {
         return Err(SessionRuntimeError::Unavailable);
@@ -3616,14 +3485,7 @@ fn request_tool_approval(
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolApprovalRequested {
             tool_call,
             shell,
@@ -3642,7 +3504,7 @@ fn request_tool_approval(
 fn resolve_approval_by_reviewer(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
@@ -3656,7 +3518,7 @@ fn resolve_approval_by_reviewer(
             tool_call_id.to_string(),
             approval_resolution_str(ApprovalResolution::ApprovedByReviewer),
             now,
-            claimed.run_id.to_string(),
+            identity.run_id.to_string(),
         ],
     )?;
     if updated != 1 {
@@ -3665,14 +3527,7 @@ fn resolve_approval_by_reviewer(
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::ApprovedByReviewer,
@@ -3688,7 +3543,7 @@ fn resolve_approval_by_reviewer(
 fn deny_approval_by_reviewer(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
     message: &str,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
@@ -3704,7 +3559,7 @@ fn deny_approval_by_reviewer(
                           AND previous.result IS NOT NULL
                     )
              FROM tool_calls current WHERE current.id = ?1 AND current.run_id = ?2",
-            params![tool_call_id.to_string(), claimed.run_id.to_string()],
+            params![tool_call_id.to_string(), identity.run_id.to_string()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -3723,7 +3578,7 @@ fn deny_approval_by_reviewer(
     }
     reserve_tool_result_capacity(
         &transaction,
-        claimed.run_id,
+        identity.run_id,
         &provider_call_id,
         message,
         first_result_in_turn,
@@ -3743,14 +3598,7 @@ fn deny_approval_by_reviewer(
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     let event = append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::DeniedByReviewer,
@@ -3765,14 +3613,14 @@ fn deny_approval_by_reviewer(
 /// calls by name and path. Bounded; never results or model text.
 fn load_review_context(
     connection: &Connection,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
 ) -> Result<(Option<String>, Vec<RecentAction>), SessionRuntimeError> {
-    let task_brief = if claimed.child {
+    let task_brief = if identity.child {
         connection
             .query_row(
                 "SELECT m.output FROM messages m JOIN runs r ON r.user_message_id = m.id
                  WHERE r.id = ?1",
-                [claimed.run_id.to_string()],
+                [identity.run_id.to_string()],
                 |row| row.get::<_, String>(0),
             )
             .optional()?
@@ -3787,7 +3635,10 @@ fn load_review_context(
     )?;
     let mut recent = statement
         .query_map(
-            params![claimed.run_id.to_string(), MAX_REVIEW_RECENT_ACTIONS as i64],
+            params![
+                identity.run_id.to_string(),
+                MAX_REVIEW_RECENT_ACTIONS as i64
+            ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?
         .collect::<Result<Vec<_>, _>>()?
@@ -3812,7 +3663,7 @@ fn load_review_context(
 fn conclude_tool_approval(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     tool_call_id: ToolCallId,
     timed_out: bool,
 ) -> Result<ConcludedApproval, SessionRuntimeError> {
@@ -3829,7 +3680,7 @@ fn conclude_tool_approval(
                     )
              FROM tool_calls current
              WHERE current.id = ?1 AND current.run_id = ?2",
-            params![tool_call_id.to_string(), claimed.run_id.to_string()],
+            params![tool_call_id.to_string(), identity.run_id.to_string()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -3862,7 +3713,7 @@ fn conclude_tool_approval(
     }
     reserve_tool_result_capacity(
         &transaction,
-        claimed.run_id,
+        identity.run_id,
         &provider_call_id,
         approval::TIMEOUT_DENIED_RESULT,
         first_result_in_turn,
@@ -3883,14 +3734,7 @@ fn conclude_tool_approval(
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     append_event(
         &transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: None,
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, identity, now).uncaused(),
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::DeniedTimeout,
@@ -3954,14 +3798,14 @@ fn settle_grant_promotion(
     // publishable even when the session was deleted in the meantime.
     let event = append_event(
         &transaction,
-        EventContext {
+        EventContext::for_run_ids(
             store_id,
-            workspace_id: promotion.workspace_id,
-            session_id: promotion.session_id,
-            run_id: Some(promotion.run_id),
-            caused_by: Some(promotion.command_id),
-            occurred_at_ms: now_ms(),
-        },
+            promotion.workspace_id,
+            promotion.session_id,
+            promotion.run_id,
+            Some(promotion.command_id),
+            now_ms(),
+        ),
         SessionEvent::WorkspaceGrantPromoted {
             grant: promotion.grant.clone(),
             outcome,
@@ -4055,14 +3899,13 @@ fn append_parent_session_update(
     let session = load_session_summary(transaction, parent_id)?;
     events.push(append_event(
         transaction,
-        EventContext {
+        EventContext::for_session(
             store_id,
             workspace_id,
-            session_id: parent_id,
-            run_id: None,
-            caused_by: Some(caused_by),
+            parent_id,
+            Some(caused_by),
             occurred_at_ms,
-        },
+        ),
         SessionEvent::SessionUpdated { session },
     )?);
     Ok(())
@@ -4077,7 +3920,13 @@ fn complete_run(
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let mut events = Vec::new();
-    supersede_pending_steering(&transaction, store_id, claimed, now_ms(), &mut events)?;
+    supersede_pending_steering(
+        &transaction,
+        store_id,
+        claimed.identity,
+        now_ms(),
+        &mut events,
+    )?;
     events.push(finalize_run(
         &transaction,
         store_id,
@@ -4088,9 +3937,9 @@ fn complete_run(
     append_parent_session_update(
         &transaction,
         store_id,
-        claimed.workspace_id,
-        claimed.session_id,
-        claimed.command_id,
+        claimed.identity.workspace_id,
+        claimed.identity.session_id,
+        claimed.identity.command_id,
         now_ms(),
         &mut events,
     )?;
@@ -4113,7 +3962,8 @@ fn complete_compaction(
     let transaction = store::begin_unit(connection)?;
     // A cancel that raced the summarizer's completion wins: the run settles
     // cancelled and no marker is committed.
-    let mut outcome = cancellation_wins(&transaction, claimed.run_id, RunOutcome::Completed)?;
+    let mut outcome =
+        cancellation_wins(&transaction, claimed.identity.run_id, RunOutcome::Completed)?;
     if matches!(outcome, RunOutcome::Completed)
         && let Err(reason) = validate_compaction_summary(&summary)
     {
@@ -4127,7 +3977,7 @@ fn complete_compaction(
     let mut events = Vec::with_capacity(2);
     if matches!(outcome, RunOutcome::Completed) {
         let now = now_ms();
-        let before_bytes = assembled_context_bytes(&transaction, claimed.session_id)?;
+        let before_bytes = assembled_context_bytes(&transaction, claimed.identity.session_id)?;
         // The cutoff covers exactly the span the summary replaced: the
         // messages assembly showed the summarizer. A prompt still queued
         // behind an auto-compaction has an ordinal but was not summarized —
@@ -4135,7 +3985,7 @@ fn complete_compaction(
         let cutoff_ordinal: u64 = transaction.query_row(
             "SELECT COALESCE(MAX(ordinal), 0) FROM messages
                  WHERE session_id = ?1 AND state IN ('complete', 'interrupted')",
-            [claimed.session_id.to_string()],
+            [claimed.identity.session_id.to_string()],
             |row| row.get(0),
         )?;
         // Insert the candidate marker, then measure the assembly it
@@ -4148,15 +3998,15 @@ fn complete_compaction(
                      before_bytes, after_bytes, created_at_ms
                  ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
             params![
-                claimed.session_id.to_string(),
-                claimed.run_id.to_string(),
+                claimed.identity.session_id.to_string(),
+                claimed.identity.run_id.to_string(),
                 summary,
                 cutoff_ordinal,
                 u64::try_from(before_bytes).unwrap_or(u64::MAX),
                 now,
             ],
         )?;
-        let after_bytes = assembled_context_bytes(&transaction, claimed.session_id)?;
+        let after_bytes = assembled_context_bytes(&transaction, claimed.identity.session_id)?;
         // Shrinkage is the point of compaction. A short transcript is the one
         // exception: the structured summary's fixed framing can exceed it,
         // yet compacting it is still correct when the provider reported
@@ -4166,7 +4016,10 @@ fn complete_compaction(
         if shrinkage_required && after_bytes >= before_bytes {
             transaction.execute(
                 "DELETE FROM session_compactions WHERE session_id = ?1 AND run_id = ?2",
-                params![claimed.session_id.to_string(), claimed.run_id.to_string()],
+                params![
+                    claimed.identity.session_id.to_string(),
+                    claimed.identity.run_id.to_string()
+                ],
             )?;
             let failed = RunOutcome::Failed {
                 failure: RunFailure {
@@ -4188,9 +4041,9 @@ fn complete_compaction(
             append_parent_session_update(
                 &transaction,
                 store_id,
-                claimed.workspace_id,
-                claimed.session_id,
-                claimed.command_id,
+                claimed.identity.workspace_id,
+                claimed.identity.session_id,
+                claimed.identity.command_id,
                 now_ms(),
                 &mut events,
             )?;
@@ -4201,8 +4054,8 @@ fn complete_compaction(
             "UPDATE session_compactions SET after_bytes = ?3
                  WHERE session_id = ?1 AND run_id = ?2",
             params![
-                claimed.session_id.to_string(),
-                claimed.run_id.to_string(),
+                claimed.identity.session_id.to_string(),
+                claimed.identity.run_id.to_string(),
                 u64::try_from(after_bytes).unwrap_or(u64::MAX),
             ],
         )?;
@@ -4214,7 +4067,10 @@ fn complete_compaction(
                      SELECT rowid FROM session_compactions WHERE session_id = ?1
                      ORDER BY rowid DESC LIMIT ?2
                  )",
-            params![claimed.session_id.to_string(), COMPACTION_HISTORY_ROWS],
+            params![
+                claimed.identity.session_id.to_string(),
+                COMPACTION_HISTORY_ROWS
+            ],
         )?;
         // The compaction request measured the context that was just
         // replaced, not the summary now occupying the session. Keep the
@@ -4225,7 +4081,7 @@ fn complete_compaction(
                      context_occupancy_json = NULL,
                      pending_context_overflow_basis_json = NULL
                  WHERE id = ?1",
-            [claimed.session_id.to_string()],
+            [claimed.identity.session_id.to_string()],
         )?;
         events.push(finalize_run(
             &transaction,
@@ -4234,17 +4090,10 @@ fn complete_compaction(
             outcome,
             accounting,
         )?);
-        let session = load_session_summary(&transaction, claimed.session_id)?;
+        let session = load_session_summary(&transaction, claimed.identity.session_id)?;
         events.push(append_event(
             &transaction,
-            EventContext {
-                store_id,
-                workspace_id: claimed.workspace_id,
-                session_id: claimed.session_id,
-                run_id: Some(claimed.run_id),
-                caused_by: Some(claimed.command_id),
-                occurred_at_ms: now,
-            },
+            EventContext::for_run(store_id, claimed.identity, now),
             SessionEvent::SessionCompacted {
                 session,
                 summary: Some(truncate_utf8(summary, MAX_EVENT_SUMMARY_BYTES)),
@@ -4264,9 +4113,9 @@ fn complete_compaction(
     append_parent_session_update(
         &transaction,
         store_id,
-        claimed.workspace_id,
-        claimed.session_id,
-        claimed.command_id,
+        claimed.identity.workspace_id,
+        claimed.identity.session_id,
+        claimed.identity.command_id,
         now_ms(),
         &mut events,
     )?;
@@ -4284,13 +4133,13 @@ fn finalize_run(
     accounting: Option<RunAccounting>,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let now = now_ms();
-    let outcome = cancellation_wins(transaction, claimed.run_id, outcome)?;
+    let outcome = cancellation_wins(transaction, claimed.identity.run_id, outcome)?;
     interrupt_active_tool_calls(
         transaction,
         store_id,
-        claimed,
+        claimed.identity,
         &outcome,
-        Some(claimed.command_id),
+        Some(claimed.identity.command_id),
         now,
     )?;
     let (run_status, message_state) = outcome_states(&outcome);
@@ -4307,7 +4156,7 @@ fn finalize_run(
     let saw_turn = accounting
         .as_ref()
         .is_some_and(|accounting| accounting.saw_turn);
-    let pending_context_overflow_basis = if claimed.kind == RunKind::Prompt
+    let pending_context_overflow_basis = if claimed.identity.kind == RunKind::Prompt
         && matches!(
             &outcome,
             RunOutcome::Failed {
@@ -4326,7 +4175,7 @@ fn finalize_run(
     };
     let (current_cost, current_cost_known) = transaction.query_row(
         "SELECT estimated_cost_usd_nanos, cost_known FROM sessions WHERE id = ?1",
-        [claimed.session_id.to_string()],
+        [claimed.identity.session_id.to_string()],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
     )?;
     let (next_cost, next_cost_known) = if saw_turn {
@@ -4347,7 +4196,7 @@ fn finalize_run(
                  context_tokens = CASE WHEN ?8 THEN ?7 ELSE context_tokens END
              WHERE id = ?1 AND outcome_json IS NULL",
         params![
-            claimed.run_id.to_string(),
+            claimed.identity.run_id.to_string(),
             run_status,
             outcome_json,
             now,
@@ -4357,11 +4206,11 @@ fn finalize_run(
             saw_turn,
         ],
     )?;
-    let context_tokens = run_context_tokens(transaction, claimed.run_id)?;
+    let context_tokens = run_context_tokens(transaction, claimed.identity.run_id)?;
     transaction.execute(
         "UPDATE messages SET state = ?2
              WHERE run_id = ?1 AND role = 'assistant' AND state = 'streaming'",
-        params![claimed.run_id.to_string(), message_state],
+        params![claimed.identity.run_id.to_string(), message_state],
     )?;
     transaction.execute(
         "UPDATE sessions
@@ -4380,32 +4229,25 @@ fn finalize_run(
                   updated_at_ms = ?2
              WHERE id = ?1 AND active_run_id = ?3",
         params![
-            claimed.session_id.to_string(),
+            claimed.identity.session_id.to_string(),
             now,
-            claimed.run_id.to_string(),
+            claimed.identity.run_id.to_string(),
             next_cost,
             next_cost_known,
-            claimed.kind == RunKind::Prompt,
+            claimed.identity.kind == RunKind::Prompt,
             saw_turn,
             reported_context_tokens,
             &claimed.model.model,
             pending_context_overflow_basis,
         ],
     )?;
-    let summary = load_session_summary(transaction, claimed.session_id)?;
+    let summary = load_session_summary(transaction, claimed.identity.session_id)?;
     append_event(
         transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: Some(claimed.command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, claimed.identity, now),
         SessionEvent::RunFinished {
             session: summary,
-            run_id: claimed.run_id,
+            run_id: claimed.identity.run_id,
             outcome,
             usage,
             context_tokens,
@@ -4491,14 +4333,7 @@ fn finish_queued_run_with_outcome(
     let summary = load_session_summary(transaction, session_id)?;
     append_event(
         transaction,
-        EventContext {
-            store_id,
-            workspace_id,
-            session_id,
-            run_id: Some(run_id),
-            caused_by: None,
-            occurred_at_ms: now,
-        },
+        EventContext::for_run_ids(store_id, workspace_id, session_id, run_id, None, now),
         SessionEvent::RunFinished {
             session: summary,
             run_id,
@@ -4513,14 +4348,14 @@ fn finish_queued_run_with_outcome(
 fn finish_reserved_run(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     outcome: RunOutcome,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let state = transaction
         .query_row(
             "SELECT status, outcome_json FROM runs WHERE id = ?1 AND session_id = ?2",
-            params![claimed.run_id.to_string(), claimed.session_id.to_string()],
+            params![identity.run_id.to_string(), identity.session_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .optional()?;
@@ -4536,18 +4371,18 @@ fn finish_reserved_run(
     let mut events = vec![finish_queued_run_with_outcome(
         &transaction,
         store_id,
-        claimed.workspace_id,
-        claimed.session_id,
-        claimed.run_id,
+        identity.workspace_id,
+        identity.session_id,
+        identity.run_id,
         outcome,
         now_ms(),
     )?];
     append_parent_session_update(
         &transaction,
         store_id,
-        claimed.workspace_id,
-        claimed.session_id,
-        claimed.command_id,
+        identity.workspace_id,
+        identity.session_id,
+        identity.command_id,
         now_ms(),
         &mut events,
     )?;
@@ -4558,7 +4393,7 @@ fn finish_reserved_run(
 fn finish_prepared_run(
     connection: &mut Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     audit: &PreparedRunAudit,
     outcome: RunOutcome,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
@@ -4569,7 +4404,7 @@ fn finish_prepared_run(
     let state = transaction
         .query_row(
             "SELECT status, outcome_json FROM runs WHERE id = ?1 AND session_id = ?2",
-            params![claimed.run_id.to_string(), claimed.session_id.to_string()],
+            params![identity.run_id.to_string(), identity.session_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .optional()?;
@@ -4589,8 +4424,8 @@ fn finish_prepared_run(
              WHERE id = ?1 AND session_id = ?2 AND status = 'queued'
                AND outcome_json IS NULL",
         params![
-            claimed.run_id.to_string(),
-            claimed.session_id.to_string(),
+            identity.run_id.to_string(),
+            identity.session_id.to_string(),
             prompt_identity,
             resolved_model,
             context_base_bytes,
@@ -4602,18 +4437,18 @@ fn finish_prepared_run(
     let mut events = vec![finish_queued_run_with_outcome(
         &transaction,
         store_id,
-        claimed.workspace_id,
-        claimed.session_id,
-        claimed.run_id,
+        identity.workspace_id,
+        identity.session_id,
+        identity.run_id,
         outcome,
         now_ms(),
     )?];
     append_parent_session_update(
         &transaction,
         store_id,
-        claimed.workspace_id,
-        claimed.session_id,
-        claimed.command_id,
+        identity.workspace_id,
+        identity.session_id,
+        identity.command_id,
         now_ms(),
         &mut events,
     )?;
@@ -4640,7 +4475,7 @@ fn settle_panicked_execution(
     let session_state = transaction
         .query_row(
             "SELECT active_run_id, preparing_run_id FROM sessions WHERE id = ?1",
-            [original.session_id.to_string()],
+            [original.identity.session_id.to_string()],
             |row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
@@ -4655,12 +4490,12 @@ fn settle_panicked_execution(
             run_ids: Vec::new(),
         });
     };
-    let original_id = original.run_id.to_string();
+    let original_id = original.identity.run_id.to_string();
     let original_state = transaction
         .query_row(
             "SELECT status, outcome_json
              FROM runs WHERE id = ?1 AND session_id = ?2",
-            params![original_id, original.session_id.to_string()],
+            params![original_id, original.identity.session_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .optional()?;
@@ -4668,13 +4503,13 @@ fn settle_panicked_execution(
     // Cleanup ownership is independent of whether this transaction emits a
     // new terminal event: a concurrent cancel may already have settled the
     // original while its task still owns the in-memory registration.
-    let mut run_ids = vec![original.run_id];
+    let mut run_ids = vec![original.identity.run_id];
     if let Some(active_run) = active_run {
         let active = transaction
             .query_row(
                 "SELECT command_id, kind, auto_compaction_for_run_id, status, outcome_json
                  FROM runs WHERE id = ?1 AND session_id = ?2",
-                params![active_run, original.session_id.to_string()],
+                params![active_run, original.identity.session_id.to_string()],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -4694,13 +4529,15 @@ fn settle_panicked_execution(
         {
             let active_run_id: RunId = parse_id(&active_run)?;
             let active_claim = ClaimedRun {
-                workspace_id: original.workspace_id,
+                identity: RunIdentity {
+                    workspace_id: original.identity.workspace_id,
+                    session_id: original.identity.session_id,
+                    run_id: active_run_id,
+                    command_id: parse_id(&command_id)?,
+                    kind: parse_run_kind(&kind)?,
+                    child: original.identity.child,
+                },
                 workspace: String::new(),
-                session_id: original.session_id,
-                run_id: active_run_id,
-                command_id: parse_id(&command_id)?,
-                kind: parse_run_kind(&kind)?,
-                child: original.child,
                 user_initiated: false,
                 literal_slash: false,
                 session_model: original.session_model.clone(),
@@ -4738,9 +4575,9 @@ fn settle_panicked_execution(
         events.push(finish_queued_run_with_outcome(
             &transaction,
             store_id,
-            original.workspace_id,
-            original.session_id,
-            original.run_id,
+            original.identity.workspace_id,
+            original.identity.session_id,
+            original.identity.run_id,
             outcome,
             now_ms(),
         )?);
@@ -4749,9 +4586,9 @@ fn settle_panicked_execution(
         append_parent_session_update(
             &transaction,
             store_id,
-            original.workspace_id,
-            original.session_id,
-            original.command_id,
+            original.identity.workspace_id,
+            original.identity.session_id,
+            original.identity.command_id,
             now_ms(),
             &mut events,
         )?;
@@ -4890,14 +4727,14 @@ fn cancel_owned_child_runs(
         let summary = load_session_summary(transaction, session_id)?;
         let requested = append_event(
             transaction,
-            EventContext {
+            EventContext::for_run_ids(
                 store_id,
                 workspace_id,
                 session_id,
-                run_id: Some(run_id),
-                caused_by: Some(command_id),
-                occurred_at_ms: now,
-            },
+                run_id,
+                Some(command_id),
+                now,
+            ),
             SessionEvent::CancellationRequested {
                 session: summary,
                 run_id,
@@ -4962,14 +4799,14 @@ fn cascade_auto_compaction_cancel(
     let summary = load_session_summary(transaction, session_id)?;
     let event = append_event(
         transaction,
-        EventContext {
+        EventContext::for_run_ids(
             store_id,
             workspace_id,
             session_id,
-            run_id: Some(compaction_run),
-            caused_by: Some(command_id),
-            occurred_at_ms: now,
-        },
+            compaction_run,
+            Some(command_id),
+            now,
+        ),
         SessionEvent::CancellationRequested {
             session: summary,
             run_id: compaction_run,
@@ -5050,17 +4887,15 @@ fn recover_interrupted_runs(
         let session_id = parse_id(&session)?;
         let workspace_id = parse_id(&workspace)?;
         let claimed = ClaimedRun {
-            workspace_id,
+            identity: RunIdentity {
+                workspace_id,
+                session_id,
+                run_id,
+                command_id: CommandId::from_bytes([0; 16]),
+                kind: RunKind::Prompt,
+                child: false,
+            },
             workspace: String::new(),
-            session_id,
-            run_id,
-            command_id: CommandId::from_bytes([0; 16]),
-            // Recovery settles the run row generically; a crashed compaction
-            // committed no marker, so interrupting it leaves nothing behind
-            // and the command can simply be retried. `child` is likewise
-            // irrelevant here: recovery never runs the tool loop.
-            kind: RunKind::Prompt,
-            child: false,
             user_initiated: false,
             literal_slash: false,
             session_model: ModelSelection::default(),
@@ -5095,18 +4930,23 @@ fn complete_run_in_transaction(
     outcome: RunOutcome,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let now = now_ms();
-    let outcome = cancellation_wins(transaction, claimed.run_id, outcome)?;
-    interrupt_active_tool_calls(transaction, store_id, claimed, &outcome, None, now)?;
+    let outcome = cancellation_wins(transaction, claimed.identity.run_id, outcome)?;
+    interrupt_active_tool_calls(transaction, store_id, claimed.identity, &outcome, None, now)?;
     let (run_status, message_state) = outcome_states(&outcome);
     let outcome_json = serde_json::to_string(&outcome)?;
     transaction.execute(
         "UPDATE runs SET status = ?2, outcome_json = ?3, finished_at_ms = ?4 WHERE id = ?1",
-        params![claimed.run_id.to_string(), run_status, outcome_json, now],
+        params![
+            claimed.identity.run_id.to_string(),
+            run_status,
+            outcome_json,
+            now
+        ],
     )?;
     transaction.execute(
         "UPDATE messages SET state = ?2
              WHERE run_id = ?1 AND role = 'assistant' AND state = 'streaming'",
-        params![claimed.run_id.to_string(), message_state],
+        params![claimed.identity.run_id.to_string(), message_state],
     )?;
     transaction.execute(
         "UPDATE sessions
@@ -5114,27 +4954,20 @@ fn complete_run_in_transaction(
                  status = CASE WHEN queued_prompts > 0 THEN 'queued' ELSE 'idle' END,
                  updated_at_ms = ?2
              WHERE id = ?1",
-        params![claimed.session_id.to_string(), now],
+        params![claimed.identity.session_id.to_string(), now],
     )?;
-    let summary = load_session_summary(transaction, claimed.session_id)?;
+    let summary = load_session_summary(transaction, claimed.identity.session_id)?;
     append_event(
         transaction,
-        EventContext {
-            store_id,
-            workspace_id: claimed.workspace_id,
-            session_id: claimed.session_id,
-            run_id: Some(claimed.run_id),
-            caused_by: None,
-            occurred_at_ms: now,
-        },
+        EventContext::for_run(store_id, claimed.identity, now).uncaused(),
         SessionEvent::RunFinished {
             session: summary,
-            run_id: claimed.run_id,
+            run_id: claimed.identity.run_id,
             outcome,
             // Recovery knows no summed usage, but the run row keeps the last
             // committed turn's context occupancy.
             usage: None,
-            context_tokens: run_context_tokens(transaction, claimed.run_id)?,
+            context_tokens: run_context_tokens(transaction, claimed.identity.run_id)?,
         },
     )
 }
@@ -5142,7 +4975,7 @@ fn complete_run_in_transaction(
 fn interrupt_active_tool_calls(
     transaction: &Connection,
     store_id: StoreId,
-    claimed: &ClaimedRun,
+    identity: RunIdentity,
     outcome: &RunOutcome,
     caused_by: Option<CommandId>,
     now: u64,
@@ -5153,7 +4986,7 @@ fn interrupt_active_tool_calls(
              ORDER BY turn_ordinal, call_ordinal",
     )?;
     let ids = statement
-        .query_map([claimed.run_id.to_string()], |row| {
+        .query_map([identity.run_id.to_string()], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -5184,14 +5017,14 @@ fn interrupt_active_tool_calls(
         let tool_call = load_tool_call(transaction, id)?;
         append_event(
             transaction,
-            EventContext {
+            EventContext::for_run_ids(
                 store_id,
-                workspace_id: claimed.workspace_id,
-                session_id: claimed.session_id,
-                run_id: Some(claimed.run_id),
+                identity.workspace_id,
+                identity.session_id,
+                identity.run_id,
                 caused_by,
-                occurred_at_ms: now,
-            },
+                now,
+            ),
             SessionEvent::ToolCallFinished { tool_call },
         )?;
     }
@@ -5506,6 +5339,66 @@ struct EventContext {
     run_id: Option<RunId>,
     caused_by: Option<CommandId>,
     occurred_at_ms: u64,
+}
+
+impl EventContext {
+    /// An event scoped to a run and caused by the command that queued it.
+    const fn for_run(store_id: StoreId, identity: RunIdentity, occurred_at_ms: u64) -> Self {
+        Self {
+            store_id,
+            workspace_id: identity.workspace_id,
+            session_id: identity.session_id,
+            run_id: Some(identity.run_id),
+            caused_by: Some(identity.command_id),
+            occurred_at_ms,
+        }
+    }
+
+    /// An event scoped to a run by explicit ids: cascades and settlements of
+    /// rows other than the claimed run.
+    const fn for_run_ids(
+        store_id: StoreId,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+        run_id: RunId,
+        caused_by: Option<CommandId>,
+        occurred_at_ms: u64,
+    ) -> Self {
+        Self {
+            store_id,
+            workspace_id,
+            session_id,
+            run_id: Some(run_id),
+            caused_by,
+            occurred_at_ms,
+        }
+    }
+
+    /// A session-level event with no run.
+    const fn for_session(
+        store_id: StoreId,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+        caused_by: Option<CommandId>,
+        occurred_at_ms: u64,
+    ) -> Self {
+        Self {
+            store_id,
+            workspace_id,
+            session_id,
+            run_id: None,
+            caused_by,
+            occurred_at_ms,
+        }
+    }
+
+    /// The same context with no causing command (recovery, timeouts).
+    const fn uncaused(self) -> Self {
+        Self {
+            caused_by: None,
+            ..self
+        }
+    }
 }
 
 fn append_event(
@@ -6996,14 +6889,7 @@ fn delete_idle_session(
     }
     let deleted = append_event(
         transaction,
-        EventContext {
-            store_id,
-            workspace_id,
-            session_id,
-            run_id: None,
-            caused_by: Some(command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_session(store_id, workspace_id, session_id, Some(command_id), now),
         SessionEvent::SessionDeleted { session_id },
     )?;
     let Some(parent_id) = parent_id else {
@@ -7012,14 +6898,7 @@ fn delete_idle_session(
     let session = load_session_summary(transaction, parent_id)?;
     append_event(
         transaction,
-        EventContext {
-            store_id,
-            workspace_id,
-            session_id: parent_id,
-            run_id: None,
-            caused_by: Some(command_id),
-            occurred_at_ms: now,
-        },
+        EventContext::for_session(store_id, workspace_id, parent_id, Some(command_id), now),
         SessionEvent::SessionUpdated { session },
     )
 }
@@ -14111,13 +13990,15 @@ mod tests {
             )
             .unwrap();
         let claimed = ClaimedRun {
-            workspace_id,
+            identity: RunIdentity {
+                workspace_id,
+                session_id,
+                run_id,
+                command_id,
+                kind: RunKind::Prompt,
+                child: false,
+            },
             workspace: "/w".to_owned(),
-            session_id,
-            run_id,
-            command_id,
-            kind: RunKind::Prompt,
-            child: false,
             user_initiated: true,
             literal_slash: false,
             session_model: ModelSelection::default(),
@@ -14158,7 +14039,7 @@ mod tests {
             DenialCapacityPath::Policy => deny_tool_call(
                 connection,
                 store_id,
-                claimed,
+                claimed.identity,
                 tool_call_id,
                 approval::POLICY_DENIED_RESULT,
             )
@@ -14168,7 +14049,7 @@ mod tests {
                 store_id,
                 CommandId::from_bytes([8; 16]),
                 SessionCommand::RespondToolApproval {
-                    run_id: claimed.run_id,
+                    run_id: claimed.identity.run_id,
                     tool_call_id,
                     decision: ApprovalDecision::Deny,
                 },
@@ -14177,7 +14058,7 @@ mod tests {
             )
             .map(|_| ()),
             DenialCapacityPath::Timeout => {
-                conclude_tool_approval(connection, store_id, claimed, tool_call_id, true)
+                conclude_tool_approval(connection, store_id, claimed.identity, tool_call_id, true)
                     .map(|_| ())
             }
         }
@@ -14228,7 +14109,7 @@ mod tests {
             apply_denial_capacity_path(&mut connection, store_id, &claimed, tool_call_id, path)
                 .unwrap();
             let (increment, state, result, events, commands) =
-                denial_capacity_state(&connection, claimed.run_id, tool_call_id);
+                denial_capacity_state(&connection, claimed.identity.run_id, tool_call_id);
             assert_eq!(increment, u64::try_from(result_bytes).unwrap());
             assert_eq!(state, "denied");
             assert_eq!(result.as_deref(), Some(path.result()));
@@ -14252,7 +14133,7 @@ mod tests {
                 SessionRuntimeError::OutputTooLarge
             );
             assert_eq!(
-                denial_capacity_state(&connection, claimed.run_id, tool_call_id),
+                denial_capacity_state(&connection, claimed.identity.run_id, tool_call_id),
                 (0, path.initial_state().to_owned(), None, 0, 0)
             );
         }
@@ -14376,7 +14257,12 @@ mod tests {
     #[tokio::test]
     async fn session_summaries_carry_the_latest_run_activity_while_running() {
         let (_directory, store, claimed) = claimed_store_fixture().await;
-        let request = SnapshotRequest::new(claimed.workspace_id, Some(claimed.session_id), 4, 4);
+        let request = SnapshotRequest::new(
+            claimed.identity.workspace_id,
+            Some(claimed.identity.session_id),
+            4,
+            4,
+        );
         let idle = store.snapshot(request.clone()).await.unwrap();
         assert_eq!(idle.focused.unwrap().summary.activity, None);
 
@@ -14390,7 +14276,7 @@ mod tests {
             .unwrap();
         let live = store.snapshot(request).await.unwrap();
         let summary = live.focused.unwrap().summary;
-        assert_eq!(summary.active_run_id, Some(claimed.run_id));
+        assert_eq!(summary.active_run_id, Some(claimed.identity.run_id));
         assert_eq!(summary.activity, Some(RunActivity::GeneratingResponse));
         assert!(
             live.sessions
@@ -14432,7 +14318,7 @@ mod tests {
             .command(
                 CommandId::generate().unwrap(),
                 SessionCommand::SubmitPrompt {
-                    session_id: claimed.session_id,
+                    session_id: claimed.identity.session_id,
                     input: vec![InputPart::text("continue".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
@@ -14472,7 +14358,7 @@ mod tests {
             .command(
                 CommandId::generate().unwrap(),
                 SessionCommand::SubmitPrompt {
-                    session_id: claimed.session_id,
+                    session_id: claimed.identity.session_id,
                     input: vec![InputPart::text("continue".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
@@ -14480,7 +14366,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let session_id = claimed.session_id;
+        let session_id = claimed.identity.session_id;
         store
             .call(Priority::Control, move |connection| {
                 connection.execute(
@@ -14571,7 +14457,7 @@ mod tests {
                         "UPDATE runs
                              SET context_base_bytes = ?2, context_increment_bytes = 0
                              WHERE id = ?1",
-                        params![claimed.run_id.to_string(), context_base],
+                        params![claimed.identity.run_id.to_string(), context_base],
                     )?;
                     Ok(())
                 })
@@ -14618,7 +14504,7 @@ mod tests {
                                     m.state
                              FROM runs r JOIN messages m ON m.id = ?2
                              WHERE r.id = ?1",
-                            params![claimed.run_id.to_string(), message_id.to_string()],
+                            params![claimed.identity.run_id.to_string(), message_id.to_string()],
                             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                         )
                         .map_err(|_| SessionRuntimeError::CODEC)
@@ -14683,7 +14569,7 @@ mod tests {
                BEGIN SELECT RAISE(ABORT, 'injected event failure'); END;"#,
         ] {
             let (_directory, store, claimed) = claimed_store_fixture().await;
-            let before = streaming_transaction_state(&store, claimed.run_id).await;
+            let before = streaming_transaction_state(&store, claimed.identity.run_id).await;
             store
                 .call(Priority::Control, move |connection| {
                     connection
@@ -14707,7 +14593,7 @@ mod tests {
                 SessionRuntimeError::CONSTRAINT
             );
             assert_eq!(
-                streaming_transaction_state(&store, claimed.run_id).await,
+                streaming_transaction_state(&store, claimed.identity.run_id).await,
                 before
             );
             store.close().await.unwrap();
@@ -14735,7 +14621,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let before = streaming_transaction_state(&store, claimed.run_id).await;
+            let before = streaming_transaction_state(&store, claimed.identity.run_id).await;
             store
                 .call(Priority::Control, move |connection| {
                     connection
@@ -14784,7 +14670,7 @@ mod tests {
                 SessionRuntimeError::CONSTRAINT
             );
             assert_eq!(
-                streaming_transaction_state(&store, claimed.run_id).await,
+                streaming_transaction_state(&store, claimed.identity.run_id).await,
                 before
             );
             let (message_state, tool_calls): (String, u64) = store
@@ -14796,7 +14682,7 @@ mod tests {
                     )?;
                     let tool_calls = connection.query_row(
                         "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1",
-                        [claimed.run_id.to_string()],
+                        [claimed.identity.run_id.to_string()],
                         |row| row.get(0),
                     )?;
                     Ok((message_state, tool_calls))
@@ -14849,8 +14735,8 @@ mod tests {
             };
             expected.push_str(text);
         }
-        let workspace_id = claimed.workspace_id;
-        let session_id = claimed.session_id;
+        let workspace_id = claimed.identity.workspace_id;
+        let session_id = claimed.identity.session_id;
         store.close().await.unwrap();
         drop(store);
 
@@ -14938,7 +14824,7 @@ mod tests {
             .begin_assistant_message(&claimed, message_id, 1, TextChannel::Output, "x".to_owned())
             .await
             .unwrap();
-        let run_id = claimed.run_id;
+        let run_id = claimed.identity.run_id;
         let before = store
             .call(Priority::Control, move |connection| {
                 connection.execute(
@@ -22379,7 +22265,7 @@ mod tests {
             .unwrap();
 
         let claimed = store.reserve_next_run(false).await.unwrap().unwrap();
-        assert_eq!(claimed.run_id, run_id);
+        assert_eq!(claimed.identity.run_id, run_id);
         let synchronous = store
             .call(Priority::Control, |connection| {
                 connection
@@ -22598,7 +22484,7 @@ mod tests {
         let (active, newer, session_state) = store
             .call(Priority::Control, move |connection| {
                 Ok((
-                    load_run(connection, compaction.run_id)?,
+                    load_run(connection, compaction.identity.run_id)?,
                     load_run(connection, new_id)?,
                     connection.query_row(
                         "SELECT active_run_id, preparing_run_id
@@ -22619,7 +22505,10 @@ mod tests {
         assert_eq!(active.outcome, None);
         assert_eq!(newer.status, RunStatus::Queued);
         assert_eq!(newer.outcome, None);
-        assert_eq!(session_state.0, Some(compaction.run_id.to_string()));
+        assert_eq!(
+            session_state.0,
+            Some(compaction.identity.run_id.to_string())
+        );
         assert_eq!(session_state.1, Some(new_id.to_string()));
 
         store
@@ -22741,7 +22630,7 @@ mod tests {
                 run_id: finished,
                 outcome: RunOutcome::Interrupted,
                 ..
-            } if finished == compaction.run_id
+            } if finished == compaction.identity.run_id
         )));
         assert!(
             observed.iter().any(|event| matches!(
@@ -22911,7 +22800,7 @@ mod tests {
                 run_id: finished,
                 outcome: RunOutcome::Interrupted,
                 ..
-            } if finished == compaction.run_id
+            } if finished == compaction.identity.run_id
         )));
         assert!(observed.iter().any(|event| matches!(
             event.event,
@@ -22940,7 +22829,7 @@ mod tests {
                                 auto.auto_compaction_for_run_id
                          FROM runs original JOIN runs auto ON auto.id = ?2
                          WHERE original.id = ?1",
-                        params![run_id.to_string(), compaction.run_id.to_string()],
+                        params![run_id.to_string(), compaction.identity.run_id.to_string()],
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .map_err(|_| SessionRuntimeError::CODEC)
@@ -26874,12 +26763,12 @@ mod tests {
                         connection,
                         store_id,
                         ChildRunParent {
-                            workspace_id: create_parent.workspace_id,
-                            session_id: create_parent.session_id,
-                            run_id: create_parent.run_id,
+                            workspace_id: create_parent.identity.workspace_id,
+                            session_id: create_parent.identity.session_id,
+                            run_id: create_parent.identity.run_id,
                             tool_call_id: None,
                             depth: 0,
-                            root_run_id: create_parent.run_id,
+                            root_run_id: create_parent.identity.run_id,
                         },
                         ChildAdmission {
                             model: ModelSelection {
@@ -26917,7 +26806,7 @@ mod tests {
             .command(
                 CommandId::generate().unwrap(),
                 SessionCommand::CancelRun {
-                    run_id: parent.run_id,
+                    run_id: parent.identity.run_id,
                 },
             )
             .await
@@ -26944,7 +26833,7 @@ mod tests {
             .command(
                 CommandId::generate().unwrap(),
                 SessionCommand::CancelRun {
-                    run_id: cancelling_parent.run_id,
+                    run_id: cancelling_parent.identity.run_id,
                 },
             )
             .await
@@ -27000,11 +26889,11 @@ mod tests {
             .await
             .unwrap();
         let claimed_child = store.claim_next_run(true).await.unwrap().unwrap();
-        assert_eq!(claimed_child.run_id, child.run_id);
+        assert_eq!(claimed_child.identity.run_id, child.run_id);
 
         let command_id = CommandId::generate().unwrap();
         let command = SessionCommand::CancelRun {
-            run_id: parent.run_id,
+            run_id: parent.identity.run_id,
         };
         let first = store.command(command_id, command.clone()).await.unwrap();
         let replay = store.command(command_id, command).await.unwrap();
@@ -27096,7 +26985,7 @@ mod tests {
                 run_id,
                 outcome: RunOutcome::Interrupted,
                 ..
-            } if *run_id == parent.run_id
+            } if *run_id == parent.identity.run_id
         )));
         assert!(requests.lock().unwrap().is_empty());
         let snapshot = runtime
@@ -28179,17 +28068,19 @@ mod tests {
         };
         let parent_run = RunId::generate().unwrap();
         let parent = ClaimedRun {
-            workspace_id,
+            identity: RunIdentity {
+                workspace_id,
+                session_id,
+                run_id: parent_run,
+                command_id: CommandId::generate().unwrap(),
+                kind: RunKind::Prompt,
+                child: false,
+            },
             workspace: std::fs::canonicalize(directory.path())
                 .unwrap()
                 .to_str()
                 .unwrap()
                 .to_owned(),
-            session_id,
-            run_id: parent_run,
-            command_id: CommandId::generate().unwrap(),
-            kind: RunKind::Prompt,
-            child: false,
             user_initiated: true,
             literal_slash: false,
             session_model: ModelSelection {
@@ -30148,7 +30039,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            store.run_outcome(parent.run_id).await.unwrap(),
+            store.run_outcome(parent.identity.run_id).await.unwrap(),
             Some((RunOutcome::Cancelled, SpawnAgentSpend::UNKNOWN))
         );
         store.close().await.unwrap();

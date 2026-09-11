@@ -141,7 +141,7 @@ async fn prepare_execution(
     resources: &RunResources,
 ) -> Result<PreparedExecution, RunOutcome> {
     let tool_cancellation = Arc::new(AtomicBool::new(false));
-    let internal = claimed.kind == RunKind::Compaction;
+    let internal = claimed.identity.kind == RunKind::Compaction;
     // Take the only full transcript before cloning run metadata into gates or
     // spawners. ClaimedRun clones after this point stay scalar/empty instead
     // of duplicating up to 4 MiB per tool call.
@@ -294,7 +294,7 @@ async fn prepare_execution(
         }
         match inner.steering.lock() {
             Ok(mut steering) => {
-                steering.insert(claimed.run_id, sender);
+                steering.insert(claimed.identity.run_id, sender);
             }
             Err(_) => {
                 tool_cancellation.store(true, Ordering::Release);
@@ -305,8 +305,8 @@ async fn prepare_execution(
             .with_limits(claimed.limits, loaded.resolved_model().pricing.clone())
             .with_history(Arc::new(SessionHistorySearcher::new(
                 Arc::clone(inner),
-                claimed.session_id,
-                claimed.run_id,
+                claimed.identity.session_id,
+                claimed.identity.run_id,
             )))
             .with_steering(receiver);
         // Only user-initiated roots are audited: children answer to their
@@ -363,7 +363,9 @@ async fn prepare_execution(
                 // larger configured ceiling.
                 resolved_model.max_output_tokens = weight.max_output_tokens;
                 let context_shape = context_request_shape(&resolved_model);
-                if claimed.kind == RunKind::Prompt && weight.compatible_input_tokens.is_none() {
+                if claimed.identity.kind == RunKind::Prompt
+                    && weight.compatible_input_tokens.is_none()
+                {
                     weight.compatible_input_tokens =
                         claimed.context_occupancy.and_then(|occupancy| {
                             compatible_context_tokens(
@@ -488,7 +490,7 @@ pub(super) async fn execute_run(
             reducible_message_bytes: prepared.audit.weight.reducible_message_bytes,
             irreducible_message_bytes: prepared.audit.weight.irreducible_message_bytes,
             compatible_input_tokens: prepared.audit.weight.compatible_input_tokens,
-            compaction: if claimed.kind == RunKind::Compaction
+            compaction: if claimed.identity.kind == RunKind::Compaction
                 || claimed.context_compaction_attempted
             {
                 context::CompactionDisposition::AlreadyAttempted
@@ -504,7 +506,7 @@ pub(super) async fn execute_run(
                     prepared.audit.static_prefix,
                 )
             })
-            && claimed.kind == RunKind::Prompt;
+            && claimed.identity.kind == RunKind::Prompt;
         if repeats_known_overflow {
             if claimed.context_compaction_attempted {
                 let context::ContextPlan::Send { estimate } = plan else {
@@ -580,7 +582,8 @@ pub(super) async fn execute_run(
                     max_output_tokens: Some(prepared.audit.resolved_model.max_output_tokens),
                     organization: prepared.audit.resolved_model.organization.clone(),
                 };
-                let cancelled = match cancellation_requested(&inner, claimed.run_id).await {
+                let cancelled = match cancellation_requested(&inner, claimed.identity.run_id).await
+                {
                     Ok(cancelled) => cancelled || *cancellation.borrow(),
                     Err(error) => {
                         finish_run(
@@ -619,7 +622,7 @@ pub(super) async fn execute_run(
                 .await;
                 return;
             }
-            context::ContextPlan::Compact { .. } if claimed.kind == RunKind::Prompt => {
+            context::ContextPlan::Compact { .. } if claimed.identity.kind == RunKind::Prompt => {
                 let audit = prepared.audit.clone();
                 drop(prepared);
                 if !run_auto_compaction(
@@ -669,7 +672,7 @@ async fn run_auto_compaction(
     }
     let messages = inner
         .store
-        .load_auto_compaction_messages(original.session_id)
+        .load_auto_compaction_messages(original.identity.session_id)
         .await;
     let messages = match messages {
         Ok(messages) => messages,
@@ -685,7 +688,7 @@ async fn run_auto_compaction(
         }
     };
     let mut candidate = original.clone();
-    candidate.run_id = match RunId::generate() {
+    candidate.identity.run_id = match RunId::generate() {
         Ok(run_id) => run_id,
         Err(_) => {
             finish_prepared_run(
@@ -698,7 +701,7 @@ async fn run_auto_compaction(
             return false;
         }
     };
-    candidate.command_id = match CommandId::generate() {
+    candidate.identity.command_id = match CommandId::generate() {
         Ok(command_id) => command_id,
         Err(_) => {
             finish_prepared_run(
@@ -711,7 +714,7 @@ async fn run_auto_compaction(
             return false;
         }
     };
-    candidate.kind = RunKind::Compaction;
+    candidate.identity.kind = RunKind::Compaction;
     candidate.user_initiated = false;
     candidate.literal_slash = false;
     candidate.messages = messages;
@@ -784,7 +787,7 @@ async fn run_auto_compaction(
     };
     let (compaction_cancel, compaction_cancellation) = watch::channel(false);
     if let Ok(mut cancellations) = inner.cancellations.lock() {
-        cancellations.insert(compaction.run_id, compaction_cancel);
+        cancellations.insert(compaction.identity.run_id, compaction_cancel);
     } else {
         inner.failed.send_replace(true);
         let outcome = internal_failure("run cancellation registry is unavailable");
@@ -797,7 +800,7 @@ async fn run_auto_compaction(
         max_output_tokens: Some(prepared.audit.resolved_model.max_output_tokens),
         organization: prepared.audit.resolved_model.organization.clone(),
     };
-    let cancelled = match cancellation_requested(inner, compaction.run_id).await {
+    let cancelled = match cancellation_requested(inner, compaction.identity.run_id).await {
         Ok(cancelled) => cancelled,
         Err(error) => {
             let outcome = persistence_failure("failed to re-read compaction cancellation", &error);
@@ -813,7 +816,7 @@ async fn run_auto_compaction(
         finish_prepared_run(inner, original, &original_audit, outcome).await;
         return false;
     }
-    let compaction_run_id = compaction.run_id;
+    let compaction_run_id = compaction.identity.run_id;
     if cancelled {
         prepared.tool_cancellation.store(true, Ordering::Release);
         finish_run(inner, &compaction, RunOutcome::Cancelled).await;
@@ -834,7 +837,7 @@ async fn run_auto_compaction(
     }
     let committed = inner
         .store
-        .compaction_committed(original.session_id, compaction_run_id)
+        .compaction_committed(original.identity.session_id, compaction_run_id)
         .await;
     let compacted = match committed {
         Ok(compacted) => compacted,
@@ -860,7 +863,7 @@ async fn run_auto_compaction(
             true
         }
         Ok(None) => {
-            clear_run_registration(inner, original.run_id);
+            clear_run_registration(inner, original.identity.run_id);
             false
         }
         Err(error) => {
@@ -906,7 +909,7 @@ async fn finish_reserved_run(
             inner
                 .settlements
                 .send_modify(|generation| *generation = generation.wrapping_add(1));
-            clear_run_registration(inner, claimed.run_id);
+            clear_run_registration(inner, claimed.identity.run_id);
         }
         Err(_) => {
             inner.failed.send_replace(true);
@@ -939,7 +942,7 @@ async fn finish_prepared_run(
             inner
                 .settlements
                 .send_modify(|generation| *generation = generation.wrapping_add(1));
-            clear_run_registration(inner, claimed.run_id);
+            clear_run_registration(inner, claimed.identity.run_id);
         }
         Err(error) => {
             // A trigger or storage failure on one descriptor/identity column
@@ -986,7 +989,7 @@ async fn execute_started_run(
         .await;
         return;
     }
-    let internal = claimed.kind == RunKind::Compaction;
+    let internal = claimed.identity.kind == RunKind::Compaction;
     let mut accounting =
         RunAccountingAccumulator::new(resolved_model.pricing.clone(), initial_occupancy_basis);
     let mut pending_text = String::new();
@@ -2064,9 +2067,9 @@ async fn execute_started_run(
                         }
                     }
                     if let Ok(mut cancellations) = inner.cancellations.lock() {
-                        cancellations.remove(&claimed.run_id);
+                        cancellations.remove(&claimed.identity.run_id);
                     }
-                    inner.clear_run_approvals(claimed.run_id);
+                    inner.clear_run_approvals(claimed.identity.run_id);
                     return;
                 }
                 if let Err(error) = flush_pending_text(
@@ -2376,7 +2379,7 @@ async fn finish_run_accounted(
             inner
                 .settlements
                 .send_modify(|generation| *generation = generation.wrapping_add(1));
-            clear_run_registration(inner, claimed.run_id);
+            clear_run_registration(inner, claimed.identity.run_id);
         }
         Err(_) => {
             inner.failed.send_replace(true);

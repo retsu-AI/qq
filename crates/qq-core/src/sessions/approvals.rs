@@ -31,7 +31,11 @@ impl ToolGate for SessionToolGate {
         let call = call.clone();
         let mut cancellation = self.cancellation.clone();
         Box::pin(async move {
-            let (mode, grants) = match inner.store.approval_policy(claimed.session_id).await {
+            let (mode, grants) = match inner
+                .store
+                .approval_policy(claimed.identity.session_id)
+                .await
+            {
                 Ok(policy) => policy,
                 Err(error) => return approval_persistence_failure(error),
             };
@@ -59,7 +63,7 @@ impl ToolGate for SessionToolGate {
                     let edit = approval::edit_preview(&call.name, &call.arguments);
                     // Register before publishing the request so a client
                     // response can never race past the waiting run.
-                    let mut resolved = inner.register_approval(call.id, claimed.run_id);
+                    let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
                     match inner
                         .store
                         .request_tool_approval(&claimed, call.id, shell.clone(), edit.clone())
@@ -95,10 +99,10 @@ impl ToolGate for SessionToolGate {
                                 shell,
                                 edit,
                                 workspace: claimed.workspace.clone(),
-                                origin: if claimed.child {
+                                origin: if claimed.identity.child {
                                     ReviewOrigin::Child {
                                         depth: claimed.depth,
-                                        parent_run: claimed.run_id,
+                                        parent_run: claimed.identity.run_id,
                                     }
                                 } else {
                                     ReviewOrigin::Root

@@ -724,9 +724,9 @@ impl Store {
     ) -> Result<CreatedChildRun, SessionRuntimeError> {
         let store_id = self.store_id;
         let parent = ChildRunParent {
-            workspace_id: parent.workspace_id,
-            session_id: parent.session_id,
-            run_id: parent.run_id,
+            workspace_id: parent.identity.workspace_id,
+            session_id: parent.identity.session_id,
+            run_id: parent.identity.run_id,
             tool_call_id: Some(call_id),
             depth: parent.depth,
             root_run_id: parent.root_run_id,
@@ -889,15 +889,15 @@ impl Store {
         audit: PreparedRunAudit,
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         #[cfg(test)]
-        if let Some(hook) = take_reserved_start_hold_hook(claimed.run_id) {
+        if let Some(hook) = take_reserved_start_hold_hook(claimed.identity.run_id) {
             let _ = hook.entered.send(());
             let _ = hook.release.await;
             return Err(SessionRuntimeError::CONSTRAINT);
         }
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call_write(Priority::AwaitControl, move |connection| {
-            start_reserved_run(connection, store_id, &claimed, &audit)
+            start_reserved_run(connection, store_id, identity, &audit)
         })
         .await
     }
@@ -930,12 +930,14 @@ impl Store {
         claimed: &ClaimedRun,
     ) -> Result<Option<(Vec<Message>, bool)>, SessionRuntimeError> {
         #[cfg(test)]
-        if let Some(failure) = take_targeted_failure(&RESERVED_RELOAD_FAILURES, claimed.run_id) {
+        if let Some(failure) =
+            take_targeted_failure(&RESERVED_RELOAD_FAILURES, claimed.identity.run_id)
+        {
             return Err(failure);
         }
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::AwaitControl, move |connection| {
-            reload_reserved_messages(connection, &claimed)
+            reload_reserved_messages(connection, identity)
         })
         .await
     }
@@ -982,14 +984,15 @@ impl Store {
         outcome: RunOutcome,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         #[cfg(test)]
-        if let Some(failure) = take_targeted_failure(&RESERVED_SETTLEMENT_FAILURES, claimed.run_id)
+        if let Some(failure) =
+            take_targeted_failure(&RESERVED_SETTLEMENT_FAILURES, claimed.identity.run_id)
         {
             return Err(failure);
         }
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call_write(Priority::AwaitControl, move |connection| {
-            finish_reserved_run(connection, store_id, &claimed, outcome)
+            finish_reserved_run(connection, store_id, identity, outcome)
         })
         .await
     }
@@ -1001,9 +1004,9 @@ impl Store {
         outcome: RunOutcome,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call_write(Priority::AwaitControl, move |connection| {
-            finish_prepared_run(connection, store_id, &claimed, &audit, outcome)
+            finish_prepared_run(connection, store_id, identity, &audit, outcome)
         })
         .await
     }
@@ -1033,12 +1036,12 @@ impl Store {
         text: String,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
             begin_assistant_message(
                 connection,
                 store_id,
-                &claimed,
+                identity,
                 message_id,
                 turn_ordinal,
                 channel,
@@ -1056,9 +1059,9 @@ impl Store {
         text: String,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            append_text(connection, store_id, &claimed, message_id, channel, text)
+            append_text(connection, store_id, identity, message_id, channel, text)
         })
         .await
     }
@@ -1092,9 +1095,9 @@ impl Store {
         activity: RunActivity,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            append_run_activity(connection, store_id, &claimed, activity)
+            append_run_activity(connection, store_id, identity, activity)
         })
         .await
     }
@@ -1115,8 +1118,8 @@ impl Store {
                      WHERE id = ?1 AND session_id = ?2 AND status = 'running'
                        AND prompt_identity_json IS NULL",
                 params![
-                    claimed.run_id.to_string(),
-                    claimed.session_id.to_string(),
+                    claimed.identity.run_id.to_string(),
+                    claimed.identity.session_id.to_string(),
                     identity,
                 ],
             )?;
@@ -1135,9 +1138,9 @@ impl Store {
         turn_ordinal: u16,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            apply_steering_message(connection, store_id, &claimed, message_id, turn_ordinal)
+            apply_steering_message(connection, store_id, identity, message_id, turn_ordinal)
         })
         .await
     }
@@ -1148,9 +1151,9 @@ impl Store {
         turn_ordinal: u16,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            record_run_interrupted(connection, store_id, &claimed, turn_ordinal)
+            record_run_interrupted(connection, store_id, identity, turn_ordinal)
         })
         .await
     }
@@ -1164,9 +1167,9 @@ impl Store {
         continuation: u16,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            record_run_output_truncated(connection, store_id, &claimed, turn_ordinal, continuation)
+            record_run_output_truncated(connection, store_id, identity, turn_ordinal, continuation)
         })
         .await
     }
@@ -1181,9 +1184,9 @@ impl Store {
         reasoning: ReasoningEvent,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            append_reasoning(connection, store_id, &claimed, reasoning)
+            append_reasoning(connection, store_id, identity, reasoning)
         })
         .await
     }
@@ -1194,9 +1197,9 @@ impl Store {
         tool_call_id: ToolCallId,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            start_tool_call(connection, store_id, &claimed, tool_call_id)
+            start_tool_call(connection, store_id, identity, tool_call_id)
         })
         .await
     }
@@ -1211,9 +1214,9 @@ impl Store {
         chunk: String,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            append_tool_call_output(connection, store_id, &claimed, tool_call_id, chunk)
+            append_tool_call_output(connection, store_id, identity, tool_call_id, chunk)
         })
         .await
     }
@@ -1228,12 +1231,12 @@ impl Store {
         display: Option<ToolCallDisplay>,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
             finish_tool_call(
                 connection,
                 store_id,
-                &claimed,
+                identity,
                 tool_call_id,
                 result,
                 is_error,
@@ -1261,9 +1264,9 @@ impl Store {
         message: String,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            deny_tool_call(connection, store_id, &claimed, tool_call_id, &message)
+            deny_tool_call(connection, store_id, identity, tool_call_id, &message)
         })
         .await
     }
@@ -1276,9 +1279,9 @@ impl Store {
         edit: Option<EditPreview>,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            request_tool_approval(connection, store_id, &claimed, tool_call_id, shell, edit)
+            request_tool_approval(connection, store_id, identity, tool_call_id, shell, edit)
         })
         .await
     }
@@ -1290,9 +1293,9 @@ impl Store {
         timed_out: bool,
     ) -> Result<ConcludedApproval, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            conclude_tool_approval(connection, store_id, &claimed, tool_call_id, timed_out)
+            conclude_tool_approval(connection, store_id, identity, tool_call_id, timed_out)
         })
         .await
     }
@@ -1303,9 +1306,9 @@ impl Store {
         tool_call_id: ToolCallId,
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            resolve_approval_by_reviewer(connection, store_id, &claimed, tool_call_id)
+            resolve_approval_by_reviewer(connection, store_id, identity, tool_call_id)
         })
         .await
     }
@@ -1317,9 +1320,9 @@ impl Store {
         record: AuditRecord,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            record_run_audit(connection, store_id, &claimed, record)
+            record_run_audit(connection, store_id, identity, record)
         })
         .await
     }
@@ -1332,9 +1335,9 @@ impl Store {
         message: String,
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            deny_approval_by_reviewer(connection, store_id, &claimed, tool_call_id, &message)
+            deny_approval_by_reviewer(connection, store_id, identity, tool_call_id, &message)
         })
         .await
     }
@@ -1344,9 +1347,9 @@ impl Store {
         &self,
         claimed: &ClaimedRun,
     ) -> Result<(Option<String>, Vec<RecentAction>), SessionRuntimeError> {
-        let claimed = claimed.clone();
+        let identity = claimed.identity;
         self.call(Priority::AwaitControl, move |connection| {
-            load_review_context(connection, &claimed)
+            load_review_context(connection, identity)
         })
         .await
     }
