@@ -554,8 +554,8 @@ pub(super) async fn execute_run(
                     .store
                     .start_reserved_run(&claimed, prepared.audit.clone())
                     .await;
-                let started = match started {
-                    Ok(Some(started)) => started,
+                match started {
+                    Ok(Some(_)) => {}
                     Ok(None) => {
                         finish_reserved_run(
                             &inner,
@@ -575,7 +575,6 @@ pub(super) async fn execute_run(
                         return;
                     }
                 };
-                inner.notify(started.cursor);
                 claimed.model = ModelSelection {
                     model: Some(prepared.audit.resolved_model.route.clone()),
                     max_output_tokens: Some(prepared.audit.resolved_model.max_output_tokens),
@@ -760,8 +759,8 @@ async fn run_auto_compaction(
         .store
         .start_auto_compaction(original, prepared.audit.clone())
         .await;
-    let (mut compaction, started) = match started {
-        Ok(Some(started)) => started,
+    let mut compaction = match started {
+        Ok(Some((compaction, _))) => compaction,
         Ok(None) => {
             finish_prepared_run(
                 inner,
@@ -793,7 +792,6 @@ async fn run_auto_compaction(
         finish_prepared_run(inner, original, &original_audit, outcome).await;
         return false;
     }
-    inner.notify(started.cursor);
     compaction.model = ModelSelection {
         model: Some(prepared.audit.resolved_model.route.clone()),
         max_output_tokens: Some(prepared.audit.resolved_model.max_output_tokens),
@@ -1391,7 +1389,7 @@ async fn execute_started_run(
                     continue;
                 }
                 match inner.store.append_run_activity(&claimed, activity).await {
-                    Ok(event) => inner.notify(event.cursor),
+                    Ok(_) => {}
                     Err(error) => {
                         if resources.stop(&mut events).await.is_err() {
                             inner.failed.send_replace(true);
@@ -1418,7 +1416,7 @@ async fn execute_started_run(
                     .append_reasoning(&claimed, ReasoningEvent::Started { kind })
                     .await
                 {
-                    Ok(event) => inner.notify(event.cursor),
+                    Ok(_) => {}
                     Err(error) => {
                         if resources.stop(&mut events).await.is_err() {
                             inner.failed.send_replace(true);
@@ -1448,7 +1446,7 @@ async fn execute_started_run(
                         .append_reasoning(&claimed, ReasoningEvent::Delta { kind, text })
                         .await
                     {
-                        Ok(event) => inner.notify(event.cursor),
+                        Ok(_) => {}
                         Err(error) => {
                             if resources.stop(&mut events).await.is_err() {
                                 inner.failed.send_replace(true);
@@ -1508,7 +1506,7 @@ async fn execute_started_run(
                     .append_reasoning(&claimed, ReasoningEvent::Completed { kind })
                     .await
                 {
-                    Ok(event) => inner.notify(event.cursor),
+                    Ok(_) => {}
                     Err(error) => {
                         if resources.stop(&mut events).await.is_err() {
                             inner.failed.send_replace(true);
@@ -1573,11 +1571,7 @@ async fn execute_started_run(
                         )
                         .await
                     {
-                        Ok(events) => {
-                            for event in events {
-                                inner.notify(event.cursor);
-                            }
-                        }
+                        Ok(_) => {}
                         Err(error) => {
                             if resources.stop(&mut events).await.is_err() {
                                 inner.failed.send_replace(true);
@@ -1661,11 +1655,7 @@ async fn execute_started_run(
                     )
                     .await
                 {
-                    Ok(events) => {
-                        for event in events {
-                            inner.notify(event.cursor);
-                        }
-                    }
+                    Ok(_) => {}
                     Err(error) => {
                         if resources.stop(&mut events).await.is_err() {
                             inner.failed.send_replace(true);
@@ -1706,7 +1696,7 @@ async fn execute_started_run(
                     estimated_cost_usd_nanos: cost_usd_nanos,
                 };
                 match inner.store.record_audit(&claimed, record).await {
-                    Ok(event) => inner.notify(event.cursor),
+                    Ok(_) => {}
                     Err(error) => {
                         if resources.stop(&mut events).await.is_err() {
                             inner.failed.send_replace(true);
@@ -1735,7 +1725,7 @@ async fn execute_started_run(
                     continue;
                 }
                 match inner.store.start_tool_call(&claimed, id).await {
-                    Ok(event) => inner.notify(event.cursor),
+                    Ok(_) => {}
                     Err(error) => {
                         if resources.stop(&mut events).await.is_err() {
                             inner.failed.send_replace(true);
@@ -1846,7 +1836,7 @@ async fn execute_started_run(
                     .finish_tool_call(&claimed, id, result, is_error, file_state, display)
                     .await
                 {
-                    Ok(event) => inner.notify(event.cursor),
+                    Ok(_) => {}
                     Err(error) => {
                         if resources.stop(&mut events).await.is_err() {
                             inner.failed.send_replace(true);
@@ -1966,7 +1956,7 @@ async fn execute_started_run(
                     .apply_steering(&claimed, message_id, turn_ordinal)
                     .await
                 {
-                    Ok(event) => inner.notify(event.cursor),
+                    Ok(_) => {}
                     Err(error) => {
                         if resources.stop(&mut events).await.is_err() {
                             inner.failed.send_replace(true);
@@ -1989,11 +1979,7 @@ async fn execute_started_run(
                 pending_tool_call = None;
                 pending_tool_output.clear();
                 match inner.store.record_interrupted(&claimed, turn_ordinal).await {
-                    Ok(events) => {
-                        for event in events {
-                            inner.notify(event.cursor);
-                        }
-                    }
+                    Ok(_) => {}
                     Err(error) => {
                         if resources.stop(&mut events).await.is_err() {
                             inner.failed.send_replace(true);
@@ -2021,7 +2007,7 @@ async fn execute_started_run(
                     .record_output_truncated(&claimed, turn_ordinal, continuation)
                     .await
                 {
-                    Ok(event) => inner.notify(event.cursor),
+                    Ok(_) => {}
                     Err(error) => {
                         if resources.stop(&mut events).await.is_err() {
                             inner.failed.send_replace(true);
@@ -2278,11 +2264,10 @@ async fn flush_pending_reasoning(
     if text.is_empty() {
         return Ok(());
     }
-    let event = inner
+    inner
         .store
         .append_reasoning(claimed, ReasoningEvent::Delta { kind, text })
         .await?;
-    inner.notify(event.cursor);
     Ok(())
 }
 
@@ -2323,11 +2308,10 @@ async fn flush_pending_tool_output(
     if chunk.is_empty() {
         return Ok(());
     }
-    let event = inner
+    inner
         .store
         .append_tool_output(claimed, tool_call_id, chunk)
         .await?;
-    inner.notify(event.cursor);
     Ok(())
 }
 
@@ -2350,22 +2334,18 @@ async fn persist_text(
         let chunk = remaining[..end].to_owned();
         match *current_message {
             Some(message_id) => {
-                let event = inner
+                inner
                     .store
                     .append_text(claimed, message_id, channel, chunk)
                     .await?;
-                inner.notify(event.cursor);
             }
             None => {
                 let message_id =
                     MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
-                let events = inner
+                inner
                     .store
                     .begin_assistant_message(claimed, message_id, current_turn, channel, chunk)
                     .await?;
-                for event in events {
-                    inner.notify(event.cursor);
-                }
                 *current_message = Some(message_id);
             }
         }

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
@@ -38,6 +38,7 @@ use crate::{
     GateDecision, PreparedRequestWeight, PreparedStaticPrefix, RunCapabilities, Runtime,
     RuntimeEvent, RuntimeToolCall, SpawnAgentFuture, SpawnAgentOutcome, SpawnAgentSpend,
     SpawnRequest, SubagentSpawner, ToolGate, ToolGateFuture, approval,
+    catalog::EffectClass,
     runtime::{HistoryMatch, HistorySearchFuture, HistorySearcher, excerpt_around},
     workspace::{FileState, FileStateUpdate},
 };
@@ -136,8 +137,9 @@ const RUNTIME_NOTICE_PREAMBLE: &str = "[QQ runtime notice; not a user instructio
 const RUNTIME_NOTICE_GUIDANCE: &str = "Continue from the committed history above. Do not \
     automatically retry tool calls whose result says execution was interrupted.";
 /// Read-only built-in tools whose results context assembly may replace with
-/// stubs: the agent can re-derive them on demand. Mutating, shell, and MCP
-/// results are never pruned — their outputs are not re-derivable.
+/// stubs when the call predates the stored effect class (schema 26): the
+/// agent can re-derive them on demand. Calls with a stored effect prune by
+/// that class instead; mutating, shell, and external results are never pruned.
 const PRUNABLE_READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_dir", "search", "search_history"];
 /// Prefixes the latest compaction summary when assembly replays it as the
 /// conversation's opening message.
@@ -3010,8 +3012,8 @@ fn persist_model_turn(
             .execute(
                 "INSERT INTO tool_calls(
                      id, run_id, turn_ordinal, call_ordinal, provider_call_id, name,
-                     arguments_json, state, requested_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'requested', ?8)",
+                     arguments_json, state, requested_at_ms, effect
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'requested', ?8, ?9)",
                 params![
                     call.id.to_string(),
                     claimed.run_id.to_string(),
@@ -3021,6 +3023,7 @@ fn persist_model_turn(
                     call.name,
                     call.arguments,
                     now,
+                    call.effect.as_str(),
                 ],
             )
             .map_err(|_| SessionRuntimeError::Persistence)?;
@@ -4105,7 +4108,6 @@ fn conclude_tool_approval(
             | ApprovalResolution::DeniedTimeout
             | ApprovalResolution::DeniedByReviewer => Ok(ConcludedApproval::Denied {
                 message: result.unwrap_or_else(|| approval::USER_DENIED_RESULT.to_owned()),
-                event: None,
             }),
         };
     }
@@ -4135,7 +4137,7 @@ fn conclude_tool_approval(
         )
         .map_err(|_| SessionRuntimeError::Persistence)?;
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
-    let event = append_event(
+    append_event(
         &transaction,
         EventContext {
             store_id,
@@ -4155,7 +4157,6 @@ fn conclude_tool_approval(
         .map_err(|_| SessionRuntimeError::Persistence)?;
     Ok(ConcludedApproval::Denied {
         message: approval::TIMEOUT_DENIED_RESULT.to_owned(),
-        event: Some(Box::new(event)),
     })
 }
 
@@ -6545,11 +6546,13 @@ fn load_model_context_with_rewrite_status(
     }
     drop(statement);
 
-    // Every recorded tool result, keyed by run and provider call id.
-    let mut results: HashMap<String, HashMap<String, (String, bool)>> = HashMap::new();
+    // Every recorded tool result, keyed by run and provider call id, with the
+    // effect class the call was admitted under (absent for rows written
+    // before schema 26).
+    let mut results: HashMap<String, HashMap<String, RecordedResult>> = HashMap::new();
     let mut statement = transaction
         .prepare_cached(
-            "SELECT c.run_id, c.provider_call_id, c.result, c.is_error
+            "SELECT c.run_id, c.provider_call_id, c.result, c.is_error, c.effect
              FROM tool_calls c JOIN runs r ON r.id = c.run_id
              WHERE r.session_id = ?1 AND c.result IS NOT NULL",
         )
@@ -6561,16 +6564,22 @@ fn load_model_context_with_rewrite_status(
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, bool>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })
         .map_err(|_| SessionRuntimeError::Persistence)?;
+    let mut prunable = HashSet::new();
     for row in rows {
-        let (run_id, call_id, content, is_error) =
+        let (run_id, call_id, content, is_error, effect) =
             row.map_err(|_| SessionRuntimeError::Persistence)?;
+        let effect = effect.as_deref().and_then(EffectClass::from_stored);
+        if effect == Some(EffectClass::ReadOnly) {
+            prunable.insert(call_id.clone());
+        }
         results
             .entry(run_id)
             .or_default()
-            .insert(call_id, (content, is_error));
+            .insert(call_id, RecordedResult { content, is_error });
     }
     drop(statement);
 
@@ -6647,8 +6656,14 @@ fn load_model_context_with_rewrite_status(
             }
         }
     }
-    let context_rewritten = prune_stale_tool_results(&mut context);
+    let context_rewritten = prune_stale_tool_results(&mut context, &prunable);
     Ok((context, context_rewritten))
+}
+
+/// One stored tool result as context assembly reads it.
+struct RecordedResult {
+    content: String,
+    is_error: bool,
 }
 
 /// Assistant rows from stores that predate `model_turns`: one query per such
@@ -6743,12 +6758,14 @@ fn latest_compaction(
 }
 
 /// Replaces read-only tool results older than the recency window with
-/// one-line stubs. Only the built-in read-only tools are prunable — their
-/// results are re-derivable on demand; mutating, shell, and MCP outputs are
-/// not. The window keeps the last [`CONTEXT_PRUNE_KEEP_TURNS`] model turns
-/// (assistant messages) verbatim. `is_error` is preserved so an error result
-/// stays an error stub.
-fn prune_stale_tool_results(context: &mut [Message]) -> bool {
+/// one-line stubs. A result is prunable when the call was admitted with the
+/// `read_only` effect class (`prunable` holds those provider call ids from the
+/// store) — its output is re-derivable on demand; mutating, shell, and
+/// external outputs are not. Rows recorded before the effect was stored fall
+/// back to the built-in read-only names. The window keeps the last
+/// [`CONTEXT_PRUNE_KEEP_TURNS`] model turns (assistant messages) verbatim.
+/// `is_error` is preserved so an error result stays an error stub.
+fn prune_stale_tool_results(context: &mut [Message], prunable: &HashSet<String>) -> bool {
     let assistant_positions = context
         .iter()
         .enumerate()
@@ -6781,7 +6798,7 @@ fn prune_stale_tool_results(context: &mut [Message]) -> bool {
     for message in &mut context[..window_start] {
         let needs_pruning = message.content().iter().any(|block| {
             matches!(block, ContentBlock::ToolResult { call_id, content, .. }
-                if prunable_stub(&calls, call_id, content).is_some())
+                if prunable_stub(&calls, prunable, call_id, content).is_some())
         });
         if !needs_pruning {
             continue;
@@ -6794,7 +6811,7 @@ fn prune_stale_tool_results(context: &mut [Message]) -> bool {
                     call_id,
                     content,
                     is_error,
-                } => match prunable_stub(&calls, call_id, content) {
+                } => match prunable_stub(&calls, prunable, call_id, content) {
                     Some(stub) => ContentBlock::ToolResult {
                         call_id: call_id.clone(),
                         content: stub,
@@ -6816,11 +6833,12 @@ fn prune_stale_tool_results(context: &mut [Message]) -> bool {
 /// than the stub would be).
 fn prunable_stub(
     calls: &HashMap<String, (String, String)>,
+    prunable: &HashSet<String>,
     call_id: &str,
     content: &str,
 ) -> Option<String> {
     let (name, arguments) = calls.get(call_id)?;
-    if !PRUNABLE_READ_ONLY_TOOLS.contains(&name.as_str()) {
+    if !prunable.contains(call_id) && !PRUNABLE_READ_ONLY_TOOLS.contains(&name.as_str()) {
         return None;
     }
     let mut arguments = arguments.clone();
@@ -7064,7 +7082,7 @@ fn compaction_instruction(
 /// and the continuation notice after a truncated turn.
 fn append_run_turns(
     turns: Vec<(u16, String, bool)>,
-    mut recorded: HashMap<String, (String, bool)>,
+    mut recorded: HashMap<String, RecordedResult>,
     mut steering: std::collections::VecDeque<(u16, String)>,
     context: &mut Vec<Message>,
 ) -> Result<(), SessionRuntimeError> {
@@ -7090,7 +7108,7 @@ fn append_run_turns(
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::ToolCall { id, .. } => Some(match recorded.remove(id) {
-                    Some((content, is_error)) => ContentBlock::ToolResult {
+                    Some(RecordedResult { content, is_error }) => ContentBlock::ToolResult {
                         call_id: id.clone(),
                         content,
                         is_error,
@@ -11716,7 +11734,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(
             !connection
@@ -11843,7 +11861,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "tool_calls", "display_json").unwrap());
         let (turn_ordinal, output, state) = connection
@@ -11911,7 +11929,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         let (display_json, result) = connection
             .query_row(
@@ -11970,7 +11988,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "runs", "kind").unwrap());
         assert_eq!(
@@ -12035,7 +12053,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "sessions", "context_tokens").unwrap());
         assert!(has_column(&connection, "sessions", "owner_run_id").unwrap());
@@ -12123,7 +12141,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "sessions", "owner_run_id").unwrap());
         assert_eq!(
@@ -12179,7 +12197,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "runs", "prompt_identity_json").unwrap());
         assert_eq!(
@@ -12223,7 +12241,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         for column in [
             "model_json",
@@ -12290,7 +12308,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "message_chunks", "chunk_ordinal").unwrap());
         assert!(has_column(&connection, "message_chunks", "text").unwrap());
@@ -12364,7 +12382,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         let command_id_not_null: bool = connection
             .query_row(
@@ -12403,7 +12421,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "message_chunks", "text").unwrap());
         assert!(has_column(&connection, "runs", "context_base_bytes").unwrap());
@@ -12473,7 +12491,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert!(has_column(&connection, "runs", "resolved_model_json").unwrap());
         assert_eq!(
@@ -12565,7 +12583,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         let preparing_shape: (String, bool, Option<String>) = connection
             .query_row(
@@ -12688,7 +12706,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         let occupancy_shape: (String, bool, Option<String>) = connection
             .query_row(
@@ -12794,7 +12812,7 @@ mod tests {
                         |row| row.get::<_, String>(0),
                     )
                     .unwrap(),
-                "25"
+                "26"
             );
         }
     }
@@ -12915,7 +12933,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         // A historical child keeps its parent run but has no recorded call:
         // the summary says so explicitly instead of inventing one.
@@ -12997,7 +13015,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         assert_eq!(
             connection
@@ -13023,6 +13041,51 @@ mod tests {
         let summary = load_session_summary(&connection, session_id).unwrap();
         assert_eq!(summary.active_run_id, Some(run_id));
         assert_eq!(summary.activity, None);
+    }
+
+    #[test]
+    fn version_twenty_six_migration_adds_the_tool_call_effect_and_keeps_history_unknown() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let (connection, _) = open_database(&path).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO workspaces(id, path) VALUES ('w', '/v25-effect');
+                 INSERT INTO sessions(id, workspace_id, title, status, created_at_ms,
+                                      updated_at_ms)
+                 VALUES ('s', 'w', 'Old', 'idle', 1, 1);
+                 INSERT INTO runs(id, session_id, command_id, user_message_id,
+                                  assistant_message_id, status, created_at_ms)
+                 VALUES ('r', 's', 'cmd', 'u', 'a', 'completed', 1);
+                 INSERT INTO tool_calls(id, run_id, turn_ordinal, call_ordinal,
+                                        provider_call_id, name, arguments_json, state,
+                                        result, requested_at_ms)
+                 VALUES ('c', 'r', 1, 1, 'p1', 'read_file', '{}', 'completed', 'x', 1);
+                 UPDATE metadata SET value = '25' WHERE key = 'schema_version';
+                 ALTER TABLE tool_calls DROP COLUMN effect;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let (connection, _) = open_database(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "26"
+        );
+        // A historical call has no recorded effect: assembly falls back to
+        // the name rather than guessing a class for it.
+        let effect: Option<String> = connection
+            .query_row("SELECT effect FROM tool_calls WHERE id = 'c'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(effect, None);
     }
 
     /// D6: activity is a column written with its event, and the summary reads
@@ -13155,7 +13218,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         let message = load_message(&connection, message_id).unwrap();
         assert!(!message.truncated);
@@ -13242,7 +13305,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         let shape: (String, bool, Option<String>) = connection
             .query_row(
@@ -13324,7 +13387,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
     }
 
@@ -14097,7 +14160,7 @@ mod tests {
         ];
         let before = context_bytes(&context);
 
-        assert!(prune_stale_tool_results(&mut context));
+        assert!(prune_stale_tool_results(&mut context, &HashSet::new()));
 
         let results = context
             .iter()
@@ -14129,6 +14192,133 @@ mod tests {
         // Inside the window everything stays verbatim.
         assert!(results[3].1.starts_with("yyy"));
         assert!(context_bytes(&context) < before);
+    }
+
+    #[test]
+    fn assembly_pruning_decides_from_the_stored_effect_class_not_the_tool_name() {
+        let call = |id: &str, name: &str| ContentBlock::ToolCall {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            arguments: serde_json::json!({"q": "x"}),
+        };
+        let result = |id: &str| ContentBlock::ToolResult {
+            call_id: id.to_owned(),
+            content: "y".repeat(500),
+            is_error: false,
+        };
+        let mut context = vec![
+            Message::user("start"),
+            // An external read-only tool: prunable only because the store
+            // recorded its effect as read_only.
+            Message::new(Role::Assistant, vec![call("c1", "mcp__docs__lookup")]),
+            Message::tool_results(vec![result("c1")]),
+            // A built-in read-only name without a stored effect (a row from
+            // before schema 26) still prunes through the name fallback.
+            Message::new(Role::Assistant, vec![call("c2", "read_file")]),
+            Message::tool_results(vec![result("c2")]),
+            // An external tool without a read-only effect is never pruned.
+            Message::new(Role::Assistant, vec![call("c3", "mcp__docs__write")]),
+            Message::tool_results(vec![result("c3")]),
+            Message::assistant("a"),
+            Message::assistant("b"),
+            Message::assistant("c"),
+            Message::assistant("d"),
+        ];
+        let prunable = HashSet::from(["c1".to_owned()]);
+        assert!(prune_stale_tool_results(&mut context, &prunable));
+        let results = context
+            .iter()
+            .flat_map(Message::content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult {
+                    call_id, content, ..
+                } => Some((call_id.as_str(), content.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(results[0].1.starts_with("[pruned: mcp__docs__lookup"));
+        assert!(
+            results[1].1.starts_with("[pruned: read_file"),
+            "legacy name fallback"
+        );
+        assert!(
+            results[2].1.starts_with("yyy"),
+            "an external non-read-only result stays"
+        );
+    }
+
+    #[tokio::test]
+    async fn admitted_tool_calls_store_their_effect_class() {
+        let (_directory, store, claimed) = claimed_store_fixture().await;
+        let runtime_call =
+            |ordinal: u16, provider_id: &str, name: &str, effect: EffectClass| RuntimeToolCall {
+                id: ToolCallId::from_bytes([ordinal as u8; 16]),
+                turn_ordinal: 1,
+                call_ordinal: ordinal,
+                provider_call_id: provider_id.to_owned(),
+                name: name.to_owned(),
+                arguments: "{}".to_owned(),
+                effect,
+                rejection: None,
+            };
+        store
+            .persist_model_turn(
+                &claimed,
+                ModelTurnCommit {
+                    turn_ordinal: 1,
+                    message: Message::new(
+                        Role::Assistant,
+                        vec![
+                            ContentBlock::ToolCall {
+                                id: "p1".to_owned(),
+                                name: "read_file".to_owned(),
+                                arguments: serde_json::json!({}),
+                            },
+                            ContentBlock::ToolCall {
+                                id: "p2".to_owned(),
+                                name: "shell".to_owned(),
+                                arguments: serde_json::json!({}),
+                            },
+                        ],
+                    ),
+                    calls: vec![
+                        runtime_call(1, "p1", "read_file", EffectClass::ReadOnly),
+                        runtime_call(2, "p2", "shell", EffectClass::Shell),
+                    ],
+                    turn_message: None,
+                    context_tokens: None,
+                    occupancy_basis: None,
+                    usage: None,
+                    estimated_cost_usd_nanos: None,
+                    accounting: None,
+                    truncated: false,
+                },
+            )
+            .await
+            .unwrap();
+        let stored = store
+            .call(Priority::Control, |connection| {
+                connection
+                    .prepare(
+                        "SELECT provider_call_id, effect FROM tool_calls ORDER BY call_ordinal",
+                    )
+                    .map_err(|_| SessionRuntimeError::Persistence)?
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                    })
+                    .map_err(|_| SessionRuntimeError::Persistence)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| SessionRuntimeError::Persistence)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            stored,
+            vec![
+                ("p1".to_owned(), Some("read_only".to_owned())),
+                ("p2".to_owned(), Some("shell".to_owned())),
+            ]
+        );
     }
 
     #[test]
@@ -15593,7 +15783,9 @@ mod tests {
                     }
                 }
             }
-            let context_rewritten = prune_stale_tool_results(&mut context);
+            // The reference predates the stored effect column and prunes by
+            // name alone; the differential fixtures use built-in tools only.
+            let context_rewritten = prune_stale_tool_results(&mut context, &HashSet::new());
             Ok((context, context_rewritten))
         }
         fn reference_append_legacy_run_messages(

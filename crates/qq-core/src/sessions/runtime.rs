@@ -464,8 +464,7 @@ async fn run_grant_promotions(
             .settle_grant_promotion(promotion, outcome)
             .await
         {
-            Ok(Some(event)) => runtime.notify(event.cursor),
-            Ok(None) => {}
+            Ok(Some(_)) | Ok(None) => {}
             Err(_) => {
                 runtime.failed.send_replace(true);
                 return;
@@ -866,6 +865,11 @@ impl SessionRuntime {
 }
 
 impl SessionRuntimeInner {
+    /// Wakes in-process waiters on a workspace after a run settled. Client
+    /// delivery is the feed's job (published by the store worker after
+    /// commit); this watch exists only so a parent awaiting a child in
+    /// `subagents.rs` learns that an outcome may now be readable. Every
+    /// settlement path calls it; streaming and lifecycle writes do not.
     pub(super) fn notify(&self, cursor: EventCursor) {
         let Ok(mut wakeups) = self.wakeups.lock() else {
             return;

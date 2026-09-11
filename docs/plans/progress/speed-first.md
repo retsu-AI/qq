@@ -12,7 +12,7 @@ dated entries appended below, newest last.
 | H21.1 | Behavioral settlement: `RunIdentity`, `RunSettlement`, `PersistenceFault`, teardown-before-terminal structural | Planned | | After H20. ADR-0012 reserved |
 | H27 | Superseded-generation accounting, atomic refresh admission, guard reclamation | In review | `feat/speed-first-phase-5b-6` | Pinned LRU and admission already existed (`src/plan.rs`) |
 | H28 | Typed context-source capacity error; sources in descriptor | In review | `feat/speed-first-phase-5b-6` | `DESCRIPTOR_VERSION` 5 → 6. ADR-0013 |
-| H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | Planned | | |
+| H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | In review | `feat/speed-first-phase-5b-6` | Store schema 25 → 26 (`tool_calls.effect`). MCP permit ordering was already correct |
 | H18 | `Arc<Vec<Message>>`, prompt prefix, `RawValue` schemas | Planned | | Add `provider_encode` bench first |
 | H19 | SSE framing, conditional | Planned | | Add `sse_decode` bench first; no-change decision acceptable |
 | H21.2 | Mechanical `sessions.rs` split | Planned | | After HC3 behavioral changes; separate commit |
@@ -264,3 +264,18 @@ returns `PlanCompileError::TooManyContextSources` for a ninth source;
 `Runtime::with_context_source` no longer drops. Tests +2 plus seven digest
 mutation rows; qq-core 448 passed. ADR-0013 written. No protocol or schema
 change.
+
+#### H22.1 receipt
+
+`notify(` sites 37 → 10: streaming, lifecycle, approval, and grant-promotion
+writes no longer call the workspace watch (the feed publishes after commit);
+the remaining calls are settlement, command, recovery, and child cancellation
+— the paths `subagents.rs` waits on. `ConcludedApproval::Denied` lost its
+event payload. Stored-kind pruning: `tool_calls.effect` (schema 26) records
+the catalog effect class at admission; context assembly prunes by that class
+and falls back to the built-in read-only names for pre-26 rows. MCP permit
+ordering (connect before `permits.acquire`) was already in place. Tests +3
+(`assembly_pruning_decides_from_the_stored_effect_class_not_the_tool_name`,
+`admitted_tool_calls_store_their_effect_class`,
+`version_twenty_six_migration_adds_the_tool_call_effect_and_keeps_history_unknown`);
+workspace suite green, fmt, strict Clippy.

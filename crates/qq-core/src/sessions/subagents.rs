@@ -536,7 +536,6 @@ async fn run_owned_child(
         inner: Arc::clone(&inner),
         run_id: Some(run_id),
     };
-    inner.notify(committed_through);
     // The run cannot start until scheduling below, so subscribing after the
     // atomic commit and before that signal cannot miss its completion.
     let Ok(mut wakeup) = inner.subscribe(parent.workspace_id, committed_through.sequence) else {

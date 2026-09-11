@@ -671,7 +671,11 @@ grouped query. A claimed run carries the cancellation flag, session file
 hashes, and pending steering out of the claim transaction, so claim to first
 provider request is two store hops (claim, then `RunStarted`), and context
 assembly runs a fixed number of session-scoped queries rather than one per
-message and per turn. Workspace path canonicalization runs on a blocking
+message and per turn. Assembly stubs read-only tool results older than the
+last four model turns; a result is prunable when its `tool_calls.effect`
+column (the catalog effect class the call was admitted under, schema 26) is
+`read_only`, with rows recorded before that column falling back to the
+built-in read-only names. Workspace path canonicalization runs on a blocking
 thread before the command reaches the store worker.
 
 Caller budgets are core-owned. `submit_prompt.limits` carries a versioned

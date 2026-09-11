@@ -45,10 +45,7 @@ impl ToolGate for SessionToolGate {
                         .deny_tool_call(&claimed, call.id, message.clone())
                         .await
                     {
-                        Ok(event) => {
-                            inner.notify(event.cursor);
-                            GateDecision::Deny { message }
-                        }
+                        Ok(_) => GateDecision::Deny { message },
                         Err(error) => approval_persistence_failure(error),
                     }
                 }
@@ -68,7 +65,7 @@ impl ToolGate for SessionToolGate {
                         .request_tool_approval(&claimed, call.id, shell.clone(), edit.clone())
                         .await
                     {
-                        Ok(event) => inner.notify(event.cursor),
+                        Ok(_) => {}
                         Err(error) => {
                             inner.remove_approval(call.id);
                             return approval_persistence_failure(error);
@@ -144,8 +141,7 @@ impl ToolGate for SessionToolGate {
                                                 .resolve_approval_by_reviewer(&claimed, call.id)
                                                 .await
                                             {
-                                                Ok(Some(event)) => {
-                                                    inner.notify(event.cursor);
+                                                Ok(Some(_)) => {
                                                     inner.remove_approval(call.id);
                                                     return reviewed(GateDecision::Execute, review_spend);
                                                 }
@@ -169,8 +165,7 @@ impl ToolGate for SessionToolGate {
                                                 .deny_approval_by_reviewer(&claimed, call.id, message.clone())
                                                 .await
                                             {
-                                                Ok(Some(event)) => {
-                                                    inner.notify(event.cursor);
+                                                Ok(Some(_)) => {
                                                     inner.remove_approval(call.id);
                                                     return reviewed(
                                                         GateDecision::Deny { message },
@@ -216,10 +211,7 @@ impl ToolGate for SessionToolGate {
                         Ok(ConcludedApproval::Approved) => {
                             reviewed(GateDecision::Execute, review_spend)
                         }
-                        Ok(ConcludedApproval::Denied { message, event }) => {
-                            if let Some(event) = event {
-                                inner.notify(event.cursor);
-                            }
+                        Ok(ConcludedApproval::Denied { message }) => {
                             reviewed(GateDecision::Deny { message }, review_spend)
                         }
                         Ok(ConcludedApproval::StillWaiting) => GateDecision::Fail {
@@ -251,10 +243,7 @@ fn approval_persistence_failure(error: SessionRuntimeError) -> GateDecision {
 
 pub(super) enum ConcludedApproval {
     Approved,
-    Denied {
-        message: String,
-        event: Option<Box<SessionEventEnvelope>>,
-    },
+    Denied { message: String },
     StillWaiting,
 }
 
