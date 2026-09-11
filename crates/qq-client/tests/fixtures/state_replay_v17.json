@@ -1,0 +1,137 @@
+{
+  "effects": [
+    {
+      "effects": [],
+      "sequence": 10
+    },
+    {
+      "effects": [],
+      "sequence": 14
+    },
+    {
+      "effects": [],
+      "sequence": 15
+    },
+    {
+      "effects": [],
+      "sequence": 16
+    },
+    {
+      "effects": [],
+      "sequence": 17
+    },
+    {
+      "effects": [],
+      "sequence": 18
+    },
+    {
+      "effects": [
+        "Attention(RunFinished { session_title: \"Fix the login redirect\" })",
+        "Notice { session: Some(SessionId(\"03030303030303030303030303030303\")), level: Error, text: \"workspace file \\\"src/auth.rs\\\" changed: expected content hash 11…, found 22…\" }"
+      ],
+      "sequence": 19
+    },
+    {
+      "effects": [
+        "Notice { session: Some(SessionId(\"03030303030303030303030303030303\")), level: Info, text: \"output limit reached; continuing (1)\" }"
+      ],
+      "sequence": 20
+    },
+    {
+      "effects": [
+        "Attention(RunFinished { session_title: \"Fix the login redirect\" })",
+        "Notice { session: Some(SessionId(\"03030303030303030303030303030303\")), level: Error, text: \"the provider stopped at its output token limit (16384 tokens) on 4 consecutive turns; the partial answer is in the transcript\" }"
+      ],
+      "sequence": 21
+    },
+    {
+      "effects": [],
+      "sequence": 22
+    },
+    {
+      "effects": [],
+      "sequence": 23
+    },
+    {
+      "effects": [
+        "Notice { session: Some(SessionId(\"03030303030303030303030303030303\")), level: Info, text: \"audit asked for a revision (1 finding)\" }"
+      ],
+      "sequence": 24
+    }
+  ],
+  "sessions": [
+    {
+      "active_run_id": "04040404040404040404040404040404",
+      "activity": null,
+      "context_tokens": 1200,
+      "context_window": 400000,
+      "finished_unread": true,
+      "group": "NeedsYou",
+      "id": "03030303030303030303030303030303",
+      "last_outcome": null,
+      "live": {
+        "active_tool": null,
+        "awaiting_approval": [],
+        "tail": "The first part of a long answer"
+      },
+      "messages": [
+        {
+          "id": "20202020202020202020202020202020",
+          "output": "Fix the login redirect\n@src/auth.rs",
+          "refusal": "",
+          "role": "user",
+          "run_id": "04040404040404040404040404040404",
+          "state": "complete",
+          "truncated": false,
+          "turn": 0
+        },
+        {
+          "id": "21212121212121212121212121212121",
+          "output": "also check the tests",
+          "refusal": "",
+          "role": "user",
+          "run_id": "04040404040404040404040404040404",
+          "state": "complete",
+          "truncated": false,
+          "turn": 0
+        }
+      ],
+      "need": "FinishedUnread",
+      "prompt_history": [],
+      "queued_prompts": 1,
+      "reasoning": [],
+      "runs": [
+        {
+          "cost_usd_nanos": 42,
+          "finished_at_ms": 1700000000000,
+          "first_token_at_ms": null,
+          "id": "04040404040404040404040404040404",
+          "live_cost_usd_nanos": null,
+          "outcome": {
+            "failure": {
+              "kind": "provider_output_truncated",
+              "message": "the provider stopped at its output token limit (16384 tokens) on 4 consecutive turns; the partial answer is in the transcript"
+            },
+            "type": "failed"
+          },
+          "plan": [
+            "review",
+            "aaaaaaaa"
+          ],
+          "resolved_route": null,
+          "started_at_ms": 1700000000000,
+          "tool_calls": 0,
+          "turns": 0,
+          "usage": null
+        }
+      ],
+      "status": "running",
+      "title": "Fix the login redirect",
+      "tool_calls": [],
+      "unread": 3
+    }
+  ],
+  "thread_order": [
+    "03030303030303030303030303030303"
+  ]
+}

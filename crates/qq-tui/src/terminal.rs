@@ -238,16 +238,6 @@ where
                     output.write_all(&attention_bytes(&attention)).await?;
                     output.flush().await?;
                 }
-                Effect::Notice {
-                    session,
-                    level,
-                    text,
-                } => {
-                    app.apply_notice(session, level, text);
-                    redraw = Some(redraw.map_or(Redraw::Scheduled, |existing| {
-                        existing.max(Redraw::Scheduled)
-                    }));
-                }
                 Effect::MouseCapture(enabled) => {
                     let bytes = mouse_capture_bytes(enabled)?;
                     output.write_all(&bytes).await?;

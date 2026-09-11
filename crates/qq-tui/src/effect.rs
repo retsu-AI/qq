@@ -2,10 +2,8 @@
 //! touches the network, the terminal, or the clock; it returns these and the
 //! loop applies them in order.
 
-use qq_protocol::SessionId;
-
 use crate::ClientRequest;
-use crate::app::{Attention, NoticeLevel};
+use qq_client::state::Attention;
 
 /// One effect produced by an update.
 #[derive(Debug, PartialEq)]
@@ -20,13 +18,6 @@ pub(crate) enum Effect {
     Editor(String),
     /// Ring the terminal for an event that happened while it was unfocused.
     Attention(Attention),
-    /// A transient notice for `session` (or the focused session). Produced
-    /// by the reducer and consumed by `App` before effects reach the loop.
-    Notice {
-        session: Option<SessionId>,
-        level: NoticeLevel,
-        text: String,
-    },
     /// Turn terminal mouse reporting on or off.
     MouseCapture(bool),
     Quit,

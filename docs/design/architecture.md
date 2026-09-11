@@ -81,6 +81,8 @@ crates/
   qq-client/
     Cargo.toml
     src/lib.rs
+    src/state.rs
+    src/state/reduce.rs
   qq-config/
     Cargo.toml
     src/lib.rs
@@ -138,6 +140,19 @@ xtask/
   behind cargo features: `native` (default; Tokio, `TuiClient`, `observer`)
   and `wasm` (browser `fetch`; decoder, cursor validation, and `ClientPort`
   only). The transport-neutral decoder tests compile for both.
+  `qq_client::state` is the surface-neutral session model every client shares:
+  `SessionStore` (per-session `SessionView` with warm body, `LiveStatus`,
+  `RunStats`, `Reasoning`, bounded tails, and the lazily rebuilt tree index),
+  the snapshot installer, warm-body eviction, and `SessionStore::reduce_event`,
+  which applies every `SessionEvent` and returns `StateEffect`s (notice,
+  attention, refocus, snapshot request, draft submission, session removed)
+  for the surface to act on. It reads a `ReduceContext` (focused session,
+  attentiveness, workspace, capabilities, model catalog) and never touches
+  the network, the clock, or rendering state. Surfaces supply a
+  `TextSanitizer` for the live tail; the default drops controls and bidi
+  overrides. A fixture-replay golden (`tests/fixtures/state_replay_v17.json`)
+  pins the projection of every `event_*` wire fixture, natively and on
+  `wasm32`.
 - `qq-config` contains layered configuration, built-in provider/model presets,
   managed policy, remote organization documents, and config provenance. It
   returns config-owned TUI values; the root translates them into `qq-tui`
@@ -161,9 +176,13 @@ xtask/
 - `qq-server` contains the Axum adapter, HTTP/SSE route wiring, bearer-token
   authentication, an exact-origin CORS layer that is inert until configured,
   and private local-instance discovery metadata.
-- `qq-tui` contains terminal rendering, input handling, and client-side state.
-  It communicates through `qq-client` and the protocol and does not depend
-  directly on `qq-core` or application configuration. Rendering is retained:
+- `qq-tui` contains terminal rendering, input handling, and terminal-only
+  state (view, viewport, overlays, composer, pickers, folds, themes, notice
+  line). Its session model is `qq_client::state::SessionStore`, constructed
+  with `terminal_safe_character` as the sanitizer; `App::reduce_event` maps
+  `StateEffect`s onto terminal effects, pending-intent bookkeeping, and the
+  session picker. It communicates through `qq-client` and the protocol and
+  does not depend directly on `qq-core` or application configuration. Rendering is retained:
   one `TranscriptCache` holds laid-out messages keyed by width for the shown
   session, streaming messages lay out only their open block,
   syntax highlighting runs off the render tick, and frames are diffed by row

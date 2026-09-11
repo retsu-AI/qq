@@ -12,7 +12,6 @@ mod effect;
 pub mod fixtures;
 mod input;
 mod lazy_port;
-mod model;
 mod picker;
 mod render;
 mod settings;

@@ -7,7 +7,7 @@ dated entries appended below, newest last.
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | W1 | Transport-agnostic `qq-client`; `wasm32` build | Done | [#15](https://github.com/retsu-AI/qq/pull/15) `5080f85` | `native`/`wasm` features; `ServerConnection` |
-| W2 | Extract reducer into `qq-client::state` | In progress | `feat/multi-surface-w2-client-state` | |
+| W2 | Extract reducer into `qq-client::state` | In review | `feat/multi-surface-w2-client-state` | `ReduceContext`/`StateEffect` seam |
 | W3 | Multi-server client model | Planned | | Needs W1, W2, S1 |
 | S1 | Stable `ServerId`; protocol 17 | Done | [#14](https://github.com/retsu-AI/qq/pull/14) `fff4ec8` | Reuses the store id as the server identity |
 | S2 | Client enrollment | Planned | | ADR-0015 drafting; second review required |
@@ -97,3 +97,27 @@ Plan (#13 `0d9f709`), S1 (#14 `fff4ec8`), W1 (#15 `5080f85`), S3 (#16
 
 Shipped: S1, W1, S3. In progress: W2 (`../qq-msc`); ADR-0015 draft for S2.
 Blocked: none. TB gate needs W2 and S2.
+
+#### W2 receipt — 2026-09-10
+Commit(s): see branch `feat/multi-surface-w2-client-state`.
+Tests: 6 added in `qq_client::state::tests` (fixture-replay golden over the
+12 `event_*` v17 fixtures, run natively and under `wasm-bindgen-test`;
+caller-supplied sanitizer; draft hand-back and unread/attention gating;
+delete cascade with refocus and cold-body fetch; warm-body bound with pin;
+truncation notice with/without capabilities). All 234 `qq-tui` tests pass
+unchanged apart from one that now asserts the store-level effects and the
+App-level mapping separately.
+Gates: `cargo bench -p qq-tui --bench render` baseline vs candidate on the
+same host, same session: medians within noise (steady 23.1→24.4 µs,
+streaming focused 35.4→36.5, streaming 32 KiB 410→398, golden path
+36.3→35.7, sessions 200 35.7→34.4). Reports in
+`target/qq-perf/w2-2026-09-10/` (not committed).
+Deviations: `Reasoning.ticks` stays on the shared struct (surface writes it,
+reducer ignores it) rather than a side table, to keep the render hot path a
+single map lookup. `unread`/`finished_unread`/`last_focused`/`drafts`/
+`prompt_history` move with the model: they are per-session client state any
+surface needs, gated by `ReduceContext.focused`. TUI-only `Effect::Notice`
+removed; notices are absorbed inside `App::reduce_event`.
+Docs: `docs/design/architecture.md` (`qq-client`, `qq-tui` paragraphs, tree),
+`AGENTS.md` repository map, plan W2 fixture path v16→v17.
+Open: `ClientPort: Send` bound (port.rs) is still native-only shaped; W3.

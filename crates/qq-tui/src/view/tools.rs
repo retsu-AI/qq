@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::ToolCallTiming;
+use qq_client::state::ToolCallTiming;
 
 /// Runs with more than this many quiet tool calls fold into one summary row.
 pub(super) const TOOL_FOLD_THRESHOLD: usize = 3;

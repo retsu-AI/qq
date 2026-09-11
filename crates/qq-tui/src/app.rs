@@ -4,59 +4,45 @@ use std::{
 };
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+pub use qq_client::state::ModelOption;
+pub(crate) use qq_client::state::{
+    ApprovalPreview, Attention, NoticeLevel, SessionStore, SessionView,
+};
+use qq_client::state::{
+    MAX_QUEUED_DRAFTS, ReduceContext, StateEffect, body_request, model_context_window,
+};
 use qq_protocol::{
     AgentProfileId, ApprovalDecision, ApprovalGrant, ApprovalMode, ApprovalResolution, CommandId,
-    CommandOutcome, CommandRequest, ModelDescriptor, ModelSelection, ServerCapabilities,
-    SessionCommand, SessionEvent, SessionEventEnvelope, SessionId, SessionSnapshot, SessionStatus,
-    SnapshotRequest, SteeringCapabilities, ToolCallSnapshot, ToolCallState, WorkspaceId,
-    WorkspaceSnapshot,
+    CommandOutcome, CommandRequest, ModelSelection, ServerCapabilities, SessionCommand,
+    SessionEvent, SessionEventEnvelope, SessionId, SessionStatus, SteeringCapabilities,
+    ToolCallSnapshot, ToolCallState, WorkspaceId, WorkspaceSnapshot,
 };
 use thiserror::Error;
 
-pub(crate) use crate::model::{
-    ApprovalPreview, LiveStatus, ReasoningDetail, SessionStore, SessionView,
-};
-use crate::model::{MAX_PROMPT_HISTORY, MAX_QUEUED_DRAFTS, WARM_BODY_LIMIT};
 use crate::{
     Action, ClientFailure, ClientPort, ClientRequest, ClientUpdate, ConnectionState, Settings,
     commands::{self, Command, SlashAction, SlashEntry},
     composer::Composer,
     effect::{Effect, Effects, Redraw},
-    input::{Mode, Overlay, approval_mode_label},
+    input::{Mode, Overlay, SessionConfirm, approval_mode_label},
     picker::Picker,
     terminal,
     theme::Theme,
     viewport::{View, Viewport},
 };
-use reduce::{retain_recent_messages, retain_recent_tool_calls};
-
 mod pickers;
-mod reduce;
 
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 /// Milliseconds the loop's animation tick advances `now_ms` by; matches
 /// `terminal::ANIMATION_INTERVAL`.
 pub(crate) const ANIMATION_INTERVAL_MS: u64 = 125;
 const MAX_RECENT_EVENTS: usize = 1024;
-const SNAPSHOT_SESSION_LIMIT: u16 = 512;
-const SNAPSHOT_MESSAGE_LIMIT: u16 = 256;
-const MAX_RECENT_TOOL_CALLS: usize = 64;
-/// Per-call cap on buffered live tool output. The buffer is a display tail,
-/// not a record: the head drops first, and the persisted bounded result
-/// replaces the buffer when the call finishes.
 const MOUSE_SCROLL_ROWS: usize = 3;
 /// Notices are deliberately ephemeral. At the 125 ms UI tick this keeps each
 /// notice visible for five seconds without making it permanent UI.
 const NOTICE_TICKS: u16 = 40;
 /// Animation ticks (125 ms) within which a second Esc cancels the active run.
 const ESC_CANCEL_TICKS: usize = 16;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NoticeLevel {
-    Info,
-    Warning,
-    Error,
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct TuiOptions {
@@ -66,27 +52,6 @@ pub struct TuiOptions {
     /// Every selectable theme; the first is active at startup. An empty list
     /// means the compiled `qq` theme.
     pub themes: Vec<Theme>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelOption {
-    pub provider: String,
-    pub model: String,
-    pub name: Option<String>,
-    pub context_window: Option<u32>,
-    pub selection: ModelSelection,
-}
-
-impl From<ModelDescriptor> for ModelOption {
-    fn from(descriptor: ModelDescriptor) -> Self {
-        Self {
-            provider: descriptor.provider,
-            model: descriptor.model,
-            name: descriptor.name,
-            context_window: descriptor.context_window,
-            selection: descriptor.selection,
-        }
-    }
 }
 
 pub async fn run<P>(client: P, options: TuiOptions) -> Result<(), TuiError>
@@ -182,25 +147,12 @@ impl ToolDetail {
     }
 }
 
-/// An event worth interrupting the user for while the terminal is unfocused.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Attention {
-    /// A tool call is waiting for the user to approve it.
-    ApprovalRequested { session_title: String },
-    /// A run finished in a session; the user may want to read the result.
-    RunFinished { session_title: String },
-}
-
-impl Attention {
-    /// One-line text for a desktop notification.
-    pub(crate) fn summary(&self) -> String {
-        match self {
-            Self::ApprovalRequested { session_title } => {
-                format!("qq: {session_title} needs approval")
-            }
-            Self::RunFinished { session_title } => format!("qq: {session_title} finished"),
-        }
-    }
+/// Whether reasoning blocks render as a collapsed one-liner or in full.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ReasoningDetail {
+    #[default]
+    Collapsed,
+    Expanded,
 }
 
 #[derive(Debug, Clone)]
@@ -341,7 +293,7 @@ impl App {
             models: options.models,
             workspace_id: None,
             workspace_path: String::new(),
-            sessions: SessionStore::default(),
+            sessions: SessionStore::with_sanitizer(terminal_safe_character),
             view: View::default(),
             viewport: Viewport::default(),
             view_return: None,
@@ -623,27 +575,18 @@ impl App {
         }
         if initial || snapshot_sequence >= self.last_sequence {
             for summary in snapshot.sessions {
-                let context_window = model_context_window(&self.models, summary.model.as_deref());
-                match self.sessions.entry(summary.id) {
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        entry.get_mut().set_summary(summary, context_window);
-                    }
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(SessionView::summary_only(
-                            summary,
-                            context_window,
-                            snapshot_sequence,
-                        ));
-                    }
-                }
+                self.sessions
+                    .upsert_summary(summary, &self.models, snapshot_sequence);
             }
         }
         for body in snapshot.included {
-            self.install_session_snapshot(body, snapshot_sequence);
+            self.sessions
+                .install_session_snapshot(body, &self.models, snapshot_sequence);
         }
         if let Some(focused) = snapshot.focused {
             let focused_id = focused.summary.id;
-            self.install_session_snapshot(focused, snapshot_sequence);
+            self.sessions
+                .install_session_snapshot(focused, &self.models, snapshot_sequence);
             // The body may have been fetched for a non-focused pane (the
             // user moved on before it arrived); only the initial snapshot
             // and a still-focused pane move focus.
@@ -672,83 +615,91 @@ impl App {
             .collect::<Vec<_>>();
         let mut effects = Effects::redraw(Redraw::Scheduled);
         for event in replay {
-            let reduced = self.reduce_event(&event);
-            effects.extend(self.absorb_notices(reduced));
+            effects.extend(self.reduce_event(&event));
         }
         effects
     }
 
-    /// Load one session's transcript body. Other warm bodies are untouched;
-    /// `evict_cold_bodies` enforces the warm limit afterwards.
-    fn install_session_snapshot(&mut self, snapshot: SessionSnapshot, loaded_through: u64) {
-        let session_id = snapshot.summary.id;
-        let mut messages = snapshot.messages;
-        retain_recent_messages(&mut messages);
-        let history = messages
-            .iter()
-            .filter(|message| message.role == qq_protocol::MessageRole::User)
-            .map(|message| message.output.clone())
-            .filter(|prompt| !prompt.trim().is_empty())
-            .collect::<VecDeque<_>>();
-        let mut tool_calls = snapshot.tool_calls;
-        retain_recent_tool_calls(&mut tool_calls);
-        let context_window = model_context_window(&self.models, snapshot.summary.model.as_deref());
-        let previous = self.sessions.remove(&session_id);
-        let mut view = SessionView::summary_only(snapshot.summary, context_window, loaded_through);
-        view.live = LiveStatus::from_body(&messages, &tool_calls);
-        for run in &snapshot.runs {
-            let stats = view.runs.entry(run.id).or_default();
-            stats.outcome = run.outcome.clone();
-            stats.usage = run.usage;
-            stats.cost_usd_nanos = run.estimated_cost_usd_nanos;
-            stats.plan = run.plan.as_deref().map(plan_label);
-            stats.resolved_route = run
-                .resolved_model
-                .as_deref()
-                .map(|model| model.route.clone());
-        }
-        for call in &tool_calls {
-            if matches!(
-                call.state,
-                ToolCallState::Completed | ToolCallState::Failed | ToolCallState::Denied
-            ) {
-                view.runs.entry(call.run_id).or_default().tool_calls += 1;
+    /// Reduce one event into the store and apply what the reducer asks of the
+    /// surface: notices land in the status line here, focus and picker state
+    /// update here, and the rest become loop effects.
+    fn reduce_event(&mut self, envelope: &SessionEventEnvelope) -> Effects {
+        let caused_by_me = envelope
+            .caused_by
+            .and_then(|id| self.pending.get(&id))
+            .is_some_and(|intent| matches!(intent, PendingIntent::Create));
+        let reduced = self.sessions.reduce_event(
+            envelope,
+            ReduceContext {
+                focused: self.focused(),
+                attentive: self.terminal_focused,
+                workspace_id: self.workspace_id,
+                capabilities: self.capabilities.as_ref(),
+                models: &self.models,
+                caused_by_me,
+            },
+        );
+        let mut effects = Effects::none();
+        for effect in reduced {
+            match effect {
+                StateEffect::Notice {
+                    session,
+                    level,
+                    text,
+                } => self.apply_notice(session, level, text),
+                StateEffect::Attention(attention) => effects.push(Effect::Attention(attention)),
+                StateEffect::RequestSnapshot(request) => {
+                    effects.push(Effect::Send(ClientRequest::Snapshot(request)));
+                }
+                StateEffect::Refocus(target) => self.view = View::Transcript(target),
+                StateEffect::AdoptCreated(session_id) => self.adopt_created_session(session_id),
+                StateEffect::SubmitDraft { session_id, text } => {
+                    effects.extend(self.submit_text(session_id, text));
+                }
+                StateEffect::SessionRemoved {
+                    session_id,
+                    tool_call_ids,
+                } => {
+                    for call in tool_call_ids {
+                        self.answered_approvals.remove(&call);
+                    }
+                    self.pending.retain(|_, intent| {
+                        !matches!(
+                            intent,
+                            PendingIntent::Prompt { session_id: target, .. } if *target == session_id
+                        )
+                    });
+                    if let Some(Overlay::Sessions { confirm, .. }) = &mut self.overlay
+                        && matches!(confirm, Some(SessionConfirm::Delete(pending)) if *pending == session_id)
+                    {
+                        *confirm = None;
+                    }
+                }
             }
         }
-        view.prompt_history = history
-            .into_iter()
-            .rev()
-            .take(MAX_PROMPT_HISTORY)
-            .rev()
-            .collect();
-        if let Some(previous) = previous {
-            view.last_focused = previous.last_focused;
-            view.drafts = previous.drafts;
-            // Live tool output for calls this body no longer reports as
-            // running would render forever; keep only the running ones.
-            view.live_tool_output = previous.live_tool_output;
-            view.live_tool_output.retain(|id, _| {
-                tool_calls
-                    .iter()
-                    .any(|call| call.id == *id && call.state == ToolCallState::Running)
-            });
-            view.approval_previews = previous.approval_previews;
+        // Summaries and deletions reshape the tree the picker lists.
+        if matches!(
+            envelope.event,
+            SessionEvent::SessionCreated { .. }
+                | SessionEvent::SessionUpdated { .. }
+                | SessionEvent::SessionDeleted { .. }
+                | SessionEvent::PromptQueued { .. }
+                | SessionEvent::RunStarted { .. }
+                | SessionEvent::CancellationRequested { .. }
+                | SessionEvent::SessionCompacted { .. }
+                | SessionEvent::SessionCompactionRolledBack { .. }
+                | SessionEvent::RunFinished { .. }
+        ) {
+            self.refresh_session_picker();
         }
-        view.messages = Some(messages);
-        view.tool_calls = Some(tool_calls);
-        self.sessions.insert(session_id, view);
+        effects
     }
 
     /// A session this client just created has an empty transcript by
     /// construction, so it is warm immediately: focus moves in this frame and
     /// no snapshot round trip is needed before the user can type.
     pub(super) fn adopt_created_session(&mut self, session_id: SessionId) {
-        if let Some(session) = self.sessions.get_mut(&session_id)
-            && !session.is_warm()
-        {
-            session.messages = Some(Vec::new());
-            session.tool_calls = Some(Vec::new());
-        }
+        self.sessions.warm_empty(session_id);
         self.set_focus(session_id);
         self.reset_history_browse();
         self.evict_cold_bodies();
@@ -764,36 +715,11 @@ impl App {
 
     fn set_focus_clock(&mut self, session_id: SessionId) {
         self.focus_clock += 1;
-        if let Some(session) = self.sessions.get_mut(&session_id) {
-            session.last_focused = self.focus_clock;
-            session.unread = 0;
-            session.finished_unread = false;
-        }
+        self.sessions.mark_focused(session_id, self.focus_clock);
     }
 
-    /// Drop transcript bodies beyond the warm limit, least recently focused
-    /// first. The shown session is pinned and never evicted.
-    /// Summaries and live status stay, so the sidebar and pickers keep
-    /// working for cold sessions.
     fn evict_cold_bodies(&mut self) {
-        let pinned: std::collections::HashSet<SessionId> = self.focused().into_iter().collect();
-        let mut warm: Vec<(u64, SessionId)> = self
-            .sessions
-            .values()
-            .filter(|session| session.is_warm() && !pinned.contains(&session.summary.id))
-            .map(|session| (session.last_focused, session.summary.id))
-            .collect();
-        let keep = WARM_BODY_LIMIT.saturating_sub(pinned.len());
-        if warm.len() <= keep {
-            return;
-        }
-        warm.sort_unstable();
-        let evict = warm.len() - keep;
-        for (_, session_id) in warm.into_iter().take(evict) {
-            if let Some(session) = self.sessions.get_mut(&session_id) {
-                session.evict_body();
-            }
-        }
+        self.sessions.evict_cold_bodies(self.focused());
     }
 
     fn apply_live_event(&mut self, event: SessionEventEnvelope) -> Effects {
@@ -821,8 +747,7 @@ impl App {
             .is_some_and(|session| event.cursor.sequence <= session.loaded_through);
         let mut effects = Effects::changed(self.event_is_visible(&event));
         if !already_loaded {
-            let reduced = self.reduce_event(&event);
-            effects.extend(self.absorb_notices(reduced));
+            effects.extend(self.reduce_event(&event));
         }
         if let Some(command_id) = event.caused_by {
             self.pending.remove(&command_id);
@@ -893,23 +818,6 @@ impl App {
         text: String,
     ) {
         self.set_notice_for(session.or_else(|| self.focused()), text, level);
-    }
-
-    /// Apply the reducer's notice effects here, where notice state lives,
-    /// and pass everything else through to the loop.
-    fn absorb_notices(&mut self, effects: Effects) -> Effects {
-        let mut rest = Effects::none();
-        for effect in effects {
-            match effect {
-                Effect::Notice {
-                    session,
-                    level,
-                    text,
-                } => self.apply_notice(session, level, text),
-                other => rest.push(other),
-            }
-        }
-        rest
     }
 
     fn set_info_for(&mut self, session_id: Option<SessionId>, text: String) {
@@ -1257,16 +1165,6 @@ impl App {
         }
     }
 
-    /// An effect asking for the user's attention, or nothing while the
-    /// terminal is focused: a focused user is already looking.
-    pub(super) fn attention(&self, attention: Attention) -> Effects {
-        let mut effects = Effects::none();
-        if !self.terminal_focused {
-            effects.push(Effect::Attention(attention));
-        }
-        effects
-    }
-
     /// Test view of the viewport through the renderer's reconcile step.
     #[cfg(test)]
     pub(crate) fn update_transcript_viewport(
@@ -1455,13 +1353,10 @@ impl App {
         let Some(workspace_id) = self.workspace_id else {
             return Effects::redraw(Redraw::Immediate);
         };
-        Effects::send_now(ClientRequest::Snapshot(SnapshotRequest {
+        Effects::send_now(ClientRequest::Snapshot(body_request(
             workspace_id,
-            focused_session_id: Some(session_id),
-            include_sessions: Vec::new(),
-            session_limit: SNAPSHOT_SESSION_LIMIT,
-            message_limit: SNAPSHOT_MESSAGE_LIMIT,
-        }))
+            session_id,
+        )))
     }
 
     fn create_session(&mut self, parent_id: Option<SessionId>) -> Effects {
@@ -1699,20 +1594,6 @@ impl App {
             .into_iter()
             .flat_map(|session| &session.drafts)
             .map(String::as_str)
-    }
-
-    /// Submit the oldest waiting draft once the session goes idle. Called by
-    /// the reducer on `RunFinished`; one draft per run so each becomes its
-    /// own run in order.
-    pub(super) fn flush_draft(&mut self, session_id: SessionId) -> Effects {
-        let Some(draft) = self
-            .sessions
-            .get_mut(&session_id)
-            .and_then(|session| session.drafts.pop_front())
-        else {
-            return Effects::none();
-        };
-        self.submit_text(session_id, draft)
     }
 
     fn record_prompt(&mut self, session_id: SessionId, prompt: &str) {
@@ -2176,26 +2057,13 @@ impl App {
 
     /// Sessions with a tool call awaiting approval, in tree order.
     pub(crate) fn sessions_awaiting_approval(&self) -> Vec<SessionId> {
-        self.sessions
-            .thread_order()
-            .iter()
-            .copied()
-            .filter(|id| !self.sessions[id].live.awaiting_approval.is_empty())
-            .collect()
+        self.sessions.awaiting_approval()
     }
 
     /// Sessions that need the user, most urgent first and then in tree
     /// order: approvals, then unread failures, then unread finishes.
     pub(crate) fn sessions_needing_attention(&self) -> Vec<SessionId> {
-        let mut needing: Vec<(crate::model::Need, usize, SessionId)> = self
-            .sessions
-            .thread_order()
-            .iter()
-            .enumerate()
-            .filter_map(|(position, id)| self.sessions[id].need().map(|need| (need, position, *id)))
-            .collect();
-        needing.sort();
-        needing.into_iter().map(|(_, _, id)| id).collect()
+        self.sessions.needing_attention()
     }
 
     /// The next session (after the focused one, wrapping) that needs the
@@ -2254,35 +2122,10 @@ fn approval_grant(tool_call: &ToolCallSnapshot) -> ApprovalGrant {
     }
 }
 
-/// Renders a byte count for the status line: whole bytes below 1 KiB, one
-/// decimal of KiB/MiB/GiB above it.
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: [(&str, u64); 3] = [
-        ("GiB", 1024 * 1024 * 1024),
-        ("MiB", 1024 * 1024),
-        ("KiB", 1024),
-    ];
-    for (unit, scale) in UNITS {
-        if bytes >= scale {
-            #[expect(clippy::cast_precision_loss, reason = "display rounding only")]
-            let value = bytes as f64 / scale as f64;
-            return format!("{value:.1} {unit}");
-        }
-    }
-    format!("{bytes} B")
-}
-
 fn valid_model_route(route: &str) -> bool {
     route
         .split_once('/')
         .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
-}
-
-fn model_context_window(models: &[ModelOption], model: Option<&str>) -> Option<u32> {
-    models
-        .iter()
-        .find(|option| option.selection.model.as_deref() == model)?
-        .context_window
 }
 
 pub(crate) fn terminal_safe_character(character: char) -> Option<char> {
@@ -2381,14 +2224,4 @@ impl App {
             ComposerMode::Queue
         }
     }
-}
-
-/// The profile and the first eight hex digits of the plan digest: enough to
-/// tell two plans apart in a transcript without filling the line.
-pub(crate) fn plan_label(plan: &qq_protocol::RunPlanIdentity) -> (AgentProfileId, String) {
-    let digest = plan.digest.to_string();
-    (
-        plan.profile.clone(),
-        digest[..digest.len().min(8)].to_owned(),
-    )
 }
