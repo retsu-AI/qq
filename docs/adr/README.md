@@ -26,6 +26,7 @@ written.
 | 0012 | Structural settlement (`RunSettlement`, teardown before terminal publication) | Reserved: H21 |
 | 0013 | Context-source identity in the plan descriptor | Reserved: H28 |
 | 0014 | Typed final output contract | Reserved: HC3 |
+| 0015 | [Enroll remote clients with a pairing code and issue per-client credentials](0015-pairing-code-client-enrollment.md) | Proposed (multi-surface S2) |
 
 ## When to write one
 

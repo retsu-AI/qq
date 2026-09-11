@@ -20,7 +20,7 @@ may append a **request** row; only root changes a request's status.
 | 0012 | Structural settlement and teardown-before-terminal | speed-first H21 | Reserved |
 | 0013 | Context-source identity in the plan descriptor | speed-first H28 | Reserved |
 | 0014 | Typed final output contract | speed-first HC3 | Reserved |
-| 0015 | Remote client authentication: pairing-code enrollment, per-client credentials | multi-surface S2 | Reserved |
+| 0015 | Remote client authentication: pairing-code enrollment, per-client credentials | multi-surface S2 | Proposed: `docs/adr/0015-pairing-code-client-enrollment.md` |
 | 0016 | Remote exposure: loopback default, TLS required off loopback, `tailscale serve` front | multi-surface S4 | Reserved |
 | 0017 | Client UI stack: Rust/WASM, framework chosen by the W1 spike | multi-surface W1/U1 | Reserved |
 | 0018 | `apps/` as a separate Cargo workspace | multi-surface U1 | Reserved |
