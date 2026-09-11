@@ -368,11 +368,17 @@ identical digest, epoch, and live bindings keep the live generation, otherwise t
 generation is published atomically for later runs while active runs keep the
 `Arc` they were admitted with. A failed recompile returns the configuration
 error to the triggering run and leaves the previous generation cached. The
-cache has hard entry and estimated-byte bounds, evicts least-recently-used
-inactive generations, never evicts a generation an active run holds, fails
-admission explicitly when pinned generations exhaust the bound, compiles one
-generation per key at a time under refresh storms, and refuses loads after
-shutdown.
+cache has hard entry and estimated-byte bounds that cover live slots, their
+recorded source evidence, and superseded generations a run still holds; it
+admits a replacement (or the growth of an equivalent plan's evidence) before
+displacing the previous generation, so a rejected refresh leaves the cache
+exactly as it was; evicts least-recently-used inactive generations; never
+evicts a generation an active run holds; fails admission explicitly when
+pinned generations exhaust the bound; compiles one generation per key at a
+time under refresh storms and reclaims the guard when the load finishes; and
+refuses loads after shutdown. Cache keys carry the inline configuration
+document as an exactly compared, never hashed value whose `Debug` output is
+redacted.
 
 A run's `RunPlanIdentity` — the selected profile, descriptor version, digest,
 and credential epoch — is written in the same statement that moves the run to

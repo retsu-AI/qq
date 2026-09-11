@@ -10,7 +10,7 @@ dated entries appended below, newest last.
 | 5a-windows | Full native Windows workspace run | Planned | | Targeted `windows-teardown` CI job passes; full qualification not claimed |
 | H20 | Wake-driven control admission; delete 13 `sleep(1 ms)` loops; ≤20 ms output gap | In review | `perf/h20-control-admission` (`ab6de6f`, `d05e474`) | Gap median 24 → 20 ms, p95 28 → 33 ms (bimodal tail, 27/30 samples ≤22 ms). Executable budget stays 50 ms until p95 qualifies. ADR-0011 |
 | H21.1 | Behavioral settlement: `RunIdentity`, `RunSettlement`, `PersistenceFault`, teardown-before-terminal structural | Planned | | After H20. ADR-0012 reserved |
-| H27 | Superseded-generation accounting, atomic refresh admission, guard reclamation | Planned | | Pinned LRU and admission already exist (`src/plan.rs`) |
+| H27 | Superseded-generation accounting, atomic refresh admission, guard reclamation | In review | `feat/speed-first-phase-5b-6` | Pinned LRU and admission already existed (`src/plan.rs`) |
 | H28 | Typed context-source capacity error; sources in descriptor | Planned | | `DESCRIPTOR_VERSION` bump. ADR-0013 reserved |
 | H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | Planned | | |
 | H18 | `Arc<Vec<Message>>`, prompt prefix, `RawValue` schemas | Planned | | Add `provider_encode` bench first |
@@ -230,3 +230,27 @@ is deferred to H22 with a note rather than folded into H20.
 Evidence: `target/qq-perf/h20-2026-09-09/` (untracked): baseline and
 candidate worker binaries by SHA, `ab2-*.jsonl`, `aa-*.jsonl`, pressure
 snapshots, and `summarize.py`.
+
+### 2026-09-11 — Phase 5b/6 completion branch opened
+
+Branch `feat/speed-first-phase-5b-6` from `66ad201`. One branch, one commit
+per slice, in this order: H27, H28, H22.1, H21.1, HC1, HC3, HC4, H18, H19,
+H21.2, H22.2. Versions at start: protocol 17 (the plan said 16; corrected
+below), capabilities 1, descriptor 5, schema 25, H0 fixture 4.
+
+#### H27 receipt
+
+`src/plan.rs` only. `PlanKey` no longer derives `Hash` or `Debug`; the
+single-flight map is a linear `Vec` keyed by exact comparison, and `Debug`
+redacts the inline document. Superseded generations a run still holds move to
+`State::superseded` and count toward both limits until released. A replacement
+is admitted before the old slot is removed (unpinned predecessor excluded from
+the count, pinned one included), so a `Capacity` rejection leaves the previous
+generation served. An equivalent-plan refresh admits only the growth of its
+evidence, which now includes `sources`. Compile guards are removed when the
+last holder finishes. Tests +5 (`plan_key_debug_redacts_inline_configuration`,
+`same_key_refresh_keeps_a_pinned_predecessor_in_the_accounting`,
+`rejected_replacement_keeps_the_previous_generation`,
+`equivalent_refresh_admits_grown_source_evidence`,
+`completed_compile_guards_are_reclaimed_under_distinct_key_churn`); root crate
+109 passed. Cold path only; no gate.
