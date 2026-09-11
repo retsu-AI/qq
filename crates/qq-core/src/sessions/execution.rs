@@ -89,6 +89,20 @@ pub(super) enum ExecutionCleanupError {
     Children(#[source] crate::runtime::ChildCleanupError),
 }
 
+/// Proof that a run's tools and children were drained. The store requires it
+/// to settle a started run, so a terminal event cannot be published while
+/// execution is still in flight; only `RunResources::drain` / `stop` mint it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TeardownComplete(());
+
+impl TeardownComplete {
+    /// Store-level tests settle claims that never ran anything.
+    #[cfg(test)]
+    pub(super) const fn nothing_ran() -> Self {
+        Self(())
+    }
+}
+
 #[cfg(test)]
 static STOP_OBSERVERS: Mutex<Vec<(RunId, oneshot::Sender<()>)>> = Mutex::new(Vec::new());
 
@@ -105,16 +119,19 @@ impl RunResources {
         self.run_id = Some(run_id);
         self
     }
-    pub(super) async fn drain(&self) -> Result<(), ExecutionCleanupError> {
+    pub(super) async fn drain(&self) -> Result<TeardownComplete, ExecutionCleanupError> {
         let (tools, children) = tokio::join!(self.tools.drain(), self.children.drain());
         match (tools, children) {
-            (Ok(()), Ok(_)) => Ok(()),
+            (Ok(()), Ok(_)) => Ok(TeardownComplete(())),
             (Err(error), _) => Err(ExecutionCleanupError::Tools(error)),
             (_, Err(error)) => Err(ExecutionCleanupError::Children(error)),
         }
     }
 
-    async fn stop(&self, events: &mut crate::RuntimeStream) -> Result<(), ExecutionCleanupError> {
+    async fn stop(
+        &self,
+        events: &mut crate::RuntimeStream,
+    ) -> Result<TeardownComplete, ExecutionCleanupError> {
         *events = Box::pin(futures_util::stream::empty());
         #[cfg(test)]
         {
@@ -472,7 +489,7 @@ pub(super) async fn execute_run(
         return;
     }
     loop {
-        let prepared =
+        let mut prepared =
             match prepare_execution(&inner, &mut claimed, &loaded, &mut cancellation, &resources)
                 .await
             {
@@ -586,10 +603,17 @@ pub(super) async fn execute_run(
                 {
                     Ok(cancelled) => cancelled || *cancellation.borrow(),
                     Err(error) => {
+                        // The row is started but the provider stream was
+                        // never polled: dropping it is the whole teardown.
+                        let Ok(teardown) = resources.stop(&mut prepared.events).await else {
+                            inner.failed.send_replace(true);
+                            return;
+                        };
                         finish_run(
                             &inner,
                             &claimed,
                             persistence_failure("failed to re-read run cancellation", &error),
+                            teardown,
                         )
                         .await;
                         return;
@@ -597,17 +621,26 @@ pub(super) async fn execute_run(
                 };
                 if *inner.failed.borrow() {
                     prepared.tool_cancellation.store(true, Ordering::Release);
+                    let Ok(teardown) = resources.stop(&mut prepared.events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         internal_failure("session runtime failed before provider work"),
+                        teardown,
                     )
                     .await;
                     return;
                 }
                 if cancelled {
                     prepared.tool_cancellation.store(true, Ordering::Release);
-                    finish_run(&inner, &claimed, RunOutcome::Cancelled).await;
+                    let Ok(teardown) = resources.stop(&mut prepared.events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
+                    finish_run(&inner, &claimed, RunOutcome::Cancelled, teardown).await;
                     return;
                 }
                 execute_started_run(
@@ -720,7 +753,7 @@ async fn run_auto_compaction(
     candidate.messages = messages;
     candidate.context_compaction_attempted = true;
     candidate.context_occupancy = None;
-    let prepared =
+    let mut prepared =
         match prepare_execution(inner, &mut candidate, loaded, cancellation, resources).await {
             Ok(prepared) => prepared,
             Err(outcome) => {
@@ -791,7 +824,11 @@ async fn run_auto_compaction(
     } else {
         inner.failed.send_replace(true);
         let outcome = internal_failure("run cancellation registry is unavailable");
-        finish_run(inner, &compaction, outcome.clone()).await;
+        // Started row, unpolled provider stream: dropping it is the teardown.
+        let Ok(teardown) = resources.stop(&mut prepared.events).await else {
+            return false;
+        };
+        finish_run(inner, &compaction, outcome.clone(), teardown).await;
         finish_prepared_run(inner, original, &original_audit, outcome).await;
         return false;
     }
@@ -804,7 +841,11 @@ async fn run_auto_compaction(
         Ok(cancelled) => cancelled,
         Err(error) => {
             let outcome = persistence_failure("failed to re-read compaction cancellation", &error);
-            finish_run(inner, &compaction, outcome.clone()).await;
+            let Ok(teardown) = resources.stop(&mut prepared.events).await else {
+                inner.failed.send_replace(true);
+                return false;
+            };
+            finish_run(inner, &compaction, outcome.clone(), teardown).await;
             finish_prepared_run(inner, original, &original_audit, outcome).await;
             return false;
         }
@@ -812,14 +853,21 @@ async fn run_auto_compaction(
     if *inner.failed.borrow() {
         prepared.tool_cancellation.store(true, Ordering::Release);
         let outcome = internal_failure("session runtime failed before compaction provider work");
-        finish_run(inner, &compaction, outcome.clone()).await;
+        let Ok(teardown) = resources.stop(&mut prepared.events).await else {
+            return false;
+        };
+        finish_run(inner, &compaction, outcome.clone(), teardown).await;
         finish_prepared_run(inner, original, &original_audit, outcome).await;
         return false;
     }
     let compaction_run_id = compaction.identity.run_id;
     if cancelled {
         prepared.tool_cancellation.store(true, Ordering::Release);
-        finish_run(inner, &compaction, RunOutcome::Cancelled).await;
+        let Ok(teardown) = resources.stop(&mut prepared.events).await else {
+            inner.failed.send_replace(true);
+            return false;
+        };
+        finish_run(inner, &compaction, RunOutcome::Cancelled, teardown).await;
     } else {
         execute_started_run(
             Arc::clone(inner),
@@ -977,14 +1025,15 @@ async fn execute_started_run(
     let mut runtime_failed = inner.failed.subscribe();
     if *runtime_failed.borrow() {
         tool_cancellation.store(true, Ordering::Release);
-        if resources.stop(&mut events).await.is_err() {
+        let Ok(teardown) = resources.stop(&mut events).await else {
             inner.failed.send_replace(true);
             return;
-        }
+        };
         finish_run(
             &inner,
             &claimed,
             internal_failure("session runtime failed before provider work"),
+            teardown,
         )
         .await;
         return;
@@ -1080,14 +1129,15 @@ async fn execute_started_run(
             )
             .await
         {
-            if resources.stop(&mut events).await.is_err() {
+            let Ok(teardown) = resources.stop(&mut events).await else {
                 inner.failed.send_replace(true);
                 return;
-            }
+            };
             finish_run(
                 &inner,
                 &claimed,
                 persistence_failure("failed to persist model output", &error),
+                teardown,
             )
             .await;
             return;
@@ -1107,14 +1157,15 @@ async fn execute_started_run(
             )
             .await
         {
-            if resources.stop(&mut events).await.is_err() {
+            let Ok(teardown) = resources.stop(&mut events).await else {
                 inner.failed.send_replace(true);
                 return;
-            }
+            };
             finish_run(
                 &inner,
                 &claimed,
                 persistence_failure("failed to persist tool output", &error),
+                teardown,
             )
             .await;
             return;
@@ -1129,14 +1180,15 @@ async fn execute_started_run(
             )
             .await
         {
-            if resources.stop(&mut events).await.is_err() {
+            let Ok(teardown) = resources.stop(&mut events).await else {
                 inner.failed.send_replace(true);
                 return;
-            }
+            };
             finish_run(
                 &inner,
                 &claimed,
                 persistence_failure("failed to persist reasoning", &error),
+                teardown,
             )
             .await;
             return;
@@ -1157,14 +1209,15 @@ async fn execute_started_run(
                 )
                 .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist reasoning", &error),
+                        teardown,
                     )
                     .await;
                     return;
@@ -1179,14 +1232,15 @@ async fn execute_started_run(
                 )
                 .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist model output", &error),
+                        teardown,
                     )
                     .await;
                     return;
@@ -1199,14 +1253,15 @@ async fn execute_started_run(
                 )
                 .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist tool output", &error),
+                        teardown,
                     )
                     .await;
                     return;
@@ -1223,14 +1278,15 @@ async fn execute_started_run(
                 )
                 .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist reasoning", &error),
+                        teardown,
                     )
                     .await;
                     return;
@@ -1245,14 +1301,15 @@ async fn execute_started_run(
                 )
                 .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist model output", &error),
+                        teardown,
                     )
                     .await;
                     return;
@@ -1264,11 +1321,18 @@ async fn execute_started_run(
                 } else {
                     RunOutcome::Interrupted
                 };
-                if resources.stop(&mut events).await.is_err() {
+                let Ok(teardown) = resources.stop(&mut events).await else {
                     inner.failed.send_replace(true);
                     return;
-                }
-                finish_run_accounted(&inner, &claimed, outcome, Some(accounting.snapshot())).await;
+                };
+                finish_run_accounted(
+                    &inner,
+                    &claimed,
+                    outcome,
+                    Some(accounting.snapshot()),
+                    teardown,
+                )
+                .await;
                 return;
             }
             RunInput::RuntimeFailed => {
@@ -1281,14 +1345,15 @@ async fn execute_started_run(
                 )
                 .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist reasoning", &error),
+                        teardown,
                     )
                     .await;
                     return;
@@ -1303,27 +1368,29 @@ async fn execute_started_run(
                 )
                 .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist model output", &error),
+                        teardown,
                     )
                     .await;
                     return;
                 }
-                if resources.stop(&mut events).await.is_err() {
+                let Ok(teardown) = resources.stop(&mut events).await else {
                     inner.failed.send_replace(true);
                     return;
-                }
+                };
                 finish_run_accounted(
                     &inner,
                     &claimed,
                     internal_failure("session runtime failed during provider work"),
                     Some(accounting.snapshot()),
+                    teardown,
                 )
                 .await;
                 return;
@@ -1338,14 +1405,15 @@ async fn execute_started_run(
                 if let Some(identity) = identity
                     && let Err(error) = inner.store.record_prompt_identity(&claimed, identity).await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist the run prompt identity", &error),
+                        teardown,
                     )
                     .await;
                     return;
@@ -1371,11 +1439,11 @@ async fn execute_started_run(
                 match plan {
                     context::ContextPlan::Send { .. } => {}
                     plan => {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
-                        finish_run(&inner, &claimed, planned_context_failure(plan)).await;
+                        };
+                        finish_run(&inner, &claimed, planned_context_failure(plan), teardown).await;
                         return;
                     }
                 }
@@ -1394,14 +1462,15 @@ async fn execute_started_run(
                 match inner.store.append_run_activity(&claimed, activity).await {
                     Ok(_) => {}
                     Err(error) => {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run(
                             &inner,
                             &claimed,
                             persistence_failure("failed to persist run activity", &error),
+                            teardown,
                         )
                         .await;
                         return;
@@ -1421,14 +1490,15 @@ async fn execute_started_run(
                 {
                     Ok(_) => {}
                     Err(error) => {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run(
                             &inner,
                             &claimed,
                             persistence_failure("failed to persist reasoning", &error),
+                            teardown,
                         )
                         .await;
                         return;
@@ -1451,14 +1521,15 @@ async fn execute_started_run(
                     {
                         Ok(_) => {}
                         Err(error) => {
-                            if resources.stop(&mut events).await.is_err() {
+                            let Ok(teardown) = resources.stop(&mut events).await else {
                                 inner.failed.send_replace(true);
                                 return;
-                            }
+                            };
                             finish_run(
                                 &inner,
                                 &claimed,
                                 persistence_failure("failed to persist reasoning", &error),
+                                teardown,
                             )
                             .await;
                             return;
@@ -1483,14 +1554,15 @@ async fn execute_started_run(
                     )
                     .await
                     {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run(
                             &inner,
                             &claimed,
                             persistence_failure("failed to persist reasoning", &error),
+                            teardown,
                         )
                         .await;
                         return;
@@ -1511,14 +1583,15 @@ async fn execute_started_run(
                 {
                     Ok(_) => {}
                     Err(error) => {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run(
                             &inner,
                             &claimed,
                             persistence_failure("failed to persist reasoning", &error),
+                            teardown,
                         )
                         .await;
                         return;
@@ -1576,10 +1649,10 @@ async fn execute_started_run(
                     {
                         Ok(_) => {}
                         Err(error) => {
-                            if resources.stop(&mut events).await.is_err() {
+                            let Ok(teardown) = resources.stop(&mut events).await else {
                                 inner.failed.send_replace(true);
                                 return;
-                            }
+                            };
                             finish_run(
                                 &inner,
                                 &claimed,
@@ -1587,6 +1660,7 @@ async fn execute_started_run(
                                     "failed to persist the completed compaction turn",
                                     &error,
                                 ),
+                                teardown,
                             )
                             .await;
                             return;
@@ -1604,14 +1678,15 @@ async fn execute_started_run(
                 )
                 .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist model output", &error),
+                        teardown,
                     )
                     .await;
                     return;
@@ -1660,10 +1735,10 @@ async fn execute_started_run(
                 {
                     Ok(_) => {}
                     Err(error) => {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run(
                             &inner,
                             &claimed,
@@ -1671,6 +1746,7 @@ async fn execute_started_run(
                                 "failed to persist the completed model turn",
                                 &error,
                             ),
+                            teardown,
                         )
                         .await;
                         return;
@@ -1701,14 +1777,15 @@ async fn execute_started_run(
                 match inner.store.record_audit(&claimed, record).await {
                     Ok(_) => {}
                     Err(error) => {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run(
                             &inner,
                             &claimed,
                             persistence_failure("failed to persist the audit record", &error),
+                            teardown,
                         )
                         .await;
                         return;
@@ -1730,14 +1807,15 @@ async fn execute_started_run(
                 match inner.store.start_tool_call(&claimed, id).await {
                     Ok(_) => {}
                     Err(error) => {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run(
                             &inner,
                             &claimed,
                             persistence_failure("failed to persist the started tool call", &error),
+                            teardown,
                         )
                         .await;
                         return;
@@ -1757,14 +1835,15 @@ async fn execute_started_run(
                     )
                     .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist tool output", &error),
+                        teardown,
                     )
                     .await;
                     return;
@@ -1787,14 +1866,15 @@ async fn execute_started_run(
                     )
                     .await
                     {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run(
                             &inner,
                             &claimed,
                             persistence_failure("failed to persist tool output", &error),
+                            teardown,
                         )
                         .await;
                         return;
@@ -1822,14 +1902,15 @@ async fn execute_started_run(
                 )
                 .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist tool output", &error),
+                        teardown,
                     )
                     .await;
                     return;
@@ -1841,14 +1922,15 @@ async fn execute_started_run(
                 {
                     Ok(_) => {}
                     Err(error) => {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run(
                             &inner,
                             &claimed,
                             persistence_failure("failed to persist the tool result", &error),
+                            teardown,
                         )
                         .await;
                         return;
@@ -1882,14 +1964,15 @@ async fn execute_started_run(
                     )
                     .await
                     {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run(
                             &inner,
                             &claimed,
                             persistence_failure("failed to persist model output", &error),
+                            teardown,
                         )
                         .await;
                         return;
@@ -1907,14 +1990,15 @@ async fn execute_started_run(
                     )
                     .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist model output", &error),
+                        teardown,
                     )
                     .await;
                     return;
@@ -1935,14 +2019,15 @@ async fn execute_started_run(
                     )
                     .await
                     {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run(
                             &inner,
                             &claimed,
                             persistence_failure("failed to persist model output", &error),
+                            teardown,
                         )
                         .await;
                         return;
@@ -1961,14 +2046,15 @@ async fn execute_started_run(
                 {
                     Ok(_) => {}
                     Err(error) => {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run(
                             &inner,
                             &claimed,
                             persistence_failure("failed to persist applied steering", &error),
+                            teardown,
                         )
                         .await;
                         return;
@@ -1984,14 +2070,15 @@ async fn execute_started_run(
                 match inner.store.record_interrupted(&claimed, turn_ordinal).await {
                     Ok(_) => {}
                     Err(error) => {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run(
                             &inner,
                             &claimed,
                             persistence_failure("failed to persist the interrupted turn", &error),
+                            teardown,
                         )
                         .await;
                         return;
@@ -2012,14 +2099,15 @@ async fn execute_started_run(
                 {
                     Ok(_) => {}
                     Err(error) => {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run(
                             &inner,
                             &claimed,
                             persistence_failure("failed to persist the truncated turn", &error),
+                            teardown,
                         )
                         .await;
                         return;
@@ -2030,10 +2118,10 @@ async fn execute_started_run(
                 if internal {
                     let summary = std::mem::take(&mut summary_text);
                     if summary.trim().is_empty() {
-                        if resources.stop(&mut events).await.is_err() {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
-                        }
+                        };
                         finish_run_accounted(
                             &inner,
                             &claimed,
@@ -2044,17 +2132,23 @@ async fn execute_started_run(
                                 },
                             },
                             Some(accounting.snapshot()),
+                            teardown,
                         )
                         .await;
                         return;
                     }
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     match inner
                         .store
-                        .finish_compaction_run(&claimed, summary, Some(accounting.snapshot()))
+                        .finish_compaction_run(
+                            &claimed,
+                            summary,
+                            Some(accounting.snapshot()),
+                            teardown,
+                        )
                         .await
                     {
                         Ok(events) => {
@@ -2082,27 +2176,29 @@ async fn execute_started_run(
                 )
                 .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist model output", &error),
+                        teardown,
                     )
                     .await;
                     return;
                 }
-                if resources.stop(&mut events).await.is_err() {
+                let Ok(teardown) = resources.stop(&mut events).await else {
                     inner.failed.send_replace(true);
                     return;
-                }
+                };
                 finish_run_accounted(
                     &inner,
                     &claimed,
                     RunOutcome::Completed,
                     Some(accounting.snapshot()),
+                    teardown,
                 )
                 .await;
                 return;
@@ -2118,22 +2214,23 @@ async fn execute_started_run(
                 )
                 .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist model output", &error),
+                        teardown,
                     )
                     .await;
                     return;
                 }
-                if resources.stop(&mut events).await.is_err() {
+                let Ok(teardown) = resources.stop(&mut events).await else {
                     inner.failed.send_replace(true);
                     return;
-                }
+                };
                 finish_run_accounted(
                     &inner,
                     &claimed,
@@ -2141,6 +2238,7 @@ async fn execute_started_run(
                         exhaustion: Box::new(exhaustion),
                     },
                     Some(accounting.snapshot()),
+                    teardown,
                 )
                 .await;
                 return;
@@ -2156,22 +2254,23 @@ async fn execute_started_run(
                 )
                 .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist model output", &error),
+                        teardown,
                     )
                     .await;
                     return;
                 }
-                if resources.stop(&mut events).await.is_err() {
+                let Ok(teardown) = resources.stop(&mut events).await else {
                     inner.failed.send_replace(true);
                     return;
-                }
+                };
                 finish_run_accounted(
                     &inner,
                     &claimed,
@@ -2182,6 +2281,7 @@ async fn execute_started_run(
                         },
                     },
                     Some(accounting.snapshot()),
+                    teardown,
                 )
                 .await;
                 return;
@@ -2195,14 +2295,15 @@ async fn execute_started_run(
                 )
                 .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist reasoning", &error),
+                        teardown,
                     )
                     .await;
                     return;
@@ -2217,27 +2318,29 @@ async fn execute_started_run(
                 )
                 .await
                 {
-                    if resources.stop(&mut events).await.is_err() {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
-                    }
+                    };
                     finish_run(
                         &inner,
                         &claimed,
                         persistence_failure("failed to persist model output", &error),
+                        teardown,
                     )
                     .await;
                     return;
                 }
-                if resources.stop(&mut events).await.is_err() {
+                let Ok(teardown) = resources.stop(&mut events).await else {
                     inner.failed.send_replace(true);
                     return;
-                }
+                };
                 finish_run_accounted(
                     &inner,
                     &claimed,
                     internal_failure("model stream ended without a terminal event"),
                     Some(accounting.snapshot()),
+                    teardown,
                 )
                 .await;
                 return;
@@ -2357,12 +2460,15 @@ async fn persist_text(
     Ok(())
 }
 
+/// Settles a started run. `teardown` proves the run's tools and children were
+/// drained first; the store will not settle a started run without it.
 pub(super) async fn finish_run(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
     outcome: RunOutcome,
+    teardown: TeardownComplete,
 ) {
-    finish_run_accounted(inner, claimed, outcome, None).await;
+    finish_run_accounted(inner, claimed, outcome, None, teardown).await;
 }
 
 async fn finish_run_accounted(
@@ -2370,8 +2476,13 @@ async fn finish_run_accounted(
     claimed: &ClaimedRun,
     outcome: RunOutcome,
     accounting: Option<RunAccounting>,
+    teardown: TeardownComplete,
 ) {
-    match inner.store.finish_run(claimed, outcome, accounting).await {
+    match inner
+        .store
+        .finish_run(claimed, outcome, accounting, teardown)
+        .await
+    {
         Ok(events) => {
             for event in events {
                 inner.notify(event.cursor);

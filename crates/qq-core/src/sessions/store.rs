@@ -1354,11 +1354,15 @@ impl Store {
         .await
     }
 
+    /// Settles a started run. `TeardownComplete` is only minted by draining
+    /// the run's execution resources, so a terminal `RunFinished` cannot be
+    /// committed while tools or children are still running.
     pub(super) async fn finish_run(
         &self,
         claimed: &ClaimedRun,
         outcome: RunOutcome,
         accounting: Option<RunAccounting>,
+        _teardown: TeardownComplete,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let claimed = claimed.clone();
@@ -1376,6 +1380,7 @@ impl Store {
         claimed: &ClaimedRun,
         summary: String,
         accounting: Option<RunAccounting>,
+        _teardown: TeardownComplete,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let claimed = claimed.clone();

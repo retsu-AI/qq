@@ -67,7 +67,7 @@ pub use store::STORE_SCHEMA_VERSION;
 use approvals::ConcludedApproval;
 #[cfg(test)]
 use execution::RunAccountingAccumulator;
-use execution::{ModelTurnCommit, RunAccounting, add_usage};
+use execution::{ModelTurnCommit, RunAccounting, TeardownComplete, add_usage};
 use store::Store;
 #[cfg(test)]
 use store::{Priority, has_column, open_database};
@@ -3919,6 +3919,11 @@ fn complete_run(
     accounting: Option<RunAccounting>,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    // Guard before any write: a replayed settlement must leave the superseded
+    // steering rows exactly as the first settlement left them.
+    if run_is_settled(&transaction, claimed.identity.run_id)? {
+        return Ok(Vec::new());
+    }
     let mut events = Vec::new();
     supersede_pending_steering(
         &transaction,
@@ -3927,13 +3932,14 @@ fn complete_run(
         now_ms(),
         &mut events,
     )?;
-    events.push(finalize_run(
+    events.push(expect_settled(settle_run(
         &transaction,
         store_id,
         claimed,
         outcome,
         accounting,
-    )?);
+        SettlementCause::Executor,
+    )?)?);
     append_parent_session_update(
         &transaction,
         store_id,
@@ -3960,6 +3966,11 @@ fn complete_compaction(
     accounting: Option<RunAccounting>,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    // A settled compaction already committed (or rejected) its marker; a
+    // replay must not insert a second one.
+    if run_is_settled(&transaction, claimed.identity.run_id)? {
+        return Ok(Vec::new());
+    }
     // A cancel that raced the summarizer's completion wins: the run settles
     // cancelled and no marker is committed.
     let mut outcome =
@@ -4031,13 +4042,14 @@ fn complete_compaction(
                     ),
                 },
             };
-            events.push(finalize_run(
+            events.push(expect_settled(settle_run(
                 &transaction,
                 store_id,
                 claimed,
                 failed,
                 accounting,
-            )?);
+                SettlementCause::Executor,
+            )?)?);
             append_parent_session_update(
                 &transaction,
                 store_id,
@@ -4083,13 +4095,14 @@ fn complete_compaction(
                  WHERE id = ?1",
             [claimed.identity.session_id.to_string()],
         )?;
-        events.push(finalize_run(
+        events.push(expect_settled(settle_run(
             &transaction,
             store_id,
             claimed,
             outcome,
             accounting,
-        )?);
+            SettlementCause::Executor,
+        )?)?);
         let session = load_session_summary(&transaction, claimed.identity.session_id)?;
         events.push(append_event(
             &transaction,
@@ -4102,13 +4115,14 @@ fn complete_compaction(
             },
         )?);
     } else {
-        events.push(finalize_run(
+        events.push(expect_settled(settle_run(
             &transaction,
             store_id,
             claimed,
             outcome,
             accounting,
-        )?);
+            SettlementCause::Executor,
+        )?)?);
     }
     append_parent_session_update(
         &transaction,
@@ -4123,23 +4137,67 @@ fn complete_compaction(
     Ok(events)
 }
 
-/// Settles a claimed run inside an open transaction: outcome, usage and cost
-/// accounting, message states, session status, and the `RunFinished` event.
-fn finalize_run(
+/// Who is settling a started run. The executor that owns the run knows the
+/// command that queued it; recovery and panic sweeps settle rows they never
+/// claimed and record no cause.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SettlementCause {
+    Executor,
+    Recovery,
+}
+
+/// Result of a settlement attempt: the `RunFinished` envelope when this call
+/// settled the run, `None` when the run already carried an outcome and
+/// nothing was written. A run settles exactly once through any path.
+type RunSettled = Option<SessionEventEnvelope>;
+
+/// For callers that checked `run_is_settled` earlier in the same transaction:
+/// `None` there means the row changed under an open write transaction, which
+/// SQLite forbids.
+fn expect_settled(settled: RunSettled) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+    settled.ok_or(SessionRuntimeError::CONSTRAINT)
+}
+
+fn run_is_settled(transaction: &Connection, run_id: RunId) -> Result<bool, SessionRuntimeError> {
+    let settled = transaction
+        .query_row(
+            "SELECT outcome_json IS NOT NULL FROM runs WHERE id = ?1",
+            [run_id.to_string()],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()?;
+    // A missing row has nothing left to settle either.
+    Ok(settled.unwrap_or(true))
+}
+
+/// Settles a started run inside an open transaction: outcome, usage and cost
+/// accounting, message states, tool-call interruption, session status, and
+/// the `RunFinished` event. This is the only path that writes a started run's
+/// `outcome_json`; the pre-read guard makes any replay a no-op.
+fn settle_run(
     transaction: &Connection,
     store_id: StoreId,
     claimed: &ClaimedRun,
     outcome: RunOutcome,
     accounting: Option<RunAccounting>,
-) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+    cause: SettlementCause,
+) -> Result<RunSettled, SessionRuntimeError> {
+    let already_settled = run_is_settled(transaction, claimed.identity.run_id)?;
+    if already_settled {
+        return Ok(None);
+    }
     let now = now_ms();
+    let caused_by = match cause {
+        SettlementCause::Executor => Some(claimed.identity.command_id),
+        SettlementCause::Recovery => None,
+    };
     let outcome = cancellation_wins(transaction, claimed.identity.run_id, outcome)?;
     interrupt_active_tool_calls(
         transaction,
         store_id,
         claimed.identity,
         &outcome,
-        Some(claimed.identity.command_id),
+        caused_by,
         now,
     )?;
     let (run_status, message_state) = outcome_states(&outcome);
@@ -4188,11 +4246,17 @@ fn finalize_run(
     };
     // Terminal accounting owns the final per-turn figure only when a model
     // turn completed. No completed turn preserves an earlier committed value;
-    // an unmeasured completed turn explicitly clears it.
+    // an unmeasured completed turn explicitly clears it. Recovery never held
+    // the accumulator, so the row keeps whatever its last committed turn
+    // recorded.
+    let preserve_run_accounting = cause == SettlementCause::Recovery;
     transaction.execute(
         "UPDATE runs
              SET status = ?2, outcome_json = ?3, finished_at_ms = ?4,
-                 usage_json = ?5, estimated_cost_usd_nanos = ?6,
+                 usage_json = CASE WHEN ?9 THEN usage_json ELSE ?5 END,
+                 estimated_cost_usd_nanos = CASE
+                     WHEN ?9 THEN estimated_cost_usd_nanos ELSE ?6
+                 END,
                  context_tokens = CASE WHEN ?8 THEN ?7 ELSE context_tokens END
              WHERE id = ?1 AND outcome_json IS NULL",
         params![
@@ -4204,6 +4268,7 @@ fn finalize_run(
             cost,
             reported_context_tokens,
             saw_turn,
+            preserve_run_accounting,
         ],
     )?;
     let context_tokens = run_context_tokens(transaction, claimed.identity.run_id)?;
@@ -4242,9 +4307,14 @@ fn finalize_run(
         ],
     )?;
     let summary = load_session_summary(transaction, claimed.identity.session_id)?;
+    let context = EventContext::for_run(store_id, claimed.identity, now);
+    let context = match cause {
+        SettlementCause::Executor => context,
+        SettlementCause::Recovery => context.uncaused(),
+    };
     append_event(
         transaction,
-        EventContext::for_run(store_id, claimed.identity, now),
+        context,
         SessionEvent::RunFinished {
             session: summary,
             run_id: claimed.identity.run_id,
@@ -4253,6 +4323,7 @@ fn finalize_run(
             context_tokens,
         },
     )
+    .map(Some)
 }
 
 /// The run row's persisted context occupancy: the input-token total of its
@@ -4270,6 +4341,7 @@ fn run_context_tokens(
         .map_err(|_| SessionRuntimeError::CODEC)
 }
 
+/// Cancels a run the caller has just read as `queued` in this transaction.
 fn finish_queued_run(
     transaction: &Connection,
     store_id: StoreId,
@@ -4278,7 +4350,7 @@ fn finish_queued_run(
     run_id: RunId,
     now: u64,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
-    finish_queued_run_with_outcome(
+    expect_settled(finish_queued_run_with_outcome(
         transaction,
         store_id,
         workspace_id,
@@ -4286,9 +4358,11 @@ fn finish_queued_run(
         run_id,
         RunOutcome::Cancelled,
         now,
-    )
+    )?)
 }
 
+/// Settles a run that never started. Only a `queued` row without an outcome
+/// is written; a started or already-settled row is left untouched.
 fn finish_queued_run_with_outcome(
     transaction: &Connection,
     store_id: StoreId,
@@ -4297,18 +4371,18 @@ fn finish_queued_run_with_outcome(
     run_id: RunId,
     outcome: RunOutcome,
     now: u64,
-) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+) -> Result<RunSettled, SessionRuntimeError> {
     let outcome = cancellation_wins(transaction, run_id, outcome)?;
     let (run_status, message_state) = outcome_states(&outcome);
     let outcome_json = serde_json::to_string(&outcome)?;
     let settled = transaction.execute(
         "UPDATE runs
              SET status = ?2, outcome_json = ?3, finished_at_ms = ?4
-             WHERE id = ?1 AND status = 'queued'",
+             WHERE id = ?1 AND status = 'queued' AND outcome_json IS NULL",
         params![run_id.to_string(), run_status, outcome_json, now],
     )?;
     if settled != 1 {
-        return Err(SessionRuntimeError::Unavailable);
+        return Ok(None);
     }
     transaction.execute(
         "UPDATE messages SET state = ?2 WHERE run_id = ?1 AND state = 'queued'",
@@ -4343,6 +4417,7 @@ fn finish_queued_run_with_outcome(
             context_tokens: None,
         },
     )
+    .map(Some)
 }
 
 fn finish_reserved_run(
@@ -4368,7 +4443,7 @@ fn finish_reserved_run(
     if status != "queued" {
         return Err(SessionRuntimeError::Unavailable);
     }
-    let mut events = vec![finish_queued_run_with_outcome(
+    let mut events = vec![expect_settled(finish_queued_run_with_outcome(
         &transaction,
         store_id,
         identity.workspace_id,
@@ -4376,7 +4451,7 @@ fn finish_reserved_run(
         identity.run_id,
         outcome,
         now_ms(),
-    )?];
+    )?)?];
     append_parent_session_update(
         &transaction,
         store_id,
@@ -4434,7 +4509,7 @@ fn finish_prepared_run(
     if recorded != 1 {
         return Err(SessionRuntimeError::Unavailable);
     }
-    let mut events = vec![finish_queued_run_with_outcome(
+    let mut events = vec![expect_settled(finish_queued_run_with_outcome(
         &transaction,
         store_id,
         identity.workspace_id,
@@ -4442,7 +4517,7 @@ fn finish_prepared_run(
         identity.run_id,
         outcome,
         now_ms(),
-    )?];
+    )?)?];
     append_parent_session_update(
         &transaction,
         store_id,
@@ -4557,12 +4632,14 @@ fn settle_panicked_execution(
                 pending_steering: Vec::new(),
                 purpose: original.purpose,
             };
-            events.push(complete_run_in_transaction(
+            events.push(expect_settled(settle_run(
                 &transaction,
                 store_id,
                 &active_claim,
                 outcome.clone(),
-            )?);
+                None,
+                SettlementCause::Recovery,
+            )?)?);
             if !run_ids.contains(&active_run_id) {
                 run_ids.push(active_run_id);
             }
@@ -4572,7 +4649,7 @@ fn settle_panicked_execution(
         && status == "queued"
         && stored_outcome.is_none()
     {
-        events.push(finish_queued_run_with_outcome(
+        events.push(expect_settled(finish_queued_run_with_outcome(
             &transaction,
             store_id,
             original.identity.workspace_id,
@@ -4580,7 +4657,7 @@ fn settle_panicked_execution(
             original.identity.run_id,
             outcome,
             now_ms(),
-        )?);
+        )?)?);
     }
     if !events.is_empty() {
         append_parent_session_update(
@@ -4915,61 +4992,18 @@ fn recover_interrupted_runs(
             pending_steering: Vec::new(),
             purpose: SessionPurpose::Task,
         };
-        let event =
-            complete_run_in_transaction(&transaction, store_id, &claimed, RunOutcome::Interrupted)?;
+        let event = expect_settled(settle_run(
+            &transaction,
+            store_id,
+            &claimed,
+            RunOutcome::Interrupted,
+            None,
+            SettlementCause::Recovery,
+        )?)?;
         cursors.push(event.cursor);
     }
     transaction.commit()?;
     Ok(cursors)
-}
-
-fn complete_run_in_transaction(
-    transaction: &Connection,
-    store_id: StoreId,
-    claimed: &ClaimedRun,
-    outcome: RunOutcome,
-) -> Result<SessionEventEnvelope, SessionRuntimeError> {
-    let now = now_ms();
-    let outcome = cancellation_wins(transaction, claimed.identity.run_id, outcome)?;
-    interrupt_active_tool_calls(transaction, store_id, claimed.identity, &outcome, None, now)?;
-    let (run_status, message_state) = outcome_states(&outcome);
-    let outcome_json = serde_json::to_string(&outcome)?;
-    transaction.execute(
-        "UPDATE runs SET status = ?2, outcome_json = ?3, finished_at_ms = ?4 WHERE id = ?1",
-        params![
-            claimed.identity.run_id.to_string(),
-            run_status,
-            outcome_json,
-            now
-        ],
-    )?;
-    transaction.execute(
-        "UPDATE messages SET state = ?2
-             WHERE run_id = ?1 AND role = 'assistant' AND state = 'streaming'",
-        params![claimed.identity.run_id.to_string(), message_state],
-    )?;
-    transaction.execute(
-        "UPDATE sessions
-             SET active_run_id = NULL,
-                 status = CASE WHEN queued_prompts > 0 THEN 'queued' ELSE 'idle' END,
-                 updated_at_ms = ?2
-             WHERE id = ?1",
-        params![claimed.identity.session_id.to_string(), now],
-    )?;
-    let summary = load_session_summary(transaction, claimed.identity.session_id)?;
-    append_event(
-        transaction,
-        EventContext::for_run(store_id, claimed.identity, now).uncaused(),
-        SessionEvent::RunFinished {
-            session: summary,
-            run_id: claimed.identity.run_id,
-            outcome,
-            // Recovery knows no summed usage, but the run row keeps the last
-            // committed turn's context occupancy.
-            usage: None,
-            context_tokens: run_context_tokens(transaction, claimed.identity.run_id)?,
-        },
-    )
 }
 
 fn interrupt_active_tool_calls(
@@ -14311,7 +14345,12 @@ mod tests {
             .await
             .unwrap();
         store
-            .finish_run(&claimed, RunOutcome::Completed, None)
+            .finish_run(
+                &claimed,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
             .await
             .unwrap();
         store
@@ -14351,7 +14390,12 @@ mod tests {
     async fn malformed_context_bases_are_cleared_while_reserving_instead_of_failing_the_run() {
         let (directory, store, claimed) = claimed_store_fixture().await;
         store
-            .finish_run(&claimed, RunOutcome::Completed, None)
+            .finish_run(
+                &claimed,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
             .await
             .unwrap();
         store
@@ -19099,7 +19143,12 @@ mod tests {
                 .await
                 .unwrap();
             store
-                .finish_run(&claimed, outcome.clone(), None)
+                .finish_run(
+                    &claimed,
+                    outcome.clone(),
+                    None,
+                    TeardownComplete::nothing_ran(),
+                )
                 .await
                 .unwrap();
 
@@ -19303,7 +19352,10 @@ mod tests {
             .request_tool_approval(&claimed, awaiting_call_id, None, None)
             .await
             .unwrap();
-        let finished = store.finish_run(&claimed, outcome, None).await.unwrap();
+        let finished = store
+            .finish_run(&claimed, outcome, None, TeardownComplete::nothing_ran())
+            .await
+            .unwrap();
         let after = finished.last().unwrap().cursor;
         store.close().await.unwrap();
         drop(store);
@@ -19999,6 +20051,7 @@ mod tests {
                     },
                 },
                 None,
+                TeardownComplete::nothing_ran(),
             )
             .await
             .unwrap();
@@ -20128,6 +20181,7 @@ mod tests {
                     },
                 },
                 None,
+                TeardownComplete::nothing_ran(),
             )
             .await
             .unwrap();
@@ -20163,7 +20217,12 @@ mod tests {
             .await
             .unwrap();
         let finished = store
-            .finish_run(&growth_run, RunOutcome::Completed, None)
+            .finish_run(
+                &growth_run,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
             .await
             .unwrap();
         let after = finished.last().unwrap().cursor;
@@ -20418,6 +20477,286 @@ mod tests {
         assert_eq!(focused.messages[1].turn_ordinal, 2);
         assert_eq!(focused.messages[1].output, "done");
         assert_eq!(focused.tool_calls[0].turn_ordinal, 1);
+    }
+
+    /// Every settlement path shares one null guard: a run that already carries
+    /// an outcome is never re-settled, no second `RunFinished` is appended,
+    /// and the session's ownership of a *newer* run is not cleared.
+    #[tokio::test]
+    async fn settling_a_settled_run_is_a_no_op_on_every_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("sessions.sqlite3"))
+            .await
+            .unwrap();
+        let (_, session_id, first) = create_claimed_parent(&store, directory.path()).await;
+        let finished = store
+            .finish_run(
+                &first,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            finished.last().unwrap().event,
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::Completed,
+                ..
+            }
+        ));
+        // A newer run now owns the session; a stale settlement of the first
+        // run must not steal that ownership.
+        store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::text("second".to_owned())],
+                    limits: qq_protocol::RunLimits::default(),
+                    correlation: Correlation::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let second = store.claim_next_run(false).await.unwrap().unwrap();
+        let store_id = store.store_id();
+        let events_before = store
+            .call(Priority::Control, |connection| {
+                Ok(
+                    connection.query_row("SELECT COUNT(*) FROM events", [], |row| {
+                        row.get::<_, u64>(0)
+                    })?,
+                )
+            })
+            .await
+            .unwrap();
+
+        // Path 1: the started-run settlement, replayed.
+        let replayed = store
+            .finish_run(
+                &first,
+                RunOutcome::Cancelled,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        assert!(replayed.is_empty(), "replayed finish_run published events");
+        // Path 2: the recovery / panic settlement path, which previously had
+        // no `outcome_json IS NULL` guard.
+        let first_claim = first.clone();
+        store
+            .call_write(Priority::Control, move |connection| {
+                let transaction = store::begin_unit(connection)?;
+                let settled = settle_run(
+                    &transaction,
+                    store_id,
+                    &first_claim,
+                    RunOutcome::Interrupted,
+                    None,
+                    SettlementCause::Recovery,
+                )?;
+                assert!(settled.is_none());
+                transaction.commit()?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        // Path 3: the queued-run settlement, replayed against a started row.
+        let first_identity = first.identity;
+        store
+            .call_write(Priority::Control, move |connection| {
+                let transaction = store::begin_unit(connection)?;
+                let settled = finish_queued_run_with_outcome(
+                    &transaction,
+                    store_id,
+                    first_identity.workspace_id,
+                    first_identity.session_id,
+                    first_identity.run_id,
+                    RunOutcome::Cancelled,
+                    now_ms(),
+                )?;
+                assert!(settled.is_none());
+                transaction.commit()?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let second_id = second.identity.run_id;
+        let first_id = first.identity.run_id;
+        let (first_row, second_row, active, events_after) = store
+            .call(Priority::Control, move |connection| {
+                Ok((
+                    load_run(connection, first_id)?,
+                    load_run(connection, second_id)?,
+                    connection.query_row(
+                        "SELECT active_run_id FROM sessions WHERE id = ?1",
+                        [session_id.to_string()],
+                        |row| row.get::<_, Option<String>>(0),
+                    )?,
+                    connection.query_row("SELECT COUNT(*) FROM events", [], |row| {
+                        row.get::<_, u64>(0)
+                    })?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(first_row.status, RunStatus::Completed);
+        assert_eq!(first_row.outcome, Some(RunOutcome::Completed));
+        assert_eq!(second_row.status, RunStatus::Running);
+        assert_eq!(active, Some(second_id.to_string()));
+        assert_eq!(
+            events_after, events_before,
+            "a replayed settlement appended events"
+        );
+        store
+            .finish_run(
+                &second,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+    }
+
+    /// An auto-compaction that already committed its marker is not re-settled
+    /// by the original prompt's later teardown: exactly one marker, one
+    /// `RunFinished` for the compaction, and the committed outcome stands.
+    #[tokio::test]
+    async fn a_committed_compaction_is_not_resettled_by_the_prompts_teardown() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("sessions.sqlite3"))
+            .await
+            .unwrap();
+        let (_, session_id, original) = create_claimed_parent(&store, directory.path()).await;
+        // Reset the claim to a reservation so an auto-compaction can start on
+        // the prompt's behalf.
+        store
+            .finish_run(
+                &original,
+                RunOutcome::Cancelled,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::text("long prompt".repeat(64)); 1],
+                    limits: qq_protocol::RunLimits::default(),
+                    correlation: Correlation::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let original = store.reserve_next_run(false).await.unwrap().unwrap();
+        let (compaction, _) = store
+            .start_auto_compaction(&original, test_prepared_audit(&original))
+            .await
+            .unwrap()
+            .unwrap();
+        let summary = "## Summary\n\nThe user asked for a long prompt.".to_owned();
+        let committed = store
+            .finish_compaction_run(&compaction, summary, None, TeardownComplete::nothing_ran())
+            .await
+            .unwrap();
+        let compaction_outcome = committed
+            .iter()
+            .find_map(|event| match &event.event {
+                SessionEvent::RunFinished {
+                    run_id, outcome, ..
+                } if *run_id == compaction.identity.run_id => Some(outcome.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let events_before = store
+            .call(Priority::Control, |connection| {
+                Ok(
+                    connection.query_row("SELECT COUNT(*) FROM events", [], |row| {
+                        row.get::<_, u64>(0)
+                    })?,
+                )
+            })
+            .await
+            .unwrap();
+
+        // The prompt's teardown fails the compaction again (the shape of the
+        // `finish_run(compaction); finish_prepared_run(original)` pairs in
+        // execution.rs) and then the panic path sweeps the session.
+        let replayed = store
+            .finish_run(
+                &compaction,
+                execution::internal_failure("late teardown"),
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        assert!(replayed.is_empty());
+        let swept = store
+            .settle_panicked_execution(&original, execution::internal_failure("late panic sweep"))
+            .await
+            .unwrap();
+        // The sweep settles only the still-queued original, never the
+        // compaction.
+        assert!(swept.events.iter().all(|event| !matches!(
+            &event.event,
+            SessionEvent::RunFinished { run_id, .. } if *run_id == compaction.identity.run_id
+        )));
+
+        let compaction_id = compaction.identity.run_id;
+        let (row, markers, finished_events) = store
+            .call(Priority::Control, move |connection| {
+                Ok((
+                    load_run(connection, compaction_id)?,
+                    connection.query_row(
+                        "SELECT COUNT(*) FROM session_compactions WHERE run_id = ?1",
+                        [compaction_id.to_string()],
+                        |row| row.get::<_, u64>(0),
+                    )?,
+                    connection.query_row(
+                        "SELECT COUNT(*) FROM events
+                             WHERE envelope_json LIKE '%\"type\":\"run_finished\"%'
+                               AND envelope_json LIKE ?1",
+                        [format!("%{compaction_id}%")],
+                        |row| row.get::<_, u64>(0),
+                    )?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(row.outcome, Some(compaction_outcome.clone()));
+        assert_eq!(finished_events, 1, "compaction settled more than once");
+        assert_eq!(
+            markers,
+            u64::from(matches!(compaction_outcome, RunOutcome::Completed))
+        );
+        let events_after = store
+            .call(Priority::Control, |connection| {
+                Ok(
+                    connection.query_row("SELECT COUNT(*) FROM events", [], |row| {
+                        row.get::<_, u64>(0)
+                    })?,
+                )
+            })
+            .await
+            .unwrap();
+        // Only the original's own settlement (and its parent update, if any)
+        // may have been appended by the sweep.
+        assert!(
+            swept.events.len() as u64 == events_after - events_before,
+            "sweep appended {} events but {} were persisted",
+            swept.events.len(),
+            events_after - events_before
+        );
+        store.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -22516,6 +22855,7 @@ mod tests {
                 &compaction,
                 execution::internal_failure("test cleanup"),
                 None,
+                TeardownComplete::nothing_ran(),
             )
             .await
             .unwrap();
@@ -26821,7 +27161,12 @@ mod tests {
         );
         assert!(store.claim_next_run(true).await.unwrap().is_none());
         store
-            .finish_run(&parent, RunOutcome::Cancelled, None)
+            .finish_run(
+                &parent,
+                RunOutcome::Cancelled,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
             .await
             .unwrap();
         assert!(store.unfinished_run_ids().await.unwrap().is_empty());
@@ -26857,7 +27202,12 @@ mod tests {
             .await;
         assert!(matches!(rejected, Err(SessionRuntimeError::RunNotFound)));
         store
-            .finish_run(&cancelling_parent, RunOutcome::Cancelled, None)
+            .finish_run(
+                &cancelling_parent,
+                RunOutcome::Cancelled,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
             .await
             .unwrap();
         assert!(store.unfinished_run_ids().await.unwrap().is_empty());
@@ -26902,11 +27252,21 @@ mod tests {
         assert_eq!(first.cascade_cancels, [child.run_id]);
         assert_eq!(replay.cascade_cancels, [child.run_id]);
         store
-            .finish_run(&claimed_child, RunOutcome::Cancelled, None)
+            .finish_run(
+                &claimed_child,
+                RunOutcome::Cancelled,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
             .await
             .unwrap();
         store
-            .finish_run(&parent, RunOutcome::Cancelled, None)
+            .finish_run(
+                &parent,
+                RunOutcome::Cancelled,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
             .await
             .unwrap();
         assert!(store.unfinished_run_ids().await.unwrap().is_empty());
@@ -30035,7 +30395,12 @@ mod tests {
             Some((RunOutcome::Cancelled, SpawnAgentSpend::NONE))
         );
         store
-            .finish_run(&parent, RunOutcome::Cancelled, None)
+            .finish_run(
+                &parent,
+                RunOutcome::Cancelled,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
             .await
             .unwrap();
         assert_eq!(
