@@ -907,6 +907,15 @@ restarts, and a failed write must not be presented to clients as durable. Do
 not introduce an external database until measurements show SQLite is the
 bottleneck.
 
+A run settles exactly once. Every settlement path — the executor, the queued
+cancel, recovery, and the panic sweep — goes through one guarded write that
+pre-reads the run's outcome and does nothing when it is already set, so a
+replayed settlement never overwrites an outcome, appends a second
+`RunFinished`, or releases a session a newer run now owns. A started run's
+terminal event additionally requires proof that its tools and children were
+drained (`TeardownComplete`, minted only by the execution teardown), so
+publication before teardown does not compile (ADR-0012).
+
 ## Workspaces And Tools
 
 The server executes tools on the machine where it runs. In local `qq` mode,

@@ -484,7 +484,7 @@ imported in Phase 1.
 | H26 | Done | Bounded workspace-feed admission and lifecycle; feed ring | H15 | `qq-core`, server |
 | HC2 | Done | Positive tool exposure via optional `policy.exposed_tools` | H6, H13 | Config, core plan |
 | H20 | In review | Lifecycle store calls wait for admission (13 loops deleted); control writes share the output group commit; scheduler claim no longer closes groups (D8, ADR-0011). Gap median 20 ms; p95 qualification open | H16, H23–H26 | `qq-core` |
-| **H21** | **Next** | `RunIdentity`, `PersistenceFault`, one settlement path; then the `sessions.rs` split (D9) | H15–H17, H20 | `qq-core` |
+| **H21** | **H21.1 in review; H21.2 next** | `RunIdentity`, `PersistenceFault`, one guarded `settle_run`, `TeardownComplete` (D9, ADR-0012) shipped; the `sessions.rs` split (H21.2) remains | H15–H17, H20 | `qq-core` |
 | H27 | Partly open | Same-key refresh drops the old generation before admission; superseded active generations are absent from byte accounting; a rejected replacement loses the old entry; equivalent-plan refresh can grow source evidence without admission; completed per-key compile guards are retained. Pinned-generation LRU and admission already exist and are tested | H2 | Root |
 | H28 | Open | A ninth context source is silently ignored (`lib.rs`); source identity, version, budget, and fail policy are absent from the descriptor | H8 | Core, protocol |
 | H22 | Open | Bundled cold-path and structural fixes (list above) | — | Per crate |

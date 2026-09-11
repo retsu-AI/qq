@@ -9,7 +9,7 @@ dated entries appended below, newest last.
 | 5a-accept | Full version-4 H0 comparison on a quiet host | Planned | | Baseline `1c08cef`, candidate `main`. Prior recordings on the shared host: A/A fails the same tail gates as A/B; retained, not waived |
 | 5a-windows | Full native Windows workspace run | Planned | | Targeted `windows-teardown` CI job passes; full qualification not claimed |
 | H20 | Wake-driven control admission; delete 13 `sleep(1 ms)` loops; ≤20 ms output gap | In review | `perf/h20-control-admission` (`ab6de6f`, `d05e474`) | Gap median 24 → 20 ms, p95 28 → 33 ms (bimodal tail, 27/30 samples ≤22 ms). Executable budget stays 50 ms until p95 qualifies. ADR-0011 |
-| H21.1 | Behavioral settlement: `RunIdentity`, `RunSettlement`, `PersistenceFault`, teardown-before-terminal structural | In progress | `feat/speed-first-phase-5b-6` (`a67b186`, `83647e0`) | Parts a+b shipped on branch; part c (`settle_run` null guard, `TeardownComplete` token, ADR-0012) not started |
+| H21.1 | Behavioral settlement: `RunIdentity`, `RunSettlement`, `PersistenceFault`, teardown-before-terminal structural | In review | `feat/speed-first-phase-5b-6` (`a67b186`, `83647e0`, merged in #22); `refactor/h21-settle-run` (part c) | Parts a+b merged; part c (`settle_run` null guard, `TeardownComplete`, ADR-0012) on branch, 2 regression tests |
 | H27 | Superseded-generation accounting, atomic refresh admission, guard reclamation | In review | `feat/speed-first-phase-5b-6` | Pinned LRU and admission already existed (`src/plan.rs`) |
 | H28 | Typed context-source capacity error; sources in descriptor | In review | `feat/speed-first-phase-5b-6` | `DESCRIPTOR_VERSION` 5 → 6. ADR-0013 |
 | H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | In review | `feat/speed-first-phase-5b-6` | Store schema 25 → 26 (`tool_calls.effect`). MCP permit ordering was already correct |
@@ -304,3 +304,67 @@ and required by `Store::settle_run` so terminal publication cannot compile
 without a drained execution (46 `stop(..).is_err()` sites in
 `execution.rs`); regression tests `settling_a_settled_run_is_a_no_op_on_every_path`
 and the compaction double-marker case; ADR-0012 (reserved in `root.md`).
+
+### 2026-09-11 — H21.1 part c: one settlement path, teardown token
+
+Branch `refactor/h21-settle-run` from `73a3a57` (v0.0.2, which merged
+parts a+b in #22). Owned paths: `crates/qq-core/src/sessions.rs`,
+`sessions/{store,execution}.rs`, ADR-0012, this ledger, `root.md`,
+`architecture.md` § Persistence, the plan's H21 status row.
+
+#### H21.1c receipt
+
+`settle_run(transaction, store_id, claimed, outcome, accounting, cause)`
+replaces `finalize_run` and `complete_run_in_transaction`; it pre-reads
+`outcome_json IS NOT NULL` via `run_is_settled` and returns `None` without
+writing when the run already carries an outcome. `SettlementCause::{Executor,
+Recovery}` folds the two former flavours: recovery emits the event uncaused
+and preserves the run row's committed `usage_json` /
+`estimated_cost_usd_nanos` (a `CASE WHEN ?9` in the one `UPDATE runs`);
+the executor overwrites them from the accumulator as before.
+`finish_queued_run_with_outcome` adds `AND outcome_json IS NULL` and returns
+`None` on zero rows instead of `Unavailable`. `complete_run` and
+`complete_compaction` check the guard first so a replay commits nothing (no
+superseded steering, no second compaction marker). `expect_settled` maps a
+`None` after an in-transaction guard read to `PersistenceFault::Constraint`.
+`complete_run_in_transaction` (49 lines) deleted.
+
+`TeardownComplete(())` is minted only by `RunResources::{drain, stop}` and
+required by value in `Store::finish_run` and `Store::finish_compaction_run`.
+The 46 `if resources.stop(..).is_err() { fail; return }` blocks become
+`let Ok(teardown) = resources.stop(..).await else { fail; return };`, and
+seven pre-stream exits (three in `execute_run` after `start_reserved_run`,
+four in `run_auto_compaction` after `start_auto_compaction`) that previously
+settled a started row without any teardown now `stop` the unpolled provider
+stream first. Reserved/prepared settlements are unchanged. Store tests use
+`TeardownComplete::nothing_ran()` (`cfg(test)`).
+
+Tests +2: `settling_a_settled_run_is_a_no_op_on_every_path` (settle, claim a
+second run, replay through `finish_run`, `settle_run(Recovery)`, and the
+queued path; asserts one outcome, `active_run_id` still the second run, and
+an unchanged `events` row count) and
+`a_committed_compaction_is_not_resettled_by_the_prompts_teardown` (commit a
+compaction, replay `finish_run` and `settle_panicked_execution`; asserts one
+`run_finished` event for the compaction and at most one marker). Both were
+run against the pre-change source with the tests transplanted: both fail
+("replayed finish_run published events" / `replayed.is_empty()`), confirming
+they exercise the double settle rather than an incidental difference.
+
+Verification: qq-core 454 passed / 1 ignored; workspace 1,256 passed / 3
+ignored; `cargo fmt --all -- --check`; strict all-target Clippy clean (one
+`large_enum_variant` finding on an intermediate `RunSettled` enum resolved by
+making it `Option<SessionEventEnvelope>`). No gate run: the change adds one
+primary-key `SELECT` to a transaction that already does two `UPDATE`s and an
+`INSERT`, and the token is zero-sized; eight-streams gate deferred to the
+next recording on a quiet host with the other phase-6 slices.
+
+Deviation from the plan text: D9 named a `RunSettlement { identity, outcome,
+accounting, audit }` struct. The six-argument `settle_run` was kept instead —
+every caller already holds a `&ClaimedRun`, and a struct would have added a
+construction site per call without removing a parameter. ADR-0012 records the
+decision as implemented. ADR-0012 written (Accepted); `root.md` updated;
+`architecture.md` § Persistence gains a settlement paragraph.
+
+Open for H21: H21.2 (mechanical split of `sessions.rs` into
+`sessions/{codec, events, snapshots, transcript, claim, streaming,
+tool_calls, settlement, compaction, commands}.rs`) after HC3.
