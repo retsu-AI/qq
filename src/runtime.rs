@@ -3516,7 +3516,7 @@ mod tests {
                 )"#,
             ))
             .unwrap();
-        assert_eq!(plan.descriptor().version, 5);
+        assert_eq!(plan.descriptor().version, 6);
         assert_eq!(plan.descriptor().delegation.roster.len(), 1);
         assert_eq!(plan.descriptor().delegation.roster[0].route, "custom/fast");
         assert_eq!(
@@ -5369,7 +5369,7 @@ mod tests {
                 "descriptor leaked {forbidden}"
             );
         }
-        assert!(canonical.starts_with("qq-agent-plan-descriptor-v5\0{"));
+        assert!(canonical.starts_with("qq-agent-plan-descriptor-v6\0{"));
     }
 
     #[test]

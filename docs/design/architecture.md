@@ -340,8 +340,9 @@ and static header *names*, the resolved model, workspace root, prompt version,
 instruction hash and source, the tool catalog (digest, exposure, admitted
 names, host generations, typed exclusions), the skill index, the selected pack
 (identifier, version, manifest digest, persona hash, tool policy), spawn
-routes, configuration grants, MCP server declarations, and configuration
-source labels. Retry is the provider's alone (`qq_provider::AttemptPolicy`)
+routes, configuration grants, MCP server declarations, configuration
+source labels, and every registered context source (name, version, the
+clamped budget the runtime enforces, fail policy). Retry is the provider's alone (`qq_provider::AttemptPolicy`)
 and is not part of the plan. `AgentPlanDigest` is the SHA-256 of a domain-tagged compact JSON
 encoding in declaration order (`DESCRIPTOR_VERSION` pins the encoding). Secret
 values, secret hashes, live handles, and the credential epoch never enter the
@@ -483,8 +484,10 @@ error rather than degrading.
 ### Context Sources
 
 A `ContextSource` supplies pre-turn context the runtime does not own (memory,
-retrieval, project state). Sources are attached to the profile, bounded to
-eight per plan, and fetched after guidance and before the first provider
+retrieval, project state). Sources are attached to the profile; at most eight
+compile into one plan and a ninth fails compilation with the typed
+`PlanCompileError::TooManyContextSources` before any provider work. They are
+fetched after guidance and before the first provider
 request under a clamped `ContextBudget` (at most 64 KiB, 64 items, 10 s) with
 a bounded LRU `ContextCache` keyed by source and query. Each fetch settles with
 a `ContextSourceOutcome` (`Fetched`, `FetchedTruncated`, `Cached`,

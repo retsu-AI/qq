@@ -622,14 +622,13 @@ impl Runtime {
     }
 
     /// Registers a bounded pre-turn context source. Sources are consulted
-    /// once per run, concurrently, before the first provider request; at
-    /// most [`MAX_CONTEXT_SOURCES`] may be registered and later ones are
-    /// ignored with no effect on the run.
+    /// once per run, concurrently, before the first provider request. At
+    /// most [`MAX_CONTEXT_SOURCES`] may be registered; plan compilation,
+    /// which every run path goes through, rejects more with
+    /// [`plan::PlanCompileError::TooManyContextSources`] before any
+    /// provider work.
     #[must_use]
     pub fn with_context_source(mut self, source: Arc<dyn ContextSource>) -> Self {
-        if self.context_sources.len() >= MAX_CONTEXT_SOURCES {
-            return self;
-        }
         let mut sources = self.context_sources.to_vec();
         sources.push(context_source::RegisteredSource::new(source));
         self.context_sources = sources.into();

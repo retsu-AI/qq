@@ -479,7 +479,12 @@ impl PlanCache {
                 .slots
                 .iter()
                 .map(|slot| slot.generation.estimated_bytes())
-                .chain(state.superseded.iter().map(CompiledGeneration::estimated_bytes))
+                .chain(
+                    state
+                        .superseded
+                        .iter()
+                        .map(CompiledGeneration::estimated_bytes),
+                )
                 .sum()
         })
     }

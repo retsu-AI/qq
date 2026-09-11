@@ -28,8 +28,9 @@ use sha2::Digest as _;
 use thiserror::Error;
 
 pub use descriptor::{
-    AgentPlanDescriptor, AuditDescriptor, AuditModeDescriptor, CredentialReference,
-    DESCRIPTOR_VERSION, McpServerDescriptor, McpTransportKind, PackDescriptor, ProviderDescriptor,
+    AgentPlanDescriptor, AuditDescriptor, AuditModeDescriptor, ContextBudgetDescriptor,
+    ContextSourceDescriptor, CredentialReference, DESCRIPTOR_VERSION, FailPolicyDescriptor,
+    McpServerDescriptor, McpTransportKind, PackDescriptor, ProviderDescriptor,
     SkillIndexDescriptor, ToolCatalogDescriptor,
 };
 pub use fingerprint::SourceFingerprint;
@@ -339,6 +340,11 @@ pub enum PlanCompileError {
          roster notes or the roster"
     )]
     SpawnSchemaTooLarge { bytes: usize, limit: usize },
+    #[error(
+        "{count} context sources are registered, above the {limit}-source bound; remove or merge \
+         sources"
+    )]
+    TooManyContextSources { count: usize, limit: usize },
 }
 
 /// The immutable live plan one or more runs execute from. It is never
@@ -409,6 +415,12 @@ impl CompiledAgentPlan {
             context_sources,
             context_cache,
         } = profile;
+        if context_sources.len() > crate::MAX_CONTEXT_SOURCES {
+            return Err(PlanCompileError::TooManyContextSources {
+                count: context_sources.len(),
+                limit: crate::MAX_CONTEXT_SOURCES,
+            });
+        }
         let mut runtime = Runtime::with_provider(
             provider,
             resolved_model.provider_model.clone(),
@@ -623,6 +635,11 @@ impl CompiledAgentPlan {
             pack: pack_descriptor,
             mcp_servers,
             provenance,
+            context_sources: runtime
+                .context_sources
+                .iter()
+                .map(ContextSourceDescriptor::from)
+                .collect(),
         };
         let digest = descriptor.digest()?;
         let descriptor_json = match serde_json::to_string(&descriptor) {
@@ -1073,6 +1090,16 @@ mod tests {
                 max_concurrent_calls: 4,
             }],
             provenance: vec!["compiled defaults".to_owned()],
+            context_sources: vec![ContextSourceDescriptor {
+                name: "memory".to_owned(),
+                version: "1".to_owned(),
+                budget: ContextBudgetDescriptor {
+                    max_bytes: 16 * 1024,
+                    max_items: 16,
+                    timeout_ms: 2_000,
+                },
+                fail_policy: FailPolicyDescriptor::Open,
+            }],
         }
     }
 
@@ -1082,7 +1109,7 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v5\0{\"version\":5,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v6\0{\"version\":6,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
@@ -1090,10 +1117,10 @@ mod tests {
         // from a different encoding.
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "724ffeb55a54288aebdf946424f81deb4a6e87f07c04b722b850b5e847dd0ca7"
+            "63c411dcf3391331a8b05f3e6a4a40536b033bdabe6731cc2aee2fecfe94c504"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v5\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v6\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }
@@ -1262,6 +1289,31 @@ mod tests {
                 "provenance",
                 Box::new(|d| d.provenance.push("extra".to_owned())),
             ),
+            ("context_sources", Box::new(|d| d.context_sources.clear())),
+            (
+                "context_sources.name",
+                Box::new(|d| d.context_sources[0].name.push('x')),
+            ),
+            (
+                "context_sources.version",
+                Box::new(|d| d.context_sources[0].version.push('x')),
+            ),
+            (
+                "context_sources.budget.max_bytes",
+                Box::new(|d| d.context_sources[0].budget.max_bytes += 1),
+            ),
+            (
+                "context_sources.budget.max_items",
+                Box::new(|d| d.context_sources[0].budget.max_items += 1),
+            ),
+            (
+                "context_sources.budget.timeout_ms",
+                Box::new(|d| d.context_sources[0].budget.timeout_ms += 1),
+            ),
+            (
+                "context_sources.fail_policy",
+                Box::new(|d| d.context_sources[0].fail_policy = FailPolicyDescriptor::Closed),
+            ),
         ];
         for (name, mutate) in variants {
             let mut variant = golden_descriptor();
@@ -1272,6 +1324,134 @@ mod tests {
                 "changing {name} must change the digest"
             );
         }
+    }
+
+    /// A source with a fixed identity and a requested budget; never fetched.
+    struct NamedSource {
+        name: String,
+        policy: crate::FailPolicy,
+        budget: crate::ContextBudget,
+    }
+
+    impl ContextSource for NamedSource {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn version(&self) -> &str {
+            "7"
+        }
+
+        fn cache_key(&self, _request: &crate::ContextRequest) -> Option<[u8; 32]> {
+            None
+        }
+
+        fn fetch(
+            &self,
+            _request: crate::ContextRequest,
+            _cancelled: Arc<std::sync::atomic::AtomicBool>,
+        ) -> crate::ContextFetchFuture {
+            Box::pin(async { panic!("compile-time tests never fetch") })
+        }
+
+        fn fail_policy(&self) -> crate::FailPolicy {
+            self.policy
+        }
+
+        fn budget(&self) -> crate::ContextBudget {
+            self.budget
+        }
+    }
+
+    fn named_source(index: usize) -> Arc<dyn ContextSource> {
+        Arc::new(NamedSource {
+            name: format!("source-{index}"),
+            policy: if index.is_multiple_of(2) {
+                crate::FailPolicy::Open
+            } else {
+                crate::FailPolicy::Closed
+            },
+            budget: crate::ContextBudget {
+                max_bytes: 1024 * 1024,
+                max_items: 1_000,
+                timeout: std::time::Duration::from_secs(600),
+            },
+        })
+    }
+
+    #[test]
+    fn a_ninth_context_source_fails_compilation_with_a_typed_capacity_error() {
+        let directory = canonical_temp();
+        let mut profile = profile(directory.path());
+        for index in 0..=crate::MAX_CONTEXT_SOURCES {
+            profile = profile.with_context_source(named_source(index));
+        }
+        let error = CompiledAgentPlan::compile_blocking(profile).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PlanCompileError::TooManyContextSources { count, limit }
+                    if count == crate::MAX_CONTEXT_SOURCES + 1 && limit == crate::MAX_CONTEXT_SOURCES
+            ),
+            "{error}"
+        );
+
+        // The direct runtime path compiles through the same check.
+        let mut runtime = Runtime::new(SilentProvider, "m", 64).unwrap();
+        for index in 0..=crate::MAX_CONTEXT_SOURCES {
+            runtime = runtime.with_context_source(named_source(index));
+        }
+        let error = CompiledAgentPlan::compile_blocking(AgentProfile::embedded(
+            &runtime,
+            directory.path().to_owned(),
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            PlanCompileError::TooManyContextSources { .. }
+        ));
+    }
+
+    #[test]
+    fn the_descriptor_lists_every_context_source_with_its_enforced_budget() {
+        let directory = canonical_temp();
+        let mut profile = profile(directory.path());
+        for index in 0..crate::MAX_CONTEXT_SOURCES {
+            profile = profile.with_context_source(named_source(index));
+        }
+        let plan = CompiledAgentPlan::compile_blocking(profile).unwrap();
+        let sources = &plan.descriptor().context_sources;
+        assert_eq!(sources.len(), crate::MAX_CONTEXT_SOURCES);
+        for (index, source) in sources.iter().enumerate() {
+            assert_eq!(source.name, format!("source-{index}"));
+            assert_eq!(source.version, "7");
+            // The descriptor records the clamped budget the runtime enforces,
+            // not the one the source asked for.
+            assert_eq!(
+                source.budget,
+                ContextBudgetDescriptor {
+                    max_bytes: crate::context_source::MAX_CONTEXT_SOURCE_BYTES as u64,
+                    max_items: crate::context_source::MAX_CONTEXT_SOURCE_ITEMS as u32,
+                    timeout_ms: crate::context_source::MAX_CONTEXT_SOURCE_TIMEOUT.as_millis()
+                        as u64,
+                }
+            );
+            assert_eq!(
+                source.fail_policy,
+                if index.is_multiple_of(2) {
+                    FailPolicyDescriptor::Open
+                } else {
+                    FailPolicyDescriptor::Closed
+                }
+            );
+        }
+        // Without sources the field is absent from the canonical encoding.
+        let bare =
+            CompiledAgentPlan::compile_blocking(super::tests_support::profile(directory.path()))
+                .unwrap();
+        assert!(bare.descriptor().context_sources.is_empty());
+        assert!(!bare.descriptor_json().contains("context_sources"));
+        assert_ne!(bare.digest(), plan.digest());
     }
 
     #[test]

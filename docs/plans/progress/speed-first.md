@@ -11,7 +11,7 @@ dated entries appended below, newest last.
 | H20 | Wake-driven control admission; delete 13 `sleep(1 ms)` loops; ≤20 ms output gap | In review | `perf/h20-control-admission` (`ab6de6f`, `d05e474`) | Gap median 24 → 20 ms, p95 28 → 33 ms (bimodal tail, 27/30 samples ≤22 ms). Executable budget stays 50 ms until p95 qualifies. ADR-0011 |
 | H21.1 | Behavioral settlement: `RunIdentity`, `RunSettlement`, `PersistenceFault`, teardown-before-terminal structural | Planned | | After H20. ADR-0012 reserved |
 | H27 | Superseded-generation accounting, atomic refresh admission, guard reclamation | In review | `feat/speed-first-phase-5b-6` | Pinned LRU and admission already existed (`src/plan.rs`) |
-| H28 | Typed context-source capacity error; sources in descriptor | Planned | | `DESCRIPTOR_VERSION` bump. ADR-0013 reserved |
+| H28 | Typed context-source capacity error; sources in descriptor | In review | `feat/speed-first-phase-5b-6` | `DESCRIPTOR_VERSION` 5 → 6. ADR-0013 |
 | H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | Planned | | |
 | H18 | `Arc<Vec<Message>>`, prompt prefix, `RawValue` schemas | Planned | | Add `provider_encode` bench first |
 | H19 | SSE framing, conditional | Planned | | Add `sse_decode` bench first; no-change decision acceptable |
@@ -254,3 +254,13 @@ last holder finishes. Tests +5 (`plan_key_debug_redacts_inline_configuration`,
 `equivalent_refresh_admits_grown_source_evidence`,
 `completed_compile_guards_are_reclaimed_under_distinct_key_churn`); root crate
 109 passed. Cold path only; no gate.
+
+#### H28 receipt
+
+`DESCRIPTOR_VERSION` 5 → 6; golden digest re-pinned
+(`63c411dc…c504`). `AgentPlanDescriptor.context_sources` lists name,
+version, clamped budget (fixed-width), fail policy. `compile_blocking`
+returns `PlanCompileError::TooManyContextSources` for a ninth source;
+`Runtime::with_context_source` no longer drops. Tests +2 plus seven digest
+mutation rows; qq-core 448 passed. ADR-0013 written. No protocol or schema
+change.
