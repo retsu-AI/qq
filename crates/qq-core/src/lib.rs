@@ -115,6 +115,10 @@ pub const MAX_OUTPUT_CONTINUATIONS: u16 = 3;
 pub(crate) const OUTPUT_TRUNCATED_CONTINUE_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe \
 previous response was cut off at the output token limit. Continue exactly from where it \
 stopped; do not repeat what was already written.";
+/// Fills a skipped empty assistant turn so the follow-up user message does
+/// not sit next to the previous user message. Providers require alternation.
+pub(crate) const EMPTY_TURN_PLACEHOLDER: &str = "[QQ runtime notice; not a user instruction]\nThe previous \
+turn produced no model-visible text.";
 
 enum StreamStep<T> {
     Interrupted,
@@ -914,7 +918,12 @@ impl plan::CompiledAgentPlan {
             let _cancel_on_drop = CancelOnDrop(Arc::clone(&cancelled));
             yield RuntimeEvent::Started;
 
-            if messages.is_empty() || messages.iter().any(|message| !message.has_content()) {
+            // Completed turns can persist an assistant message with no model-visible
+            // content (reasoning-only or a call-less empty completion). Live turns
+            // already skip those; reconstructed history must too, or a follow-up
+            // on a finished session fails before the provider is reached.
+            messages = usable_conversation(messages);
+            if messages.is_empty() {
                 yield RuntimeEvent::Failed {
                     kind: RunFailureKind::InvalidCommand,
                     message: "conversation messages must not be empty".to_owned(),
@@ -2520,6 +2529,26 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
             }
         }
     })
+}
+
+fn usable_conversation(messages: Vec<Message>) -> Vec<Message> {
+    let mut conversation = Vec::with_capacity(messages.len());
+    let mut skipped_empty = false;
+    for message in messages {
+        if !message.has_content() {
+            skipped_empty = true;
+            continue;
+        }
+        if skipped_empty && conversation.last().map(Message::role) == Some(message.role()) {
+            conversation.push(match message.role() {
+                Role::User => Message::assistant(EMPTY_TURN_PLACEHOLDER),
+                Role::Assistant => Message::user(EMPTY_TURN_PLACEHOLDER),
+            });
+        }
+        skipped_empty = false;
+        conversation.push(message);
+    }
+    conversation
 }
 
 fn measure_messages(messages: &[Message]) -> u64 {
@@ -4644,6 +4673,69 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[1].messages().len(), 1);
         assert_eq!(requests[1].messages()[0].role(), Role::User);
+    }
+
+    #[tokio::test]
+    async fn prior_empty_assistant_turns_do_not_block_a_follow_up() {
+        struct CompletingProvider {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for CompletingProvider {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                assert!(
+                    request.messages().iter().all(Message::has_content),
+                    "empty reconstructed turns must not reach the provider: {:?}",
+                    request.messages()
+                );
+                self.requests.lock().unwrap().push(request);
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "ok".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            CompletingProvider {
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(
+                vec![
+                    Message::user("hello"),
+                    Message::assistant(""),
+                    Message::user("continue"),
+                ],
+                directory.path().to_owned(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(events.last(), Some(&RuntimeEvent::Completed));
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            RuntimeEvent::Failed { message, .. }
+                if message.contains("must not be empty")
+        )));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].messages(),
+            [
+                Message::user("hello"),
+                Message::assistant(EMPTY_TURN_PLACEHOLDER),
+                Message::user("continue"),
+            ]
+        );
     }
 
     #[tokio::test]
