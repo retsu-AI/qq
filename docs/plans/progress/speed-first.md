@@ -8,11 +8,11 @@ dated entries appended below, newest last.
 | --- | --- | --- | --- | --- |
 | 5a-accept | Full version-4 H0 comparison on a quiet host | Planned | | Baseline `1c08cef`, candidate `main`. Prior recordings on the shared host: A/A fails the same tail gates as A/B; retained, not waived |
 | 5a-windows | Full native Windows workspace run | Planned | | Targeted `windows-teardown` CI job passes; full qualification not claimed |
-| H20 | Wake-driven control admission; delete 13 `sleep(1 ms)` loops; ≤20 ms output gap | In review | `perf/h20-control-admission` (`ab6de6f`, `d05e474`) | Gap median 24 → 20 ms, p95 28 → 33 ms (bimodal tail, 27/30 samples ≤22 ms). Executable budget stays 50 ms until p95 qualifies. ADR-0011 |
-| H21.1 | Behavioral settlement: `RunIdentity`, `RunSettlement`, `PersistenceFault`, teardown-before-terminal structural | In review | `feat/speed-first-phase-5b-6` (`a67b186`, `83647e0`, merged in #22); `refactor/h21-settle-run` (part c) | Parts a+b merged; part c (`settle_run` null guard, `TeardownComplete`, ADR-0012) on branch, 2 regression tests |
-| H27 | Superseded-generation accounting, atomic refresh admission, guard reclamation | In review | `feat/speed-first-phase-5b-6` | Pinned LRU and admission already existed (`src/plan.rs`) |
-| H28 | Typed context-source capacity error; sources in descriptor | In review | `feat/speed-first-phase-5b-6` | `DESCRIPTOR_VERSION` 5 → 6. ADR-0013 |
-| H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | In review | `feat/speed-first-phase-5b-6` | Store schema 25 → 26 (`tool_calls.effect`). MCP permit ordering was already correct |
+| H20 | Wake-driven control admission; delete 13 `sleep(1 ms)` loops; ≤20 ms output gap | Done; p95 open | merged in #22 (`61682be`; slices `ab6de6f`, `d05e474`) | Gap median 24 → 20 ms, p95 28 → 33 ms (bimodal tail, 27/30 samples ≤22 ms). Executable budget stays 50 ms until a quiet-host p95 qualifies. ADR-0011 |
+| H21.1 | Behavioral settlement: `RunIdentity`, `RunSettlement`, `PersistenceFault`, teardown-before-terminal structural | Part c in review | a+b merged in #22 (`a67b186`, `83647e0`); c on `refactor/h21-settle-run` (`6938758`) | Part c: `settle_run` null guard, `TeardownComplete`, ADR-0012, 2 regression tests |
+| H27 | Superseded-generation accounting, atomic refresh admission, guard reclamation | Done | merged in #22 | Pinned LRU and admission already existed (`src/plan.rs`) |
+| H28 | Typed context-source capacity error; sources in descriptor | Done | merged in #22 | `DESCRIPTOR_VERSION` 5 → 6. ADR-0013 |
+| H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | Done | merged in #22 | Store schema 25 → 26 (`tool_calls.effect`). MCP permit ordering was already correct |
 | H18 | `Arc<Vec<Message>>`, prompt prefix, `RawValue` schemas | Planned | | Add `provider_encode` bench first |
 | H19 | SSE framing, conditional | Planned | | Add `sse_decode` bench first; no-change decision acceptable |
 | H21.2 | Mechanical `sessions.rs` split | Planned | | After HC3 behavioral changes; separate commit |
@@ -368,3 +368,15 @@ decision as implemented. ADR-0012 written (Accepted); `root.md` updated;
 Open for H21: H21.2 (mechanical split of `sessions.rs` into
 `sessions/{codec, events, snapshots, transcript, claim, streaming,
 tool_calls, settlement, compaction, commands}.rs`) after HC3.
+
+### 2026-09-11 — status reconciliation after #22
+
+`feat/speed-first-phase-5b-6` merged as #22 (`61682be`) and was released as
+v0.0.2 (`73a3a57`). The ledger rows for H20, H27, H28, H22.1, and H21.1a/b
+still read "In review"; corrected to Done. The plan's `Now` row and version
+line (protocol 17, descriptor 6, schema 26) corrected to match source. H20's
+remaining work is a quiet-host p95 recording and the 50→20 ms budget
+tightening, not code. Next slice: HC1, then HC3 (which gates H21.2).
+
+Shipped: none this entry. In progress: H21.1c (`refactor/h21-settle-run`).
+Blocked: none.
