@@ -16,9 +16,9 @@ may append a **request** row; only root changes a request's status.
 
 | ADR | Reserved for | Reserved by | Status |
 | --- | --- | --- | --- |
-| 0011 | Shared commit discipline across store lanes (was: wake-driven control admission) | speed-first H20 | Written (`d05e474` follow-up) |
-| 0012 | Structural settlement and teardown-before-terminal | speed-first H21 | Written (`refactor/h21-settle-run`) |
-| 0013 | Context-source identity in the plan descriptor | speed-first H28 | Written (`feat/speed-first-phase-5b-6`) |
+| 0011 | Shared commit discipline across store lanes (was: wake-driven control admission) | speed-first H20 | Accepted (merged in #22) |
+| 0012 | Structural settlement and teardown-before-terminal | speed-first H21 | Accepted (`refactor/h21-settle-run`, in review) |
+| 0013 | Context-source identity in the plan descriptor | speed-first H28 | Accepted (merged in #22) |
 | 0014 | Typed final output contract | speed-first HC3 | Reserved |
 | 0015 | Remote client authentication: pairing-code enrollment, per-client credentials | multi-surface S2 | Proposed: `docs/adr/0015-pairing-code-client-enrollment.md` |
 | 0016 | Remote exposure: loopback default, TLS required off loopback, `tailscale serve` front | multi-surface S4 | Reserved |
