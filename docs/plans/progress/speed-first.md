@@ -9,7 +9,7 @@ dated entries appended below, newest last.
 | 5a-accept | Full version-4 H0 comparison on a quiet host | Planned | | Baseline `1c08cef`, candidate `main`. Prior recordings on the shared host: A/A fails the same tail gates as A/B; retained, not waived |
 | 5a-windows | Full native Windows workspace run | Planned | | Targeted `windows-teardown` CI job passes; full qualification not claimed |
 | H20 | Wake-driven control admission; delete 13 `sleep(1 ms)` loops; ≤20 ms output gap | Done; p95 open | merged in #22 (`61682be`; slices `ab6de6f`, `d05e474`) | Gap median 24 → 20 ms, p95 28 → 33 ms (bimodal tail, 27/30 samples ≤22 ms). Executable budget stays 50 ms until a quiet-host p95 qualifies. ADR-0011 |
-| H21.1 | Behavioral settlement: `RunIdentity`, `RunSettlement`, `PersistenceFault`, teardown-before-terminal structural | Part c in review | a+b merged in #22 (`a67b186`, `83647e0`); c on `refactor/h21-settle-run` (`6938758`) | Part c: `settle_run` null guard, `TeardownComplete`, ADR-0012, 2 regression tests |
+| H21.1 | Behavioral settlement: `RunIdentity`, `RunSettlement`, `PersistenceFault`, teardown-before-terminal structural | Done | a+b merged in #22 (`a67b186`, `83647e0`); c merged in #24 (`e6a1399`) | Part c: `settle_run` null guard, `TeardownComplete`, ADR-0012 accepted, 2 regression tests |
 | H27 | Superseded-generation accounting, atomic refresh admission, guard reclamation | Done | merged in #22 | Pinned LRU and admission already existed (`src/plan.rs`) |
 | H28 | Typed context-source capacity error; sources in descriptor | Done | merged in #22 | `DESCRIPTOR_VERSION` 5 → 6. ADR-0013 |
 | H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | Done | merged in #22 | Store schema 25 → 26 (`tool_calls.effect`). MCP permit ordering was already correct |
@@ -17,7 +17,7 @@ dated entries appended below, newest last.
 | H19 | SSE framing, conditional | Planned | | Add `sse_decode` bench first; no-change decision acceptable |
 | H21.2 | Mechanical `sessions.rs` split | Planned | | After HC3 behavioral changes; separate commit |
 | H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI | Planned | | |
-| HC1 | `--correlation`, `--session`, `u32` turns, model-less `config check` | Planned | | `PROTOCOL_VERSION` bump. Parallel worktree OK |
+| HC1 | `--correlation`, `--session`, `u32` turns, model-less `config check` | In review | `feat/hc1-headless-run-contract` (`95c6e3d`, `f0b7dd3`, `d079e21`, `63cb256`, `63032ab`) | `PROTOCOL_VERSION` 17 → 18; `v17/` fixtures retained decode-only. Per-store owner lock on every open (ADR-0022, proposed). `SessionRuntime::abandon_for_test` added for crash-simulation tests |
 | HC3 | `--output-schema`, repair turns, `final_output` | Planned | | Before H21.2. ADR-0014 reserved |
 | HC4 | Headless golden fixtures | Planned | | After HC1–HC3 |
 | H10 / H11 / H12 | Sandbox / adapters / qualification | Planned | | Gated; see plan |
@@ -380,3 +380,45 @@ tightening, not code. Next slice: HC1, then HC3 (which gates H21.2).
 
 Shipped: none this entry. In progress: H21.1c (`refactor/h21-settle-run`).
 Blocked: none.
+
+### 2026-09-11 — HC1 headless contract on `feat/hc1-headless-run-contract`
+
+Five commits, one per gap-table row plus the ownership prerequisite, each
+with its own regression tests:
+
+1. `95c6e3d` `config check` without a model. Document finalization now
+   raises `ModelRequired` last, after every other rule; `ConfigLoader::check`
+   maps that one error to `Ok(None)`. `ConfigSnapshot::model()` stays
+   non-optional, so no run-time consumer changed.
+2. `f0b7dd3` `--correlation KEY=VALUE`. Validated as one set before
+   configuration loads; a repeated key is an error, not last-wins. `trial`
+   gains an optional `correlation` (omitted when empty; default payload
+   unchanged).
+3. `d079e21` `u16 → u32` for `max_model_turns`, every `turn_ordinal`, the
+   turn loop, the budget meter, and the CLI. `PROTOCOL_VERSION` 18; the
+   fixture harness reads `v<PROTOCOL_VERSION>/` and a new
+   `historical_fixtures_still_decode` keeps `v17/` decode-only. Boundary
+   tests pin 65 536 and `u32::MAX` on the wire and drive the meter past
+   65 535 in O(1) per turn. Harbor trace fixtures re-pinned to 18. SQLite
+   `INTEGER` is 64-bit: no store migration.
+4. `63cb256` One owner per store (ADR-0022). Advisory `File::try_lock` on
+   `<store>.lock` taken on the worker thread before SQLite opens, so it also
+   precedes `recover_interrupted_runs`. `StoreBusy` after a 1.5 s handoff
+   grace; the loser does no database I/O. Applies to every opener, not only
+   `--session`. Ten core tests that held a subscription across a "restart"
+   or opened a second `Store` on a live runtime's file were corrected; a
+   subscription clones the store handle and keeps ownership.
+5. `63032ab` `qq run --session ID`. Idle root session of the workspace only;
+   unknown and foreign ids are one refusal. The invocation's model, profile,
+   and approval are written first; the stream starts at the new prompt. The
+   restart test kills a process mid-turn via `abandon_for_test`, resumes, and
+   checks the interrupted turn was not re-executed.
+
+Decision #4 closed: HC1 bumps alone (18); HC3 will bump to 19.
+
+Verification: `cargo test --workspace` 1,272 passed; fmt and clippy
+(`-D warnings`, all targets, all features) clean. No hot-path change: the
+lock is one syscall per store open on the blocking worker thread.
+
+Shipped: none this entry (branch in review). In progress: HC1 review.
+Blocked: none. Next: HC3.
