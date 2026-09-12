@@ -100,14 +100,14 @@ impl BuiltInTool {
             ),
             Self::Tree => ToolSpec::new(
                 "tree",
-                "Show a depth-bounded, ignore-aware directory tree with file sizes and per-directory (files, dirs) counts. Top level fills first. Build output and ignored directories appear as `…ignored`.",
+                "Show a depth-bounded, ignore-aware directory tree with sizes and counts.",
                 json!({
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "default": "." },
                         "depth": { "type": "integer", "minimum": 1, "maximum": MAX_DEPTH, "default": 2 },
                         "limit": { "type": "integer", "minimum": 1, "maximum": MAX_ENTRIES, "default": 120 },
-                        "glob": { "type": "string", "maxLength": MAX_GLOB_BYTES, "description": "Show only files matching this gitignore-style glob." },
+                        "glob": { "type": "string", "maxLength": MAX_GLOB_BYTES },
                         "include_ignored": { "type": "boolean", "default": false }
                     },
                     "additionalProperties": false
@@ -115,7 +115,7 @@ impl BuiltInTool {
             ),
             Self::Search => ToolSpec::new(
                 "search",
-                "Search workspace file contents or names, ignore-aware. Modes: content (default), names, definition, references. Results group by file as `L<n>: text`; the header carries matches=shown/total and next=<cursor> when more exist. Prefer this over shell grep/rg/find.",
+                "Search workspace file contents or names, ignore-aware. Modes: content (default), names, definition, references. Pass the header's next= cursor to continue.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -332,15 +332,16 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
 /// The built-in tools as the catalog compiler receives them, each carrying
 /// the effect policy will classify it by.
 pub(crate) fn static_tools() -> Vec<StaticTool> {
-    specs()
-        .into_iter()
-        .zip(BuiltInTool::ALL)
-        .map(|(spec, tool)| StaticTool {
-            spec,
-            host: ToolHost::BuiltIn,
-            effect: tool.effect(),
+    static TOOLS: OnceLock<Vec<StaticTool>> = OnceLock::new();
+    TOOLS
+        .get_or_init(|| {
+            specs()
+                .into_iter()
+                .zip(BuiltInTool::ALL)
+                .map(|(spec, tool)| StaticTool::new(spec, ToolHost::BuiltIn, tool.effect()))
+                .collect()
         })
-        .collect()
+        .clone()
 }
 
 /// The effect of a hidden alias for an advertised built-in: `list_dir` is

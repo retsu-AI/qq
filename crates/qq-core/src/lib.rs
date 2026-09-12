@@ -46,7 +46,7 @@ use runtime::{
     HistorySearcher, PendingToolCall, PreparedRequestWeight, PreparedStaticPrefix, RuntimeEvent,
     RuntimeToolCall, SPAWN_UNAVAILABLE_RESULT, SearchHistoryArgs, SpawnAgentFuture,
     SpawnAgentOutcome, SpawnAgentSpend, SpawnRequest, SubagentSpawner, ToolGate, ToolGateFuture,
-    TurnBlock, agent_system_prompt, render_history_matches, tool_schema_measurement,
+    TurnBlock, agent_system_prompt, render_history_matches,
 };
 
 pub use approval::shell_prefix_matches;
@@ -1080,7 +1080,7 @@ impl plan::CompiledAgentPlan {
                 system.push_str(&context_blocks);
                 system
             });
-            let mut tool_schema = tool_schema_measurement(&tool_specs);
+            let mut tool_schema = catalog.schema_measurement(&tool_specs);
             let system_prompt_hash = ContentHash::from_bytes(Sha256::digest(system.as_bytes()).into());
             let mut prompt_identity = Some(Arc::new(RunPromptIdentity {
                     version: AGENT_PROMPT_VERSION,
@@ -2014,7 +2014,7 @@ impl plan::CompiledAgentPlan {
                 }
                 if pins_changed {
                     tool_specs = catalog.specs_with_pins(&base_specs, &pins);
-                    tool_schema = tool_schema_measurement(&tool_specs);
+                    tool_schema = catalog.schema_measurement(&tool_specs);
                 }
                 let approved = approved
                     .into_iter()

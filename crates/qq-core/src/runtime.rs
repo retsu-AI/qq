@@ -25,8 +25,8 @@ pub(crate) use history::{
     excerpt_around, render_history_matches, search_history_spec,
 };
 pub(crate) use prompt::{
-    AGENT_PROMPT_VERSION, PromptSections, agent_system_prompt, delegation_roster_text,
-    tool_schema_measurement,
+    AGENT_PROMPT_VERSION, PromptSections, ToolSchemaMeasurement, agent_system_prompt,
+    delegation_roster_text, measure_tool_schemas, tool_schema_measurement,
 };
 pub use steering::MAX_PENDING_STEERING;
 pub(crate) use steering::{SteeringMessage, SteeringReceiver, SteeringSender, steering_channel};

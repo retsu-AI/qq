@@ -140,24 +140,36 @@ pub(crate) fn agent_system_prompt(
     prompt
 }
 
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ToolSchemaMeasurement {
     pub(crate) hash: ContentHash,
     pub(crate) bytes: u64,
 }
 
 pub(crate) fn tool_schema_measurement(specs: &[ToolSpec]) -> ToolSchemaMeasurement {
+    let schemas: Vec<String> = specs
+        .iter()
+        .map(|spec| spec.input_schema().to_string())
+        .collect();
+    measure_tool_schemas(specs.iter().zip(schemas.iter().map(String::as_str)))
+}
+
+/// Measures declarations whose schemas are already serialized, so callers
+/// that serialized them once (the catalog compiler) need not do it again.
+pub(crate) fn measure_tool_schemas<'a>(
+    specs: impl Iterator<Item = (&'a ToolSpec, &'a str)>,
+) -> ToolSchemaMeasurement {
     use sha2::{Digest, Sha256};
 
     let mut digest = Sha256::new();
     let mut measured_bytes = 0_u64;
-    for spec in specs {
+    for (spec, schema) in specs {
         for bytes in [spec.name().as_bytes(), spec.description().as_bytes()] {
             digest.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
             digest.update(bytes);
             measured_bytes =
                 measured_bytes.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         }
-        let schema = spec.input_schema().to_string();
         digest.update(
             u64::try_from(schema.len())
                 .unwrap_or(u64::MAX)
