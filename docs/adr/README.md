@@ -23,7 +23,7 @@ written.
 | 0009 | [QQ ends at the headless contract; supervisors own hosting](0009-headless-hosting-boundary.md) | Accepted |
 | 0010 | [Ship a stripped, thin-LTO release profile and tighten size budgets](0010-release-profile.md) | Accepted |
 | 0011 | [One commit discipline for both store lanes; wakeups do not close groups](0011-shared-commit-across-lanes.md) | Accepted |
-| 0012 | Structural settlement (`RunSettlement`, teardown before terminal publication) | Reserved: H21 |
+| 0012 | [One settlement path with a pre-read guard; teardown is a typed prerequisite for a started run's terminal event](0012-structural-settlement.md) | Accepted |
 | 0013 | [Context sources are part of plan identity; excess sources fail compilation](0013-context-sources-in-descriptor.md) | Accepted |
 | 0014 | Typed final output contract | Reserved: HC3 |
 | 0015 | [Enroll remote clients with a pairing code and issue per-client credentials](0015-pairing-code-client-enrollment.md) | Proposed (multi-surface S2) |
