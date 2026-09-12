@@ -560,10 +560,10 @@ file on 2026-09-11.
 | crate | status | slice | notes |
 | --- | --- | --- | --- |
 | `cap-std`, `sha2`, `tokio`, `rustix` | present | all | unchanged |
-| `regex` | transitive only | T2, T1 masking, T6 | add direct to `qq-core` |
-| `ignore` (+ `globset`, `walkdir`) | new | T2, T12 | BurntSushi; the only new walk dependency |
+| `regex` | direct in `qq-core` (T2) | T2, T6 | T1 masking stayed hand-rolled |
+| `ignore` (+ `globset`, `bstr`) | direct in `qq-core` (T2) | T2, T12 | matcher only; listing stays on `cap-std` |
 | `tree-sitter` 0.26, `tree-sitter-bash` 0.25 | present in `qq-tui` | T6 | promote to `[workspace.dependencies]`; root request |
-| `base64` | present at workspace | T2 cursors | add to `qq-core` |
+| `base64` | direct in `qq-core` (T2) | T2 cursors | |
 | `reqwest` (`rustls`, `stream`) | present at workspace, not in `qq-core` | T9 | add with `stream` only |
 | `url` | transitive | T9, T12 | add direct |
 | `html2text` or `htmd` | new | T9 | fixture bake-off decides |
