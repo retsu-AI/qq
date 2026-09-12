@@ -42,6 +42,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub organization: Option<String>,
 
+    /// Open this existing session in the interactive terminal instead of
+    /// starting a new one. Only meaningful without a subcommand; `qq run`
+    /// has its own `--session`.
+    #[arg(long, value_name = "ID")]
+    pub session: Option<qq_protocol::SessionId>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -454,6 +460,23 @@ mod tests {
                 }),
             None
         );
+    }
+
+    #[test]
+    fn top_level_session_opens_the_tui_and_is_distinct_from_run_session() {
+        let id = qq_protocol::SessionId::from_bytes([7; 16]);
+        let cli = Cli::try_parse_from(["qq", "--session", &id.to_string()]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.session, Some(id));
+        assert_eq!(Cli::try_parse_from(["qq"]).unwrap().session, None);
+
+        // `qq run --session` belongs to the run command, not the top level.
+        let cli = Cli::try_parse_from(["qq", "run", "task", "--session", &id.to_string()]).unwrap();
+        assert_eq!(cli.session, None);
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("expected a run command");
+        };
+        assert_eq!(args.session, Some(id));
     }
 
     #[test]

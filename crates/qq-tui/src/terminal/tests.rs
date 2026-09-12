@@ -382,7 +382,7 @@ async fn loop_reports_client_stop() {
         mpsc::unbounded_channel().0,
     ));
     let result = task.await.expect("loop task");
-    assert!(matches!(result, Err(TuiError::ClientStopped)));
+    assert!(matches!(result, Err(TuiError::ClientStopped(_))));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -602,5 +602,5 @@ async fn a_failed_connection_is_reported_once_and_then_the_client_stops() {
         |_| Box::pin(async { Err(EditorError::NotConfigured) }),
     ));
     let result = task.await.expect("loop task");
-    assert!(matches!(result, Err(TuiError::ClientStopped)));
+    assert!(matches!(result, Err(TuiError::ClientStopped(_))));
 }

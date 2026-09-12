@@ -115,6 +115,13 @@ same hint for the focused session after `/quit`, once the terminal is
 restored. JSONL output never carries the hint: the id is in the `trial`
 record, and a piped stderr receives nothing it did not ask for.
 
+The interactive surface mirrors this: bare `qq` starts a new session, and
+`qq --session ID` opens that session in the TUI. A session `qq run` left
+behind can therefore be picked up interactively, and one the TUI left behind
+can be driven headlessly. The TUI refuses an unknown id, one from another
+workspace, or a spawned sub-agent session before painting anything, with the
+same wording `qq run --session` uses.
+
 ### Configuration Injection
 
 `QQ_CONFIG_CONTENT` carries one inline RON document (at most 1 MiB), applied

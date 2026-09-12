@@ -68,8 +68,12 @@ where
 pub enum TuiError {
     #[error("terminal I/O failed")]
     Terminal(#[from] std::io::Error),
-    #[error("TUI client stopped")]
-    ClientStopped,
+    /// The client's update stream closed. Carries the last failure the client
+    /// reported before closing, when there was one, so a startup that never
+    /// reached a usable state (a bad `--session`, an unreachable server) is
+    /// explained on the restored terminal rather than as a bare "stopped".
+    #[error("TUI client stopped{}", .0.as_ref().map(|reason| format!(": {reason}")).unwrap_or_default())]
+    ClientStopped(Option<String>),
 }
 
 /// Whether the live session tree renders beside the transcript.

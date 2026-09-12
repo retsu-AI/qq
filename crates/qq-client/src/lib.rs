@@ -38,7 +38,7 @@ pub mod state;
 mod time;
 
 #[cfg(feature = "native")]
-pub use interactive::TuiClient;
+pub use interactive::{InitialSession, TuiClient};
 pub use port::{ClientFailure, ClientPort, ClientRequest, ClientUpdate, ConnectionState};
 
 /// Marker for values that must cross threads on native targets. Browser
@@ -652,6 +652,10 @@ pub enum ClientError {
     MalformedEvent,
     #[error("server event exceeds the wire size limit")]
     EventTooLarge,
+    #[error("session {0} does not exist in this workspace")]
+    SessionNotInWorkspace(qq_protocol::SessionId),
+    #[error("session {0} is a spawned sub-agent session; open its root session instead")]
+    SessionIsChild(qq_protocol::SessionId),
 }
 
 #[cfg(all(test, feature = "native"))]

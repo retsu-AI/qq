@@ -162,6 +162,9 @@ where
     let mut terminal_size = size()?;
     // The most urgent redraw requested since the last frame, if any.
     let mut redraw = Some(Redraw::Immediate);
+    // The most recent client-reported failure, surfaced if the client then
+    // stops without recovering.
+    let mut last_client_failure: Option<String> = None;
 
     loop {
         if redraw == Some(Redraw::Immediate) {
@@ -193,8 +196,11 @@ where
             }
             update = client.recv() => {
                 let Some(update) = update else {
-                    return Err(TuiError::ClientStopped);
+                    return Err(TuiError::ClientStopped(last_client_failure.take()));
                 };
+                if let ClientUpdate::SnapshotFailed(failure) = &update {
+                    last_client_failure = Some(failure.message().to_owned());
+                }
                 app.apply_client_update(update)
             }
             highlighted = renderer.highlighter.next() => {
