@@ -546,10 +546,18 @@ fn config_command(
         }
         cli::ConfigCommand::Check => {
             let request = overrides.load_request()?;
-            loader.load(&request)?;
+            let snapshot = loader.check(&request)?;
             let (tui, _) = load_tui_config(&loader, request.cwd())?;
             loader.load_theme(request.cwd(), tui.settings().theme())?;
-            println!("configuration is valid");
+            match snapshot {
+                Some(snapshot) => println!(
+                    "configuration is valid (model: {})",
+                    snapshot.model().as_str()
+                ),
+                None => {
+                    println!("configuration is valid (no model selected; set one before running)")
+                }
+            }
         }
         cli::ConfigCommand::Show => {
             let request = overrides.load_request()?;

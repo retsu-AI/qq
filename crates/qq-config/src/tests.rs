@@ -1271,6 +1271,77 @@ fn require_https_and_custom_provider_policy_are_enforced() {
 }
 
 #[test]
+fn check_validates_a_document_without_a_model_and_load_still_requires_one() {
+    let tree = TempTree::new();
+    let request = LoadRequest::new(tree.path("work")).with_explicit_content("(version: 1)");
+
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::ModelRequired)
+    ));
+    assert!(matches!(tree.loader().check(&request), Ok(None)));
+
+    // With a model, `check` returns the same snapshot `load` does.
+    let with_model = tree.request();
+    let loaded = tree.loader().load(&with_model).unwrap();
+    let checked = tree.loader().check(&with_model).unwrap().unwrap();
+    assert_eq!(loaded.model(), checked.model());
+    assert_eq!(loaded.providers(), checked.providers());
+}
+
+#[test]
+fn check_without_a_model_still_reports_every_other_error() {
+    let tree = TempTree::new();
+    // Provider-level policy is independent of the selected route.
+    tree.write(
+        "global/config.ron",
+        r#"(
+            version: 1,
+            providers: {
+                "custom": Custom(connection: (
+                    base_url: "http://localhost:8080",
+                    api: OpenAiChatCompletions,
+                    auth: NoAuth,
+                )),
+            },
+        )"#,
+    );
+    tree.write(
+        "managed/managed.ron",
+        r#"(
+            version: 1,
+            policy: (require_https: true, allow_custom_providers: true),
+        )"#,
+    );
+    assert!(matches!(
+        tree.loader().check(&LoadRequest::new(tree.path("work"))),
+        Err(ConfigError::PolicyViolation {
+            rule: "require_https",
+            ..
+        })
+    ));
+
+    // A route that is present but names an unknown provider fails the same
+    // way with or without a top-level model.
+    let unknown_worker = LoadRequest::new(tree.path("work"))
+        .with_explicit_content(r#"(version: 1, worker_model: "nope/model")"#);
+    assert!(matches!(
+        tree.loader().check(&unknown_worker),
+        Err(ConfigError::UnknownProvider(provider)) if provider == "nope"
+    ));
+
+    // Profile validation does not depend on the top-level selection either.
+    let clean = TempTree::new();
+    let bad_profile = LoadRequest::new(clean.path("work")).with_explicit_content(
+        r#"(version: 1, profiles: {"Bad_Name": Profile(approval_mode: ask)})"#,
+    );
+    assert!(matches!(
+        clean.loader().check(&bad_profile),
+        Err(ConfigError::InvalidProfileName(_))
+    ));
+}
+
+#[test]
 fn custom_provider_policy_classifies_litellm_as_a_custom_endpoint() {
     let tree = TempTree::new();
     tree.write(

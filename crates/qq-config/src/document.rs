@@ -1769,17 +1769,31 @@ impl MergeState {
             self.profiles.insert(name.clone(), profile);
             self.provenance.profiles.insert(name, source);
         }
-        let model = ModelRoute::parse(self.model.ok_or(ConfigError::ModelRequired)?)?;
+        // The model requirement is enforced last (below) so that a document
+        // without one still has every other rule checked; `ConfigLoader::check`
+        // relies on `ModelRequired` meaning "valid apart from the selection".
+        let model = self.model.map(ModelRoute::parse).transpose()?;
         let worker_model = self.worker_model.map(ModelRoute::parse).transpose()?;
         let reviewer_model = self.reviewer_model.map(ModelRoute::parse).transpose()?;
-        for route in std::iter::once(&model)
+        for route in model
+            .iter()
             .chain(worker_model.as_ref())
             .chain(reviewer_model.as_ref())
         {
             if !self.providers.contains_key(route.provider()) {
                 return Err(ConfigError::UnknownProvider(route.provider().to_owned()));
             }
-            enforce_policy(&self.policy, route, self.max_output_tokens, &self.providers)?;
+            enforce_policy(
+                &self.policy,
+                Some(route),
+                self.max_output_tokens,
+                &self.providers,
+            )?;
+        }
+        if model.is_none() {
+            // Provider-level policy (custom endpoints, literal secrets, HTTPS,
+            // the output cap) applies whether or not a route selects them.
+            enforce_policy(&self.policy, None, self.max_output_tokens, &self.providers)?;
         }
         // The roster is validated route by route exactly like `model`. Without
         // a declared section, a legacy `worker_model` is the one-entry
@@ -1809,7 +1823,7 @@ impl MergeState {
                     }
                     enforce_policy(
                         &self.policy,
-                        &route,
+                        Some(&route),
                         self.max_output_tokens,
                         &self.providers,
                     )?;
@@ -1894,12 +1908,12 @@ impl MergeState {
                 }
                 enforce_policy(
                     &self.policy,
-                    &route,
+                    Some(&route),
                     profile.max_output_tokens.unwrap_or(self.max_output_tokens),
                     &self.providers,
                 )?;
             } else if let Some(cap) = profile.max_output_tokens {
-                enforce_policy(&self.policy, &model, cap, &self.providers)?;
+                enforce_policy(&self.policy, model.as_ref(), cap, &self.providers)?;
             }
             // A pack profile that names MCP servers must name declared ones.
             if let Some(reference) = &profile.pack
@@ -1934,6 +1948,11 @@ impl MergeState {
             None => AuditConfig::default(),
         };
         let grants = resolve_policy_grants(&self.policy, &self.mcp);
+        // Every other rule has passed by this point, so `ModelRequired` is the
+        // only error a model-less but otherwise valid document can produce.
+        let Some(model) = model else {
+            return Err(ConfigError::ModelRequired);
+        };
         Ok(ConfigSnapshot {
             organization: self.organization,
             model,
@@ -2108,27 +2127,29 @@ fn apply_model_patch(model: &mut ModelMetadata, patch: &ModelPatch) {
 
 fn enforce_policy(
     policy: &EffectivePolicy,
-    model: &ModelRoute,
+    model: Option<&ModelRoute>,
     max_output_tokens: u32,
     providers: &BTreeMap<String, ProviderConfig>,
 ) -> Result<(), ConfigError> {
-    if let Some(allowed) = &policy.allowed_providers
-        && !allowed.iter().any(|provider| provider == model.provider())
-    {
-        return Err(policy_violation(
-            "allowed_providers",
-            format!("provider {:?} is not allowed", model.provider()),
-        ));
-    }
-    if policy
-        .denied_providers
-        .iter()
-        .any(|provider| provider == model.provider())
-    {
-        return Err(policy_violation(
-            "denied_providers",
-            format!("provider {:?} is denied", model.provider()),
-        ));
+    if let Some(model) = model {
+        if let Some(allowed) = &policy.allowed_providers
+            && !allowed.iter().any(|provider| provider == model.provider())
+        {
+            return Err(policy_violation(
+                "allowed_providers",
+                format!("provider {:?} is not allowed", model.provider()),
+            ));
+        }
+        if policy
+            .denied_providers
+            .iter()
+            .any(|provider| provider == model.provider())
+        {
+            return Err(policy_violation(
+                "denied_providers",
+                format!("provider {:?} is denied", model.provider()),
+            ));
+        }
     }
     if let Some(limit) = policy.max_output_tokens
         && max_output_tokens > limit
