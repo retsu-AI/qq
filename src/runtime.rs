@@ -1900,6 +1900,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::AccountingUnavailable
         | SessionRuntimeError::ShutdownTimedOut
         | SessionRuntimeError::Unavailable
+        | SessionRuntimeError::StoreBusy
         | SessionRuntimeError::Persistence(_) => ServerHandlerError::Internal,
     }
 }
@@ -2929,8 +2930,7 @@ mod tests {
                 max_output_tokens: Some(256),
                 organization: None,
             },
-            None,
-            false,
+            qq_client::InitialSession::Existing,
             || std::future::ready(None),
         )
         .unwrap();
@@ -2992,6 +2992,134 @@ mod tests {
         assert_eq!(reviewer.pack.as_ref().unwrap().id, "kit");
 
         drop(tui);
+        server.shutdown().await.unwrap();
+        handler.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tui_client_opens_new_named_or_existing_sessions_and_refuses_bad_ids() {
+        use qq_client::{ClientPort as _, ClientUpdate, InitialSession};
+
+        let fixture = RuntimeFixture::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(fixture.path("data"), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::create_dir_all(fixture.path("work")).unwrap();
+        fs::create_dir_all(fixture.path("elsewhere")).unwrap();
+        let model_runtime = Arc::new(
+            Runtime::new(
+                CapturingProvider {
+                    requests: Arc::new(Mutex::new(Vec::new())),
+                },
+                "test/model",
+                256,
+            )
+            .unwrap(),
+        );
+        let durable = SessionRuntime::open(
+            SessionRuntimeOptions::new(fixture.path("sessions.sqlite3")),
+            Arc::new(FixedRuntimeLoader {
+                runtime: model_runtime,
+            }),
+        )
+        .await
+        .unwrap();
+        let handler = Arc::new(RuntimeHandler {
+            durable,
+            factory: fixture.factory(),
+        });
+        let server = match qq_server::start(
+            handler.clone(),
+            handler.server_identity(None),
+            ServerOptions::new(ServerPaths::new(fixture.path("server"))),
+        )
+        .await
+        .unwrap()
+        {
+            StartOutcome::Started(server) => server,
+            StartOutcome::Existing(_) => panic!("test unexpectedly found a running server"),
+        };
+        let selection = ModelSelection {
+            model: Some("custom/test-model".to_owned()),
+            max_output_tokens: Some(256),
+            organization: None,
+        };
+        let start = |workspace: &str, initial: InitialSession| {
+            qq_client::TuiClient::start(
+                server.connection().to_server_connection(),
+                fixture.path(workspace),
+                selection.clone(),
+                initial,
+                || std::future::ready(None),
+            )
+            .unwrap()
+        };
+        /// The first snapshot, or the failure that replaced it.
+        async fn first_snapshot(
+            tui: &mut qq_client::TuiClient,
+        ) -> Result<qq_protocol::WorkspaceSnapshot, String> {
+            loop {
+                match tokio::time::timeout(Duration::from_secs(10), tui.recv())
+                    .await
+                    .expect("client update")
+                    .expect("client alive")
+                {
+                    ClientUpdate::Snapshot(snapshot) => return Ok(snapshot),
+                    ClientUpdate::SnapshotFailed(failure) => {
+                        return Err(failure.message().to_owned());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Bare `qq`: every launch creates a session and focuses it.
+        let mut first = start("work", InitialSession::New(selection.clone()));
+        let one = first_snapshot(&mut first).await.unwrap();
+        let first_id = one.focused.as_ref().expect("focused").summary.id;
+        assert_eq!(one.sessions.len(), 1);
+        drop(first);
+        let mut second = start("work", InitialSession::New(selection.clone()));
+        let two = first_snapshot(&mut second).await.unwrap();
+        let second_id = two.focused.as_ref().expect("focused").summary.id;
+        assert_ne!(second_id, first_id, "a new launch never reuses a session");
+        assert_eq!(two.sessions.len(), 2);
+        drop(second);
+
+        // `qq --session ID`: focuses exactly that one and creates nothing.
+        let mut opened = start("work", InitialSession::Open(first_id));
+        let snapshot = first_snapshot(&mut opened).await.unwrap();
+        assert_eq!(snapshot.focused.as_ref().unwrap().summary.id, first_id);
+        assert_eq!(snapshot.sessions.len(), 2);
+        drop(opened);
+
+        // A client attached to a server it does not own shows the newest.
+        let mut attached = start("work", InitialSession::Existing);
+        let snapshot = first_snapshot(&mut attached).await.unwrap();
+        assert_eq!(snapshot.focused.as_ref().unwrap().summary.id, second_id);
+        assert_eq!(snapshot.sessions.len(), 2);
+        drop(attached);
+
+        // Unknown id, and an id that lives in another workspace, fail before
+        // any snapshot is shown, with the same message.
+        let unknown = qq_protocol::SessionId::from_bytes([9; 16]);
+        let mut bad = start("work", InitialSession::Open(unknown));
+        let failure = first_snapshot(&mut bad).await.unwrap_err();
+        assert!(
+            failure.contains(&unknown.to_string()) && failure.contains("does not exist"),
+            "{failure}"
+        );
+        drop(bad);
+        let mut foreign = start("elsewhere", InitialSession::Open(first_id));
+        let failure = first_snapshot(&mut foreign).await.unwrap_err();
+        assert!(
+            failure.contains("does not exist in this workspace"),
+            "{failure}"
+        );
+        drop(foreign);
+
         server.shutdown().await.unwrap();
         handler.shutdown().await.unwrap();
     }

@@ -55,7 +55,7 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         Some(cli::Command::Org { command }) => organization_command(command)?,
         Some(cli::Command::Trust) => trust_command(&overrides)?,
         Some(cli::Command::Version) => print!("{}", version_report()),
-        None => interactive(&overrides).await?,
+        None => interactive(&overrides, cli.session).await?,
     }
 
     Ok(ExitCode::SUCCESS)
@@ -186,6 +186,12 @@ async fn prepare_headless(
     let invalid = |message: String| (headless::HeadlessStatus::InvalidConfiguration, message);
     let harness = |message: String| (headless::HeadlessStatus::HarnessFailure, message);
 
+    // Pure argument validation runs before any filesystem or configuration
+    // work so a malformed label never costs a config load.
+    let correlation = args
+        .correlation()
+        .map_err(|error| invalid(format!("invalid --correlation: {error}")))?;
+
     let workspace = match args.workspace {
         Some(path) => path,
         None => std::env::current_dir().map_err(|error| {
@@ -274,6 +280,7 @@ async fn prepare_headless(
     let options = headless::HeadlessOptions {
         prompt: args.prompt,
         workspace,
+        session: args.session,
         model,
         profile,
         context_window: model_metadata.and_then(qq_config::ModelMetadata::context_window),
@@ -291,11 +298,13 @@ async fn prepare_headless(
         timeout: args.timeout_seconds.map(std::time::Duration::from_secs),
         max_turns: args.max_turns,
         max_cost_usd_nanos,
+        correlation,
         format: match args.format {
             cli::RunFormat::Text => headless::HeadlessFormat::Text,
             cli::RunFormat::Jsonl => headless::HeadlessFormat::Jsonl,
         },
         trace: args.trace,
+        resume_hint: args.format == cli::RunFormat::Text && io::stderr().is_terminal(),
         arm: std::env::var("QQ_EVAL_ARM")
             .ok()
             .map(|arm| arm.trim().to_owned())
@@ -392,7 +401,10 @@ enum EmbeddedShutdownError {
     },
 }
 
-async fn interactive(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
+async fn interactive(
+    overrides: &CliOverrides,
+    session: Option<qq_protocol::SessionId>,
+) -> Result<(), Box<dyn Error>> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::other("interactive mode requires a terminal").into());
     }
@@ -433,11 +445,20 @@ async fn interactive(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
             let options = server::ServerOptions::for_user()
                 .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?
                 .with_version(cli::BUILD_VERSION);
-            let (connection, create_initial_session) = match server::reserve(options)
+            // Which session to show first. `--session` opens that one. Bare
+            // `qq` starts a new conversation when this process owns the
+            // server and the configured model is usable; a client attaching
+            // to a server it does not own shows what is already there.
+            let initial = |owns_server: bool| match (session, owns_server, &model) {
+                (Some(id), _, _) => qq_client::InitialSession::Open(id),
+                (None, true, Some(model)) => qq_client::InitialSession::New(model.clone()),
+                (None, _, _) => qq_client::InitialSession::Existing,
+            };
+            let (connection, initial) = match server::reserve(options)
                 .await
                 .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?
             {
-                server::ReserveOutcome::Existing(connection) => (connection, false),
+                server::ReserveOutcome::Existing(connection) => (connection, initial(false)),
                 server::ReserveOutcome::Reserved(reservation) => {
                     let handler = Arc::new(
                         runtime::RuntimeHandler::open(factory)
@@ -455,15 +476,14 @@ async fn interactive(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
                     let connection = server.connection().clone();
                     // The receiver only drops when the TUI already exited.
                     let _ = embedded_tx.send(EmbeddedRuntime { server, handler });
-                    (connection, true)
+                    (connection, initial(true))
                 }
             };
             client::TuiClient::start(
                 connection.into(),
                 workspace,
                 configured_model,
-                model,
-                create_initial_session,
+                initial,
                 || async {
                     server::discover()
                         .await
@@ -489,7 +509,12 @@ async fn interactive(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
     if let Ok(embedded) = embedded_rx.try_recv() {
         embedded.shutdown().await?;
     }
-    result.map_err(Into::into)
+    // The terminal is already restored; this lands on the normal screen.
+    let focused = result?;
+    if let Some(session_id) = focused {
+        eprint!("{}", cli::resume_hint(session_id));
+    }
+    Ok(())
 }
 
 async fn render_events(
@@ -546,10 +571,18 @@ fn config_command(
         }
         cli::ConfigCommand::Check => {
             let request = overrides.load_request()?;
-            loader.load(&request)?;
+            let snapshot = loader.check(&request)?;
             let (tui, _) = load_tui_config(&loader, request.cwd())?;
             loader.load_theme(request.cwd(), tui.settings().theme())?;
-            println!("configuration is valid");
+            match snapshot {
+                Some(snapshot) => println!(
+                    "configuration is valid (model: {})",
+                    snapshot.model().as_str()
+                ),
+                None => {
+                    println!("configuration is valid (no model selected; set one before running)")
+                }
+            }
         }
         cli::ConfigCommand::Show => {
             let request = overrides.load_request()?;

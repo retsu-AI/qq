@@ -847,6 +847,22 @@ impl SessionRuntime {
         self.inner.store.close().await
     }
 
+    /// Abandons the store without settling anything: the worker thread is
+    /// stopped and joined, every later store call fails as unavailable, and
+    /// runs still executing are left exactly as a crashed process would leave
+    /// them (`running` rows, no terminal event). For tests of recovery and
+    /// ownership handoff across a simulated process death.
+    #[doc(hidden)]
+    pub async fn abandon_for_test(&self) -> Result<(), SessionRuntimeError> {
+        let Some(worker) = self.inner.store.stop_worker_for_test() else {
+            return Ok(());
+        };
+        tokio::task::spawn_blocking(move || worker.join())
+            .await
+            .map_err(|_| SessionRuntimeError::Unavailable)?
+            .map_err(|_| SessionRuntimeError::Unavailable)
+    }
+
     pub(super) fn request_schedule(&self) {
         if *self.inner.shutdown.borrow() {
             return;
@@ -1050,6 +1066,8 @@ pub enum SessionRuntimeError {
     ShutdownTimedOut,
     #[error("session runtime is unavailable")]
     Unavailable,
+    #[error("session store is owned by another running qq process")]
+    StoreBusy,
     #[error("session persistence failed: {0}")]
     Persistence(PersistenceFault),
 }

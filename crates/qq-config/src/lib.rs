@@ -318,6 +318,20 @@ impl ConfigLoader {
         loader::load(self, request)
     }
 
+    /// Validates the layered configuration without requiring a model
+    /// selection. Every other rule (syntax, providers, policy, profiles,
+    /// packs, MCP, trust) is enforced exactly as in [`Self::load`]; a
+    /// document that only lacks `model` validates because the selection is
+    /// checked where it is used, at run time. Returns the snapshot when a
+    /// model is configured so callers can report it.
+    pub fn check(&self, request: &LoadRequest) -> Result<Option<ConfigSnapshot>, ConfigError> {
+        match loader::load(self, request) {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(ConfigError::ModelRequired) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn load_tui<Validate, ValidationError>(
         &self,
         cwd: &Path,

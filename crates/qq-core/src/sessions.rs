@@ -2604,7 +2604,7 @@ fn begin_assistant_message(
     store_id: StoreId,
     identity: RunIdentity,
     message_id: MessageId,
-    turn_ordinal: u16,
+    turn_ordinal: u32,
     channel: TextChannel,
     text: &str,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
@@ -2949,7 +2949,7 @@ fn apply_steering_message(
     store_id: StoreId,
     identity: RunIdentity,
     message_id: MessageId,
-    turn_ordinal: u16,
+    turn_ordinal: u32,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let changed = transaction.execute(
@@ -2984,7 +2984,7 @@ fn record_run_interrupted(
     connection: &mut Connection,
     store_id: StoreId,
     identity: RunIdentity,
-    turn_ordinal: u16,
+    turn_ordinal: u32,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
@@ -3064,7 +3064,7 @@ fn record_run_output_truncated(
     connection: &mut Connection,
     store_id: StoreId,
     identity: RunIdentity,
-    turn_ordinal: u16,
+    turn_ordinal: u32,
     continuation: u16,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
@@ -5825,7 +5825,7 @@ fn load_message(
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, u16>(2)?,
+                    row.get::<_, u32>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
@@ -6032,7 +6032,7 @@ fn load_model_context_with_rewrite_status(
     drop(statement);
 
     // Every committed turn for the session's runs, grouped by run.
-    let mut turns: HashMap<String, Vec<(u16, String, bool)>> = HashMap::new();
+    let mut turns: HashMap<String, Vec<(u32, String, bool)>> = HashMap::new();
     let mut statement = transaction.prepare_cached(
         "SELECT t.run_id, t.turn_ordinal, t.assistant_content_json, t.truncated
              FROM model_turns t JOIN runs r ON r.id = t.run_id
@@ -6042,7 +6042,7 @@ fn load_model_context_with_rewrite_status(
     let rows = statement.query_map([&session], |row| {
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, u16>(1)?,
+            row.get::<_, u32>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, bool>(3)?,
         ))
@@ -6090,7 +6090,7 @@ fn load_model_context_with_rewrite_status(
 
     // Applied steering, per run, in the order it was applied. Each carries
     // the ordinal of the turn whose request first included it.
-    let mut steering: HashMap<String, std::collections::VecDeque<(u16, String)>> = HashMap::new();
+    let mut steering: HashMap<String, std::collections::VecDeque<(u32, String)>> = HashMap::new();
     let mut statement = transaction.prepare_cached(
         "SELECT run_id, turn_ordinal, output FROM messages
              WHERE session_id = ?1 AND steering = 1 AND state = 'complete'
@@ -6099,7 +6099,7 @@ fn load_model_context_with_rewrite_status(
     let rows = statement.query_map([&session], |row| {
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, u16>(1)?,
+            row.get::<_, u32>(1)?,
             row.get::<_, String>(2)?,
         ))
     })?;
@@ -6431,7 +6431,7 @@ fn search_session_history(
         )?;
         let turns = statement
             .query_map([run_id.to_string()], |row| {
-                Ok((row.get::<_, u16>(0)?, row.get::<_, String>(1)?))
+                Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
@@ -6557,9 +6557,9 @@ fn compaction_instruction(
 /// steering placed immediately before the turn whose request first carried it
 /// and the continuation notice after a truncated turn.
 fn append_run_turns(
-    turns: Vec<(u16, String, bool)>,
+    turns: Vec<(u32, String, bool)>,
     mut recorded: HashMap<String, RecordedResult>,
-    mut steering: std::collections::VecDeque<(u16, String)>,
+    mut steering: std::collections::VecDeque<(u32, String)>,
     context: &mut Vec<Message>,
 ) -> Result<(), SessionRuntimeError> {
     for (turn_ordinal, content_json, truncated) in turns {
@@ -6632,7 +6632,7 @@ fn load_tool_call(
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, u16>(2)?,
+                    row.get::<_, u32>(2)?,
                     row.get::<_, u16>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
@@ -7489,6 +7489,9 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         runtime.shutdown().await.unwrap();
         drop(runtime);
+        // A live subscription holds the store open (reads stay available after
+        // shutdown), which holds the store's ownership; drop it before reopening.
+        drop(events);
 
         *pricing.lock().unwrap() = Some(ModelPricing {
             input_usd_nanos_per_token: 11,
@@ -9170,9 +9173,8 @@ mod tests {
         assert!(row.steering);
         assert_eq!(row.state, MessageState::Complete);
         assert_eq!(row.turn_ordinal, 2);
-        let store = Store::open(harness._directory.path().join("sessions.sqlite3"))
-            .await
-            .unwrap();
+        // The runtime owns the store exclusively; read through it.
+        let store = harness.runtime.inner.store.clone();
         let session_id = harness.session_id;
         let context = store
             .call(Priority::Control, move |connection| {
@@ -9503,6 +9505,8 @@ mod tests {
             .unwrap();
         assert_ne!(second_plan.digest, started_plan.digest);
         runtime.shutdown().await.unwrap();
+        drop(events);
+        drop(runtime);
 
         let reopened = SessionRuntime::open(SessionRuntimeOptions::new(database_path), loader)
             .await
@@ -9514,9 +9518,9 @@ mod tests {
         let runs = &snapshot.focused.as_ref().unwrap().runs;
         let first = runs.iter().find(|run| run.id == run_id).unwrap();
         assert_eq!(first.plan.as_deref(), Some(&*started_plan));
-        let stored_descriptor: String = Store::open(directory.path().join("sessions.sqlite3"))
-            .await
-            .unwrap()
+        let stored_descriptor: String = reopened
+            .inner
+            .store
             .call(Priority::Control, move |connection| {
                 connection
                     .query_row(
@@ -9617,9 +9621,9 @@ mod tests {
             assert!(text.contains("remember the tests"));
         }
         // The attachment recorded the file so an edit is not "unread".
-        let files: Vec<(String, String)> = Store::open(directory.path().join("sessions.sqlite3"))
-            .await
-            .unwrap()
+        let files: Vec<(String, String)> = runtime
+            .inner
+            .store
             .call(Priority::Control, move |connection| {
                 let mut statement = connection.prepare(
                     "SELECT path, content_hash FROM session_files WHERE session_id = ?1",
@@ -9836,6 +9840,7 @@ mod tests {
         assert_eq!(guidance.version, None);
 
         runtime.shutdown().await.unwrap();
+        drop(events);
         drop(runtime);
         let reopened = SessionRuntime::open(
             SessionRuntimeOptions::new(database_path),
@@ -9949,6 +9954,7 @@ mod tests {
 
         *configured.lock().unwrap() = test_resolved_model("test/changed", "wire-model-b", 32, None);
         runtime.shutdown().await.unwrap();
+        drop(events);
         drop(runtime);
 
         let reopened = SessionRuntime::open(SessionRuntimeOptions::new(database_path), loader)
@@ -11349,7 +11355,7 @@ mod tests {
                 [],
                 |row| {
                     Ok((
-                        row.get::<_, u16>(0)?,
+                        row.get::<_, u32>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                     ))
@@ -12773,7 +12779,7 @@ mod tests {
         assert!(!truncated);
         assert_eq!(continuations, 0);
         // Historical context replays without a continuation notice.
-        let (ordinal, content_json, truncated): (u16, String, bool) = connection
+        let (ordinal, content_json, truncated): (u32, String, bool) = connection
             .query_row(
                 "SELECT turn_ordinal, assistant_content_json, truncated FROM model_turns
                  WHERE run_id = ?1",
@@ -15343,7 +15349,7 @@ mod tests {
             let turns = statement
                 .query_map([run_id.to_string()], |row| {
                     Ok((
-                        row.get::<_, u16>(0)?,
+                        row.get::<_, u32>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, bool>(2)?,
                     ))
@@ -15360,7 +15366,7 @@ mod tests {
             )?;
             let mut steering = statement
                 .query_map([run_id.to_string()], |row| {
-                    Ok((row.get::<_, u16>(0)?, row.get::<_, String>(1)?))
+                    Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
                 })?
                 .collect::<Result<std::collections::VecDeque<_>, _>>()?;
             drop(statement);
@@ -18856,6 +18862,7 @@ mod tests {
         }
 
         let replay_after = observed.last().unwrap().cursor;
+        drop(events);
         drop(runtime);
         let runtime = SessionRuntime::open(
             SessionRuntimeOptions::new(database_path),
@@ -19846,9 +19853,7 @@ mod tests {
         assert_eq!(run.status, RunStatus::Completed);
 
         // The counter is durable on the run row.
-        let store = Store::open(directory.path().join("sessions.sqlite3"))
-            .await
-            .unwrap();
+        let store = runtime.inner.store.clone();
         let continuations: u16 = store
             .call(Priority::Control, move |connection| {
                 connection
@@ -25713,9 +25718,12 @@ mod tests {
             workspace_path,
             workspace_id,
             session_id,
+            events,
             ..
         } = harness;
         runtime.shutdown().await.unwrap();
+        // The subscription keeps the store (and its ownership) alive.
+        drop(events);
         drop(runtime);
 
         let reopened = SessionRuntime::open(
@@ -32487,7 +32495,11 @@ mod tests {
         .await;
         // An unclean stop (no shutdown) leaves the hanging run interrupted and
         // the limited run queued; recovery must enforce its persisted limits.
+        // The hanging task still holds the runtime, so stop the store worker
+        // directly: that is what process death looks like to the store, and
+        // it releases store ownership for the successor.
         drop(events);
+        harness.runtime.abandon_for_test().await.unwrap();
         drop(harness.runtime);
         let connection = Connection::open(&harness.database_path).unwrap();
         let stored: Option<String> = connection

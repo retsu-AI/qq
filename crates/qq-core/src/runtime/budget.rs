@@ -41,7 +41,7 @@ pub(crate) struct BudgetMeter {
     limits: RunLimits,
     pricing: Option<ModelPricing>,
     started: Instant,
-    turns: u16,
+    turns: u32,
     tool_calls: u32,
     /// Total input plus output tokens across every turn, `None` once a turn
     /// omitted usage while a token or cost bound was imposed.
@@ -467,6 +467,39 @@ mod tests {
             assert_eq!(meter.before_turn(now, 16), BudgetDecision::Continue);
         }
         assert_eq!(meter.deadline(), None);
+    }
+
+    #[test]
+    fn turn_budget_counts_and_compares_past_the_old_u16_range() {
+        // Charging is O(1) per turn, so the meter can be driven past 65 535
+        // without a provider. The limit sits one above that boundary: the
+        // 65 535th charge must not wrap or saturate into an early trip, and
+        // the reserve rule must still fire exactly one turn before the limit.
+        let now = Instant::now();
+        let limit = u32::from(u16::MAX) + 1;
+        let limits = RunLimits {
+            max_model_turns: Some(limit),
+            ..RunLimits::default()
+        };
+        let mut meter = BudgetMeter::new(limits, None, now);
+        // Turns 1..=65 535 are ordinary; a u16 counter would have saturated
+        // or wrapped before the last of them.
+        for _ in 0..(limit - 1) {
+            assert_eq!(meter.before_turn(now, 0), BudgetDecision::Continue);
+            meter.charge_turn(None);
+        }
+        assert_eq!(meter.turns, u32::from(u16::MAX));
+        // Turn 65 536 is the last permitted one, so it is the final response.
+        assert_eq!(
+            meter.before_turn(now, 0),
+            BudgetDecision::FinalResponse(BudgetLimitKind::ModelTurns)
+        );
+        meter.charge_turn(None);
+        assert_eq!(meter.turns, limit);
+        assert!(matches!(
+            meter.before_turn(now, 0),
+            BudgetDecision::Exhausted(exhaustion) if exhaustion.limit == BudgetLimitKind::ModelTurns
+        ));
     }
 
     #[test]

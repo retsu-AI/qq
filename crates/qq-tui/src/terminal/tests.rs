@@ -243,6 +243,40 @@ async fn loop_draws_first_frame_then_only_when_state_changes() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn quitting_returns_the_focused_session_for_the_resume_hint() {
+    let mut harness = Harness::new(64);
+    let task = harness.spawn(App::new(TuiOptions::default()));
+    let snapshot = snapshot(1, Vec::new());
+    let focused = snapshot.focused.as_ref().expect("focused").summary.id;
+    harness.update(ClientUpdate::Snapshot(snapshot));
+    harness.update(ClientUpdate::Connection(ConnectionState::Live));
+    harness.settle().await;
+
+    // `/quit` through the composer, the way a person leaves.
+    for character in "/quit".chars() {
+        harness.key(KeyCode::Char(character), KeyModifiers::NONE);
+    }
+    harness.key(KeyCode::Enter, KeyModifiers::NONE);
+    harness.settle().await;
+    let app = task.await.expect("loop task").expect("loop exits cleanly");
+
+    // `terminal::run` prints `app.focused()` after restoring the terminal;
+    // the loop must hand back the app with that focus intact.
+    assert_eq!(app.focused(), Some(focused));
+}
+
+#[tokio::test(start_paused = true)]
+async fn quitting_without_a_session_reports_none() {
+    let mut harness = Harness::new(64);
+    let task = harness.spawn(App::new(TuiOptions::default()));
+    harness.update(ClientUpdate::Connection(ConnectionState::Live));
+    harness.settle().await;
+    harness.quit();
+    let app = task.await.expect("loop task").expect("loop exits cleanly");
+    assert_eq!(app.focused(), None);
+}
+
+#[tokio::test(start_paused = true)]
 async fn loop_records_send_failures_as_local_updates() {
     // Capacity zero: every outbound request fails at the port, which the
     // loop must turn into a local failure update instead of dropping it.
@@ -348,7 +382,7 @@ async fn loop_reports_client_stop() {
         mpsc::unbounded_channel().0,
     ));
     let result = task.await.expect("loop task");
-    assert!(matches!(result, Err(TuiError::ClientStopped)));
+    assert!(matches!(result, Err(TuiError::ClientStopped(_))));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -568,5 +602,5 @@ async fn a_failed_connection_is_reported_once_and_then_the_client_stops() {
         |_| Box::pin(async { Err(EditorError::NotConfigured) }),
     ));
     let result = task.await.expect("loop task");
-    assert!(matches!(result, Err(TuiError::ClientStopped)));
+    assert!(matches!(result, Err(TuiError::ClientStopped(_))));
 }

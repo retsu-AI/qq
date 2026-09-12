@@ -1,11 +1,15 @@
-//! Golden wire encodings for protocol version 17.
+//! Golden wire encodings for the current protocol version, plus decode-only
+//! coverage of every retained historical version.
 //!
-//! Each fixture under `tests/fixtures/v17/` is the exact JSON a conforming
-//! peer sends or receives. The test decodes every fixture into its Rust type,
-//! re-encodes it, and requires byte equality with the file, so a field rename,
-//! reorder, or default change fails here before any client notices. Set
-//! `QQ_UPDATE_FIXTURES=1` to rewrite the files from the Rust values after an
-//! intentional protocol change (and bump `PROTOCOL_VERSION`).
+//! Each fixture under `tests/fixtures/v<PROTOCOL_VERSION>/` is the exact JSON
+//! a conforming peer sends or receives. The test decodes every fixture into
+//! its Rust type, re-encodes it, and requires byte equality with the file, so
+//! a field rename, reorder, or default change fails here before any client
+//! notices. Set `QQ_UPDATE_FIXTURES=1` to rewrite the files from the Rust
+//! values after an intentional protocol change (and bump `PROTOCOL_VERSION`).
+//!
+//! Older directories are never rewritten: `historical_fixtures_still_decode`
+//! proves that a record a peer on that version produced is still accepted.
 
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
@@ -134,13 +138,15 @@ fn envelope(sequence: u64, event: SessionEvent) -> SessionEventEnvelope {
     }
 }
 
+fn fixture_dir(version: u16) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/v{version}"))
+}
+
 fn check<T>(name: &str, value: &T)
 where
     T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
 {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/v17")
-        .join(format!("{name}.json"));
+    let path = fixture_dir(PROTOCOL_VERSION).join(format!("{name}.json"));
     let encoded = serde_json::to_string_pretty(value).unwrap() + "\n";
     if std::env::var_os("QQ_UPDATE_FIXTURES").is_some() {
         fs::write(&path, &encoded).unwrap();
@@ -160,8 +166,8 @@ where
 }
 
 #[test]
-fn version_17_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 17);
+fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
+    assert_eq!(PROTOCOL_VERSION, 18);
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
@@ -706,10 +712,9 @@ fn version_17_commands_receipts_events_and_capabilities_match_their_goldens() {
 
 #[test]
 fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
-    let base = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/v17/command_submit_prompt.json"),
-    )
+    let base = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "tests/fixtures/v{PROTOCOL_VERSION}/command_submit_prompt.json"
+    )))
     .unwrap();
     let mut with_extra: serde_json::Value = serde_json::from_str(&base).unwrap();
     with_extra["command"]["future"] = serde_json::json!(true);
@@ -727,10 +732,8 @@ fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
     with_extra["command"]["limits"]["max_pizzas"] = serde_json::json!(1);
     assert!(serde_json::from_value::<CommandRequest>(with_extra).is_err());
 
-    let capabilities = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v17/capabilities.json"),
-    )
-    .unwrap();
+    let capabilities =
+        fs::read_to_string(fixture_dir(PROTOCOL_VERSION).join("capabilities.json")).unwrap();
     let mut newer: serde_json::Value = serde_json::from_str(&capabilities).unwrap();
     newer["future_section"] = serde_json::json!({"anything": 1});
     newer["limits"]["max_future"] = serde_json::json!(1);
@@ -741,10 +744,8 @@ fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
 
     // Events and snapshots stay strict: a server never sends what a client
     // cannot name, and both bump the version together.
-    let started = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v17/event_run_started.json"),
-    )
-    .unwrap();
+    let started =
+        fs::read_to_string(fixture_dir(PROTOCOL_VERSION).join("event_run_started.json")).unwrap();
     let mut event: serde_json::Value = serde_json::from_str(&started).unwrap();
     event["event"]["plan"]["future"] = serde_json::json!(1);
     assert!(serde_json::from_value::<SessionEventEnvelope>(event).is_err());
@@ -766,4 +767,92 @@ fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
     assert!(plan.is_none());
     assert!(session.profile.is_default());
     assert!(session.correlation.is_empty());
+}
+
+/// Every retained historical fixture directory still decodes into today's
+/// types. This is decode-only: older encodings are not required to round-trip
+/// byte-for-byte (a widened field or an added optional field changes the
+/// current encoding without invalidating what an older peer produced).
+#[test]
+fn historical_fixtures_still_decode() {
+    const RETAINED: &[u16] = &[17];
+    for &version in RETAINED {
+        assert!(version < PROTOCOL_VERSION);
+        let directory = fixture_dir(version);
+        let mut entries: Vec<PathBuf> = fs::read_dir(&directory)
+            .unwrap_or_else(|error| panic!("{}: {error}", directory.display()))
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .collect();
+        entries.sort();
+        assert!(!entries.is_empty(), "{}: no fixtures", directory.display());
+        for path in entries {
+            let name = path.file_stem().unwrap().to_str().unwrap();
+            let stored = fs::read_to_string(&path).unwrap();
+            fn decode<T: DeserializeOwned>(path: &std::path::Path, stored: &str) -> T {
+                serde_json::from_str(stored).unwrap_or_else(|error| {
+                    panic!(
+                        "{}: does not decode as version {PROTOCOL_VERSION}: {error}",
+                        path.display()
+                    )
+                })
+            }
+            // The prefix selects the type exactly as the golden test named it.
+            if name.starts_with("command_") {
+                decode::<CommandRequest>(&path, &stored);
+            } else if name.starts_with("receipt_") {
+                decode::<CommandReceipt>(&path, &stored);
+            } else if name.starts_with("event_") {
+                decode::<SessionEventEnvelope>(&path, &stored);
+            } else if name.starts_with("snapshot_") {
+                decode::<RunSnapshot>(&path, &stored);
+            } else if name.starts_with("capabilities_request") {
+                decode::<CapabilitiesRequest>(&path, &stored);
+            } else if name == "capabilities" {
+                let decoded = decode::<ServerCapabilities>(&path, &stored);
+                assert_eq!(decoded.protocol_version, version);
+            } else if name == "server_info" {
+                let decoded = decode::<ServerInfo>(&path, &stored);
+                assert_eq!(decoded.protocol_version, version);
+            } else {
+                panic!(
+                    "{}: unrecognized fixture prefix; extend this test",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+/// Version 18 widened the model-turn limit and ordinals to `u32`. A limit or
+/// ordinal above the old `u16` range is accepted on the wire and round-trips;
+/// a value above `u32` is rejected. No turns are executed here: this pins the
+/// accepted range, not the runtime's ability to reach it.
+#[test]
+fn model_turn_limits_and_ordinals_accept_the_full_u32_range() {
+    const ABOVE_U16: u32 = 65_536;
+
+    let limits = RunLimits {
+        max_model_turns: Some(ABOVE_U16),
+        ..RunLimits::default()
+    };
+    let encoded = serde_json::to_string(&limits).unwrap();
+    assert!(encoded.contains(&ABOVE_U16.to_string()));
+    let decoded: RunLimits = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded.max_model_turns, Some(ABOVE_U16));
+
+    let max: RunLimits =
+        serde_json::from_str(&format!(r#"{{"max_model_turns":{}}}"#, u32::MAX)).unwrap();
+    assert_eq!(max.max_model_turns, Some(u32::MAX));
+    let too_wide = format!(r#"{{"max_model_turns":{}}}"#, u64::from(u32::MAX) + 1);
+    assert!(serde_json::from_str::<RunLimits>(&too_wide).is_err());
+
+    let mut message = message(0x21, false, MessageState::Complete);
+    message.turn_ordinal = ABOVE_U16;
+    let round_trip: MessageSnapshot =
+        serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
+    assert_eq!(round_trip.turn_ordinal, ABOVE_U16);
 }

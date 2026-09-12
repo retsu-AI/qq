@@ -1031,7 +1031,7 @@ impl Store {
         &self,
         claimed: &ClaimedRun,
         message_id: MessageId,
-        turn_ordinal: u16,
+        turn_ordinal: u32,
         channel: TextChannel,
         text: String,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
@@ -1135,7 +1135,7 @@ impl Store {
         &self,
         claimed: &ClaimedRun,
         message_id: MessageId,
-        turn_ordinal: u16,
+        turn_ordinal: u32,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
@@ -1148,7 +1148,7 @@ impl Store {
     pub(super) async fn record_interrupted(
         &self,
         claimed: &ClaimedRun,
-        turn_ordinal: u16,
+        turn_ordinal: u32,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
@@ -1163,7 +1163,7 @@ impl Store {
     pub(super) async fn record_output_truncated(
         &self,
         claimed: &ClaimedRun,
-        turn_ordinal: u16,
+        turn_ordinal: u32,
         continuation: u16,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
@@ -1614,7 +1614,9 @@ impl Store {
         .await
     }
 
-    #[cfg(test)]
+    /// Stops the worker as a crash would: no settlement, no final commit.
+    /// The caller joins the handle so ownership is released before a
+    /// successor opens the store.
     pub(super) fn stop_worker_for_test(&self) -> Option<std::thread::JoinHandle<()>> {
         self.inner.closing.store(true, Ordering::Release);
         self.inner.output_slots.close();
@@ -1699,6 +1701,67 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_store_has_one_owner_and_a_busy_store_is_refused_without_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let first = Store::open(path.clone()).await.unwrap();
+        assert!(path.exists());
+        let modified_before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let wal_before = std::fs::metadata(path.with_extension("sqlite3-wal"))
+            .ok()
+            .map(|metadata| metadata.len());
+
+        let started = std::time::Instant::now();
+        let second = Store::open(path.clone()).await;
+        assert!(matches!(second, Err(SessionRuntimeError::StoreBusy)));
+        // The refusal waits out the handoff grace (a departing owner may still
+        // be closing) but never longer, and it is not a SQLite busy timeout.
+        let elapsed = started.elapsed();
+        assert!(elapsed >= schema::OWNERSHIP_WAIT, "{elapsed:?}");
+        assert!(elapsed < schema::OWNERSHIP_WAIT * 3, "{elapsed:?}");
+        // Nothing about the database changed: the loser never opened it.
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            modified_before
+        );
+        assert_eq!(
+            std::fs::metadata(path.with_extension("sqlite3-wal"))
+                .ok()
+                .map(|metadata| metadata.len()),
+            wal_before
+        );
+        // The first owner is unaffected by the refused attempt.
+        assert_eq!(
+            first.unfinished_run_ids().await.unwrap(),
+            Vec::<RunId>::new()
+        );
+
+        // A clean close hands ownership over.
+        first.close().await.unwrap();
+        let successor = Store::open(path.clone()).await.unwrap();
+        // So does dropping the last handle without closing (process exit).
+        drop(successor);
+        let after_drop = Store::open(path).await.unwrap();
+        after_drop.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_busy_store_is_refused_before_the_database_is_created() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        // Another process holds ownership but has not created the database
+        // yet (or the database was removed under it). The candidate must not
+        // create it either.
+        let _foreign = schema::acquire_ownership(&path).unwrap();
+
+        assert!(matches!(
+            Store::open(path.clone()).await,
+            Err(SessionRuntimeError::StoreBusy)
+        ));
+        assert!(!path.exists());
+    }
 
     /// A raw job with nothing to settle, for queue-shape tests.
     fn raw_job(job: impl FnOnce(&mut Connection) + Send + 'static) -> worker::DatabaseJob {

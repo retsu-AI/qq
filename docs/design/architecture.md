@@ -916,6 +916,13 @@ terminal event additionally requires proof that its tools and children were
 drained (`TeardownComplete`, minted only by the execution teardown), so
 publication before teardown does not compile (ADR-0012).
 
+One process owns a store at a time. Opening the store takes an advisory lock
+on a sibling `<store>.lock` file before SQLite is opened and before recovery
+runs; a second opener is refused as `StoreBusy` without touching the database
+(ADR-0022). Recovery therefore never runs against runs another live process
+is executing. The store belongs on a local filesystem, which SQLite's WAL
+mode already requires.
+
 ## Workspaces And Tools
 
 The server executes tools on the machine where it runs. In local `qq` mode,

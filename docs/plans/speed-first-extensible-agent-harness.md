@@ -4,11 +4,11 @@
 
 | | |
 | --- | --- |
-| Now | Phase 6 — H21.1c in review (`refactor/h21-settle-run`, ADR-0012); every other behavioral Phase 6 slice (H20, H27, H28, H22.1, H21.1a/b) merged in #22. Next: HC1, then HC3 |
-| Next | Phase 5b HC1 → HC3 → HC4; then H18, measured H19, mechanical H21.2 split (after HC3), structural H22.2 |
+| Now | Phase 5b — HC1 in review (`feat/hc1-headless-run-contract`, 5 commits, ADR-0022; `PROTOCOL_VERSION` 18). H21.1c merged (#24). Next: HC3 |
+| Next | Phase 5b HC3 → HC4; then H18, measured H19, mechanical H21.2 split (after HC3), structural H22.2 |
 | Open gates carried | Eight-stream output service gap ≤20 ms at p95 (median met by H20; executable budget stays 50 ms until a quiet-host p95); Phase 5a full H0 tail acceptance on a quiet host; native Windows teardown beyond the targeted CI job |
-| Last closed | H20, H27, H28, H22.1, H21.1a/b, 2026-09-11 (#22 `61682be`; ADR-0011, ADR-0013); Phase 5a feed hot-path redesign and release profile, 2026-09-07 (`893e582`) |
-| Versions | `PROTOCOL_VERSION` 17, `CAPABILITIES_VERSION` 1, `DESCRIPTOR_VERSION` 6, store schema 26, H0 fixture version 4 |
+| Last closed | H21.1c, 2026-09-11 (#24, ADR-0012); H20, H27, H28, H22.1, H21.1a/b, 2026-09-11 (#22 `61682be`; ADR-0011, ADR-0013) |
+| Versions | `PROTOCOL_VERSION` 18 (HC1), `CAPABILITIES_VERSION` 1, `DESCRIPTOR_VERSION` 6, store schema 26, H0 fixture version 4 |
 
 Updated 2026-09-11. The `Now` row is authoritative for what is being worked;
 update it in the same PR that ships or reprioritizes work.
@@ -484,13 +484,13 @@ imported in Phase 1.
 | H26 | Done | Bounded workspace-feed admission and lifecycle; feed ring | H15 | `qq-core`, server |
 | HC2 | Done | Positive tool exposure via optional `policy.exposed_tools` | H6, H13 | Config, core plan |
 | H20 | Done (p95 open) | Lifecycle store calls wait for admission (13 loops deleted); control writes share the output group commit; scheduler claim no longer closes groups (D8, ADR-0011). Gap median 20 ms; quiet-host p95 qualification and the 50→20 ms budget tightening remain | H16, H23–H26 | `qq-core` |
-| **H21** | **H21.1 done (part c in review); H21.2 next after HC3** | `RunIdentity`, `PersistenceFault`, one guarded `settle_run`, `TeardownComplete` (D9, ADR-0012) shipped; the mechanical `sessions.rs` split (H21.2) remains | H15–H17, H20 | `qq-core` |
+| **H21** | **H21.1 done; H21.2 next after HC3** | `RunIdentity`, `PersistenceFault`, one guarded `settle_run`, `TeardownComplete` (D9, ADR-0012) shipped; the mechanical `sessions.rs` split (H21.2) remains | H15–H17, H20 | `qq-core` |
 | H27 | Done | Superseded active generations count toward entry/byte limits; a replacement is admitted before the old slot is removed; equivalent-plan evidence growth is admitted; completed per-key compile guards are reclaimed; `PlanKey` compares inline configuration exactly and redacts it | H2 | Root |
 | H28 | Done | `PlanCompileError::TooManyContextSources` for a ninth source; `AgentPlanDescriptor.context_sources` (name, version, budget, fail policy); `DESCRIPTOR_VERSION` 6 (ADR-0013) | H8 | Core, protocol |
 | H22 | H22.1 done; H22.2 open | Correctness bundle shipped (`notify(` 37→10, `tool_calls.effect` schema 26, MCP permit ordering verified); the structural bundle (route table, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI, `Notify` cancellation) remains | — | Per crate |
 | H18 | Open | Shared transcript `Arc`, precompiled prompt prefix, `RawValue` schemas (D5) | H14 | `qq-core`, `qq-provider` |
 | H19 | Conditional | SSE framing (D10) only if the decoder baseline justifies it | H18, `sse_decode` baseline | `qq-provider`, `qq-client` |
-| HC1 | Open | `--correlation`, exclusive `--session` resume, `u32` turn limits, model-less `config check` | H3, H26 | Root, config, core, protocol |
+| HC1 | In review | `--correlation`, `--session` resume behind a per-store owner lock (ADR-0022), `u32` turn limits (`PROTOCOL_VERSION` 18), model-less `config check` | H3, H26 | Root, config, core, protocol |
 | HC3 | Open | `--output-schema`, bounded repair turns, `final_output` on `outcome`/`RunFinished` | H3, HC1 | Protocol, core, root |
 | HC4 | Open | Headless golden fixtures per `PROTOCOL_VERSION` and compatibility statement | HC1–HC3 | Protocol tests, docs |
 | H10 | Gated | First real OS process-sandbox adapter | R6, platform threat model | Core tools, root |
@@ -540,7 +540,8 @@ Open items, tracked here until closed:
 
 ### Phase 5b — Headless Contract For Supervisors
 
-Status: HC2 shipped 2026-09-06 (`893e582`, squashed from `93ef6b8`); HC1, HC3, HC4 open. Design
+Status: HC2 shipped 2026-09-06 (`893e582`, squashed from `93ef6b8`); HC1 in
+review 2026-09-11 (`feat/hc1-headless-run-contract`); HC3, HC4 open. Design
 authority, gap table, bounds, and acceptance criteria are in
 [`headless-contract.md`](../design/headless-contract.md); this section records
 only sequencing and the constraints that interact with Phase 6.
@@ -574,8 +575,8 @@ workspace gates and default-path H0 regression gate pass.
 Status: active from 2026-09-08. H20 implemented 2026-09-09 (`ab6de6f`,
 `d05e474`; ADR-0011). H20, H27, H28, H22.1, and H21.1a/b merged in #22
 (`61682be`, 2026-09-11); H21.1c (`settle_run`, `TeardownComplete`,
-ADR-0012) is in review on `refactor/h21-settle-run`. Order from here: HC1,
-HC3, HC4 (Phase 5b); then H18; then H19 after its decoder baseline; then the
+ADR-0012) merged in #24. Order from here: HC3, HC4 (Phase 5b; HC1 is in
+review); then H18; then H19 after its decoder baseline; then the
 mechanical H21.2 split (after HC3) and the structural H22.2 items as separate
 commits. The H20 p95 qualification is a quiet-host recording, not code.
 

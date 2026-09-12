@@ -76,18 +76,51 @@ approximate anchors, not stable identifiers.
 ### Invocation
 
 ```sh
-qq run [--workspace PATH] [--approval read-only|auto|full] [--profile NAME]
+qq run [--workspace PATH] [--session ID]
+       [--approval read-only|auto|full] [--profile NAME]
        [--allow-tool NAME]... [--allow-shell PREFIX]... [--steer-stdin]
        [--timeout-seconds N] [--max-turns N] [--max-cost-usd VALUE]
-       [--format text|jsonl] [--trace PATH]
+       [--correlation KEY=VALUE]... [--format text|jsonl] [--trace PATH]
        [--model PROVIDER/MODEL] [--max-output-tokens N] [--organization NAME]
        -- PROMPT
 ```
 
-Source: `src/cli.rs`. `--max-turns` is `u16`. `ask` is not representable in
+Source: `src/cli.rs`. `--max-turns` is `u32` (widened from `u16` in protocol version 18). `ask` is not representable in
 headless mode because there is no one to ask. `--max-cost-usd` requires
 pricing for the selected model in configuration and exits `2` otherwise
-(`src/main.rs`).
+(`src/main.rs`). `--correlation` labels are validated against the protocol's
+bounds (8 entries, 64-byte keys, 256-byte values, 2 KiB total; a repeated
+key is an error) before any configuration is read, stamped on both the
+session and the run, and never interpreted.
+
+`--session ID` submits into an existing session instead of creating one. The
+session must be a root session of the workspace (a spawned sub-agent session
+is refused) and idle with no queued prompt; an unknown id and a session of
+another workspace are the same `invalid_configuration` refusal, so the id's
+existence elsewhere is not disclosed. The invocation decides the run exactly
+as it would for a new session: the configured model (after `--model`),
+`--profile`, and `--approval` are written to the session before the prompt is
+submitted. Store ownership (below) and the recovery sweep both precede this,
+so an earlier run the previous process left executing is already settled as
+`interrupted` when the resume is examined, and its history — including the
+runtime notice not to retry interrupted tool calls — is what the resumed run
+sees. The event stream starts at the new prompt, not at the session's history
+or the settings writes.
+
+The id is made visible where a person can copy it. In text format, when stderr
+is a terminal, `qq run` ends with a resume hint on stderr naming the exact
+`qq run --session ID "<prompt>"` command, after any outcome (an interrupted or
+exhausted run is exactly when someone wants to continue). The TUI prints the
+same hint for the focused session after `/quit`, once the terminal is
+restored. JSONL output never carries the hint: the id is in the `trial`
+record, and a piped stderr receives nothing it did not ask for.
+
+The interactive surface mirrors this: bare `qq` starts a new session, and
+`qq --session ID` opens that session in the TUI. A session `qq run` left
+behind can therefore be picked up interactively, and one the TUI left behind
+can be driven headlessly. The TUI refuses an unknown id, one from another
+workspace, or a spawned sub-agent session before painting anything, with the
+same wording `qq run --session` uses.
 
 ### Configuration Injection
 
@@ -116,6 +149,13 @@ referenced, never inlined.
 A supervisor that wants the session store as an artifact redirects
 `XDG_DATA_HOME` to a run-scoped directory.
 
+One process owns a store at a time (ADR-0022). A second `qq` opening the same
+store — a retry that starts before the previous attempt has exited, or two
+runs sharing a data directory — exits `4` (`harness_failure`) with "session
+store is owned by another running qq process" after a bounded wait, without
+creating, opening, or recovering the database. It is safe to retry once the
+owner exits; concurrent runs need distinct `XDG_DATA_HOME`s.
+
 ### Output: JSONL Records
 
 With `--format jsonl`, stdout carries one JSON object per line, tagged by
@@ -123,7 +163,7 @@ With `--format jsonl`, stdout carries one JSON object per line, tagged by
 
 | `type` | Fields | Notes |
 | --- | --- | --- |
-| `trial` | `qq_version`, `qq_source_revision`, `protocol_version`, `workspace_identity`, `model`, `profile`, `context_window?`, `pricing_provenance?`, `approval`, `timeout_seconds?`, `max_turns?`, `max_cost_usd_nanos?`, `arm?`, `workspace_id`, `session_id`, `run_id` | Exactly one, first, unless startup fails before a session exists |
+| `trial` | `qq_version`, `qq_source_revision`, `protocol_version`, `workspace_identity`, `model`, `profile`, `context_window?`, `pricing_provenance?`, `approval`, `timeout_seconds?`, `max_turns?`, `max_cost_usd_nanos?`, `correlation?`, `arm?`, `workspace_id`, `session_id`, `run_id` | Exactly one, first, unless startup fails before a session exists. `correlation` is present only when at least one `--correlation` was given |
 | `event` | `envelope: SessionEventEnvelope` | `{ cursor: { sequence }, session_id, run_id?, caused_by?, occurred_at_ms, event: { type, ... } }`. Includes child-session events for the workspace |
 | `outcome` | `status`, `exit_code`, `message?`, `usage?`, `estimated_cost_usd_nanos?`, `prompt_identity?`, `audit?` | Exactly one, last |
 
@@ -253,10 +293,10 @@ validation and repair turns, with bounded work and measured performance.
 
 | Gap | Today | Intended | Task |
 | --- | --- | --- | --- |
-| Correlation from the CLI | `qq run` passes `Correlation::default()`; the protocol already supports up to 8 bounded entries and returns them in snapshots | `--correlation KEY=VALUE` (repeatable) stamped on the session and echoed in `trial` and every envelope's session snapshot | HC1 |
-| Resume into an existing session | `qq run` always creates a session; `SubmitPrompt` on an existing session exists only through the server | `qq run --session ID` establishes exclusive store ownership before opening the runtime or running recovery, rejects a busy store without mutation, then submits into an idle session in the same workspace; recovery never replays uncertain side effects | HC1 |
-| `--max-turns` width | CLI, `RunLimits.max_model_turns`, and the core turn counter are `u16` | Widen the shared types and CLI to `u32`, with a protocol-version bump, historical decoding fixtures, and boundary tests | HC1 |
-| Minimal configuration check | `config check` with `(version: 1)` fails with "model must be configured" | A document with no model validates; model selection is checked at run time, where it already is | HC1 |
+| Correlation from the CLI | **Shipped** 2026-09-11 (`f0b7dd3`). `--correlation KEY=VALUE` (repeatable) is validated as one set against the protocol bounds before configuration loads, stamped on the session and the run, and echoed on `trial` (omitted when empty) and every session snapshot | — | HC1 |
+| Resume into an existing session | **Shipped** 2026-09-11 (`63cb256`, `63032ab`; ADR-0022). Every store open takes an advisory owner lock before SQLite is opened and before recovery; a busy store is refused as `StoreBusy` without database I/O. `qq run --session ID` then submits into an idle root session of the workspace, applying the invocation's model, profile, and approval first; an interrupted earlier run is already settled by recovery and is never re-executed | — | HC1 |
+| `--max-turns` width | **Shipped** 2026-09-11 (`d079e21`). `RunLimits.max_model_turns`, every `turn_ordinal`, the core turn loop, the budget meter, and the CLI are `u32`; `PROTOCOL_VERSION` 17 → 18 with `v18/` goldens and `v17/` retained decode-only; boundary tests pin 65 536 and `u32::MAX` on the wire and drive the meter past 65 535 without a provider | — | HC1 |
+| Minimal configuration check | **Shipped** 2026-09-11 (`95c6e3d`). `ConfigLoader::check` validates every rule and treats only `ModelRequired` as "valid apart from the selection"; `config check` with `(version: 1)` passes and names the missing model. `load()` and every run-time path still require one | — | HC1 |
 | Narrowing tool exposure | **Shipped** 2026-09-06 (`93ef6b8`). Optional `policy.exposed_tools` narrows the catalog by intersection across layers and existing profile/pack exposure. An absent field adds no restriction; an empty list exposes no tools. Existing grants and managed grant denies retain their meaning. Static names and MCP name syntax validate during `config check`; profile-admitted MCP membership validates during plan compilation without discovery in `config check`; ordinary catalog bounds remain authoritative | — | HC2 |
 | Typed final output | The final answer is free text; a supervisor that wants a structured report parses prose or asks the model to write a file | Compile `--output-schema PATH` off the run hot path; core validates the final answer and performs bounded repair turns. Optional `final_output` on `RunFinished` and `outcome` carries the validated value or a typed validation failure, persisted before publication. Valid JSON is not a correct answer; the supervisor still verifies | HC3 |
 | Pinning the contract | Supervisors re-read QQ source at each bump | Golden JSONL fixtures for `trial`/`event`/`outcome` per `PROTOCOL_VERSION` under `crates/qq-protocol/tests/fixtures/headless/`, with a compatibility statement in this document | HC4 |

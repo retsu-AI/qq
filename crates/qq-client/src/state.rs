@@ -485,7 +485,7 @@ impl SessionStore {
     /// Marks a run's still-streaming assistant messages complete through the
     /// given turn: the server finalizes a turn's message in the same
     /// transaction as the turn's tool calls, without a dedicated event.
-    fn complete_streamed_turns(&mut self, session_id: SessionId, run_id: RunId, through_turn: u16) {
+    fn complete_streamed_turns(&mut self, session_id: SessionId, run_id: RunId, through_turn: u32) {
         let Some(messages) = self
             .get_mut(&session_id)
             .and_then(|session| session.messages.as_mut())
@@ -632,7 +632,7 @@ pub struct RunStats {
     pub cost_usd_nanos: Option<u64>,
     /// Highest model turn committed so far, from `ModelTurnCompleted`; zero
     /// for historical runs loaded from a snapshot.
-    pub turns: u16,
+    pub turns: u32,
     /// The profile the run was claimed under and the first eight hex digits
     /// of its plan digest, from `RunStarted.plan` or the loaded run.
     pub plan: Option<(AgentProfileId, String)>,

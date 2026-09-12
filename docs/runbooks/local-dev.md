@@ -50,7 +50,7 @@ to its source. Cargo reruns the script when `HEAD` moves. See
 
 ```sh
 cargo run -- ask "Reply with pong"      # needs a configured model
-cargo run -- config check               # validates configuration without a model call (HC1 will relax the model requirement)
+cargo run -- config check               # validates configuration; a model is not required (it is checked at run time)
 ```
 
 ## Concurrent agents

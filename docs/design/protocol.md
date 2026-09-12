@@ -46,7 +46,7 @@ Related documents:
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 17
+PROTOCOL_VERSION = 18
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -122,8 +122,13 @@ tags and failure kind. Version 17 added the server's durable identity to
 and a bounded printable `display_name`. A client keys a saved server profile
 by `server_id`, never by address, and can confirm that a cursor belongs to the
 server it is talking to before replaying it. Older clients tolerate the new
-fields on decode but their discovery metadata format is rejected. Golden
-fixtures live under `crates/qq-protocol/tests/fixtures/v17/`.
+fields on decode but their discovery metadata format is rejected. Version 18
+widened `RunLimits.max_model_turns` and every `turn_ordinal` from `u16` to
+`u32`. The accepted wire range grew; no field was renamed or removed, so every
+version-17 record still decodes, and a version-17 client would reject only a
+value above 65 535. Golden fixtures live under
+`crates/qq-protocol/tests/fixtures/v18/`; the `v17` directory is retained
+decode-only.
 
 Clients and servers must agree on this value.
 

@@ -34,10 +34,24 @@ cd my-project
 qq
 ```
 
-`qq` opens the TUI using the current directory as the workspace. The developer
-can have an ongoing conversation, watch model and tool activity stream in real
-time, approve sensitive actions, cancel work, inspect changes, and resume the
-conversation later.
+`qq` opens the TUI using the current directory as the workspace and starts a
+new session. The developer can have an ongoing conversation, watch model and
+tool activity stream in real time, approve sensitive actions, cancel work,
+inspect changes, and resume the conversation later.
+
+Every entry point follows the same shape — bare starts a new session,
+`--session ID` continues an existing one — and every exit prints the id and
+the command that continues it:
+
+| Command | Surface | Session |
+| --- | --- | --- |
+| `qq` | TUI | New |
+| `qq --session ID` | TUI | Existing (root session of this workspace, idle or not) |
+| `qq ask "<prompt>"` | One streamed answer | New, not resumable |
+| `qq run "<prompt>"` | Non-interactive agent, JSONL or text | New |
+| `qq run --session ID "<prompt>"` | Non-interactive agent | Existing (must be idle) |
+
+Earlier sessions stay reachable from the TUI's session list as well as by id.
 
 The first complete vertical slice should allow a developer to:
 

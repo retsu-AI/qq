@@ -16,6 +16,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EndSynchronizedUpdate},
 };
 use futures_util::{Stream, StreamExt};
+use qq_protocol::SessionId;
 use tokio::{
     io::{AsyncWrite, AsyncWriteExt},
     time::{Duration, MissedTickBehavior, interval},
@@ -32,7 +33,11 @@ use crate::{
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 const ANIMATION_INTERVAL: Duration = Duration::from_millis(crate::app::ANIMATION_INTERVAL_MS);
 
-pub async fn run<P>(client: P, app: App) -> Result<(), TuiError>
+/// Runs the interactive loop to exit and returns the session that was focused
+/// when it ended (`None` when the user never had one, or exited on a signal
+/// before the loop started). The terminal is restored before this returns,
+/// so the caller may print to the ordinary screen.
+pub async fn run<P>(client: P, app: App) -> Result<Option<SessionId>, TuiError>
 where
     P: ClientPort,
 {
@@ -40,14 +45,14 @@ where
     tokio::pin!(shutdown);
     tokio::select! {
         biased;
-        result = &mut shutdown => return result.map_err(TuiError::from),
+        result = &mut shutdown => return result.map(|()| None).map_err(TuiError::from),
         _ = tokio::task::yield_now() => {}
     }
 
-    let _terminal = TerminalGuard::enter()?;
+    let terminal = TerminalGuard::enter()?;
     let events = EventStream::new();
     let output = tokio::io::stdout();
-    run_loop(
+    let app = run_loop(
         client,
         app,
         events,
@@ -56,8 +61,9 @@ where
         shutdown,
         external_editor,
     )
-    .await
-    .map(drop)
+    .await?;
+    drop(terminal);
+    Ok(app.focused())
 }
 
 /// Edit `draft` in `$VISUAL` or `$EDITOR`. The terminal leaves raw mode and
@@ -156,6 +162,9 @@ where
     let mut terminal_size = size()?;
     // The most urgent redraw requested since the last frame, if any.
     let mut redraw = Some(Redraw::Immediate);
+    // The most recent client-reported failure, surfaced if the client then
+    // stops without recovering.
+    let mut last_client_failure: Option<String> = None;
 
     loop {
         if redraw == Some(Redraw::Immediate) {
@@ -187,8 +196,11 @@ where
             }
             update = client.recv() => {
                 let Some(update) = update else {
-                    return Err(TuiError::ClientStopped);
+                    return Err(TuiError::ClientStopped(last_client_failure.take()));
                 };
+                if let ClientUpdate::SnapshotFailed(failure) = &update {
+                    last_client_failure = Some(failure.message().to_owned());
+                }
                 app.apply_client_update(update)
             }
             highlighted = renderer.highlighter.next() => {

@@ -9,6 +9,69 @@ use crate::sessions::{PersistenceFault, SessionRuntimeError};
 /// with every migration step appended to `open_database`.
 pub const STORE_SCHEMA_VERSION: u16 = 26;
 
+/// Suffix of the sibling file whose advisory lock marks the store's owner.
+pub const OWNER_LOCK_SUFFIX: &str = ".lock";
+
+/// Exclusive ownership of one store. An OS advisory lock on a sibling
+/// `<store>.lock` file: a process that exits or crashes releases it without
+/// cleanup, and dropping the guard releases it deliberately. The file carries
+/// no data; the database itself is opened only after the lock is held.
+pub(in crate::sessions) struct StoreOwnership {
+    _file: std::fs::File,
+}
+
+/// How long an opener waits for a departing owner to release the store
+/// before reporting it busy. Covers the ordinary handoff (the previous owner
+/// is closing its connection as the next one starts) without turning a
+/// genuinely busy store into a hang. Blocking: runs on the store's own
+/// thread, never on an executor.
+pub(in crate::sessions) const OWNERSHIP_WAIT: std::time::Duration =
+    std::time::Duration::from_millis(1_500);
+const OWNERSHIP_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Takes exclusive ownership of the store at `path` or reports that another
+/// process holds it. Runs before SQLite is opened so a busy store sees no
+/// I/O beyond this probe.
+pub(in crate::sessions) fn acquire_ownership(
+    path: &std::path::Path,
+) -> Result<StoreOwnership, SessionRuntimeError> {
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(OWNER_LOCK_SUFFIX);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|_| {
+            SessionRuntimeError::Persistence(PersistenceFault::Sqlite(
+                rusqlite::ffi::ErrorCode::CannotOpen,
+            ))
+        })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600));
+    }
+    let deadline = std::time::Instant::now() + OWNERSHIP_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(StoreOwnership { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(SessionRuntimeError::StoreBusy);
+                }
+                std::thread::sleep(OWNERSHIP_POLL);
+            }
+            Err(std::fs::TryLockError::Error(_)) => {
+                return Err(SessionRuntimeError::Persistence(PersistenceFault::Sqlite(
+                    rusqlite::ffi::ErrorCode::CannotOpen,
+                )));
+            }
+        }
+    }
+}
+
 pub(in crate::sessions) fn open_database(
     path: &PathBuf,
 ) -> Result<(Connection, StoreId), SessionRuntimeError> {

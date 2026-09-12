@@ -655,7 +655,7 @@ pub struct RunLimits {
     /// Provider turns this run may make in total. The last permitted turn is
     /// reserved as a tool-free final status response when work remains.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_model_turns: Option<u16>,
+    pub max_model_turns: Option<u32>,
     /// Tool calls the model may request across the whole run. The meter
     /// reserves a tool-free final response before the cap would be crossed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1291,7 +1291,7 @@ pub struct MessageSnapshot {
     /// (and assistant messages persisted before per-turn messages existed)
     /// carry 0; assistant turns are 1-based, matching tool-call ordinals.
     #[serde(default)]
-    pub turn_ordinal: u16,
+    pub turn_ordinal: u32,
     pub role: MessageRole,
     pub state: MessageState,
     /// A user message added by `SteerRun` while the run executed, rather than
@@ -1326,7 +1326,7 @@ pub struct ToolCallSnapshot {
     pub id: ToolCallId,
     pub session_id: SessionId,
     pub run_id: RunId,
-    pub turn_ordinal: u16,
+    pub turn_ordinal: u32,
     pub call_ordinal: u16,
     pub provider_call_id: String,
     pub name: String,
@@ -1469,7 +1469,7 @@ pub enum SessionEvent {
         run_id: RunId,
         message_id: MessageId,
         /// The model turn whose request first carried the steering.
-        turn_ordinal: u16,
+        turn_ordinal: u32,
     },
     /// The run finished before the steering could be applied. The message's
     /// state moves to `cancelled`.
@@ -1482,7 +1482,7 @@ pub enum SessionEvent {
     /// tool calls that had not finished settle as interrupted.
     RunInterrupted {
         run_id: RunId,
-        turn_ordinal: u16,
+        turn_ordinal: u32,
     },
     /// The provider stopped turn `turn_ordinal` at its output token limit.
     /// The partial turn is committed (its text stands in the transcript) and
@@ -1491,7 +1491,7 @@ pub enum SessionEvent {
     /// (1-based) against `LimitCapabilities::max_output_continuations`.
     RunOutputTruncated {
         run_id: RunId,
-        turn_ordinal: u16,
+        turn_ordinal: u32,
         continuation: u16,
     },
     /// The run's candidate final answer is being audited by a read-only
@@ -1543,7 +1543,7 @@ pub enum SessionEvent {
     /// calls and therefore has no assistant message row.
     ModelTurnCompleted {
         run_id: RunId,
-        turn_ordinal: u16,
+        turn_ordinal: u32,
         model: ModelSelection,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<TokenUsage>,
@@ -2766,7 +2766,10 @@ mod tests {
         // truncated`, and the `provider_output_truncated` failure kind.
         // Version 17 added the durable `server_id` and `display_name` to
         // `ServerInfo` so clients can key a server profile by identity.
-        assert_eq!(crate::PROTOCOL_VERSION, 17);
+        // Version 18 widened `RunLimits.max_model_turns` and every
+        // `turn_ordinal` from u16 to u32; the accepted wire range grew, so
+        // every version-17 record still decodes.
+        assert_eq!(crate::PROTOCOL_VERSION, 18);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

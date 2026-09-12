@@ -42,6 +42,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub organization: Option<String>,
 
+    /// Open this existing session in the interactive terminal instead of
+    /// starting a new one. Only meaningful without a subcommand; `qq run`
+    /// has its own `--session`.
+    #[arg(long, value_name = "ID")]
+    pub session: Option<qq_protocol::SessionId>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -114,6 +120,15 @@ pub struct RunArgs {
     #[arg(long, value_name = "PATH")]
     pub workspace: Option<PathBuf>,
 
+    /// Submit the prompt into this existing idle root session of the
+    /// workspace instead of creating one. The invocation, not the session's
+    /// history, decides the run: the configured model (after `--model`),
+    /// `--profile`, and `--approval` are applied to the session first. An
+    /// interrupted earlier run is recovered before anything else and never
+    /// re-executes uncertain tool calls.
+    #[arg(long, value_name = "ID")]
+    pub session: Option<qq_protocol::SessionId>,
+
     /// Unattended approval policy. Interactive `ask` approval is not
     /// available in headless mode.
     #[arg(long, value_enum, default_value_t = RunApproval::ReadOnly)]
@@ -146,7 +161,14 @@ pub struct RunArgs {
 
     /// Cancel the run as soon as a model turn beyond N starts.
     #[arg(long, value_name = "N")]
-    pub max_turns: Option<u16>,
+    pub max_turns: Option<u32>,
+
+    /// Attach an opaque `KEY=VALUE` label to the session and run
+    /// (repeatable; at most 8 entries, keys up to 64 bytes, values up to
+    /// 256 bytes, 2 KiB total). Echoed on the trial record and every session
+    /// snapshot for attribution; never interpreted by QQ.
+    #[arg(long = "correlation", value_name = "KEY=VALUE", value_parser = parse_correlation_entry)]
+    pub correlation: Vec<(String, String)>,
 
     /// Cancel the run when its estimated cost exceeds VALUE US dollars,
     /// checked at durable accounting boundaries (committed model turns and
@@ -187,6 +209,41 @@ pub enum RunFormat {
     Text,
     /// Emit ordered protocol events plus trial metadata as JSON lines.
     Jsonl,
+}
+
+/// Splits one `--correlation KEY=VALUE` argument on its first `=`. Per-entry
+/// and aggregate bounds are the protocol's ([`qq_protocol::Correlation::new`])
+/// and are applied once every entry is collected, so an over-limit set is
+/// reported as one error naming the rule rather than failing on the ninth
+/// flag.
+fn parse_correlation_entry(argument: &str) -> Result<(String, String), String> {
+    match argument.split_once('=') {
+        Some((key, value)) if !key.is_empty() => Ok((key.to_owned(), value.to_owned())),
+        Some(_) => Err("the key before `=` must not be empty".to_owned()),
+        None => Err(format!("expected KEY=VALUE, found {argument:?}")),
+    }
+}
+
+/// The lines a surface prints when it hands a session back to the user, so
+/// the id becomes visible somewhere a human can copy it. Every surface prints
+/// the same text.
+#[must_use]
+pub fn resume_hint(session_id: qq_protocol::SessionId) -> String {
+    format!("To continue this session:\n  qq run --session {session_id} \"<prompt>\"\n")
+}
+
+impl RunArgs {
+    /// The validated correlation set for the session and run. A key given
+    /// twice is an error rather than a silent last-wins merge.
+    pub fn correlation(&self) -> Result<qq_protocol::Correlation, String> {
+        let mut entries = std::collections::BTreeMap::new();
+        for (key, value) in &self.correlation {
+            if entries.insert(key.clone(), value.clone()).is_some() {
+                return Err(format!("--correlation key {key:?} is given more than once"));
+            }
+        }
+        qq_protocol::Correlation::new(entries).map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -385,11 +442,112 @@ mod tests {
     }
 
     #[test]
+    fn run_session_is_a_parsed_identifier() {
+        let id = qq_protocol::SessionId::from_bytes([7; 16]);
+        let cli = Cli::try_parse_from(["qq", "run", "task", "--session", &id.to_string()]).unwrap();
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("expected a run command");
+        };
+        assert_eq!(args.session, Some(id));
+        assert!(Cli::try_parse_from(["qq", "run", "task", "--session", "not-an-id"]).is_err());
+        assert_eq!(
+            Cli::try_parse_from(["qq", "run", "task"])
+                .unwrap()
+                .command
+                .and_then(|command| match command {
+                    Command::Run(args) => args.session,
+                    _ => None,
+                }),
+            None
+        );
+    }
+
+    #[test]
+    fn top_level_session_opens_the_tui_and_is_distinct_from_run_session() {
+        let id = qq_protocol::SessionId::from_bytes([7; 16]);
+        let cli = Cli::try_parse_from(["qq", "--session", &id.to_string()]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.session, Some(id));
+        assert_eq!(Cli::try_parse_from(["qq"]).unwrap().session, None);
+
+        // `qq run --session` belongs to the run command, not the top level.
+        let cli = Cli::try_parse_from(["qq", "run", "task", "--session", &id.to_string()]).unwrap();
+        assert_eq!(cli.session, None);
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("expected a run command");
+        };
+        assert_eq!(args.session, Some(id));
+    }
+
+    #[test]
     fn run_rejects_interactive_ask_approval() {
         // Headless mode must never select interactive approval; `ask` is not
         // a value of the headless approval enum, so it fails at parse time —
         // before any prompt could be submitted.
         assert!(Cli::try_parse_from(["qq", "run", "task", "--approval", "ask"]).is_err());
+    }
+
+    #[test]
+    fn run_correlation_entries_are_parsed_validated_and_bounded() {
+        let run = |extra: &[&str]| {
+            let mut argv = vec!["qq", "run", "task"];
+            argv.extend_from_slice(extra);
+            Cli::try_parse_from(argv).map(|cli| match cli.command {
+                Some(Command::Run(args)) => args,
+                _ => panic!("expected a run command"),
+            })
+        };
+
+        let args = run(&[
+            "--correlation",
+            "job=j-1",
+            "--correlation",
+            "attempt=2",
+            "--correlation",
+            "note=has=equals",
+        ])
+        .unwrap();
+        let correlation = args.correlation().unwrap();
+        assert_eq!(correlation.len(), 3);
+        assert_eq!(correlation.get("job"), Some("j-1"));
+        assert_eq!(correlation.get("attempt"), Some("2"));
+        assert_eq!(
+            correlation.get("note"),
+            Some("has=equals"),
+            "only the first `=` separates the key"
+        );
+        assert!(run(&[]).unwrap().correlation().unwrap().is_empty());
+
+        // Shape errors fail at parse time, before any session exists.
+        assert!(run(&["--correlation", "novalue"]).is_err());
+        assert!(run(&["--correlation", "=empty-key"]).is_err());
+
+        // Duplicates and protocol bounds fail at validation with a reason.
+        let duplicate = run(&["--correlation", "job=a", "--correlation", "job=b"]).unwrap();
+        assert!(duplicate.correlation().unwrap_err().contains("job"));
+        let nine: Vec<String> = (0..9).map(|index| format!("k{index}=v")).collect();
+        let mut argv = Vec::new();
+        for entry in &nine {
+            argv.push("--correlation");
+            argv.push(entry.as_str());
+        }
+        assert!(
+            run(&argv)
+                .unwrap()
+                .correlation()
+                .unwrap_err()
+                .contains(&qq_protocol::MAX_CORRELATION_ENTRIES.to_string())
+        );
+        let long_key = format!(
+            "{}=v",
+            "k".repeat(qq_protocol::MAX_CORRELATION_KEY_BYTES + 1)
+        );
+        assert!(
+            run(&["--correlation", &long_key])
+                .unwrap()
+                .correlation()
+                .is_err()
+        );
     }
 
     #[test]

@@ -8,8 +8,8 @@ use std::{
 
 use futures_util::StreamExt;
 use qq_protocol::{
-    CommandId, ModelCatalogRequest, ModelSelection, SessionCommand, SnapshotRequest, WorkspaceId,
-    WorkspaceSnapshot,
+    CommandId, ModelCatalogRequest, ModelSelection, SessionCommand, SessionId, SnapshotRequest,
+    WorkspaceId, WorkspaceSnapshot,
 };
 use tokio::sync::{Semaphore, mpsc};
 
@@ -29,11 +29,26 @@ const PREWARM_SESSIONS: usize = 4;
 type ReconnectFuture = Pin<Box<dyn Future<Output = Option<Connection>> + Send + 'static>>;
 type ConnectionResolver = Arc<dyn Fn() -> ReconnectFuture + Send + Sync + 'static>;
 
+/// Which session the TUI shows first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitialSession {
+    /// Create a fresh session with this model before the first snapshot. This
+    /// is bare `qq`: every launch starts a new conversation, and earlier ones
+    /// stay reachable from the session list or by id.
+    New(ModelSelection),
+    /// Focus this existing session. Rejected at bootstrap when it is not a
+    /// session of the workspace, so the TUI never paints a wrong session.
+    Open(SessionId),
+    /// Focus whatever the workspace already has (newest first) and create
+    /// nothing. Used by clients that attach to a server they do not own, and
+    /// by every reconnect after the first bootstrap.
+    Existing,
+}
+
 struct InteractiveSession {
     workspace: PathBuf,
     selection: ModelSelection,
-    initial_model: Option<ModelSelection>,
-    create_initial_session: bool,
+    initial: InitialSession,
     resolve_connection: ConnectionResolver,
 }
 
@@ -82,8 +97,7 @@ impl TuiClient {
         connection: Connection,
         workspace: PathBuf,
         selection: ModelSelection,
-        initial_model: Option<ModelSelection>,
-        create_initial_session: bool,
+        initial: InitialSession,
         resolve_connection: Resolve,
     ) -> Result<Self, ClientError>
     where
@@ -100,8 +114,7 @@ impl TuiClient {
             InteractiveSession {
                 workspace,
                 selection,
-                initial_model,
-                create_initial_session,
+                initial,
                 resolve_connection,
             },
             request_rx,
@@ -140,8 +153,7 @@ async fn run_tui_client(
     let InteractiveSession {
         workspace,
         selection,
-        initial_model,
-        create_initial_session,
+        initial,
         resolve_connection,
     } = session;
     if updates
@@ -151,15 +163,7 @@ async fn run_tui_client(
     {
         return;
     }
-    let (mut workspace_id, snapshot) = match bootstrap_tui(
-        &client,
-        &workspace,
-        create_initial_session
-            .then_some(initial_model.as_ref())
-            .flatten(),
-    )
-    .await
-    {
+    let (mut workspace_id, snapshot) = match bootstrap_tui(&client, &workspace, &initial).await {
         Ok(bootstrap) => bootstrap,
         Err(error) => {
             send_bootstrap_failure(&updates, error).await;
@@ -167,7 +171,11 @@ async fn run_tui_client(
         }
     };
     let mut cursor = snapshot.cursor;
-    let create_after_validation = !create_initial_session && snapshot.sessions.is_empty();
+    // An attached client with an empty workspace creates one session once
+    // the catalog has validated the model. `New` already created; `Open`
+    // never creates.
+    let create_after_validation =
+        initial == InitialSession::Existing && snapshot.sessions.is_empty();
     if updates
         .send(ClientUpdate::Snapshot(snapshot))
         .await
@@ -198,16 +206,8 @@ async fn run_tui_client(
         let mut events = match client.events(workspace_id, cursor).await {
             Ok(events) => events,
             Err(error) => {
-                if let Some((recovered_client, recovered_workspace, snapshot)) = recover_tui_client(
-                    &client,
-                    &workspace,
-                    create_initial_session
-                        .then_some(initial_model.as_ref())
-                        .flatten(),
-                    &error,
-                    &resolve_connection,
-                )
-                .await
+                if let Some((recovered_client, recovered_workspace, snapshot)) =
+                    recover_tui_client(&client, &workspace, &error, &resolve_connection).await
                 {
                     client = recovered_client;
                     workspace_id = recovered_workspace;
@@ -217,7 +217,7 @@ async fn run_tui_client(
                         workspace.clone(),
                         workspace_id,
                         selection.clone(),
-                        !create_initial_session && snapshot.sessions.is_empty(),
+                        snapshot.sessions.is_empty(),
                         updates.clone(),
                     ));
                     reconnect_delay = Duration::from_millis(50);
@@ -303,16 +303,8 @@ async fn run_tui_client(
             }
         }
         if let Some(error) = reset_error {
-            if let Some((recovered_client, recovered_workspace, snapshot)) = recover_tui_client(
-                &client,
-                &workspace,
-                create_initial_session
-                    .then_some(initial_model.as_ref())
-                    .flatten(),
-                &error,
-                &resolve_connection,
-            )
-            .await
+            if let Some((recovered_client, recovered_workspace, snapshot)) =
+                recover_tui_client(&client, &workspace, &error, &resolve_connection).await
             {
                 client = recovered_client;
                 workspace_id = recovered_workspace;
@@ -322,7 +314,7 @@ async fn run_tui_client(
                     workspace.clone(),
                     workspace_id,
                     selection.clone(),
-                    !create_initial_session && snapshot.sessions.is_empty(),
+                    snapshot.sessions.is_empty(),
                     updates.clone(),
                 ));
                 reconnect_delay = Duration::from_millis(50);
@@ -465,7 +457,7 @@ async fn load_tui_models(
 async fn bootstrap_tui(
     client: &SessionClient,
     workspace: &Path,
-    model: Option<&ModelSelection>,
+    initial: &InitialSession,
 ) -> Result<(WorkspaceId, WorkspaceSnapshot), ClientError> {
     let (workspace_id, _) = client.resolve_workspace(workspace).await?;
     let snapshot = client
@@ -477,28 +469,43 @@ async fn bootstrap_tui(
             message_limit: 256,
         })
         .await?;
-    let focused = if let Some(session) = snapshot.sessions.first() {
-        session.id
-    } else if let Some(model) = model {
-        let receipt = client
-            .command(
-                CommandId::generate().map_err(|_| ClientError::Unavailable)?,
-                SessionCommand::CreateSession {
-                    workspace_id,
-                    parent_id: None,
-                    model: model.clone(),
-                    approval_mode: qq_protocol::ApprovalMode::default(),
-                    profile: qq_protocol::AgentProfileId::default(),
-                    correlation: qq_protocol::Correlation::default(),
-                },
-            )
-            .await?;
-        let qq_protocol::CommandOutcome::SessionCreated { session_id } = receipt.outcome else {
-            return Err(ClientError::MalformedEvent);
-        };
-        session_id
-    } else {
-        return Ok((workspace_id, snapshot));
+    let focused = match initial {
+        InitialSession::New(model) => {
+            let receipt = client
+                .command(
+                    CommandId::generate().map_err(|_| ClientError::Unavailable)?,
+                    SessionCommand::CreateSession {
+                        workspace_id,
+                        parent_id: None,
+                        model: model.clone(),
+                        approval_mode: qq_protocol::ApprovalMode::default(),
+                        profile: qq_protocol::AgentProfileId::default(),
+                        correlation: qq_protocol::Correlation::default(),
+                    },
+                )
+                .await?;
+            let qq_protocol::CommandOutcome::SessionCreated { session_id } = receipt.outcome else {
+                return Err(ClientError::MalformedEvent);
+            };
+            session_id
+        }
+        InitialSession::Open(session_id) => {
+            // Only root sessions are openable; a sub-agent session is shown
+            // under its parent, never as the entry point.
+            match snapshot
+                .sessions
+                .iter()
+                .find(|session| session.id == *session_id)
+            {
+                Some(session) if session.parent_id.is_none() => *session_id,
+                Some(_) => return Err(ClientError::SessionIsChild(*session_id)),
+                None => return Err(ClientError::SessionNotInWorkspace(*session_id)),
+            }
+        }
+        InitialSession::Existing => match snapshot.sessions.first() {
+            Some(session) => session.id,
+            None => return Ok((workspace_id, snapshot)),
+        },
     };
     // Pre-warm the most recent other sessions so the first few switches in
     // the TUI cost no round trip. Sessions arrive newest-first.
@@ -521,10 +528,13 @@ async fn bootstrap_tui(
     Ok((workspace_id, snapshot))
 }
 
+/// Re-bootstraps after a stream failure. Always [`InitialSession::Existing`]:
+/// the first bootstrap already created or opened what was asked for, and a
+/// reconnect must neither create a second session nor fail on an id that
+/// has since been deleted.
 async fn recover_tui_client(
     current: &SessionClient,
     workspace: &Path,
-    model: Option<&ModelSelection>,
     error: &ClientError,
     resolve_connection: &ConnectionResolver,
 ) -> Option<(SessionClient, WorkspaceId, WorkspaceSnapshot)> {
@@ -534,7 +544,8 @@ async fn recover_tui_client(
             | ClientError::EventTooLarge
             | ClientError::ServerResponse { status: 400 }
             | ClientError::ServerMessage { status: 400, .. }
-    ) && let Ok((workspace_id, snapshot)) = bootstrap_tui(current, workspace, model).await
+    ) && let Ok((workspace_id, snapshot)) =
+        bootstrap_tui(current, workspace, &InitialSession::Existing).await
     {
         return Some((current.clone(), workspace_id, snapshot));
     }
@@ -546,7 +557,9 @@ async fn recover_tui_client(
     }
     let connection = resolve_connection().await?;
     let client = SessionClient::new(connection).ok()?;
-    let (workspace_id, snapshot) = bootstrap_tui(&client, workspace, model).await.ok()?;
+    let (workspace_id, snapshot) = bootstrap_tui(&client, workspace, &InitialSession::Existing)
+        .await
+        .ok()?;
     Some((client, workspace_id, snapshot))
 }
 

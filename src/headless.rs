@@ -49,6 +49,9 @@ pub struct HeadlessOptions {
     pub prompt: String,
     /// Workspace directory; resolved to its canonical form by the store.
     pub workspace: PathBuf,
+    /// An existing idle root session of the workspace to submit into. `None`
+    /// creates a fresh session.
+    pub session: Option<SessionId>,
     pub model: ModelSelection,
     /// Agent profile the session runs as; validated against the workspace
     /// configuration before the run starts.
@@ -68,10 +71,18 @@ pub struct HeadlessOptions {
     /// commands are approved for the session on first request.
     pub allow_shell_prefixes: Vec<String>,
     pub timeout: Option<Duration>,
-    pub max_turns: Option<u16>,
+    pub max_turns: Option<u32>,
     pub max_cost_usd_nanos: Option<u64>,
+    /// Opaque labels stamped on the session and the run; echoed on the trial
+    /// record and every session snapshot. Never interpreted.
+    pub correlation: qq_protocol::Correlation,
     pub format: HeadlessFormat,
     pub trace: Option<PathBuf>,
+    /// Print the resume hint (session id and the command that continues it)
+    /// to stderr after the outcome. Set only for text output to a terminal:
+    /// JSONL consumers read `session_id` from the trial record, and scripts
+    /// capturing stderr get nothing they did not ask for.
+    pub resume_hint: bool,
     /// An evaluation arm label (`QQ_EVAL_ARM`) stamped on the trial record so
     /// paired comparisons can tell configurations apart without inferring
     /// them from prompt or schema hashes. Never affects behavior.
@@ -176,9 +187,11 @@ enum TrialRecord<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         timeout_seconds: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        max_turns: Option<u16>,
+        max_turns: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         max_cost_usd_nanos: Option<u64>,
+        #[serde(skip_serializing_if = "qq_protocol::Correlation::is_empty")]
+        correlation: &'a qq_protocol::Correlation,
         #[serde(skip_serializing_if = "Option::is_none")]
         arm: Option<&'a str>,
         workspace_id: String,
@@ -260,6 +273,13 @@ impl Failure {
     fn harness(message: impl Into<String>) -> Self {
         Self {
             status: HeadlessStatus::HarnessFailure,
+            message: message.into(),
+        }
+    }
+
+    fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            status: HeadlessStatus::InvalidConfiguration,
             message: message.into(),
         }
     }
@@ -402,6 +422,7 @@ pub async fn run(
         timeout_seconds: options.timeout.map(|timeout| timeout.as_secs()),
         max_turns: options.max_turns,
         max_cost_usd_nanos: options.max_cost_usd_nanos,
+        correlation: &options.correlation,
         arm: options.arm.as_deref(),
         workspace_id: handle.workspace_id.to_string(),
         session_id: handle.session_id.to_string(),
@@ -472,13 +493,18 @@ pub async fn run(
     } else if let Some(message) = &end.message {
         let _ = writeln!(stderr, "error: {message}");
     }
+    // The session persists whatever the outcome; an interrupted or exhausted
+    // run is exactly when a person wants to pick it up again.
+    if options.resume_hint && options.format == HeadlessFormat::Text {
+        let _ = write!(stderr, "\n{}", crate::cli::resume_hint(handle.session_id));
+    }
 
     end.status
 }
 
-/// Resolves the workspace, creates the session with the model and approval
-/// choices, and submits the prompt. Any failure here happens before the model
-/// sees the task.
+/// Resolves the workspace, creates the session (or adopts the requested
+/// existing one) with the model and approval choices, and submits the prompt.
+/// Any failure here happens before the model sees the task.
 async fn submit(
     sessions: &SessionRuntime,
     options: &HeadlessOptions,
@@ -495,22 +521,115 @@ async fn submit(
         ));
     };
 
-    let created = send(
-        sessions,
-        SessionCommand::CreateSession {
-            workspace_id,
-            parent_id: None,
-            model: options.model.clone(),
-            approval_mode: options.approval.approval_mode(),
-            profile: options.profile.clone(),
-            correlation: qq_protocol::Correlation::default(),
-        },
-    )
-    .await?;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        return Err(Failure::harness(
-            "session creation returned an unexpected outcome",
-        ));
+    let (session_id, subscribe_after) = match options.session {
+        None => {
+            let created = send(
+                sessions,
+                SessionCommand::CreateSession {
+                    workspace_id,
+                    parent_id: None,
+                    model: options.model.clone(),
+                    approval_mode: options.approval.approval_mode(),
+                    profile: options.profile.clone(),
+                    correlation: options.correlation.clone(),
+                },
+            )
+            .await?;
+            let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+                return Err(Failure::harness(
+                    "session creation returned an unexpected outcome",
+                ));
+            };
+            (session_id, created.committed_through)
+        }
+        Some(session_id) => {
+            // Store ownership was taken when the runtime opened and its
+            // recovery sweep has already run, so what the snapshot shows is
+            // the session's settled state. Everything below is a rejection
+            // or a session-level setting; no run exists until the prompt
+            // is admitted.
+            let snapshot = match sessions
+                .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 1))
+                .await
+            {
+                Ok(snapshot) => snapshot,
+                // Unknown ids and sessions of other workspaces are the same
+                // answer: nothing to resume here. Neither leaks that the id
+                // exists elsewhere.
+                Err(SessionRuntimeError::SessionNotFound) => {
+                    return Err(Failure::invalid(format!(
+                        "session {session_id} does not exist in this workspace"
+                    )));
+                }
+                Err(error) => {
+                    return Err(Failure {
+                        status: status_for_error(&error),
+                        message: error.to_string(),
+                    });
+                }
+            };
+            let Some(focused) = snapshot.focused else {
+                return Err(Failure::harness(
+                    "workspace snapshot omitted the focused session",
+                ));
+            };
+            let summary = focused.summary;
+            if summary.parent_id.is_some() {
+                return Err(Failure::invalid(format!(
+                    "session {session_id} is a spawned sub-agent session; \
+                     resume its root session instead"
+                )));
+            }
+            if summary.status != qq_protocol::SessionStatus::Idle
+                || summary.active_run_id.is_some()
+                || summary.queued_prompts > 0
+            {
+                return Err(Failure::invalid(format!(
+                    "session {session_id} is {}; it must be idle with no queued prompts",
+                    match summary.status {
+                        qq_protocol::SessionStatus::Idle => "settling",
+                        qq_protocol::SessionStatus::Queued => "queued",
+                        qq_protocol::SessionStatus::Running => "running",
+                    }
+                )));
+            }
+            // The invocation decides the run, exactly as it would for a new
+            // session. The model selection is always written (the summary
+            // shows only the route, not the output cap or organization);
+            // profile and approval are written only when they differ.
+            let receipt = send(
+                sessions,
+                SessionCommand::SetSessionModel {
+                    session_id,
+                    model: options.model.clone(),
+                },
+            )
+            .await?;
+            let mut after = receipt.committed_through;
+            if summary.profile != options.profile {
+                let receipt = send(
+                    sessions,
+                    SessionCommand::SetSessionProfile {
+                        session_id,
+                        profile: options.profile.clone(),
+                    },
+                )
+                .await?;
+                after = receipt.committed_through;
+            }
+            if summary.approval_mode != options.approval.approval_mode() {
+                let receipt = send(
+                    sessions,
+                    SessionCommand::SetApprovalMode {
+                        session_id,
+                        mode: options.approval.approval_mode(),
+                    },
+                )
+                .await?;
+                after = receipt.committed_through;
+            }
+            (session_id, after)
+        }
     };
 
     // Budgets are core-owned: the runtime enforces them and settles the run
@@ -534,7 +653,7 @@ async fn submit(
                 max_children: None,
                 max_concurrent_children: None,
             },
-            correlation: qq_protocol::Correlation::default(),
+            correlation: options.correlation.clone(),
         },
     )
     .await?;
@@ -548,10 +667,12 @@ async fn submit(
         workspace_id,
         session_id,
         run_id,
-        // Subscribing from the session-creation cursor replays the queued
-        // prompt and everything after it, so no event is lost to the gap
-        // between submission and subscription.
-        subscribe_after: created.committed_through,
+        // Subscribing from the cursor just before submission replays the
+        // queued prompt and everything after it, so no event is lost to the
+        // gap between submission and subscription. For a resumed session that
+        // is the snapshot cursor (or the last settings write), not the
+        // session's history.
+        subscribe_after,
     })
 }
 
@@ -1082,7 +1203,9 @@ mod tests {
         RuntimeLoader, SessionRuntimeOptions,
     };
     use qq_protocol::{AccountingTotal, ModelPricing, RunStatus, SessionStatus, WorkspaceSnapshot};
-    use qq_provider::{ModelRequest, Provider, ProviderEvent, ProviderStream, ProviderUsage};
+    use qq_provider::{
+        Message, ModelRequest, Provider, ProviderEvent, ProviderStream, ProviderUsage,
+    };
 
     use super::*;
 
@@ -1662,6 +1785,7 @@ mod tests {
         HeadlessOptions {
             prompt: "do the task".to_owned(),
             workspace: workspace.to_owned(),
+            session: None,
             model: ModelSelection {
                 model: Some("test/model".to_owned()),
                 max_output_tokens: Some(256),
@@ -1677,8 +1801,10 @@ mod tests {
             timeout: None,
             max_turns: None,
             max_cost_usd_nanos: None,
+            correlation: qq_protocol::Correlation::default(),
             format: HeadlessFormat::Jsonl,
             trace: None,
+            resume_hint: false,
             arm: None,
         }
     }
@@ -2097,6 +2223,430 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn correlation_is_stamped_on_the_trial_record_and_every_session_snapshot() {
+        let fixture = fixture(|| TextProvider).await;
+        let correlation = qq_protocol::Correlation::new(
+            [("job", "j-1"), ("attempt", "2")]
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect(),
+        )
+        .unwrap();
+        let options = HeadlessOptions {
+            correlation: correlation.clone(),
+            ..options(&fixture.workspace)
+        };
+
+        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        assert_eq!(records[0]["type"], "trial");
+        assert_eq!(records[0]["correlation"]["job"], "j-1");
+        assert_eq!(records[0]["correlation"]["attempt"], "2");
+        let snapshots: Vec<&serde_json::Value> = event_records(&records)
+            .iter()
+            .filter_map(|record| {
+                let session = &record["envelope"]["event"]["session"];
+                session.is_object().then_some(session)
+            })
+            .collect();
+        assert!(
+            !snapshots.is_empty(),
+            "lifecycle events must carry a session snapshot"
+        );
+        for session in snapshots {
+            assert_eq!(session["correlation"]["job"], "j-1");
+            assert_eq!(session["correlation"]["attempt"], "2");
+        }
+        let workspace = workspace_snapshot(&fixture).await;
+        assert!(
+            workspace
+                .sessions
+                .iter()
+                .all(|session| session.correlation == correlation)
+        );
+    }
+
+    /// Answers with text and records every request, so a test can see the
+    /// history a resumed run was given.
+    struct RecordingTextProvider {
+        requests: Arc<Mutex<Vec<ModelRequest>>>,
+    }
+
+    impl Provider for RecordingTextProvider {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            self.requests.lock().unwrap().push(request);
+            Box::pin(stream::iter([
+                Ok(ProviderEvent::OutputTextDelta {
+                    text: "ok".to_owned(),
+                }),
+                Ok(ProviderEvent::Completed { usage: None }),
+            ]))
+        }
+    }
+
+    #[tokio::test]
+    async fn session_resume_submits_into_the_idle_session_and_applies_the_invocation() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let fixture = {
+            let requests = Arc::clone(&requests);
+            fixture(move || RecordingTextProvider {
+                requests: Arc::clone(&requests),
+            })
+            .await
+        };
+
+        // First run creates the session.
+        let first = HeadlessOptions {
+            prompt: "first task".to_owned(),
+            ..options(&fixture.workspace)
+        };
+        let (status, stdout, _) = run_to_end(&fixture, first, std::future::pending()).await;
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        let session_id: SessionId = records[0]["session_id"].as_str().unwrap().parse().unwrap();
+        let first_run_id = records[0]["run_id"].as_str().unwrap().to_owned();
+
+        // Second run resumes it with a different approval and model cap.
+        let second = HeadlessOptions {
+            prompt: "second task".to_owned(),
+            session: Some(session_id),
+            approval: HeadlessApproval::Auto,
+            model: ModelSelection {
+                model: Some("test/model".to_owned()),
+                max_output_tokens: Some(128),
+                organization: None,
+            },
+            ..options(&fixture.workspace)
+        };
+        let (status, stdout, stderr) = run_to_end(&fixture, second, std::future::pending()).await;
+        assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
+        let records = parse_records(&stdout);
+        assert_eq!(records[0]["type"], "trial");
+        assert_eq!(records[0]["session_id"], session_id.to_string());
+        assert_ne!(records[0]["run_id"], first_run_id);
+        assert_eq!(records[0]["approval"], "auto");
+        // No session_created: the session already existed. The stream starts
+        // at the prompt, not at the session's history and not at the
+        // settings writes that preceded submission.
+        let events = event_records(&records);
+        assert!(events.iter().all(|record| {
+            let kind = &record["envelope"]["event"]["type"];
+            kind != "session_created" && kind != "session_updated"
+        }));
+        assert_eq!(
+            events[0]["envelope"]["event"]["type"], "prompt_queued",
+            "{:?}",
+            events[0]
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|record| record["envelope"]["event"]["type"] == "prompt_queued")
+                .count(),
+            1
+        );
+
+        // The resumed run's provider request carries the first exchange.
+        {
+            let captured = requests.lock().unwrap();
+            assert_eq!(captured.len(), 2);
+            let history = captured[1].messages();
+            assert!(history.len() >= 3, "{history:?}");
+            assert_eq!(history[0], Message::user("first task"));
+            assert_eq!(history[history.len() - 1], Message::user("second task"));
+        }
+
+        let workspace = workspace_snapshot(&fixture).await;
+        assert_eq!(workspace.sessions.len(), 1, "no second session was created");
+        let session = &workspace.sessions[0];
+        assert_eq!(session.approval_mode, ApprovalMode::Auto);
+        assert_eq!(session.status, SessionStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn session_resume_rejects_unknown_foreign_busy_and_child_sessions() {
+        let fixture = fixture(|| TextProvider).await;
+
+        // Unknown id: invalid configuration, nothing created.
+        let unknown = HeadlessOptions {
+            session: Some(SessionId::generate().unwrap()),
+            ..options(&fixture.workspace)
+        };
+        let (status, stdout, stderr) = run_to_end(&fixture, unknown, std::future::pending()).await;
+        assert_eq!(status, HeadlessStatus::InvalidConfiguration);
+        assert!(
+            stderr.contains("does not exist in this workspace"),
+            "{stderr}"
+        );
+        assert!(stdout.is_empty(), "no trial record before a session exists");
+        assert!(workspace_snapshot(&fixture).await.sessions.is_empty());
+
+        // A session in another workspace is not visible from this one.
+        let other_workspace = fixture.workspace.parent().unwrap().join("other");
+        std::fs::create_dir_all(&other_workspace).unwrap();
+        let (status, stdout, _) = run_to_end(
+            &fixture,
+            HeadlessOptions {
+                workspace: other_workspace.clone(),
+                ..options(&other_workspace)
+            },
+            std::future::pending(),
+        )
+        .await;
+        assert_eq!(status, HeadlessStatus::Completed);
+        let foreign: SessionId = parse_records(&stdout)[0]["session_id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let (status, _, stderr) = run_to_end(
+            &fixture,
+            HeadlessOptions {
+                session: Some(foreign),
+                ..options(&fixture.workspace)
+            },
+            std::future::pending(),
+        )
+        .await;
+        assert_eq!(status, HeadlessStatus::InvalidConfiguration);
+        assert!(
+            stderr.contains("does not exist in this workspace"),
+            "{stderr}"
+        );
+
+        // A child session is never a resume target.
+        let resolved = send(
+            &fixture.sessions,
+            SessionCommand::ResolveWorkspace {
+                path: fixture.workspace.display().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.outcome else {
+            panic!("unexpected receipt");
+        };
+        let created = send(
+            &fixture.sessions,
+            SessionCommand::CreateSession {
+                workspace_id,
+                parent_id: None,
+                model: options(&fixture.workspace).model,
+                approval_mode: ApprovalMode::ReadOnly,
+                profile: qq_protocol::AgentProfileId::default(),
+                correlation: qq_protocol::Correlation::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("unexpected receipt");
+        };
+        let child = send(
+            &fixture.sessions,
+            SessionCommand::CreateSession {
+                workspace_id,
+                parent_id: Some(session_id),
+                model: options(&fixture.workspace).model,
+                approval_mode: ApprovalMode::ReadOnly,
+                profile: qq_protocol::AgentProfileId::default(),
+                correlation: qq_protocol::Correlation::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::SessionCreated {
+            session_id: child_id,
+        } = child.outcome
+        else {
+            panic!("unexpected receipt");
+        };
+        let (status, _, stderr) = run_to_end(
+            &fixture,
+            HeadlessOptions {
+                session: Some(child_id),
+                ..options(&fixture.workspace)
+            },
+            std::future::pending(),
+        )
+        .await;
+        assert_eq!(status, HeadlessStatus::InvalidConfiguration);
+        assert!(stderr.contains("sub-agent"), "{stderr}");
+    }
+
+    /// Hangs on the first request (so a process can die mid-run) and answers
+    /// with text on every later one, recording what it saw.
+    struct HangsOnceProvider {
+        turn: Arc<Mutex<usize>>,
+        requests: Arc<Mutex<Vec<ModelRequest>>>,
+    }
+
+    impl Provider for HangsOnceProvider {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            self.requests.lock().unwrap().push(request);
+            let mut turn = self.turn.lock().unwrap();
+            let current = *turn;
+            *turn += 1;
+            drop(turn);
+            if current == 0 {
+                Box::pin(stream::pending())
+            } else {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "recovered".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_resume_after_an_unclean_exit_recovers_the_interrupted_run_first() {
+        let turn = Arc::new(Mutex::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let loader: Arc<dyn RuntimeLoader> = {
+            let turn = Arc::clone(&turn);
+            let requests = Arc::clone(&requests);
+            Arc::new(ProviderLoader(move || HangsOnceProvider {
+                turn: Arc::clone(&turn),
+                requests: Arc::clone(&requests),
+            }))
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("work");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let workspace = std::fs::canonicalize(&workspace).unwrap();
+        let database = directory.path().join("sessions.sqlite3");
+
+        // Process one: start a run that never finishes, then die without
+        // shutting down. The store is left with a `running` run.
+        let first =
+            SessionRuntime::open(SessionRuntimeOptions::new(database.clone()), loader.clone())
+                .await
+                .unwrap();
+        let handle = submit(
+            &first,
+            &HeadlessOptions {
+                prompt: "hang".to_owned(),
+                ..options(&workspace)
+            },
+        )
+        .await
+        .unwrap();
+        let mut events = first
+            .subscribe(SubscribeRequest {
+                workspace_id: handle.workspace_id,
+                after: handle.subscribe_after,
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let envelope = events.next().await.unwrap().unwrap();
+                if matches!(envelope.event, SessionEvent::RunStarted { .. }) {
+                    break;
+                }
+            }
+            // `RunStarted` precedes the first provider request; die only
+            // once the provider is actually mid-turn.
+            while requests.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(events);
+        // The hanging task still holds the runtime; abandon the store, which
+        // is what process death looks like to it.
+        first.abandon_for_test().await.unwrap();
+        drop(first);
+
+        // Process two: `qq run --session ID`. Opening the runtime recovers
+        // the interrupted run before submit() ever looks at the session.
+        let second = SessionRuntime::open(SessionRuntimeOptions::new(database), loader)
+            .await
+            .unwrap();
+        let fixture = Fixture {
+            sessions: second,
+            workspace: workspace.clone(),
+            _directory: directory,
+        };
+        let (status, stdout, stderr) = run_to_end(
+            &fixture,
+            HeadlessOptions {
+                prompt: "continue".to_owned(),
+                session: Some(handle.session_id),
+                ..options(&workspace)
+            },
+            std::future::pending(),
+        )
+        .await;
+        assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
+        let records = parse_records(&stdout);
+        assert_eq!(records[0]["session_id"], handle.session_id.to_string());
+        assert_ne!(records[0]["run_id"], handle.run_id.to_string());
+
+        // The first run settled as interrupted, durably, before the resume.
+        let snapshot = fixture
+            .sessions
+            .snapshot(SnapshotRequest::new(
+                handle.workspace_id,
+                Some(handle.session_id),
+                8,
+                8,
+            ))
+            .await
+            .unwrap();
+        let runs = &snapshot.focused.unwrap().runs;
+        let interrupted = runs.iter().find(|run| run.id == handle.run_id).unwrap();
+        assert_eq!(interrupted.status, RunStatus::Interrupted);
+        assert_eq!(runs.len(), 2);
+
+        // The provider was asked exactly twice: the hung first turn and the
+        // resumed turn. The interrupted turn was not re-executed, and the
+        // resumed request carries the notice about it.
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        let history = captured[1].messages();
+        assert_eq!(history[0], Message::user("hang"));
+        assert!(
+            history.iter().any(|message| {
+                message.content().iter().any(|block| {
+                    matches!(
+                        block,
+                        qq_provider::ContentBlock::Text { text }
+                            if text.contains("Do not automatically retry tool calls")
+                    )
+                })
+            }),
+            "{history:?}"
+        );
+        assert_eq!(history[history.len() - 1], Message::user("continue"));
+    }
+
+    #[tokio::test]
+    async fn an_empty_correlation_is_absent_from_the_trial_record() {
+        let fixture = fixture(|| TextProvider).await;
+
+        let (status, stdout, _stderr) = run_to_end(
+            &fixture,
+            options(&fixture.workspace),
+            std::future::pending(),
+        )
+        .await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        assert_eq!(records[0]["type"], "trial");
+        assert!(
+            records[0].get("correlation").is_none(),
+            "the default payload must not grow a field no flag asked for"
+        );
+    }
+
+    #[tokio::test]
     async fn jsonl_records_have_monotonic_cursors_and_exactly_one_terminal_outcome() {
         let fixture = fixture(|| TextProvider).await;
         let options = HeadlessOptions {
@@ -2199,6 +2749,63 @@ mod tests {
         assert_eq!(status, HeadlessStatus::Completed);
         assert_eq!(stdout, "hello\n", "stdout carries only the final answer");
         assert!(stderr.contains("hello"), "stderr streams the progress");
+        assert!(
+            !stderr.contains("To continue this session"),
+            "no hint unless asked for (stderr was not a terminal): {stderr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_resume_hint_names_the_session_on_stderr_and_never_touches_stdout() {
+        let fixture = fixture(|| TextProvider).await;
+        let mut options = options(&fixture.workspace);
+        options.format = HeadlessFormat::Text;
+        options.resume_hint = true;
+
+        let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        assert_eq!(stdout, "hello\n", "the hint must not pollute the answer");
+        let session_id = workspace_snapshot(&fixture).await.sessions[0].id;
+        assert!(
+            stderr.ends_with(&crate::cli::resume_hint(session_id)),
+            "{stderr}"
+        );
+        assert!(stderr.contains(&format!("qq run --session {session_id}")));
+    }
+
+    #[tokio::test]
+    async fn the_resume_hint_is_printed_after_a_timed_out_run_too() {
+        // A run that ended early is exactly when a person wants to continue.
+        let fixture = fixture(|| HangingProvider).await;
+        let mut options = options(&fixture.workspace);
+        options.format = HeadlessFormat::Text;
+        options.resume_hint = true;
+        options.timeout = Some(Duration::from_millis(100));
+
+        let (status, _, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::TimedOut);
+        let session_id = workspace_snapshot(&fixture).await.sessions[0].id;
+        assert!(
+            stderr.ends_with(&crate::cli::resume_hint(session_id)),
+            "{stderr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn jsonl_output_never_carries_the_resume_hint() {
+        // Even if a caller sets the flag, JSONL consumers get the id from the
+        // trial record and nothing else on stderr they did not ask for.
+        let fixture = fixture(|| TextProvider).await;
+        let mut options = options(&fixture.workspace);
+        options.resume_hint = true;
+
+        let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        assert!(parse_records(&stdout)[0]["session_id"].is_string());
+        assert!(!stderr.contains("To continue this session"), "{stderr}");
     }
 
     #[tokio::test]

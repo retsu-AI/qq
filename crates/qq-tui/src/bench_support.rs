@@ -279,7 +279,7 @@ impl BenchHarness {
             id[15] = index;
             let call = ToolCallSnapshot {
                 run_id,
-                turn_ordinal: u16::from(index) + 1,
+                turn_ordinal: u32::from(index) + 1,
                 call_ordinal: 0,
                 arguments,
                 result: Some(result),
@@ -362,7 +362,7 @@ impl BenchHarness {
                 plan: None,
             },
         );
-        let call = |index: u8, name: &str, arguments: &str, turn: u16| {
+        let call = |index: u8, name: &str, arguments: &str, turn: u32| {
             let mut id = [0x50; 16];
             id[15] = index;
             ToolCallSnapshot {
