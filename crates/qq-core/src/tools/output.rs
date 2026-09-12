@@ -104,48 +104,66 @@ impl BoundedText {
     }
 }
 
-/// The size of `byte` once serde_json escapes it inside a JSON string.
-const fn escaped_byte_len(byte: u8) -> usize {
-    match byte {
-        b'"' | b'\\' | 0x08 | 0x09 | 0x0A | 0x0C | 0x0D => 2,
-        byte if byte < 0x20 => 6,
-        _ => 1,
+/// The size of each byte once serde_json escapes it inside a JSON string.
+/// A table so `escaped_len` compiles to a gather-and-sum the optimizer can
+/// unroll, not a per-byte branch.
+const ESCAPED_BYTE_LEN: [u8; 256] = {
+    let mut table = [1_u8; 256];
+    let mut byte = 0_usize;
+    while byte < 0x20 {
+        table[byte] = 6;
+        byte += 1;
     }
+    table[0x08] = 2;
+    table[0x09] = 2;
+    table[0x0A] = 2;
+    table[0x0C] = 2;
+    table[0x0D] = 2;
+    table[b'"' as usize] = 2;
+    table[b'\\' as usize] = 2;
+    table
+};
+
+#[inline]
+const fn escaped_byte_len(byte: u8) -> usize {
+    ESCAPED_BYTE_LEN[byte as usize] as usize
 }
 
 pub(crate) fn escaped_len(content: &str) -> usize {
-    content.bytes().map(escaped_byte_len).sum()
+    content
+        .bytes()
+        .map(|byte| ESCAPED_BYTE_LEN[byte as usize] as usize)
+        .sum()
 }
 
-/// Whether `text` needs cutting. One pass over the bytes, taken only when the
-/// length alone cannot prove the text fits.
+/// Whether `text` needs cutting. Cheap size checks first; otherwise one pass
+/// per line, with the newline search vectorized by `split_inclusive`.
 fn exceeds(text: &str, bounds: &Bounds) -> bool {
-    let trivially_fits = text.len() <= bounds.max_line_bytes
+    if text.len() > bounds.max_bytes {
+        return true;
+    }
+    // Escaping only grows text; short text with few possible lines fits.
+    if text.len().saturating_mul(6) <= bounds.max_bytes
+        && text.len() <= bounds.max_line_bytes
         && text.len() <= bounds.max_lines
-        && text.len().saturating_mul(6) <= bounds.max_bytes;
-    if trivially_fits {
+    {
         return false;
     }
     let mut escaped = 0_usize;
-    let mut newlines = 0_usize;
-    let mut line_len = 0_usize;
-    for &byte in text.as_bytes() {
-        escaped += escaped_byte_len(byte);
-        if byte == b'\n' {
-            newlines += 1;
-            line_len = 0;
-        } else {
-            line_len += 1;
-        }
-        if escaped > bounds.max_bytes
-            || newlines > bounds.max_lines
-            || line_len > bounds.max_line_bytes
+    let mut lines = 0_usize;
+    for line in text.split_inclusive('\n') {
+        lines += 1;
+        if lines > bounds.max_lines
+            || line.len() - usize::from(line.ends_with('\n')) > bounds.max_line_bytes
         {
             return true;
         }
+        escaped += escaped_len(line);
+        if escaped > bounds.max_bytes {
+            return true;
+        }
     }
-    let lines = newlines + usize::from(!text.is_empty() && !text.ends_with('\n'));
-    lines > bounds.max_lines
+    false
 }
 
 /// Escaped bytes reserved for a `…+N` clip suffix.
@@ -193,6 +211,12 @@ fn push_line(
     let _ = write!(out, "…+{}", content.len() - end);
     out.push_str(newline);
     Some((escaped_len(&out[before..]), true))
+}
+
+/// Lines in `text`: newline count, plus one for an unterminated last line.
+/// `matches` uses the standard library's vectorized byte search.
+fn count_lines(text: &str) -> usize {
+    text.matches('\n').count() + usize::from(!text.is_empty() && !text.ends_with('\n'))
 }
 
 /// The start of the last line of `text` (a line ends at `\n` or the end).
@@ -285,9 +309,7 @@ pub(crate) fn bound_text(text: String, bounds: &Bounds, note: Option<&str>) -> B
     let omitted_lines = if omitted_bytes == 0 {
         0
     } else {
-        let omitted = &text[head_end..tail_start];
-        let omitted_lines = omitted.bytes().filter(|&byte| byte == b'\n').count()
-            + usize::from(!omitted.ends_with('\n'));
+        let omitted_lines = count_lines(&text[head_end..tail_start]);
         push_marker(&mut out, omitted_bytes, omitted_lines, note);
         omitted_lines
     };
@@ -307,7 +329,7 @@ pub(crate) fn bound_text(text: String, bounds: &Bounds, note: Option<&str>) -> B
 fn push_grouped(out: &mut String, value: usize) {
     let digits = value.to_string();
     for (index, digit) in digits.chars().enumerate() {
-        if index != 0 && (digits.len() - index) % 3 == 0 {
+        if index != 0 && (digits.len() - index).is_multiple_of(3) {
             out.push(',');
         }
         out.push(digit);
@@ -577,26 +599,79 @@ fn detect(bytes: &[u8], at: usize) -> Option<Hit> {
     }
 }
 
-const fn is_trigger(byte: u8) -> bool {
-    matches!(byte, b'A' | b'g' | b's' | b'p' | b'x' | b'B' | b'=' | b':')
+/// Byte pairs a secret shape can start with, as a 64 Kbit set: one load and
+/// one bit test per input byte, no branch on content. `=` pairs with any
+/// second byte (the value follows), everything else is a fixed digraph.
+const START_PAIRS: [u64; 1024] = {
+    let mut bits = [0_u64; 1024];
+    let mut second = 0_usize;
+    while second < 256 {
+        let pair = (b'=' as usize) << 8 | second;
+        bits[pair / 64] |= 1 << (pair % 64);
+        second += 1;
+    }
+    let digraphs: [&[u8; 2]; 13] = [
+        b":/", b"AK", b"AS", b"AI", b"AG", b"AR", b"AN", b"gh", b"gi", b"sk", b"pk", b"xo", b"Be",
+    ];
+    let mut index = 0_usize;
+    while index < digraphs.len() {
+        let pair = (digraphs[index][0] as usize) << 8 | digraphs[index][1] as usize;
+        bits[pair / 64] |= 1 << (pair % 64);
+        index += 1;
+    }
+    bits
+};
+
+#[inline]
+fn could_start(bytes: &[u8], at: usize) -> bool {
+    let Some(&next) = bytes.get(at + 1) else {
+        return false;
+    };
+    let pair = usize::from(bytes[at]) << 8 | usize::from(next);
+    START_PAIRS[pair / 64] & (1 << (pair % 64)) != 0
+}
+
+/// First bytes of every secret shape; the scan skips everything else with one
+/// table load per byte.
+const FIRST: [bool; 256] = {
+    let mut table = [false; 256];
+    table[b'=' as usize] = true;
+    table[b':' as usize] = true;
+    table[b'A' as usize] = true;
+    table[b'g' as usize] = true;
+    table[b's' as usize] = true;
+    table[b'p' as usize] = true;
+    table[b'x' as usize] = true;
+    table[b'B' as usize] = true;
+    table
+};
+
+#[inline]
+const fn is_first(byte: u8) -> bool {
+    FIRST[byte as usize]
+}
+
+/// The first secret at or after `from` whose span starts at or after `copied`.
+fn next_hit(bytes: &[u8], from: usize, copied: usize) -> Option<Hit> {
+    let mut index = from;
+    while index + 1 < bytes.len() {
+        index += bytes[index..].iter().position(|&byte| is_first(byte))?;
+        if could_start(bytes, index)
+            && let Some(hit) = detect(bytes, index)
+            && hit.start >= copied
+        {
+            return Some(hit);
+        }
+        index += 1;
+    }
+    None
 }
 
 /// Replaces secret-shaped spans with `[masked:<kind>]`. Returns the input
 /// untouched (no allocation) when nothing matches, which is the common case.
 pub(crate) fn mask_secrets(text: String) -> String {
     let bytes = text.as_bytes();
-    let mut first_hit = None;
-    let mut index = 0;
-    while index < bytes.len() {
-        if is_trigger(bytes[index])
-            && let Some(hit) = detect(bytes, index)
-        {
-            first_hit = Some(hit);
-            break;
-        }
-        index += 1;
-    }
-    let Some(mut hit) = first_hit else {
+    let Some(mut hit) = next_hit(bytes, 0, 0) else {
         return text;
     };
     let mut out = String::with_capacity(text.len());
@@ -607,20 +682,8 @@ pub(crate) fn mask_secrets(text: String) -> String {
         out.push_str(hit.kind.label());
         out.push(']');
         copied = hit.end;
-        index = hit.end;
-        let mut next = None;
-        while index < bytes.len() {
-            if is_trigger(bytes[index])
-                && let Some(candidate) = detect(bytes, index)
-                && candidate.start >= copied
-            {
-                next = Some(candidate);
-                break;
-            }
-            index += 1;
-        }
-        match next {
-            Some(candidate) => hit = candidate,
+        match next_hit(bytes, hit.end, copied) {
+            Some(next) => hit = next,
             None => break,
         }
     }
@@ -1029,6 +1092,23 @@ mod tests {
         let mut small = "fits".to_owned();
         assert!(!budget.admit(&mut small));
         assert_eq!(small, "fits");
+    }
+
+    #[test]
+    fn a_huge_single_line_shell_capture_is_bounded() {
+        // Mirrors the R4 shell fixture: 1 MiB of `s` on one line, captured
+        // head+tail at 128 KiB, then bounded for the model.
+        let mut text = String::from("shell exit=0 elapsed=0.0 bytes=1048576\n");
+        text.push_str(&"s".repeat(64 * 1024));
+        text.push_str("\n…[qq: 917504 bytes not captured]…\n");
+        text.push_str(&"s".repeat(64 * 1024));
+        let bounded = bound_text(text, &Bounds::new(16 * 1024, 4_000), None);
+        assert!(bounded.text.starts_with("shell exit=0 "));
+        assert!(bounded.text.len() <= 16 * 1024);
+        // Both 64 KiB lines survive, clipped; nothing is omitted whole.
+        assert_eq!(bounded.clipped_lines, 2);
+        assert_eq!(bounded.omitted_bytes, 0);
+        assert!(bounded.text.contains("bytes not captured"));
     }
 
     #[test]

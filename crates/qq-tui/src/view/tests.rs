@@ -672,10 +672,21 @@ fn collapsed_summaries_curate_known_tools() {
                 "read_file",
                 r#"{"path":"big.log"}"#,
                 ToolCallState::Completed,
-                Some("a\n...[truncated by qq]\n"),
+                Some("a\n…[qq: 41,207 bytes / 1,142 lines omitted; not stored]…\nz\n"),
                 false,
             ),
-            " ● Read big.log 1 line · truncated",
+            " ● Read big.log 2 lines · truncated",
+        ),
+        (
+            tool_call_snapshot(
+                6,
+                "shell",
+                r#"{"command":"cargo test"}"#,
+                ToolCallState::Completed,
+                Some("shell exit=0 elapsed=3.2 bytes=512\nrunning 4 tests\n"),
+                false,
+            ),
+            " ● Run cargo test exit 0",
         ),
         (
             tool_call_snapshot(
