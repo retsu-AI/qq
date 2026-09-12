@@ -114,6 +114,15 @@ pub struct RunArgs {
     #[arg(long, value_name = "PATH")]
     pub workspace: Option<PathBuf>,
 
+    /// Submit the prompt into this existing idle root session of the
+    /// workspace instead of creating one. The invocation, not the session's
+    /// history, decides the run: the configured model (after `--model`),
+    /// `--profile`, and `--approval` are applied to the session first. An
+    /// interrupted earlier run is recovered before anything else and never
+    /// re-executes uncertain tool calls.
+    #[arg(long, value_name = "ID")]
+    pub session: Option<qq_protocol::SessionId>,
+
     /// Unattended approval policy. Interactive `ask` approval is not
     /// available in headless mode.
     #[arg(long, value_enum, default_value_t = RunApproval::ReadOnly)]
@@ -416,6 +425,27 @@ mod tests {
         assert_eq!(args.max_cost_usd, None);
         assert_eq!(args.format, RunFormat::Text);
         assert_eq!(args.trace, None);
+    }
+
+    #[test]
+    fn run_session_is_a_parsed_identifier() {
+        let id = qq_protocol::SessionId::from_bytes([7; 16]);
+        let cli = Cli::try_parse_from(["qq", "run", "task", "--session", &id.to_string()]).unwrap();
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("expected a run command");
+        };
+        assert_eq!(args.session, Some(id));
+        assert!(Cli::try_parse_from(["qq", "run", "task", "--session", "not-an-id"]).is_err());
+        assert_eq!(
+            Cli::try_parse_from(["qq", "run", "task"])
+                .unwrap()
+                .command
+                .and_then(|command| match command {
+                    Command::Run(args) => args.session,
+                    _ => None,
+                }),
+            None
+        );
     }
 
     #[test]

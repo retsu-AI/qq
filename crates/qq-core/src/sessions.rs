@@ -32499,10 +32499,7 @@ mod tests {
         // directly: that is what process death looks like to the store, and
         // it releases store ownership for the successor.
         drop(events);
-        let worker = harness.runtime.inner.store.stop_worker_for_test().unwrap();
-        tokio::task::spawn_blocking(move || worker.join().unwrap())
-            .await
-            .unwrap();
+        harness.runtime.abandon_for_test().await.unwrap();
         drop(harness.runtime);
         let connection = Connection::open(&harness.database_path).unwrap();
         let stored: Option<String> = connection

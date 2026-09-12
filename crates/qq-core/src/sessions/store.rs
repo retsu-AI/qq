@@ -1614,7 +1614,9 @@ impl Store {
         .await
     }
 
-    #[cfg(test)]
+    /// Stops the worker as a crash would: no settlement, no final commit.
+    /// The caller joins the handle so ownership is released before a
+    /// successor opens the store.
     pub(super) fn stop_worker_for_test(&self) -> Option<std::thread::JoinHandle<()>> {
         self.inner.closing.store(true, Ordering::Release);
         self.inner.output_slots.close();

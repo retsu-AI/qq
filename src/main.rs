@@ -280,6 +280,7 @@ async fn prepare_headless(
     let options = headless::HeadlessOptions {
         prompt: args.prompt,
         workspace,
+        session: args.session,
         model,
         profile,
         context_window: model_metadata.and_then(qq_config::ModelMetadata::context_window),

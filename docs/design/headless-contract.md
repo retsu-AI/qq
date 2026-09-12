@@ -76,7 +76,8 @@ approximate anchors, not stable identifiers.
 ### Invocation
 
 ```sh
-qq run [--workspace PATH] [--approval read-only|auto|full] [--profile NAME]
+qq run [--workspace PATH] [--session ID]
+       [--approval read-only|auto|full] [--profile NAME]
        [--allow-tool NAME]... [--allow-shell PREFIX]... [--steer-stdin]
        [--timeout-seconds N] [--max-turns N] [--max-cost-usd VALUE]
        [--correlation KEY=VALUE]... [--format text|jsonl] [--trace PATH]
@@ -91,6 +92,20 @@ pricing for the selected model in configuration and exits `2` otherwise
 bounds (8 entries, 64-byte keys, 256-byte values, 2 KiB total; a repeated
 key is an error) before any configuration is read, stamped on both the
 session and the run, and never interpreted.
+
+`--session ID` submits into an existing session instead of creating one. The
+session must be a root session of the workspace (a spawned sub-agent session
+is refused) and idle with no queued prompt; an unknown id and a session of
+another workspace are the same `invalid_configuration` refusal, so the id's
+existence elsewhere is not disclosed. The invocation decides the run exactly
+as it would for a new session: the configured model (after `--model`),
+`--profile`, and `--approval` are written to the session before the prompt is
+submitted. Store ownership (below) and the recovery sweep both precede this,
+so an earlier run the previous process left executing is already settled as
+`interrupted` when the resume is examined, and its history — including the
+runtime notice not to retry interrupted tool calls — is what the resumed run
+sees. The event stream starts at the new prompt, not at the session's history
+or the settings writes.
 
 ### Configuration Injection
 
