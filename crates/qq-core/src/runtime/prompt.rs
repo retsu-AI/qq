@@ -102,7 +102,7 @@ pub(crate) fn agent_system_prompt(
     let mut prompt = format!(
         "You are QQ, a coding agent operating in the workspace rooted at {root}.\n\
          \n\
-         Available tools: {tool_names}. read_file, list_dir, search, and search_history are read-only; \
+         Available tools: {tool_names}. read_file, tree, search, and search_history are read-only; \
          edit_file and write_file modify workspace files and may require user approval; \
          shell runs one command in the workspace with a bounded timeout and may require user approval.{mcp_note}\n\
          \n\
@@ -110,7 +110,7 @@ pub(crate) fn agent_system_prompt(
          - Determine observable completion criteria from the user's request before acting.\n\
          - Read a file with read_file before editing or overwriting it; edits without a prior read in this session are rejected.\n\
          - Inspect existing state before changing it and preserve unrelated work.\n\
-         - Prefer search over guessing file paths.\n\
+         - Prefer search over guessing file paths, and search/tree over shell grep, rg, find, and ls; search groups matches by file as L<n>: text and its header carries next=<cursor> when more exist.\n\
          - Give every tool path relative to the workspace root; absolute paths are rejected.\n\
          - Before changing files below a subdirectory, inspect each directory from the workspace root to the target for AGENTS.md; when AGENTS.md is absent at one scope, check CLAUDE.md. Apply selected instructions root-to-leaf, with more-specific instructions taking precedence.\n\
          - Implement requested changes rather than stopping at analysis unless the user requested analysis-only work.\n\
@@ -140,24 +140,36 @@ pub(crate) fn agent_system_prompt(
     prompt
 }
 
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ToolSchemaMeasurement {
     pub(crate) hash: ContentHash,
     pub(crate) bytes: u64,
 }
 
 pub(crate) fn tool_schema_measurement(specs: &[ToolSpec]) -> ToolSchemaMeasurement {
+    let schemas: Vec<String> = specs
+        .iter()
+        .map(|spec| spec.input_schema().to_string())
+        .collect();
+    measure_tool_schemas(specs.iter().zip(schemas.iter().map(String::as_str)))
+}
+
+/// Measures declarations whose schemas are already serialized, so callers
+/// that serialized them once (the catalog compiler) need not do it again.
+pub(crate) fn measure_tool_schemas<'a>(
+    specs: impl Iterator<Item = (&'a ToolSpec, &'a str)>,
+) -> ToolSchemaMeasurement {
     use sha2::{Digest, Sha256};
 
     let mut digest = Sha256::new();
     let mut measured_bytes = 0_u64;
-    for spec in specs {
+    for (spec, schema) in specs {
         for bytes in [spec.name().as_bytes(), spec.description().as_bytes()] {
             digest.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
             digest.update(bytes);
             measured_bytes =
                 measured_bytes.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         }
-        let schema = spec.input_schema().to_string();
         digest.update(
             u64::try_from(schema.len())
                 .unwrap_or(u64::MAX)

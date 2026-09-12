@@ -21,7 +21,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::hosts::{HostCatalog, HostReadiness, ToolHints};
+use crate::{
+    hosts::{HostCatalog, HostReadiness, ToolHints},
+    runtime::ToolSchemaMeasurement,
+};
 
 /// Most entries one catalog holds, across every host. Hosts contribute in
 /// declaration order; entries past the cap are excluded with a reason.
@@ -203,8 +206,12 @@ pub struct ToolCatalog {
     /// Specs of the static tools, shared into every request under
     /// progressive exposure with no pins (the common case).
     static_specs: Arc<[ToolSpec]>,
+    /// Measurement of `static_specs`, computed once from the schemas already
+    /// serialized at compile so a run start does not re-serialize them.
+    static_measurement: ToolSchemaMeasurement,
     /// Every exposed spec under full exposure, or `None` when progressive.
     full_specs: Option<Arc<[ToolSpec]>>,
+    full_measurement: Option<ToolSchemaMeasurement>,
     /// Rendered once for the system prompt under progressive exposure.
     index_text: Option<Arc<str>>,
 }
@@ -220,11 +227,27 @@ impl std::fmt::Debug for ToolCatalog {
     }
 }
 
-/// A static tool as the compiler receives it.
+/// A static tool as the compiler receives it. `schema` is the serialized
+/// `input_schema`, computed once per process for built-ins whose declarations
+/// never change, so each plan compile does not re-serialize them.
+#[derive(Clone)]
 pub(crate) struct StaticTool {
     pub(crate) spec: ToolSpec,
     pub(crate) host: ToolHost,
     pub(crate) effect: EffectClass,
+    pub(crate) schema: Arc<str>,
+}
+
+impl StaticTool {
+    pub(crate) fn new(spec: ToolSpec, host: ToolHost, effect: EffectClass) -> Self {
+        let schema = Arc::from(spec.input_schema().to_string());
+        Self {
+            spec,
+            host,
+            effect,
+            schema,
+        }
+    }
 }
 
 impl ToolCatalog {
@@ -235,19 +258,18 @@ impl ToolCatalog {
         let mut entries = Vec::with_capacity(static_tools.len() + 16);
         let mut names = BTreeSet::new();
         let mut static_order = Vec::with_capacity(static_tools.len());
-        let mut schemas: Vec<String> = Vec::with_capacity(static_tools.len() + 16);
+        let mut schemas: Vec<Arc<str>> = Vec::with_capacity(static_tools.len() + 16);
         for tool in static_tools {
             names.insert(tool.spec.name().to_owned());
             static_order.push(entries.len());
-            let schema = tool.spec.input_schema().to_string();
             entries.push(ToolEntry::new(
                 tool.spec,
                 tool.host,
                 tool.effect,
                 ToolHints::default(),
-                schema.len(),
+                tool.schema.len(),
             ));
-            schemas.push(schema);
+            schemas.push(tool.schema);
         }
 
         let mut external_order = Vec::new();
@@ -325,7 +347,7 @@ impl ToolCatalog {
                     tool.hints,
                     schema.len(),
                 ));
-                schemas.push(schema);
+                schemas.push(Arc::from(schema));
             }
             summaries.push(HostSummary {
                 name: host.name,
@@ -346,7 +368,7 @@ impl ToolCatalog {
         }
         let mut sorted = Vec::with_capacity(entries.len());
         let mut sorted_schemas = Vec::with_capacity(entries.len());
-        let mut originals: Vec<Option<(ToolEntry, String)>> =
+        let mut originals: Vec<Option<(ToolEntry, Arc<str>)>> =
             entries.into_iter().zip(schemas).map(Some).collect();
         for original in &permutation {
             let (entry, schema) = originals[*original].take().expect("each index once");
@@ -390,6 +412,28 @@ impl ToolCatalog {
         });
         let index_text = (exposure == Exposure::Progressive)
             .then(|| Arc::from(render_index(&sorted, &external_order, &summaries)));
+        let measure = |indices: &mut dyn Iterator<Item = usize>| {
+            crate::runtime::measure_tool_schemas(
+                indices.map(|index| (&sorted[index].spec, sorted_schemas[index].as_ref())),
+            )
+        };
+        let static_measurement = measure(&mut static_order.iter().copied().filter(|index| {
+            exposure == Exposure::Progressive || sorted[*index].host != ToolHost::SelectTools
+        }));
+        // Without externals the full list is the static list: one digest.
+        let full_measurement = (exposure == Exposure::Full).then(|| {
+            if external_order.is_empty() {
+                static_measurement
+            } else {
+                measure(
+                    &mut static_order
+                        .iter()
+                        .copied()
+                        .filter(|index| sorted[*index].host != ToolHost::SelectTools)
+                        .chain(external_order.iter().copied()),
+                )
+            }
+        });
 
         let mut digest = Sha256::new();
         digest.update(b"qq-tool-catalog-v1\0");
@@ -420,7 +464,9 @@ impl ToolCatalog {
             digest: ContentHash::from_bytes(digest.finalize().into()),
             external_schema_bytes,
             static_specs,
+            static_measurement,
             full_specs,
+            full_measurement,
             index_text,
         }
     }
@@ -498,6 +544,22 @@ impl ToolCatalog {
     /// The tools every run sees before pins: the static list (with
     /// `select_tools` under progressive exposure, without it under full),
     /// plus every external tool under full exposure.
+    /// The schema measurement of `specs`: precomputed when `specs` is one of
+    /// the catalog's shared lists, serialized afresh otherwise.
+    pub(crate) fn schema_measurement(&self, specs: &Arc<[ToolSpec]>) -> ToolSchemaMeasurement {
+        if let Some(full) = &self.full_specs
+            && Arc::ptr_eq(full, specs)
+        {
+            return self
+                .full_measurement
+                .expect("full exposure has a measurement");
+        }
+        if Arc::ptr_eq(&self.static_specs, specs) {
+            return self.static_measurement;
+        }
+        crate::runtime::tool_schema_measurement(specs)
+    }
+
     pub(crate) fn base_specs(&self, include: &StaticFilter) -> Arc<[ToolSpec]> {
         let source = self.full_specs.as_ref().unwrap_or(&self.static_specs);
         if include.spawn_agent && include.search_history && include.load_skill && !include.read_only
@@ -740,16 +802,16 @@ mod tests {
 
     fn statics() -> Vec<StaticTool> {
         vec![
-            StaticTool {
-                spec: ToolSpec::new("read_file", "read", json!({"type": "object"})),
-                host: ToolHost::BuiltIn,
-                effect: EffectClass::ReadOnly,
-            },
-            StaticTool {
-                spec: select_tools_spec(),
-                host: ToolHost::SelectTools,
-                effect: EffectClass::ReadOnly,
-            },
+            StaticTool::new(
+                ToolSpec::new("read_file", "read", json!({"type": "object"})),
+                ToolHost::BuiltIn,
+                EffectClass::ReadOnly,
+            ),
+            StaticTool::new(
+                select_tools_spec(),
+                ToolHost::SelectTools,
+                EffectClass::ReadOnly,
+            ),
         ]
     }
 
@@ -924,11 +986,11 @@ mod tests {
     #[test]
     fn static_filters_drop_session_tools_for_runs_without_them() {
         let mut tools = statics();
-        tools.push(StaticTool {
-            spec: ToolSpec::new("spawn_agent", "", json!({"type": "object"})),
-            host: ToolHost::SpawnAgent,
-            effect: EffectClass::ReadOnly,
-        });
+        tools.push(StaticTool::new(
+            ToolSpec::new("spawn_agent", "", json!({"type": "object"})),
+            ToolHost::SpawnAgent,
+            EffectClass::ReadOnly,
+        ));
         let catalog = ToolCatalog::compile(tools, Vec::new());
         let without = catalog.base_specs(&StaticFilter {
             spawn_agent: false,
@@ -954,16 +1016,16 @@ mod tests {
     fn read_only_runs_are_never_offered_schemas_their_policy_denies() {
         let mut tools = statics();
         tools.extend([
-            StaticTool {
-                spec: ToolSpec::new("edit_file", "", json!({"type": "object"})),
-                host: ToolHost::BuiltIn,
-                effect: EffectClass::Mutating,
-            },
-            StaticTool {
-                spec: ToolSpec::new("shell", "", json!({"type": "object"})),
-                host: ToolHost::BuiltIn,
-                effect: EffectClass::Shell,
-            },
+            StaticTool::new(
+                ToolSpec::new("edit_file", "", json!({"type": "object"})),
+                ToolHost::BuiltIn,
+                EffectClass::Mutating,
+            ),
+            StaticTool::new(
+                ToolSpec::new("shell", "", json!({"type": "object"})),
+                ToolHost::BuiltIn,
+                EffectClass::Shell,
+            ),
         ]);
         let mut reader = external("mcp__srv__lookup", "Look it up");
         reader.hints.read_only = true;
@@ -1019,11 +1081,11 @@ pub mod bench_support {
     #[must_use]
     pub fn compile_default_catalog(hosts: Vec<(String, Vec<HostTool>)>) -> ToolCatalog {
         let mut static_tools: Vec<StaticTool> = crate::tools::static_tools();
-        static_tools.push(StaticTool {
-            spec: select_tools_spec(),
-            host: ToolHost::SelectTools,
-            effect: EffectClass::ReadOnly,
-        });
+        static_tools.push(StaticTool::new(
+            select_tools_spec(),
+            ToolHost::SelectTools,
+            EffectClass::ReadOnly,
+        ));
         ToolCatalog::compile(
             static_tools,
             hosts
@@ -1053,5 +1115,33 @@ pub mod bench_support {
     #[must_use]
     pub fn index_len(catalog: &ToolCatalog) -> usize {
         catalog.index_text().map_or(0, |text| text.len())
+    }
+}
+
+#[cfg(test)]
+mod measurement_tests {
+    use super::*;
+
+    #[test]
+    fn precomputed_measurements_equal_a_fresh_measurement() {
+        let catalog = ToolCatalog::compile(crate::tools::static_tools(), Vec::new());
+        let base = catalog.base_specs(&StaticFilter {
+            spawn_agent: true,
+            search_history: true,
+            load_skill: true,
+            read_only: false,
+        });
+        let precomputed = catalog.schema_measurement(&base);
+        let fresh = crate::runtime::tool_schema_measurement(&base);
+        assert_eq!(precomputed.hash, fresh.hash);
+        assert_eq!(precomputed.bytes, fresh.bytes);
+        // A list the catalog does not share is measured afresh.
+        let narrowed: Arc<[ToolSpec]> = base.iter().take(2).cloned().collect();
+        let narrowed_measurement = catalog.schema_measurement(&narrowed);
+        assert_eq!(
+            narrowed_measurement.hash,
+            crate::runtime::tool_schema_measurement(&narrowed).hash
+        );
+        assert_ne!(narrowed_measurement.hash, fresh.hash);
     }
 }

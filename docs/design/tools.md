@@ -289,9 +289,13 @@ and keeps the schema for each tool in one place:
 
 - `read_file` — line-windowed read with offset/limit over a 4 MiB scan;
   records a content hash for the staleness guard below.
-- `list_dir` — directory listing, `limit` entries.
-- `search` — file-name and content search over the workspace, bounded result
-  count.
+- `tree` — depth-bounded, ignore-aware directory tree with sizes and
+  per-directory counts (§ Read-Side Walk). `list_dir` is its hidden alias
+  (`tree depth=1`, ignored entries included) for one release so persisted
+  transcripts and grants keep resolving; it is never advertised and resolves
+  only while `tree` is exposed.
+- `search` — ignore-aware content, name, definition, and reference search
+  with an exact resume cursor (§ Read-Side Walk).
 - `edit_file` — exact-string replacement; the applied diff is the UI payload.
 - `write_file` — full-file create or overwrite; the content is the UI payload.
 - `shell` — command execution with a 16 KiB head+tail model bound.
@@ -299,9 +303,86 @@ and keeps the schema for each tool in one place:
 Each returns complete domain output within its own scan and count limits;
 the model-facing text is then bounded once at dispatch (§ Output Bounding).
 
-Read-only tools (`read_file`, `list_dir`, `search`) never require approval
+Read-only tools (`read_file`, `tree`, `search`) never require approval
 inside the workspace and may execute concurrently. Everything else is a
 mutating or externally visible tool and goes through policy.
+
+### Read-Side Walk
+
+`search` and `tree` share one walker (`tools/walk.rs`). It lists one
+directory at a time through the workspace's `cap-std` capability — the
+`ignore` crate is used only as a matcher, never as a filesystem walker, so
+containment has no second addressing scheme — and asks a stack of gitignore
+matchers whether each child is excluded: `.git/info/exclude`, then every
+ancestor's `.gitignore`/`.ignore` down to the directory's own. Deeper files
+override shallower ones and the last matching pattern wins, as in git.
+Hidden entries and a fixed generated-directory list (`target`,
+`node_modules`, `dist`, `build`, `.venv`, `__pycache__`) are excluded by
+default; `include_ignored` lifts all of that except `.git`, whose objects
+are never useful results. Symlinks are reported and never followed. Files
+over 4 MiB and binary files (a NUL in the first 8 KiB) are skipped and
+counted in the header's `skipped=`. Names that are not UTF-8 are dropped
+and counted: nothing could address them later.
+
+Children sort so that a depth-first walk yields bytewise path order, a
+directory sorting as `name/`. Output is therefore deterministic and a
+cursor can name an exact position in it.
+
+**`search`.** Modes: `content` (default), `names`, `definition`,
+`references`. A literal query is escaped into one `regex::bytes` program;
+`regex=true` passes it through (multi-line, 1 MiB compiled-size limit —
+`invalid_regex` and `regex_too_large` are the failures). `case=smart`
+(default) is insensitive unless the query has an uppercase letter.
+`definition` and `references` take one identifier and use per-language
+tables keyed by extension (Rust, TS/JS, Python, Go, Zig, C/C++, Markdown
+headings; a generic `name =|:|(` fallback otherwise): a definition line is
+one the anchored table pattern matches, a reference is a word-boundary
+match on any other line. The tables are data, not a parser; `mode=content
+regex=true` is always available for what they miss.
+
+The whole file buffer is scanned in one vectorized pass and matches are
+mapped to lines afterwards; a line with several matches is one result.
+Output groups by file:
+
+```
+search "apply_lock" mode=content matches=4/4 files=3 scanned=612
+crates/qq-core/src/tools/edit.rs
+L41:     let _guard = workspace.apply_lock().lock();
+L88- fn apply(
+L89:     apply_lock: &Mutex<()>,
++3 more in file
+```
+
+`L<n>: ` marks a match, `L<n>- ` a context line, `--` a gap between
+context blocks, `+N more in file` the matches past `max_per_file`. The
+header's `matches=<shown>/<total>` grows a `+` when the walk stopped before
+the total was known; `files=` counts files shown, `scanned=` files read.
+`next=<cursor>` appears when `limit` was reached (`base64url(path \0
+line)`: the last match shown) or the byte budget was (`truncated=bytes`);
+passing it back resumes at the exact next match, skipping whole directories
+that sort before it. `partial=scan|bytes|time` names a scan bound (50 000
+entries, 64 MiB, 5 s) that stopped the walk, with a cursor past the last
+file scanned. A case-sensitive content search that finds nothing reports
+`hint=case_insensitive_matches=N` so the model need not retry blind.
+
+The byte budget (12 KiB) is respected by the walk itself: rather than
+letting dispatch cut the middle out of a result, `search` stops emitting
+and hands back a cursor, so no match is lost between pages.
+
+**`tree`.** Fills breadth-first so the top level is complete before any
+deeper level appears — a model asking about a repository sees every
+top-level entry even under a small `limit`. Directories carry
+`(<files>f <dirs>d)` from a bounded sub-walk (`+` when it hit its 2 000-entry
+cap); single-child chains collapse to one row up to four components
+(`deep/er/est/`); leaf files pack onto rows of ≤ 100 bytes with a size
+suffix; symlinks show `@`; ignored directories appear once at the top
+level as `…ignored`; `+N more` closes a directory whose children exceeded
+the budget. Bounds: `depth` ≤ 6 (default 2), `limit` ≤ 500 (default 120),
+20 000 scanned entries, 2 s. `glob` restricts the files shown without
+restricting descent.
+
+Both tools are `ReadOnly`, run concurrently, and are prunable; a pruned
+stub keeps the header, so the match count and cursor survive.
 
 ## File References In Prompts
 

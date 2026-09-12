@@ -275,7 +275,7 @@ pub(super) fn live_status_line(app: &App, session_id: SessionId) -> Option<(Stri
 fn tool_verb(name: &str) -> &str {
     match name {
         "read_file" => "read",
-        "list_dir" => "list",
+        "tree" | "list_dir" => "list",
         "search" => "search",
         "edit_file" => "edit",
         "write_file" => "write",

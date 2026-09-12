@@ -18,12 +18,12 @@ use crate::{
 
 use super::{
     edit::edit_file,
-    list::list_dir,
     output::{Bounds, bound_text, mask_secrets},
     read::read_file,
     search::search,
     shell::{ShellArgs, run_shell},
     specs::BuiltInTool,
+    tree::{TreeArgs, tree},
     write::write_file,
 };
 
@@ -299,9 +299,13 @@ pub(super) fn execute_blocking(
             .map_or_else(ToolOutput::error, |args| {
                 read_file(workspace, file_state, args, cancelled)
             }),
-        Some(BuiltInTool::ListDir) => deserialize(arguments)
+        Some(BuiltInTool::Tree) => deserialize(arguments)
+            .map_or_else(ToolOutput::error, |args| tree(workspace, args, cancelled)),
+        // Hidden alias: `list_dir` is `tree depth=1` so persisted transcripts
+        // and grants keep resolving for one release.
+        Some(BuiltInTool::ListDir) => deserialize::<super::tree::ListDirArgs>(arguments)
             .map_or_else(ToolOutput::error, |args| {
-                list_dir(workspace, args, cancelled)
+                tree(workspace, TreeArgs::from(args), cancelled)
             }),
         Some(BuiltInTool::Search) => deserialize(arguments)
             .map_or_else(ToolOutput::error, |args| search(workspace, args, cancelled)),

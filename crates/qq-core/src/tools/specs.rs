@@ -5,7 +5,15 @@ use qq_provider::ToolSpec;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{list::MAX_DIRECTORY_ENTRIES, read::MAX_READ_LINES, shell::MAX_SHELL_TIMEOUT_SECS};
+use super::{
+    read::MAX_READ_LINES,
+    search::{
+        MAX_CONTEXT, MAX_CURSOR_BYTES, MAX_GLOB_BYTES, MAX_GLOBS, MAX_LIMIT, MAX_PER_FILE,
+        MAX_QUERY_BYTES,
+    },
+    shell::MAX_SHELL_TIMEOUT_SECS,
+    tree::{MAX_DEPTH, MAX_ENTRIES},
+};
 use crate::catalog::{EffectClass, StaticTool, ToolHost};
 
 /// The sub-agent tool. Not a [`BuiltInTool`]: it is declared only for runs
@@ -16,11 +24,13 @@ pub(crate) const SPAWN_AGENT_TOOL: &str = "spawn_agent";
 #[derive(Clone, Copy)]
 pub(super) enum BuiltInTool {
     ReadFile,
-    ListDir,
+    Tree,
     Search,
     EditFile,
     WriteFile,
     Shell,
+    /// Hidden alias for `tree depth=1`: dispatchable, never advertised.
+    ListDir,
     #[cfg(test)]
     TestDelay,
     #[cfg(test)]
@@ -32,7 +42,7 @@ pub(super) enum BuiltInTool {
 impl BuiltInTool {
     const ALL: [Self; 6] = [
         Self::ReadFile,
-        Self::ListDir,
+        Self::Tree,
         Self::Search,
         Self::EditFile,
         Self::WriteFile,
@@ -42,6 +52,7 @@ impl BuiltInTool {
     pub(super) fn from_name(name: &str) -> Option<Self> {
         match name {
             "read_file" => Some(Self::ReadFile),
+            "tree" => Some(Self::Tree),
             "list_dir" => Some(Self::ListDir),
             "search" => Some(Self::Search),
             "edit_file" => Some(Self::EditFile),
@@ -59,7 +70,7 @@ impl BuiltInTool {
 
     fn effect(self) -> EffectClass {
         match self {
-            Self::ReadFile | Self::ListDir | Self::Search => EffectClass::ReadOnly,
+            Self::ReadFile | Self::Tree | Self::ListDir | Self::Search => EffectClass::ReadOnly,
             Self::EditFile | Self::WriteFile => EffectClass::Mutating,
             Self::Shell => EffectClass::Shell,
             #[cfg(test)]
@@ -87,27 +98,39 @@ impl BuiltInTool {
                     "additionalProperties": false
                 }),
             ),
-            Self::ListDir => ToolSpec::new(
-                "list_dir",
-                "List one workspace directory in deterministic name order.",
+            Self::Tree => ToolSpec::new(
+                "tree",
+                "Show a depth-bounded, ignore-aware directory tree with sizes and counts.",
                 json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string" },
-                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_DIRECTORY_ENTRIES }
+                        "path": { "type": "string", "default": "." },
+                        "depth": { "type": "integer", "minimum": 1, "maximum": MAX_DEPTH, "default": 2 },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_ENTRIES, "default": 120 },
+                        "glob": { "type": "string", "maxLength": MAX_GLOB_BYTES },
+                        "include_ignored": { "type": "boolean", "default": false }
                     },
-                    "required": ["path"],
                     "additionalProperties": false
                 }),
             ),
             Self::Search => ToolSpec::new(
                 "search",
-                "Search workspace file names and UTF-8 file contents for a literal string.",
+                "Search workspace file contents or names, ignore-aware. Modes: content (default), names, definition, references. Pass the header's next= cursor to continue.",
                 json!({
                     "type": "object",
                     "properties": {
-                        "query": { "type": "string", "minLength": 1 },
-                        "path": { "type": "string" }
+                        "query": { "type": "string", "minLength": 1, "maxLength": MAX_QUERY_BYTES },
+                        "mode": { "enum": ["content", "names", "definition", "references"], "default": "content" },
+                        "regex": { "type": "boolean", "default": false },
+                        "case": { "enum": ["sensitive", "insensitive", "smart"], "default": "smart" },
+                        "path": { "type": "string" },
+                        "include": { "type": "array", "maxItems": MAX_GLOBS, "items": { "type": "string", "maxLength": MAX_GLOB_BYTES } },
+                        "exclude": { "type": "array", "maxItems": MAX_GLOBS, "items": { "type": "string", "maxLength": MAX_GLOB_BYTES } },
+                        "context": { "type": "integer", "minimum": 0, "maximum": MAX_CONTEXT, "default": 0 },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 60 },
+                        "max_per_file": { "type": "integer", "minimum": 1, "maximum": MAX_PER_FILE, "default": 10 },
+                        "include_ignored": { "type": "boolean", "default": false },
+                        "cursor": { "type": "string", "maxLength": MAX_CURSOR_BYTES }
                     },
                     "required": ["query"],
                     "additionalProperties": false
@@ -162,6 +185,7 @@ impl BuiltInTool {
                     "additionalProperties": false
                 }),
             ),
+            Self::ListDir => unreachable!("list_dir is a hidden alias and is not advertised"),
             #[cfg(test)]
             Self::TestDelay | Self::TestMutate | Self::TestShell => {
                 unreachable!("test tools are not advertised")
@@ -308,15 +332,30 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
 /// The built-in tools as the catalog compiler receives them, each carrying
 /// the effect policy will classify it by.
 pub(crate) fn static_tools() -> Vec<StaticTool> {
-    specs()
-        .into_iter()
-        .zip(BuiltInTool::ALL)
-        .map(|(spec, tool)| StaticTool {
-            spec,
-            host: ToolHost::BuiltIn,
-            effect: tool.effect(),
+    static TOOLS: OnceLock<Vec<StaticTool>> = OnceLock::new();
+    TOOLS
+        .get_or_init(|| {
+            specs()
+                .into_iter()
+                .zip(BuiltInTool::ALL)
+                .map(|(spec, tool)| StaticTool::new(spec, ToolHost::BuiltIn, tool.effect()))
+                .collect()
         })
-        .collect()
+        .clone()
+}
+
+/// The effect of a hidden alias for an advertised built-in: `list_dir` is
+/// `tree depth=1` for one release so persisted transcripts and grants keep
+/// resolving. Resolves only when the tool it aliases is exposed, so a
+/// profile that hides `tree` hides its alias too.
+pub(crate) fn alias_effect(
+    name: &str,
+    catalog: &crate::catalog::ToolCatalog,
+) -> Option<EffectClass> {
+    match BuiltInTool::from_name(name)? {
+        tool @ BuiltInTool::ListDir => catalog.lookup("tree").map(|_| tool.effect()),
+        _ => None,
+    }
 }
 
 /// The effect of a test-only tool, which dispatch executes but the catalog
