@@ -8266,6 +8266,49 @@ mod tests {
         }
     }
 
+    struct EmptyThenTextLoader {
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    }
+
+    impl RuntimeLoader for EmptyThenTextLoader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let requests = Arc::clone(&self.requests);
+            Box::pin(async move {
+                Runtime::new(EmptyThenTextProvider { requests }, "test-model", 256)
+                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+                    .map_err(|error| RuntimeLoadError {
+                        kind: RunFailureKind::Configuration,
+                        message: error.to_string(),
+                    })
+            })
+        }
+    }
+
+    struct EmptyThenTextProvider {
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    }
+
+    impl Provider for EmptyThenTextProvider {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            let mut requests = self.requests.lock().unwrap();
+            let turn = requests.len();
+            requests.push(request);
+            drop(requests);
+            if turn == 0 {
+                Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
+                    usage: None,
+                })]))
+            } else {
+                Box::pin(stream::iter([
+                    Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                        text: "ok".to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+    }
+
     struct CapturingLoader {
         requests: Arc<StdMutex<Vec<ModelRequest>>>,
     }
@@ -22531,6 +22574,78 @@ mod tests {
                 Message::user("first"),
                 Message::assistant("answer"),
                 Message::user("second"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn follow_up_after_an_empty_completed_turn_reaches_the_provider() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions {
+                database_path: directory.path().join("sessions.sqlite3"),
+                max_active_runs: 1,
+                approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
+                grant_authority: None,
+                approval_reviewer: None,
+            },
+            Arc::new(EmptyThenTextLoader {
+                requests: Arc::clone(&requests),
+            }),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session(&runtime, workspace_id, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("unexpected receipt")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+
+        submit_prompt_to(&runtime, session_id, "hello").await;
+        let first = collect_through_finished(&mut events).await;
+        assert!(first.iter().any(|event| matches!(
+            event.event,
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::Completed,
+                ..
+            }
+        )));
+
+        submit_prompt_to(&runtime, session_id, "continue").await;
+        let second = collect_through_finished(&mut events).await;
+        assert!(
+            second.iter().all(|event| !matches!(
+                &event.event,
+                SessionEvent::RunFinished {
+                    outcome: RunOutcome::Failed { failure },
+                    ..
+                } if failure.message.contains("must not be empty")
+            )),
+            "follow-up failed with empty-conversation: {second:?}"
+        );
+        assert!(second.iter().any(|event| matches!(
+            event.event,
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::Completed,
+                ..
+            }
+        )));
+
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(
+            captured[1].messages(),
+            [
+                Message::user("hello"),
+                Message::assistant(crate::EMPTY_TURN_PLACEHOLDER),
+                Message::user("continue"),
             ]
         );
     }
