@@ -26,6 +26,10 @@
 - [`harness-audit-2026-08.md`](design/harness-audit-2026-08.md) — reference
   audit of Codex, OpenCode, Pi, fx, and the Hermes boundary (research; does
   not change as work ships).
+- [`harness-catalog-2026-09.md`](design/harness-catalog-2026-09.md) — deep
+  per-feature catalog of the same harnesses (tools, bounds, shell safety,
+  input ergonomics) against QQ, with ranked gaps and differentiators
+  (research; motivates `plans/tool-layer.md`).
 
 ## Decisions — `adr/`
 

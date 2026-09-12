@@ -1010,6 +1010,11 @@ untracked.
 
 Priority: P1. Use benchmark evidence; do not ship every candidate.
 
+The concrete candidate designs (search, patch/edit batch, persistent
+terminal) and their delivery slices now live in
+[`tool-layer.md`](./tool-layer.md) (T2, T5, T10). This section keeps the
+experiment method and acceptance targets, which that plan inherits.
+
 ### Experiment Method
 
 For each candidate tool contract:

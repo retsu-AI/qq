@@ -24,8 +24,11 @@ may append a **request** row; only root changes a request's status.
 | 0016 | Remote exposure: loopback default, TLS required off loopback, `tailscale serve` front | multi-surface S4 | Reserved |
 | 0017 | Client UI stack: Rust/WASM, framework chosen by the W1 spike | multi-surface W1/U1 | Reserved |
 | 0018 | `apps/` as a separate Cargo workspace | multi-surface U1 | Reserved |
+| 0019 | Spill handles as durable session state; masked inline, exact on explicit read | tool-layer T4 | Reserved |
+| 0020 | Shell `Forbidden` as a policy decision with a CST classifier and self-tested rules | tool-layer T6 | Reserved |
+| 0021 | `Network` and `Interactive` effect classes | tool-layer T8/T9 | Reserved |
 
-Next free number: 0019. Reserve here before opening a PR that adds an ADR.
+Next free number: 0022. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -35,6 +38,8 @@ Next free number: 0019. Reserve here before opening a PR that adds an ADR.
 | 2026-09-10 | multi-surface S4 | root `Cargo.toml`, `Cargo.lock` | Add `rustls`-based TLS acceptor for `qq-server` (one bump) | Open |
 | 2026-09-10 | multi-surface plan | `docs/design/architecture.md` § Intentionally Deferred, § Local And Remote Networking, repository map; `docs/design/product.md` non-goals and open decisions | Remove web/mobile deferral; record remote exposure and enrollment once S2/S4 ship | Open |
 | 2026-09-10 | multi-surface plan | `docs/plans/README.md` | Plan row and priority entry (done in the plan PR; confirm) | Open |
+| 2026-09-11 | tool-layer T6 | root `Cargo.toml`, `Cargo.lock`, `crates/qq-tui/Cargo.toml` | Promote `tree-sitter` 0.26 and `tree-sitter-bash` 0.25 to `[workspace.dependencies]` so `qq-core` can share them (no version bump) | Open |
+| 2026-09-11 | tool-layer plan | `docs/plans/README.md`, `docs/README.md` | Plan row, priority entry, catalog link (done in the plan PR; confirm) | Open |
 
 Shared files: root `Cargo.toml` and `Cargo.lock` version bumps,
 `rust-toolchain.toml`, `flake.nix`, `.github/workflows/*`,

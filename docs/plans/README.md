@@ -21,7 +21,8 @@ system boundaries and [`workflow.md`](./workflow.md) before starting a slice.
 | --- | --- |
 | [`workflow.md`](./workflow.md) | Slice protocol, ledger rules, review, escalation, dispatch skeletons |
 | [`speed-first-extensible-agent-harness.md`](./speed-first-extensible-agent-harness.md) | Backend plan: compiled plan, protocol, extension lanes, hot path, perf gates; Phases 5a–9 and HC1–HC4 |
-| [`terminal-bench-readiness.md`](./terminal-bench-readiness.md) | Harness reliability and Terminal-Bench program; R6–R8 open |
+| [`terminal-bench-readiness.md`](./terminal-bench-readiness.md) | Harness reliability and Terminal-Bench program; R6–R8 open (R6 candidate designs moved to `tool-layer.md`) |
+| [`tool-layer.md`](./tool-layer.md) | Slim, safe, token-efficient built-ins: bounding/spill primitives, `search`/`read_file`/`tree`/`edit_file` v2, shell classifier and `exec`, `fetch`, `ask_user`, `@` mentions; T1–T14 |
 | [`supervised-delegation.md`](./supervised-delegation.md) | Continuation, roster, supervised children, audit; D6b open |
 | [`multi-surface-clients.md`](./multi-surface-clients.md) | Web, desktop, and mobile clients over many headless servers; client-core W1–W3, server readiness S1–S6, then U/D/M |
 | [`run-snapshots.md`](./run-snapshots.md) | Proposed: reversible mutating-run state |
@@ -36,7 +37,7 @@ system boundaries and [`workflow.md`](./workflow.md) before starting a slice.
 | 1 | Phase 6 — H20 control admission first, then behavioral H21/H27/H28 and correctness H22, then H18, measured H19, and mechanical consolidation | `speed-first-…` | Closes the carried eight-stream service-gap gate (23–28 ms vs the 20 ms target), removes the 13 `sleep(1 ms)` overload loops, repairs cache accounting and context-source identity, then moves the 1 MiB heap and cold `plan_for` gates |
 | 2 | Phase 5b — HC1, HC3, HC4 headless contract (parallel worktree) | `speed-first-…` and [`../design/headless-contract.md`](../design/headless-contract.md) | HC2 shipped; HC3 must land before the mechanical `sessions.rs` split |
 | 3 | D6b paired evaluation (paid runs) and the default decisions it feeds | `supervised-delegation.md` | Decides delegation depth and worker-model defaults with evidence |
-| 4 | R6 tool tournament and terminal; R7 sub-agent economics; R8 remaining warm-path candidates | `terminal-bench-readiness.md` | Evaluation-gated; R6 feeds H10 |
+| 4 | T1–T4 tool-layer "token" release (primitives, `search`/`tree`, `read_file` v2, spill store), then T5–T7 "safety" release; R7 sub-agent economics; R8 remaining warm-path candidates | `tool-layer.md`, `terminal-bench-readiness.md` | Largest measured token and safety gaps in the 2026-09 catalog; replaces the R6 candidates and feeds H10 |
 | 5 | Phase 7 — H10 process sandbox | `speed-first-…` | Gated on R6 and a platform threat model |
 | 6 | Phase 8 — H11 product adapters; Phase 9 — H12 qualification | `speed-first-…` | H11 needs a real consumer; H12 closes the story |
 | 3a | Multi-surface Phases 1–2 — W1, S1 first, then W2, S2, S3; tracer bullet before Phase 3 | `multi-surface-clients.md` | Touches `qq-client`, `qq-server`, and `qq-tui` extraction, not the store hot path; can run in a parallel worktree beside Phase 6 |
@@ -49,11 +50,13 @@ system boundaries and [`workflow.md`](./workflow.md) before starting a slice.
 | --- | --- |
 | Compiled plan, protocol contract, extension lanes, store/provider hot path, perf gates and budgets, headless-contract sequencing (HC1–HC4) | `speed-first-extensible-agent-harness.md` |
 | Tool-contract ablations, terminal, sub-agent economics, Terminal-Bench evaluation program, remaining warm-path candidates | `terminal-bench-readiness.md` |
+| Built-in tool contracts, output bounding and spill, shell classification, `exec`/`fetch`/`ask_user`/`terminal`, `@` mentions | `tool-layer.md` |
 | Continuation on truncation, delegation roster, supervised write children, final-answer audit, paired evaluation | `supervised-delegation.md` |
 | Web, desktop, mobile clients; remote server readiness (identity, enrollment, CORS, TLS, workspace catalog) | `multi-surface-clients.md` |
 | Reversible mutating-run state | `run-snapshots.md` |
 | Diagnostics integration | `lsp-diagnostics.md` |
 | Reference audit of Codex, OpenCode, Pi, fx, and the Hermes boundary | [`../design/harness-audit-2026-08.md`](../design/harness-audit-2026-08.md) (research, not a plan) |
+| Per-feature harness catalog and ranked QQ gaps | [`../design/harness-catalog-2026-09.md`](../design/harness-catalog-2026-09.md) (research, not a plan) |
 | Shared files, dependency and toolchain bumps, ADR numbering | [`progress/root.md`](./progress/root.md) |
 
 Shipped and removed 2026-09-04: TUI rearchitecture and refinement, compaction,
