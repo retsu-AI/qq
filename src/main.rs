@@ -304,6 +304,7 @@ async fn prepare_headless(
             cli::RunFormat::Jsonl => headless::HeadlessFormat::Jsonl,
         },
         trace: args.trace,
+        resume_hint: args.format == cli::RunFormat::Text && io::stderr().is_terminal(),
         arm: std::env::var("QQ_EVAL_ARM")
             .ok()
             .map(|arm| arm.trim().to_owned())
@@ -497,7 +498,12 @@ async fn interactive(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
     if let Ok(embedded) = embedded_rx.try_recv() {
         embedded.shutdown().await?;
     }
-    result.map_err(Into::into)
+    // The terminal is already restored; this lands on the normal screen.
+    let focused = result?;
+    if let Some(session_id) = focused {
+        eprint!("{}", cli::resume_hint(session_id));
+    }
+    Ok(())
 }
 
 async fn render_events(

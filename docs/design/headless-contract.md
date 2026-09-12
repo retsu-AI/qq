@@ -107,6 +107,14 @@ runtime notice not to retry interrupted tool calls — is what the resumed run
 sees. The event stream starts at the new prompt, not at the session's history
 or the settings writes.
 
+The id is made visible where a person can copy it. In text format, when stderr
+is a terminal, `qq run` ends with a resume hint on stderr naming the exact
+`qq run --session ID "<prompt>"` command, after any outcome (an interrupted or
+exhausted run is exactly when someone wants to continue). The TUI prints the
+same hint for the focused session after `/quit`, once the terminal is
+restored. JSONL output never carries the hint: the id is in the `trial`
+record, and a piped stderr receives nothing it did not ask for.
+
 ### Configuration Injection
 
 `QQ_CONFIG_CONTENT` carries one inline RON document (at most 1 MiB), applied

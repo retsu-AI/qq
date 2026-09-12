@@ -54,7 +54,10 @@ pub struct TuiOptions {
     pub themes: Vec<Theme>,
 }
 
-pub async fn run<P>(client: P, options: TuiOptions) -> Result<(), TuiError>
+/// Runs the TUI to exit. Returns the session focused at exit, after the
+/// terminal has been restored, so the caller can tell the user how to
+/// continue it.
+pub async fn run<P>(client: P, options: TuiOptions) -> Result<Option<SessionId>, TuiError>
 where
     P: ClientPort,
 {

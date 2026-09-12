@@ -218,6 +218,14 @@ fn parse_correlation_entry(argument: &str) -> Result<(String, String), String> {
     }
 }
 
+/// The lines a surface prints when it hands a session back to the user, so
+/// the id becomes visible somewhere a human can copy it. Every surface prints
+/// the same text.
+#[must_use]
+pub fn resume_hint(session_id: qq_protocol::SessionId) -> String {
+    format!("To continue this session:\n  qq run --session {session_id} \"<prompt>\"\n")
+}
+
 impl RunArgs {
     /// The validated correlation set for the session and run. A key given
     /// twice is an error rather than a silent last-wins merge.

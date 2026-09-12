@@ -78,6 +78,11 @@ pub struct HeadlessOptions {
     pub correlation: qq_protocol::Correlation,
     pub format: HeadlessFormat,
     pub trace: Option<PathBuf>,
+    /// Print the resume hint (session id and the command that continues it)
+    /// to stderr after the outcome. Set only for text output to a terminal:
+    /// JSONL consumers read `session_id` from the trial record, and scripts
+    /// capturing stderr get nothing they did not ask for.
+    pub resume_hint: bool,
     /// An evaluation arm label (`QQ_EVAL_ARM`) stamped on the trial record so
     /// paired comparisons can tell configurations apart without inferring
     /// them from prompt or schema hashes. Never affects behavior.
@@ -487,6 +492,11 @@ pub async fn run(
         }
     } else if let Some(message) = &end.message {
         let _ = writeln!(stderr, "error: {message}");
+    }
+    // The session persists whatever the outcome; an interrupted or exhausted
+    // run is exactly when a person wants to pick it up again.
+    if options.resume_hint && options.format == HeadlessFormat::Text {
+        let _ = write!(stderr, "\n{}", crate::cli::resume_hint(handle.session_id));
     }
 
     end.status
@@ -1794,6 +1804,7 @@ mod tests {
             correlation: qq_protocol::Correlation::default(),
             format: HeadlessFormat::Jsonl,
             trace: None,
+            resume_hint: false,
             arm: None,
         }
     }
@@ -2738,6 +2749,63 @@ mod tests {
         assert_eq!(status, HeadlessStatus::Completed);
         assert_eq!(stdout, "hello\n", "stdout carries only the final answer");
         assert!(stderr.contains("hello"), "stderr streams the progress");
+        assert!(
+            !stderr.contains("To continue this session"),
+            "no hint unless asked for (stderr was not a terminal): {stderr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_resume_hint_names_the_session_on_stderr_and_never_touches_stdout() {
+        let fixture = fixture(|| TextProvider).await;
+        let mut options = options(&fixture.workspace);
+        options.format = HeadlessFormat::Text;
+        options.resume_hint = true;
+
+        let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        assert_eq!(stdout, "hello\n", "the hint must not pollute the answer");
+        let session_id = workspace_snapshot(&fixture).await.sessions[0].id;
+        assert!(
+            stderr.ends_with(&crate::cli::resume_hint(session_id)),
+            "{stderr}"
+        );
+        assert!(stderr.contains(&format!("qq run --session {session_id}")));
+    }
+
+    #[tokio::test]
+    async fn the_resume_hint_is_printed_after_a_timed_out_run_too() {
+        // A run that ended early is exactly when a person wants to continue.
+        let fixture = fixture(|| HangingProvider).await;
+        let mut options = options(&fixture.workspace);
+        options.format = HeadlessFormat::Text;
+        options.resume_hint = true;
+        options.timeout = Some(Duration::from_millis(100));
+
+        let (status, _, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::TimedOut);
+        let session_id = workspace_snapshot(&fixture).await.sessions[0].id;
+        assert!(
+            stderr.ends_with(&crate::cli::resume_hint(session_id)),
+            "{stderr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn jsonl_output_never_carries_the_resume_hint() {
+        // Even if a caller sets the flag, JSONL consumers get the id from the
+        // trial record and nothing else on stderr they did not ask for.
+        let fixture = fixture(|| TextProvider).await;
+        let mut options = options(&fixture.workspace);
+        options.resume_hint = true;
+
+        let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        assert!(parse_records(&stdout)[0]["session_id"].is_string());
+        assert!(!stderr.contains("To continue this session"), "{stderr}");
     }
 
     #[tokio::test]
