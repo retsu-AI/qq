@@ -198,10 +198,67 @@ result is never re-executed after a crash. `recover_interrupted_runs` marks it
 result and decides what to verify. Side effects are not idempotent, so replay
 must never mean re-run.
 
-Tool results can be large. Persist the full result up to a bounded size
-(default 256 KiB per call, truncated with an explicit marker) and stream
-deltas through the existing batching path so persistence latency stays off
-the token hot path.
+Tool results can be large. What is persisted is the model-facing text after
+bounding (§ Output Bounding) plus any UI payload; live deltas stream through
+the existing batching path so persistence latency stays off the token hot
+path.
+
+### Output Bounding
+
+Every tool result crosses one boundary: `ToolOutput`. Tools return complete
+domain output; the constructor masks secrets, then bounds the text to the
+tool's `Bounds`, so no tool carries its own truncation code. `ToolOutput`
+splits what the model reads from what clients render:
+
+- `model_text` — the only part that enters model context. Persisted in the
+  tool-call row's `result`.
+- `ui_payload` — a `ToolCallDisplay` (today: the unified diff of an applied
+  edit). Persisted as `display_json`, rendered by clients, never sent back to
+  the model. The model gets the one-line summary of an edit it just wrote,
+  not its own diff echoed back.
+
+`Bounds` is a struct of named limits with ceilings: `max_bytes` (per-tool
+default; ceiling 128 KiB, floor 4 KiB), `max_lines` (ceiling 4000),
+`max_line_bytes` (2000; longer lines are clipped with `…+N`), and
+`head_ratio` (percent of the budget spent on the head, 50 by default).
+Bytes are measured JSON-escaped: results embed in persisted event envelopes
+with a hard cap, and control-dense content escapes up to 6:1.
+
+`bound_text` keeps whole lines from the start and whole lines from the end
+and inserts exactly one marker for what fell between:
+
+```text
+…[qq: 41,207 bytes / 1,142 lines omitted; not stored]…
+```
+
+The marker names the counts so the model knows what it did not see;
+`not stored` says so honestly until the spill store (T4) makes cut text
+reachable by handle. Every marker qq inserts into model text — omission,
+scan caps, unlisted directory entries — starts with `…[qq: `, so clients
+detect markers with one prefix check. Bounding is deterministic: the same
+text and bounds produce the same bytes.
+
+**Headers.** A result whose tool follows the convention starts with one line
+`<tool> <subject> (<key>=<value>)*` — keys lowercase ASCII, values without
+whitespace. `shell` ships it: `shell exit=0 elapsed=1.2 bytes=428890`. The
+header is where the verdict lives, so a head-only glance, a truncated tail,
+or a pruned stub all still say how the call ended. Context pruning keeps
+the header line in front of its `[pruned: …]` stub.
+
+**Secret masking** applies to `model_text` before bounding and replaces each
+hit with `[masked:<kind>]`: AWS access keys, GitHub tokens, `sk-`/`sk_live_`/
+`pk_live_`/`xox[bp]-` keys, `Bearer <token>`, `KEY=value` where the key names
+a credential (`password`, `secret`, `token`, `api_key`, …) and the value is
+≥ 8 non-numeric characters, and `scheme://user:pass@host`. `$VAR` references
+are exempt. Masking never changes a file hash: the hash is of the file, not
+of the rendering. The scan is a hand-rolled byte matcher (no regex
+dependency); clean text is returned without allocation.
+
+**Per-turn budget.** The sum of `model_text` across one turn's tool calls is
+capped at 96 KiB (`MAX_TURN_TOOL_OUTPUT_BYTES`). Results enter context in
+call order; a result that would overshoot is re-bounded to the remainder
+(never below 4 KiB) and its marker adds `turn budget reached`. The persisted
+row keeps the call's own bounded text; only what the model sees shrinks.
 
 ### Context Budget
 
@@ -218,8 +275,9 @@ Result pruning is the first shedding mechanism (shipped compaction design;
 bounds recorded under "Compaction Hardening" in
 `docs/plans/terminal-bench-readiness.md`):
 during assembly, read-only built-in results older than the last few model
-turns are replaced by one-line stubs naming the tool, arguments, and size,
-because the agent can re-derive them on demand. Mutating, shell, and MCP
+turns are replaced by stubs naming the tool, arguments, and size (preceded
+by the result's header line when it has one), because the agent can
+re-derive them on demand. Mutating, shell, and MCP
 outputs are never pruned — they are not re-derivable. The stored rows are
 untouched; pruning is a property of assembly alone.
 
@@ -229,14 +287,17 @@ The first tool set is small, executed in-process, and dispatched statically —
 an enum, not a trait-object registry. This keeps per-call overhead near zero
 and keeps the schema for each tool in one place:
 
-- `read_file` — bounded read with offset/limit; records a content hash for
-  the staleness guard below.
-- `list_dir` — bounded directory listing.
+- `read_file` — line-windowed read with offset/limit over a 4 MiB scan;
+  records a content hash for the staleness guard below.
+- `list_dir` — directory listing, `limit` entries.
 - `search` — file-name and content search over the workspace, bounded result
   count.
-- `edit_file` — exact-string replacement.
-- `write_file` — full-file create or overwrite.
-- `shell` — bounded command execution.
+- `edit_file` — exact-string replacement; the applied diff is the UI payload.
+- `write_file` — full-file create or overwrite; the content is the UI payload.
+- `shell` — command execution with a 16 KiB head+tail model bound.
+
+Each returns complete domain output within its own scan and count limits;
+the model-facing text is then bounded once at dispatch (§ Output Bounding).
 
 Read-only tools (`read_file`, `list_dir`, `search`) never require approval
 inside the workspace and may execute concurrently. Everything else is a
@@ -329,9 +390,15 @@ get isolated worktrees later. Worktree orchestration stays deferred.
 - Working directory pinned to the workspace (or a contained subdirectory).
 - A default timeout (120 s, capped per call) that kills the whole process
   group, as does run cancellation.
-- Bounded captured output (default 128 KiB, truncated head+tail with a
-  marker), streamed to clients as `ToolCallOutputDelta` events through the
-  existing batching path so long builds render live.
+- Combined stdout+stderr captured head+tail within 128 KiB (a capture cap,
+  marked `bytes not captured` when exceeded) and streamed to clients as
+  `ToolCallOutputDelta` events through the existing batching path so long
+  builds render live.
+- Model-facing text bounded to 16 KiB head+tail behind a
+  `shell exit=<code> elapsed=<s> bytes=<n>` header (§ Output Bounding). The
+  head shows how a command started, the tail its verdict; the middle of a
+  long build log is what the model should page into deliberately, not read
+  by default. `exit` is `signal:<n>` or `timeout` when there is no code.
 - No login/profile shell initialization on the hot path.
 
 Shell is the one tool that cannot be contained by path checks — any command
