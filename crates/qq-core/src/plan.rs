@@ -556,8 +556,20 @@ impl CompiledAgentPlan {
                 effect: EffectClass::ReadOnly,
             });
         }
-        let exposed_tools =
-            exposed_tools.map(|names| names.into_iter().collect::<std::collections::BTreeSet<_>>());
+        // `list_dir` is the hidden alias of `tree` for one release: an
+        // exposure list naming it exposes `tree`, which the alias resolves to.
+        let exposed_tools = exposed_tools.map(|names| {
+            names
+                .into_iter()
+                .map(|name| {
+                    if name == "list_dir" {
+                        "tree".to_owned()
+                    } else {
+                        name
+                    }
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        });
         if let Some(names) = &exposed_tools {
             // Validate before either restriction removes tools. load_skill
             // is known even when this workspace has no disclosed skills.
@@ -972,6 +984,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(narrow.digest(), same.digest());
+        // The hidden `list_dir` alias exposes the tool it aliases.
+        let aliased = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path()).with_exposed_tools(vec!["list_dir".to_owned()]),
+        )
+        .unwrap();
+        assert_eq!(aliased.catalog().names().collect::<Vec<_>>(), ["tree"]);
     }
 
     #[test]

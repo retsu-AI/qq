@@ -138,15 +138,35 @@ impl SymbolMatchers {
         self.reference.find_iter(buffer).map(|found| found.start())
     }
 
-    /// Byte offsets of line starts that define the symbol in `language`.
+    /// Byte offsets (within the line) of definitions of the symbol in
+    /// `language`. A line can define the symbol only if it mentions it, so
+    /// the cheap word-boundary scan finds candidates and the anchored table
+    /// pattern runs on those lines alone.
     pub(super) fn definition_matches<'b>(
         &'b self,
         language: Language,
         buffer: &'b [u8],
     ) -> impl Iterator<Item = usize> + 'b {
-        self.definition(language)
-            .into_iter()
-            .flat_map(move |regex| regex.find_iter(buffer).map(|found| found.start()))
+        let definition = self.definition(language);
+        let mut last_line_end = 0_usize;
+        self.reference.find_iter(buffer).filter_map(move |found| {
+            let start = found.start();
+            if start < last_line_end {
+                return None;
+            }
+            let line_start = buffer[..start]
+                .iter()
+                .rposition(|&byte| byte == b'\n')
+                .map_or(0, |index| index + 1);
+            let line_end = buffer[start..]
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .map_or(buffer.len(), |index| start + index);
+            last_line_end = line_end + 1;
+            definition
+                .is_some_and(|regex| regex.is_match(&buffer[line_start..line_end]))
+                .then_some(start)
+        })
     }
 
     #[cfg(test)]

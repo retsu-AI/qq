@@ -37,6 +37,7 @@ mod tools;
 
 /// Entry points for the `tool_output` bench. Not a public API.
 #[doc(hidden)]
+pub use tools::bench_support as tool_bench;
 pub use tools::output::bench_support as tool_output_bench;
 mod workspace;
 

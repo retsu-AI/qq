@@ -55,3 +55,7 @@ harness = false
 [[bench]]
 name = "tool_output"
 harness = false
+
+[[bench]]
+name = "search_walk"
+harness = false

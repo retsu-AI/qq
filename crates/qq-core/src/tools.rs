@@ -12,6 +12,30 @@ mod write;
 
 #[cfg(test)]
 pub(crate) use dispatch::test_executions_started;
+
+/// Entry points for the `search_walk` bench. Not a public API.
+pub mod bench_support {
+    use std::{
+        path::Path,
+        sync::{Arc, atomic::AtomicBool},
+    };
+
+    use crate::workspace::{FileState, Workspace};
+
+    /// Runs one built-in read-side tool against `workspace_root` and returns
+    /// its model-facing text.
+    pub fn run_tool(workspace_root: &Path, name: &str, arguments: &str) -> String {
+        let workspace = Workspace::open(workspace_root).expect("workspace must open");
+        super::dispatch::execute_blocking(
+            &workspace,
+            &FileState::default(),
+            name,
+            arguments,
+            &super::dispatch::ToolCancellation::new(Arc::new(AtomicBool::new(false))),
+        )
+        .model_text
+    }
+}
 pub(crate) use dispatch::{ToolDrainError, ToolOutput, ToolTasks, bounded_result, execute};
 #[cfg(test)]
 pub(crate) use edit::hold_tool_apply;

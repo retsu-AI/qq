@@ -131,12 +131,16 @@ impl ToolRow {
                 arguments.is_some(),
                 has_result.then(|| count_noun(content_lines(), "line", "lines")),
             ),
-            "list_dir" => (
+            // `tree <path> depth= entries=<shown>/<total> files= dirs=` heads
+            // the result; `list_dir` is its alias.
+            "tree" | "list_dir" => (
                 "List",
                 false,
-                string_argument("path").or_else(compact),
+                string_argument("path")
+                    .or_else(|| (call.name == "tree").then(|| ".".to_owned()))
+                    .or_else(compact),
                 arguments.is_some(),
-                has_result.then(|| count_noun(content_lines(), "entry", "entries")),
+                has_result.then(|| tree_metric(result)),
             ),
             "search" => (
                 "Search",
@@ -287,31 +291,41 @@ fn strip_header<'a>(result: &'a str, tool: &str) -> &'a str {
     result.get(header.len() + 1..).unwrap_or_default()
 }
 
+/// `<shown> hits · <files> files` from the `search "…" mode= matches=<shown>/
+/// <total> files=<n>` header; `no matches` when the total is zero.
 fn search_metric(result: &str) -> String {
-    if result.starts_with("No matches found.") {
+    let (shown, total) = header_field(result, "search", "matches")
+        .and_then(|value| value.split_once('/'))
+        .map_or((0, "0"), |(shown, total)| {
+            (shown.parse::<usize>().unwrap_or(0), total)
+        });
+    if total == "0" {
         return "no matches".to_owned();
     }
-    // Match rows are `path:line:content` or `path: filename match`, grouped
-    // per file, so counting consecutive distinct path prefixes counts files.
-    let mut matches = 0_usize;
-    let mut files = 0_usize;
-    let mut previous: Option<&str> = None;
-    for line in result.lines() {
-        if line.is_empty() || is_marker_line(line) {
-            continue;
-        }
-        matches += 1;
-        let path = line.split(':').next().unwrap_or(line);
-        if previous != Some(path) {
-            files += 1;
-            previous = Some(path);
-        }
+    let files = header_field(result, "search", "files")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut metric = count_noun(shown, "hit", "hits");
+    if total != shown.to_string() {
+        metric = format!("{shown}/{total} hits");
     }
-    format!(
-        "{} · {}",
-        count_noun(matches, "hit", "hits"),
-        count_noun(files, "file", "files")
-    )
+    metric.push_str(" · ");
+    metric.push_str(&count_noun(files, "file", "files"));
+    metric
+}
+
+/// `<n> entries` from the `tree … entries=<shown>/<total>` header, with the
+/// total when entries were left unlisted.
+fn tree_metric(result: &str) -> String {
+    match header_field(result, "tree", "entries").and_then(|value| value.split_once('/')) {
+        Some((shown, total)) if shown != total => format!("{shown}/{total} entries"),
+        Some((shown, _)) => count_noun(shown.parse().unwrap_or(0), "entry", "entries"),
+        None => count_noun(
+            result.lines().filter(|line| !is_marker_line(line)).count(),
+            "entry",
+            "entries",
+        ),
+    }
 }
 
 /// `+12 −3` from a unified diff.

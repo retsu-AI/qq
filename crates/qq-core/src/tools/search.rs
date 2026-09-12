@@ -196,7 +196,7 @@ enum Matcher {
     Content(Regex),
     Names(Regex),
     Symbol {
-        matchers: SymbolMatchers,
+        matchers: Box<SymbolMatchers>,
         definitions: bool,
     },
 }
@@ -333,10 +333,10 @@ impl Walker<'_> {
             self.scan_buffer(&child.path);
         }
         self.last_scanned = Some(child.path.clone());
-        if self.stop.is_none() {
-            if let Some(reason) = stop_after {
-                self.stop = Some(Stop::Scan(reason));
-            }
+        if self.stop.is_none()
+            && let Some(reason) = stop_after
+        {
+            self.stop = Some(Stop::Scan(reason));
         }
         Ok(())
     }
@@ -577,7 +577,7 @@ fn push_row(out: &mut String, number: u32, separator: char, line: &[u8]) {
     out.push('\n');
 }
 
-fn build_regex(pattern: &str, case_insensitive: bool) -> Result<Regex, ToolOutput> {
+fn build_regex(pattern: &str, case_insensitive: bool) -> Result<Regex, String> {
     RegexBuilder::new(pattern)
         .case_insensitive(case_insensitive)
         .multi_line(true)
@@ -585,10 +585,10 @@ fn build_regex(pattern: &str, case_insensitive: bool) -> Result<Regex, ToolOutpu
         .dfa_size_limit(REGEX_SIZE_LIMIT)
         .build()
         .map_err(|error| match error {
-            regex::Error::CompiledTooBig(_) => ToolOutput::error(format!(
+            regex::Error::CompiledTooBig(_) => format!(
                 "regex_too_large: the compiled pattern exceeds {REGEX_SIZE_LIMIT} bytes; simplify it"
-            )),
-            other => ToolOutput::error(format!("invalid_regex: {other}")),
+            ),
+            other => format!("invalid_regex: {other}"),
         })
 }
 
@@ -665,13 +665,13 @@ pub(super) fn search(
             match build_regex(&pattern, case_insensitive) {
                 Ok(regex) if arguments.mode == SearchMode::Names => Matcher::Names(regex),
                 Ok(regex) => Matcher::Content(regex),
-                Err(output) => return output,
+                Err(message) => return ToolOutput::error(message),
             }
         }
         SearchMode::Definition | SearchMode::References => {
             match SymbolMatchers::new(&arguments.query, case_insensitive) {
                 Ok(matchers) => Matcher::Symbol {
-                    matchers,
+                    matchers: Box::new(matchers),
                     definitions: arguments.mode == SearchMode::Definition,
                 },
                 Err(error @ SymbolError::Invalid) => return ToolOutput::error(error.to_string()),
@@ -707,8 +707,8 @@ pub(super) fn search(
         buffer: Vec::new(),
         scratch: String::new(),
     };
-    if let Err(output) = run(&mut walker, &root) {
-        return output;
+    if let Err(message) = run(&mut walker, &root) {
+        return ToolOutput::error(message);
     }
     if walker.stop == Some(Stop::Cancelled) {
         return ToolOutput::error(CANCELLED_MESSAGE);
@@ -717,43 +717,41 @@ pub(super) fn search(
     // A sensitive search that found nothing tells the model what a
     // case-insensitive one would have, so it need not guess and retry.
     let mut hint_insensitive = None;
-    if walker.total == 0
+    let hint_wanted = walker.total == 0
         && walker.stop.is_none()
         && !case_insensitive
         && matches!(arguments.mode, SearchMode::Content)
         && !arguments.regex
-        && Instant::now() < deadline
-    {
-        if let Ok(regex) = build_regex(&regex::escape(&arguments.query), true) {
-            let insensitive = Matcher::Content(regex);
-            let mut counter = Walker {
-                workspace,
-                cancelled,
-                matcher: &insensitive,
-                filter: &filter,
-                stack: IgnoreStack::open(workspace, &root, arguments.include_ignored),
-                budget: ScanBudget::new(MAX_SCAN_ENTRIES, MAX_SCAN_BYTES, deadline),
-                cursor: cursor.as_ref(),
-                limit: usize::MAX,
-                max_per_file: usize::MAX,
-                context: 0,
-                count_only: true,
-                body: String::new(),
-                body_escaped: 0,
-                body_budget: 0,
-                shown: 0,
-                total: 0,
-                files_with_matches: 0,
-                scanned_files: 0,
-                last_emitted: None,
-                last_scanned: None,
-                stop: None,
-                buffer: std::mem::take(&mut walker.buffer),
-                scratch: String::new(),
-            };
-            if run(&mut counter, &root).is_ok() && counter.total > 0 {
-                hint_insensitive = Some((counter.total, counter.stop.is_some()));
-            }
+        && Instant::now() < deadline;
+    if hint_wanted && let Ok(regex) = build_regex(&regex::escape(&arguments.query), true) {
+        let insensitive = Matcher::Content(regex);
+        let mut counter = Walker {
+            workspace,
+            cancelled,
+            matcher: &insensitive,
+            filter: &filter,
+            stack: IgnoreStack::open(workspace, &root, arguments.include_ignored),
+            budget: ScanBudget::new(MAX_SCAN_ENTRIES, MAX_SCAN_BYTES, deadline),
+            cursor: cursor.as_ref(),
+            limit: usize::MAX,
+            max_per_file: usize::MAX,
+            context: 0,
+            count_only: true,
+            body: String::new(),
+            body_escaped: 0,
+            body_budget: 0,
+            shown: 0,
+            total: 0,
+            files_with_matches: 0,
+            scanned_files: 0,
+            last_emitted: None,
+            last_scanned: None,
+            stop: None,
+            buffer: std::mem::take(&mut walker.buffer),
+            scratch: String::new(),
+        };
+        if run(&mut counter, &root).is_ok() && counter.total > 0 {
+            hint_insensitive = Some((counter.total, counter.stop.is_some()));
         }
     }
 
@@ -846,7 +844,7 @@ pub(super) fn path_error(requested: &str, error: &crate::workspace::WorkspacePat
     }
 }
 
-fn run(walker: &mut Walker<'_>, root: &str) -> Result<(), ToolOutput> {
+fn run(walker: &mut Walker<'_>, root: &str) -> Result<(), String> {
     let is_dir = walker.workspace.root().is_dir(root);
     let result = if is_dir {
         walker.visit_dir(root, 0)
@@ -864,9 +862,9 @@ fn run(walker: &mut Walker<'_>, root: &str) -> Result<(), ToolOutput> {
                 };
                 walker.scan(&child, metadata.len())
             }
-            Ok(_) => return Err(ToolOutput::error("path_not_found: not a file or directory")),
-            Err(error) => return Err(ToolOutput::error(format!("path_not_found: {error}"))),
+            Ok(_) => return Err("path_not_found: not a file or directory".to_owned()),
+            Err(error) => return Err(format!("path_not_found: {error}")),
         }
     };
-    result.map_err(|error| ToolOutput::error(error.to_string()))
+    result.map_err(|error| error.to_string())
 }
