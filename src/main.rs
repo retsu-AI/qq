@@ -186,6 +186,12 @@ async fn prepare_headless(
     let invalid = |message: String| (headless::HeadlessStatus::InvalidConfiguration, message);
     let harness = |message: String| (headless::HeadlessStatus::HarnessFailure, message);
 
+    // Pure argument validation runs before any filesystem or configuration
+    // work so a malformed label never costs a config load.
+    let correlation = args
+        .correlation()
+        .map_err(|error| invalid(format!("invalid --correlation: {error}")))?;
+
     let workspace = match args.workspace {
         Some(path) => path,
         None => std::env::current_dir().map_err(|error| {
@@ -291,6 +297,7 @@ async fn prepare_headless(
         timeout: args.timeout_seconds.map(std::time::Duration::from_secs),
         max_turns: args.max_turns,
         max_cost_usd_nanos,
+        correlation,
         format: match args.format {
             cli::RunFormat::Text => headless::HeadlessFormat::Text,
             cli::RunFormat::Jsonl => headless::HeadlessFormat::Jsonl,

@@ -79,7 +79,7 @@ approximate anchors, not stable identifiers.
 qq run [--workspace PATH] [--approval read-only|auto|full] [--profile NAME]
        [--allow-tool NAME]... [--allow-shell PREFIX]... [--steer-stdin]
        [--timeout-seconds N] [--max-turns N] [--max-cost-usd VALUE]
-       [--format text|jsonl] [--trace PATH]
+       [--correlation KEY=VALUE]... [--format text|jsonl] [--trace PATH]
        [--model PROVIDER/MODEL] [--max-output-tokens N] [--organization NAME]
        -- PROMPT
 ```
@@ -87,7 +87,10 @@ qq run [--workspace PATH] [--approval read-only|auto|full] [--profile NAME]
 Source: `src/cli.rs`. `--max-turns` is `u16`. `ask` is not representable in
 headless mode because there is no one to ask. `--max-cost-usd` requires
 pricing for the selected model in configuration and exits `2` otherwise
-(`src/main.rs`).
+(`src/main.rs`). `--correlation` labels are validated against the protocol's
+bounds (8 entries, 64-byte keys, 256-byte values, 2 KiB total; a repeated
+key is an error) before any configuration is read, stamped on both the
+session and the run, and never interpreted.
 
 ### Configuration Injection
 
@@ -123,7 +126,7 @@ With `--format jsonl`, stdout carries one JSON object per line, tagged by
 
 | `type` | Fields | Notes |
 | --- | --- | --- |
-| `trial` | `qq_version`, `qq_source_revision`, `protocol_version`, `workspace_identity`, `model`, `profile`, `context_window?`, `pricing_provenance?`, `approval`, `timeout_seconds?`, `max_turns?`, `max_cost_usd_nanos?`, `arm?`, `workspace_id`, `session_id`, `run_id` | Exactly one, first, unless startup fails before a session exists |
+| `trial` | `qq_version`, `qq_source_revision`, `protocol_version`, `workspace_identity`, `model`, `profile`, `context_window?`, `pricing_provenance?`, `approval`, `timeout_seconds?`, `max_turns?`, `max_cost_usd_nanos?`, `correlation?`, `arm?`, `workspace_id`, `session_id`, `run_id` | Exactly one, first, unless startup fails before a session exists. `correlation` is present only when at least one `--correlation` was given |
 | `event` | `envelope: SessionEventEnvelope` | `{ cursor: { sequence }, session_id, run_id?, caused_by?, occurred_at_ms, event: { type, ... } }`. Includes child-session events for the workspace |
 | `outcome` | `status`, `exit_code`, `message?`, `usage?`, `estimated_cost_usd_nanos?`, `prompt_identity?`, `audit?` | Exactly one, last |
 

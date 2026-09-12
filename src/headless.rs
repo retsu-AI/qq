@@ -70,6 +70,9 @@ pub struct HeadlessOptions {
     pub timeout: Option<Duration>,
     pub max_turns: Option<u16>,
     pub max_cost_usd_nanos: Option<u64>,
+    /// Opaque labels stamped on the session and the run; echoed on the trial
+    /// record and every session snapshot. Never interpreted.
+    pub correlation: qq_protocol::Correlation,
     pub format: HeadlessFormat,
     pub trace: Option<PathBuf>,
     /// An evaluation arm label (`QQ_EVAL_ARM`) stamped on the trial record so
@@ -179,6 +182,8 @@ enum TrialRecord<'a> {
         max_turns: Option<u16>,
         #[serde(skip_serializing_if = "Option::is_none")]
         max_cost_usd_nanos: Option<u64>,
+        #[serde(skip_serializing_if = "qq_protocol::Correlation::is_empty")]
+        correlation: &'a qq_protocol::Correlation,
         #[serde(skip_serializing_if = "Option::is_none")]
         arm: Option<&'a str>,
         workspace_id: String,
@@ -402,6 +407,7 @@ pub async fn run(
         timeout_seconds: options.timeout.map(|timeout| timeout.as_secs()),
         max_turns: options.max_turns,
         max_cost_usd_nanos: options.max_cost_usd_nanos,
+        correlation: &options.correlation,
         arm: options.arm.as_deref(),
         workspace_id: handle.workspace_id.to_string(),
         session_id: handle.session_id.to_string(),
@@ -503,7 +509,7 @@ async fn submit(
             model: options.model.clone(),
             approval_mode: options.approval.approval_mode(),
             profile: options.profile.clone(),
-            correlation: qq_protocol::Correlation::default(),
+            correlation: options.correlation.clone(),
         },
     )
     .await?;
@@ -534,7 +540,7 @@ async fn submit(
                 max_children: None,
                 max_concurrent_children: None,
             },
-            correlation: qq_protocol::Correlation::default(),
+            correlation: options.correlation.clone(),
         },
     )
     .await?;
@@ -1677,6 +1683,7 @@ mod tests {
             timeout: None,
             max_turns: None,
             max_cost_usd_nanos: None,
+            correlation: qq_protocol::Correlation::default(),
             format: HeadlessFormat::Jsonl,
             trace: None,
             arm: None,
@@ -2093,6 +2100,72 @@ mod tests {
             finished_tool_calls(&records)
                 .iter()
                 .all(|call| call["state"] == "denied")
+        );
+    }
+
+    #[tokio::test]
+    async fn correlation_is_stamped_on_the_trial_record_and_every_session_snapshot() {
+        let fixture = fixture(|| TextProvider).await;
+        let correlation = qq_protocol::Correlation::new(
+            [("job", "j-1"), ("attempt", "2")]
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect(),
+        )
+        .unwrap();
+        let options = HeadlessOptions {
+            correlation: correlation.clone(),
+            ..options(&fixture.workspace)
+        };
+
+        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        assert_eq!(records[0]["type"], "trial");
+        assert_eq!(records[0]["correlation"]["job"], "j-1");
+        assert_eq!(records[0]["correlation"]["attempt"], "2");
+        let snapshots: Vec<&serde_json::Value> = event_records(&records)
+            .iter()
+            .filter_map(|record| {
+                let session = &record["envelope"]["event"]["session"];
+                session.is_object().then_some(session)
+            })
+            .collect();
+        assert!(
+            !snapshots.is_empty(),
+            "lifecycle events must carry a session snapshot"
+        );
+        for session in snapshots {
+            assert_eq!(session["correlation"]["job"], "j-1");
+            assert_eq!(session["correlation"]["attempt"], "2");
+        }
+        let workspace = workspace_snapshot(&fixture).await;
+        assert!(
+            workspace
+                .sessions
+                .iter()
+                .all(|session| session.correlation == correlation)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_correlation_is_absent_from_the_trial_record() {
+        let fixture = fixture(|| TextProvider).await;
+
+        let (status, stdout, _stderr) = run_to_end(
+            &fixture,
+            options(&fixture.workspace),
+            std::future::pending(),
+        )
+        .await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        assert_eq!(records[0]["type"], "trial");
+        assert!(
+            records[0].get("correlation").is_none(),
+            "the default payload must not grow a field no flag asked for"
         );
     }
 
