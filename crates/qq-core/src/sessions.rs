@@ -6340,10 +6340,19 @@ fn prunable_stub(
         arguments = truncate_utf8(arguments, CONTEXT_PRUNE_STUB_ARGUMENT_BYTES);
         arguments.push_str("...");
     }
-    let stub = format!(
-        "[pruned: {name} {arguments} returned {} bytes; call it again if needed]",
-        content.len()
-    );
+    // A result that follows the header convention keeps its header: the
+    // counts, hash, and cursor it carries let the model continue without
+    // re-running the call.
+    let stub = match crate::tools::header_line(name, content) {
+        Some(header) => format!(
+            "{header}\n[pruned: {name} {arguments} returned {} bytes; call it again if needed]",
+            content.len()
+        ),
+        None => format!(
+            "[pruned: {name} {arguments} returned {} bytes; call it again if needed]",
+            content.len()
+        ),
+    };
     (content.len() > stub.len()).then_some(stub)
 }
 
@@ -13731,6 +13740,57 @@ mod tests {
         // Inside the window everything stays verbatim.
         assert!(results[3].1.starts_with("yyy"));
         assert!(context_bytes(&context) < before);
+    }
+
+    #[test]
+    fn pruning_stubs_keep_a_result_header_line() {
+        let call = |id: &str, name: &str| ContentBlock::ToolCall {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            arguments: serde_json::json!({"query": "needle"}),
+        };
+        let with_header = format!(
+            "search \"needle\" matches=4/4 files=3 scanned=612\n{}",
+            "match\n".repeat(200)
+        );
+        let mut context = vec![
+            Message::user("start"),
+            Message::new(Role::Assistant, vec![call("c1", "search")]),
+            Message::tool_results(vec![ContentBlock::ToolResult {
+                call_id: "c1".to_owned(),
+                content: with_header.clone(),
+                is_error: false,
+            }]),
+            Message::new(Role::Assistant, vec![call("c2", "search")]),
+            Message::tool_results(vec![ContentBlock::ToolResult {
+                call_id: "c2".to_owned(),
+                content: format!("searching...\n{}", "match\n".repeat(200)),
+                is_error: false,
+            }]),
+            Message::assistant("a"),
+            Message::assistant("b"),
+            Message::assistant("c"),
+            Message::assistant("d"),
+        ];
+        assert!(prune_stale_tool_results(&mut context, &HashSet::new()));
+        let stubs = context
+            .iter()
+            .flat_map(Message::content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stubs[0],
+            format!(
+                "search \"needle\" matches=4/4 files=3 scanned=612\n\
+                 [pruned: search {{\"query\":\"needle\"}} returned {} bytes; call it again if needed]",
+                with_header.len()
+            )
+        );
+        // A first line that does not follow `<tool> …` is not a header.
+        assert!(stubs[1].starts_with("[pruned: search"), "{}", stubs[1]);
     }
 
     #[test]
@@ -25410,7 +25470,7 @@ mod tests {
         for tool_call in &completed {
             let result = tool_call.result.as_deref().unwrap();
             assert!(result.contains("approved-output"), "{result}");
-            assert!(result.ends_with("exit code: 0"), "{result}");
+            assert!(result.starts_with("shell exit=0 "), "{result}");
         }
         // Live output was published, and before the call's terminal event.
         let first_delta = observed

@@ -9,11 +9,17 @@ use std::sync::{
 use serde::Deserialize;
 use tokio::sync::{Notify, mpsc};
 
-use crate::workspace::{FileState, FileStateUpdate, Workspace, blocking_permits};
+use qq_protocol::ToolCallDisplay;
+
+use crate::{
+    approval::edit_result_display,
+    workspace::{FileState, FileStateUpdate, Workspace, blocking_permits},
+};
 
 use super::{
     edit::edit_file,
     list::list_dir,
+    output::{Bounds, bound_text, mask_secrets},
     read::read_file,
     search::search,
     shell::{ShellArgs, run_shell},
@@ -21,9 +27,7 @@ use super::{
     write::write_file,
 };
 
-pub(crate) const MAX_TOOL_RESULT_BYTES: usize = 256 * 1024;
 const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
-pub(super) const TRUNCATION_MARKER: &str = "\n...[truncated by qq]\n";
 #[cfg(test)]
 static TEST_EXECUTIONS_STARTED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
@@ -148,9 +152,9 @@ pub(crate) async fn execute(
     cancelled: Arc<AtomicBool>,
     output: Option<mpsc::Sender<String>>,
     tasks: ToolTasks,
-) -> ToolExecutionResult {
+) -> ToolOutput {
     if arguments.len() > MAX_ARGUMENT_BYTES {
-        return ToolExecutionResult::error("tool arguments exceed the 64 KiB limit");
+        return ToolOutput::error("tool arguments exceed the 64 KiB limit");
     }
     let cancelled = ToolCancellation::new(cancelled);
     let _cancel_on_drop = CancelCallOnDrop(Arc::clone(&cancelled.call));
@@ -162,7 +166,7 @@ pub(crate) async fn execute(
         let arguments = match serde_json::from_str::<ShellArgs>(&arguments) {
             Ok(arguments) => arguments,
             Err(error) => {
-                return ToolExecutionResult::error(format!("invalid arguments: {error}"));
+                return ToolOutput::error(format!("invalid arguments: {error}"));
             }
         };
         let lease = tasks.enter();
@@ -180,12 +184,12 @@ pub(crate) async fn execute(
         .await
         {
             Ok(result) => result,
-            Err(_) => ToolExecutionResult::error("tool execution stopped unexpectedly"),
+            Err(_) => ToolOutput::error("tool execution stopped unexpectedly"),
         };
     }
     let permit = match blocking_permits().acquire_owned().await {
         Ok(permit) => permit,
-        Err(_) => return ToolExecutionResult::error("tool executor is unavailable"),
+        Err(_) => return ToolOutput::error("tool executor is unavailable"),
     };
     let lease = tasks.enter();
     match tokio::task::spawn_blocking(move || {
@@ -196,44 +200,61 @@ pub(crate) async fn execute(
     .await
     {
         Ok(result) => result,
-        Err(_) => ToolExecutionResult::error("tool execution stopped unexpectedly"),
+        Err(_) => ToolOutput::error("tool execution stopped unexpectedly"),
     }
 }
 
 /// Wraps an externally produced result (an MCP call outcome) in the same
-/// bounded-result truncation as built-in tool executions.
-pub(crate) fn bounded_result(content: String, is_error: bool) -> ToolExecutionResult {
+/// masking and bounding as built-in tool executions.
+pub(crate) fn bounded_result(content: String, is_error: bool) -> ToolOutput {
     if is_error {
-        ToolExecutionResult::error(content)
+        ToolOutput::error(content)
     } else {
-        ToolExecutionResult::success(content)
+        ToolOutput::success(content)
     }
 }
 
+/// What one tool call produced. `model_text` is the only part that enters
+/// model context; `ui_payload` is persisted for clients and never sent back
+/// to the model. Constructors are the one bounding boundary: they mask
+/// secrets, then bound the text to the tool's [`Bounds`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ToolExecutionResult {
-    pub(crate) content: String,
+pub(crate) struct ToolOutput {
+    pub(crate) model_text: String,
     pub(crate) is_error: bool,
+    pub(crate) ui_payload: Option<ToolCallDisplay>,
     /// Set when the execution (re)recorded a file's content hash, so the
     /// session store can persist the file-state map alongside the result.
     pub(crate) file_state: Option<FileStateUpdate>,
 }
 
-impl ToolExecutionResult {
+impl ToolOutput {
     #[inline]
-    pub(super) fn success(content: String) -> Self {
-        Self {
-            content: truncate_result(content),
-            is_error: false,
-            file_state: None,
-        }
+    pub(super) fn success(text: String) -> Self {
+        Self::bounded(text, &Bounds::DEFAULT, false)
     }
 
     #[inline]
     pub(super) fn error(message: impl Into<String>) -> Self {
+        Self::bounded(message.into(), &Bounds::DEFAULT, true)
+    }
+
+    pub(super) fn bounded(text: String, bounds: &Bounds, is_error: bool) -> Self {
         Self {
-            content: truncate_result(message.into()),
+            model_text: bound_text(mask_secrets(text), bounds, None).text,
+            is_error,
+            ui_payload: None,
+            file_state: None,
+        }
+    }
+
+    /// A result that bypasses masking and bounding: fixed runtime messages
+    /// (denials, interruption) whose text is a constant.
+    pub(crate) fn verbatim_error(message: String) -> Self {
+        Self {
+            model_text: message,
             is_error: true,
+            ui_payload: None,
             file_state: None,
         }
     }
@@ -269,39 +290,47 @@ pub(super) fn execute_blocking(
     name: &str,
     arguments: &str,
     cancelled: &ToolCancellation,
-) -> ToolExecutionResult {
+) -> ToolOutput {
     if cancelled.is_cancelled() {
-        return ToolExecutionResult::error("tool execution was cancelled");
+        return ToolOutput::error("tool execution was cancelled");
     }
     match BuiltInTool::from_name(name) {
         Some(BuiltInTool::ReadFile) => deserialize(arguments)
-            .map_or_else(ToolExecutionResult::error, |args| {
+            .map_or_else(ToolOutput::error, |args| {
                 read_file(workspace, file_state, args, cancelled)
             }),
         Some(BuiltInTool::ListDir) => deserialize(arguments)
-            .map_or_else(ToolExecutionResult::error, |args| {
+            .map_or_else(ToolOutput::error, |args| {
                 list_dir(workspace, args, cancelled)
             }),
         Some(BuiltInTool::Search) => deserialize(arguments)
-            .map_or_else(ToolExecutionResult::error, |args| {
-                search(workspace, args, cancelled)
-            }),
-        Some(BuiltInTool::EditFile) => deserialize(arguments)
-            .map_or_else(ToolExecutionResult::error, |args| {
-                edit_file(workspace, file_state, &args, cancelled)
-            }),
-        Some(BuiltInTool::WriteFile) => deserialize(arguments)
-            .map_or_else(ToolExecutionResult::error, |args| {
-                write_file(workspace, file_state, &args, cancelled)
-            }),
-        Some(BuiltInTool::Shell) => {
-            ToolExecutionResult::error("shell commands must execute asynchronously")
+            .map_or_else(ToolOutput::error, |args| search(workspace, args, cancelled)),
+        // The applied change is rendered once as a UI payload; the model gets
+        // the one-line summary, never the diff it just wrote.
+        Some(BuiltInTool::EditFile) => {
+            deserialize(arguments).map_or_else(ToolOutput::error, |args| {
+                let mut output = edit_file(workspace, file_state, &args, cancelled);
+                if !output.is_error {
+                    output.ui_payload = edit_result_display(name, arguments);
+                }
+                output
+            })
         }
+        Some(BuiltInTool::WriteFile) => {
+            deserialize(arguments).map_or_else(ToolOutput::error, |args| {
+                let mut output = write_file(workspace, file_state, &args, cancelled);
+                if !output.is_error {
+                    output.ui_payload = edit_result_display(name, arguments);
+                }
+                output
+            })
+        }
+        Some(BuiltInTool::Shell) => ToolOutput::error("shell commands must execute asynchronously"),
         #[cfg(test)]
         Some(BuiltInTool::TestDelay) => {
             let arguments: TestDelayArgs = match deserialize(arguments) {
                 Ok(arguments) => arguments,
-                Err(error) => return ToolExecutionResult::error(error),
+                Err(error) => return ToolOutput::error(error),
             };
             TEST_EXECUTIONS_STARTED.fetch_add(1, Ordering::Release);
             if arguments.synchronize {
@@ -311,72 +340,33 @@ pub(super) fn execute_blocking(
             }
             for _ in 0..arguments.delay_ms {
                 if cancelled.is_cancelled() {
-                    return ToolExecutionResult::error("tool execution was cancelled");
+                    return ToolOutput::error("tool execution was cancelled");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
-            ToolExecutionResult::success(arguments.result)
+            ToolOutput::success(arguments.result)
         }
         #[cfg(test)]
         Some(BuiltInTool::TestMutate) => {
             let arguments: TestMutateArgs = match deserialize(arguments) {
                 Ok(arguments) => arguments,
-                Err(error) => return ToolExecutionResult::error(error),
+                Err(error) => return ToolOutput::error(error),
             };
             TEST_EXECUTIONS_STARTED.fetch_add(1, Ordering::Release);
             for _ in 0..arguments.delay_ms {
                 if cancelled.is_cancelled() {
-                    return ToolExecutionResult::error("tool execution was cancelled");
+                    return ToolOutput::error("tool execution was cancelled");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
-            ToolExecutionResult::success(arguments.result.unwrap_or_else(|| "mutated".to_owned()))
+            ToolOutput::success(arguments.result.unwrap_or_else(|| "mutated".to_owned()))
         }
         #[cfg(test)]
-        Some(BuiltInTool::TestShell) => ToolExecutionResult::success("shell ran".to_owned()),
-        None => ToolExecutionResult::error(format!("unknown tool {name:?}")),
+        Some(BuiltInTool::TestShell) => ToolOutput::success("shell ran".to_owned()),
+        None => ToolOutput::error(format!("unknown tool {name:?}")),
     }
 }
 
 fn deserialize<T: serde::de::DeserializeOwned>(arguments: &str) -> Result<T, String> {
     serde_json::from_str(arguments).map_err(|error| format!("invalid arguments: {error}"))
-}
-
-/// The size of `byte` once serde_json escapes it inside a JSON string.
-const fn escaped_byte_len(byte: u8) -> usize {
-    match byte {
-        b'"' | b'\\' | 0x08 | 0x09 | 0x0A | 0x0C | 0x0D => 2,
-        byte if byte < 0x20 => 6,
-        _ => 1,
-    }
-}
-
-pub(super) fn escaped_len(content: &str) -> usize {
-    content.bytes().map(escaped_byte_len).sum()
-}
-
-/// Bounds a tool result by its JSON-escaped size, not its raw size. Results are
-/// embedded in persisted event envelopes with a hard byte cap; control-heavy
-/// content (for example ANSI logs) escapes up to 6:1, so budgeting the raw size
-/// could make persistence fail on legitimate workspace file content.
-fn truncate_result(mut content: String) -> String {
-    if escaped_len(&content) <= MAX_TOOL_RESULT_BYTES {
-        return content;
-    }
-    let available = MAX_TOOL_RESULT_BYTES.saturating_sub(escaped_len(TRUNCATION_MARKER));
-    let mut escaped = 0_usize;
-    let mut end = 0_usize;
-    for (index, byte) in content.bytes().enumerate() {
-        escaped += escaped_byte_len(byte);
-        if escaped > available {
-            break;
-        }
-        end = index + 1;
-    }
-    while !content.is_char_boundary(end) {
-        end -= 1;
-    }
-    content.truncate(end);
-    content.push_str(TRUNCATION_MARKER);
-    content
 }

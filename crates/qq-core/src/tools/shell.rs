@@ -3,9 +3,18 @@ use tokio::{io::AsyncReadExt, sync::mpsc};
 
 use crate::workspace::Workspace;
 
-use super::dispatch::{ToolCancellation, ToolExecutionResult};
+use super::{
+    dispatch::{ToolCancellation, ToolOutput},
+    output::{Bounds, Header},
+};
 
+/// Combined output captured (head+tail) and streamed per command. The full
+/// capture is what a spill store keeps; the model sees [`SHELL_BOUNDS`].
 pub(super) const MAX_SHELL_OUTPUT_BYTES: usize = 128 * 1024;
+/// Model-facing bound: the head of a command's output and its tail, where the
+/// verdict lives, are what the model reads; the middle of a long build log
+/// is noise it should page into deliberately.
+pub(super) const SHELL_BOUNDS: Bounds = Bounds::new(16 * 1024, 4_000);
 const SHELL_READ_CHUNK_BYTES: usize = 8 * 1024;
 const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
 pub(super) const MAX_SHELL_TIMEOUT_SECS: u64 = 600;
@@ -64,18 +73,18 @@ pub(super) async fn run_shell(
     cancelled: &ToolCancellation,
     output: Option<&mpsc::Sender<String>>,
     process_pending: &mut bool,
-) -> ToolExecutionResult {
+) -> ToolOutput {
     if cancelled.is_cancelled() {
-        return ToolExecutionResult::error("tool execution was cancelled");
+        return ToolOutput::error("tool execution was cancelled");
     }
     if arguments.command.trim().is_empty() {
-        return ToolExecutionResult::error("command must not be empty");
+        return ToolOutput::error("command must not be empty");
     }
     let timeout_seconds = arguments
         .timeout_seconds
         .unwrap_or(DEFAULT_SHELL_TIMEOUT_SECS);
     if timeout_seconds == 0 || timeout_seconds > MAX_SHELL_TIMEOUT_SECS {
-        return ToolExecutionResult::error(format!(
+        return ToolOutput::error(format!(
             "timeout_seconds must be between 1 and {MAX_SHELL_TIMEOUT_SECS}"
         ));
     }
@@ -84,10 +93,10 @@ pub(super) async fn run_shell(
         Some(requested) => {
             let relative = match workspace.contained_path(requested) {
                 Ok(relative) => relative,
-                Err(error) => return ToolExecutionResult::error(error.to_string()),
+                Err(error) => return ToolOutput::error(error.to_string()),
             };
             if !workspace.root().is_dir(&relative) {
-                return ToolExecutionResult::error("cwd is not a directory");
+                return ToolOutput::error("cwd is not a directory");
             }
             workspace.path().join(relative)
         }
@@ -105,7 +114,7 @@ pub(super) async fn run_shell(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            return ToolExecutionResult::error(format!("could not start the command: {error}"));
+            return ToolOutput::error(format!("could not start the command: {error}"));
         }
     };
     *process_pending = true;
@@ -129,7 +138,8 @@ pub(super) async fn run_shell(
     }
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds);
+    let started = tokio::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(timeout_seconds);
     let mut capture = BoundedCapture::new(MAX_SHELL_OUTPUT_BYTES);
     let mut streamed = 0_usize;
     let mut stdout_buffer = vec![0_u8; SHELL_READ_CHUNK_BYTES];
@@ -182,29 +192,35 @@ pub(super) async fn run_shell(
         }
     };
 
+    let elapsed = started.elapsed();
     match outcome {
-        ShellOutcome::Exited(Ok(status)) => shell_result(capture, status),
+        ShellOutcome::Exited(Ok(status)) => shell_result(capture, status, elapsed),
         ShellOutcome::Exited(Err(error)) => {
-            ToolExecutionResult::error(format!("could not observe the command exit: {error}"))
+            ToolOutput::error(format!("could not observe the command exit: {error}"))
         }
         ShellOutcome::TimedOut => {
             if let Err(message) = stop_shell(&mut child, &mut guard, process_pending).await {
-                return ToolExecutionResult::error(message);
+                return ToolOutput::error(message);
             }
-            let mut content = capture.into_output();
-            if !content.is_empty() && !content.ends_with('\n') {
+            let mut content = Header::new("shell", None)
+                .field("exit", "timeout")
+                .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
+                .field("bytes", capture.total())
+                .into_line();
+            content.push_str(&capture.into_output());
+            if !content.ends_with('\n') {
                 content.push('\n');
             }
             content.push_str(&format!(
                 "command timed out after {timeout_seconds} s; its process group was killed"
             ));
-            ToolExecutionResult::error(content)
+            ToolOutput::bounded(content, &SHELL_BOUNDS, true)
         }
         ShellOutcome::Cancelled => {
             if let Err(message) = stop_shell(&mut child, &mut guard, process_pending).await {
-                return ToolExecutionResult::error(message);
+                return ToolOutput::error(message);
             }
-            ToolExecutionResult::error("tool execution was cancelled")
+            ToolOutput::error("tool execution was cancelled")
         }
     }
 }
@@ -280,34 +296,44 @@ fn forward_shell_chunk(output: Option<&mpsc::Sender<String>>, streamed: &mut usi
     }
 }
 
-fn shell_result(capture: BoundedCapture, status: std::process::ExitStatus) -> ToolExecutionResult {
-    let mut content = capture.into_output();
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
-    }
+/// `shell exit=<code> elapsed=<s> bytes=<n>` then the captured output. The
+/// header carries the verdict so a pruned stub, a head-only glance, or a
+/// truncated tail all still tell the model how the command ended.
+fn shell_result(
+    capture: BoundedCapture,
+    status: std::process::ExitStatus,
+    elapsed: std::time::Duration,
+) -> ToolOutput {
+    #[cfg(unix)]
+    let signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal()
+    };
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+    let mut header = Header::new("shell", None);
+    header = match (status.code(), signal) {
+        (Some(code), _) => header.field("exit", code),
+        (None, Some(signal)) => header.field("exit", format_args!("signal:{signal}")),
+        (None, None) => header.field("exit", "unknown"),
+    };
+    let mut content = header
+        .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
+        .field("bytes", capture.total())
+        .into_line();
+    content.push_str(&capture.into_output());
     match status.code() {
-        Some(0) => {
-            content.push_str("exit code: 0");
-            ToolExecutionResult::success(content)
-        }
-        Some(code) => {
-            content.push_str(&format!("exit code: {code}"));
-            ToolExecutionResult::error(content)
-        }
+        Some(0) => ToolOutput::bounded(content, &SHELL_BOUNDS, false),
+        Some(_) => ToolOutput::bounded(content, &SHELL_BOUNDS, true),
         None => {
-            #[cfg(unix)]
-            let detail = {
-                use std::os::unix::process::ExitStatusExt;
-                status
-                    .signal()
-                    .map(|signal| format!("command was terminated by signal {signal}"))
-            };
-            #[cfg(not(unix))]
-            let detail: Option<String> = None;
-            content.push_str(
-                &detail.unwrap_or_else(|| "command was terminated without an exit code".to_owned()),
-            );
-            ToolExecutionResult::error(content)
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str(&match signal {
+                Some(signal) => format!("command was terminated by signal {signal}"),
+                None => "command was terminated without an exit code".to_owned(),
+            });
+            ToolOutput::bounded(content, &SHELL_BOUNDS, true)
         }
     }
 }
@@ -402,6 +428,14 @@ impl BoundedCapture {
         }
     }
 
+    /// Every byte the command wrote, including bytes the capture dropped.
+    pub(super) fn total(&self) -> u64 {
+        self.total
+    }
+
+    /// The captured bytes as text. When the capture itself dropped bytes the
+    /// gap is marked here (a capture limit, distinct from output bounding);
+    /// the model-facing bound is applied afterwards by dispatch.
     pub(super) fn into_output(self) -> String {
         let omitted = self.total - self.head.len() as u64 - self.tail.len() as u64;
         let tail = self.tail.into_iter().collect::<Vec<_>>();
@@ -411,7 +445,7 @@ impl BoundedCapture {
             return String::from_utf8_lossy(&bytes).into_owned();
         }
         format!(
-            "{}\n...[truncated by qq: {omitted} bytes omitted]...\n{}",
+            "{}\n…[qq: {omitted} bytes not captured]…\n{}",
             String::from_utf8_lossy(&self.head),
             String::from_utf8_lossy(&tail),
         )

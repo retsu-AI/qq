@@ -23,6 +23,9 @@ const DEFAULT_HEAD_RATIO: u8 = 50;
 const MARKER_RESERVE_BYTES: usize = 160;
 /// Longest header line a pruning stub preserves.
 pub(crate) const MAX_STUB_HEADER_BYTES: usize = 512;
+/// Every marker line qq inserts into model text starts with this, so clients
+/// can tell a marker from content with one prefix check.
+pub(crate) const MARKER_PREFIX: &str = "…[qq: ";
 
 /// How much of a tool's complete output reaches the model.
 ///
@@ -202,7 +205,7 @@ fn push_marker(out: &mut String, omitted_bytes: usize, omitted_lines: usize, not
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str("…[qq: ");
+    out.push_str(MARKER_PREFIX);
     push_grouped(out, omitted_bytes);
     out.push_str(" bytes / ");
     push_grouped(out, omitted_lines);

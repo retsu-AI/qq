@@ -8,7 +8,7 @@ use serde::Deserialize;
 use crate::workspace::{FileState, FileStateUpdate, Workspace, content_hash, stale_file_error};
 
 use super::{
-    dispatch::{ToolCancellation, ToolExecutionResult},
+    dispatch::{ToolCancellation, ToolOutput},
     edit::{MAX_EDIT_FILE_BYTES, apply_atomically, read_editable},
 };
 
@@ -24,16 +24,16 @@ pub(super) fn write_file(
     file_state: &FileState,
     arguments: &WriteFileArgs,
     cancelled: &ToolCancellation,
-) -> ToolExecutionResult {
+) -> ToolOutput {
     if arguments.content.len() as u64 > MAX_EDIT_FILE_BYTES {
-        return ToolExecutionResult::error(format!(
+        return ToolOutput::error(format!(
             "content exceeds the {} MiB file size limit",
             MAX_EDIT_FILE_BYTES / (1024 * 1024)
         ));
     }
     let path = match resolve_write_path(workspace, &arguments.path) {
         Ok(path) => path,
-        Err(error) => return ToolExecutionResult::error(error),
+        Err(error) => return ToolOutput::error(error),
     };
     let key = path.to_string_lossy().into_owned();
 
@@ -42,24 +42,24 @@ pub(super) fn write_file(
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     if cancelled.is_cancelled() {
-        return ToolExecutionResult::error("tool execution was cancelled");
+        return ToolOutput::error("tool execution was cancelled");
     }
     let created = match workspace.root().symlink_metadata(&path) {
         Ok(metadata) if metadata.is_file() => {
             // Overwrites follow the same read-before-write and staleness
             // rules as edits; only brand-new files are exempt.
             let Some(recorded) = file_state.recorded(&key) else {
-                return ToolExecutionResult::error(format!(
+                return ToolOutput::error(format!(
                     "{} already exists but has not been read in this session; call read_file on it first, then retry the overwrite",
                     arguments.path
                 ));
             };
             let current = match read_editable(workspace, &path) {
                 Ok(current) => current,
-                Err(error) => return ToolExecutionResult::error(error),
+                Err(error) => return ToolOutput::error(error),
             };
             if content_hash(&current.bytes) != recorded {
-                return ToolExecutionResult::error(stale_file_error(&arguments.path));
+                return ToolOutput::error(stale_file_error(&arguments.path));
             }
             if let Err(error) = apply_atomically(
                 workspace,
@@ -67,31 +67,31 @@ pub(super) fn write_file(
                 arguments.content.as_bytes(),
                 Some(current.permissions),
             ) {
-                return ToolExecutionResult::error(error);
+                return ToolOutput::error(error);
             }
             false
         }
         Ok(metadata) if metadata.file_type().is_symlink() => {
-            return ToolExecutionResult::error("path is a symlink; address its target directly");
+            return ToolOutput::error("path is a symlink; address its target directly");
         }
-        Ok(_) => return ToolExecutionResult::error("path is not a regular file"),
+        Ok(_) => return ToolOutput::error("path is not a regular file"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if let Err(error) =
                 apply_atomically(workspace, &path, arguments.content.as_bytes(), None)
             {
-                return ToolExecutionResult::error(error);
+                return ToolOutput::error(error);
             }
             true
         }
         Err(error) => {
-            return ToolExecutionResult::error(format!("could not inspect path: {error}"));
+            return ToolOutput::error(format!("could not inspect path: {error}"));
         }
     };
     drop(guard);
 
     let hash = content_hash(arguments.content.as_bytes());
     file_state.record(key.clone(), hash.clone());
-    let mut result = ToolExecutionResult::success(format!(
+    let mut result = ToolOutput::success(format!(
         "{} {} ({} bytes).",
         if created { "Created" } else { "Wrote" },
         arguments.path,

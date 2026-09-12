@@ -12,7 +12,7 @@ use serde::Deserialize;
 use crate::workspace::{FileState, FileStateUpdate, Workspace, content_hash, stale_file_error};
 
 use super::{
-    dispatch::{ToolCancellation, ToolExecutionResult},
+    dispatch::{ToolCancellation, ToolOutput},
     read::MAX_READ_SCAN_BYTES,
 };
 
@@ -61,25 +61,25 @@ pub(super) fn edit_file(
     file_state: &FileState,
     arguments: &EditFileArgs,
     cancelled: &ToolCancellation,
-) -> ToolExecutionResult {
+) -> ToolOutput {
     if arguments.old_string.is_empty() {
-        return ToolExecutionResult::error("old_string must not be empty");
+        return ToolOutput::error("old_string must not be empty");
     }
     if arguments.old_string == arguments.new_string {
-        return ToolExecutionResult::error(
+        return ToolOutput::error(
             "old_string and new_string are identical; there is nothing to change",
         );
     }
     let path = match workspace.contained_path(&arguments.path) {
         Ok(path) => path,
-        Err(error) => return ToolExecutionResult::error(error.to_string()),
+        Err(error) => return ToolOutput::error(error.to_string()),
     };
     if !workspace.root().is_file(&path) {
-        return ToolExecutionResult::error("path is not a file");
+        return ToolOutput::error("path is not a file");
     }
     let key = path.to_string_lossy().into_owned();
     let Some(recorded) = file_state.recorded(&key) else {
-        return ToolExecutionResult::error(format!(
+        return ToolOutput::error(format!(
             "{} has not been read in this session; call read_file on it first, then retry the edit",
             arguments.path
         ));
@@ -92,28 +92,28 @@ pub(super) fn edit_file(
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     if cancelled.is_cancelled() {
-        return ToolExecutionResult::error("tool execution was cancelled");
+        return ToolOutput::error("tool execution was cancelled");
     }
     let current = match read_editable(workspace, &path) {
         Ok(current) => current,
-        Err(error) => return ToolExecutionResult::error(error),
+        Err(error) => return ToolOutput::error(error),
     };
     if content_hash(&current.bytes) != recorded {
-        return ToolExecutionResult::error(stale_file_error(&arguments.path));
+        return ToolOutput::error(stale_file_error(&arguments.path));
     }
     let content = match std::str::from_utf8(&current.bytes) {
         Ok(content) => content,
-        Err(_) => return ToolExecutionResult::error("file is not valid UTF-8"),
+        Err(_) => return ToolOutput::error("file is not valid UTF-8"),
     };
     let occurrences = content.matches(&arguments.old_string).count();
     if occurrences == 0 {
-        return ToolExecutionResult::error(format!(
+        return ToolOutput::error(format!(
             "old_string was not found in {}; re-read the file and match its current content exactly",
             arguments.path
         ));
     }
     if occurrences > 1 && !arguments.replace_all {
-        return ToolExecutionResult::error(format!(
+        return ToolOutput::error(format!(
             "old_string occurs {occurrences} times in {}; extend it until it is unique, or set replace_all",
             arguments.path
         ));
@@ -124,7 +124,7 @@ pub(super) fn edit_file(
         content.replacen(&arguments.old_string, &arguments.new_string, 1)
     };
     if new_content.len() as u64 > MAX_EDIT_FILE_BYTES {
-        return ToolExecutionResult::error(format!(
+        return ToolOutput::error(format!(
             "the edited content exceeds the {} MiB file size limit",
             MAX_EDIT_FILE_BYTES / (1024 * 1024)
         ));
@@ -135,7 +135,7 @@ pub(super) fn edit_file(
         new_content.as_bytes(),
         Some(current.permissions),
     ) {
-        return ToolExecutionResult::error(error);
+        return ToolOutput::error(error);
     }
     drop(guard);
 
@@ -146,7 +146,7 @@ pub(super) fn edit_file(
     };
     let hash = content_hash(new_content.as_bytes());
     file_state.record(key.clone(), hash.clone());
-    let mut result = ToolExecutionResult::success(format!(
+    let mut result = ToolOutput::success(format!(
         "Edited {}: replaced {replaced} occurrence(s).",
         arguments.path
     ));
