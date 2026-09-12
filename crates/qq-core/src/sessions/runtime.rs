@@ -1050,6 +1050,8 @@ pub enum SessionRuntimeError {
     ShutdownTimedOut,
     #[error("session runtime is unavailable")]
     Unavailable,
+    #[error("session store is owned by another running qq process")]
+    StoreBusy,
     #[error("session persistence failed: {0}")]
     Persistence(PersistenceFault),
 }

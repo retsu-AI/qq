@@ -119,6 +119,13 @@ referenced, never inlined.
 A supervisor that wants the session store as an artifact redirects
 `XDG_DATA_HOME` to a run-scoped directory.
 
+One process owns a store at a time (ADR-0022). A second `qq` opening the same
+store — a retry that starts before the previous attempt has exited, or two
+runs sharing a data directory — exits `4` (`harness_failure`) with "session
+store is owned by another running qq process" after a bounded wait, without
+creating, opening, or recovering the database. It is safe to retry once the
+owner exits; concurrent runs need distinct `XDG_DATA_HOME`s.
+
 ### Output: JSONL Records
 
 With `--format jsonl`, stdout carries one JSON object per line, tagged by

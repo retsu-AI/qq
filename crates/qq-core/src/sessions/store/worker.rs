@@ -6,7 +6,8 @@ use rusqlite::Connection;
 use tokio::sync::{OwnedSemaphorePermit, oneshot, watch};
 
 use super::{
-    CONTROL_BURST_LIMIT, CONTROL_QUEUE_CAPACITY, OUTPUT_QUEUE_CAPACITY, schema::open_database,
+    CONTROL_BURST_LIMIT, CONTROL_QUEUE_CAPACITY, OUTPUT_QUEUE_CAPACITY,
+    schema::{acquire_ownership, open_database},
 };
 use crate::sessions::{SessionRuntimeError, feed};
 
@@ -78,8 +79,12 @@ pub(super) fn start(
     let worker = thread::Builder::new()
         .name("qq-session-store".to_owned())
         .spawn(move || {
-            match open_database(&path) {
-                Ok((mut connection, store_id)) => {
+            // Ownership precedes the database open, and therefore precedes
+            // the recovery sweep the runtime runs next: a second process
+            // never mutates a store another process is serving.
+            let ownership = acquire_ownership(&path);
+            match ownership.and_then(|ownership| open_database(&path).map(|db| (ownership, db))) {
+                Ok((ownership, (mut connection, store_id))) => {
                     let _ = ready_tx.send(Ok(store_id));
                     database_worker(
                         &mut connection,
@@ -88,6 +93,10 @@ pub(super) fn start(
                         &output_rx,
                         &shutdown_rx,
                     );
+                    // Release ownership only after the connection is closed
+                    // so a successor never sees a live WAL writer.
+                    drop(connection);
+                    drop(ownership);
                 }
                 Err(error) => {
                     let _ = ready_tx.send(Err(error));

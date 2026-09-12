@@ -27,8 +27,9 @@ may append a **request** row; only root changes a request's status.
 | 0019 | Spill handles as durable session state; masked inline, exact on explicit read | tool-layer T4 | Reserved |
 | 0020 | Shell `Forbidden` as a policy decision with a CST classifier and self-tested rules | tool-layer T6 | Reserved |
 | 0021 | `Network` and `Interactive` effect classes | tool-layer T8/T9 | Reserved |
+| 0022 | One owner per session store: advisory lock before open and recovery | speed-first HC1 | Written (`feat/hc1-headless-run-contract`) |
 
-Next free number: 0022. Reserve here before opening a PR that adds an ADR.
+Next free number: 0023. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 

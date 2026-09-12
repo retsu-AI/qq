@@ -27,6 +27,7 @@ written.
 | 0013 | [Context sources are part of plan identity; excess sources fail compilation](0013-context-sources-in-descriptor.md) | Accepted |
 | 0014 | Typed final output contract | Reserved: HC3 |
 | 0015 | [Enroll remote clients with a pairing code and issue per-client credentials](0015-pairing-code-client-enrollment.md) | Proposed (multi-surface S2) |
+| 0022 | [One owner per session store: an advisory lock precedes open and recovery](0022-single-store-owner.md) | Proposed (speed-first HC1) |
 
 ## When to write one
 

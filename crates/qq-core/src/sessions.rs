@@ -7489,6 +7489,9 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         runtime.shutdown().await.unwrap();
         drop(runtime);
+        // A live subscription holds the store open (reads stay available after
+        // shutdown), which holds the store's ownership; drop it before reopening.
+        drop(events);
 
         *pricing.lock().unwrap() = Some(ModelPricing {
             input_usd_nanos_per_token: 11,
@@ -9170,9 +9173,8 @@ mod tests {
         assert!(row.steering);
         assert_eq!(row.state, MessageState::Complete);
         assert_eq!(row.turn_ordinal, 2);
-        let store = Store::open(harness._directory.path().join("sessions.sqlite3"))
-            .await
-            .unwrap();
+        // The runtime owns the store exclusively; read through it.
+        let store = harness.runtime.inner.store.clone();
         let session_id = harness.session_id;
         let context = store
             .call(Priority::Control, move |connection| {
@@ -9503,6 +9505,8 @@ mod tests {
             .unwrap();
         assert_ne!(second_plan.digest, started_plan.digest);
         runtime.shutdown().await.unwrap();
+        drop(events);
+        drop(runtime);
 
         let reopened = SessionRuntime::open(SessionRuntimeOptions::new(database_path), loader)
             .await
@@ -9514,9 +9518,9 @@ mod tests {
         let runs = &snapshot.focused.as_ref().unwrap().runs;
         let first = runs.iter().find(|run| run.id == run_id).unwrap();
         assert_eq!(first.plan.as_deref(), Some(&*started_plan));
-        let stored_descriptor: String = Store::open(directory.path().join("sessions.sqlite3"))
-            .await
-            .unwrap()
+        let stored_descriptor: String = reopened
+            .inner
+            .store
             .call(Priority::Control, move |connection| {
                 connection
                     .query_row(
@@ -9617,9 +9621,9 @@ mod tests {
             assert!(text.contains("remember the tests"));
         }
         // The attachment recorded the file so an edit is not "unread".
-        let files: Vec<(String, String)> = Store::open(directory.path().join("sessions.sqlite3"))
-            .await
-            .unwrap()
+        let files: Vec<(String, String)> = runtime
+            .inner
+            .store
             .call(Priority::Control, move |connection| {
                 let mut statement = connection.prepare(
                     "SELECT path, content_hash FROM session_files WHERE session_id = ?1",
@@ -9836,6 +9840,7 @@ mod tests {
         assert_eq!(guidance.version, None);
 
         runtime.shutdown().await.unwrap();
+        drop(events);
         drop(runtime);
         let reopened = SessionRuntime::open(
             SessionRuntimeOptions::new(database_path),
@@ -9949,6 +9954,7 @@ mod tests {
 
         *configured.lock().unwrap() = test_resolved_model("test/changed", "wire-model-b", 32, None);
         runtime.shutdown().await.unwrap();
+        drop(events);
         drop(runtime);
 
         let reopened = SessionRuntime::open(SessionRuntimeOptions::new(database_path), loader)
@@ -18856,6 +18862,7 @@ mod tests {
         }
 
         let replay_after = observed.last().unwrap().cursor;
+        drop(events);
         drop(runtime);
         let runtime = SessionRuntime::open(
             SessionRuntimeOptions::new(database_path),
@@ -19846,9 +19853,7 @@ mod tests {
         assert_eq!(run.status, RunStatus::Completed);
 
         // The counter is durable on the run row.
-        let store = Store::open(directory.path().join("sessions.sqlite3"))
-            .await
-            .unwrap();
+        let store = runtime.inner.store.clone();
         let continuations: u16 = store
             .call(Priority::Control, move |connection| {
                 connection
@@ -25713,9 +25718,12 @@ mod tests {
             workspace_path,
             workspace_id,
             session_id,
+            events,
             ..
         } = harness;
         runtime.shutdown().await.unwrap();
+        // The subscription keeps the store (and its ownership) alive.
+        drop(events);
         drop(runtime);
 
         let reopened = SessionRuntime::open(
@@ -32487,7 +32495,14 @@ mod tests {
         .await;
         // An unclean stop (no shutdown) leaves the hanging run interrupted and
         // the limited run queued; recovery must enforce its persisted limits.
+        // The hanging task still holds the runtime, so stop the store worker
+        // directly: that is what process death looks like to the store, and
+        // it releases store ownership for the successor.
         drop(events);
+        let worker = harness.runtime.inner.store.stop_worker_for_test().unwrap();
+        tokio::task::spawn_blocking(move || worker.join().unwrap())
+            .await
+            .unwrap();
         drop(harness.runtime);
         let connection = Connection::open(&harness.database_path).unwrap();
         let stored: Option<String> = connection
