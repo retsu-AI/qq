@@ -51,6 +51,7 @@ futures-util = "0.3"
 getrandom = "0.3"
 hmac = "0.12"
 http-body = "1"
+ignore = "0.4"
 keyring = "4"
 qq-auth = { path = "crates/qq-auth" }
 qq-client = { path = "crates/qq-client" }
@@ -67,6 +68,7 @@ rustix = { version = "1", default-features = false, features = ["process", "std"
 # reqwest 0.13.2 dropped the optional `webpki-roots` dependency (and with it
 # the implicit `webpki-roots` feature); the `rustls` feature verifies against
 # platform trust roots via rustls-platform-verifier instead.
+regex = "1"
 reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "form", "json", "rustls", "stream"] }
 rmcp = { version = "3.0.0", default-features = false, features = ["client", "reqwest", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 ron = "0.12"

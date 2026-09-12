@@ -1612,7 +1612,10 @@ impl plan::CompiledAgentPlan {
                     // the name. A name the catalog does not hold is not
                     // executable, so it settles as a tool error before any
                     // gate sees it.
-                    let known = catalog.lookup(&pending.name).map(|entry| entry.effect);
+                    let known = catalog
+                        .lookup(&pending.name)
+                        .map(|entry| entry.effect)
+                        .or_else(|| tools::alias_effect(&pending.name, &catalog));
                     #[cfg(test)]
                     let known = known.or_else(|| tools::test_tool_effect(&pending.name));
                     let (effect, rejection) = match known {
@@ -3748,7 +3751,7 @@ mod tests {
             ] if call_id == "read"
                 && content == "contents\n"
                 && second_id == "list"
-                && second_content == "note.txt\n"
+                && second_content == "tree . depth=1 entries=1/1 files=1 dirs=0\nnote.txt 9\n"
         ));
     }
 
