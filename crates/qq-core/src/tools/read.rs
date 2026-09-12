@@ -4,8 +4,9 @@ use serde::Deserialize;
 
 use crate::workspace::{FileState, FileStateUpdate, Workspace, content_hash};
 
-use super::dispatch::{
-    MAX_TOOL_RESULT_BYTES, TRUNCATION_MARKER, ToolCancellation, ToolExecutionResult,
+use super::{
+    dispatch::{ToolCancellation, ToolOutput},
+    output::{MARKER_PREFIX, MAX_MODEL_TEXT_BYTES},
 };
 
 pub(super) const MAX_READ_LINES: usize = 2_000;
@@ -35,32 +36,30 @@ pub(super) fn read_file(
     file_state: &FileState,
     arguments: ReadFileArgs,
     cancelled: &ToolCancellation,
-) -> ToolExecutionResult {
+) -> ToolOutput {
     if arguments.offset == 0 || arguments.offset > MAX_READ_OFFSET {
-        return ToolExecutionResult::error(format!(
-            "offset must be between 1 and {MAX_READ_OFFSET}"
-        ));
+        return ToolOutput::error(format!("offset must be between 1 and {MAX_READ_OFFSET}"));
     }
     if arguments.limit == 0 || arguments.limit > MAX_READ_LINES {
-        return ToolExecutionResult::error(format!("limit must be between 1 and {MAX_READ_LINES}"));
+        return ToolOutput::error(format!("limit must be between 1 and {MAX_READ_LINES}"));
     }
     let path = match workspace.contained_path(&arguments.path) {
         Ok(path) => path,
-        Err(error) => return ToolExecutionResult::error(error.to_string()),
+        Err(error) => return ToolOutput::error(error.to_string()),
     };
     if !workspace.root().is_file(&path) {
-        return ToolExecutionResult::error("path is not a file");
+        return ToolOutput::error("path is not a file");
     }
     let file = match workspace.root().open(&path) {
         Ok(file) => file,
-        Err(error) => return ToolExecutionResult::error(format!("could not open file: {error}")),
+        Err(error) => return ToolOutput::error(format!("could not open file: {error}")),
     };
     // The whole content (bounded by the scan cap) is read so the session's
     // file-state map can record a full-file hash for the staleness guard.
     // Larger files record nothing: they are not editable anyway.
     let mut bytes = Vec::new();
     if let Err(error) = file.take(MAX_READ_SCAN_BYTES + 1).read_to_end(&mut bytes) {
-        return ToolExecutionResult::error(format!("could not read file: {error}"));
+        return ToolOutput::error(format!("could not read file: {error}"));
     }
     let update = (bytes.len() as u64 <= MAX_READ_SCAN_BYTES).then(|| FileStateUpdate {
         path: path.to_string_lossy().into_owned(),
@@ -82,19 +81,19 @@ fn window_lines<R: Read>(
     offset: usize,
     limit: usize,
     cancelled: &ToolCancellation,
-) -> ToolExecutionResult {
+) -> ToolOutput {
     let mut output = String::new();
     let mut line = Vec::new();
     let end = offset.saturating_add(limit);
     for line_number in 1..end {
         if cancelled.is_cancelled() {
-            return ToolExecutionResult::error("tool execution was cancelled");
+            return ToolOutput::error("tool execution was cancelled");
         }
         line.clear();
         let read = match reader.read_until(b'\n', &mut line) {
             Ok(read) => read,
             Err(error) => {
-                return ToolExecutionResult::error(format!("could not read file: {error}"));
+                return ToolOutput::error(format!("could not read file: {error}"));
             }
         };
         if read == 0 {
@@ -111,14 +110,16 @@ fn window_lines<R: Read>(
                         std::str::from_utf8(&line[..error.valid_up_to()])
                             .expect("the UTF-8 validator reported a valid prefix"),
                     );
-                    output.push_str(TRUNCATION_MARKER);
-                    return ToolExecutionResult::success(output);
+                    push_scan_cap_marker(&mut output);
+                    return ToolOutput::success(output);
                 }
-                Err(_) => return ToolExecutionResult::error("file is not valid UTF-8"),
+                Err(_) => return ToolOutput::error("file is not valid UTF-8"),
             };
             output.push_str(text);
-            if output.len() > MAX_TOOL_RESULT_BYTES {
-                return ToolExecutionResult::success(output);
+            // Past the model-facing ceiling nothing more can be shown;
+            // dispatch bounds what was collected.
+            if output.len() > MAX_MODEL_TEXT_BYTES {
+                return ToolOutput::success(output);
             }
         }
     }
@@ -128,8 +129,20 @@ fn window_lines<R: Read>(
         // because end-of-file cannot be confirmed.
         let mut probe = [0_u8; 1];
         if !matches!(reader.get_mut().read(&mut probe), Ok(0)) {
-            output.push_str(TRUNCATION_MARKER);
+            push_scan_cap_marker(&mut output);
         }
     }
-    ToolExecutionResult::success(output)
+    ToolOutput::success(output)
+}
+
+/// The file continues past what a read may scan; a domain limit, distinct
+/// from output bounding.
+fn push_scan_cap_marker(output: &mut String) {
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(MARKER_PREFIX);
+    output.push_str("file continues past the ");
+    output.push_str(&(MAX_READ_SCAN_BYTES / (1024 * 1024)).to_string());
+    output.push_str(" MiB scan cap]…\n");
 }

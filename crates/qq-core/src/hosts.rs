@@ -159,7 +159,7 @@ pub trait ExternalToolHost: Send + Sync {
 }
 
 /// Renders a host failure as the bounded tool error the model sees.
-pub(crate) fn host_error_result(error: &HostCallError) -> crate::tools::ToolExecutionResult {
+pub(crate) fn host_error_result(error: &HostCallError) -> crate::tools::ToolOutput {
     crate::tools::bounded_result(error.to_string(), true)
 }
 

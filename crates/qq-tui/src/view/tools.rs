@@ -3,8 +3,9 @@ use qq_client::state::ToolCallTiming;
 
 /// Runs with more than this many quiet tool calls fold into one summary row.
 pub(super) const TOOL_FOLD_THRESHOLD: usize = 3;
-/// Emitted by qq-core tools when a result was cut short; excluded from counts.
-pub(super) const TOOL_TRUNCATION_MARKER: &str = "...[truncated by qq]";
+/// Every marker line qq-core inserts into a result (omitted head/tail, scan
+/// caps, unlisted entries) starts with this; markers are excluded from counts.
+pub(super) const TOOL_MARKER_PREFIX: &str = "…[qq: ";
 pub(super) const TOOL_SUBJECT_WIDTH: usize = 48;
 pub(super) const MAX_TOOL_ERROR_BYTES: usize = 2 * 1024;
 pub(super) const MAX_TOOL_ERROR_ROWS: usize = 6;
@@ -107,13 +108,8 @@ impl ToolRow {
                 .map(str::to_owned)
         };
         let result = call.result.as_deref().unwrap_or_default();
-        let truncated = result.lines().any(|line| line == TOOL_TRUNCATION_MARKER);
-        let content_lines = || {
-            result
-                .lines()
-                .filter(|line| *line != TOOL_TRUNCATION_MARKER)
-                .count()
-        };
+        let truncated = result.lines().any(is_marker_line);
+        let content_lines = || result.lines().filter(|line| !is_marker_line(line)).count();
         let has_result = call.result.is_some() && !call.is_error;
         let diff = match &call.display {
             Some(ToolCallDisplay::Diff { diff, .. }) => Some(diff.clone()),
@@ -176,12 +172,8 @@ impl ToolRow {
                     Some(cwd) => format!("{command}  (in {cwd})"),
                     None => command,
                 });
-                let exit = call
-                    .result
-                    .as_deref()
-                    .and_then(|result| result.lines().last())
-                    .and_then(|last| last.strip_prefix("exit code: "))
-                    .map(|code| format!("exit {code}"));
+                // `shell exit=<code> elapsed=<s> bytes=<n>` heads the result.
+                let exit = header_field(result, "shell", "exit").map(|code| format!("exit {code}"));
                 ("Run", false, command, false, exit)
             }
             "spawn_agent" => (
@@ -262,6 +254,39 @@ impl ToolRow {
     }
 }
 
+/// A line qq-core inserted rather than the tool's content.
+pub(super) fn is_marker_line(line: &str) -> bool {
+    line.starts_with(TOOL_MARKER_PREFIX)
+}
+
+/// `value` of `key=value` from a result's header line, when the result
+/// starts with `<tool> …`.
+fn header_field<'a>(result: &'a str, tool: &str, key: &str) -> Option<&'a str> {
+    let header = result.lines().next()?;
+    let rest = header.strip_prefix(tool)?;
+    if !rest.starts_with(' ') {
+        return None;
+    }
+    rest.split_whitespace()
+        .find_map(|field| field.split_once('=').filter(|(k, _)| *k == key))
+        .map(|(_, value)| value)
+}
+
+/// The result without its `<tool> k=v …` header line; the row's metric
+/// already shows what the header says.
+fn strip_header<'a>(result: &'a str, tool: &str) -> &'a str {
+    let Some(header) = result.lines().next() else {
+        return result;
+    };
+    if !header
+        .strip_prefix(tool)
+        .is_some_and(|rest| rest.starts_with(' '))
+    {
+        return result;
+    }
+    result.get(header.len() + 1..).unwrap_or_default()
+}
+
 fn search_metric(result: &str) -> String {
     if result.starts_with("No matches found.") {
         return "no matches".to_owned();
@@ -272,7 +297,7 @@ fn search_metric(result: &str) -> String {
     let mut files = 0_usize;
     let mut previous: Option<&str> = None;
     for line in result.lines() {
-        if line.is_empty() || line == TOOL_TRUNCATION_MARKER {
+        if line.is_empty() || is_marker_line(line) {
             continue;
         }
         matches += 1;
@@ -433,7 +458,7 @@ pub(super) fn render_tool_calls(
         if call.is_error
             && let Some(result) = call.result.as_deref()
         {
-            lines.extend(tool_error_lines(result, width));
+            lines.extend(tool_error_lines(strip_header(result, &call.name), width));
         }
         if context.expanded {
             lines.extend(tool_expanded_lines(call, context, width));
@@ -679,12 +704,13 @@ pub(super) fn tool_expanded_lines(
     let Some(result) = call.result.as_deref().filter(|_| !call.is_error) else {
         return lines;
     };
+    let result = strip_header(result, &call.name);
     match row.body {
         ResultBody::Head => {
             let total = result.lines().count();
             for line in result
                 .lines()
-                .filter(|line| *line != TOOL_TRUNCATION_MARKER)
+                .filter(|line| !is_marker_line(line))
                 .take(MAX_TOOL_RESULT_ROWS)
             {
                 lines.push(truncate_line(

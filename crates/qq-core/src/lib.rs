@@ -34,6 +34,10 @@ pub mod plan;
 mod runtime;
 mod sessions;
 mod tools;
+
+/// Entry points for the `tool_output` bench. Not a public API.
+#[doc(hidden)]
+pub use tools::output::bench_support as tool_output_bench;
 mod workspace;
 
 use runtime::{
@@ -179,7 +183,7 @@ fn note_audited_action(
     actions: &mut Vec<runtime::AuditedAction>,
     keep_actions: bool,
     call: &RuntimeToolCall,
-    result: &tools::ToolExecutionResult,
+    result: &tools::ToolOutput,
 ) {
     triggers.tool_calls = triggers.tool_calls.saturating_add(1);
     match approval::classify(call.effect, &call.name, &call.arguments) {
@@ -271,7 +275,7 @@ fn select_tools(
     catalog: &catalog::ToolCatalog,
     pins: &mut catalog::PinSet,
     arguments: &str,
-) -> (tools::ToolExecutionResult, bool) {
+) -> (tools::ToolOutput, bool) {
     let arguments = match serde_json::from_str::<catalog::SelectToolsArgs>(arguments) {
         Ok(arguments) if arguments.query.trim().is_empty() => {
             return (
@@ -1922,11 +1926,7 @@ impl plan::CompiledAgentPlan {
                     if turn_interrupted_in_tools {
                         // Calls behind an interrupted approval wait never
                         // execute; they settle like calls behind a cancel.
-                        results[index] = Some(tools::ToolExecutionResult {
-                            content: INTERRUPTED_TOOL_RESULT.to_owned(),
-                            is_error: true,
-                            file_state: None,
-                        });
+                        results[index] = Some(tools::ToolOutput::verbatim_error(INTERRUPTED_TOOL_RESULT.to_owned()));
                         continue;
                     }
                     // An approval wait is a boundary too: an interrupting
@@ -1942,11 +1942,7 @@ impl plan::CompiledAgentPlan {
                     };
                     let Some(decision) = decision else {
                         turn_interrupted_in_tools = true;
-                        results[index] = Some(tools::ToolExecutionResult {
-                            content: INTERRUPTED_TOOL_RESULT.to_owned(),
-                            is_error: true,
-                            file_state: None,
-                        });
+                        results[index] = Some(tools::ToolOutput::verbatim_error(INTERRUPTED_TOOL_RESULT.to_owned()));
                         continue;
                     };
                     // Reviewer spend is charged whatever the verdict; the
@@ -1965,11 +1961,7 @@ impl plan::CompiledAgentPlan {
                     match decision {
                         GateDecision::Execute => {}
                         GateDecision::Deny { message } => {
-                            results[index] = Some(tools::ToolExecutionResult {
-                                content: message.clone(),
-                                is_error: true,
-                                file_state: None,
-                            });
+                            results[index] = Some(tools::ToolOutput::verbatim_error(message.clone()));
                             yield RuntimeEvent::ToolCallDenied { id: call.id, message };
                         }
                         GateDecision::Fail { kind, message } => {
@@ -2010,10 +2002,10 @@ impl plan::CompiledAgentPlan {
                     results[index] = Some(result.clone());
                     yield RuntimeEvent::ToolCallFinished {
                         id: call.id,
-                        result: result.content,
+                        result: result.model_text,
                         is_error: result.is_error,
                         file_state: None,
-                        display: None,
+                        display: result.ui_payload,
                     };
                 }
                 if pins_changed {
@@ -2050,11 +2042,7 @@ impl plan::CompiledAgentPlan {
                         let mut child_spend: Option<SpawnAgentSpend> = None;
                         let host = catalog.lookup(&call.name).map(|entry| entry.host);
                         let result = match call.rejection.clone() {
-                            Some(error) => tools::ToolExecutionResult {
-                                content: error,
-                                is_error: true,
-                                file_state: None,
-                            },
+                            Some(error) => tools::ToolOutput::verbatim_error(error),
                             // spawn_agent dispatches to the session layer. A
                             // run without a spawner rejects the call outright:
                             // the declaration is already absent there, but a
@@ -2267,11 +2255,7 @@ impl plan::CompiledAgentPlan {
                                             }
                                         }
                                     }
-                                    break (call_id_holder.take().expect("call retained"), tools::ToolExecutionResult {
-                                        content: INTERRUPTED_TOOL_RESULT.to_owned(),
-                                        is_error: true,
-                                        file_state: None,
-                                    }, None);
+                                    break (call_id_holder.take().expect("call retained"), tools::ToolOutput::verbatim_error(INTERRUPTED_TOOL_RESULT.to_owned()), None);
                                 }
                                 chunk = deltas.recv(), if !output_closed => match chunk {
                                     Some(chunk) => {
@@ -2287,7 +2271,7 @@ impl plan::CompiledAgentPlan {
                             yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
                             return;
                         }
-                        let interrupted_here = result.content == INTERRUPTED_TOOL_RESULT && result.is_error && result.file_state.is_none() && steering.as_ref().is_some_and(|steering| *steering.interrupts.borrow() > handled_interrupt);
+                        let interrupted_here = result.model_text == INTERRUPTED_TOOL_RESULT && result.is_error && result.file_state.is_none() && steering.as_ref().is_some_and(|steering| *steering.interrupts.borrow() > handled_interrupt);
                         // Chunks sent in the execution's final poll may still
                         // be buffered; drain them before the terminal event.
                         while let Ok(chunk) = deltas.try_recv() {
@@ -2305,15 +2289,12 @@ impl plan::CompiledAgentPlan {
                             &result,
                         );
                         results[usize::from(call.call_ordinal - 1)] = Some(result.clone());
-                        let display = (!result.is_error)
-                            .then(|| approval::edit_result_display(&call.name, &call.arguments))
-                            .flatten();
                         yield RuntimeEvent::ToolCallFinished {
                             id: call.id,
-                            result: result.content,
+                            result: result.model_text,
                             is_error: result.is_error,
                             file_state: result.file_state,
-                            display,
+                            display: result.ui_payload,
                         };
                         if interrupted_here {
                             turn_interrupted_in_tools = true;
@@ -2357,11 +2338,10 @@ impl plan::CompiledAgentPlan {
                         results[usize::from(call.call_ordinal - 1)] = Some(result.clone());
                         yield RuntimeEvent::ToolCallFinished {
                             id: call.id,
-                            result: result.content,
+                            result: result.model_text,
                             is_error: result.is_error,
                             file_state: result.file_state,
-                            // Read-only turns never carry an edit display.
-                            display: None,
+                            display: result.ui_payload,
                         };
                     }
                 }
@@ -2386,11 +2366,7 @@ impl plan::CompiledAgentPlan {
                     // transcript stays provider-valid: one result per call.
                     for (index, call) in calls.iter().enumerate() {
                         if results[index].is_none() {
-                            results[index] = Some(tools::ToolExecutionResult {
-                                content: INTERRUPTED_TOOL_RESULT.to_owned(),
-                                is_error: true,
-                                file_state: None,
-                            });
+                            results[index] = Some(tools::ToolOutput::verbatim_error(INTERRUPTED_TOOL_RESULT.to_owned()));
                             yield RuntimeEvent::ToolCallFinished {
                                 id: call.id,
                                 result: INTERRUPTED_TOOL_RESULT.to_owned(),
@@ -2402,15 +2378,22 @@ impl plan::CompiledAgentPlan {
                     }
                     yield RuntimeEvent::Interrupted { turn_ordinal };
                 }
+                // The per-turn output budget: results enter context in call
+                // order, and a late result that would overshoot is re-bounded
+                // to the remainder. The persisted row keeps the per-call
+                // bounded text; only what the model sees shrinks.
+                let mut turn_output = tools::TurnOutputBudget::new();
                 let result_blocks = calls
                     .iter()
                     .zip(results.into_iter())
                     .map(|(call, result)| {
                         let result = result.expect("every bounded tool execution completed");
-                        budget.charge_tool_output(result.content.len());
+                        let mut content = result.model_text;
+                        turn_output.admit(&mut content);
+                        budget.charge_tool_output(content.len());
                         ContentBlock::ToolResult {
                             call_id: call.provider_call_id.clone(),
-                            content: result.content,
+                            content,
                             is_error: result.is_error,
                         }
                     })
@@ -3877,7 +3860,106 @@ mod tests {
         cancelled.store(true, Ordering::Release);
         let result = execution.await.unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("cancelled"));
+        assert!(result.model_text.contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn a_turns_tool_output_is_capped_and_persisted_results_stay_whole() {
+        // Three reads of 40 KiB each: per call every one fits its own bound,
+        // together they exceed the 96 KiB turn budget. The third result the
+        // model sees is re-bounded to the remainder; the events (what the
+        // store persists) keep each call's full bounded text.
+        struct ThreeReadsProvider {
+            turn: Mutex<usize>,
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for ThreeReadsProvider {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.requests.lock().unwrap().push(request);
+                let mut turn = self.turn.lock().unwrap();
+                let current = *turn;
+                *turn += 1;
+                drop(turn);
+                if current != 0 {
+                    return Box::pin(stream::iter([Ok(ProviderEvent::Completed { usage: None })]));
+                }
+                let mut events = Vec::new();
+                for index in 0..3 {
+                    let id = format!("read-{index}");
+                    events.push(Ok(ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "read_file".to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: format!(r#"{{"path":"big-{index}.txt","limit":2000}}"#),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
+                }
+                events.push(Ok(ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let line = format!("{}\n", "z".repeat(63));
+        for index in 0..3 {
+            std::fs::write(
+                directory.path().join(format!("big-{index}.txt")),
+                line.repeat(640),
+            )
+            .unwrap();
+        }
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            ThreeReadsProvider {
+                turn: Mutex::new(0),
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("read")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+
+        let persisted = events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::ToolCallFinished { result, .. } => Some(result.len()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(persisted, [40 * 1024, 40 * 1024, 40 * 1024]);
+
+        let requests = requests.lock().unwrap();
+        let in_context = requests[1].messages()[2]
+            .content()
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => content.as_str(),
+                other => panic!("unexpected block {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(in_context[0].len(), 40 * 1024);
+        assert_eq!(in_context[1].len(), 40 * 1024);
+        assert!(in_context[2].len() <= 16 * 1024, "{}", in_context[2].len());
+        assert!(
+            in_context[2].contains("turn budget reached"),
+            "{}",
+            in_context[2]
+        );
+        assert!(in_context[2].starts_with(&line), "the head survives");
+        assert!(in_context[2].ends_with(&line), "the tail survives");
+        let total: usize = in_context.iter().map(|content| content.len()).sum();
+        assert!(
+            total <= tools::output::MAX_TURN_TOOL_OUTPUT_BYTES,
+            "{total}"
+        );
     }
 
     #[tokio::test]
@@ -4057,7 +4139,7 @@ mod tests {
                 matches!(
                     event,
                     RuntimeEvent::ToolCallFinished { result, is_error: false, .. }
-                        if result.contains("streamed-hello") && result.ends_with("exit code: 0")
+                        if result.contains("streamed-hello") && result.starts_with("shell exit=0 ")
                 )
             })
             .expect("the bounded result must follow the streamed output");
@@ -5518,7 +5600,7 @@ mod tests {
             "an MCP failure must never fail the run"
         );
 
-        let oversized = "x".repeat(tools::MAX_TOOL_RESULT_BYTES + 1024);
+        let oversized = format!("{}\n", "x".repeat(1_023)).repeat(200);
         let registry = MockMcpRegistry::returning(HostToolResult {
             content: oversized,
             is_error: false,
@@ -5549,8 +5631,8 @@ mod tests {
                 _ => None,
             })
             .expect("the oversized MCP result must still finish");
-        assert!(result.len() <= tools::MAX_TOOL_RESULT_BYTES);
-        assert!(result.contains("truncated by qq"));
+        assert!(result.len() <= tools::MAX_MODEL_TEXT_BYTES);
+        assert!(result.contains("…[qq: "));
     }
 
     #[tokio::test]
@@ -5768,7 +5850,7 @@ mod tests {
         let tasks = Arc::new(Mutex::new(Vec::new()));
         let spawner = Arc::new(StubSpawner::new(
             SpawnAgentOutcome {
-                content: "x".repeat(tools::MAX_TOOL_RESULT_BYTES + 1024),
+                content: format!("{}\n", "x".repeat(1_023)).repeat(200),
                 is_error: false,
                 spend: SpawnAgentSpend::NONE,
                 session_id: None,
@@ -5807,8 +5889,8 @@ mod tests {
                 _ => None,
             })
             .expect("the spawn call must finish successfully");
-        assert!(result.len() <= tools::MAX_TOOL_RESULT_BYTES);
-        assert!(result.contains("truncated by qq"));
+        assert!(result.len() <= tools::MAX_MODEL_TEXT_BYTES);
+        assert!(result.contains("…[qq: "));
         assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
         assert_eq!(
             tasks.lock().unwrap().as_slice(),

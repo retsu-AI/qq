@@ -1,6 +1,7 @@
 mod dispatch;
 mod edit;
 mod list;
+pub mod output;
 mod read;
 mod search;
 mod shell;
@@ -8,12 +9,13 @@ mod specs;
 mod write;
 
 #[cfg(test)]
-pub(crate) use dispatch::{MAX_TOOL_RESULT_BYTES, test_executions_started};
-pub(crate) use dispatch::{
-    ToolDrainError, ToolExecutionResult, ToolTasks, bounded_result, execute,
-};
+pub(crate) use dispatch::test_executions_started;
+pub(crate) use dispatch::{ToolDrainError, ToolOutput, ToolTasks, bounded_result, execute};
 #[cfg(test)]
 pub(crate) use edit::hold_tool_apply;
+#[cfg(test)]
+pub(crate) use output::MAX_MODEL_TEXT_BYTES;
+pub(crate) use output::{TurnOutputBudget, header_line};
 pub(crate) use specs::{
     MAX_SPAWN_AGENT_SCHEMA_BYTES, SPAWN_AGENT_TOOL, SpawnAgentArgs, spawn_agent_spec, static_tools,
 };
@@ -23,9 +25,11 @@ pub(crate) use specs::{specs, test_tool_effect};
 #[cfg(test)]
 use crate::workspace::{FileState, Workspace, content_hash};
 #[cfg(test)]
-use dispatch::{TRUNCATION_MARKER, ToolCancellation, escaped_len, execute_blocking};
+use dispatch::{ToolCancellation, execute_blocking};
 #[cfg(test)]
 use list::MAX_DIRECTORY_ENTRIES;
+#[cfg(test)]
+use output::{MARKER_PREFIX, escaped_len};
 #[cfg(test)]
 use read::MAX_READ_SCAN_BYTES;
 #[cfg(test)]
@@ -35,7 +39,7 @@ use serde_json::json;
 #[cfg(test)]
 use shell::BoundedCapture;
 #[cfg(all(test, unix))]
-use shell::MAX_SHELL_OUTPUT_BYTES;
+use shell::SHELL_BOUNDS;
 #[cfg(test)]
 use std::sync::{
     Arc,
@@ -117,7 +121,7 @@ mod tests {
         state: &FileState,
         name: &str,
         arguments: &str,
-    ) -> ToolExecutionResult {
+    ) -> ToolOutput {
         execute_blocking(
             workspace,
             state,
@@ -136,7 +140,7 @@ mod tests {
         let state = FileState::default();
 
         let listed = run_tool(&workspace, &state, "list_dir", r#"{"path":"."}"#);
-        assert_eq!(listed.content, "a.txt\nb.txt\n");
+        assert_eq!(listed.model_text, "a.txt\nb.txt\n");
 
         let read = run_tool(
             &workspace,
@@ -144,7 +148,7 @@ mod tests {
             "read_file",
             r#"{"path":"b.txt","offset":2,"limit":1}"#,
         );
-        assert_eq!(read.content, "two\n");
+        assert_eq!(read.model_text, "two\n");
         let update = read.file_state.unwrap();
         assert_eq!(update.path, "b.txt");
         assert_eq!(update.hash, content_hash(b"one\ntwo\nthree\n"));
@@ -154,11 +158,9 @@ mod tests {
     #[test]
     fn read_file_marks_oversized_results_as_truncated() {
         let directory = tempfile::tempdir().unwrap();
-        fs::write(
-            directory.path().join("large.txt"),
-            "x".repeat(MAX_TOOL_RESULT_BYTES + 1),
-        )
-        .unwrap();
+        // 200 lines of 1 KiB: within the read limit, over the byte ceiling.
+        let line = format!("{}\n", "x".repeat(1_023));
+        fs::write(directory.path().join("large.txt"), line.repeat(200)).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
 
         let result = run_tool(
@@ -169,8 +171,11 @@ mod tests {
         );
 
         assert!(!result.is_error);
-        assert!(result.content.len() <= MAX_TOOL_RESULT_BYTES);
-        assert!(result.content.ends_with(TRUNCATION_MARKER));
+        assert!(result.model_text.len() <= MAX_MODEL_TEXT_BYTES);
+        assert!(result.model_text.starts_with(&line), "head was not kept");
+        assert!(result.model_text.ends_with(&line), "tail was not kept");
+        assert_eq!(result.model_text.matches(MARKER_PREFIX).count(), 1);
+        assert!(result.model_text.contains("lines omitted"));
     }
 
     #[test]
@@ -180,7 +185,7 @@ mod tests {
         // escaped size would far exceed the persisted-event budget.
         fs::write(
             directory.path().join("ansi.log"),
-            "\u{1b}".repeat(MAX_TOOL_RESULT_BYTES - 16 * 1024),
+            format!("{}\n", "\u{1b}".repeat(1_000)).repeat(120),
         )
         .unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
@@ -193,9 +198,11 @@ mod tests {
         );
 
         assert!(!result.is_error);
-        assert!(result.content.ends_with(TRUNCATION_MARKER));
-        assert!(escaped_len(&result.content) <= MAX_TOOL_RESULT_BYTES);
-        assert!(serde_json::to_string(&result.content).unwrap().len() <= MAX_TOOL_RESULT_BYTES + 2);
+        assert!(result.model_text.contains(MARKER_PREFIX));
+        assert!(escaped_len(&result.model_text) <= MAX_MODEL_TEXT_BYTES);
+        assert!(
+            serde_json::to_string(&result.model_text).unwrap().len() <= MAX_MODEL_TEXT_BYTES + 2
+        );
     }
 
     #[test]
@@ -217,8 +224,19 @@ mod tests {
             r#"{"path":"split.txt","offset":2,"limit":1}"#,
         );
 
-        assert!(!result.is_error, "unexpected error: {}", result.content);
-        assert_eq!(result.content, format!("ab{TRUNCATION_MARKER}"));
+        assert!(!result.is_error, "unexpected error: {}", result.model_text);
+        assert!(
+            result.model_text.starts_with("ab\n"),
+            "{}",
+            result.model_text
+        );
+        assert!(
+            result
+                .model_text
+                .contains("file continues past the 4 MiB scan cap"),
+            "{}",
+            result.model_text
+        );
     }
 
     #[test]
@@ -241,7 +259,7 @@ mod tests {
         );
 
         assert!(!result.is_error);
-        assert_eq!(result.content, "y");
+        assert_eq!(result.model_text, "y");
     }
 
     #[test]
@@ -282,8 +300,8 @@ mod tests {
             r#"{"query":"needle"}"#,
         );
         assert!(!result.is_error);
-        assert!(result.content.contains("src/needle.rs: filename match"));
-        assert!(result.content.contains("src/needle.rs:2:needle here"));
+        assert!(result.model_text.contains("src/needle.rs: filename match"));
+        assert!(result.model_text.contains("src/needle.rs:2:needle here"));
     }
 
     #[test]
@@ -302,8 +320,8 @@ mod tests {
         );
 
         assert!(!result.is_error);
-        assert!(result.content.contains("filename match"));
-        assert!(result.content.contains(TRUNCATION_MARKER));
+        assert!(result.model_text.contains("filename match"));
+        assert!(result.model_text.contains("more matches may exist"));
     }
 
     #[test]
@@ -319,7 +337,7 @@ mod tests {
             &ToolCancellation::new(Arc::new(AtomicBool::new(true))),
         );
         assert!(result.is_error);
-        assert!(result.content.contains("cancelled"));
+        assert!(result.model_text.contains("cancelled"));
 
         for index in 0..=MAX_DIRECTORY_ENTRIES {
             fs::write(directory.path().join(format!("entry-{index}")), "").unwrap();
@@ -331,7 +349,7 @@ mod tests {
             r#"{"path":"."}"#,
         );
         assert!(result.is_error);
-        assert!(result.content.contains("more than"));
+        assert!(result.model_text.contains("more than"));
     }
 
     #[test]
@@ -352,7 +370,7 @@ mod tests {
             "edit_file",
             r#"{"path":"main.rs","old_string":"fn one() {}","new_string":"fn one() { start() }"}"#,
         );
-        assert!(!edited.is_error, "unexpected error: {}", edited.content);
+        assert!(!edited.is_error, "unexpected error: {}", edited.model_text);
         assert_eq!(
             fs::read_to_string(directory.path().join("main.rs")).unwrap(),
             "fn one() { start() }\nfn two() {}\n"
@@ -372,7 +390,11 @@ mod tests {
             "edit_file",
             r#"{"path":"main.rs","old_string":"fn two() {}","new_string":"fn two() { end() }"}"#,
         );
-        assert!(!followup.is_error, "unexpected error: {}", followup.content);
+        assert!(
+            !followup.is_error,
+            "unexpected error: {}",
+            followup.model_text
+        );
         assert_eq!(
             fs::read_to_string(directory.path().join("main.rs")).unwrap(),
             "fn one() { start() }\nfn two() { end() }\n"
@@ -393,8 +415,8 @@ mod tests {
             "edit_file",
             r#"{"path":"list.txt","old_string":"item","new_string":"entry","replace_all":true}"#,
         );
-        assert!(!edited.is_error, "unexpected error: {}", edited.content);
-        assert!(edited.content.contains("3 occurrence"));
+        assert!(!edited.is_error, "unexpected error: {}", edited.model_text);
+        assert!(edited.model_text.contains("3 occurrence"));
         assert_eq!(
             fs::read_to_string(directory.path().join("list.txt")).unwrap(),
             "entry\nentry\nentry\n"
@@ -530,7 +552,11 @@ mod tests {
             r#"{"path":"list.txt","old_string":"missing","new_string":"other"}"#,
         );
         assert!(absent.is_error);
-        assert!(absent.content.contains("not found"), "{}", absent.content);
+        assert!(
+            absent.model_text.contains("not found"),
+            "{}",
+            absent.model_text
+        );
 
         let ambiguous = run_tool(
             &workspace,
@@ -540,9 +566,10 @@ mod tests {
         );
         assert!(ambiguous.is_error);
         assert!(
-            ambiguous.content.contains("2 times") && ambiguous.content.contains("replace_all"),
+            ambiguous.model_text.contains("2 times")
+                && ambiguous.model_text.contains("replace_all"),
             "{}",
-            ambiguous.content
+            ambiguous.model_text
         );
         assert_eq!(
             fs::read_to_string(directory.path().join("list.txt")).unwrap(),
@@ -564,7 +591,7 @@ mod tests {
             r#"{"path":"note.txt","old_string":"content","new_string":"changed"}"#,
         );
         assert!(edit.is_error);
-        assert!(edit.content.contains("read_file"), "{}", edit.content);
+        assert!(edit.model_text.contains("read_file"), "{}", edit.model_text);
 
         let overwrite = run_tool(
             &workspace,
@@ -574,9 +601,9 @@ mod tests {
         );
         assert!(overwrite.is_error);
         assert!(
-            overwrite.content.contains("read_file"),
+            overwrite.model_text.contains("read_file"),
             "{}",
-            overwrite.content
+            overwrite.model_text
         );
         assert_eq!(
             fs::read_to_string(directory.path().join("note.txt")).unwrap(),
@@ -602,7 +629,11 @@ mod tests {
             r#"{"path":"note.txt","old_string":"original","new_string":"edited"}"#,
         );
         assert!(stale.is_error);
-        assert!(stale.content.contains("changed since"), "{}", stale.content);
+        assert!(
+            stale.model_text.contains("changed since"),
+            "{}",
+            stale.model_text
+        );
         assert_eq!(
             fs::read_to_string(directory.path().join("note.txt")).unwrap(),
             "external change\n"
@@ -615,7 +646,11 @@ mod tests {
             "edit_file",
             r#"{"path":"note.txt","old_string":"external change","new_string":"edited"}"#,
         );
-        assert!(!retried.is_error, "unexpected error: {}", retried.content);
+        assert!(
+            !retried.is_error,
+            "unexpected error: {}",
+            retried.model_text
+        );
         assert_eq!(
             fs::read_to_string(directory.path().join("note.txt")).unwrap(),
             "edited\n"
@@ -638,7 +673,7 @@ mod tests {
             "edit_file",
             r#"{"path":"shared.txt","old_string":"base","new_string":"winner"}"#,
         );
-        assert!(!won.is_error, "unexpected error: {}", won.content);
+        assert!(!won.is_error, "unexpected error: {}", won.model_text);
 
         let lost = run_tool(
             &workspace,
@@ -647,7 +682,11 @@ mod tests {
             r#"{"path":"shared.txt","old_string":"base","new_string":"loser"}"#,
         );
         assert!(lost.is_error);
-        assert!(lost.content.contains("changed since"), "{}", lost.content);
+        assert!(
+            lost.model_text.contains("changed since"),
+            "{}",
+            lost.model_text
+        );
 
         run_tool(&workspace, &loser, "read_file", r#"{"path":"shared.txt"}"#);
         let reconciled = run_tool(
@@ -659,7 +698,7 @@ mod tests {
         assert!(
             !reconciled.is_error,
             "unexpected error: {}",
-            reconciled.content
+            reconciled.model_text
         );
         assert_eq!(
             fs::read_to_string(directory.path().join("shared.txt")).unwrap(),
@@ -686,7 +725,7 @@ mod tests {
             "edit_file",
             r#"{"path":"run.sh","old_string":"echo one","new_string":"echo two"}"#,
         );
-        assert!(!edited.is_error, "unexpected error: {}", edited.content);
+        assert!(!edited.is_error, "unexpected error: {}", edited.model_text);
         assert_eq!(fs::read_to_string(&target).unwrap(), "echo two\n");
         assert_eq!(
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
@@ -702,7 +741,7 @@ mod tests {
         assert!(
             !overwritten.is_error,
             "unexpected error: {}",
-            overwritten.content
+            overwritten.model_text
         );
         assert_eq!(
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
@@ -735,8 +774,12 @@ mod tests {
             "write_file",
             r#"{"path":"docs/NOTES.md","content":"first\n"}"#,
         );
-        assert!(!created.is_error, "unexpected error: {}", created.content);
-        assert!(created.content.starts_with("Created"));
+        assert!(
+            !created.is_error,
+            "unexpected error: {}",
+            created.model_text
+        );
+        assert!(created.model_text.starts_with("Created"));
         assert_eq!(
             fs::read_to_string(directory.path().join("docs/NOTES.md")).unwrap(),
             "first\n"
@@ -756,9 +799,9 @@ mod tests {
         assert!(
             !overwritten.is_error,
             "unexpected error: {}",
-            overwritten.content
+            overwritten.model_text
         );
-        assert!(overwritten.content.starts_with("Wrote"));
+        assert!(overwritten.model_text.starts_with("Wrote"));
         assert_eq!(
             fs::read_to_string(directory.path().join("docs/NOTES.md")).unwrap(),
             "second\n"
@@ -773,13 +816,93 @@ mod tests {
         assert!(missing_parent.is_error);
     }
 
+    #[test]
+    fn edits_carry_their_diff_as_a_ui_payload_never_as_model_text() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        run_tool(&workspace, &state, "read_file", r#"{"path":"a.txt"}"#);
+
+        let edited = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"path":"a.txt","old_string":"beta","new_string":"gamma"}"#,
+        );
+        assert!(!edited.is_error, "{}", edited.model_text);
+        assert_eq!(edited.model_text, "Edited a.txt: replaced 1 occurrence(s).");
+        match edited.ui_payload {
+            Some(qq_protocol::ToolCallDisplay::Diff { path, diff }) => {
+                assert_eq!(path, "a.txt");
+                assert_eq!(diff, "- beta\n+ gamma\n");
+            }
+            other => panic!("expected a diff payload, got {other:?}"),
+        }
+
+        let written = run_tool(
+            &workspace,
+            &state,
+            "write_file",
+            r#"{"path":"b.txt","content":"one\n"}"#,
+        );
+        assert!(!written.is_error);
+        assert!(matches!(
+            written.ui_payload,
+            Some(qq_protocol::ToolCallDisplay::Diff { .. })
+        ));
+
+        // A failed edit carries no payload: nothing was applied.
+        let failed = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"path":"a.txt","old_string":"missing","new_string":"x"}"#,
+        );
+        assert!(failed.is_error);
+        assert!(failed.ui_payload.is_none());
+        assert!(
+            run_tool(&workspace, &state, "read_file", r#"{"path":"a.txt"}"#)
+                .ui_payload
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn secrets_in_results_are_masked_at_the_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join(".env"),
+            "AWS_KEY=AKIAIOSFODNN7EXAMPLE\nDB_PASSWORD=hunter2hunter2\nPORT=$PORT\n",
+        )
+        .unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+
+        let read = run_tool(&workspace, &state, "read_file", r#"{"path":".env"}"#);
+        assert!(!read.is_error);
+        assert_eq!(
+            read.model_text,
+            "AWS_KEY=[masked:aws_key]\nDB_PASSWORD=[masked:credential]\nPORT=$PORT\n"
+        );
+        // The hash is of the file, not of the rendering.
+        assert_eq!(
+            read.file_state.unwrap().hash,
+            content_hash(b"AWS_KEY=AKIAIOSFODNN7EXAMPLE\nDB_PASSWORD=hunter2hunter2\nPORT=$PORT\n")
+        );
+
+        let found = run_tool(&workspace, &state, "search", r#"{"query":"AKIA"}"#);
+        assert!(found.model_text.contains(".env:1:AWS_KEY=[masked:aws_key]"));
+        assert!(!found.model_text.contains("AKIAIOSFODNN7EXAMPLE"));
+    }
+
     #[cfg(unix)]
     async fn run_shell_tool(
         workspace: Workspace,
         arguments: &'static str,
         cancelled: Arc<AtomicBool>,
         output: Option<mpsc::Sender<String>>,
-    ) -> ToolExecutionResult {
+    ) -> ToolOutput {
         execute(
             workspace,
             Arc::new(FileState::default()),
@@ -962,7 +1085,7 @@ mod tests {
         .await
         .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("timed out"));
+        assert!(result.model_text.contains("timed out"));
         tasks.drain().await.unwrap();
     }
 
@@ -1012,14 +1135,12 @@ mod tests {
         )
         .await;
 
-        assert!(!result.is_error, "unexpected error: {}", result.content);
-        assert!(result.content.contains("out\n"), "{}", result.content);
-        assert!(result.content.contains("err\n"), "{}", result.content);
-        assert!(
-            result.content.ends_with("exit code: 0"),
-            "{}",
-            result.content
-        );
+        assert!(!result.is_error, "unexpected error: {}", result.model_text);
+        assert!(result.model_text.contains("out\n"), "{}", result.model_text);
+        assert!(result.model_text.contains("err\n"), "{}", result.model_text);
+        let header = result.model_text.lines().next().unwrap();
+        assert!(header.starts_with("shell exit=0 elapsed="), "{header}");
+        assert!(header.ends_with(" bytes=8"), "{header}");
         let mut streamed = String::new();
         while let Ok(chunk) = receiver.try_recv() {
             streamed.push_str(&chunk);
@@ -1044,14 +1165,14 @@ mod tests {
 
         assert!(result.is_error);
         assert!(
-            result.content.contains("before failure"),
+            result.model_text.contains("before failure"),
             "{}",
-            result.content
+            result.model_text
         );
         assert!(
-            result.content.ends_with("exit code: 7"),
+            result.model_text.starts_with("shell exit=7 "),
             "{}",
-            result.content
+            result.model_text
         );
     }
 
@@ -1069,12 +1190,13 @@ mod tests {
             None,
         )
         .await;
-        assert!(!inside.is_error, "unexpected error: {}", inside.content);
+        assert!(!inside.is_error, "unexpected error: {}", inside.model_text);
         let expected = fs::canonicalize(directory.path().join("sub")).unwrap();
-        assert!(
-            inside.content.starts_with(expected.to_str().unwrap()),
+        assert_eq!(
+            inside.model_text.lines().nth(1),
+            Some(expected.to_str().unwrap()),
             "{}",
-            inside.content
+            inside.model_text
         );
 
         for arguments in [
@@ -1132,8 +1254,12 @@ mod tests {
         .await;
 
         assert!(result.is_error);
-        assert!(result.content.contains("timed out"), "{}", result.content);
-        assert_process_exits(parse_marked_pid(&result.content)).await;
+        assert!(
+            result.model_text.contains("timed out"),
+            "{}",
+            result.model_text
+        );
+        assert_process_exits(parse_marked_pid(&result.model_text)).await;
     }
 
     #[cfg(unix)]
@@ -1156,7 +1282,11 @@ mod tests {
         .expect("a full live-output queue must not stall the shell deadline");
 
         assert!(result.is_error);
-        assert!(result.content.contains("timed out"), "{}", result.content);
+        assert!(
+            result.model_text.contains("timed out"),
+            "{}",
+            result.model_text
+        );
     }
 
     #[cfg(unix)]
@@ -1186,7 +1316,7 @@ mod tests {
             .expect("cancellation must remain live with a full output queue")
             .unwrap();
         assert!(result.is_error);
-        assert_eq!(result.content, "tool execution was cancelled");
+        assert_eq!(result.model_text, "tool execution was cancelled");
     }
 
     #[cfg(unix)]
@@ -1216,7 +1346,11 @@ mod tests {
             .expect("cancellation must stop the command promptly")
             .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("cancelled"), "{}", result.content);
+        assert!(
+            result.model_text.contains("cancelled"),
+            "{}",
+            result.model_text
+        );
         assert_process_exits(parse_marked_pid(&chunk)).await;
     }
 
@@ -1226,8 +1360,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
 
-        // Pure-shell loop producing well over the 128 KiB budget with
-        // distinct head and tail lines.
+        // Pure-shell loop producing well over the 16 KiB model bound (and the
+        // 128 KiB capture) with distinct head and tail lines.
         let result = run_shell_tool(
             workspace.clone(),
             r#"{"command":"i=0; while [ $i -lt 40000 ]; do echo line-$i; i=$((i+1)); done"}"#,
@@ -1236,16 +1370,32 @@ mod tests {
         )
         .await;
 
-        assert!(!result.is_error, "unexpected error: {}", result.content);
-        assert!(result.content.starts_with("line-0\n"), "head was not kept");
-        assert!(result.content.contains("line-39999"), "tail was not kept");
+        assert!(!result.is_error, "unexpected error: {}", result.model_text);
+        let mut lines = result.model_text.lines();
+        let header = lines.next().unwrap();
+        assert!(header.starts_with("shell exit=0 elapsed="), "{header}");
+        // 40 000 lines of `line-N\n`: the header counts every byte written.
+        assert!(header.ends_with(" bytes=428890"), "{header}");
+        assert_eq!(lines.next(), Some("line-0"), "head was not kept");
         assert!(
-            result.content.contains("bytes omitted"),
-            "missing the truncation marker"
+            result.model_text.ends_with("line-39999\n"),
+            "tail was not kept"
         );
-        assert!(result.content.ends_with("exit code: 0"));
-        // Head+tail budget plus the marker and exit-code line.
-        assert!(result.content.len() <= MAX_SHELL_OUTPUT_BYTES + 256);
+        assert_eq!(
+            result.model_text.matches(MARKER_PREFIX).count(),
+            1,
+            "{}",
+            result.model_text
+        );
+        assert!(result.model_text.contains("lines omitted"));
+        assert!(result.model_text.len() <= SHELL_BOUNDS.max_bytes);
+        // Every kept line is whole.
+        for line in result.model_text.lines().skip(1) {
+            assert!(
+                line.starts_with("line-") || line.starts_with(MARKER_PREFIX),
+                "partial line kept: {line:?}"
+            );
+        }
     }
 
     #[test]
@@ -1266,7 +1416,7 @@ mod tests {
         // Head keeps the first 4 bytes, the rolling tail keeps the last 4.
         assert_eq!(
             capture.into_output(),
-            "abcd\n...[truncated by qq: 8 bytes omitted]...\nmnop"
+            "abcd\n…[qq: 8 bytes not captured]…\nmnop"
         );
     }
 

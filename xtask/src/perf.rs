@@ -61,7 +61,10 @@ const WORKER_PROCESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const COMMAND_OUTPUT_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const LONG_STREAM_CHUNK_BYTES: usize = 1_024;
 const R4_BATCH_MAX_BYTES: usize = 8 * 1_024;
+/// Bytes streamed as `ToolCallOutputDelta` per command (the capture cap).
 const R4_SHELL_OUTPUT_MAX_BYTES: usize = 128 * 1_024;
+/// Model-facing shell text after head+tail bounding.
+const R4_SHELL_MODEL_TEXT_MAX_BYTES: usize = 16 * 1_024;
 const LOAD_PROVIDER_DELAY: Duration = Duration::from_millis(50);
 const PROVIDER_MARK_CAPACITY: usize = 256;
 
@@ -4476,9 +4479,10 @@ async fn r4_shell_sample() -> Result<R4WorkerSample, PerfError> {
             || observed.tool_state != Some(ToolCallState::Completed)
             || observed.tool_is_error
             || !observed.tool_result.as_deref().is_some_and(|result| {
-                result.contains("bytes omitted")
-                    && result.ends_with("exit code: 0")
-                    && result.len() <= R4_SHELL_OUTPUT_MAX_BYTES + 256
+                result.starts_with("shell exit=0 ")
+                    && result.contains("bytes not captured")
+                    && result.contains("…+")
+                    && result.len() <= R4_SHELL_MODEL_TEXT_MAX_BYTES
             })
         {
             return Err(PerfError::Fixture(

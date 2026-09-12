@@ -4,8 +4,9 @@ use serde::Deserialize;
 
 use crate::workspace::Workspace;
 
-use super::dispatch::{
-    MAX_TOOL_RESULT_BYTES, TRUNCATION_MARKER, ToolCancellation, ToolExecutionResult,
+use super::{
+    dispatch::{ToolCancellation, ToolOutput},
+    output::{MARKER_PREFIX, MAX_MODEL_TEXT_BYTES},
 };
 
 const MAX_SEARCH_ENTRIES: usize = 20_000;
@@ -29,13 +30,13 @@ pub(super) fn search(
     workspace: &Workspace,
     arguments: SearchArgs,
     cancelled: &ToolCancellation,
-) -> ToolExecutionResult {
+) -> ToolOutput {
     if arguments.query.is_empty() || arguments.query.len() > 1_024 {
-        return ToolExecutionResult::error("query must contain between 1 and 1024 bytes");
+        return ToolOutput::error("query must contain between 1 and 1024 bytes");
     }
     let root = match workspace.contained_path(&arguments.path) {
         Ok(path) => path,
-        Err(error) => return ToolExecutionResult::error(error.to_string()),
+        Err(error) => return ToolOutput::error(error.to_string()),
     };
     let mut pending = vec![root];
     let mut files = 0_usize;
@@ -47,7 +48,7 @@ pub(super) fn search(
 
     while let Some(path) = pending.pop() {
         if cancelled.is_cancelled() {
-            return ToolExecutionResult::error("tool execution was cancelled");
+            return ToolOutput::error("tool execution was cancelled");
         }
         // `bounded` also stops the walk: once the result buffer is full no
         // further match can be reported, so scanning more files is wasted work.
@@ -64,10 +65,7 @@ pub(super) fn search(
         let metadata = match workspace.root().symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) => {
-                return ToolExecutionResult::error(format!(
-                    "could not inspect {}: {error}",
-                    path.display()
-                ));
+                return ToolOutput::error(format!("could not inspect {}: {error}", path.display()));
             }
         };
         if metadata.file_type().is_symlink() {
@@ -77,7 +75,7 @@ pub(super) fn search(
             let entries = match workspace.root().read_dir(&path) {
                 Ok(entries) => entries,
                 Err(error) => {
-                    return ToolExecutionResult::error(format!(
+                    return ToolOutput::error(format!(
                         "could not list {}: {error}",
                         path.display()
                     ));
@@ -86,7 +84,7 @@ pub(super) fn search(
             let mut children = Vec::new();
             for entry in entries {
                 if cancelled.is_cancelled() {
-                    return ToolExecutionResult::error("tool execution was cancelled");
+                    return ToolOutput::error("tool execution was cancelled");
                 }
                 if visited_entries
                     .saturating_add(pending.len())
@@ -99,7 +97,7 @@ pub(super) fn search(
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(error) => {
-                        return ToolExecutionResult::error(format!(
+                        return ToolOutput::error(format!(
                             "could not read an entry in {}: {error}",
                             path.display()
                         ));
@@ -124,7 +122,7 @@ pub(super) fn search(
             .is_some_and(|name| name.to_string_lossy().contains(&arguments.query))
         {
             let entry = format!("{relative}: filename match");
-            if match_bytes.saturating_add(entry.len() + 1) > MAX_TOOL_RESULT_BYTES {
+            if match_bytes.saturating_add(entry.len() + 1) > MAX_MODEL_TEXT_BYTES {
                 bounded = true;
                 break;
             }
@@ -143,10 +141,7 @@ pub(super) fn search(
         let file = match workspace.root().open(&path) {
             Ok(file) => file,
             Err(error) => {
-                return ToolExecutionResult::error(format!(
-                    "could not open {}: {error}",
-                    path.display()
-                ));
+                return ToolOutput::error(format!("could not open {}: {error}", path.display()));
             }
         };
         let mut bytes = Vec::new();
@@ -155,13 +150,13 @@ pub(super) fn search(
         let mut chunk = [0_u8; 64 * 1024];
         loop {
             if cancelled.is_cancelled() {
-                return ToolExecutionResult::error("tool execution was cancelled");
+                return ToolOutput::error("tool execution was cancelled");
             }
             let read = match file.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(read) => read,
                 Err(error) => {
-                    return ToolExecutionResult::error(format!(
+                    return ToolOutput::error(format!(
                         "could not read {}: {error}",
                         path.display()
                     ));
@@ -178,28 +173,18 @@ pub(super) fn search(
             }
             Err(_) => continue,
         };
+        // Matches past the model-facing ceiling can never be shown, so the
+        // walk stops collecting there; dispatch clips long lines and bounds
+        // the whole.
         for (index, line) in content.lines().enumerate() {
             if line.contains(&arguments.query) {
-                let prefix = format!("{relative}:{}:", index + 1);
-                let available = MAX_TOOL_RESULT_BYTES
-                    .saturating_sub(match_bytes)
-                    .saturating_sub(prefix.len() + 1);
-                if available == 0 {
+                let entry = format!("{relative}:{}:{line}", index + 1);
+                if match_bytes.saturating_add(entry.len() + 1) > MAX_MODEL_TEXT_BYTES {
                     bounded = true;
                     break;
                 }
-                let mut end = line.len().min(available);
-                while !line.is_char_boundary(end) {
-                    end -= 1;
-                }
-                let line_truncated = end < line.len();
-                let entry = format!("{prefix}{}", &line[..end]);
                 match_bytes += entry.len() + 1;
                 matches.push(entry);
-                if line_truncated {
-                    bounded = true;
-                    break;
-                }
                 if matches.len() >= MAX_SEARCH_RESULTS {
                     bounded = true;
                     break;
@@ -217,7 +202,8 @@ pub(super) fn search(
         output
     };
     if bounded {
-        output.push_str(TRUNCATION_MARKER);
+        output.push_str(MARKER_PREFIX);
+        output.push_str("more matches may exist; narrow the query or path]…\n");
     }
-    ToolExecutionResult::success(output)
+    ToolOutput::success(output)
 }

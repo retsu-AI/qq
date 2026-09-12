@@ -414,7 +414,7 @@ impl BenchHarness {
                 tool_call: ToolCallSnapshot {
                     state: qq_protocol::ToolCallState::Completed,
                     result: Some(
-                        "running 4 tests\ntest reconnect_replays ... FAILED\ntest result: FAILED. 3 passed; 1 failed\nexit code: 101\n"
+                        "shell exit=101 elapsed=3.2 bytes=97\nrunning 4 tests\ntest reconnect_replays ... FAILED\ntest result: FAILED. 3 passed; 1 failed\n"
                             .to_owned(),
                     ),
                     ..test
