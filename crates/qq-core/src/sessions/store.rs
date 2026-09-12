@@ -1031,7 +1031,7 @@ impl Store {
         &self,
         claimed: &ClaimedRun,
         message_id: MessageId,
-        turn_ordinal: u16,
+        turn_ordinal: u32,
         channel: TextChannel,
         text: String,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
@@ -1135,7 +1135,7 @@ impl Store {
         &self,
         claimed: &ClaimedRun,
         message_id: MessageId,
-        turn_ordinal: u16,
+        turn_ordinal: u32,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
@@ -1148,7 +1148,7 @@ impl Store {
     pub(super) async fn record_interrupted(
         &self,
         claimed: &ClaimedRun,
-        turn_ordinal: u16,
+        turn_ordinal: u32,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
@@ -1163,7 +1163,7 @@ impl Store {
     pub(super) async fn record_output_truncated(
         &self,
         claimed: &ClaimedRun,
-        turn_ordinal: u16,
+        turn_ordinal: u32,
         continuation: u16,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;

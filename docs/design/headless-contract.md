@@ -84,7 +84,7 @@ qq run [--workspace PATH] [--approval read-only|auto|full] [--profile NAME]
        -- PROMPT
 ```
 
-Source: `src/cli.rs`. `--max-turns` is `u16`. `ask` is not representable in
+Source: `src/cli.rs`. `--max-turns` is `u32` (widened from `u16` in protocol version 18). `ask` is not representable in
 headless mode because there is no one to ask. `--max-cost-usd` requires
 pricing for the selected model in configuration and exits `2` otherwise
 (`src/main.rs`). `--correlation` labels are validated against the protocol's

@@ -58,7 +58,7 @@ impl PreparedStaticPrefix {
 pub(crate) enum RuntimeEvent {
     Started,
     Prepared {
-        turn_ordinal: u16,
+        turn_ordinal: u32,
         identity: Option<Arc<RunPromptIdentity>>,
         static_prefix: PreparedStaticPrefix,
         weight: PreparedRequestWeight,
@@ -83,7 +83,7 @@ pub(crate) enum RuntimeEvent {
         text: String,
     },
     AssistantTurnCompleted {
-        turn_ordinal: u16,
+        turn_ordinal: u32,
         message: Message,
         usage: Option<TokenUsage>,
         /// Tool calls requested by this turn, in request order. Carried on the
@@ -144,20 +144,20 @@ pub(crate) enum RuntimeEvent {
     /// turn is prepared.
     SteeringApplied {
         message_id: MessageId,
-        turn_ordinal: u16,
+        turn_ordinal: u32,
     },
     /// An interrupting steer aborted turn `turn_ordinal` in flight. Emitted
     /// after the partial turn (if any text streamed) is committed via
     /// `AssistantTurnCompleted` and before its unfinished calls are settled;
     /// the store marks every call of the turn still open as interrupted.
     Interrupted {
-        turn_ordinal: u16,
+        turn_ordinal: u32,
     },
     /// The provider cut turn `turn_ordinal` at its output token limit. Emitted
     /// after the partial turn is committed via `AssistantTurnCompleted`; the
     /// loop then continues with the next turn. `continuation` is 1-based.
     OutputTruncated {
-        turn_ordinal: u16,
+        turn_ordinal: u32,
         continuation: u16,
     },
     Completed,
@@ -176,7 +176,7 @@ pub(crate) enum RuntimeEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeToolCall {
     pub(crate) id: ToolCallId,
-    pub(crate) turn_ordinal: u16,
+    pub(crate) turn_ordinal: u32,
     pub(crate) call_ordinal: u16,
     pub(crate) provider_call_id: String,
     pub(crate) name: String,

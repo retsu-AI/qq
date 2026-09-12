@@ -146,7 +146,7 @@ pub struct RunArgs {
 
     /// Cancel the run as soon as a model turn beyond N starts.
     #[arg(long, value_name = "N")]
-    pub max_turns: Option<u16>,
+    pub max_turns: Option<u32>,
 
     /// Attach an opaque `KEY=VALUE` label to the session and run
     /// (repeatable; at most 8 entries, keys up to 64 bytes, values up to

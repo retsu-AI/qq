@@ -149,7 +149,7 @@ fn apply_steering(
     steering: &mut Option<runtime::SteeringReceiver>,
     messages: &mut Vec<Message>,
     irreducible_message_bytes: &mut u64,
-    _turn_ordinal: u16,
+    _turn_ordinal: u32,
 ) -> Option<Vec<qq_protocol::MessageId>> {
     let steering = steering.as_mut()?;
     let mut applied = Vec::new();
@@ -1121,7 +1121,7 @@ impl plan::CompiledAgentPlan {
                 .unwrap_or_default();
             let mut model_text_bytes = 0_usize;
             let mut continuing_slice = false;
-            for turn_ordinal in 1..=u16::MAX {
+            for turn_ordinal in 1..=u32::MAX {
                 // Caller budgets are decided at the turn boundary, before any
                 // provider request. A spent work budget grants one tool-free
                 // final response; a second spent check, an elapsed wall
@@ -2439,7 +2439,7 @@ impl plan::CompiledAgentPlan {
 
             yield RuntimeEvent::Failed {
                 kind: RunFailureKind::Policy,
-                message: "run exhausted the durable u16 model-turn ordinal space".to_owned(),
+                message: "run exhausted the durable u32 model-turn ordinal space".to_owned(),
             };
         })
     }

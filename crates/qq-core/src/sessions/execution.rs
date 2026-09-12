@@ -1053,7 +1053,7 @@ async fn execute_started_run(
     // message row) and finalized when the turn's `persist_model_turn`
     // commits. `current_turn` is the 1-based ordinal of the turn currently
     // streaming; text deltas always belong to it.
-    let mut current_turn: u16 = 1;
+    let mut current_turn: u32 = 1;
     let mut current_message: Option<MessageId> = None;
     let mut current_occupancy_basis = Some(initial_occupancy_basis);
     // Live tool output batches on the same timer as model text. Text and tool
@@ -2380,7 +2380,7 @@ async fn flush_pending_reasoning(
 async fn flush_pending_text(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
-    current_turn: u16,
+    current_turn: u32,
     current_message: &mut Option<MessageId>,
     channel: &mut Option<TextChannel>,
     text: &mut String,
@@ -2426,7 +2426,7 @@ async fn flush_pending_tool_output(
 async fn persist_text(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
-    current_turn: u16,
+    current_turn: u32,
     current_message: &mut Option<MessageId>,
     channel: TextChannel,
     text: String,
@@ -2668,7 +2668,7 @@ fn planned_context_failure(plan: context::ContextPlan) -> RunOutcome {
 }
 
 pub(super) struct ModelTurnCommit {
-    pub(super) turn_ordinal: u16,
+    pub(super) turn_ordinal: u32,
     pub(super) message: Message,
     pub(super) calls: Vec<RuntimeToolCall>,
     pub(super) turn_message: Option<MessageId>,

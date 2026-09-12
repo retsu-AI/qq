@@ -68,7 +68,7 @@ pub struct HeadlessOptions {
     /// commands are approved for the session on first request.
     pub allow_shell_prefixes: Vec<String>,
     pub timeout: Option<Duration>,
-    pub max_turns: Option<u16>,
+    pub max_turns: Option<u32>,
     pub max_cost_usd_nanos: Option<u64>,
     /// Opaque labels stamped on the session and the run; echoed on the trial
     /// record and every session snapshot. Never interpreted.
@@ -179,7 +179,7 @@ enum TrialRecord<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         timeout_seconds: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        max_turns: Option<u16>,
+        max_turns: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         max_cost_usd_nanos: Option<u64>,
         #[serde(skip_serializing_if = "qq_protocol::Correlation::is_empty")]

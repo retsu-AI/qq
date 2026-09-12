@@ -455,7 +455,7 @@ impl<'a> TurnIndex<'a> {
 
     /// The turn ordinal of the next assistant message of the same run after
     /// `index`, or `u16::MAX` when `index` holds the run's last one.
-    fn next_assistant_turn(&self, messages: &[MessageSnapshot], index: usize) -> u16 {
+    fn next_assistant_turn(&self, messages: &[MessageSnapshot], index: usize) -> u32 {
         let run_id = messages[index].run_id;
         self.assistant_indices
             .get(&run_id)
@@ -463,7 +463,7 @@ impl<'a> TurnIndex<'a> {
                 let position = indices.iter().position(|candidate| *candidate == index)?;
                 indices.get(position + 1)
             })
-            .map_or(u16::MAX, |next| messages[*next].turn_ordinal)
+            .map_or(u32::MAX, |next| messages[*next].turn_ordinal)
     }
 
     fn calls_of(&self, run_id: RunId) -> &[&'a ToolCallSnapshot] {
@@ -1024,7 +1024,7 @@ impl TranscriptCache {
                     ));
                 }
                 // The run's last assistant message carries its completion line.
-                if next_turn == u16::MAX
+                if next_turn == u32::MAX
                     && let Some(line) = run_completion_line(session, message.run_id, width)
                 {
                     body.push_line(line);
@@ -1305,7 +1305,11 @@ pub(super) fn run_completion_line(
         parts.push(format_duration_ms(finished.saturating_sub(started)));
     }
     if stats.turns > 1 {
-        parts.push(count_noun(usize::from(stats.turns), "turn", "turns"));
+        parts.push(count_noun(
+            usize::try_from(stats.turns).unwrap_or(usize::MAX),
+            "turn",
+            "turns",
+        ));
     }
     if stats.tool_calls > 0 {
         parts.push(count_noun(stats.tool_calls as usize, "tool", "tools"));
