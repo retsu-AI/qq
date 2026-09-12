@@ -6,7 +6,7 @@ newest last.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| T1 | Cross-cutting primitives: `Bounds`, `bound_text`, `ToolOutput` split, header convention, masking, per-turn budget | Planned | | First slice; everything else depends on it |
+| T1 | Cross-cutting primitives: `Bounds`, `bound_text`, `ToolOutput` split, header convention, masking, per-turn budget | In progress | `feat/tool-layer-t1-output-bounds` | Started 2026-09-11; baseline `target/qq-perf/t1-2026-09-11/` |
 | T2 | `search` v2 + `tree` | Planned | | Needs `ignore`, `regex`, `base64` in `qq-core` |
 | T3 | `read_file` v2 | Planned | | |
 | T4 | Spill store + `read_tool_result` | Planned | | Touches `sessions/store`; second-agent review required |

@@ -1,6 +1,7 @@
 mod dispatch;
 mod edit;
 mod list;
+pub mod output;
 mod read;
 mod search;
 mod shell;
