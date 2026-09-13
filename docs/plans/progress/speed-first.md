@@ -18,7 +18,7 @@ dated entries appended below, newest last.
 | H21.2 | Mechanical `sessions.rs` split | Planned | | After HC3 behavioral changes; separate commit |
 | H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI | Planned | | |
 | HC1 | `--correlation`, `--session`, `u32` turns, model-less `config check` | Shipped (`abad2de`, #30) | `feat/hc1-headless-run-contract` | `PROTOCOL_VERSION` 17 → 18; `v17/` fixtures retained decode-only. Per-store owner lock on every open (ADR-0022). `SessionRuntime::abandon_for_test` added for crash-simulation tests |
-| HC3 | `--output-schema`, repair turns, `final_output` | In review | `feat/hc3-typed-final-output` (3 commits + docs) | `PROTOCOL_VERSION` 18 → 19 (`v19/` goldens; `v18/` decode-only); store schema 26 → 27. ADR-0014 accepted. Evidence `target/qq-perf/hc3-2026-09-12/` |
+| HC3 | `--output-schema`, repair turns, `final_output` | In review | [#33](https://github.com/retsu-AI/qq/pull/33) `feat/hc3-typed-final-output` | `PROTOCOL_VERSION` 18 → 19 (`v19/` goldens; `v18/` decode-only); store schema 26 → 27. ADR-0014 accepted. Evidence `target/qq-perf/hc3-2026-09-12/` |
 | HC4 | Headless golden fixtures | Planned | | After HC1–HC3 |
 | H10 / H11 / H12 | Sandbox / adapters / qualification | Planned | | Gated; see plan |
 
