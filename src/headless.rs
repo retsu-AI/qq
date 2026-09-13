@@ -1169,6 +1169,7 @@ const fn status_for_error(error: &SessionRuntimeError) -> HeadlessStatus {
         | SessionRuntimeError::EmptyPrompt
         | SessionRuntimeError::PromptTooLarge
         | SessionRuntimeError::InvalidRunLimits
+        | SessionRuntimeError::InvalidOutputContract(_)
         | SessionRuntimeError::InvalidModelSelection => HeadlessStatus::InvalidConfiguration,
         _ => HeadlessStatus::HarnessFailure,
     }

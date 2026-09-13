@@ -18,14 +18,15 @@ use futures_util::{FutureExt, StreamExt};
 use qq_protocol::{
     AccountingTotal, AgentProfileId, ApprovalDecision, ApprovalGrant, ApprovalMode,
     ApprovalResolution, AuditOutcome, AuditRecord, CapabilitySupport, CommandId, CommandOutcome,
-    CommandReceipt, ContentHash, Correlation, EditPreview, EventCursor, InputPart, MessageId,
-    MessageRole, MessageSnapshot, MessageState, ModelPricing, ModelSelection, ReasoningEvent,
-    ResolvedModel, RunActivity, RunFailure, RunFailureKind, RunId, RunLimits, RunOutcome,
-    RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting, SessionCommand,
-    SessionEvent, SessionEventEnvelope, SessionId, SessionPurpose, SessionSnapshot, SessionStatus,
-    SessionSummary, ShellCommandPreview, SnapshotRequest, SpawnOrigin, StoreId, SubscribeRequest,
-    TextChannel, TokenUsage, ToolCallDisplay, ToolCallId, ToolCallSnapshot, ToolCallState,
-    WorkspaceGrantOutcome, WorkspaceId, WorkspaceSnapshot, WorkspaceSummary, validate_input,
+    CommandReceipt, ContentHash, Correlation, EditPreview, EventCursor, FinalOutput, InputPart,
+    MessageId, MessageRole, MessageSnapshot, MessageState, ModelPricing, ModelSelection,
+    ReasoningEvent, ResolvedModel, RunActivity, RunFailure, RunFailureKind, RunId, RunLimits,
+    RunOutcome, RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting,
+    SessionCommand, SessionEvent, SessionEventEnvelope, SessionId, SessionPurpose, SessionSnapshot,
+    SessionStatus, SessionSummary, ShellCommandPreview, SnapshotRequest, SpawnOrigin, StoreId,
+    SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallId, ToolCallSnapshot,
+    ToolCallState, WorkspaceGrantOutcome, WorkspaceId, WorkspaceSnapshot, WorkspaceSummary,
+    validate_input,
 };
 use qq_provider::{ContentBlock, Message, Role};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -370,6 +371,10 @@ struct ClaimedRun {
     cancel_requested: bool,
     file_state: Vec<(String, String)>,
     pending_steering: Vec<crate::runtime::SteeringMessage>,
+    /// The typed-output contract the prompt was submitted with, compiled
+    /// from the persisted JSON at claim time. Absent for compaction runs,
+    /// children, and every prompt without a contract.
+    output: Option<Arc<crate::output::CompiledOutputSchema>>,
 }
 
 impl ClaimedRun {
@@ -398,6 +403,7 @@ impl ClaimedRun {
             depth: self.depth,
             root_run_id: self.root_run_id,
             purpose: self.purpose,
+            output: None,
         }
     }
 }
@@ -1118,6 +1124,18 @@ fn execute_command(
                 Err(error) => return Err(SessionRuntimeError::InvalidInput(error)),
             }
             validate_run_limits(&limits)?;
+            // The contract is compiled here only to reject it: a schema the
+            // runtime cannot enforce must fail the command, not the run. The
+            // claim recompiles from the persisted JSON so a restart enforces
+            // exactly what the caller accepted.
+            let output_contract_json = match &output {
+                None => None,
+                Some(contract) => {
+                    crate::output::CompiledOutputSchema::compile(contract)
+                        .map_err(SessionRuntimeError::InvalidOutputContract)?;
+                    Some(serde_json::to_string(contract)?)
+                }
+            };
             let correlation_json = encode_correlation(&correlation)?;
             let input_json = serde_json::to_string(&input)?;
             // The transcript row carries the rendered text: text parts
@@ -1174,8 +1192,9 @@ fn execute_command(
             transaction.execute(
                 "INSERT INTO runs(
                         id, session_id, command_id, user_message_id, assistant_message_id,
-                        status, created_at_ms, limits_json, input_json, correlation_json
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9)",
+                        status, created_at_ms, limits_json, input_json, correlation_json,
+                        output_contract_json
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?10)",
                 params![
                     run_id.to_string(),
                     session_id.to_string(),
@@ -1186,6 +1205,7 @@ fn execute_command(
                     limits_json,
                     input_json,
                     correlation_json,
+                    output_contract_json,
                 ],
             )?;
             transaction.execute(
@@ -2070,7 +2090,7 @@ fn reserve_next_run_recoverable(
                     s.pending_context_overflow_basis_json,
                     s.context_tokens, s.context_occupancy_json, r.limits_json,
                     r.input_json, s.profile, s.approval_mode, s.depth, s.root_run_id,
-                    s.purpose
+                    s.purpose, r.output_contract_json
              FROM runs r
              JOIN sessions s ON s.id = r.session_id
              JOIN workspaces w ON w.id = s.workspace_id
@@ -2109,6 +2129,7 @@ fn reserve_next_run_recoverable(
                     row.get::<_, u16>(19)?,
                     row.get::<_, Option<String>>(20)?,
                     row.get::<_, String>(21)?,
+                    row.get::<_, Option<String>>(22)?,
                 ))
             },
         )
@@ -2136,9 +2157,23 @@ fn reserve_next_run_recoverable(
         depth,
         root_run,
         purpose,
+        output_contract_json,
     )) = row
     else {
         return Ok(None);
+    };
+    // A stored contract that no longer compiles is a persistence fault: it
+    // was compiled at admission, so only corruption or a bounds change can
+    // make it fail here.
+    let output = match output_contract_json {
+        None => None,
+        Some(encoded) => {
+            let contract = serde_json::from_str::<qq_protocol::OutputContract>(&encoded)?;
+            Some(
+                crate::output::CompiledOutputSchema::compile(&contract)
+                    .map_err(|_| SessionRuntimeError::CONSTRAINT)?,
+            )
+        }
     };
     let purpose = match purpose.as_str() {
         "task" => SessionPurpose::Task,
@@ -2306,6 +2341,7 @@ fn reserve_next_run_recoverable(
         cancel_requested,
         file_state,
         pending_steering,
+        output,
         purpose,
     }))
 }
@@ -2522,6 +2558,7 @@ fn start_auto_compaction(
             cancel_requested: false,
             file_state: Vec::new(),
             pending_steering: Vec::new(),
+            output: None,
         },
         started,
     )))
@@ -4215,6 +4252,21 @@ fn settle_run(
     let saw_turn = accounting
         .as_ref()
         .is_some_and(|accounting| accounting.saw_turn);
+    // The verdict is meaningful only for a completed answer: a run that was
+    // cancelled, failed, or ran out of budget never produced one to judge.
+    let final_output = match &outcome {
+        RunOutcome::Completed => accounting
+            .as_ref()
+            .and_then(|accounting| accounting.final_output.clone()),
+        RunOutcome::Cancelled
+        | RunOutcome::Interrupted
+        | RunOutcome::Failed { .. }
+        | RunOutcome::BudgetExhausted { .. } => None,
+    };
+    let final_output_json = final_output
+        .as_deref()
+        .map(serde_json::to_string)
+        .transpose()?;
     let pending_context_overflow_basis = if claimed.identity.kind == RunKind::Prompt
         && matches!(
             &outcome,
@@ -4258,7 +4310,8 @@ fn settle_run(
                  estimated_cost_usd_nanos = CASE
                      WHEN ?9 THEN estimated_cost_usd_nanos ELSE ?6
                  END,
-                 context_tokens = CASE WHEN ?8 THEN ?7 ELSE context_tokens END
+                 context_tokens = CASE WHEN ?8 THEN ?7 ELSE context_tokens END,
+                 final_output_json = ?10
              WHERE id = ?1 AND outcome_json IS NULL",
         params![
             claimed.identity.run_id.to_string(),
@@ -4270,6 +4323,7 @@ fn settle_run(
             reported_context_tokens,
             saw_turn,
             preserve_run_accounting,
+            final_output_json,
         ],
     )?;
     let context_tokens = run_context_tokens(transaction, claimed.identity.run_id)?;
@@ -4322,7 +4376,7 @@ fn settle_run(
             outcome,
             usage,
             context_tokens,
-            final_output: None,
+            final_output,
         },
     )
     .map(Some)
@@ -4633,6 +4687,7 @@ fn settle_panicked_execution(
                 cancel_requested: false,
                 file_state: Vec::new(),
                 pending_steering: Vec::new(),
+                output: None,
                 purpose: original.purpose,
             };
             events.push(expect_settled(settle_run(
@@ -4993,6 +5048,7 @@ fn recover_interrupted_runs(
             cancel_requested: false,
             file_state: Vec::new(),
             pending_steering: Vec::new(),
+            output: None,
             purpose: SessionPurpose::Task,
         };
         let event = expect_settled(settle_run(
@@ -6695,7 +6751,7 @@ fn load_run(connection: &Connection, run_id: RunId) -> Result<RunSnapshot, Sessi
             "SELECT session_id, status, outcome_json, prompt_identity_json,
                     resolved_model_json, usage_json, context_tokens,
                     estimated_cost_usd_nanos, limits_json, plan_identity_json, correlation_json,
-                    audit_json
+                    audit_json, final_output_json
              FROM runs WHERE id = ?1",
             [run_id.to_string()],
             |row| {
@@ -6712,6 +6768,7 @@ fn load_run(connection: &Connection, run_id: RunId) -> Result<RunSnapshot, Sessi
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, Option<String>>(10)?,
                     row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
                 ))
             },
         )
@@ -6730,6 +6787,7 @@ fn load_run(connection: &Connection, run_id: RunId) -> Result<RunSnapshot, Sessi
                 plan_identity,
                 correlation,
                 audit,
+                final_output,
             )| {
                 Ok(RunSnapshot {
                     id: run_id,
@@ -6764,7 +6822,11 @@ fn load_run(connection: &Connection, run_id: RunId) -> Result<RunSnapshot, Sessi
                         .map(serde_json::from_str)
                         .transpose()?
                         .map(Box::new),
-                    final_output: None,
+                    final_output: final_output
+                        .as_deref()
+                        .map(serde_json::from_str)
+                        .transpose()?
+                        .map(Box::new),
                 })
             },
         )
@@ -11246,7 +11308,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         assert!(
             !connection
@@ -11373,7 +11435,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         assert!(has_column(&connection, "tool_calls", "display_json").unwrap());
         let (turn_ordinal, output, state) = connection
@@ -11441,7 +11503,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         let (display_json, result) = connection
             .query_row(
@@ -11500,7 +11562,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         assert!(has_column(&connection, "runs", "kind").unwrap());
         assert_eq!(
@@ -11565,7 +11627,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         assert!(has_column(&connection, "sessions", "context_tokens").unwrap());
         assert!(has_column(&connection, "sessions", "owner_run_id").unwrap());
@@ -11653,7 +11715,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         assert!(has_column(&connection, "sessions", "owner_run_id").unwrap());
         assert_eq!(
@@ -11709,7 +11771,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         assert!(has_column(&connection, "runs", "prompt_identity_json").unwrap());
         assert_eq!(
@@ -11753,7 +11815,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         for column in [
             "model_json",
@@ -11820,7 +11882,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         assert!(has_column(&connection, "message_chunks", "chunk_ordinal").unwrap());
         assert!(has_column(&connection, "message_chunks", "text").unwrap());
@@ -11894,7 +11956,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         let command_id_not_null: bool = connection
             .query_row(
@@ -11933,7 +11995,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         assert!(has_column(&connection, "message_chunks", "text").unwrap());
         assert!(has_column(&connection, "runs", "context_base_bytes").unwrap());
@@ -12003,7 +12065,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         assert!(has_column(&connection, "runs", "resolved_model_json").unwrap());
         assert_eq!(
@@ -12095,7 +12157,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         let preparing_shape: (String, bool, Option<String>) = connection
             .query_row(
@@ -12218,7 +12280,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         let occupancy_shape: (String, bool, Option<String>) = connection
             .query_row(
@@ -12324,7 +12386,7 @@ mod tests {
                         |row| row.get::<_, String>(0),
                     )
                     .unwrap(),
-                "26"
+                "27"
             );
         }
     }
@@ -12445,7 +12507,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         // A historical child keeps its parent run but has no recorded call:
         // the summary says so explicitly instead of inventing one.
@@ -12527,7 +12589,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         assert_eq!(
             connection
@@ -12653,7 +12715,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         // A historical call has no recorded effect: assembly falls back to
         // the name rather than guessing a class for it.
@@ -12663,6 +12725,49 @@ mod tests {
             })
             .unwrap();
         assert_eq!(effect, None);
+    }
+
+    #[test]
+    fn version_twenty_seven_migration_adds_the_output_contract_columns_and_keeps_history_null() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let (connection, _) = open_database(&path).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO workspaces(id, path) VALUES ('w', '/v26-output');
+                 INSERT INTO sessions(id, workspace_id, title, status, created_at_ms,
+                                      updated_at_ms)
+                 VALUES ('s', 'w', 'Old', 'idle', 1, 1);
+                 INSERT INTO runs(id, session_id, command_id, user_message_id,
+                                  assistant_message_id, status, created_at_ms, outcome_json)
+                 VALUES ('r', 's', 'cmd', 'u', 'a', 'completed', 1, '{\"type\":\"completed\"}');
+                 UPDATE metadata SET value = '26' WHERE key = 'schema_version';
+                 ALTER TABLE runs DROP COLUMN output_contract_json;
+                 ALTER TABLE runs DROP COLUMN final_output_json;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let (connection, _) = open_database(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "27"
+        );
+        let (contract, final_output): (Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT output_contract_json, final_output_json FROM runs WHERE id = 'r'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(contract, None);
+        assert_eq!(final_output, None);
     }
 
     /// D6: activity is a column written with its event, and the summary reads
@@ -12790,7 +12895,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         let message = load_message(&connection, message_id).unwrap();
         assert!(!message.truncated);
@@ -12877,7 +12982,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
         let shape: (String, bool, Option<String>) = connection
             .query_row(
@@ -12959,7 +13064,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "26"
+            "27"
         );
     }
 
@@ -14179,6 +14284,7 @@ mod tests {
             cancel_requested: false,
             file_state: Vec::new(),
             pending_steering: Vec::new(),
+            output: None,
         };
         (
             directory,
@@ -26933,6 +27039,540 @@ mod tests {
         })
     }
 
+    /// Answers each turn with the next scripted text and records requests.
+    struct TextScriptLoader {
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+        answers: Arc<StdMutex<std::collections::VecDeque<&'static str>>>,
+    }
+
+    struct TextScriptProvider {
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+        answers: Arc<StdMutex<std::collections::VecDeque<&'static str>>>,
+    }
+
+    impl RuntimeLoader for TextScriptLoader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let provider = TextScriptProvider {
+                requests: Arc::clone(&self.requests),
+                answers: Arc::clone(&self.answers),
+            };
+            Box::pin(async move {
+                Runtime::new(provider, "test-model", 256)
+                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+                    .map_err(|error| RuntimeLoadError {
+                        kind: RunFailureKind::Configuration,
+                        message: error.to_string(),
+                    })
+            })
+        }
+    }
+
+    impl Provider for TextScriptProvider {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            self.requests.lock().unwrap().push(request);
+            let text = self
+                .answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or("out of script");
+            if text == "<hang>" {
+                return Box::pin(stream::pending());
+            }
+            Box::pin(stream::iter([
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: text.to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+            ]))
+        }
+    }
+
+    struct OutputContractHarness {
+        _directory: TempDir,
+        runtime: SessionRuntime,
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+        events: SessionEventStream,
+    }
+
+    async fn output_contract_harness(answers: &[&'static str]) -> OutputContractHarness {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(TextScriptLoader {
+                requests: Arc::clone(&requests),
+                answers: Arc::new(StdMutex::new(answers.iter().copied().collect())),
+            }),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::CreateSession {
+                    workspace_id,
+                    parent_id: None,
+                    model: ModelSelection {
+                        model: Some("test/model".to_owned()),
+                        max_output_tokens: Some(256),
+                        organization: None,
+                    },
+                    approval_mode: ApprovalMode::ReadOnly,
+                    profile: AgentProfileId::default(),
+                    correlation: Correlation::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("unexpected receipt")
+        };
+        let events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+        OutputContractHarness {
+            _directory: directory,
+            runtime,
+            requests,
+            workspace_id,
+            session_id,
+            events,
+        }
+    }
+
+    fn report_contract(repair_turns: u8) -> qq_protocol::OutputContract {
+        qq_protocol::OutputContract {
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}, "n": {"type": "integer"}},
+                "required": ["ok", "n"],
+                "additionalProperties": false
+            }),
+            repair_turns,
+        }
+    }
+
+    async fn submit_with_contract(
+        harness: &OutputContractHarness,
+        contract: qq_protocol::OutputContract,
+    ) -> Result<RunId, SessionRuntimeError> {
+        let queued = harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id: harness.session_id,
+                    input: vec![InputPart::text("report")],
+                    limits: qq_protocol::RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: Some(Box::new(contract)),
+                },
+            )
+            .await?;
+        let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
+            panic!("unexpected receipt")
+        };
+        Ok(run_id)
+    }
+
+    fn finished_final_output(
+        events: &[SessionEventEnvelope],
+        run_id: RunId,
+    ) -> Option<Box<FinalOutput>> {
+        events.iter().find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id: done,
+                final_output,
+                ..
+            } if *done == run_id => final_output.clone(),
+            _ => None,
+        })
+    }
+
+    async fn run_snapshot(harness: &OutputContractHarness, run_id: RunId) -> RunSnapshot {
+        harness
+            .runtime
+            .snapshot(SnapshotRequest {
+                workspace_id: harness.workspace_id,
+                focused_session_id: Some(harness.session_id),
+                include_sessions: Vec::new(),
+                session_limit: 8,
+                message_limit: 32,
+            })
+            .await
+            .unwrap()
+            .focused
+            .unwrap()
+            .runs
+            .into_iter()
+            .find(|run| run.id == run_id)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_contract_survives_a_restart_and_is_enforced_by_the_recovering_runtime() {
+        // The contract rides the run row: a store reopened by a fresh runtime
+        // claims the still-queued run and enforces the same schema and
+        // allowance the caller was admitted with.
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let answers: Arc<StdMutex<std::collections::VecDeque<&'static str>>> =
+            Arc::new(StdMutex::new(
+                ["<hang>", "nope", r#"{"ok": true, "n": 9}"#]
+                    .into_iter()
+                    .collect(),
+            ));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(path.clone()),
+            Arc::new(TextScriptLoader {
+                requests: Arc::clone(&requests),
+                answers: Arc::clone(&answers),
+            }),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session(&runtime, workspace_id, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("unexpected receipt")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+        // A hanging run occupies the session so the contract run stays queued
+        // through the simulated process death.
+        let hanging = submit_prompt_to(&runtime, session_id, "hang").await;
+        let queued = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::text("report")],
+                    limits: qq_protocol::RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: Some(Box::new(report_contract(1))),
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
+            panic!("unexpected receipt")
+        };
+        collect_until(
+            &mut events,
+            |event| matches!(event, SessionEvent::RunStarted { run_id, .. } if *run_id == hanging),
+        )
+        .await;
+        // `RunStarted` precedes the provider call; wait until the hanging
+        // stream has actually consumed its scripted answer so the contract
+        // run inherits the rest of the script after the restart.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while requests.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the hanging run reaches the provider");
+        drop(events);
+        runtime.abandon_for_test().await.unwrap();
+        drop(runtime);
+
+        let connection = Connection::open(&path).unwrap();
+        let after = EventCursor {
+            store_id: connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key = 'store_id'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+                .parse()
+                .unwrap(),
+            workspace_id,
+            sequence: 0,
+        };
+        drop(connection);
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(path),
+            Arc::new(TextScriptLoader {
+                requests: Arc::clone(&requests),
+                answers,
+            }),
+        )
+        .await
+        .unwrap();
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after,
+            })
+            .unwrap();
+        let observed = collect_until_run_finished(&mut events, run_id).await;
+        assert_eq!(
+            finished_final_output(&observed, run_id).as_deref(),
+            Some(&FinalOutput::Valid {
+                value: serde_json::json!({"ok": true, "n": 9}),
+                repair_turns: 1,
+            })
+        );
+        // The interrupted run was settled by recovery, not re-executed: after
+        // the hang, exactly the contract run's answer and one repair ran.
+        let texts: Vec<String> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request_texts(request).join("\n"))
+            .collect();
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert!(texts[1].ends_with("report"), "{texts:?}");
+        assert!(
+            texts[2].contains(crate::output::OUTPUT_REPAIR_NOTICE),
+            "{texts:?}"
+        );
+        runtime.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn repair_turns_spend_the_turn_budget_and_exhaustion_publishes_no_verdict() {
+        // Two turns permitted: the first answer fails validation, so the one
+        // repair becomes the reserved budget-final turn, which settles as
+        // exhaustion (never a contract verdict) even though it validates.
+        let mut harness = output_contract_harness(&["nope", r#"{"ok": true, "n": 1}"#]).await;
+        let queued = harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id: harness.session_id,
+                    input: vec![InputPart::text("report")],
+                    limits: qq_protocol::RunLimits {
+                        max_model_turns: Some(2),
+                        ..qq_protocol::RunLimits::default()
+                    },
+                    correlation: Correlation::default(),
+                    output: Some(Box::new(report_contract(4))),
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
+            panic!("unexpected receipt")
+        };
+        let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+        assert!(matches!(
+            finished_outcome(&observed, run_id),
+            Some(RunOutcome::BudgetExhausted { .. })
+        ));
+        assert_eq!(finished_final_output(&observed, run_id), None);
+        assert_eq!(harness.requests.lock().unwrap().len(), 2);
+        assert_eq!(run_snapshot(&harness, run_id).await.final_output, None);
+    }
+
+    #[tokio::test]
+    async fn a_valid_first_answer_completes_with_the_parsed_final_output() {
+        let mut harness = output_contract_harness(&[r#"{"ok": true, "n": 3}"#]).await;
+        let run_id = submit_with_contract(&harness, report_contract(2))
+            .await
+            .unwrap();
+        let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+        assert!(matches!(
+            finished_outcome(&observed, run_id),
+            Some(RunOutcome::Completed)
+        ));
+        assert_eq!(
+            finished_final_output(&observed, run_id).as_deref(),
+            Some(&FinalOutput::Valid {
+                value: serde_json::json!({"ok": true, "n": 3}),
+                repair_turns: 0,
+            })
+        );
+        // The verdict is durable on the row before it was published.
+        let snapshot = run_snapshot(&harness, run_id).await;
+        assert_eq!(
+            snapshot.final_output,
+            finished_final_output(&observed, run_id)
+        );
+        // The model saw the schema before its first turn.
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let system = requests[0].system().unwrap();
+        assert!(system.contains("## Output contract"), "{system}");
+        assert!(system.contains(r#""required":["ok","n"]"#), "{system}");
+    }
+
+    #[tokio::test]
+    async fn an_invalid_answer_is_repaired_within_the_allowance_and_the_notice_names_the_errors() {
+        let mut harness = output_contract_harness(&[
+            "Sure! Here you go.",
+            r#"{"ok": "yes", "n": 1}"#,
+            "```json\n{\"ok\": false, \"n\": 2}\n```",
+        ])
+        .await;
+        let run_id = submit_with_contract(&harness, report_contract(2))
+            .await
+            .unwrap();
+        let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+        assert!(matches!(
+            finished_outcome(&observed, run_id),
+            Some(RunOutcome::Completed)
+        ));
+        assert_eq!(
+            finished_final_output(&observed, run_id).as_deref(),
+            Some(&FinalOutput::Valid {
+                value: serde_json::json!({"ok": false, "n": 2}),
+                repair_turns: 2,
+            })
+        );
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "answer, repair, repair");
+        let first_repair = request_texts(&requests[1]).join("\n");
+        assert!(
+            first_repair.contains(crate::output::OUTPUT_REPAIR_NOTICE),
+            "{first_repair}"
+        );
+        assert!(
+            first_repair.contains("not a JSON document"),
+            "{first_repair}"
+        );
+        let second_repair = request_texts(&requests[2]).join("\n");
+        assert!(
+            second_repair.contains("/ok: expected boolean, found string"),
+            "{second_repair}"
+        );
+        // Every failing answer stays in the durable transcript as its own turn.
+        let turns = observed
+            .iter()
+            .filter(|event| {
+                matches!(&event.event, SessionEvent::ModelTurnCompleted { run_id: r, .. } if *r == run_id)
+            })
+            .count();
+        assert_eq!(turns, 3);
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_never_validates_completes_with_the_typed_failure_after_the_last_repair()
+    {
+        let mut harness = output_contract_harness(&["nope", "still nope", "never"]).await;
+        let run_id = submit_with_contract(&harness, report_contract(1))
+            .await
+            .unwrap();
+        let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+        assert!(matches!(
+            finished_outcome(&observed, run_id),
+            Some(RunOutcome::Completed)
+        ));
+        let Some(final_output) = finished_final_output(&observed, run_id) else {
+            panic!("a contract run publishes a verdict");
+        };
+        let FinalOutput::Invalid {
+            errors,
+            repair_turns,
+        } = *final_output
+        else {
+            panic!("expected an invalid verdict, got {final_output:?}");
+        };
+        assert_eq!(repair_turns, 1);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].starts_with("/: the answer is not a JSON document"),
+            "{errors:?}"
+        );
+        // Exactly one repair was spent: the third scripted answer was never
+        // requested.
+        assert_eq!(harness.requests.lock().unwrap().len(), 2);
+        let snapshot = run_snapshot(&harness, run_id).await;
+        assert!(matches!(
+            snapshot.final_output.as_deref(),
+            Some(FinalOutput::Invalid {
+                repair_turns: 1,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn zero_repair_turns_judges_the_first_answer_only() {
+        let mut harness = output_contract_harness(&["nope", r#"{"ok":true,"n":1}"#]).await;
+        let run_id = submit_with_contract(&harness, report_contract(0))
+            .await
+            .unwrap();
+        let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+        assert!(matches!(
+            finished_final_output(&observed, run_id).as_deref(),
+            Some(FinalOutput::Invalid {
+                repair_turns: 0,
+                ..
+            })
+        ));
+        assert_eq!(harness.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_run_without_a_contract_publishes_no_final_output() {
+        let mut harness = output_contract_harness(&["free text"]).await;
+        let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "hello").await;
+        let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+        assert!(matches!(
+            finished_outcome(&observed, run_id),
+            Some(RunOutcome::Completed)
+        ));
+        assert_eq!(finished_final_output(&observed, run_id), None);
+        assert_eq!(run_snapshot(&harness, run_id).await.final_output, None);
+        let system = harness.requests.lock().unwrap()[0]
+            .system()
+            .unwrap()
+            .to_owned();
+        assert!(!system.contains("## Output contract"));
+    }
+
+    #[tokio::test]
+    async fn an_unenforceable_contract_is_refused_at_admission_and_creates_no_run() {
+        let harness = output_contract_harness(&[]).await;
+        for contract in [
+            qq_protocol::OutputContract {
+                schema: serde_json::json!({"$ref": "#/nope"}),
+                repair_turns: 1,
+            },
+            qq_protocol::OutputContract {
+                schema: serde_json::json!({"type": "string", "pattern": "x"}),
+                repair_turns: 1,
+            },
+            qq_protocol::OutputContract {
+                schema: serde_json::json!({}),
+                repair_turns: qq_protocol::MAX_OUTPUT_REPAIR_TURNS + 1,
+            },
+        ] {
+            let error = submit_with_contract(&harness, contract).await.unwrap_err();
+            assert!(
+                matches!(error, SessionRuntimeError::InvalidOutputContract(_)),
+                "{error:?}"
+            );
+        }
+        let snapshot = harness
+            .runtime
+            .snapshot(SnapshotRequest {
+                workspace_id: harness.workspace_id,
+                focused_session_id: Some(harness.session_id),
+                include_sessions: Vec::new(),
+                session_limit: 8,
+                message_limit: 32,
+            })
+            .await
+            .unwrap();
+        assert!(snapshot.focused.unwrap().runs.is_empty());
+    }
+
     #[tokio::test]
     async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
         let parent_requests = Arc::new(StdMutex::new(Vec::new()));
@@ -28740,6 +29380,7 @@ mod tests {
             cancel_requested: false,
             file_state: Vec::new(),
             pending_steering: Vec::new(),
+            output: None,
         };
         let child = tokio::spawn(spawn_child_run(
             Arc::clone(&runtime.inner),
@@ -31435,6 +32076,145 @@ mod tests {
         // The parent's own model saw no audit notice.
         let parent_reqs = parent_requests.lock().unwrap().clone();
         assert_eq!(parent_reqs.len(), 2);
+    }
+
+    /// A provider that runs one mutating tool turn (to trigger the heuristic
+    /// audit) and then answers with the next scripted text.
+    struct MutateThenScriptProvider {
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+        answers: StdMutex<std::collections::VecDeque<&'static str>>,
+        turn: AtomicUsize,
+    }
+
+    impl Provider for MutateThenScriptProvider {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            self.requests.lock().unwrap().push(request);
+            if self.turn.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Box::pin(stream::iter([
+                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                        id: "call_0".to_owned(),
+                        name: "write_file".to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                        id: "call_0".to_owned(),
+                        json: r#"{"path":"out.txt","content":"hello"}"#.to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallCompleted {
+                        id: "call_0".to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                ]));
+            }
+            let text = self
+                .answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or("out of script");
+            Box::pin(stream::iter([
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: text.to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+            ]))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_contract_judges_the_audited_revision_and_a_revision_does_not_reset_repairs() {
+        // Turn 1 mutates (audit trigger); turn 2 answers validly; the auditor
+        // says revise; turn 3 (the revision) is invalid JSON; the contract
+        // spends its one repair on turn 4, which validates. A second revise
+        // cannot happen (max_revisions 1), so the order is
+        // answer → audit → revision → repair.
+        let parent_requests = Arc::new(StdMutex::new(Vec::new()));
+        let parent: Arc<dyn Provider> = Arc::new(MutateThenScriptProvider {
+            requests: Arc::clone(&parent_requests),
+            answers: StdMutex::new(
+                [
+                    r#"{"ok": true, "n": 1}"#,
+                    "revised, but prose",
+                    r#"{"ok": true, "n": 2}"#,
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            turn: AtomicUsize::new(0),
+        });
+        let auditor: Arc<dyn Provider> = Arc::new(VerdictProvider {
+            reply: r#"{"verdict":"revise","findings":["n is wrong"]}"#,
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let mut harness =
+            audit_harness(parent, auditor, crate::runtime::AuditMode::Heuristic, 1).await;
+        let queued = harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id: harness.session_id,
+                    input: vec![InputPart::text("write hello and report")],
+                    limits: qq_protocol::RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: Some(Box::new(report_contract(1))),
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
+            panic!("unexpected receipt")
+        };
+        let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+        let (_, completed) = audit_events(&observed, run_id);
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].outcome, AuditOutcome::Revised);
+        assert_eq!(
+            finished_final_output(&observed, run_id).as_deref(),
+            Some(&FinalOutput::Valid {
+                value: serde_json::json!({"ok": true, "n": 2}),
+                repair_turns: 1,
+            })
+        );
+        {
+            let requests = parent_requests.lock().unwrap();
+            assert_eq!(requests.len(), 4, "tool turn, answer, revision, repair");
+            let revision = request_texts(&requests[2]).join("\n");
+            assert!(
+                revision.contains("independent read-only audit"),
+                "{revision}"
+            );
+            let repair = request_texts(&requests[3]).join("\n");
+            assert!(
+                repair.contains(crate::output::OUTPUT_REPAIR_NOTICE),
+                "{repair}"
+            );
+        }
+        // The audit record and the verdict are both durable on the row.
+        let snapshot = harness
+            .runtime
+            .snapshot(SnapshotRequest {
+                workspace_id: harness.workspace_id,
+                focused_session_id: Some(harness.session_id),
+                include_sessions: Vec::new(),
+                session_limit: 8,
+                message_limit: 32,
+            })
+            .await
+            .unwrap()
+            .focused
+            .unwrap()
+            .runs
+            .into_iter()
+            .find(|run| run.id == run_id)
+            .unwrap();
+        assert!(snapshot.audit.is_some());
+        assert!(matches!(
+            snapshot.final_output.as_deref(),
+            Some(FinalOutput::Valid {
+                repair_turns: 1,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

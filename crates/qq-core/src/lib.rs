@@ -398,6 +398,10 @@ pub(crate) struct RunCapabilities {
     /// one; children, internal runs, and direct runs have none.
     audit_hook: Option<Arc<dyn runtime::AuditHook>>,
     tool_tasks: Option<tools::ToolTasks>,
+    /// The typed-output contract of a prompt submitted with one. The final
+    /// answer is validated at the completion boundary and repaired within
+    /// the contract's turn allowance. Compaction and children have none.
+    output: Option<Arc<output::CompiledOutputSchema>>,
 }
 
 impl RunCapabilities {
@@ -415,6 +419,7 @@ impl RunCapabilities {
             steering: None,
             audit_hook: None,
             tool_tasks: None,
+            output: None,
         }
     }
 
@@ -468,6 +473,11 @@ impl RunCapabilities {
         self
     }
 
+    pub(crate) fn with_output(mut self, output: Option<Arc<output::CompiledOutputSchema>>) -> Self {
+        self.output = output;
+        self
+    }
+
     /// Installs a spawner on a restricted run: a model-authored child task at a
     /// depth the roster still permits to delegate.
     pub(crate) fn with_spawner(mut self, spawner: Arc<dyn SubagentSpawner>) -> Self {
@@ -500,6 +510,7 @@ impl RunCapabilities {
             steering: None,
             audit_hook: None,
             tool_tasks: None,
+            output: None,
         }
     }
 }
@@ -908,6 +919,7 @@ impl plan::CompiledAgentPlan {
                 steering,
                 audit_hook,
                 tool_tasks,
+                output,
             } = capabilities;
             let tool_tasks = tool_tasks.unwrap_or_default();
             let mut steering = steering;
@@ -1078,6 +1090,12 @@ impl plan::CompiledAgentPlan {
                     selected_guidance.as_ref(),
                 );
                 system.push_str(&context_blocks);
+                if let Some(output) = &output {
+                    system.push_str("\n\n");
+                    system.push_str(output::OUTPUT_CONTRACT_SYSTEM_NOTICE);
+                    system.push_str(output.schema_json());
+                    system.push_str("\n```\n");
+                }
                 system
             });
             let mut tool_schema = tool_schema_measurement(&tool_specs);
@@ -1113,6 +1131,9 @@ impl plan::CompiledAgentPlan {
             let mut audit_triggers = runtime::AuditTriggers::default();
             let mut audit_actions: Vec<runtime::AuditedAction> = Vec::new();
             let mut audit_revisions = 0_u16;
+            // Repair turns spent against the output contract, for the whole
+            // run: neither an audit revision nor steering resets them.
+            let mut output_repairs = 0_u8;
             let audit_prompt = messages
                 .iter()
                 .rev()
@@ -1906,7 +1927,45 @@ impl plan::CompiledAgentPlan {
                         yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
                         return;
                     }
-                    yield RuntimeEvent::Completed;
+                    // The answer that survived audit and steering is the one
+                    // the contract judges. A failure within the repair
+                    // allowance continues the loop with the errors as a
+                    // runtime notice; past it, the run completes with the
+                    // typed failure rather than a synthetic outcome.
+                    let final_output = match &output {
+                        None => None,
+                        Some(schema) => {
+                            let answer = assistant
+                                .content()
+                                .iter()
+                                .filter_map(|block| match block {
+                                    ContentBlock::Text { text } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let validation = schema.validate(&answer);
+                            if let Err(errors) = &validation
+                                && output_repairs < schema.repair_turns()
+                            {
+                                output_repairs += 1;
+                                yield RuntimeEvent::OutputRepairRequested {
+                                    turn_ordinal,
+                                    repair: output_repairs,
+                                    errors: output::bounded_errors(errors.clone()),
+                                };
+                                irreducible_message_bytes = irreducible_message_bytes
+                                    .saturating_add(measure_message(&assistant));
+                                messages.push(assistant);
+                                messages.push(Message::user(output::repair_notice(errors)));
+                                irreducible_message_bytes = irreducible_message_bytes
+                                    .saturating_add(measure_message(messages.last().expect("just pushed")));
+                                continue;
+                            }
+                            Some(Box::new(output::final_output(validation, output_repairs)))
+                        }
+                    };
+                    yield RuntimeEvent::Completed { final_output };
                     return;
                 }
                 irreducible_message_bytes = irreducible_message_bytes
@@ -2492,8 +2551,10 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 | RuntimeEvent::Audited { .. }
                 // Continuation is transparent to the direct stream: the text
                 // keeps flowing and the typed failure names exhaustion.
-                | RuntimeEvent::OutputTruncated { .. } => {}
-                RuntimeEvent::Completed => {
+                | RuntimeEvent::OutputTruncated { .. }
+                // Direct runs carry no output contract.
+                | RuntimeEvent::OutputRepairRequested { .. } => {}
+                RuntimeEvent::Completed { .. } => {
                     yield RunEvent::Completed;
                     return;
                 }
@@ -3289,7 +3350,10 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
 
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
         assert_eq!(
             std::fs::read_to_string(directory.path().join("src/feature/note.txt")).unwrap(),
             "after\n"
@@ -3713,7 +3777,10 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
 
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
         assert_eq!(
             events
                 .iter()
@@ -3926,7 +3993,10 @@ mod tests {
             .run_messages_in_workspace(vec![Message::user("read")], directory.path().to_owned())
             .collect::<Vec<_>>()
             .await;
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
 
         let persisted = events
             .iter()
@@ -4057,7 +4127,10 @@ mod tests {
         );
         assert_eq!(finished[0].1, "slow");
         assert_eq!(finished[1].1, "fast");
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
     }
 
     #[cfg(unix)]
@@ -4145,7 +4218,10 @@ mod tests {
             })
             .expect("the bounded result must follow the streamed output");
         assert!(started < delta && delta < finished);
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
     }
 
     #[tokio::test]
@@ -4202,7 +4278,10 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
 
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
         assert!(events.iter().any(|event| matches!(
             event,
             RuntimeEvent::ToolCallFinished { is_error: true, result, .. }
@@ -4311,7 +4390,10 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, RuntimeEvent::ToolCallStarted { .. }))
         );
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
         let requests = requests.lock().unwrap();
         assert!(matches!(
             requests[1].messages()[2].content(),
@@ -4408,7 +4490,10 @@ mod tests {
             RuntimeEvent::ToolCallFinished { is_error: true, result, .. }
                 if result.contains("not valid JSON")
         )));
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
     }
 
     #[tokio::test]
@@ -4551,7 +4636,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(continuations, vec![(1, 1), (2, 2)]);
-        assert_eq!(events.last(), Some(&RuntimeEvent::Completed));
+        assert_eq!(
+            events.last(),
+            Some(&RuntimeEvent::Completed { final_output: None })
+        );
         // The half-streamed tool call never reached the tool loop.
         assert!(!events.iter().any(|event| matches!(
             event,
@@ -4741,7 +4829,10 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
 
-        assert_eq!(events.last(), Some(&RuntimeEvent::Completed));
+        assert_eq!(
+            events.last(),
+            Some(&RuntimeEvent::Completed { final_output: None })
+        );
         assert!(events.iter().any(|event| matches!(
             event,
             RuntimeEvent::OutputTruncated {
@@ -4803,7 +4894,10 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
 
-        assert_eq!(events.last(), Some(&RuntimeEvent::Completed));
+        assert_eq!(
+            events.last(),
+            Some(&RuntimeEvent::Completed { final_output: None })
+        );
         assert!(events.iter().all(|event| !matches!(
             event,
             RuntimeEvent::Failed { message, .. }
@@ -5523,7 +5617,10 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
 
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
         assert!(events.iter().any(|event| matches!(
             event,
             RuntimeEvent::ToolCallFinished { result, is_error: false, .. } if result == "pong"
@@ -5597,7 +5694,7 @@ mod tests {
                 if result == "the server exploded"
         )));
         assert!(
-            matches!(events.last(), Some(RuntimeEvent::Completed)),
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
             "an MCP failure must never fail the run"
         );
 
@@ -5663,7 +5760,10 @@ mod tests {
             RuntimeEvent::ToolCallDenied { message, .. }
                 if message == approval::UNATTENDED_DENIED_RESULT
         )));
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
 
         struct AllowAllGate;
 
@@ -5698,7 +5798,10 @@ mod tests {
             RuntimeEvent::ToolCallFinished { result, is_error: true, .. }
                 if result.contains("unknown tool")
         )));
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
     }
 
     /// Scripts one `spawn_agent` call on the first turn, then completes.
@@ -5817,7 +5920,10 @@ mod tests {
             RuntimeEvent::ToolCallFinished { result, is_error: true, .. }
                 if result == SPAWN_UNAVAILABLE_RESULT
         )));
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
         let requests = requests.lock().unwrap();
         assert!(
             !requests[0]
@@ -5892,7 +5998,10 @@ mod tests {
             .expect("the spawn call must finish successfully");
         assert!(result.len() <= tools::MAX_MODEL_TEXT_BYTES);
         assert!(result.contains("…[qq: "));
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
         assert_eq!(
             tasks.lock().unwrap().as_slice(),
             [("count the widgets".to_owned(), None)]
@@ -6596,7 +6705,7 @@ mod tests {
                     }
                 }
                 assert!(
-                    matches!(events.last(), Some(RuntimeEvent::Completed)),
+                    matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
                     "{context}: {events:?}"
                 );
             }
@@ -6651,7 +6760,7 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
         assert!(
-            matches!(events.last(), Some(RuntimeEvent::Completed)),
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
             "{events:?}"
         );
         assert!(
@@ -6977,7 +7086,10 @@ mod tests {
             .run_messages_in_workspace(messages, directory.path().to_owned())
             .collect::<Vec<_>>()
             .await;
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
         let requests = requests.lock().unwrap();
         let names = tool_names(&requests[0]);
         assert!(names.contains(&"ext__wide__tool03"), "{names:?}");
@@ -7008,7 +7120,10 @@ mod tests {
             .run_messages_in_workspace(vec![Message::user("go")], directory.path().to_owned())
             .collect::<Vec<_>>()
             .await;
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
         let requests = requests.lock().unwrap();
         let names = tool_names(&requests[0]);
         assert!(names.contains(&"ext__wide__tool01"));
@@ -7124,7 +7239,10 @@ mod tests {
             )
             .collect::<Vec<_>>()
             .await;
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed)));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
         let restricted_requests = restricted_requests.lock().unwrap();
         assert!(
             !restricted_requests[0]

@@ -160,7 +160,19 @@ pub(crate) enum RuntimeEvent {
         turn_ordinal: u32,
         continuation: u16,
     },
-    Completed,
+    /// The final answer failed its output contract and the loop is about to
+    /// spend repair turn `repair` (1-based) on it. Emitted after the failing
+    /// turn is committed via `AssistantTurnCompleted`; `errors` is bounded.
+    OutputRepairRequested {
+        turn_ordinal: u32,
+        repair: u8,
+        errors: Vec<String>,
+    },
+    /// The run reached a final answer. `final_output` is the contract
+    /// verdict for a run claimed with one, `None` otherwise.
+    Completed {
+        final_output: Option<Box<qq_protocol::FinalOutput>>,
+    },
     Failed {
         kind: RunFailureKind,
         message: String,

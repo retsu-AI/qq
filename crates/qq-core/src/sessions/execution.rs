@@ -341,7 +341,8 @@ async fn prepare_execution(
         }
     }
     .with_literal_slash(claimed.literal_slash)
-    .with_tool_tasks(resources.tools.clone());
+    .with_tool_tasks(resources.tools.clone())
+    .with_output(claimed.output.clone());
     // The claimed workspace is the plan's workspace: the loader compiled the
     // plan for exactly this session's canonical root, so no per-run
     // canonicalization or directory open happens here.
@@ -2114,7 +2115,11 @@ async fn execute_started_run(
                     }
                 }
             }
-            RunInput::Event(Some(RuntimeEvent::Completed)) => {
+            // The failing turn is already committed via AssistantTurnCompleted;
+            // the repair notice is a runtime message this run alone sees, so
+            // nothing further is persisted or published here.
+            RunInput::Event(Some(RuntimeEvent::OutputRepairRequested { .. })) => {}
+            RunInput::Event(Some(RuntimeEvent::Completed { final_output })) => {
                 if internal {
                     let summary = std::mem::take(&mut summary_text);
                     if summary.trim().is_empty() {
@@ -2193,11 +2198,13 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
+                let mut settled = accounting.snapshot();
+                settled.final_output = final_output;
                 finish_run_accounted(
                     &inner,
                     &claimed,
                     RunOutcome::Completed,
-                    Some(accounting.snapshot()),
+                    Some(settled),
                     teardown,
                 )
                 .await;
@@ -2507,6 +2514,10 @@ pub(super) struct RunAccounting {
     /// Basis of the most recently prepared provider request. A provider
     /// overflow persists it so the retry cannot repeat the same request.
     pub(super) request_basis: ContextOccupancyBasis,
+    /// The typed-output verdict the runtime reached with `Completed`; set
+    /// only for runs claimed with a contract, persisted in the settlement
+    /// transaction.
+    pub(super) final_output: Option<Box<FinalOutput>>,
 }
 
 pub(super) struct RunAccountingAccumulator {
@@ -2580,6 +2591,7 @@ impl RunAccountingAccumulator {
                 .flatten(),
             saw_turn: self.saw_turn,
             request_basis: self.request_basis,
+            final_output: None,
         }
     }
 }

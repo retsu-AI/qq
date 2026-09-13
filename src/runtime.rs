@@ -1865,6 +1865,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::EmptyPrompt
         | SessionRuntimeError::PromptTooLarge
         | SessionRuntimeError::InvalidRunLimits
+        | SessionRuntimeError::InvalidOutputContract(_)
         | SessionRuntimeError::InvalidInput(_)
         | SessionRuntimeError::RunNotSteerable
         | SessionRuntimeError::UnknownProfile(_)

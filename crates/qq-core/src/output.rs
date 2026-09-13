@@ -164,6 +164,9 @@ struct SchemaNode {
 pub struct CompiledOutputSchema {
     root: Node,
     repair_turns: u8,
+    /// Compact canonical encoding of the source schema, shown to the model
+    /// in the system prompt. Serialized once here, never per turn.
+    schema_json: Box<str>,
 }
 
 impl CompiledOutputSchema {
@@ -194,15 +197,27 @@ impl CompiledOutputSchema {
         let mut budget = Budget::default();
         budget.measure(&contract.schema, 0)?;
         let root = compile_node(&contract.schema, &mut String::new())?;
+        let schema_json = String::from_utf8(encoded)
+            .map_err(|error| OutputSchemaError::Invalid {
+                pointer: String::new(),
+                message: error.to_string(),
+            })?
+            .into_boxed_str();
         Ok(Arc::new(Self {
             root,
             repair_turns: contract.repair_turns,
+            schema_json,
         }))
     }
 
     #[must_use]
     pub const fn repair_turns(&self) -> u8 {
         self.repair_turns
+    }
+
+    #[must_use]
+    pub fn schema_json(&self) -> &str {
+        &self.schema_json
     }
 
     /// Validates a final answer. The answer must be one JSON document,

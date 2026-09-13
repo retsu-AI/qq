@@ -7,7 +7,7 @@ use crate::sessions::{PersistenceFault, SessionRuntimeError};
 
 /// Current session store schema, stored as `metadata.schema_version`. Bump it
 /// with every migration step appended to `open_database`.
-pub const STORE_SCHEMA_VERSION: u16 = 26;
+pub const STORE_SCHEMA_VERSION: u16 = 27;
 
 /// Suffix of the sibling file whose advisory lock marks the store's owner.
 pub const OWNER_LOCK_SUFFIX: &str = ".lock";
@@ -381,7 +381,7 @@ pub(in crate::sessions) fn open_database(
         }
         Some(
             "10" | "11" | "12" | "13" | "14" | "15" | "16" | "17" | "18" | "19" | "20" | "21"
-            | "22" | "23" | "24" | "25" | "26",
+            | "22" | "23" | "24" | "25" | "26" | "27",
         ) => {}
         Some(_) => return Err(SessionRuntimeError::CONSTRAINT),
     }
@@ -403,6 +403,7 @@ pub(in crate::sessions) fn open_database(
                 | "24"
                 | "25"
                 | "26"
+                | "27"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -430,6 +431,7 @@ pub(in crate::sessions) fn open_database(
                 | "24"
                 | "25"
                 | "26"
+                | "27"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -456,6 +458,7 @@ pub(in crate::sessions) fn open_database(
                 | "24"
                 | "25"
                 | "26"
+                | "27"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -481,6 +484,7 @@ pub(in crate::sessions) fn open_database(
                 | "24"
                 | "25"
                 | "26"
+                | "27"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -494,7 +498,20 @@ pub(in crate::sessions) fn open_database(
     validate_model_turn_audit_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("15" | "16" | "17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26")
+        Some(
+            "15" | "16"
+                | "17"
+                | "18"
+                | "19"
+                | "20"
+                | "21"
+                | "22"
+                | "23"
+                | "24"
+                | "25"
+                | "26"
+                | "27"
+        )
     ) {
         let transaction = connection.transaction()?;
         add_linear_streaming_storage(&transaction)?;
@@ -517,7 +534,7 @@ pub(in crate::sessions) fn open_database(
     validate_linear_streaming_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("16" | "17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26")
+        Some("16" | "17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27")
     ) {
         let transaction = connection.transaction()?;
         add_runs_resolved_model_column(&transaction)?;
@@ -532,7 +549,7 @@ pub(in crate::sessions) fn open_database(
     }
     if !matches!(
         schema_version.as_deref(),
-        Some("17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26")
+        Some("17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27")
     ) {
         let transaction = connection.transaction()?;
         add_preparing_run_storage(&transaction)?;
@@ -546,7 +563,7 @@ pub(in crate::sessions) fn open_database(
     validate_preparing_run_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26")
+        Some("18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27")
     ) {
         let transaction = connection.transaction()?;
         add_context_occupancy_storage(&transaction)?;
@@ -560,7 +577,7 @@ pub(in crate::sessions) fn open_database(
     validate_context_occupancy_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("19" | "20" | "21" | "22" | "23" | "24" | "25" | "26")
+        Some("19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27")
     ) {
         let transaction = connection.transaction()?;
         add_run_limits_storage(&transaction)?;
@@ -574,7 +591,7 @@ pub(in crate::sessions) fn open_database(
     validate_run_limits_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("20" | "21" | "22" | "23" | "24" | "25" | "26")
+        Some("20" | "21" | "22" | "23" | "24" | "25" | "26" | "27")
     ) {
         let transaction = connection.transaction()?;
         add_sessions_spawned_by_tool_call_column(&transaction)?;
@@ -586,7 +603,7 @@ pub(in crate::sessions) fn open_database(
     }
     if !matches!(
         schema_version.as_deref(),
-        Some("21" | "22" | "23" | "24" | "25" | "26")
+        Some("21" | "22" | "23" | "24" | "25" | "26" | "27")
     ) {
         let transaction = connection.transaction()?;
         add_contract_columns(&transaction)?;
@@ -598,7 +615,7 @@ pub(in crate::sessions) fn open_database(
     }
     if !matches!(
         schema_version.as_deref(),
-        Some("22" | "23" | "24" | "25" | "26")
+        Some("22" | "23" | "24" | "25" | "26" | "27")
     ) {
         let transaction = connection.transaction()?;
         add_output_truncation_columns(&transaction)?;
@@ -609,7 +626,10 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_output_truncation_schema(&connection)?;
-    if !matches!(schema_version.as_deref(), Some("23" | "24" | "25" | "26")) {
+    if !matches!(
+        schema_version.as_deref(),
+        Some("23" | "24" | "25" | "26" | "27")
+    ) {
         let transaction = connection.transaction()?;
         add_session_depth_columns(&transaction)?;
         transaction.execute(
@@ -619,7 +639,7 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_session_depth_schema(&connection)?;
-    if !matches!(schema_version.as_deref(), Some("24" | "25" | "26")) {
+    if !matches!(schema_version.as_deref(), Some("24" | "25" | "26" | "27")) {
         let transaction = connection.transaction()?;
         add_audit_columns(&transaction)?;
         transaction.execute(
@@ -629,7 +649,7 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_audit_schema(&connection)?;
-    if !matches!(schema_version.as_deref(), Some("25" | "26")) {
+    if !matches!(schema_version.as_deref(), Some("25" | "26" | "27")) {
         let transaction = connection.transaction()?;
         add_fast_path_columns(&transaction)?;
         transaction.execute(
@@ -639,7 +659,7 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_fast_path_schema(&connection)?;
-    if schema_version.as_deref() != Some("26") {
+    if !matches!(schema_version.as_deref(), Some("26" | "27")) {
         let transaction = connection.transaction()?;
         add_tool_call_effect_column(&transaction)?;
         transaction.execute(
@@ -649,6 +669,16 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_tool_call_effect_schema(&connection)?;
+    if schema_version.as_deref() != Some("27") {
+        let transaction = connection.transaction()?;
+        add_output_contract_columns(&transaction)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '27' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
+    }
+    validate_output_contract_schema(&connection)?;
     debug_assert_eq!(
         connection
             .query_row(
@@ -1518,6 +1548,31 @@ fn validate_fast_path_schema(connection: &Connection) -> Result<(), SessionRunti
         .optional()?;
     if counted.is_none() {
         return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    Ok(())
+}
+
+/// Schema 27: the typed-output contract. `runs.output_contract_json` is the
+/// `OutputContract` a prompt was submitted with, so a claim (including one
+/// after restart) enforces the contract the caller accepted;
+/// `runs.final_output_json` is the durable `FinalOutput` verdict, written in
+/// the settlement transaction before `run_finished` is published. Both are
+/// null for runs without a contract and for every historical row.
+fn add_output_contract_columns(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    if !has_column(connection, "runs", "output_contract_json")? {
+        connection.execute("ALTER TABLE runs ADD COLUMN output_contract_json TEXT", [])?;
+    }
+    if !has_column(connection, "runs", "final_output_json")? {
+        connection.execute("ALTER TABLE runs ADD COLUMN final_output_json TEXT", [])?;
+    }
+    Ok(())
+}
+
+fn validate_output_contract_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    for column in ["output_contract_json", "final_output_json"] {
+        if column_shape(connection, "runs", column)? != ("TEXT".to_owned(), false, None, 0) {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
     }
     Ok(())
 }
