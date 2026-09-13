@@ -37,6 +37,7 @@ mod tools;
 
 /// Entry points for the `tool_output` bench. Not a public API.
 #[doc(hidden)]
+pub use tools::bench_support as tool_bench;
 pub use tools::output::bench_support as tool_output_bench;
 mod workspace;
 
@@ -45,7 +46,7 @@ use runtime::{
     HistorySearcher, PendingToolCall, PreparedRequestWeight, PreparedStaticPrefix, RuntimeEvent,
     RuntimeToolCall, SPAWN_UNAVAILABLE_RESULT, SearchHistoryArgs, SpawnAgentFuture,
     SpawnAgentOutcome, SpawnAgentSpend, SpawnRequest, SubagentSpawner, ToolGate, ToolGateFuture,
-    TurnBlock, agent_system_prompt, render_history_matches, tool_schema_measurement,
+    TurnBlock, agent_system_prompt, render_history_matches,
 };
 
 pub use approval::shell_prefix_matches;
@@ -1079,7 +1080,7 @@ impl plan::CompiledAgentPlan {
                 system.push_str(&context_blocks);
                 system
             });
-            let mut tool_schema = tool_schema_measurement(&tool_specs);
+            let mut tool_schema = catalog.schema_measurement(&tool_specs);
             let system_prompt_hash = ContentHash::from_bytes(Sha256::digest(system.as_bytes()).into());
             let mut prompt_identity = Some(Arc::new(RunPromptIdentity {
                     version: AGENT_PROMPT_VERSION,
@@ -1612,7 +1613,10 @@ impl plan::CompiledAgentPlan {
                     // the name. A name the catalog does not hold is not
                     // executable, so it settles as a tool error before any
                     // gate sees it.
-                    let known = catalog.lookup(&pending.name).map(|entry| entry.effect);
+                    let known = catalog
+                        .lookup(&pending.name)
+                        .map(|entry| entry.effect)
+                        .or_else(|| tools::alias_effect(&pending.name, &catalog));
                     #[cfg(test)]
                     let known = known.or_else(|| tools::test_tool_effect(&pending.name));
                     let (effect, rejection) = match known {
@@ -2010,7 +2014,7 @@ impl plan::CompiledAgentPlan {
                 }
                 if pins_changed {
                     tool_specs = catalog.specs_with_pins(&base_specs, &pins);
-                    tool_schema = tool_schema_measurement(&tool_specs);
+                    tool_schema = catalog.schema_measurement(&tool_specs);
                 }
                 let approved = approved
                     .into_iter()
@@ -3748,7 +3752,7 @@ mod tests {
             ] if call_id == "read"
                 && content == "contents\n"
                 && second_id == "list"
-                && second_content == "note.txt\n"
+                && second_content == "tree . depth=1 entries=1/1 files=1 dirs=0\nnote.txt 9\n"
         ));
     }
 

@@ -987,6 +987,7 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
             if !matches!(
                 name.as_str(),
                 "read_file"
+                    | "tree"
                     | "list_dir"
                     | "search"
                     | "edit_file"

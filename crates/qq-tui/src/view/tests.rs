@@ -694,7 +694,9 @@ fn collapsed_summaries_curate_known_tools() {
                 "search",
                 r#"{"query":"pattern"}"#,
                 ToolCallState::Completed,
-                Some("src/a.rs:1:x pattern\nsrc/a.rs:9:pattern y\nsrc/b.rs: filename match\n"),
+                Some(
+                    "search \"pattern\" mode=content matches=3/3 files=2 scanned=40\nsrc/a.rs\nL1: x pattern\nL9: pattern y\nsrc/b.rs\nL4: pattern\n",
+                ),
                 false,
             ),
             " ● Search \"pattern\" 3 hits · 2 files",
@@ -705,21 +707,49 @@ fn collapsed_summaries_curate_known_tools() {
                 "search",
                 r#"{"query":"absent"}"#,
                 ToolCallState::Completed,
-                Some("No matches found.\n"),
+                Some("search \"absent\" mode=content matches=0/0 files=0 scanned=40\n"),
                 false,
             ),
             " ● Search \"absent\" no matches",
         ),
         (
             tool_call_snapshot(
+                6,
+                "search",
+                r#"{"query":"needle","limit":25}"#,
+                ToolCallState::Completed,
+                Some(
+                    "search \"needle\" mode=content matches=25/90+ files=3 scanned=3 next=Yy50eHQANQ\n",
+                ),
+                false,
+            ),
+            " ● Search \"needle\" 25/90+ hits · 3 files",
+        ),
+        (
+            tool_call_snapshot(
                 5,
-                "list_dir",
+                "tree",
                 r#"{"path":"crates/qq-core/src"}"#,
                 ToolCallState::Completed,
-                Some("lib.rs\nsessions.rs\ntools.rs\n"),
+                Some(
+                    "tree crates/qq-core/src depth=2 entries=3/3 files=3 dirs=0\nlib.rs 1.2k  sessions.rs 40k  tools.rs 9.1k\n",
+                ),
                 false,
             ),
             " ● List crates/qq-core/src 3 entries",
+        ),
+        (
+            tool_call_snapshot(
+                7,
+                "list_dir",
+                r#"{"path":"."}"#,
+                ToolCallState::Completed,
+                Some(
+                    "tree . depth=1 entries=3/12 files=3 dirs=0\na.rs 1  b.rs 2  c.rs 3\n…[qq: 9 more entries; raise limit]…\n",
+                ),
+                false,
+            ),
+            " ● List . 3/12 entries · truncated",
         ),
     ];
     for (call, expected) in cases {

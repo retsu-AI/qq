@@ -140,7 +140,8 @@ const RUNTIME_NOTICE_GUIDANCE: &str = "Continue from the committed history above
 /// stubs when the call predates the stored effect class (schema 26): the
 /// agent can re-derive them on demand. Calls with a stored effect prune by
 /// that class instead; mutating, shell, and external results are never pruned.
-const PRUNABLE_READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_dir", "search", "search_history"];
+const PRUNABLE_READ_ONLY_TOOLS: [&str; 5] =
+    ["read_file", "tree", "list_dir", "search", "search_history"];
 /// Prefixes the latest compaction summary when assembly replays it as the
 /// conversation's opening message.
 const COMPACTION_SUMMARY_PREAMBLE: &str = "The earlier part of this conversation was compacted \

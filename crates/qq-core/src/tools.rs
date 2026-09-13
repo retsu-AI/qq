@@ -1,15 +1,41 @@
 mod dispatch;
 mod edit;
-mod list;
+mod lang;
 pub mod output;
 mod read;
 mod search;
 mod shell;
 mod specs;
+mod tree;
+mod walk;
 mod write;
 
 #[cfg(test)]
 pub(crate) use dispatch::test_executions_started;
+
+/// Entry points for the `search_walk` bench. Not a public API.
+pub mod bench_support {
+    use std::{
+        path::Path,
+        sync::{Arc, atomic::AtomicBool},
+    };
+
+    use crate::workspace::{FileState, Workspace};
+
+    /// Runs one built-in read-side tool against `workspace_root` and returns
+    /// its model-facing text.
+    pub fn run_tool(workspace_root: &Path, name: &str, arguments: &str) -> String {
+        let workspace = Workspace::open(workspace_root).expect("workspace must open");
+        super::dispatch::execute_blocking(
+            &workspace,
+            &FileState::default(),
+            name,
+            arguments,
+            &super::dispatch::ToolCancellation::new(Arc::new(AtomicBool::new(false))),
+        )
+        .model_text
+    }
+}
 pub(crate) use dispatch::{ToolDrainError, ToolOutput, ToolTasks, bounded_result, execute};
 #[cfg(test)]
 pub(crate) use edit::hold_tool_apply;
@@ -17,7 +43,8 @@ pub(crate) use edit::hold_tool_apply;
 pub(crate) use output::MAX_MODEL_TEXT_BYTES;
 pub(crate) use output::{TurnOutputBudget, header_line};
 pub(crate) use specs::{
-    MAX_SPAWN_AGENT_SCHEMA_BYTES, SPAWN_AGENT_TOOL, SpawnAgentArgs, spawn_agent_spec, static_tools,
+    MAX_SPAWN_AGENT_SCHEMA_BYTES, SPAWN_AGENT_TOOL, SpawnAgentArgs, alias_effect, spawn_agent_spec,
+    static_tools,
 };
 #[cfg(test)]
 pub(crate) use specs::{specs, test_tool_effect};
@@ -27,13 +54,9 @@ use crate::workspace::{FileState, Workspace, content_hash};
 #[cfg(test)]
 use dispatch::{ToolCancellation, execute_blocking};
 #[cfg(test)]
-use list::MAX_DIRECTORY_ENTRIES;
-#[cfg(test)]
 use output::{MARKER_PREFIX, escaped_len};
 #[cfg(test)]
 use read::MAX_READ_SCAN_BYTES;
-#[cfg(test)]
-use search::MAX_SEARCH_BYTES;
 #[cfg(test)]
 use serde_json::json;
 #[cfg(test)]
@@ -140,7 +163,15 @@ mod tests {
         let state = FileState::default();
 
         let listed = run_tool(&workspace, &state, "list_dir", r#"{"path":"."}"#);
-        assert_eq!(listed.model_text, "a.txt\nb.txt\n");
+        assert_eq!(
+            listed.model_text,
+            "tree . depth=1 entries=2/2 files=2 dirs=0\na.txt 1  b.txt 14\n"
+        );
+        let tree = run_tool(&workspace, &state, "tree", r#"{}"#);
+        assert_eq!(
+            tree.model_text,
+            "tree . depth=2 entries=2/2 files=2 dirs=0\na.txt 1  b.txt 14\n"
+        );
 
         let read = run_tool(
             &workspace,
@@ -291,6 +322,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         fs::create_dir(directory.path().join("src")).unwrap();
         fs::write(directory.path().join("src/needle.rs"), "hay\nneedle here\n").unwrap();
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            fs::write(outside.path().join("needle.txt"), "needle outside").unwrap();
+            std::os::unix::fs::symlink(outside.path(), directory.path().join("link")).unwrap();
+            // The symlink stays open across the test so its target exists.
+            std::mem::forget(outside);
+        }
         let workspace = Workspace::open(directory.path()).unwrap();
 
         let result = run_tool(
@@ -299,17 +338,30 @@ mod tests {
             "search",
             r#"{"query":"needle"}"#,
         );
-        assert!(!result.is_error);
-        assert!(result.model_text.contains("src/needle.rs: filename match"));
-        assert!(result.model_text.contains("src/needle.rs:2:needle here"));
+        assert!(!result.is_error, "{}", result.model_text);
+        assert_eq!(
+            result.model_text,
+            "search \"needle\" mode=content matches=1/1 files=1 scanned=1\nsrc/needle.rs\nL2: needle here\n"
+        );
+        let names = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"needle","mode":"names"}"#,
+        );
+        assert_eq!(
+            names.model_text,
+            "search \"needle\" mode=names matches=1/1 files=1 scanned=1\nsrc/needle.rs\n"
+        );
     }
 
     #[test]
-    fn search_marks_a_single_oversized_file_as_truncated() {
+    fn search_skips_oversized_and_binary_files_and_counts_them() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("oversized-needle.txt");
-        let file = fs::File::create(&path).unwrap();
-        file.set_len(MAX_SEARCH_BYTES + 1).unwrap();
+        let oversized = fs::File::create(directory.path().join("oversized-needle.txt")).unwrap();
+        oversized.set_len(walk::MAX_FILE_SCAN_BYTES + 1).unwrap();
+        fs::write(directory.path().join("blob.bin"), b"needle\0needle").unwrap();
+        fs::write(directory.path().join("text.txt"), "needle\n").unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
 
         let result = run_tool(
@@ -318,10 +370,409 @@ mod tests {
             "search",
             r#"{"query":"needle"}"#,
         );
-
         assert!(!result.is_error);
-        assert!(result.model_text.contains("filename match"));
-        assert!(result.model_text.contains("more matches may exist"));
+        assert!(
+            result.model_text.starts_with(
+                "search \"needle\" mode=content matches=1/1 files=1 scanned=2 skipped=2\n"
+            ),
+            "{}",
+            result.model_text
+        );
+        assert!(!result.model_text.contains("blob.bin"));
+    }
+
+    #[test]
+    fn search_honours_gitignore_generated_directories_and_include_ignored() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join(".gitignore"), "*.log\n/vendor/\n!keep.log\n").unwrap();
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::create_dir_all(root.join("vendor")).unwrap();
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::create_dir_all(root.join(".hidden")).unwrap();
+        fs::write(root.join("target/debug/out.rs"), "needle in target\n").unwrap();
+        fs::write(root.join("vendor/lib.rs"), "needle in vendor\n").unwrap();
+        fs::write(root.join("debug.log"), "needle in log\n").unwrap();
+        fs::write(root.join("keep.log"), "needle in kept log\n").unwrap();
+        fs::write(root.join(".hidden/h.rs"), "needle hidden\n").unwrap();
+        fs::write(root.join("nested/.gitignore"), "*.rs\n").unwrap();
+        fs::write(root.join("nested/a.rs"), "needle nested rs\n").unwrap();
+        fs::write(root.join("nested/a.txt"), "needle nested txt\n").unwrap();
+        fs::write(root.join("main.rs"), "needle main\n").unwrap();
+        let workspace = Workspace::open(root).unwrap();
+
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"needle"}"#,
+        );
+        assert_eq!(
+            result.model_text,
+            "search \"needle\" mode=content matches=3/3 files=3 scanned=3\n\
+             keep.log\nL1: needle in kept log\n\
+             main.rs\nL1: needle main\n\
+             nested/a.txt\nL1: needle nested txt\n"
+        );
+
+        // A walk rooted below the workspace root still honours the root file.
+        let nested = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"needle","path":"nested"}"#,
+        );
+        assert!(
+            nested.model_text.contains("nested/a.txt"),
+            "{}",
+            nested.model_text
+        );
+        assert!(!nested.model_text.contains("a.rs"));
+
+        let everything = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"needle","include_ignored":true}"#,
+        );
+        for path in [
+            "target/debug/out.rs",
+            "vendor/lib.rs",
+            "debug.log",
+            ".hidden/h.rs",
+            "nested/a.rs",
+        ] {
+            assert!(
+                everything.model_text.contains(path),
+                "{path} missing:\n{}",
+                everything.model_text
+            );
+        }
+    }
+
+    #[test]
+    fn search_pages_with_an_exact_cursor_and_caps_per_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        // 3 files × 30 lines = 90 matches; page size 60; per-file cap 10 → 30 shown per page.
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            let body: String = (1..=30).map(|n| format!("needle {n}\n")).collect();
+            fs::write(root.join(name), body).unwrap();
+        }
+        let workspace = Workspace::open(root).unwrap();
+        let state = FileState::default();
+
+        let first = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"needle","limit":25}"#,
+        );
+        let header = first.model_text.lines().next().unwrap();
+        assert!(header.contains("matches=25/"), "{header}");
+        assert!(
+            first.model_text.contains("+20 more in file"),
+            "{}",
+            first.model_text
+        );
+        let cursor = header
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("next="))
+            .expect("a cursor when limit is hit");
+        let decoded = search::Cursor::decode(cursor).unwrap();
+        assert_eq!(
+            decoded,
+            search::Cursor {
+                path: "c.txt".to_owned(),
+                line: 5
+            }
+        );
+
+        // Resume: match #26 is c.txt L6 and nothing before it repeats. The
+        // per-file cap hides the rest of c.txt behind `+N more in file` and
+        // the header's total, not behind a cursor.
+        let second = run_tool(
+            &workspace,
+            &state,
+            "search",
+            &format!(r#"{{"query":"needle","limit":25,"cursor":"{cursor}"}}"#),
+        );
+        assert!(
+            second.model_text.starts_with(
+                "search \"needle\" mode=content matches=10/25 files=1 scanned=1\nc.txt\nL6: needle 6\n"
+            ),
+            "{}",
+            second.model_text
+        );
+        assert!(
+            second
+                .model_text
+                .ends_with("L15: needle 15\n+15 more in file\n")
+        );
+        assert!(!second.model_text.contains("next="));
+
+        // Match #61 is reachable across pages with the default per-file cap.
+        let mut seen = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..10 {
+            let arguments = match &cursor {
+                Some(cursor) => format!(
+                    r#"{{"query":"needle","limit":20,"max_per_file":50,"cursor":"{cursor}"}}"#
+                ),
+                None => r#"{"query":"needle","limit":20,"max_per_file":50}"#.to_owned(),
+            };
+            let page = run_tool(&workspace, &state, "search", &arguments);
+            let mut file = String::new();
+            for line in page.model_text.lines().skip(1) {
+                if let Some(rest) = line.strip_prefix('L') {
+                    let number: u32 = rest.split(':').next().unwrap().parse().unwrap();
+                    seen.push((file.clone(), number));
+                } else {
+                    file = line.to_owned();
+                }
+            }
+            cursor = page
+                .model_text
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("next=").map(str::to_owned));
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(seen.len(), 90);
+        assert_eq!(seen[60], ("c.txt".to_owned(), 1));
+        let mut deduped = seen.clone();
+        deduped.dedup();
+        assert_eq!(deduped.len(), 90, "no match repeats across pages");
+
+        let bad = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"needle","cursor":"!!"}"#,
+        );
+        assert!(bad.is_error);
+        assert!(bad.model_text.starts_with("cursor_invalid"));
+    }
+
+    #[test]
+    fn search_modes_regex_case_context_and_globs() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "use x;\n\npub fn apply_lock(&self) {}\n\nfn caller() {\n    apply_lock();\n}\n",
+        )
+        .unwrap();
+        fs::write(root.join("notes.md"), "Apply_Lock notes\r\nplain\r\n").unwrap();
+        let workspace = Workspace::open(root).unwrap();
+        let state = FileState::default();
+
+        let definition = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"apply_lock","mode":"definition"}"#,
+        );
+        assert_eq!(
+            definition.model_text,
+            "search \"apply_lock\" mode=definition matches=1/1 files=1 scanned=2\nsrc/lib.rs\nL3: pub fn apply_lock(&self) {}\n"
+        );
+        let references = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"apply_lock","mode":"references","case":"sensitive"}"#,
+        );
+        assert_eq!(
+            references.model_text,
+            "search \"apply_lock\" mode=references matches=1/1 files=1 scanned=2\nsrc/lib.rs\nL6:     apply_lock();\n"
+        );
+        let invalid = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"fn (","mode":"definition"}"#,
+        );
+        assert!(invalid.is_error && invalid.model_text.starts_with("invalid_symbol"));
+
+        // Smart case: a lowercase query is insensitive; CRLF lines lose the CR.
+        let smart = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"apply_lock","include":["*.md"]}"#,
+        );
+        assert_eq!(
+            smart.model_text,
+            "search \"apply_lock\" mode=content matches=1/1 files=1 scanned=1\nnotes.md\nL1: Apply_Lock notes\n"
+        );
+        // Sensitive zero-result search hints at the insensitive count.
+        let sensitive = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"APPLY_LOCK","case":"sensitive"}"#,
+        );
+        assert_eq!(
+            sensitive.model_text,
+            "search \"APPLY_LOCK\" mode=content matches=0/0 files=0 scanned=2 hint=case_insensitive_matches=3\n"
+        );
+
+        let regex = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"^fn \\w+\\(","regex":true,"context":1,"exclude":["*.md"]}"#,
+        );
+        assert_eq!(
+            regex.model_text,
+            "search \"^fn \\\\w+\\\\(\" mode=content matches=1/1 files=1 scanned=1\nsrc/lib.rs\nL4- \nL5: fn caller() {\nL6-     apply_lock();\n"
+        );
+        let bad_regex = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"(","regex":true}"#,
+        );
+        assert!(bad_regex.is_error && bad_regex.model_text.starts_with("invalid_regex"));
+        let bad_glob = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"x","include":["["]}"#,
+        );
+        assert!(bad_glob.is_error && bad_glob.model_text.starts_with("bad_glob"));
+        let escape = run_tool(&workspace, &state, "search", r#"{"query":"x","path":".."}"#);
+        assert!(escape.is_error && escape.model_text.starts_with("path_escapes_workspace"));
+    }
+
+    #[test]
+    fn search_tolerates_invalid_utf8_and_a_symlink_loop() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(
+            root.join("mixed.txt"),
+            b"needle before\n\xff\xfe bad bytes\nneedle after\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(".", root.join("loop")).unwrap();
+        let workspace = Workspace::open(root).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"needle"}"#,
+        );
+        assert_eq!(
+            result.model_text,
+            "search \"needle\" mode=content matches=2/2 files=1 scanned=1\nmixed.txt\nL1: needle before\nL3: needle after\n"
+        );
+    }
+
+    #[test]
+    fn search_stops_at_the_byte_budget_with_a_cursor_instead_of_cutting() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        // 8 files × 50 matches of ~100 bytes: over the 12 KiB body budget.
+        for index in 0..8 {
+            let body: String = (1..=50)
+                .map(|n| format!("needle {n} {}\n", "x".repeat(90)))
+                .collect();
+            fs::write(root.join(format!("big-{index}.txt")), body).unwrap();
+        }
+        let workspace = Workspace::open(root).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"needle","limit":500,"max_per_file":50}"#,
+        );
+        let header = result.model_text.lines().next().unwrap();
+        assert!(header.contains("truncated=bytes"), "{header}");
+        assert!(header.contains("next="), "{header}");
+        assert!(
+            !result.model_text.contains(MARKER_PREFIX),
+            "no mid-body cut"
+        );
+        assert!(escaped_len(&result.model_text) <= search::SEARCH_BOUNDS.max_bytes);
+    }
+
+    #[test]
+    fn tree_fills_breadth_first_with_counts_chains_and_ignored_markers() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("src/deep/er/est")).unwrap();
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("src/deep/er/est/leaf.rs"), "x".repeat(2048)).unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("target/debug/bin"), "").unwrap();
+        fs::write(root.join("docs/a.md"), "a").unwrap();
+        fs::write(root.join("docs/b.md"), "bb").unwrap();
+        fs::write(root.join("README.md"), "readme").unwrap();
+        fs::write(root.join(".gitignore"), "*.tmp\n").unwrap();
+        fs::write(root.join("scratch.tmp"), "ignored").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("README.md", root.join("link.md")).unwrap();
+        let workspace = Workspace::open(root).unwrap();
+        let state = FileState::default();
+
+        // depth=3 lists src/deep/er but not est; the chain collapses as far
+        // as it was listed and the counts cover the whole subtree.
+        let tree = run_tool(&workspace, &state, "tree", r#"{"depth":3}"#);
+        assert!(!tree.is_error, "{}", tree.model_text);
+        let expected_link = if cfg!(unix) { "link.md@\n" } else { "" };
+        assert_eq!(
+            tree.model_text,
+            format!(
+                "tree . depth=3 entries={n}/{n} files={f} dirs=5\n\
+                 README.md 6\n\
+                 docs/ (2f 0d)\n\
+                 \x20 a.md 1  b.md 2\n\
+                 {link}\
+                 src/ (2f 3d)\n\
+                 \x20 deep/er/ (1f 1d)\n\
+                 \x20 main.rs 13\n\
+                 target/ …ignored\n",
+                n = if cfg!(unix) { 10 } else { 9 },
+                f = if cfg!(unix) { 5 } else { 4 },
+                link = expected_link
+            )
+        );
+        let deep = run_tool(&workspace, &state, "tree", r#"{"depth":4,"path":"src"}"#);
+        assert!(
+            deep.model_text
+                .contains("deep/er/est/ (1f 0d)\n  leaf.rs 2.0k\n"),
+            "{}",
+            deep.model_text
+        );
+
+        let shallow = run_tool(&workspace, &state, "tree", r#"{"limit":3,"depth":1}"#);
+        assert!(
+            shallow.model_text.starts_with("tree . depth=1 entries=3/"),
+            "{}",
+            shallow.model_text
+        );
+        assert!(shallow.model_text.contains("more entries; raise limit"));
+
+        let globbed = run_tool(&workspace, &state, "tree", r#"{"glob":"*.md","depth":2}"#);
+        assert!(
+            globbed.model_text.contains("a.md"),
+            "{}",
+            globbed.model_text
+        );
+        assert!(!globbed.model_text.contains("main.rs"));
+
+        let not_dir = run_tool(&workspace, &state, "tree", r#"{"path":"README.md"}"#);
+        assert!(not_dir.is_error && not_dir.model_text.starts_with("not_a_directory"));
+        let too_deep = run_tool(&workspace, &state, "tree", r#"{"depth":7}"#);
+        assert!(too_deep.is_error && too_deep.model_text.starts_with("invalid_depth"));
     }
 
     #[test]
@@ -339,7 +790,7 @@ mod tests {
         assert!(result.is_error);
         assert!(result.model_text.contains("cancelled"));
 
-        for index in 0..=MAX_DIRECTORY_ENTRIES {
+        for index in 0..=tree::MAX_ENTRIES {
             fs::write(directory.path().join(format!("entry-{index}")), "").unwrap();
         }
         let result = run_tool(
@@ -348,8 +799,17 @@ mod tests {
             "list_dir",
             r#"{"path":"."}"#,
         );
-        assert!(result.is_error);
-        assert!(result.model_text.contains("more than"));
+        assert!(!result.is_error);
+        assert!(
+            result.model_text.starts_with(&format!(
+                "tree . depth=1 entries={}/{} ",
+                tree::MAX_ENTRIES,
+                tree::MAX_ENTRIES + 2
+            )),
+            "{}",
+            result.model_text.lines().next().unwrap()
+        );
+        assert!(result.model_text.contains("2 more entries; raise limit"));
     }
 
     #[test]
@@ -430,7 +890,7 @@ mod tests {
             specs.iter().map(|spec| spec.name()).collect::<Vec<_>>(),
             [
                 "read_file",
-                "list_dir",
+                "tree",
                 "search",
                 "edit_file",
                 "write_file",
@@ -438,11 +898,12 @@ mod tests {
             ]
         );
         assert!(!specs.iter().any(|spec| spec.name() == SPAWN_AGENT_TOOL));
+        assert!(!specs.iter().any(|spec| spec.name() == "list_dir"));
         assert_eq!(
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "cda414df746f71750ae4754828cdca4d00c1c9c78a70b7f7a0182d7c62076ae9"
+            "e24c05b41d2c0e11e7f3fb7c5756fa047f25a5d9113f2fc9b853e620c34a9056"
         );
     }
 
@@ -891,8 +1352,20 @@ mod tests {
             content_hash(b"AWS_KEY=AKIAIOSFODNN7EXAMPLE\nDB_PASSWORD=hunter2hunter2\nPORT=$PORT\n")
         );
 
-        let found = run_tool(&workspace, &state, "search", r#"{"query":"AKIA"}"#);
-        assert!(found.model_text.contains(".env:1:AWS_KEY=[masked:aws_key]"));
+        // Hidden files are searched only on request; masking still applies.
+        let found = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"AKIA","include_ignored":true}"#,
+        );
+        assert!(
+            found
+                .model_text
+                .contains(".env\nL1: AWS_KEY=[masked:aws_key]"),
+            "{}",
+            found.model_text
+        );
         assert!(!found.model_text.contains("AKIAIOSFODNN7EXAMPLE"));
     }
 

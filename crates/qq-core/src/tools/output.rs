@@ -20,7 +20,7 @@ pub(crate) const MIN_MODEL_TEXT_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_TURN_TOOL_OUTPUT_BYTES: usize = 96 * 1024;
 const DEFAULT_HEAD_RATIO: u8 = 50;
 /// Escaped bytes reserved for the omission marker when computing the cut.
-const MARKER_RESERVE_BYTES: usize = 160;
+pub(crate) const MARKER_RESERVE_BYTES: usize = 160;
 /// Longest header line a pruning stub preserves.
 pub(crate) const MAX_STUB_HEADER_BYTES: usize = 512;
 /// Every marker line qq inserts into model text starts with this, so clients
