@@ -2376,6 +2376,7 @@ fn a_finished_run_ends_with_a_completion_line_and_a_running_one_does_not() {
             reasoning_tokens: None,
         }),
         context_tokens: None,
+        final_output: None,
     }));
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 20);
     let text = frame_text(&frame);
@@ -2777,6 +2778,7 @@ fn the_sidebar_groups_sessions_by_what_the_user_should_do() {
             outcome: qq_protocol::RunOutcome::Completed,
             usage: None,
             context_tokens: None,
+            final_output: None,
         },
     ));
 
@@ -3201,6 +3203,7 @@ fn the_completion_line_names_the_plan_and_an_overridden_route() {
         outcome: qq_protocol::RunOutcome::Completed,
         usage: None,
         context_tokens: None,
+        final_output: None,
     }));
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 100, 20);
     let rows = frame_rows(&frame);

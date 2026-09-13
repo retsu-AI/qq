@@ -1534,6 +1534,7 @@ impl App {
                 input: vec![qq_protocol::InputPart::text(prompt)],
                 limits: qq_protocol::RunLimits::default(),
                 correlation: qq_protocol::Correlation::default(),
+                output: None,
             },
         )
     }

@@ -17,15 +17,16 @@ use qq_protocol::{
     AgentPlanDigest, AgentProfileId, AgentProfileSummary, ApprovalDecision, ApprovalGrant,
     ApprovalMode, BudgetExhaustion, BudgetLimitKind, CAPABILITIES_VERSION, CapabilitiesRequest,
     CapabilitySupport, CommandId, CommandOutcome, CommandReceipt, CommandRequest, ContentHash,
-    Correlation, CredentialEpoch, EventCapabilities, EventCursor, GenerationCapabilities,
-    InputPart, InputPartKind, InstructionHash, LimitCapabilities, MessageId, MessageRole,
-    MessageSnapshot, MessageState, ModelSelection, PROTOCOL_VERSION, PackSummary,
-    PromptCacheCapabilities, PromptVersion, ResolvedModel, ResolvedModelVersion, RunActivity,
-    RunFailure, RunFailureKind, RunId, RunLimits, RunOutcome, RunPlanIdentity, RunPromptIdentity,
-    RunSnapshot, RunStatus, ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind,
-    SessionEvent, SessionEventEnvelope, SessionId, SessionStatus, SessionSummary,
-    SkillCapabilities, SteeringCapabilities, StoreId, TokenUsage, ToolCallId, ToolCapabilities,
-    ToolExposure, ToolHostSummary, WorkspaceId, WorkspaceToolCapabilities,
+    Correlation, CredentialEpoch, EventCapabilities, EventCursor, FinalOutput,
+    GenerationCapabilities, InputPart, InputPartKind, InstructionHash, LimitCapabilities,
+    MessageId, MessageRole, MessageSnapshot, MessageState, ModelSelection, OutputContract,
+    PROTOCOL_VERSION, PackSummary, PromptCacheCapabilities, PromptVersion, ResolvedModel,
+    ResolvedModelVersion, RunActivity, RunFailure, RunFailureKind, RunId, RunLimits, RunOutcome,
+    RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus, ServerCapabilities, ServerInfo,
+    SessionCommand, SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionId,
+    SessionStatus, SessionSummary, SkillCapabilities, SteeringCapabilities, StoreId, TokenUsage,
+    ToolCallId, ToolCapabilities, ToolExposure, ToolHostSummary, WorkspaceId,
+    WorkspaceToolCapabilities,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -167,7 +168,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 18);
+    assert_eq!(PROTOCOL_VERSION, 19);
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
@@ -233,6 +234,31 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     max_concurrent_children: Some(1),
                 },
                 correlation: correlation(&[("job", "j-1")]),
+                output: None,
+            },
+        ),
+    );
+    check(
+        "command_submit_prompt_output_contract",
+        &command(
+            0x1a,
+            SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![InputPart::text("Summarize the failing tests as JSON")],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: Some(Box::new(OutputContract {
+                    schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "failing": {"type": "array", "items": {"type": "string"}},
+                            "count": {"type": "integer", "minimum": 0}
+                        },
+                        "required": ["failing", "count"],
+                        "additionalProperties": false
+                    }),
+                    repair_turns: 2,
+                })),
             },
         ),
     );
@@ -369,6 +395,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                         ..RunLimits::default()
                     })),
                     audit: None,
+                    final_output: None,
                 }),
                 queue_position: 1,
             },
@@ -447,6 +474,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     reasoning_tokens: None,
                 }),
                 context_tokens: Some(10),
+                final_output: None,
             },
         ),
     );
@@ -476,6 +504,44 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 },
                 usage: None,
                 context_tokens: None,
+                final_output: None,
+            },
+        ),
+    );
+    check(
+        "event_run_finished_final_output_valid",
+        &envelope(
+            25,
+            SessionEvent::RunFinished {
+                session: summary(),
+                run_id,
+                outcome: RunOutcome::Completed,
+                usage: None,
+                context_tokens: Some(1_200),
+                final_output: Some(Box::new(FinalOutput::Valid {
+                    value: serde_json::json!({"failing": ["auth::login"], "count": 1}),
+                    repair_turns: 1,
+                })),
+            },
+        ),
+    );
+    check(
+        "event_run_finished_final_output_invalid",
+        &envelope(
+            26,
+            SessionEvent::RunFinished {
+                session: summary(),
+                run_id,
+                outcome: RunOutcome::Completed,
+                usage: None,
+                context_tokens: None,
+                final_output: Some(Box::new(FinalOutput::Invalid {
+                    errors: vec![
+                        "/: missing required property \"count\"".to_owned(),
+                        "/failing/0: expected string, found number".to_owned(),
+                    ],
+                    repair_turns: 2,
+                })),
             },
         ),
     );
@@ -550,6 +616,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             estimated_cost_usd_nanos: Some(42),
             limits: None,
             audit: None,
+            final_output: None,
         },
     );
 
@@ -588,6 +655,10 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 max_correlation_entries: 8,
                 max_output_continuations: 3,
                 max_descendants: 24,
+                max_output_schema_bytes: 65_536,
+                max_output_schema_depth: 32,
+                max_output_schema_values: 4_096,
+                max_output_repair_turns: 8,
             },
             approvals: vec![
                 "approve_once".to_owned(),
@@ -775,7 +846,7 @@ fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
 /// current encoding without invalidating what an older peer produced).
 #[test]
 fn historical_fixtures_still_decode() {
-    const RETAINED: &[u16] = &[17];
+    const RETAINED: &[u16] = &[17, 18];
     for &version in RETAINED {
         assert!(version < PROTOCOL_VERSION);
         let directory = fixture_dir(version);

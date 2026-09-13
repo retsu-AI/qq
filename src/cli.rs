@@ -178,6 +178,25 @@ pub struct RunArgs {
     #[arg(long, value_name = "VALUE")]
     pub max_cost_usd: Option<f64>,
 
+    /// Require the final answer to be one JSON document satisfying the JSON
+    /// Schema at PATH (at most 64 KiB, 32 levels, 4096 values; no `$ref`).
+    /// The schema is compiled before any model work; the validated value or
+    /// a typed validation failure is reported as `final_output` on the
+    /// outcome record. Valid JSON is not a correct answer: verify it.
+    #[arg(long, value_name = "PATH")]
+    pub output_schema: Option<PathBuf>,
+
+    /// Most extra model turns spent repairing an answer that fails the
+    /// output schema, for the whole run (0–8). Requires --output-schema.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = qq_protocol::DEFAULT_OUTPUT_REPAIR_TURNS,
+        value_parser = clap::value_parser!(u8).range(0..=i64::from(qq_protocol::MAX_OUTPUT_REPAIR_TURNS)),
+        requires = "output_schema"
+    )]
+    pub output_repair_turns: u8,
+
     /// Output format.
     #[arg(long, value_enum, default_value_t = RunFormat::Text)]
     pub format: RunFormat,
@@ -406,6 +425,10 @@ mod tests {
             "jsonl",
             "--trace",
             "/tmp/trace.jsonl",
+            "--output-schema",
+            "/tmp/report.schema.json",
+            "--output-repair-turns",
+            "5",
             "--model",
             "openai/gpt-test",
         ])
@@ -423,6 +446,36 @@ mod tests {
         assert_eq!(args.max_cost_usd, Some(2.5));
         assert_eq!(args.format, RunFormat::Jsonl);
         assert_eq!(args.trace.as_deref(), Some(Path::new("/tmp/trace.jsonl")));
+        assert_eq!(
+            args.output_schema.as_deref(),
+            Some(Path::new("/tmp/report.schema.json"))
+        );
+        assert_eq!(args.output_repair_turns, 5);
+    }
+
+    #[test]
+    fn output_repair_turns_are_bounded_and_require_a_schema() {
+        let cli = Cli::try_parse_from(["qq", "run", "t", "--output-schema", "/s.json"]).unwrap();
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("expected a run command");
+        };
+        assert_eq!(
+            args.output_repair_turns,
+            qq_protocol::DEFAULT_OUTPUT_REPAIR_TURNS
+        );
+        assert!(
+            Cli::try_parse_from([
+                "qq",
+                "run",
+                "t",
+                "--output-schema",
+                "/s.json",
+                "--output-repair-turns",
+                "9"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["qq", "run", "t", "--output-repair-turns", "1"]).is_err());
     }
 
     #[test]
@@ -439,6 +492,7 @@ mod tests {
         assert_eq!(args.max_cost_usd, None);
         assert_eq!(args.format, RunFormat::Text);
         assert_eq!(args.trace, None);
+        assert_eq!(args.output_schema, None);
     }
 
     #[test]

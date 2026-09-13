@@ -25,7 +25,7 @@ written.
 | 0011 | [One commit discipline for both store lanes; wakeups do not close groups](0011-shared-commit-across-lanes.md) | Accepted |
 | 0012 | [One settlement path with a pre-read guard; teardown is a typed prerequisite for a started run's terminal event](0012-structural-settlement.md) | Accepted |
 | 0013 | [Context sources are part of plan identity; excess sources fail compilation](0013-context-sources-in-descriptor.md) | Accepted |
-| 0014 | Typed final output contract | Reserved: HC3 |
+| 0014 | [Typed final output: a per-run contract compiled at admission, judged at the completion boundary, repaired within a bounded allowance](0014-typed-final-output.md) | Accepted |
 | 0015 | [Enroll remote clients with a pairing code and issue per-client credentials](0015-pairing-code-client-enrollment.md) | Proposed (multi-surface S2) |
 | 0022 | [One owner per session store: an advisory lock precedes open and recovery](0022-single-store-owner.md) | Proposed (speed-first HC1) |
 

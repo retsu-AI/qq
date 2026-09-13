@@ -1865,6 +1865,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::EmptyPrompt
         | SessionRuntimeError::PromptTooLarge
         | SessionRuntimeError::InvalidRunLimits
+        | SessionRuntimeError::InvalidOutputContract(_)
         | SessionRuntimeError::InvalidInput(_)
         | SessionRuntimeError::RunNotSteerable
         | SessionRuntimeError::UnknownProfile(_)
@@ -2517,6 +2518,7 @@ mod tests {
                     )],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: qq_protocol::Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -2551,6 +2553,7 @@ mod tests {
                 )],
                 limits: qq_protocol::RunLimits::default(),
                 correlation: qq_protocol::Correlation::default(),
+                output: None,
             },
         };
         let response = reqwest::Client::builder()

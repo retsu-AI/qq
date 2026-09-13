@@ -3015,6 +3015,7 @@ async fn direct_pipeline_workloads(
                 input: vec![qq_protocol::InputPart::text("respond with deterministic text".to_owned())],
                 limits: qq_protocol::RunLimits::default(),
                 correlation: qq_protocol::Correlation::default(),
+                output: None,
             },
         )
         .await?;
@@ -3126,6 +3127,7 @@ async fn replay_workload(
             )],
             limits: qq_protocol::RunLimits::default(),
             correlation: qq_protocol::Correlation::default(),
+            output: None,
         },
     )
     .await?;
@@ -3292,6 +3294,7 @@ async fn http_pipeline_workloads(
                 input: vec![qq_protocol::InputPart::text("respond over HTTP".to_owned())],
                 limits: qq_protocol::RunLimits::default(),
                 correlation: qq_protocol::Correlation::default(),
+                output: None,
             },
         )
         .await?;
@@ -3394,6 +3397,7 @@ async fn http_reconnect_workload(
             )],
             limits: qq_protocol::RunLimits::default(),
             correlation: qq_protocol::Correlation::default(),
+            output: None,
         },
     )
     .await?;
@@ -3606,6 +3610,7 @@ async fn measure_tool(
                     )],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: qq_protocol::Correlation::default(),
+                    output: None,
                 },
             )
             .await?;
@@ -3647,6 +3652,7 @@ async fn cancellation_workloads(
                     input: vec![qq_protocol::InputPart::text("wait until cancelled".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: qq_protocol::Correlation::default(),
+                    output: None,
                 },
             )
             .await?;
@@ -3712,6 +3718,7 @@ async fn retry_amplification_workloads(
                     input: vec![qq_protocol::InputPart::text("fail please".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: qq_protocol::Correlation::default(),
+                    output: None,
                 },
             )
             .await?;
@@ -3960,6 +3967,7 @@ async fn subscriber_fan_out_workloads(
                         )],
                         limits: qq_protocol::RunLimits::default(),
                         correlation: qq_protocol::Correlation::default(),
+                        output: None,
                     },
                 )
                 .await?;
@@ -4038,6 +4046,7 @@ async fn busy_workspace_ack_workloads(
                 input: vec![qq_protocol::InputPart::text("stream history".to_owned())],
                 limits: qq_protocol::RunLimits::default(),
                 correlation: qq_protocol::Correlation::default(),
+                output: None,
             },
         )
         .await?;
@@ -4058,6 +4067,7 @@ async fn busy_workspace_ack_workloads(
                 input: vec![qq_protocol::InputPart::text("hang".to_owned())],
                 limits: qq_protocol::RunLimits::default(),
                 correlation: qq_protocol::Correlation::default(),
+                output: None,
             },
         )
         .await?;
@@ -4176,6 +4186,7 @@ async fn measure_long_stream(bytes: usize, samples: u16) -> Result<(Vec<u64>, bo
                     ))],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: qq_protocol::Correlation::default(),
+                    output: None,
                 },
             )
             .await?;
@@ -4387,6 +4398,7 @@ async fn r4_reasoning_sample() -> Result<R4WorkerSample, PerfError> {
                 )],
                 limits: qq_protocol::RunLimits::default(),
                 correlation: qq_protocol::Correlation::default(),
+                output: None,
             },
         )
         .await?;
@@ -4460,6 +4472,7 @@ async fn r4_shell_sample() -> Result<R4WorkerSample, PerfError> {
                 )],
                 limits: qq_protocol::RunLimits::default(),
                 correlation: qq_protocol::Correlation::default(),
+                output: None,
             },
         )
         .await?;
@@ -4588,6 +4601,7 @@ async fn r4_eight_stream_sample() -> Result<R4WorkerSample, PerfError> {
                         )],
                         limits: qq_protocol::RunLimits::default(),
                         correlation: qq_protocol::Correlation::default(),
+                        output: None,
                     },
                 )
                 .await?;
@@ -4764,6 +4778,7 @@ async fn r4_restart_sample() -> Result<R4WorkerSample, PerfError> {
             )],
             limits: qq_protocol::RunLimits::default(),
             correlation: qq_protocol::Correlation::default(),
+            output: None,
         },
     )
     .await?;
@@ -5292,6 +5307,7 @@ async fn measure_load_profile(
                             )],
                             limits: qq_protocol::RunLimits::default(),
                             correlation: qq_protocol::Correlation::default(),
+                            output: None,
                         },
                     )
                     .await?;
@@ -5429,6 +5445,7 @@ mod tests {
                 input: vec![qq_protocol::InputPart::text("emit four bytes")],
                 limits: qq_protocol::RunLimits::default(),
                 correlation: qq_protocol::Correlation::default(),
+                output: None,
             },
         )
         .await

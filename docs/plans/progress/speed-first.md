@@ -17,8 +17,8 @@ dated entries appended below, newest last.
 | H19 | SSE framing, conditional | Planned | | Add `sse_decode` bench first; no-change decision acceptable |
 | H21.2 | Mechanical `sessions.rs` split | Planned | | After HC3 behavioral changes; separate commit |
 | H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI | Planned | | |
-| HC1 | `--correlation`, `--session`, `u32` turns, model-less `config check` | In review | `feat/hc1-headless-run-contract` (`95c6e3d`, `f0b7dd3`, `d079e21`, `63cb256`, `63032ab`) | `PROTOCOL_VERSION` 17 → 18; `v17/` fixtures retained decode-only. Per-store owner lock on every open (ADR-0022, proposed). `SessionRuntime::abandon_for_test` added for crash-simulation tests |
-| HC3 | `--output-schema`, repair turns, `final_output` | Planned | | Before H21.2. ADR-0014 reserved |
+| HC1 | `--correlation`, `--session`, `u32` turns, model-less `config check` | Shipped (`abad2de`, #30) | `feat/hc1-headless-run-contract` | `PROTOCOL_VERSION` 17 → 18; `v17/` fixtures retained decode-only. Per-store owner lock on every open (ADR-0022). `SessionRuntime::abandon_for_test` added for crash-simulation tests |
+| HC3 | `--output-schema`, repair turns, `final_output` | In review | [#33](https://github.com/retsu-AI/qq/pull/33) `feat/hc3-typed-final-output` | `PROTOCOL_VERSION` 18 → 19 (`v19/` goldens; `v18/` decode-only); store schema 26 → 27. ADR-0014 accepted. Evidence `target/qq-perf/hc3-2026-09-12/` |
 | HC4 | Headless golden fixtures | Planned | | After HC1–HC3 |
 | H10 / H11 / H12 | Sandbox / adapters / qualification | Planned | | Gated; see plan |
 
@@ -422,3 +422,69 @@ lock is one syscall per store open on the blocking worker thread.
 
 Shipped: none this entry (branch in review). In progress: HC1 review.
 Blocked: none. Next: HC3.
+
+### 2026-09-12 — HC3 typed final output on `feat/hc3-typed-final-output`
+
+Worktree `../qq-hc3` from `b0a18be` (post-#31). Owned paths: `qq-protocol`
+sessions/capabilities/lib, `qq-core` `output.rs` (new), `lib.rs` completion
+boundary, `sessions.rs` admission/claim/settle/load, `store/schema.rs`,
+`runtime/events.rs`, root `cli.rs`/`main.rs`/`headless.rs`, protocol
+fixtures, harbor traces, ADR-0014, headless-contract/protocol/architecture,
+this ledger, `root.md`, the plan status block. Struct-literal fan-out
+(`output: None` / `final_output: None`) touched test code in client, TUI,
+server, xtask, and core benches.
+
+Design as built (ADR-0014): the contract is per run on `SubmitPrompt.output`,
+not on the plan; compiled at admission into a closed keyword subset (no
+`$ref`/`pattern`/`format`; byte/depth/value ceilings from the contract) so an
+unenforceable schema is `InvalidOutputContract` (exit 2) and never a run
+failure; persisted as `runs.output_contract_json` and recompiled at claim;
+judged once at the completion boundary after audit and steering; repairs are
+ordinary turns bounded per run; the run *completes* with `FinalOutput::Valid |
+Invalid` (no new `RunOutcome` variant), written in `settle_run`'s transaction
+to `runs.final_output_json` and published on `RunFinished`. `qq run` maps a
+completed-invalid answer to exit 1 and prints the validated document in text
+mode. No validator crate: the subset is ~400 lines and linear in the instance.
+
+#### HC3 receipt — 2026-09-12
+Commits: `f1d18fe` (protocol types, output module), `294c5f0` (store schema
+27, admission, claim, settlement, run-loop repair), + CLI/headless/fixtures,
++ docs.
+Tests: +8 `output::tests` (subset semantics, pointer errors, fence, bounds,
+payload caps), +9 `sessions::tests` (valid first answer; repaired within
+allowance with notice contents; never-validates → typed failure; zero repairs;
+no contract → no verdict; unenforceable refused at admission with no run;
+audited revision is what the contract judges and does not reset repairs;
+repair as budget-final turn → `budget_exhausted` with no verdict; contract
+survives restart and is enforced by the recovering runtime), +1 schema-27
+migration, +6 `headless::tests`, +2 `cli::tests`, +1 `main::tests`
+(exit-2 paths before config loads), +3 protocol goldens
+(`command_submit_prompt_output_contract`, `event_run_finished_final_output_{valid,invalid}`).
+Workspace: 1,332 passed / 3 ignored; fmt; strict all-target Clippy; minimal
+provider profile 149 passed.
+Gates: default path `read_tool_loop` (15 interleaved A/B pairs, 3000
+iterations each, release, I/O pressure ~28% `some avg10`): baseline
+`b0a18be` med 54.8 / p95 76.8 µs → candidate med 52.2 / p95 65.0 µs (noise;
+no regression). Enabled path (release, 64-property schema 3.5 KiB, 7.3 KiB
+answer): compile 37 µs, validate 11 µs
+(`output::tests::enabled_path_cost`, ignored measurement test).
+Deviations: `capabilities.limits` gained four declared bounds (additive);
+default-path v18 → v19 records are otherwise byte-identical after the version
+field, verified by diffing the fixture directories. The design doc said
+"before session creation" for schema rejection; the CLI does that, and the
+protocol path rejects at prompt admission (the session already exists), which
+is the earliest point a command-level contract can be checked.
+Docs: `docs/adr/0014-typed-final-output.md`, `docs/adr/README.md`,
+`headless-contract.md` (invocation, records, exit table, gap row, bounds,
+compatibility), `protocol.md` (version 19 history, `run_finished` row,
+`submit_prompt.output`, new "Typed final output" section), `architecture.md`
+§ Structured Input And Steering, plan status block/task index, `root.md`.
+Open: HC4 (headless golden JSONL fixtures per `PROTOCOL_VERSION`) is next and
+should pin `trial`/`outcome` with and without `final_output`. H21.2 is
+unblocked. Provider-native structured output is a possible later
+optimization behind the same contract.
+Evidence: `target/qq-perf/hc3-2026-09-12/` in the main checkout (untracked):
+`ab2-tool_dispatch.txt`, `enabled-cost.txt`, pressure snapshots.
+
+Shipped: none this entry (branch in review). In progress: HC3 review.
+Blocked: none. Next: HC4.

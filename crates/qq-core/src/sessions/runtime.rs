@@ -1004,6 +1004,8 @@ pub enum SessionRuntimeError {
     PromptTooLarge,
     #[error("run limits must be greater than zero and within the runtime ceilings")]
     InvalidRunLimits,
+    #[error("invalid output contract: {0}")]
+    InvalidOutputContract(crate::output::OutputSchemaError),
     #[error("invalid input: {0}")]
     InvalidInput(qq_protocol::InputError),
     #[error("run is not executing a prompt, so it cannot be steered")]

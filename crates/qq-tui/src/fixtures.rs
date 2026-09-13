@@ -126,6 +126,7 @@ pub fn run(id: RunId, session_id: SessionId, status: RunStatus) -> RunSnapshot {
         estimated_cost_usd_nanos: None,
         limits: None,
         audit: None,
+        final_output: None,
     }
 }
 
@@ -196,6 +197,10 @@ pub fn capabilities(steering: SteeringCapabilities) -> ServerCapabilities {
             max_child_depth: 2,
             max_output_continuations: 3,
             max_descendants: 24,
+            max_output_schema_bytes: 65_536,
+            max_output_schema_depth: 32,
+            max_output_schema_values: 4_096,
+            max_output_repair_turns: 8,
             max_correlation_entries: 8,
         },
         approvals: [

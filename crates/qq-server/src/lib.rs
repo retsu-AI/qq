@@ -38,11 +38,12 @@ use qq_protocol::{
     InputPartKind, LimitCapabilities, LocalConnectionError, LocalServerConnection,
     MAX_CORRELATION_ENTRIES, MAX_EVENT_BYTES, MAX_INPUT_FILE_BYTES, MAX_INPUT_FILE_PARTS,
     MAX_INPUT_PARTS, MAX_INPUT_TEXT_BYTES, MAX_MODEL_BYTES, MAX_ORGANIZATION_BYTES,
-    MAX_REQUEST_BYTES, MAX_WORKSPACE_BYTES, ModelCatalogRequest, ModelDescriptor, PROTOCOL_VERSION,
-    ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind, SnapshotRequest,
-    SteeringCapabilities, StoreId, SubscribeRequest, ToolCapabilities, WorkspaceId,
-    WorkspaceSnapshot, WorkspaceToolCapabilities, sanitize_display_name, valid_process_version,
-    validate_input,
+    MAX_OUTPUT_REPAIR_TURNS, MAX_OUTPUT_SCHEMA_BYTES, MAX_OUTPUT_SCHEMA_DEPTH,
+    MAX_OUTPUT_SCHEMA_VALUES, MAX_REQUEST_BYTES, MAX_WORKSPACE_BYTES, ModelCatalogRequest,
+    ModelDescriptor, PROTOCOL_VERSION, ServerCapabilities, ServerInfo, SessionCommand,
+    SessionCommandKind, SnapshotRequest, SteeringCapabilities, StoreId, SubscribeRequest,
+    ToolCapabilities, WorkspaceId, WorkspaceSnapshot, WorkspaceToolCapabilities,
+    sanitize_display_name, valid_process_version, validate_input,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1017,6 +1018,10 @@ fn server_capabilities(
             max_correlation_entries: u16::try_from(MAX_CORRELATION_ENTRIES).unwrap_or(u16::MAX),
             max_output_continuations: qq_core::MAX_OUTPUT_CONTINUATIONS,
             max_descendants: qq_core::MAX_DESCENDANTS_PER_ROOT,
+            max_output_schema_bytes: MAX_OUTPUT_SCHEMA_BYTES as u64,
+            max_output_schema_depth: u16::try_from(MAX_OUTPUT_SCHEMA_DEPTH).unwrap_or(u16::MAX),
+            max_output_schema_values: u32::try_from(MAX_OUTPUT_SCHEMA_VALUES).unwrap_or(u32::MAX),
+            max_output_repair_turns: MAX_OUTPUT_REPAIR_TURNS,
         },
         approvals: vec![
             "approve_once".to_owned(),
@@ -2150,6 +2155,7 @@ mod tests {
                 )],
                 limits: qq_protocol::RunLimits::default(),
                 correlation: qq_protocol::Correlation::default(),
+                output: None,
             },
         };
 
@@ -2339,6 +2345,7 @@ mod tests {
                     input: vec![qq_protocol::InputPart::text("go")],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: qq_protocol::Correlation::default(),
+                    output: None,
                 },
             ),
             (

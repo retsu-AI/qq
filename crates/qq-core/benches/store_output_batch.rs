@@ -187,6 +187,7 @@ async fn run_batch() -> Duration {
                     input: vec![qq_protocol::InputPart::text("stream".to_owned())],
                     limits: Default::default(),
                     correlation: Default::default(),
+                    output: None,
                 },
             )
             .await

@@ -219,6 +219,53 @@ async fn prepare_headless(
         }
     };
 
+    // The output contract is read and compiled here, before the runtime
+    // opens, so an unenforceable schema is a configuration error and never a
+    // run outcome. The read is bounded to the schema byte ceiling plus one
+    // so an oversized file is refused by size, not parsed.
+    let output = match args.output_schema {
+        None => None,
+        Some(path) => {
+            let read_path = path.clone();
+            let bytes = tokio::task::spawn_blocking(move || {
+                use std::io::Read as _;
+                let file = std::fs::File::open(&read_path)?;
+                let mut bytes = Vec::new();
+                file.take(qq_protocol::MAX_OUTPUT_SCHEMA_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)?;
+                Ok::<_, std::io::Error>(bytes)
+            })
+            .await
+            .map_err(|_| harness("reading the output schema stopped unexpectedly".to_owned()))?
+            .map_err(|error| {
+                invalid(format!(
+                    "could not read --output-schema {}: {error}",
+                    path.display()
+                ))
+            })?;
+            if bytes.len() > qq_protocol::MAX_OUTPUT_SCHEMA_BYTES {
+                return Err(invalid(format!(
+                    "--output-schema {} exceeds {} bytes",
+                    path.display(),
+                    qq_protocol::MAX_OUTPUT_SCHEMA_BYTES
+                )));
+            }
+            let schema = serde_json::from_slice(&bytes).map_err(|error| {
+                invalid(format!(
+                    "--output-schema {} is not valid JSON: {error}",
+                    path.display()
+                ))
+            })?;
+            let contract = qq_protocol::OutputContract {
+                schema,
+                repair_turns: args.output_repair_turns,
+            };
+            qq_core::output::CompiledOutputSchema::compile(&contract)
+                .map_err(|error| invalid(format!("--output-schema {}: {error}", path.display())))?;
+            Some(Box::new(contract))
+        }
+    };
+
     let factory = runtime::RuntimeFactory::system().map_err(|error| invalid(error.to_string()))?;
     let load = overrides
         .load_request_in(&workspace)
@@ -299,6 +346,7 @@ async fn prepare_headless(
         max_turns: args.max_turns,
         max_cost_usd_nanos,
         correlation,
+        output,
         format: match args.format {
             cli::RunFormat::Text => headless::HeadlessFormat::Text,
             cli::RunFormat::Jsonl => headless::HeadlessFormat::Jsonl,
@@ -1128,6 +1176,70 @@ mod tests {
             assert!(contracts.contains(&expected), "{report:?}");
         }
         assert_eq!(lines.next(), None);
+    }
+
+    fn run_args(prompt: &str, extra: &[&str]) -> cli::RunArgs {
+        let mut argv = vec!["qq", "run", prompt];
+        argv.extend_from_slice(extra);
+        let parsed = <cli::Cli as clap::Parser>::try_parse_from(argv).unwrap();
+        let Some(cli::Command::Run(args)) = parsed.command else {
+            panic!("expected a run command");
+        };
+        args
+    }
+
+    /// The output schema is read and compiled before any configuration or
+    /// runtime work, so every defect is `invalid_configuration` (exit 2) and
+    /// names the path, independent of the machine's configuration.
+    #[tokio::test]
+    async fn an_unenforceable_output_schema_is_invalid_configuration_before_config_loads() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("work");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let workspace = workspace.to_str().unwrap().to_owned();
+        let schema = directory.path().join("schema.json");
+        let schema_path = schema.to_str().unwrap().to_owned();
+        let cases: [(&str, &str); 4] = [
+            ("", "could not read --output-schema"),
+            ("{not json", "is not valid JSON"),
+            (r##"{"$ref": "#/x"}"##, "references are not supported"),
+            (
+                r#"{"type": "string", "pattern": "^a"}"#,
+                "unsupported keyword",
+            ),
+        ];
+        for (contents, expected) in cases {
+            if contents.is_empty() {
+                let _ = std::fs::remove_file(&schema);
+            } else {
+                std::fs::write(&schema, contents).unwrap();
+            }
+            let args = run_args(
+                "task",
+                &["--workspace", &workspace, "--output-schema", &schema_path],
+            );
+            let (status, message) = prepare_headless(args, &CliOverrides::default())
+                .await
+                .err()
+                .expect("an unenforceable schema is refused");
+            assert_eq!(status, headless::HeadlessStatus::InvalidConfiguration);
+            assert!(message.contains(expected), "{contents:?}: {message}");
+            assert!(message.contains(&schema_path), "{message}");
+        }
+
+        // Oversized by one byte is refused by size before parsing.
+        let filler = "x".repeat(qq_protocol::MAX_OUTPUT_SCHEMA_BYTES);
+        std::fs::write(&schema, format!("{{\"description\":\"{filler}\"}}")).unwrap();
+        let args = run_args(
+            "task",
+            &["--workspace", &workspace, "--output-schema", &schema_path],
+        );
+        let (status, message) = prepare_headless(args, &CliOverrides::default())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(status, headless::HeadlessStatus::InvalidConfiguration);
+        assert!(message.contains("exceeds"), "{message}");
     }
 
     #[tokio::test]

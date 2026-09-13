@@ -76,6 +76,9 @@ pub struct HeadlessOptions {
     /// Opaque labels stamped on the session and the run; echoed on the trial
     /// record and every session snapshot. Never interpreted.
     pub correlation: qq_protocol::Correlation,
+    /// The typed-output contract, already compiled once by the caller so an
+    /// unenforceable schema was refused before the runtime opened.
+    pub output: Option<Box<qq_protocol::OutputContract>>,
     pub format: HeadlessFormat,
     pub trace: Option<PathBuf>,
     /// Print the resume hint (session id and the command that continues it)
@@ -194,6 +197,12 @@ enum TrialRecord<'a> {
         correlation: &'a qq_protocol::Correlation,
         #[serde(skip_serializing_if = "Option::is_none")]
         arm: Option<&'a str>,
+        /// SHA-256 of the compact canonical encoding of the output schema,
+        /// and the repair allowance; present only with `--output-schema`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_schema_sha256: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_repair_turns: Option<u8>,
         workspace_id: String,
         session_id: String,
         run_id: String,
@@ -214,6 +223,10 @@ enum TrialRecord<'a> {
         prompt_identity: Option<&'a RunPromptIdentity>,
         #[serde(skip_serializing_if = "Option::is_none")]
         audit: Option<&'a qq_protocol::AuditRecord>,
+        /// The typed-output verdict; present only for a completed run
+        /// submitted with `--output-schema`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        final_output: Option<&'a qq_protocol::FinalOutput>,
     },
 }
 
@@ -359,6 +372,8 @@ struct RunEnd {
     prompt_identity: Option<Box<RunPromptIdentity>>,
     /// How the final answer was audited, when it was.
     audit: Option<Box<qq_protocol::AuditRecord>>,
+    /// The typed-output verdict of a run submitted with a contract.
+    final_output: Option<Box<qq_protocol::FinalOutput>>,
     /// Accumulated text of the last assistant message: the final answer.
     answer: String,
 }
@@ -372,6 +387,7 @@ impl RunEnd {
             estimated_cost_usd_nanos: None,
             prompt_identity: None,
             audit: None,
+            final_output: None,
             answer: String::new(),
         }
     }
@@ -409,6 +425,18 @@ pub async fn run(
     let mut accepted = AcceptedRunGuard::new(sessions.clone(), handle.clone());
 
     let workspace_identity = workspace_identity(&options.workspace);
+    let output_schema_sha256 = options.output.as_deref().map(|contract| {
+        // The contract compiled before submission, so its canonical encoding
+        // exists; an encoding failure here would be a serde_json bug.
+        let encoded = serde_json::to_vec(&contract.schema).unwrap_or_default();
+        Sha256::digest(&encoded)
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            })
+    });
     let trial = TrialRecord::Trial {
         qq_version: env!("CARGO_PKG_VERSION"),
         qq_source_revision: option_env!("QQ_SOURCE_REVISION").unwrap_or("unknown"),
@@ -424,6 +452,11 @@ pub async fn run(
         max_cost_usd_nanos: options.max_cost_usd_nanos,
         correlation: &options.correlation,
         arm: options.arm.as_deref(),
+        output_schema_sha256,
+        output_repair_turns: options
+            .output
+            .as_deref()
+            .map(|contract| contract.repair_turns),
         workspace_id: handle.workspace_id.to_string(),
         session_id: handle.session_id.to_string(),
         run_id: handle.run_id.to_string(),
@@ -462,6 +495,7 @@ pub async fn run(
         estimated_cost_usd_nanos: end.estimated_cost_usd_nanos,
         prompt_identity: end.prompt_identity.as_deref(),
         audit: end.audit.as_deref(),
+        final_output: end.final_output.as_deref(),
     };
     if let Err(error) = sink.record(stdout, &outcome).and_then(|()| sink.finish()) {
         let _ = writeln!(stderr, "error: could not write the outcome record: {error}");
@@ -472,7 +506,15 @@ pub async fn run(
         match end.status {
             HeadlessStatus::Completed => {
                 let _ = writeln!(stderr);
-                let mut answer = end.answer;
+                // With a contract the validated document is the answer: a
+                // consumer piping stdout gets exactly the JSON, not a fence
+                // the model may have wrapped it in.
+                let mut answer = match end.final_output.as_deref() {
+                    Some(qq_protocol::FinalOutput::Valid { value, .. }) => {
+                        serde_json::to_string_pretty(value).unwrap_or(end.answer)
+                    }
+                    Some(qq_protocol::FinalOutput::Invalid { .. }) | None => end.answer,
+                };
                 if !answer.ends_with('\n') {
                     answer.push('\n');
                 }
@@ -654,6 +696,7 @@ async fn submit(
                 max_concurrent_children: None,
             },
             correlation: options.correlation.clone(),
+            output: options.output.clone(),
         },
     )
     .await?;
@@ -898,14 +941,14 @@ async fn stream_run(
                                 .await;
                         }
                     }
-                    SessionEvent::RunFinished { session, run_id, outcome, usage, .. }
+                    SessionEvent::RunFinished { session, run_id, outcome, usage, final_output, .. }
                         if *run_id == handle.run_id => {
                         let usage = inclusive_usage(session.accounting, *usage);
                         let cost = inclusive_cost(
                             session.accounting,
                             session.estimated_cost_usd_nanos,
                         );
-                        let (status, message) = settle(outcome, interrupted);
+                        let (status, message) = settle(outcome, final_output.as_deref(), interrupted);
                         if text
                             && matches!(
                                 status,
@@ -923,6 +966,7 @@ async fn stream_run(
                             estimated_cost_usd_nanos: cost,
                             prompt_identity,
                             audit,
+                            final_output: final_output.clone(),
                             answer,
                         });
                     }
@@ -997,7 +1041,36 @@ async fn run_prompt_identity(
 /// a terminal status. Budget outcomes are core-owned: the wall-clock bound
 /// keeps its historical `timed_out` status; every other bound is
 /// `budget_exhausted`.
-fn settle(outcome: &RunOutcome, interrupted: bool) -> (HeadlessStatus, Option<String>) {
+/// A completed run whose answer failed its output contract is a task failure
+/// (exit 1): the agent finished but did not deliver what was asked. Exit codes
+/// stay stable; `final_output.status` tells the two apart.
+fn settle(
+    outcome: &RunOutcome,
+    final_output: Option<&qq_protocol::FinalOutput>,
+    interrupted: bool,
+) -> (HeadlessStatus, Option<String>) {
+    match (outcome, final_output) {
+        (
+            RunOutcome::Completed,
+            Some(qq_protocol::FinalOutput::Invalid {
+                errors,
+                repair_turns,
+            }),
+        ) => (
+            HeadlessStatus::TaskFailed,
+            Some(format!(
+                "the final answer did not satisfy the output schema after {repair_turns} repair turn(s): {}",
+                errors.join("; ")
+            )),
+        ),
+        (RunOutcome::Completed, Some(qq_protocol::FinalOutput::Valid { .. }) | None) => {
+            (HeadlessStatus::Completed, None)
+        }
+        (outcome, _) => settle_outcome(outcome, interrupted),
+    }
+}
+
+fn settle_outcome(outcome: &RunOutcome, interrupted: bool) -> (HeadlessStatus, Option<String>) {
     match outcome {
         RunOutcome::Completed => (HeadlessStatus::Completed, None),
         RunOutcome::Failed { failure } => {
@@ -1168,6 +1241,7 @@ const fn status_for_error(error: &SessionRuntimeError) -> HeadlessStatus {
         | SessionRuntimeError::EmptyPrompt
         | SessionRuntimeError::PromptTooLarge
         | SessionRuntimeError::InvalidRunLimits
+        | SessionRuntimeError::InvalidOutputContract(_)
         | SessionRuntimeError::InvalidModelSelection => HeadlessStatus::InvalidConfiguration,
         _ => HeadlessStatus::HarnessFailure,
     }
@@ -1802,6 +1876,7 @@ mod tests {
             max_turns: None,
             max_cost_usd_nanos: None,
             correlation: qq_protocol::Correlation::default(),
+            output: None,
             format: HeadlessFormat::Jsonl,
             trace: None,
             resume_hint: false,
@@ -2624,6 +2699,170 @@ mod tests {
             "{history:?}"
         );
         assert_eq!(history[history.len() - 1], Message::user("continue"));
+    }
+
+    /// Answers each turn with the next scripted text.
+    struct ScriptedTextProvider {
+        answers: Mutex<std::collections::VecDeque<&'static str>>,
+    }
+
+    impl ScriptedTextProvider {
+        fn new(answers: &[&'static str]) -> Self {
+            Self {
+                answers: Mutex::new(answers.iter().copied().collect()),
+            }
+        }
+    }
+
+    impl Provider for ScriptedTextProvider {
+        fn stream(&self, _request: ModelRequest) -> ProviderStream {
+            let text = self
+                .answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or("out of script");
+            Box::pin(stream::iter([
+                Ok(ProviderEvent::OutputTextDelta {
+                    text: text.to_owned(),
+                }),
+                Ok(ProviderEvent::Completed { usage: None }),
+            ]))
+        }
+    }
+
+    fn report_contract(repair_turns: u8) -> Box<qq_protocol::OutputContract> {
+        Box::new(qq_protocol::OutputContract {
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"],
+                "additionalProperties": false
+            }),
+            repair_turns,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_valid_typed_answer_rides_the_outcome_record_and_the_trial_names_the_schema() {
+        let fixture =
+            fixture(|| ScriptedTextProvider::new(&["```json\n{\"ok\": true}\n```"])).await;
+        let options = HeadlessOptions {
+            output: Some(report_contract(3)),
+            ..options(&fixture.workspace)
+        };
+
+        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        assert_eq!(records[0]["type"], "trial");
+        assert_eq!(records[0]["output_repair_turns"], 3);
+        assert_eq!(
+            records[0]["output_schema_sha256"].as_str().unwrap().len(),
+            64
+        );
+        let outcome = records.last().unwrap();
+        assert_eq!(outcome["type"], "outcome");
+        assert_eq!(outcome["status"], "completed");
+        assert_eq!(outcome["exit_code"], 0);
+        assert_eq!(outcome["final_output"]["status"], "valid");
+        assert_eq!(
+            outcome["final_output"]["value"],
+            serde_json::json!({"ok": true})
+        );
+        assert_eq!(outcome["final_output"]["repair_turns"], 0);
+        // The event stream carries the same verdict on run_finished.
+        let finished = event_records(&records)
+            .into_iter()
+            .find(|record| record["envelope"]["event"]["type"] == "run_finished")
+            .expect("a run_finished event");
+        assert_eq!(
+            finished["envelope"]["event"]["final_output"]["status"],
+            "valid"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repaired_typed_answer_reports_the_repairs_it_spent() {
+        let fixture =
+            fixture(|| ScriptedTextProvider::new(&["not json", r#"{"ok": false}"#])).await;
+        let options = HeadlessOptions {
+            output: Some(report_contract(2)),
+            ..options(&fixture.workspace)
+        };
+
+        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        let outcome = parse_records(&stdout).pop().unwrap();
+        assert_eq!(outcome["final_output"]["status"], "valid");
+        assert_eq!(
+            outcome["final_output"]["value"],
+            serde_json::json!({"ok": false})
+        );
+        assert_eq!(outcome["final_output"]["repair_turns"], 1);
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_never_validates_is_a_task_failure_with_the_typed_verdict() {
+        let fixture = fixture(|| ScriptedTextProvider::new(&["nope", r#"{"ok": "yes"}"#])).await;
+        let options = HeadlessOptions {
+            output: Some(report_contract(1)),
+            ..options(&fixture.workspace)
+        };
+
+        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::TaskFailed);
+        let outcome = parse_records(&stdout).pop().unwrap();
+        assert_eq!(outcome["status"], "task_failed");
+        assert_eq!(outcome["exit_code"], 1);
+        assert_eq!(outcome["final_output"]["status"], "invalid");
+        assert_eq!(outcome["final_output"]["repair_turns"], 1);
+        assert_eq!(
+            outcome["final_output"]["errors"],
+            serde_json::json!(["/ok: expected boolean, found string"])
+        );
+        assert!(
+            outcome["message"]
+                .as_str()
+                .unwrap()
+                .contains("did not satisfy the output schema after 1 repair turn(s)"),
+            "{outcome}"
+        );
+    }
+
+    #[tokio::test]
+    async fn text_format_prints_the_validated_document_not_the_fence() {
+        let fixture = fixture(|| ScriptedTextProvider::new(&["```json\n{\"ok\":true}\n```"])).await;
+        let options = HeadlessOptions {
+            output: Some(report_contract(0)),
+            format: HeadlessFormat::Text,
+            ..options(&fixture.workspace)
+        };
+
+        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        assert_eq!(stdout, "{\n  \"ok\": true\n}\n");
+    }
+
+    #[tokio::test]
+    async fn without_a_contract_the_records_carry_no_output_fields() {
+        let fixture = fixture(|| TextProvider).await;
+        let (status, stdout, _stderr) = run_to_end(
+            &fixture,
+            options(&fixture.workspace),
+            std::future::pending(),
+        )
+        .await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        assert!(records[0].get("output_schema_sha256").is_none());
+        assert!(records[0].get("output_repair_turns").is_none());
+        assert!(records.last().unwrap().get("final_output").is_none());
     }
 
     #[tokio::test]

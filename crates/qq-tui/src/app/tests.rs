@@ -455,6 +455,7 @@ fn runtime_slash_invocations_are_submitted_as_prompts() {
                 input,
                 limits: _,
                 correlation: _,
+                output: None,
             },
         ..
     }) = &requests[0]
@@ -996,6 +997,7 @@ fn context_usage_uses_last_turn_tokens_live_updates_and_the_model_limit() {
                     reasoning_tokens: None,
                 }),
                 context_tokens: Some(18_000),
+                final_output: None,
             },
         )
     });
@@ -1169,6 +1171,7 @@ fn compaction_run_usage_does_not_become_session_context() {
                 // This is the compaction request's pre-summary input, not
                 // the session occupancy after the summary replaced it.
                 context_tokens: Some(60_000),
+                final_output: None,
             },
         )
     });
@@ -2323,6 +2326,7 @@ fn enter_during_a_run_queues_the_draft_and_it_submits_when_the_run_ends() {
             outcome: RunOutcome::Completed,
             usage: None,
             context_tokens: None,
+            final_output: None,
         }))
         .into_requests();
     assert!(matches!(
@@ -2766,6 +2770,7 @@ fn attention_is_requested_only_while_the_terminal_is_unfocused() {
         outcome: RunOutcome::Completed,
         usage: None,
         context_tokens: None,
+        final_output: None,
     };
     let attention = |effects: Effects| {
         effects.into_iter().find_map(|effect| match effect {
@@ -2909,6 +2914,7 @@ fn the_reducer_returns_notices_and_attention_as_effects_instead_of_mutating_them
                 },
                 usage: None,
                 context_tokens: None,
+                final_output: None,
             },
         )
     };
