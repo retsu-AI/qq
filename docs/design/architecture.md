@@ -814,6 +814,26 @@ session spawner still validates every resolved route against the authenticated
 served model list before any durable child state exists. Roles are declared,
 never inferred: QQ ranks nothing.
 
+A prompt may carry a typed-output contract (`submit_prompt.output`,
+ADR-0014). The contract is per run, not per plan: it is compiled at admission
+into a bounded, reference-free JSON Schema subset — an unenforceable schema
+fails the command, never the run — persisted on the run row
+(`runs.output_contract_json`, schema 27), recompiled at claim so a restart
+enforces exactly what was accepted, and appended to the run's system prompt
+so the model knows the shape before its first turn. At the completion
+boundary, after the audit and any steering have had the answer, the loop
+validates it; a failure within the contract's repair allowance (0–8 turns for
+the whole run, never reset by an audit revision or steering) pushes the
+assistant message and a runtime notice carrying at most 8 KiB of
+`<pointer>: <message>` errors and continues with an ordinary turn against the
+ordinary budgets. Past the allowance the run still completes: the verdict
+(`valid` with the parsed document, or `invalid` with the bounded errors) rides
+`RuntimeEvent::Completed` into `settle_run`, is written to
+`runs.final_output_json` in the settlement transaction, and is published on
+`run_finished.final_output` and `RunSnapshot.final_output`. No verdict is
+written for a cancelled, failed, or budget-exhausted run. Runs without a
+contract pay nothing: no allocation, no event, no prompt change.
+
 Compaction is a property of that projection, not an edit to the transcript: a
 validated summary row and cutoff marker commit atomically with the internal
 summarization run, three compactions are retained per session for

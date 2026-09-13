@@ -46,7 +46,7 @@ Related documents:
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 18
+PROTOCOL_VERSION = 19
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -126,9 +126,17 @@ fields on decode but their discovery metadata format is rejected. Version 18
 widened `RunLimits.max_model_turns` and every `turn_ordinal` from `u16` to
 `u32`. The accepted wire range grew; no field was renamed or removed, so every
 version-17 record still decodes, and a version-17 client would reject only a
-value above 65 535. Golden fixtures live under
-`crates/qq-protocol/tests/fixtures/v18/`; the `v17` directory is retained
-decode-only.
+value above 65 535. Version 19 added the optional typed-output contract
+(ADR-0014): `submit_prompt.output` carries an `OutputContract`,
+`run_finished.final_output` and `RunSnapshot.final_output` carry the
+`FinalOutput` verdict, and `capabilities.limits` declares
+`max_output_schema_bytes`, `max_output_schema_depth`,
+`max_output_schema_values`, and `max_output_repair_turns`. Every field is
+optional and omitted when absent, so a default-path version-18 record is
+byte-identical apart from the version; the version moves because event and
+snapshot decoders are strict. Golden fixtures live under
+`crates/qq-protocol/tests/fixtures/v19/`; the `v17` and `v18` directories are
+retained decode-only.
 
 Clients and servers must agree on this value.
 
@@ -655,7 +663,8 @@ not accepted as a limit. `max_input_tokens` counts fresh plus cached input;
 provider turn that omits usage under any token bound settles as
 `tokens_unknown`. `max_tool_output_bytes` counts tool results as the model
 receives them (after per-result truncation). `correlation` is stored on the
-run and echoed on `RunSnapshot`. Limits are
+run and echoed on `RunSnapshot`. Optional `output` is a typed-output contract
+(see [Typed final output](#typed-final-output)). Limits are
 persisted with the run and enforced by the runtime, not the client, so every
 surface observes the same outcome. The wall clock starts at admission and
 spans provider retries, tool execution, and sub-agent work. When the turn or
@@ -1277,7 +1286,7 @@ Every streamed payload is a `SessionEventEnvelope`:
 | `run_context_updated` | `run_id`, `context_tokens` | A measured model turn committed; the run audit value moved |
 | `session_context_updated` | `run_id`, optional `context_tokens` | A current-model prompt turn committed; the session meter moved or became unknown |
 | `cancellation_requested` | `session`, `run_id` | Cancel command accepted for a live run |
-| `run_finished` | `session`, `run_id`, `outcome`, optional `usage`, optional `context_tokens` | Terminal run state |
+| `run_finished` | `session`, `run_id`, `outcome`, optional `usage`, optional `context_tokens`, optional `final_output` | Terminal run state |
 | `session_compacted` | `session`, optional `summary`, `before_bytes`, `after_bytes` | Compaction summary + cutoff committed |
 | `session_compaction_rolled_back` | `session`, `remaining` | Latest compaction discarded; `remaining` prior compactions still roll back |
 
@@ -1768,7 +1777,7 @@ server's version and report the skew. Events, snapshots, and every inbound
 type stay strict.
 
 Golden encodings for every command, receipt, event, and the capability
-document live under `crates/qq-protocol/tests/fixtures/v15/` and are checked
+document live under `crates/qq-protocol/tests/fixtures/v19/` and are checked
 byte-for-byte by `crates/qq-protocol/tests/wire_fixtures.rs`. A wire change
 fails that test first; regenerate the goldens with `QQ_UPDATE_FIXTURES=1`
 after bumping `PROTOCOL_VERSION`.
@@ -1819,3 +1828,45 @@ the record says so. The audit child's usage and cost are charged to the audited
 run; the latest record is on `RunSnapshot.audit`. Child runs, internal runs,
 budget-final turns, and runs whose remaining budget cannot fund an auditor are
 never audited.
+
+## Typed final output
+
+`submit_prompt.output` imposes a contract on the run's final answer
+(ADR-0014):
+
+```json
+{ "schema": { "type": "object", "properties": { "count": { "type": "integer" } },
+              "required": ["count"], "additionalProperties": false },
+  "repair_turns": 2 }
+```
+
+`schema` is a JSON Schema in the runtime's bounded subset: at most
+`limits.max_output_schema_bytes` (64 KiB) in compact encoding,
+`max_output_schema_depth` (32) levels, `max_output_schema_values` (4096)
+values including enum members; no `$ref`, `$defs`, `pattern`, `format`, or
+conditionals. `repair_turns` (default 2, at most `max_output_repair_turns` =
+8) bounds the extra model turns the runtime spends when an answer fails. A
+schema outside the subset or bounds is refused at admission as an invalid
+command; it never produces a run.
+
+The contract is persisted with the run and enforced after restart. The model
+sees the schema in its system prompt. At the completion boundary — after the
+final-answer audit and any steering — the runtime validates the answer (one
+JSON document, optionally in a single ```` ```json ```` fence). A failure
+within the allowance appends the bounded errors as a runtime notice and runs
+another turn against the ordinary budgets; the allowance is per run and is not
+reset by an audit revision or steering. The run then settles `completed` with
+`final_output`, written in the settlement transaction and published on
+`run_finished` and `RunSnapshot`:
+
+```json
+{ "status": "valid", "value": { "count": 3 }, "repair_turns": 1 }
+{ "status": "invalid",
+  "errors": ["/: missing required property \"count\"", "/items/0: expected string, found number"],
+  "repair_turns": 2 }
+```
+
+`errors` is at most 16 entries and 8 KiB, each `<JSON pointer>: <message>`.
+No verdict is published for a cancelled, failed, or budget-exhausted run
+(including a repair turn that became the reserved budget-final response). A
+valid document is not a correct answer; the caller still verifies it.

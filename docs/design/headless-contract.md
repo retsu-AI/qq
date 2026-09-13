@@ -80,7 +80,8 @@ qq run [--workspace PATH] [--session ID]
        [--approval read-only|auto|full] [--profile NAME]
        [--allow-tool NAME]... [--allow-shell PREFIX]... [--steer-stdin]
        [--timeout-seconds N] [--max-turns N] [--max-cost-usd VALUE]
-       [--correlation KEY=VALUE]... [--format text|jsonl] [--trace PATH]
+       [--correlation KEY=VALUE]... [--output-schema PATH] [--output-repair-turns N]
+       [--format text|jsonl] [--trace PATH]
        [--model PROVIDER/MODEL] [--max-output-tokens N] [--organization NAME]
        -- PROMPT
 ```
@@ -92,6 +93,16 @@ pricing for the selected model in configuration and exits `2` otherwise
 bounds (8 entries, 64-byte keys, 256-byte values, 2 KiB total; a repeated
 key is an error) before any configuration is read, stamped on both the
 session and the run, and never interpreted.
+
+`--output-schema PATH` imposes a typed-output contract (ADR-0014): the final
+answer must be one JSON document satisfying the JSON Schema at `PATH`. The
+file is read (bounded to the schema ceiling) and compiled before configuration
+loads; an unreadable, oversized, malformed, referencing, or unsupported schema
+exits `2` naming the path. `--output-repair-turns N` (0–8, default 2, requires
+`--output-schema`) bounds the extra model turns the runtime may spend when an
+answer fails validation. The model sees the schema in its system prompt from
+the first turn. In text format a valid answer prints as the pretty-printed
+validated document rather than the raw model text.
 
 `--session ID` submits into an existing session instead of creating one. The
 session must be a root session of the workspace (a spawned sub-agent session
@@ -163,9 +174,9 @@ With `--format jsonl`, stdout carries one JSON object per line, tagged by
 
 | `type` | Fields | Notes |
 | --- | --- | --- |
-| `trial` | `qq_version`, `qq_source_revision`, `protocol_version`, `workspace_identity`, `model`, `profile`, `context_window?`, `pricing_provenance?`, `approval`, `timeout_seconds?`, `max_turns?`, `max_cost_usd_nanos?`, `correlation?`, `arm?`, `workspace_id`, `session_id`, `run_id` | Exactly one, first, unless startup fails before a session exists. `correlation` is present only when at least one `--correlation` was given |
+| `trial` | `qq_version`, `qq_source_revision`, `protocol_version`, `workspace_identity`, `model`, `profile`, `context_window?`, `pricing_provenance?`, `approval`, `timeout_seconds?`, `max_turns?`, `max_cost_usd_nanos?`, `correlation?`, `arm?`, `output_schema_sha256?`, `output_repair_turns?`, `workspace_id`, `session_id`, `run_id` | Exactly one, first, unless startup fails before a session exists. `correlation` is present only when at least one `--correlation` was given; the two `output_*` fields only with `--output-schema` (the hash is SHA-256 of the compact canonical schema encoding) |
 | `event` | `envelope: SessionEventEnvelope` | `{ cursor: { sequence }, session_id, run_id?, caused_by?, occurred_at_ms, event: { type, ... } }`. Includes child-session events for the workspace |
-| `outcome` | `status`, `exit_code`, `message?`, `usage?`, `estimated_cost_usd_nanos?`, `prompt_identity?`, `audit?` | Exactly one, last |
+| `outcome` | `status`, `exit_code`, `message?`, `usage?`, `estimated_cost_usd_nanos?`, `prompt_identity?`, `audit?`, `final_output?` | Exactly one, last. `final_output` is present only for a completed run submitted with `--output-schema`: `{ "status": "valid", "value": <json>, "repair_turns": n }` or `{ "status": "invalid", "errors": ["<pointer>: <message>", …], "repair_turns": n }` |
 
 `--trace PATH` writes the same records to a file in either format.
 
@@ -174,7 +185,7 @@ With `--format jsonl`, stdout carries one JSON object per line, tagged by
 | `status` | exit | Meaning |
 | --- | ---: | --- |
 | `completed` | 0 | Run finished; the model produced a final answer |
-| `task_failed` | 1 | Run finished with a failure the agent reported or a non-server run failure |
+| `task_failed` | 1 | Run finished with a failure the agent reported, a non-server run failure, or a completed answer that never satisfied `--output-schema` (`final_output.status == "invalid"`) |
 | `invalid_configuration` | 2 | QQ refused to start: config, model, pricing, or flag error |
 | `timed_out` | 3 | `max_duration_ms` limit reached |
 | `budget_exhausted` | 3 | Any other run limit reached (turns, cost, tokens, tool calls) |
@@ -298,7 +309,7 @@ validation and repair turns, with bounded work and measured performance.
 | `--max-turns` width | **Shipped** 2026-09-11 (`d079e21`). `RunLimits.max_model_turns`, every `turn_ordinal`, the core turn loop, the budget meter, and the CLI are `u32`; `PROTOCOL_VERSION` 17 → 18 with `v18/` goldens and `v17/` retained decode-only; boundary tests pin 65 536 and `u32::MAX` on the wire and drive the meter past 65 535 without a provider | — | HC1 |
 | Minimal configuration check | **Shipped** 2026-09-11 (`95c6e3d`). `ConfigLoader::check` validates every rule and treats only `ModelRequired` as "valid apart from the selection"; `config check` with `(version: 1)` passes and names the missing model. `load()` and every run-time path still require one | — | HC1 |
 | Narrowing tool exposure | **Shipped** 2026-09-06 (`93ef6b8`). Optional `policy.exposed_tools` narrows the catalog by intersection across layers and existing profile/pack exposure. An absent field adds no restriction; an empty list exposes no tools. Existing grants and managed grant denies retain their meaning. Static names and MCP name syntax validate during `config check`; profile-admitted MCP membership validates during plan compilation without discovery in `config check`; ordinary catalog bounds remain authoritative | — | HC2 |
-| Typed final output | The final answer is free text; a supervisor that wants a structured report parses prose or asks the model to write a file | Compile `--output-schema PATH` off the run hot path; core validates the final answer and performs bounded repair turns. Optional `final_output` on `RunFinished` and `outcome` carries the validated value or a typed validation failure, persisted before publication. Valid JSON is not a correct answer; the supervisor still verifies | HC3 |
+| Typed final output | **Shipped** 2026-09-12 (`feat/hc3-typed-final-output`; ADR-0014). `--output-schema PATH` and `--output-repair-turns N` compile a bounded, reference-free JSON Schema subset before configuration loads; the contract rides `submit_prompt.output`, is persisted on the run row and re-enforced after restart; core validates the answer that survived audit and steering, repairs within the allowance, and settles `Completed` with `final_output` (`valid` with the parsed value, or `invalid` with bounded `<pointer>: <message>` errors) written in the settlement transaction and published on `run_finished` and `outcome`. `PROTOCOL_VERSION` 18 → 19, store schema 26 → 27. Valid JSON is not a correct answer; the supervisor still verifies | — | HC3 |
 | Pinning the contract | Supervisors re-read QQ source at each bump | Golden JSONL fixtures for `trial`/`event`/`outcome` per `PROTOCOL_VERSION` under `crates/qq-protocol/tests/fixtures/headless/`, with a compatibility statement in this document | HC4 |
 | Exit code `3` ambiguity | Shared by `timed_out` and `budget_exhausted` | Keep the codes; the status field is authoritative and the fixtures pin that. Splitting the code is a breaking change with no consumer asking for it. Revisit only with a real request | none |
 | Static binary | musl build fails in Cargo build scripts | Packaging, not contract. Tracked outside this document | none |
@@ -306,22 +317,34 @@ validation and repair turns, with bounded work and measured performance.
 HC3 accepts at most 64 KiB of schema JSON, 32 nesting levels, and 4096 JSON
 values, including enum values. It rejects unsupported keywords and all
 references before session creation; compilation and validation perform no
-network discovery or external-reference fetches. `--output-repair-turns` is
-bounded to 0–8 (default 2) for the entire run. Each validation-error payload,
-including its rendered feedback or durable result, is at most 8 KiB; the
-repair bound limits repeated feedback. Repairs consume ordinary
-run budgets, support cancellation and steering, and do not reset their
-allowance after an audit revision or steering. The final answer, including
-any bounded audit revision, must pass validation before a valid result can
-be published. HC3 retains the audit's existing revision bound. Its acceptance
-tests cover these interactions and replay; enabled validation and repair
-cost is measured separately from the schema-less default path.
+network discovery or external-reference fetches. The supported keywords are
+`type`, `enum`, `const`, `properties`, `required`, `additionalProperties`,
+`items`, `minItems`/`maxItems`/`uniqueItems`, `minLength`/`maxLength`,
+`minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`,
+`minProperties`/`maxProperties`, `anyOf`/`oneOf`/`allOf`/`not`, and the
+annotations `$schema`, `$id`, `$comment`, `title`, `description`, `default`,
+`examples`. `--output-repair-turns` is bounded to 0–8 (default 2) for the
+entire run. Each validation-error payload, including its rendered feedback or
+durable result, is at most 8 KiB (at most 16 errors); the repair bound limits
+repeated feedback. Repairs consume ordinary run budgets (a repair that becomes
+the reserved budget-final turn settles as `budget_exhausted` with no verdict),
+support cancellation and steering, and do not reset their allowance after an
+audit revision or steering. The final answer, including any bounded audit
+revision, is what the contract judges. HC3 retains the audit's existing
+revision bound. A single ```` ```json ```` fence around the document is
+tolerated. Measured on the recording host: compile ≈37 µs and validate ≈11 µs
+for a 64-property schema and a 7 KiB answer; the schema-less default path is
+unchanged (`read_tool_loop` median 54.8 → 52.2 µs, within noise).
 
 ## Compatibility Policy
 
 - `PROTOCOL_VERSION` (`crates/qq-protocol/src/lib.rs`) governs the envelope
   and event vocabulary. The JSONL record shapes above are part of that
-  contract from HC4 onward and bump with it.
+  contract from HC4 onward and bump with it. Version 19 added the optional
+  `submit_prompt.output`, `run_finished.final_output`, and the trial/outcome
+  fields above; every default-path version-18 record is byte-identical after
+  the version field changes, and `capabilities.limits` gained four declared
+  bounds.
 - New fields are additive and optional; a supervisor must ignore unknown
   fields and must fail closed on unknown `type` or `status` values.
 - Widening the shared model-turn limit to `u32` changes the accepted wire

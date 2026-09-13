@@ -1034,6 +1034,51 @@ mod tests {
         assert!(!durable.is_empty());
     }
 
+    /// Enabled-path cost, printed for the ledger: `cargo test -p qq-core
+    /// --release output::tests::enabled_path_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement, not a check"]
+    fn enabled_path_cost() {
+        let mut properties = serde_json::Map::new();
+        for i in 0..64 {
+            properties.insert(
+                format!("field_{i}"),
+                json!({"type": ["string", "null"], "maxLength": 256}),
+            );
+        }
+        let schema = json!({
+            "type": "object",
+            "properties": properties,
+            "required": ["field_0", "field_1"],
+            "additionalProperties": false
+        });
+        let contract = OutputContract {
+            schema,
+            repair_turns: 2,
+        };
+        let mut answer = serde_json::Map::new();
+        for i in 0..64 {
+            answer.insert(format!("field_{i}"), json!("x".repeat(100)));
+        }
+        let answer = serde_json::to_string(&Value::Object(answer)).unwrap();
+        let started = std::time::Instant::now();
+        let mut compiled = CompiledOutputSchema::compile(&contract).unwrap();
+        for _ in 1..1000 {
+            compiled = CompiledOutputSchema::compile(&contract).unwrap();
+        }
+        let compile_ns = started.elapsed().as_nanos() / 1000;
+        let started = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert!(compiled.validate(&answer).is_ok());
+        }
+        let validate_ns = started.elapsed().as_nanos() / 1000;
+        println!(
+            "output contract (64 properties, {} B schema, {} B answer): compile {compile_ns} ns, validate {validate_ns} ns",
+            compiled.schema_json().len(),
+            answer.len()
+        );
+    }
+
     #[test]
     fn a_single_oversized_error_is_truncated_on_a_char_boundary() {
         let error = bounded_error("é".repeat(MAX_OUTPUT_ERROR_BYTES));
