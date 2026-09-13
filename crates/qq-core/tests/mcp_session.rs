@@ -183,6 +183,7 @@ async fn submit_prompt(runtime: &SessionRuntime, session_id: qq_protocol::Sessio
             input: vec![qq_protocol::InputPart::text("ping the server".to_owned())],
             limits: qq_protocol::RunLimits::default(),
             correlation: qq_protocol::Correlation::default(),
+            output: None,
         },
     )
     .await;

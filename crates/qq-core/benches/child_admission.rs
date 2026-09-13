@@ -388,6 +388,7 @@ async fn run_sample(case: Case) -> Sample {
                     )],
                     limits: case.limits(),
                     correlation: Default::default(),
+                    output: None,
                 },
             )
             .await

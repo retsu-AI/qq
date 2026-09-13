@@ -304,6 +304,7 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
                 outcome: RunOutcome::Completed,
                 usage: None,
                 context_tokens: None,
+                final_output: None,
             },
         ),
         context(&[]),
@@ -334,6 +335,7 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
                 outcome: RunOutcome::Completed,
                 usage: None,
                 context_tokens: None,
+                final_output: None,
             },
         ),
         ReduceContext {

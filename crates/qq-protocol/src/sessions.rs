@@ -420,6 +420,11 @@ pub enum SessionCommand {
         limits: RunLimits,
         #[serde(default, skip_serializing_if = "Correlation::is_empty")]
         correlation: Correlation,
+        /// Optional typed-output contract: the run's final answer must
+        /// satisfy `schema` and the outcome carries a [`FinalOutput`]. Absent
+        /// means the default free-text contract. Added in protocol 19.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<Box<OutputContract>>,
     },
     /// Adds user input to a run that is already executing. The input is
     /// injected as a user message at the next safe model/tool boundary, so a
@@ -707,6 +712,64 @@ impl RunLimits {
     }
 }
 
+/// Most bytes of schema JSON an [`OutputContract`] may carry.
+pub const MAX_OUTPUT_SCHEMA_BYTES: usize = 64 * 1024;
+/// Deepest nesting an output schema may declare.
+pub const MAX_OUTPUT_SCHEMA_DEPTH: usize = 32;
+/// Most JSON values (objects, arrays, and scalars, including enum members) an
+/// output schema may contain.
+pub const MAX_OUTPUT_SCHEMA_VALUES: usize = 4096;
+/// Hard ceiling on [`OutputContract::repair_turns`].
+pub const MAX_OUTPUT_REPAIR_TURNS: u8 = 8;
+/// Default [`OutputContract::repair_turns`].
+pub const DEFAULT_OUTPUT_REPAIR_TURNS: u8 = 2;
+/// Most bytes of validation detail one [`FinalOutput::Invalid`] payload or
+/// one rendered repair notice may carry.
+pub const MAX_OUTPUT_ERROR_BYTES: usize = 8 * 1024;
+
+/// A caller's typed-output contract for one run: the final answer must be a
+/// JSON document satisfying `schema`. The schema is carried verbatim; the
+/// runtime compiles and bounds it at admission, before any model work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputContract {
+    /// JSON Schema document (the runtime's supported subset).
+    pub schema: serde_json::Value,
+    /// Most additional model turns the runtime may spend repairing an answer
+    /// that fails validation, for the entire run (0–8).
+    #[serde(default = "OutputContract::default_repair_turns")]
+    pub repair_turns: u8,
+}
+
+impl OutputContract {
+    const fn default_repair_turns() -> u8 {
+        DEFAULT_OUTPUT_REPAIR_TURNS
+    }
+}
+
+/// How a run's final answer satisfied its [`OutputContract`]. Carried on
+/// `run_finished` and the run snapshot only when a contract was imposed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum FinalOutput {
+    /// The final answer parsed as JSON and satisfied the schema. `value` is
+    /// the parsed document.
+    Valid {
+        value: serde_json::Value,
+        /// Repair turns the runtime spent before this answer validated.
+        #[serde(default)]
+        repair_turns: u8,
+    },
+    /// The final answer did not satisfy the schema after every permitted
+    /// repair turn. `errors` are bounded human-readable validation failures
+    /// against the last answer, each as `<json pointer>: <message>`.
+    Invalid {
+        errors: Vec<String>,
+        #[serde(default)]
+        repair_turns: u8,
+    },
+}
+
 /// Which budget settled a run and how far it got.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -974,6 +1037,10 @@ pub struct RunSnapshot {
     /// How the final answer was audited, when the run was audited at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<Box<AuditRecord>>,
+    /// How the final answer met the run's typed-output contract. Present only
+    /// on settled runs that were submitted with one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_output: Option<Box<FinalOutput>>,
 }
 
 /// How the root run's final answer was audited before it was presented as
@@ -1635,6 +1702,11 @@ pub enum SessionEvent {
         /// session summary owns the current session-meter value.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_tokens: Option<u64>,
+        /// The typed-output verdict for a run submitted with an
+        /// `OutputContract`; absent otherwise and on every non-completed
+        /// outcome. Persisted on the run row before this event is published.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_output: Option<Box<FinalOutput>>,
     },
 }
 
@@ -2355,6 +2427,7 @@ mod tests {
             outcome: RunOutcome::Completed,
             usage: None,
             context_tokens: None,
+            final_output: None,
         };
 
         let encoded = serde_json::to_value(&event).unwrap();
@@ -2589,6 +2662,7 @@ mod tests {
                 reasoning_tokens: None,
             }),
             context_tokens: Some(16),
+            final_output: None,
         };
         let encoded = serde_json::to_value(&finished).unwrap();
         assert_eq!(encoded["type"], "run_finished");
@@ -2670,6 +2744,7 @@ mod tests {
                 ..RunLimits::default()
             })),
             audit: None,
+            final_output: None,
         };
         let encoded = serde_json::to_value(&run).unwrap();
         assert_eq!(encoded["context_tokens"], 16);
@@ -2795,6 +2870,7 @@ mod tests {
             input: vec![InputPart::text("hello")],
             limits: RunLimits::default(),
             correlation: Correlation::default(),
+            output: None,
         };
         assert!(serde_json::to_value(&bare).unwrap().get("limits").is_none());
 
@@ -2815,6 +2891,7 @@ mod tests {
             input: vec![InputPart::text("hello")],
             limits,
             correlation: Correlation::default(),
+            output: None,
         };
         let encoded = serde_json::to_value(&limited).unwrap();
         assert_eq!(encoded["limits"]["max_model_turns"], 4);

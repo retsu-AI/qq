@@ -474,6 +474,7 @@ async fn loop_rings_the_terminal_for_an_unfocused_run_finish_only() {
                 outcome: qq_protocol::RunOutcome::Completed,
                 usage: None,
                 context_tokens: None,
+                final_output: None,
             },
         ))
     };

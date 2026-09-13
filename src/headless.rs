@@ -654,6 +654,7 @@ async fn submit(
                 max_concurrent_children: None,
             },
             correlation: options.correlation.clone(),
+            output: None,
         },
     )
     .await?;

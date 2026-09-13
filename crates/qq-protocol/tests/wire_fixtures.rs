@@ -233,6 +233,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     max_concurrent_children: Some(1),
                 },
                 correlation: correlation(&[("job", "j-1")]),
+                output: None,
             },
         ),
     );
@@ -369,6 +370,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                         ..RunLimits::default()
                     })),
                     audit: None,
+                    final_output: None,
                 }),
                 queue_position: 1,
             },
@@ -447,6 +449,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     reasoning_tokens: None,
                 }),
                 context_tokens: Some(10),
+                final_output: None,
             },
         ),
     );
@@ -476,6 +479,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 },
                 usage: None,
                 context_tokens: None,
+                final_output: None,
             },
         ),
     );
@@ -550,6 +554,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             estimated_cost_usd_nanos: Some(42),
             limits: None,
             audit: None,
+            final_output: None,
         },
     );
 
@@ -588,6 +593,10 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 max_correlation_entries: 8,
                 max_output_continuations: 3,
                 max_descendants: 24,
+                max_output_schema_bytes: 65_536,
+                max_output_schema_depth: 32,
+                max_output_schema_values: 4_096,
+                max_output_repair_turns: 8,
             },
             approvals: vec![
                 "approve_once".to_owned(),

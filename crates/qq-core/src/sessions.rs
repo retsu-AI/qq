@@ -1102,6 +1102,7 @@ fn execute_command(
             input,
             limits,
             correlation,
+            output,
         } => {
             // Syntactic bounds only: file parts are read when the run starts,
             // so admission never performs I/O and a stale attachment fails
@@ -4321,6 +4322,7 @@ fn settle_run(
             outcome,
             usage,
             context_tokens,
+            final_output: None,
         },
     )
     .map(Some)
@@ -4415,6 +4417,7 @@ fn finish_queued_run_with_outcome(
             usage: None,
             // A queued run never reached the model; no context to report.
             context_tokens: None,
+            final_output: None,
         },
     )
     .map(Some)
@@ -6761,6 +6764,7 @@ fn load_run(connection: &Connection, run_id: RunId) -> Result<RunSnapshot, Sessi
                         .map(serde_json::from_str)
                         .transpose()?
                         .map(Box::new),
+                    final_output: None,
                 })
             },
         )
@@ -8864,6 +8868,7 @@ mod tests {
                     input: vec![InputPart::text(prompt.to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -8980,6 +8985,7 @@ mod tests {
                     input: vec![InputPart::text("mutate something".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -9343,6 +9349,7 @@ mod tests {
                     input: vec![InputPart::text("follow-up")],
                     limits: RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -9457,6 +9464,7 @@ mod tests {
                     input: vec![InputPart::text("work")],
                     limits: RunLimits::default(),
                     correlation: run_correlation.clone(),
+                    output: None,
                 },
             )
             .await
@@ -9593,6 +9601,7 @@ mod tests {
                     ],
                     limits: RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -9665,6 +9674,7 @@ mod tests {
                     }],
                     limits: RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -9708,6 +9718,7 @@ mod tests {
                     }],
                     limits: RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await;
@@ -9750,6 +9761,7 @@ mod tests {
                         input: vec![InputPart::text("x")],
                         limits,
                         correlation: Correlation::default(),
+                        output: None,
                     },
                 )
                 .await;
@@ -10362,6 +10374,7 @@ mod tests {
                     input: vec![InputPart::text("known overflow".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -10674,6 +10687,7 @@ mod tests {
                     input: vec![InputPart::text("first run".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -10779,6 +10793,7 @@ mod tests {
                     input: vec![InputPart::text("second run".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -10865,6 +10880,7 @@ mod tests {
                     input: vec![InputPart::text("first run".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -10942,6 +10958,7 @@ mod tests {
                     input: vec![InputPart::text("do work".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -11110,6 +11127,7 @@ mod tests {
                     input: vec![InputPart::text("keep me".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -14036,6 +14054,7 @@ mod tests {
                 input: vec![InputPart::text("continue".to_owned())],
                 limits: qq_protocol::RunLimits::default(),
                 correlation: Correlation::default(),
+                output: None,
             },
             None,
             &WorkspaceGrantSeed::default(),
@@ -14389,6 +14408,7 @@ mod tests {
                     input: vec![InputPart::text("x".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -14470,6 +14490,7 @@ mod tests {
                     input: vec![InputPart::text("continue".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -14515,6 +14536,7 @@ mod tests {
                     input: vec![InputPart::text("continue".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -14967,6 +14989,7 @@ mod tests {
                     input: vec![InputPart::text("x".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -16068,6 +16091,7 @@ mod tests {
                     input: vec![InputPart::text("do work".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -16161,6 +16185,7 @@ mod tests {
                     input: vec![InputPart::text("say hello".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -16595,6 +16620,7 @@ mod tests {
                     input: vec![InputPart::text(prompt)],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -16910,6 +16936,7 @@ mod tests {
                     input: vec![InputPart::text("y".repeat(MAX_PROMPT_BYTES))],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -16962,6 +16989,7 @@ mod tests {
                     input: vec![InputPart::text("y".repeat(MAX_PROMPT_BYTES))],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -17257,6 +17285,7 @@ mod tests {
                     input: vec![InputPart::text("cancel this".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -18006,6 +18035,7 @@ mod tests {
                         input: vec![InputPart::text(prompt.to_owned())],
                         limits: qq_protocol::RunLimits::default(),
                         correlation: Correlation::default(),
+                        output: None,
                     },
                 )
                 .await
@@ -18084,6 +18114,7 @@ mod tests {
                     input: vec![InputPart::text("first prompt".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -18199,6 +18230,7 @@ mod tests {
                     input: vec![InputPart::text("second prompt".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -18247,6 +18279,7 @@ mod tests {
                     input: vec![InputPart::text("reason until cancelled".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -18307,6 +18340,7 @@ mod tests {
                     input: vec![InputPart::text("Say hello".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -18683,6 +18717,7 @@ mod tests {
                     input: vec![InputPart::text("inspect the note".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -18765,6 +18800,7 @@ mod tests {
                     input: vec![InputPart::text("what did you read?".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -19199,6 +19235,7 @@ mod tests {
                         input: vec![InputPart::text("inspect the note".to_owned())],
                         limits: qq_protocol::RunLimits::default(),
                         correlation: Correlation::default(),
+                        output: None,
                     },
                 )
                 .await
@@ -19270,6 +19307,7 @@ mod tests {
                         input: vec![InputPart::text("continue".to_owned())],
                         limits: qq_protocol::RunLimits::default(),
                         correlation: Correlation::default(),
+                        output: None,
                     },
                 )
                 .await
@@ -19360,6 +19398,7 @@ mod tests {
                     input: vec![InputPart::text("inspect the tool boundaries".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -19500,6 +19539,7 @@ mod tests {
                     input: vec![InputPart::text("continue safely".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -19536,6 +19576,7 @@ mod tests {
                     input: vec![InputPart::text("continue safely".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -19677,6 +19718,7 @@ mod tests {
                     input: vec![InputPart::text("this prompt never started".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -19717,6 +19759,7 @@ mod tests {
                     input: vec![InputPart::text("continue after cancellation".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -19839,6 +19882,7 @@ mod tests {
                             input,
                             limits: qq_protocol::RunLimits::default(),
                             correlation: Correlation::default(),
+                            output: None,
                         },
                     )
                     .await
@@ -20005,6 +20049,7 @@ mod tests {
                     input: vec![InputPart::text("begin the task".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -20060,6 +20105,7 @@ mod tests {
                     input: vec![InputPart::text("continue from durable work".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -20134,6 +20180,7 @@ mod tests {
                     input: vec![InputPart::text("legacy prompt".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -20200,6 +20247,7 @@ mod tests {
                     input: vec![InputPart::text("continue from the legacy store".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -20274,6 +20322,7 @@ mod tests {
                     input: vec![InputPart::text("finish the migration".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -20301,6 +20350,7 @@ mod tests {
                     input: vec![InputPart::text("grow the context".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -20417,6 +20467,7 @@ mod tests {
                     input: vec![InputPart::text("y".repeat(MAX_PROMPT_BYTES))],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -20467,6 +20518,7 @@ mod tests {
                     input: vec![InputPart::text("inspect the note".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -20623,6 +20675,7 @@ mod tests {
                     input: vec![InputPart::text("second".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -20760,6 +20813,7 @@ mod tests {
                     input: vec![InputPart::text("long prompt".repeat(64)); 1],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -20913,6 +20967,7 @@ mod tests {
                     input: vec![InputPart::text("read".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -21082,6 +21137,7 @@ mod tests {
                     input: vec![InputPart::text("read".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -21182,6 +21238,7 @@ mod tests {
                     input: vec![InputPart::text("continue".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -21246,6 +21303,7 @@ mod tests {
                     input: vec![InputPart::text("read".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -21305,6 +21363,7 @@ mod tests {
                     input: vec![InputPart::text("continue".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -21385,6 +21444,7 @@ mod tests {
                     input: vec![InputPart::text("fill the context".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -21684,6 +21744,7 @@ mod tests {
                     input: vec![InputPart::text("too late".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -21714,6 +21775,7 @@ mod tests {
                     input: vec![InputPart::text("converge".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -21770,6 +21832,7 @@ mod tests {
                     input: vec![InputPart::text("persist me".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -21849,6 +21912,7 @@ mod tests {
                     input: vec![InputPart::text("retry the read".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -21942,6 +22006,7 @@ mod tests {
                     input: vec![InputPart::text("fail initialization".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -21962,6 +22027,7 @@ mod tests {
                     input: vec![InputPart::text("must not load".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -22091,6 +22157,7 @@ mod tests {
                     input: vec![InputPart::text("wait at start".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -22112,6 +22179,7 @@ mod tests {
                     input: vec![InputPart::text("fail initialization".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -22234,6 +22302,7 @@ mod tests {
                     input: vec![InputPart::text("start but do not poll".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -22255,6 +22324,7 @@ mod tests {
                     input: vec![InputPart::text("fail settlement".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -22372,6 +22442,7 @@ mod tests {
                     input: vec![InputPart::text("poisoned registry".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -22473,6 +22544,7 @@ mod tests {
                     input: vec![InputPart::text("recover me".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -22612,6 +22684,7 @@ mod tests {
                         input: vec![InputPart::text(prompt.to_owned())],
                         limits: qq_protocol::RunLimits::default(),
                         correlation: Correlation::default(),
+                        output: None,
                     },
                 )
                 .await
@@ -22763,6 +22836,7 @@ mod tests {
                     input: vec![InputPart::text("wait".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -22778,6 +22852,7 @@ mod tests {
                     input: vec![InputPart::text("later".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -22953,6 +23028,7 @@ mod tests {
                     input: vec![InputPart::text("old".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -22977,6 +23053,7 @@ mod tests {
                     input: vec![InputPart::text("new".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -23091,6 +23168,7 @@ mod tests {
                     input: vec![InputPart::text("known provider overflow".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -23252,6 +23330,7 @@ mod tests {
                     input: vec![InputPart::text("resume after legacy crash".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -23445,6 +23524,7 @@ mod tests {
                     input: vec![InputPart::text("first".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -23465,6 +23545,7 @@ mod tests {
                     input: vec![InputPart::text("second".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -23591,6 +23672,7 @@ mod tests {
                     input: vec![InputPart::text("block during load".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -23744,6 +23826,7 @@ mod tests {
                     input: vec![InputPart::text("large".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -23858,6 +23941,7 @@ mod tests {
                     input: vec![InputPart::text("first-a".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -23880,6 +23964,7 @@ mod tests {
                         input: vec![InputPart::text(prompt.to_owned())],
                         limits: qq_protocol::RunLimits::default(),
                         correlation: Correlation::default(),
+                        output: None,
                     },
                 )
                 .await
@@ -25816,6 +25901,7 @@ mod tests {
                     input: vec![InputPart::text("now edit it".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -25988,6 +26074,7 @@ mod tests {
                     input: vec![InputPart::text("mutate again".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -26088,6 +26175,7 @@ mod tests {
                     input: vec![InputPart::text("mutate".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -26694,6 +26782,7 @@ mod tests {
                     input: vec![InputPart::text("delegate work".to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -26766,6 +26855,7 @@ mod tests {
                     input: vec![InputPart::text(prompt.to_owned())],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -29211,6 +29301,7 @@ mod tests {
                         ..RunLimits::default()
                     },
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -30233,6 +30324,7 @@ mod tests {
                         ..RunLimits::default()
                     },
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -31694,6 +31786,7 @@ mod tests {
                     input: vec![InputPart::text("delegate")],
                     limits,
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -32242,6 +32335,7 @@ mod tests {
                     input: vec![InputPart::text("loop".to_owned())],
                     limits,
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -32523,6 +32617,7 @@ mod tests {
                         ..RunLimits::default()
                     },
                     correlation: Correlation::default(),
+                    output: None,
                 },
             )
             .await;

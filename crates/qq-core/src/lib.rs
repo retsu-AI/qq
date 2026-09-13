@@ -30,6 +30,7 @@ pub mod catalog;
 pub mod context_source;
 pub mod hosts;
 mod input;
+pub mod output;
 pub mod plan;
 mod runtime;
 mod sessions;

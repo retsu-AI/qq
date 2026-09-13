@@ -178,6 +178,17 @@ pub struct LimitCapabilities {
     /// limit before settling as `provider_output_truncated`.
     #[serde(default)]
     pub max_output_continuations: u16,
+    /// Bounds of the optional typed-output contract on `submit_prompt`: the
+    /// schema byte, nesting, and value ceilings and the most repair turns a
+    /// caller may request. Absent (zero) on servers before protocol 19.
+    #[serde(default)]
+    pub max_output_schema_bytes: u64,
+    #[serde(default)]
+    pub max_output_schema_depth: u16,
+    #[serde(default)]
+    pub max_output_schema_values: u32,
+    #[serde(default)]
+    pub max_output_repair_turns: u8,
 }
 
 /// A configured profile a session may select.

@@ -10,6 +10,7 @@ publish = false
 getrandom.workspace = true
 qq-reasoning.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [features]
@@ -18,6 +19,3 @@ thiserror.workspace = true
 # The build also needs `--cfg getrandom_backend="wasm_js"`; see
 # `.cargo/config.toml`.
 wasm = ["getrandom/wasm_js"]
-
-[dev-dependencies]
-serde_json.workspace = true

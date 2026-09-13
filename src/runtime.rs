@@ -2517,6 +2517,7 @@ mod tests {
                     )],
                     limits: qq_protocol::RunLimits::default(),
                     correlation: qq_protocol::Correlation::default(),
+                    output: None,
                 },
             )
             .await
@@ -2551,6 +2552,7 @@ mod tests {
                 )],
                 limits: qq_protocol::RunLimits::default(),
                 correlation: qq_protocol::Correlation::default(),
+                output: None,
             },
         };
         let response = reqwest::Client::builder()

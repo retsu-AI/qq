@@ -146,6 +146,7 @@ impl SessionClient {
                 input,
                 limits,
                 correlation,
+                output: None,
             },
         )
         .await
