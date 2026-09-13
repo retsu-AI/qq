@@ -2844,7 +2844,11 @@ mod tests {
         // Version 18 widened `RunLimits.max_model_turns` and every
         // `turn_ordinal` from u16 to u32; the accepted wire range grew, so
         // every version-17 record still decodes.
-        assert_eq!(crate::PROTOCOL_VERSION, 18);
+        // Version 19 added the optional typed-output contract:
+        // `SubmitPrompt.output`, `RunFinished.final_output`, and
+        // `RunSnapshot.final_output`; strict decoders reject the new fields
+        // on older versions, so the version moves.
+        assert_eq!(crate::PROTOCOL_VERSION, 19);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
