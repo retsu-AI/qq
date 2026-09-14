@@ -696,6 +696,34 @@ impl HistorySearcher for SessionHistorySearcher {
     }
 }
 
+/// `read_tool_result` over the run's own session: the store answers only for
+/// spills this session wrote, so a handle copied from another session reads
+/// as foreign rather than as data.
+pub(super) struct SessionSpillReader {
+    inner: Arc<SessionRuntimeInner>,
+    session_id: SessionId,
+}
+
+impl SessionSpillReader {
+    pub(super) fn new(inner: Arc<SessionRuntimeInner>, session_id: SessionId) -> Self {
+        Self { inner, session_id }
+    }
+}
+
+impl SpillReader for SessionSpillReader {
+    fn read(&self, handle: SpillHandle) -> SpillReadFuture {
+        let inner = Arc::clone(&self.inner);
+        let session_id = self.session_id;
+        Box::pin(async move {
+            inner
+                .store
+                .read_tool_spill(session_id, handle.call_prefix, handle.digest_prefix)
+                .await
+                .map_err(|error| format!("spill read failed: {error}"))
+        })
+    }
+}
+
 /// Audits a root run's candidate answer by spawning a read-only child marked
 /// `purpose: audit` at the configured roster role. The child inherits every
 /// bound of an ordinary child (remaining budget, depth, accounting,

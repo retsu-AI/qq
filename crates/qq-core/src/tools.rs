@@ -36,12 +36,14 @@ pub mod bench_support {
         .model_text
     }
 }
-pub(crate) use dispatch::{ToolDrainError, ToolOutput, ToolTasks, bounded_result, execute};
+pub(crate) use dispatch::{
+    SpillRecord, ToolDrainError, ToolOutput, ToolTasks, bounded_result, execute,
+};
 #[cfg(test)]
 pub(crate) use edit::hold_tool_apply;
 #[cfg(test)]
 pub(crate) use output::MAX_MODEL_TEXT_BYTES;
-pub(crate) use output::{TurnOutputBudget, header_line};
+pub(crate) use output::{TurnOutputBudget, finalize_spill_marker, header_line};
 pub(crate) use specs::{
     MAX_SPAWN_AGENT_SCHEMA_BYTES, SPAWN_AGENT_TOOL, SpawnAgentArgs, alias_effect, spawn_agent_spec,
     static_tools,

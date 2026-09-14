@@ -44,10 +44,10 @@ mod workspace;
 
 use runtime::{
     AGENT_PROMPT_VERSION, BUDGET_FINAL_RESPONSE_NOTICE, BudgetDecision, BudgetMeter, GateDecision,
-    HistorySearcher, PendingToolCall, PreparedRequestWeight, PreparedStaticPrefix, RuntimeEvent,
-    RuntimeToolCall, SPAWN_UNAVAILABLE_RESULT, SearchHistoryArgs, SpawnAgentFuture,
-    SpawnAgentOutcome, SpawnAgentSpend, SpawnRequest, SubagentSpawner, ToolGate, ToolGateFuture,
-    TurnBlock, agent_system_prompt, render_history_matches,
+    HistorySearcher, PendingToolCall, PreparedRequestWeight, PreparedStaticPrefix,
+    ReadToolResultArgs, RuntimeEvent, RuntimeToolCall, SPAWN_UNAVAILABLE_RESULT, SearchHistoryArgs,
+    SpawnAgentFuture, SpawnAgentOutcome, SpawnAgentSpend, SpawnRequest, SubagentSpawner, ToolGate,
+    ToolGateFuture, TurnBlock, agent_system_prompt, render_history_matches, render_tool_result,
 };
 
 pub use approval::shell_prefix_matches;
@@ -180,6 +180,30 @@ fn apply_steering(
 /// Records one finished tool call for the audit trigger and, when a hook will
 /// read it, the auditor's action summary. Bounded: the summary keeps names
 /// and targets only and stops growing at `MAX_AUDIT_ACTION_BYTES`.
+/// Names the spill in the result's marker when a session store will keep
+/// it, and drops the spill otherwise so the marker keeps saying `not
+/// stored`. The handle's digest is of the complete text, known here.
+fn cite_spill(
+    mut result: tools::ToolOutput,
+    tool: &str,
+    call: ToolCallId,
+    stored: bool,
+) -> tools::ToolOutput {
+    match (&result.spill, stored) {
+        (Some(spill), true) => {
+            let handle = spill.handle(tool, call);
+            tools::finalize_spill_marker(
+                &mut result.model_text,
+                Some(&handle),
+                Some(spill.omitted_from_line),
+            );
+        }
+        (Some(_), false) => result.spill = None,
+        (None, _) => {}
+    }
+    result
+}
+
 fn note_audited_action(
     triggers: &mut runtime::AuditTriggers,
     actions: &mut Vec<runtime::AuditedAction>,
@@ -393,6 +417,10 @@ pub(crate) struct RunCapabilities {
     /// Full-transcript recall for `search_history`. Session runs install one;
     /// direct runs have no durable history to search.
     history: Option<Arc<dyn HistorySearcher>>,
+    /// Stored complete tool outputs for `read_tool_result`. Session runs
+    /// install one and keep spills; direct runs keep none, so their markers
+    /// say `not stored`.
+    spills: Option<Arc<dyn runtime::SpillReader>>,
     /// Steering input from the session layer. Direct runs have none.
     steering: Option<runtime::SteeringReceiver>,
     /// Audits the candidate final answer of a root run. Session roots install
@@ -417,6 +445,7 @@ impl RunCapabilities {
             limits: RunLimits::default(),
             pricing: None,
             history: None,
+            spills: None,
             steering: None,
             audit_hook: None,
             tool_tasks: None,
@@ -456,6 +485,11 @@ impl RunCapabilities {
 
     pub(crate) fn with_history(mut self, history: Arc<dyn HistorySearcher>) -> Self {
         self.history = Some(history);
+        self
+    }
+
+    pub(crate) fn with_spills(mut self, spills: Arc<dyn runtime::SpillReader>) -> Self {
+        self.spills = Some(spills);
         self
     }
 
@@ -508,6 +542,7 @@ impl RunCapabilities {
             },
             pricing: None,
             history: None,
+            spills: None,
             steering: None,
             audit_hook: None,
             tool_tasks: None,
@@ -917,6 +952,7 @@ impl plan::CompiledAgentPlan {
                 limits,
                 pricing,
                 history,
+                spills,
                 steering,
                 audit_hook,
                 tool_tasks,
@@ -1057,6 +1093,7 @@ impl plan::CompiledAgentPlan {
                 catalog.base_specs(&catalog::StaticFilter {
                     spawn_agent: spawner.is_some(),
                     search_history: history.is_some(),
+                    read_tool_result: spills.is_some(),
                     load_skill: allow_guidance,
                     read_only,
                 })
@@ -2070,6 +2107,7 @@ impl plan::CompiledAgentPlan {
                         is_error: result.is_error,
                         file_state: None,
                         display: result.ui_payload,
+                        spill: None,
                     };
                 }
                 if pins_changed {
@@ -2094,6 +2132,7 @@ impl plan::CompiledAgentPlan {
                     let spawner = spawner.clone();
                     let tool_tasks = tool_tasks.clone();
                     let history = history.clone();
+                    let spills = spills.clone();
                     let delegation = Arc::clone(&delegation);
                     // Under progressive exposure only pinned externals were
                     // offered; a call to one that was not is refused with the
@@ -2197,6 +2236,45 @@ impl plan::CompiledAgentPlan {
                                             Err(error) => tools::bounded_result(error, true),
                                         }
                                     }
+                                    Err(error) => tools::bounded_result(
+                                        format!("invalid arguments: {error}"),
+                                        true,
+                                    ),
+                                }
+                            }
+                            // A stored complete output, read back exactly and
+                            // unmasked: the model asked for a range of what it
+                            // already produced. Session-scoped by the reader.
+                            None if host == Some(catalog::ToolHost::ReadToolResult) && spills.is_some() => {
+                                let spills = spills.expect("the spill reader was just checked");
+                                match serde_json::from_str::<ReadToolResultArgs>(&call.arguments) {
+                                    Ok(arguments) => match runtime::SpillHandle::parse(&arguments.handle) {
+                                        None => tools::bounded_result(
+                                            "handle_invalid: expected t:<tool>:<call8>:<digest8>".to_owned(),
+                                            true,
+                                        ),
+                                        Some(handle) => match spills.read(handle).await {
+                                            Ok(runtime::SpillRead::Found { text, .. }) => {
+                                                match render_tool_result(&arguments.handle, &arguments, &text) {
+                                                    Ok(page) => tools::ToolOutput::exact(page, &runtime::READ_TOOL_RESULT_BOUNDS),
+                                                    Err(error) => tools::bounded_result(error, true),
+                                                }
+                                            }
+                                            Ok(runtime::SpillRead::Missing) => tools::bounded_result(
+                                                format!("spill_missing: no stored output for {}", arguments.handle),
+                                                true,
+                                            ),
+                                            Ok(runtime::SpillRead::Evicted) => tools::bounded_result(
+                                                format!("spill_evicted: the stored output for {} was reclaimed by the session's 64 MiB cap", arguments.handle),
+                                                true,
+                                            ),
+                                            Ok(runtime::SpillRead::ForeignSession) => tools::bounded_result(
+                                                "handle_foreign_session: stored outputs are readable only by the session that produced them".to_owned(),
+                                                true,
+                                            ),
+                                            Err(error) => tools::bounded_result(error, true),
+                                        },
+                                    },
                                     Err(error) => tools::bounded_result(
                                         format!("invalid arguments: {error}"),
                                         true,
@@ -2352,6 +2430,7 @@ impl plan::CompiledAgentPlan {
                             &call,
                             &result,
                         );
+                        let result = cite_spill(result, &call.name, call.id, spills.is_some());
                         results[usize::from(call.call_ordinal - 1)] = Some(result.clone());
                         yield RuntimeEvent::ToolCallFinished {
                             id: call.id,
@@ -2359,6 +2438,7 @@ impl plan::CompiledAgentPlan {
                             is_error: result.is_error,
                             file_state: result.file_state,
                             display: result.ui_payload,
+                            spill: result.spill,
                         };
                         if interrupted_here {
                             turn_interrupted_in_tools = true;
@@ -2399,6 +2479,7 @@ impl plan::CompiledAgentPlan {
                             &call,
                             &result,
                         );
+                        let result = cite_spill(result, &call.name, call.id, spills.is_some());
                         results[usize::from(call.call_ordinal - 1)] = Some(result.clone());
                         yield RuntimeEvent::ToolCallFinished {
                             id: call.id,
@@ -2406,6 +2487,7 @@ impl plan::CompiledAgentPlan {
                             is_error: result.is_error,
                             file_state: result.file_state,
                             display: result.ui_payload,
+                            spill: result.spill,
                         };
                     }
                 }
@@ -2437,6 +2519,7 @@ impl plan::CompiledAgentPlan {
                                 is_error: true,
                                 file_state: None,
                                 display: None,
+                                spill: None,
                             };
                         }
                     }
@@ -2453,7 +2536,11 @@ impl plan::CompiledAgentPlan {
                     .map(|(call, result)| {
                         let result = result.expect("every bounded tool execution completed");
                         let mut content = result.model_text;
-                        turn_output.admit(&mut content);
+                        let handle = result
+                            .spill
+                            .as_ref()
+                            .map(|spill| spill.handle(&call.name, call.id));
+                        turn_output.admit(&mut content, handle.as_deref());
                         budget.charge_tool_output(content.len());
                         ContentBlock::ToolResult {
                             call_id: call.provider_call_id.clone(),

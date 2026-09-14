@@ -119,6 +119,9 @@ pub(crate) enum RuntimeEvent {
         /// A UI-facing payload persisted with the result (the applied diff of
         /// a successful edit). Never enters model context.
         display: Option<ToolCallDisplay>,
+        /// The complete output when `result` was cut and a session store
+        /// will keep it under the handle the marker already names.
+        spill: Option<crate::tools::SpillRecord>,
     },
     /// The final-answer auditor settled. Emitted before `Completed` (when the
     /// answer stands) or before the revision turn (when it does not); the

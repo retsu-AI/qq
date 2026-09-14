@@ -4,6 +4,7 @@ mod events;
 mod gate;
 mod history;
 mod prompt;
+mod spill;
 mod steering;
 mod subagent;
 
@@ -27,6 +28,10 @@ pub(crate) use history::{
 pub(crate) use prompt::{
     AGENT_PROMPT_VERSION, PromptSections, ToolSchemaMeasurement, agent_system_prompt,
     delegation_roster_text, measure_tool_schemas, tool_schema_measurement,
+};
+pub(crate) use spill::{
+    READ_TOOL_RESULT_BOUNDS, ReadToolResultArgs, SpillHandle, SpillRead, SpillReadFuture,
+    SpillReader, read_tool_result_spec, render_tool_result,
 };
 pub use steering::MAX_PENDING_STEERING;
 pub(crate) use steering::{SteeringMessage, SteeringReceiver, SteeringSender, steering_channel};

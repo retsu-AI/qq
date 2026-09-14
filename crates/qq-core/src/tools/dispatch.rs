@@ -18,7 +18,7 @@ use crate::{
 
 use super::{
     edit::edit_file,
-    output::{Bounds, bound_text, mask_secrets},
+    output::{Bounds, MAX_SPILL_ITEM_BYTES, bound_text, mask_secrets},
     read::read_file,
     search::search,
     shell::{ShellArgs, run_shell},
@@ -226,6 +226,29 @@ pub(crate) struct ToolOutput {
     /// Set when the execution (re)recorded a file's content hash, so the
     /// session store can persist the file-state map alongside the result.
     pub(crate) file_state: Option<FileStateUpdate>,
+    /// The complete masked text when bounding cut any of it, for the session
+    /// store to keep under a handle the marker names. `None` when the model
+    /// text is complete or the text exceeds what the store keeps.
+    pub(crate) spill: Option<SpillRecord>,
+}
+
+/// A complete tool output awaiting storage: the text, its SHA-256 (the
+/// handle's digest), and the line the bounded text omits from so the marker
+/// can point at it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpillRecord {
+    pub(crate) text: String,
+    pub(crate) digest: String,
+    pub(crate) omitted_from_line: usize,
+}
+
+impl SpillRecord {
+    /// The marker token for this record under `call`:
+    /// `t:<tool>:<call8>:<digest8>`.
+    pub(crate) fn handle(&self, tool: &str, call: qq_protocol::ToolCallId) -> String {
+        let call = call.to_string();
+        format!("t:{tool}:{}:{}", &call[..8], &self.digest[..8])
+    }
 }
 
 impl ToolOutput {
@@ -240,11 +263,40 @@ impl ToolOutput {
     }
 
     pub(super) fn bounded(text: String, bounds: &Bounds, is_error: bool) -> Self {
+        // The complete text is kept only when the size alone says a cut may
+        // happen: cloning every small result would cost on the hot path for
+        // nothing. It is kept unmasked — an explicit `read_tool_result` is
+        // the model asking for exact bytes of something it produced — while
+        // the inline preview is masked as before.
+        let spill_source =
+            (text.len() > bounds.max_bytes || text.len() > bounds.max_lines).then(|| text.clone());
+        let bounded = bound_text(mask_secrets(text), bounds, None);
+        let spill = spill_source
+            .filter(|text| bounded.omitted_bytes > 0 && text.len() <= MAX_SPILL_ITEM_BYTES)
+            .map(|text| SpillRecord {
+                digest: crate::workspace::content_hash(text.as_bytes()),
+                text,
+                omitted_from_line: bounded.omitted_from_line,
+            });
         Self {
-            model_text: bound_text(mask_secrets(text), bounds, None).text,
+            model_text: bounded.text,
             is_error,
             ui_payload: None,
             file_state: None,
+            spill,
+        }
+    }
+
+    /// A bounded but unmasked result: an explicit read of stored output the
+    /// model already produced, where masking would defeat the read. Never
+    /// spills — the page is itself bounded on whole lines by its renderer.
+    pub(crate) fn exact(text: String, bounds: &Bounds) -> Self {
+        Self {
+            model_text: bound_text(text, bounds, None).text,
+            is_error: false,
+            ui_payload: None,
+            file_state: None,
+            spill: None,
         }
     }
 
@@ -256,6 +308,7 @@ impl ToolOutput {
             is_error: true,
             ui_payload: None,
             file_state: None,
+            spill: None,
         }
     }
 }

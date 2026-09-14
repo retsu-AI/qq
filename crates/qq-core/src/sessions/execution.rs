@@ -2,7 +2,10 @@ use super::*;
 use super::{
     approvals::SessionToolGate,
     runtime::SessionRuntimeInner,
-    subagents::{ChildTasks, SessionAuditHook, SessionHistorySearcher, SessionSubagentSpawner},
+    subagents::{
+        ChildTasks, SessionAuditHook, SessionHistorySearcher, SessionSpillReader,
+        SessionSubagentSpawner,
+    },
 };
 
 /// Denies every tool call. Compaction runs summarize existing context; a
@@ -324,6 +327,10 @@ async fn prepare_execution(
                 Arc::clone(inner),
                 claimed.identity.session_id,
                 claimed.identity.run_id,
+            )))
+            .with_spills(Arc::new(SessionSpillReader::new(
+                Arc::clone(inner),
+                claimed.identity.session_id,
             )))
             .with_steering(receiver);
         // Only user-initiated roots are audited: children answer to their
@@ -1889,6 +1896,7 @@ async fn execute_started_run(
                 is_error,
                 file_state,
                 display,
+                spill,
             })) => {
                 if internal {
                     continue;
@@ -1918,7 +1926,7 @@ async fn execute_started_run(
                 }
                 match inner
                     .store
-                    .finish_tool_call(&claimed, id, result, is_error, file_state, display)
+                    .finish_tool_call(&claimed, id, result, is_error, file_state, display, spill)
                     .await
                 {
                     Ok(_) => {}
