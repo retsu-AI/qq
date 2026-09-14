@@ -1796,10 +1796,17 @@ mod tests {
         )
     }
 
+    /// Every stdout line must be a strict `HeadlessRecord` that re-encodes
+    /// byte-for-byte: the binary emits exactly the protocol's vocabulary.
     fn parse_records(stdout: &str) -> Vec<serde_json::Value> {
         stdout
             .lines()
-            .map(|line| serde_json::from_str(line).expect("every stdout line must be JSON"))
+            .map(|line| {
+                let record: qq_protocol::HeadlessRecord = serde_json::from_str(line)
+                    .unwrap_or_else(|error| panic!("not a headless record: {error}: {line}"));
+                assert_eq!(serde_json::to_string(&record).unwrap(), line);
+                serde_json::from_str(line).expect("every stdout line must be JSON")
+            })
             .collect()
     }
 
