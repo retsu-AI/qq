@@ -11,13 +11,13 @@ newest last.
 | T3 | `read_file` v2 (gutter, ranges, outline, info, `if_changed_since`) | Shipped (#35, `eecc76b`) | `feat/tool-layer-t3-read-file` | Evidence `target/qq-perf/t3-2026-09-14/` |
 | T4 | Spill store + `read_tool_result` | Shipped (#36, `80e7396`) | `feat/tool-layer-t4-spill-store` | Evidence `target/qq-perf/t4-2026-09-14/`; ADR-0019 |
 | T5 | `edit_file` v2 batch/cascade/anchors/dry-run; `write_file` flags | Shipped (#37, `95fef1b`) | `feat/tool-layer-t5-edit-v2` | Evidence `target/qq-perf/t5-2026-09-14/` |
-| T6 | Shell classifier + `Forbidden` decision; shell v2 env/cleared environment; builtin preference | In review | `feat/tool-layer-t6-classifier` | Started 2026-09-14; evidence `target/qq-perf/t6-2026-09-14/`; ADR-0020 written; tree-sitter promoted |
-| T7 | `exec`, env allowlist, prefer-built-in nudge, `builtin_preference` | In review | `feat/tool-layer-t7-exec` (stacked on T6) | 2026-09-14; env allowlist and preference landed in T6 (shared plumbing); T7 adds `exec` |
+| T6 | Shell classifier + `Forbidden` decision; shell v2 env/cleared environment; builtin preference | Shipped (#40, `91809b2`) | `feat/tool-layer-t6-classifier` | Evidence `target/qq-perf/t6-2026-09-14/`; ADR-0020 |
+| T7 | `exec`, env allowlist, prefer-built-in nudge, `builtin_preference` | Shipped (#41, `c3b5088`) | `feat/tool-layer-t7-exec` | env/nudge landed in T6 |
 | T8 | `ask_user` + `Interactive` class | Planned | | ADR shared with T9 |
 | T9 | `fetch` + `Network` class | Planned | | |
 | T10 | `terminal` | Planned (gated) | | Ships only on R6-terminal evidence |
 | T11 | `view_image` + provider image block | Planned | | `vision` feature |
-| T12 | `@` mentions | Planned | | Protocol additive `range` field |
+| T12 | `@` mentions: grammar, `range` field, dirs/globs, `@diff`/`@sha`, completion | In progress | `feat/tool-layer-t12-mentions` | Started 2026-09-14; baseline `target/qq-perf/t12-2026-09-14/render-baseline.txt` (35.6 µs median frame) |
 | T13 | Ablation harness A0–A5 | Planned | | Runs after T7 and after T12 |
 | T14 | `select_tools` lexical index | Planned | | |
 
@@ -132,3 +132,11 @@ Gates: none named; `exec` shares `run_shell` after spawn, so `tool_dispatch` is 
 Deviations: `exec` renders to a quoted command line for policy rather than a separate argv classifier path — one shape for classifier, grants, and preview. `Launch` enum in `shell.rs` shares everything after spawn.
 Docs: `docs/design/tools.md` § Built-In Tools, § Shell Execution (`exec`).
 Open: T13's `strict` arm; a per-tool `exec` allow table if the quoted rendering ever over-prompts.
+
+### 2026-09-14 — v0.1.0 cut; T12 in progress
+
+T6 (#40), T7 (#41), and the release (#42, protocol 20) merged; `v0.1.0`
+tagged. T12 on `feat/tool-layer-t12-mentions` (worktree
+`/tmp/opencode/qq-t12`). Baseline: `render` bench
+`sessions_200_with_sidebar_frame` median 35.6 µs (the TUI render gate the
+slice must leave unchanged).
