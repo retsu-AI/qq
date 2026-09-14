@@ -287,8 +287,9 @@ The first tool set is small, executed in-process, and dispatched statically —
 an enum, not a trait-object registry. This keeps per-call overhead near zero
 and keeps the schema for each tool in one place:
 
-- `read_file` — line-windowed read with offset/limit over a 4 MiB scan;
-  records a content hash for the staleness guard below.
+- `read_file` — line-numbered read by `offset`/`limit` or up to eight
+  `ranges`, or the file's `outline` or `info`, over a 4 MiB scan; the header
+  carries the content hash the staleness guard records (§ Reading Files).
 - `tree` — depth-bounded, ignore-aware directory tree with sizes and
   per-directory counts (§ Read-Side Walk). `list_dir` is its hidden alias
   (`tree depth=1`, ignored entries included) for one release so persisted
@@ -383,6 +384,64 @@ restricting descent.
 
 Both tools are `ReadOnly`, run concurrently, and are prunable; a pruned
 stub keeps the header, so the match count and cursor survive.
+
+### Reading Files
+
+`read_file` reads the whole file (to the 4 MiB scan cap) once, hashes it,
+and renders one of three shapes. Every result opens with a `read` header
+so the model, the TUI, and a pruning stub all get the same facts:
+
+```
+read crates/qq-core/src/tools/read.rs L1-40,88-91/412 h:3f9a1c0b7e2d
+  1	use std::fmt::Write as _;
+  2	
+ …
+ 40	    Info,
+--
+ 88	fn parse_ranges(
+ …
+```
+
+**Lines** (default). `<n>\t<text>` with one gutter width per call so
+columns align across ranges; CR is stripped from CRLF files (the hash is of
+the bytes, so the guard is unaffected); lines over 2 000 bytes clip with
+`…+N` and the header counts them in `clipped=`. `ranges` (`"12"`,
+`"40-80"`, `"400-"`) are merged when they overlap or touch, emitted
+ascending, and separated by `--`; `offset`/`limit` is the one-range form
+and the two are mutually exclusive. A read is never cut mid-line: the 32
+KiB default budget stops on a whole row, the header says
+`truncated=bytes`, and the marker names `offset=<next>` to continue from.
+The gutter is deliberate — dropping it saves tokens and costs edit
+anchors, which is the wrong trade for a tool whose purpose is to set up an
+edit.
+
+**`if_changed_since=h:<hash>`.** When the file's short hash matches, the
+answer is one line — `read <path> unchanged h:<hash> lines=<n>` — and the
+file is still recorded in the file-state map, so a re-read before an edit
+costs a header instead of a window. When it differs, the requested window
+is returned as usual.
+
+**`mode=outline`.** `L<line> <kind> <name>` per item with two-space
+nesting derived from the defining line's indentation, ≤ 400 rows, header
+`read <path> outline items=<shown>/<total> lines=<n> h:<hash>`. Kinds are
+the source keywords (`fn`, `struct`, `impl`, `class`, `def`, `func`,
+`h2`, …) from the same per-language tables `search mode=definition` uses,
+minus the bare assignment forms that would list every local. Languages
+without a table fail with `outline_unsupported`; the model falls back to
+lines.
+
+**`mode=info`.** `read <path> info size= lines= h: utf8= eol=lf|crlf|none
+perms= binary=[ mime=]`, one line, for any file including binaries (which
+`lines` and `outline` refuse with `not_text`). Images (`png jpg gif webp`)
+answer `info` plus `hint=image_unsupported_by_model` from every mode until
+T11 attaches an image block for models that accept one.
+
+Failures are typed: `invalid_ranges`, `invalid_offset`, `invalid_limit`,
+`invalid_if_changed_since`, `range_out_of_bounds` (with `last_line=`),
+`not_a_file`, `not_text`, `path_not_found`, `path_escapes_workspace`,
+`outline_unsupported`. Files over the scan cap render what was scanned,
+say `scanned=4194304` in the header with `h:-`, and record nothing — a
+file the guard cannot hash whole is not one it can protect an edit to.
 
 ## File References In Prompts
 

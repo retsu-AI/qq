@@ -8,7 +8,7 @@ newest last.
 | --- | --- | --- | --- | --- |
 | T1 | Cross-cutting primitives: `Bounds`, `bound_text`, `ToolOutput` split, header convention, masking, per-turn budget | Shipped (#31, `b0a18be`) | `feat/tool-layer-t1-output-bounds` | Evidence `target/qq-perf/t1-2026-09-11/` |
 | T2 | `search` v2 + `tree` (+ `list_dir` alias) | Shipped (#32, `8bb4050`) | `feat/tool-layer-t2-search-tree` | Evidence `target/qq-perf/t2-2026-09-12/` |
-| T3 | `read_file` v2 (gutter, ranges, outline, info, `if_changed_since`) | In progress | `feat/tool-layer-t3-read-file` | Started 2026-09-14; baseline `target/qq-perf/t3-2026-09-14/tool_dispatch-baseline.txt` (41–47 µs pinned) |
+| T3 | `read_file` v2 (gutter, ranges, outline, info, `if_changed_since`) | In review | `feat/tool-layer-t3-read-file` | Started 2026-09-14; evidence `target/qq-perf/t3-2026-09-14/` |
 | T4 | Spill store + `read_tool_result` | Planned | | Touches `sessions/store`; second-agent review required |
 | T5 | `edit_file` v2 + `write_file` flags | Planned | | |
 | T6 | Shell classifier + `Forbidden` decision | Planned | | Root request: promote `tree-sitter{,-bash}` to workspace deps; ADR reserved |
@@ -64,3 +64,12 @@ T2 merged as #32 (`8bb4050`). T3 on `feat/tool-layer-t3-read-file`
 (worktree `/tmp/opencode/qq-t3`). Pre-change baseline: `tool_dispatch`
 (its loop is a `read_file` call) 41.2–46.7 µs/iter pinned to one core,
 6 runs — the only gate whose path T3 touches.
+
+#### T3 receipt — 2026-09-14
+Commit(s): `15719c2` read_file v2 (header, gutter, ranges, outline, info, `if_changed_since`) + outline tables + TUI + prompt · `e441b17` perf: body sized to the file.
+Tests: 6 added (2 `lang` outline tables across Rust/TS/Python/Go/C/Markdown; `read_file_ranges_merge_align_and_report_bounds` incl. nine typed failures; `read_file_if_changed_since_skips_unchanged_content_but_still_records`; `read_file_outline_and_info_modes` incl. CRLF, binary, image; `read_rows_take_their_metric_from_the_header_and_hide_it_when_expanded` in the TUI) and 1 rewritten (`read_file_stops_at_its_byte_budget_and_names_the_resume_offset` replaces the head/tail-cut assertion). Existing runtime/session assertions updated for the header (`content.ends_with("\n1\t…")`). Workspace green: 773 passed.
+Gates: `tool_dispatch` A/B pinned core 10 pairs: base 43.7 → cand 41.4 µs median (a first candidate was +4 % from a 32 KiB `String::with_capacity` per read; `e441b17` sizes the body to the file). Schema hash changed as expected (`79171ee9…`).
+Deviations: the model-facing default is 32 KiB as planned but the ceiling stays the shared 128 KiB (no per-tool ceiling constant). `if_changed_since` compares the 12-hex short hash the header shows, not the full digest. `ranges` accept an open end (`"400-"`) beyond the plan's `^[0-9]+(-[0-9]+)?$`; the schema pattern is `^[0-9]+(-[0-9]*)?$`. Outline nesting uses indentation of the defining line (heading level for Markdown), as planned; Go methods render `Type.Method`. Image handling is the hint only (T11 attaches the block).
+Docs: `docs/design/tools.md` § Built-In Tools, § Reading Files (new).
+Open: T5's `edit_file` can use `h:` from the header as an optional precondition; T11 replaces the image hint; T12's `@` ranges reuse `parse_ranges`.
+Evidence: `target/qq-perf/t3-2026-09-14/` (untracked).
