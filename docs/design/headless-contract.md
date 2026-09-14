@@ -170,7 +170,12 @@ owner exits; concurrent runs need distinct `XDG_DATA_HOME`s.
 ### Output: JSONL Records
 
 With `--format jsonl`, stdout carries one JSON object per line, tagged by
-`type` (`src/headless.rs`, `TrialRecord`):
+`type`. The shapes are protocol vocabulary (`qq_protocol::HeadlessRecord`
+with `HeadlessTrial`, `HeadlessOutcome`, `HeadlessStatus`; ADR-0023) and are
+pinned byte-for-byte by the golden streams under
+`crates/qq-protocol/tests/fixtures/headless/v<PROTOCOL_VERSION>/`, one per
+exit status. Decoding a record with an unknown `type`, an unknown field, or an
+unknown `status` fails; a supervisor should do the same.
 
 | `type` | Fields | Notes |
 | --- | --- | --- |
@@ -310,7 +315,7 @@ validation and repair turns, with bounded work and measured performance.
 | Minimal configuration check | **Shipped** 2026-09-11 (`95c6e3d`). `ConfigLoader::check` validates every rule and treats only `ModelRequired` as "valid apart from the selection"; `config check` with `(version: 1)` passes and names the missing model. `load()` and every run-time path still require one | — | HC1 |
 | Narrowing tool exposure | **Shipped** 2026-09-06 (`93ef6b8`). Optional `policy.exposed_tools` narrows the catalog by intersection across layers and existing profile/pack exposure. An absent field adds no restriction; an empty list exposes no tools. Existing grants and managed grant denies retain their meaning. Static names and MCP name syntax validate during `config check`; profile-admitted MCP membership validates during plan compilation without discovery in `config check`; ordinary catalog bounds remain authoritative | — | HC2 |
 | Typed final output | **Shipped** 2026-09-12 (`feat/hc3-typed-final-output`; ADR-0014). `--output-schema PATH` and `--output-repair-turns N` compile a bounded, reference-free JSON Schema subset before configuration loads; the contract rides `submit_prompt.output`, is persisted on the run row and re-enforced after restart; core validates the answer that survived audit and steering, repairs within the allowance, and settles `Completed` with `final_output` (`valid` with the parsed value, or `invalid` with bounded `<pointer>: <message>` errors) written in the settlement transaction and published on `run_finished` and `outcome`. `PROTOCOL_VERSION` 18 → 19, store schema 26 → 27. Valid JSON is not a correct answer; the supervisor still verifies | — | HC3 |
-| Pinning the contract | Supervisors re-read QQ source at each bump | Golden JSONL fixtures for `trial`/`event`/`outcome` per `PROTOCOL_VERSION` under `crates/qq-protocol/tests/fixtures/headless/`, with a compatibility statement in this document | HC4 |
+| Pinning the contract | **Shipped** 2026-09-13 (`feat/hc4-headless-goldens`; ADR-0023). The record shapes moved into `qq-protocol` as `HeadlessRecord`/`HeadlessTrial`/`HeadlessOutcome`/`HeadlessStatus`; the binary emits through a borrowing view whose encoding a test pins to the owned type. `crates/qq-protocol/tests/fixtures/headless/v19/` holds ten complete streams (every exit status, the default payload, every optional trial field, both `final_output` verdicts) checked byte-for-byte and for framing; `v18/` holds the default-path streams decode-only. The binary's own tests decode every stdout line strictly and require it to re-encode identically | — | HC4 |
 | Exit code `3` ambiguity | Shared by `timed_out` and `budget_exhausted` | Keep the codes; the status field is authoritative and the fixtures pin that. Splitting the code is a breaking change with no consumer asking for it. Revisit only with a real request | none |
 | Static binary | musl build fails in Cargo build scripts | Packaging, not contract. Tracked outside this document | none |
 
@@ -340,13 +345,18 @@ unchanged (`read_tool_loop` median 54.8 → 52.2 µs, within noise).
 
 - `PROTOCOL_VERSION` (`crates/qq-protocol/src/lib.rs`) governs the envelope
   and event vocabulary. The JSONL record shapes above are part of that
-  contract from HC4 onward and bump with it. Version 19 added the optional
-  `submit_prompt.output`, `run_finished.final_output`, and the trial/outcome
-  fields above; every default-path version-18 record is byte-identical after
-  the version field changes, and `capabilities.limits` gained four declared
-  bounds.
-- New fields are additive and optional; a supervisor must ignore unknown
-  fields and must fail closed on unknown `type` or `status` values.
+  contract and bump with it (ADR-0023); their golden streams live under
+  `crates/qq-protocol/tests/fixtures/headless/v<PROTOCOL_VERSION>/` and
+  every retained earlier directory must still decode. Version 19 added the
+  optional `submit_prompt.output`, `run_finished.final_output`, and the
+  trial/outcome fields above; every default-path version-18 stream is
+  byte-identical after the version field changes (the `v18/` and `v19/`
+  default-path goldens differ only there), and `capabilities.limits` gained
+  four declared bounds.
+- New fields are additive and optional and are omitted, never `null`, when
+  absent. A supervisor may ignore unknown fields and must fail closed on
+  unknown `type` or `status` values; `qq_protocol::HeadlessRecord` itself
+  rejects both.
 - Widening the shared model-turn limit to `u32` changes the accepted wire
   range and requires a protocol-version bump. Existing `u16`-range records
   remain decodable; tests cover values above that range without executing
@@ -354,7 +364,11 @@ unchanged (`read_tool_loop` median 54.8 → 52.2 µs, within noise).
 - Each fixture version pins its exact `protocol_version`. Cross-version
   default-path comparisons permit declared version-field changes after
   normalizing run identity, timestamps, and build metadata; they require
-  unchanged application payload and no new opt-in fields without flags.
+  unchanged application payload and no new opt-in fields without flags. The
+  golden streams are constructed, not recorded: they pin shapes and framing
+  (one leading `trial` unless startup failed, only `event`s between, strictly
+  increasing cursors, one trailing `outcome` whose `exit_code` agrees with
+  its `status`), not a transcript.
 - Exit codes are stable. A new terminal status reuses an existing code and is
   distinguished by `status`.
 - `estimated_cost_usd_nanos`, `usage`, and `prompt_identity` are diagnostic.
