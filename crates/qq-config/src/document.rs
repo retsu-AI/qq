@@ -1005,6 +1005,7 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
                     | "edit_file"
                     | "write_file"
                     | "shell"
+                    | "exec"
                     | "spawn_agent"
                     | "search_history"
                     | "read_tool_result"

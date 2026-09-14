@@ -18,7 +18,7 @@ use super::{
     output::{Bounds, MAX_SPILL_ITEM_BYTES, bound_text, mask_secrets},
     read::read_file,
     search::search,
-    shell::{ShellArgs, run_shell},
+    shell::{ExecArgs, Launch, ShellArgs, run_shell},
     specs::BuiltInTool,
     tree::{TreeArgs, tree},
     write::write_file,
@@ -161,20 +161,35 @@ pub(crate) async fn execute(
     // rather than doing blocking filesystem work, so it must neither occupy a
     // blocking permit for its full (possibly 120 s) lifetime nor block a
     // worker thread.
-    if matches!(BuiltInTool::from_name(&name), Some(BuiltInTool::Shell)) {
-        let arguments = match serde_json::from_str::<ShellArgs>(&arguments) {
-            Ok(arguments) => arguments,
-            Err(error) => {
+    let launch_tool = BuiltInTool::from_name(&name);
+    if matches!(launch_tool, Some(BuiltInTool::Shell | BuiltInTool::Exec)) {
+        let is_exec = launch_tool == Some(BuiltInTool::Exec);
+        let shell_arguments = match (is_exec, serde_json::from_str::<ShellArgs>(&arguments)) {
+            (false, Ok(arguments)) => Some(arguments),
+            (false, Err(error)) => {
                 return ToolOutput::error(format!("invalid arguments: {error}"));
             }
+            (true, _) => None,
+        };
+        let exec_arguments = match (is_exec, serde_json::from_str::<ExecArgs>(&arguments)) {
+            (true, Ok(arguments)) => Some(arguments),
+            (true, Err(error)) => {
+                return ToolOutput::error(format!("invalid arguments: {error}"));
+            }
+            (false, _) => None,
         };
         let lease = tasks.enter();
         return match tokio::spawn(async move {
             let mut lease = lease;
+            let launch = match (&shell_arguments, &exec_arguments) {
+                (Some(shell), _) => Launch::Shell(shell),
+                (_, Some(exec)) => Launch::Exec(exec),
+                (None, None) => unreachable!("one launch shape was parsed"),
+            };
             run_shell(
                 &workspace,
                 &shell_policy,
-                &arguments,
+                launch,
                 &cancelled,
                 output.as_ref(),
                 &mut lease.process_pending,
@@ -373,7 +388,9 @@ pub(super) fn execute_blocking(
             .map_or_else(ToolOutput::error, |args| {
                 write_file(workspace, file_state, &args, cancelled)
             }),
-        Some(BuiltInTool::Shell) => ToolOutput::error("shell commands must execute asynchronously"),
+        Some(BuiltInTool::Shell | BuiltInTool::Exec) => {
+            ToolOutput::error("shell commands must execute asynchronously")
+        }
         #[cfg(test)]
         Some(BuiltInTool::TestDelay) => {
             let arguments: TestDelayArgs = match deserialize(arguments) {

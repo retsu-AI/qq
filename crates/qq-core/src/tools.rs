@@ -1203,6 +1203,7 @@ mod tests {
                 "edit_file",
                 "write_file",
                 "shell",
+                "exec",
             ]
         );
         assert!(!specs.iter().any(|spec| spec.name() == SPAWN_AGENT_TOOL));
@@ -1211,7 +1212,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "bc0dfb77dd633970bcc698b5627081b2edcb8dc9fdf4b1ec934afbc96b1b54da"
+            "2f34c2a528dfc420743ee2943a07ebba87cca8bba1d6870323411036d402070d"
         );
     }
 
@@ -2564,6 +2565,88 @@ mod tests {
         )
         .await;
         assert!(base.model_text.contains("h=set"), "{}", base.model_text);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_runs_an_exact_argv_without_shell_interpretation() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a b.txt"), "spaced\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let run = |arguments: &str| {
+            let workspace = workspace.clone();
+            let arguments = arguments.to_owned();
+            async move {
+                execute(
+                    workspace,
+                    Arc::new(FileState::default()),
+                    "exec".to_owned(),
+                    arguments,
+                    Arc::new(AtomicBool::new(false)),
+                    None,
+                    ToolTasks::default(),
+                    Arc::new(crate::runtime::ShellPolicy::default()),
+                )
+                .await
+            }
+        };
+        // Words are argv, not shell: a space in a filename needs no quoting
+        // and `$HOME`, `*`, and `|` are literal characters.
+        let literal =
+            run(r#"{"program":"printf","args":["%s|%s|%s\n","$HOME","a b.txt","*"]}"#).await;
+        assert!(!literal.is_error, "{}", literal.model_text);
+        assert!(
+            literal.model_text.starts_with("exec exit=0 elapsed="),
+            "{}",
+            literal.model_text
+        );
+        assert!(
+            literal.model_text.contains("\n$HOME|a b.txt|*\n"),
+            "{}",
+            literal.model_text
+        );
+        let spaced = run(r#"{"program":"cat","args":["a b.txt"]}"#).await;
+        assert!(
+            spaced.model_text.contains("\nspaced\n"),
+            "{}",
+            spaced.model_text
+        );
+        // stdin reaches the program and the write end closes.
+        let fed = run(r#"{"program":"tr","args":["a-z","A-Z"],"stdin":"hello\n"}"#).await;
+        assert!(fed.model_text.contains("\nHELLO\n"), "{}", fed.model_text);
+        // Failures are exit codes with the header, like shell.
+        let failed = run(r#"{"program":"false"}"#).await;
+        assert!(failed.is_error);
+        assert!(
+            failed.model_text.starts_with("exec exit=1 "),
+            "{}",
+            failed.model_text
+        );
+        let missing = run(r#"{"program":"definitely-not-a-program-qq"}"#).await;
+        assert!(missing.is_error);
+        assert!(
+            missing
+                .model_text
+                .starts_with("could not start the command"),
+            "{}",
+            missing.model_text
+        );
+        for (arguments, code) in [
+            (r#"{"program":""}"#, "invalid_program"),
+            (
+                r#"{"program":"true","args":["x"],"stdin":"y","env":["1x"]}"#,
+                "invalid_env",
+            ),
+            (r#"{"program":"true","cwd":"../"}"#, "path"),
+        ] {
+            let bad = run(arguments).await;
+            assert!(bad.is_error, "{arguments}");
+            assert!(
+                bad.model_text.contains(code),
+                "{arguments}: {}",
+                bad.model_text
+            );
+        }
     }
 
     #[cfg(unix)]

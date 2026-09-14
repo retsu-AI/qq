@@ -12,7 +12,7 @@ newest last.
 | T4 | Spill store + `read_tool_result` | Shipped (#36, `80e7396`) | `feat/tool-layer-t4-spill-store` | Evidence `target/qq-perf/t4-2026-09-14/`; ADR-0019 |
 | T5 | `edit_file` v2 batch/cascade/anchors/dry-run; `write_file` flags | Shipped (#37, `95fef1b`) | `feat/tool-layer-t5-edit-v2` | Evidence `target/qq-perf/t5-2026-09-14/` |
 | T6 | Shell classifier + `Forbidden` decision; shell v2 env/cleared environment; builtin preference | In review | `feat/tool-layer-t6-classifier` | Started 2026-09-14; evidence `target/qq-perf/t6-2026-09-14/`; ADR-0020 written; tree-sitter promoted |
-| T7 | `exec`, env allowlist, prefer-built-in nudge | Planned | | |
+| T7 | `exec`, env allowlist, prefer-built-in nudge, `builtin_preference` | In review | `feat/tool-layer-t7-exec` (stacked on T6) | 2026-09-14; env allowlist and preference landed in T6 (shared plumbing); T7 adds `exec` |
 | T8 | `ask_user` + `Interactive` class | Planned | | ADR shared with T9 |
 | T9 | `fetch` + `Network` class | Planned | | |
 | T10 | `terminal` | Planned (gated) | | Ships only on R6-terminal evidence |
@@ -123,3 +123,12 @@ Deviations: `PolicyDecision::Forbidden { rules }` is a separate variant rather t
 Docs: ADR-0020; `docs/design/tools.md` § Shell Execution (env, nudge), § Shell Classification (new), § Approval Policy (`auto`/`full` wording), § Workspace Grant Configuration (`shell_env`, `builtin_preference`).
 Open: T7 `exec`; T13 tunes the allow table from the `auto` prompt rate; configurable rule overrides deferred until asked for.
 Evidence: `target/qq-perf/t6-2026-09-14/` (untracked).
+
+#### T7 receipt — 2026-09-14
+Commit(s): on `feat/tool-layer-t7-exec`, stacked on T6.
+Scope note: the plan grouped the env allowlist and the prefer-built-in nudge under T7; both shipped in T6's shell v2 commit because they share `ShellPolicy` plumbing with the cleared environment. T7 is `exec` alone.
+Tests: `exec_runs_an_exact_argv_without_shell_interpretation` (literal `$HOME`/`*`/`|`/spaces, stdin piped and closed, exit codes, missing program, typed failures) and `exec_calls_classify_as_the_equivalent_command_line` (prefix grant covers, auto allows, metacharacter arguments quoted so `rm -rf /` as an argument is not a command, `sudo` through exec still Forbidden). Counts/hash updated for seven built-ins. Workspace green: 1391 passed.
+Gates: none named; `exec` shares `run_shell` after spawn, so `tool_dispatch` is unaffected (it never spawns).
+Deviations: `exec` renders to a quoted command line for policy rather than a separate argv classifier path — one shape for classifier, grants, and preview. `Launch` enum in `shell.rs` shares everything after spawn.
+Docs: `docs/design/tools.md` § Built-In Tools, § Shell Execution (`exec`).
+Open: T13's `strict` arm; a per-tool `exec` allow table if the quoted rendering ever over-prompts.

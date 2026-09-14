@@ -280,7 +280,7 @@ fn tool_verb(name: &str) -> &str {
         "read_tool_result" => "recall",
         "edit_file" => "edit",
         "write_file" => "write",
-        "shell" => "run",
+        "shell" | "exec" => "run",
         "spawn_agent" => "spawn",
         "web_fetch" => "fetch",
         other => other

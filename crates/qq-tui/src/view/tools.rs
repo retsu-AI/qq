@@ -175,14 +175,37 @@ impl ToolRow {
                         .map(|content| count_noun(content.lines().count(), "line", "lines"))
                 }),
             ),
-            "shell" => {
+            // `shell exit=<code> elapsed=<s> bytes=<n>` (or `exec …`) heads
+            // the result; an exec call renders as `program args…`.
+            "shell" | "exec" => {
                 let cwd = string_argument("cwd");
-                let command = string_argument("command").map(|command| match cwd {
-                    Some(cwd) => format!("{command}  (in {cwd})"),
-                    None => command,
-                });
-                // `shell exit=<code> elapsed=<s> bytes=<n>` heads the result.
-                let exit = header_field(result, "shell", "exit").map(|code| format!("exit {code}"));
+                let command = string_argument("command")
+                    .or_else(|| {
+                        let program = string_argument("program")?;
+                        let args = arguments
+                            .as_ref()
+                            .and_then(|value| value.get("args"))
+                            .and_then(|value| value.as_array())
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(|item| item.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            })
+                            .unwrap_or_default();
+                        Some(if args.is_empty() {
+                            program
+                        } else {
+                            format!("{program} {args}")
+                        })
+                    })
+                    .map(|command| match cwd {
+                        Some(cwd) => format!("{command}  (in {cwd})"),
+                        None => command,
+                    });
+                let exit =
+                    header_field(result, &call.name, "exit").map(|code| format!("exit {code}"));
                 ("Run", false, command, false, exit)
             }
             "spawn_agent" => (
@@ -240,7 +263,7 @@ impl ToolRow {
             }
         };
         let body = match call.name.as_str() {
-            "shell" => ResultBody::Tail,
+            "shell" | "exec" => ResultBody::Tail,
             _ => ResultBody::Head,
         };
         Self {
