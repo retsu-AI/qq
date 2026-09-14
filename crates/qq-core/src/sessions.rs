@@ -3298,7 +3298,7 @@ fn finish_tool_call(
     tool_call_id: ToolCallId,
     result: String,
     is_error: bool,
-    file_state: Option<FileStateUpdate>,
+    file_states: Vec<FileStateUpdate>,
     display: Option<ToolCallDisplay>,
     spill: Option<crate::tools::SpillRecord>,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
@@ -3355,8 +3355,8 @@ fn finish_tool_call(
     if updated != 1 {
         return Err(SessionRuntimeError::Unavailable);
     }
-    if let Some(update) = file_state {
-        record_session_file(&transaction, identity.session_id, &update, now)?;
+    for update in &file_states {
+        record_session_file(&transaction, identity.session_id, update, now)?;
     }
     // The complete output and the result whose marker cites it commit
     // together: a marker never names a handle the store does not hold.
@@ -8712,7 +8712,7 @@ mod tests {
                 } else if current == 0 && index == 1 {
                     (
                         "edit_file",
-                        r#"{"path":"slice-effects.txt","old_string":"seed","new_string":"seedx"}"#,
+                        r#"{"edits":[{"path":"slice-effects.txt","old":"seed","new":"seedx"}]}"#,
                     )
                 } else {
                     ("read_file", r#"{"path":"note.txt"}"#)
@@ -13054,7 +13054,7 @@ mod tests {
                 tool_call_id,
                 format!("head\n…[qq: 9 bytes / 1 lines omitted; full output {handle}; read_tool_result offset=2]…\ntail\n"),
                 false,
-                None,
+                Vec::new(),
                 None,
                 Some(crate::tools::SpillRecord {
                     text: text.to_owned(),
@@ -19883,7 +19883,7 @@ mod tests {
                     tool_call_id,
                     "tool result\n".to_owned(),
                     false,
-                    None,
+                    Vec::new(),
                     None,
                     None,
                 )
@@ -20088,7 +20088,7 @@ mod tests {
                 completed_call_id,
                 "persisted result".to_owned(),
                 false,
-                None,
+                Vec::new(),
                 None,
                 None,
             )
@@ -21635,7 +21635,7 @@ mod tests {
                 tool_call_id,
                 "noted\n".to_owned(),
                 false,
-                None,
+                Vec::new(),
                 None,
                 None,
             )
@@ -21755,7 +21755,7 @@ mod tests {
             provider_call_id: "provider-call".to_owned(),
             name: "edit_file".to_owned(),
             effect: crate::catalog::EffectClass::Mutating,
-            arguments: r#"{"path":"note.txt","old_string":"a","new_string":"b"}"#.to_owned(),
+            arguments: r#"{"edits":[{"path":"note.txt","old":"a","new":"b"}]}"#.to_owned(),
             rejection: None,
         };
         store
@@ -26398,7 +26398,7 @@ mod tests {
                 ("read_file", r#"{"path":"note.txt"}"#.to_owned()),
                 (
                     "edit_file",
-                    r#"{"path":"note.txt","old_string":"hello world","new_string":"goodbye world"}"#
+                    r#"{"edits":[{"path":"note.txt","old":"hello world","new":"goodbye world"}]}"#
                         .to_owned(),
                 ),
             ]],
@@ -26479,7 +26479,7 @@ mod tests {
                 requests: Arc::new(StdMutex::new(Vec::new())),
                 runs: vec![vec![(
                     "edit_file",
-                    r#"{"path":"note.txt","old_string":"hello","new_string":"goodbye"}"#.to_owned(),
+                    r#"{"edits":[{"path":"note.txt","old":"hello","new":"goodbye"}]}"#.to_owned(),
                 )]],
                 loads: StdMutex::new(0),
             }),
@@ -26538,7 +26538,7 @@ mod tests {
                     ("read_file", r#"{"path":"note.txt"}"#.to_owned()),
                     (
                         "edit_file",
-                        r#"{"path":"note.txt","old_string":"hello","new_string":"goodbye"}"#
+                        r#"{"edits":[{"path":"note.txt","old":"hello","new":"goodbye"}]}"#
                             .to_owned(),
                     ),
                 ],
@@ -26566,15 +26566,20 @@ mod tests {
         assert_eq!(edited.state, ToolCallState::Completed);
         // The model-facing result stays the compact summary; the diff rides
         // in the display payload only.
-        assert_eq!(
-            edited.result.as_deref(),
-            Some("Edited note.txt: replaced 1 occurrence(s).")
+        assert!(
+            edited
+                .result
+                .as_deref()
+                .is_some_and(|result| result.starts_with("edit ok files=1 edits=1\nnote.txt h:")),
+            "{:?}",
+            edited.result
         );
         assert_eq!(
             edited.display,
             Some(ToolCallDisplay::Diff {
                 path: "note.txt".to_owned(),
-                diff: "- hello\n+ goodbye\n".to_owned(),
+                diff: "--- a/note.txt\n+++ b/note.txt\n@@ -1,1 +1,1 @@\n-hello\n+goodbye\n"
+                    .to_owned(),
             })
         );
         assert_eq!(finished_call("read_file").display, None);
@@ -26615,11 +26620,16 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert!(tool_results.contains(&"Edited note.txt: replaced 1 occurrence(s)."));
+        assert!(
+            tool_results
+                .iter()
+                .any(|content| content.starts_with("edit ok files=1 edits=1\n")),
+            "{tool_results:?}"
+        );
         assert!(
             !tool_results
                 .iter()
-                .any(|content| content.contains("+ goodbye")),
+                .any(|content| content.contains("+goodbye")),
             "the display diff must never enter model context"
         );
     }
@@ -28087,7 +28097,7 @@ mod tests {
             requests: Arc::clone(&child_requests),
             script: vec![(
                 "edit_file",
-                r#"{"path":"a.txt","old_string":"x","new_string":"y"}"#.to_owned(),
+                r#"{"edits":[{"path":"a.txt","old":"x","new":"y"}]}"#.to_owned(),
             )],
             turn: StdMutex::new(0),
         });

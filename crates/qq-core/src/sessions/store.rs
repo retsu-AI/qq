@@ -1230,7 +1230,7 @@ impl Store {
         tool_call_id: ToolCallId,
         result: String,
         is_error: bool,
-        file_state: Option<FileStateUpdate>,
+        file_states: Vec<FileStateUpdate>,
         display: Option<ToolCallDisplay>,
         spill: Option<crate::tools::SpillRecord>,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
@@ -1244,7 +1244,7 @@ impl Store {
                 tool_call_id,
                 result,
                 is_error,
-                file_state,
+                file_states,
                 display,
                 spill,
             )

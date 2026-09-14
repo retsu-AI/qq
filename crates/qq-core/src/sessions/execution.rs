@@ -1894,7 +1894,7 @@ async fn execute_started_run(
                 id,
                 result,
                 is_error,
-                file_state,
+                file_states,
                 display,
                 spill,
             })) => {
@@ -1926,7 +1926,7 @@ async fn execute_started_run(
                 }
                 match inner
                     .store
-                    .finish_tool_call(&claimed, id, result, is_error, file_state, display, spill)
+                    .finish_tool_call(&claimed, id, result, is_error, file_states, display, spill)
                     .await
                 {
                     Ok(_) => {}

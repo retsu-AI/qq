@@ -54,7 +54,3 @@ pub(crate) fn content_hash(bytes: &[u8]) -> String {
     }
     hash
 }
-
-pub(crate) fn stale_file_error(path: &str) -> String {
-    format!("{path} changed since it was last read in this session; read it again and retry")
-}

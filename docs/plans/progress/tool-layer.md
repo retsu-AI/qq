@@ -9,8 +9,8 @@ newest last.
 | T1 | Cross-cutting primitives: `Bounds`, `bound_text`, `ToolOutput` split, header convention, masking, per-turn budget | Shipped (#31, `b0a18be`) | `feat/tool-layer-t1-output-bounds` | Evidence `target/qq-perf/t1-2026-09-11/` |
 | T2 | `search` v2 + `tree` (+ `list_dir` alias) | Shipped (#32, `8bb4050`) | `feat/tool-layer-t2-search-tree` | Evidence `target/qq-perf/t2-2026-09-12/` |
 | T3 | `read_file` v2 (gutter, ranges, outline, info, `if_changed_since`) | Shipped (#35, `eecc76b`) | `feat/tool-layer-t3-read-file` | Evidence `target/qq-perf/t3-2026-09-14/` |
-| T4 | Spill store + `read_tool_result` | In review | `feat/tool-layer-t4-spill-store` | Started 2026-09-14; evidence `target/qq-perf/t4-2026-09-14/`. Touches `sessions/store`; second-agent review required. ADR-0019 written |
-| T5 | `edit_file` v2 + `write_file` flags | Planned | | |
+| T4 | Spill store + `read_tool_result` | Shipped (#36, `80e7396`) | `feat/tool-layer-t4-spill-store` | Evidence `target/qq-perf/t4-2026-09-14/`; ADR-0019 |
+| T5 | `edit_file` v2 batch/cascade/anchors/dry-run; `write_file` flags | In review | `feat/tool-layer-t5-edit-v2` | Started 2026-09-14; evidence `target/qq-perf/t5-2026-09-14/` |
 | T6 | Shell classifier + `Forbidden` decision | Planned | | Root request: promote `tree-sitter{,-bash}` to workspace deps; ADR reserved |
 | T7 | `exec`, env allowlist, prefer-built-in nudge | Planned | | |
 | T8 | `ask_user` + `Interactive` class | Planned | | ADR shared with T9 |
@@ -90,3 +90,19 @@ Deviations: the marker is written provisionally as `not stored` by `bound_text` 
 Docs: `docs/design/tools.md` § Output Bounding (marker), § Spilled Outputs (new); ADR-0019; `docs/adr/README.md`; `root.md` ADR row.
 Open: T6/T7 may raise the 128 KiB shell capture cap now the bytes have a home; `search_history` over spills; client affordance to open a handle.
 Evidence: `target/qq-perf/t4-2026-09-14/` (untracked).
+
+### 2026-09-14 — T4 shipped; T5 in progress
+
+T4 merged as #36 (`80e7396`). T5 on `feat/tool-layer-t5-edit-v2` (worktree
+`/tmp/opencode/qq-t5`). Baseline: `tool_dispatch` 43.7–51.1 µs pinned (6
+runs, noisy host). The `edit_batch` gate is new to this slice; its first
+recording is the candidate.
+
+#### T5 receipt — 2026-09-14
+Commit(s): `a0216ce` edit_file v2 + matching cascade + write_file flags + approval preview + TUI.
+Tests: 8 `matching` (exact/ambiguity/fuzzy-off, line_trimmed CRLF, whitespace_normalized, indent_flexible re-indent + ambiguity, block_anchor drift + disproportionate + dissimilar, closest-line hint, no-trailing-newline spans), 5 new `tools` (multi-file batch with anchors and per-edit lines; whole-batch failure table incl. `conflicting_edits`, `invalid_edit` ×4, `stale_file`, `invalid_if_hash`, `path_not_found`, `not_a_file`, and the closest-line excerpt; `dry_run` + `if_hash` without a read + `fuzzy=false`; `partial_apply` via a read-only directory (unix); `write_file` hint), `write_file` test extended (nested parents, `too_deep`, `..` escape, `create_only`, `if_hash` proof and mismatch); approval preview batch grouping; TUI batch subject. 25 fixtures converted to the new argument shape; 6 result assertions updated. Workspace green: 1376 passed.
+Gates: `edit_batch` (new): 32 exact edits / 1 MiB dry-run 10.3 ms, apply 10.4 ms, 32 fuzzy-drifted edits 31.7 ms, single exact 1.6 ms. `tool_dispatch` A/B 15 pairs interleaved on an idle core: base 48.27 → cand 48.28 µs median (an earlier 4 % gap on a loaded core reproduced in the A/A control and was noise).
+Deviations: `line_trimmed` trims trailing whitespace only (indent kept) so `indent_flexible` is the single strategy that moves depth and re-indents — the plan's table implied both trim; `conflicting_edits` is a replacement landing inside text a prior edit wrote (inserts anchored on it are allowed). `ToolCallDisplay::Diff` keeps one `path` (the first) and carries a multi-file unified diff, avoiding a protocol bump; the changes pane therefore attributes a batch's counts to its first path until a variant with per-file entries is worth a version. The `edit_result_display` argument-echo is gone: the payload is the diff of what changed on disk. `stale_file_error` removed with its last caller. The T6 `tree-sitter` root request is filed ahead of start.
+Docs: `docs/design/tools.md` § Built-In Tools, § Edit Semantics (rewritten), § Optimistic Concurrency.
+Open: a `ToolCallDisplay` variant with per-file diffs (protocol 20) when the changes pane needs it; T12 `@` can pass `if_hash`; T13 measures the cascade's real hit rate.
+Evidence: `target/qq-perf/t5-2026-09-14/` (untracked).

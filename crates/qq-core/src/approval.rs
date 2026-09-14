@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use qq_protocol::{ApprovalMode, EditPreview, ToolCallDisplay};
+use qq_protocol::{ApprovalMode, EditPreview};
 use serde::Deserialize;
 
 use crate::catalog::EffectClass;
@@ -173,38 +173,30 @@ pub(crate) fn classify(effect: EffectClass, name: &str, arguments: &str) -> Tool
 }
 
 const MAX_PREVIEW_SIDE_BYTES: usize = 2 * 1024;
-/// One side of the display diff persisted with a completed edit result may be
-/// far larger than an approval preview: it is stored once and never enters
-/// model context, so the bound only protects the store and the wire.
-const MAX_RESULT_DIFF_SIDE_BYTES: usize = 32 * 1024;
 const PREVIEW_TRUNCATION_MARKER: &str = "[preview truncated]";
 
 /// Builds the approval-request preview for a file-modifying call: the
-/// workspace-relative path the model addressed and a bounded
-/// unified-diff-style rendering of the change. Returns None for other tools
-/// and for arguments the tool itself would reject.
+/// workspace-relative path the model addressed (the first, for a batch) and
+/// a bounded unified-diff-style rendering of every change, grouped by path.
+/// Returns None for other tools and for arguments the tool itself would
+/// reject. The preview renders what the model asked; the display persisted
+/// with the result renders what changed on disk.
 pub(crate) fn edit_preview(name: &str, arguments: &str) -> Option<EditPreview> {
-    bounded_edit_diff(name, arguments, MAX_PREVIEW_SIDE_BYTES)
-}
-
-/// Builds the display payload persisted alongside a successful
-/// `edit_file`/`write_file` result so clients can render the applied change
-/// as a diff. Returns None for other tools.
-pub(crate) fn edit_result_display(name: &str, arguments: &str) -> Option<ToolCallDisplay> {
-    bounded_edit_diff(name, arguments, MAX_RESULT_DIFF_SIDE_BYTES).map(|preview| {
-        ToolCallDisplay::Diff {
-            path: preview.path,
-            diff: preview.diff,
-        }
-    })
-}
-
-fn bounded_edit_diff(name: &str, arguments: &str, side_budget: usize) -> Option<EditPreview> {
     #[derive(Deserialize)]
     struct EditArguments {
+        edits: Vec<EditArgument>,
+    }
+    #[derive(Deserialize)]
+    struct EditArgument {
         path: String,
-        old_string: String,
-        new_string: String,
+        #[serde(default)]
+        old: Option<String>,
+        #[serde(default)]
+        new: Option<String>,
+        #[serde(default)]
+        insert_before: Option<String>,
+        #[serde(default)]
+        insert_after: Option<String>,
     }
     #[derive(Deserialize)]
     struct WriteArguments {
@@ -214,18 +206,42 @@ fn bounded_edit_diff(name: &str, arguments: &str, side_budget: usize) -> Option<
     match name {
         "edit_file" => {
             let arguments = serde_json::from_str::<EditArguments>(arguments).ok()?;
+            let first = arguments.edits.first()?;
             let mut diff = String::new();
-            push_diff_lines(&mut diff, '-', &arguments.old_string, side_budget);
-            push_diff_lines(&mut diff, '+', &arguments.new_string, side_budget);
+            let mut current_path: Option<&str> = None;
+            for edit in &arguments.edits {
+                let new = edit.new.as_deref()?;
+                if arguments.edits.len() > 1 && current_path != Some(edit.path.as_str()) {
+                    diff.push_str("=== ");
+                    diff.push_str(&edit.path);
+                    diff.push('\n');
+                    current_path = Some(&edit.path);
+                }
+                match (&edit.old, &edit.insert_before, &edit.insert_after) {
+                    (Some(old), None, None) => {
+                        push_diff_lines(&mut diff, '-', old, MAX_PREVIEW_SIDE_BYTES);
+                        push_diff_lines(&mut diff, '+', new, MAX_PREVIEW_SIDE_BYTES);
+                    }
+                    (None, Some(anchor), None) => {
+                        push_diff_lines(&mut diff, '+', new, MAX_PREVIEW_SIDE_BYTES);
+                        push_diff_lines(&mut diff, ' ', anchor, MAX_PREVIEW_SIDE_BYTES);
+                    }
+                    (None, None, Some(anchor)) => {
+                        push_diff_lines(&mut diff, ' ', anchor, MAX_PREVIEW_SIDE_BYTES);
+                        push_diff_lines(&mut diff, '+', new, MAX_PREVIEW_SIDE_BYTES);
+                    }
+                    _ => return None,
+                }
+            }
             Some(EditPreview {
-                path: arguments.path,
+                path: first.path.clone(),
                 diff,
             })
         }
         "write_file" => {
             let arguments = serde_json::from_str::<WriteArguments>(arguments).ok()?;
             let mut diff = String::new();
-            push_diff_lines(&mut diff, '+', &arguments.content, side_budget);
+            push_diff_lines(&mut diff, '+', &arguments.content, MAX_PREVIEW_SIDE_BYTES);
             Some(EditPreview {
                 path: arguments.path,
                 diff,
@@ -664,11 +680,27 @@ mod tests {
     fn edit_previews_render_bounded_diffs_for_edit_and_write_calls() {
         let preview = edit_preview(
             "edit_file",
-            r#"{"path":"src/lib.rs","old_string":"fn a() {}\nfn b() {}","new_string":"fn a() {}"}"#,
+            r#"{"edits":[{"path":"src/lib.rs","old":"fn a() {}\nfn b() {}","new":"fn a() {}"}]}"#,
         )
         .unwrap();
         assert_eq!(preview.path, "src/lib.rs");
         assert_eq!(preview.diff, "- fn a() {}\n- fn b() {}\n+ fn a() {}\n");
+
+        // A batch groups by path and shows anchors as context.
+        let preview = edit_preview(
+            "edit_file",
+            r#"{"edits":[
+                {"path":"a.rs","old":"x","new":"y"},
+                {"path":"b.rs","insert_after":"use std;","new":"use core;"},
+                {"path":"b.rs","insert_before":"fn end() {}","new":"fn mid() {}"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(preview.path, "a.rs");
+        assert_eq!(
+            preview.diff,
+            "=== a.rs\n- x\n+ y\n=== b.rs\n  use std;\n+ use core;\n+ fn mid() {}\n  fn end() {}\n"
+        );
 
         let preview = edit_preview(
             "write_file",
@@ -680,11 +712,17 @@ mod tests {
 
         assert_eq!(edit_preview("shell", r#"{"command":"ls"}"#), None);
         assert_eq!(edit_preview("edit_file", r#"{"path":"x"}"#), None);
+        assert_eq!(
+            edit_preview("edit_file", r#"{"edits":[{"path":"x"}]}"#),
+            None
+        );
 
         let oversized = serde_json::to_string(&serde_json::json!({
-            "path": "big.txt",
-            "old_string": "x".repeat(MAX_PREVIEW_SIDE_BYTES * 2),
-            "new_string": "y\n".repeat(MAX_PREVIEW_SIDE_BYTES),
+            "edits": [{
+                "path": "big.txt",
+                "old": "x".repeat(MAX_PREVIEW_SIDE_BYTES * 2),
+                "new": "y\n".repeat(MAX_PREVIEW_SIDE_BYTES),
+            }]
         }))
         .unwrap();
         let preview = edit_preview("edit_file", &oversized).unwrap();
@@ -695,42 +733,6 @@ mod tests {
                 <= 2 * (MAX_PREVIEW_SIDE_BYTES + PREVIEW_TRUNCATION_MARKER.len() + 3)
         );
         assert_eq!(preview.diff.matches(PREVIEW_TRUNCATION_MARKER).count(), 2);
-    }
-
-    #[test]
-    fn edit_result_displays_carry_larger_bounded_diffs_than_previews() {
-        let display = edit_result_display(
-            "write_file",
-            r#"{"path":"NOTES.md","content":"line one\nline two"}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            display,
-            ToolCallDisplay::Diff {
-                path: "NOTES.md".to_owned(),
-                diff: "+ line one\n+ line two\n".to_owned(),
-            }
-        );
-        assert_eq!(edit_result_display("shell", r#"{"command":"ls"}"#), None);
-
-        // A change too large for the 2 KiB approval preview still fits the
-        // result display whole; only the 32 KiB side budget truncates it.
-        let sizable = serde_json::to_string(&serde_json::json!({
-            "path": "big.txt",
-            "old_string": "x\n".repeat(MAX_PREVIEW_SIDE_BYTES),
-            "new_string": "y".repeat(MAX_RESULT_DIFF_SIDE_BYTES * 2),
-        }))
-        .unwrap();
-        let ToolCallDisplay::Diff { diff, .. } =
-            edit_result_display("edit_file", &sizable).unwrap();
-        assert_eq!(
-            diff.lines().filter(|line| line.starts_with('-')).count(),
-            MAX_PREVIEW_SIDE_BYTES
-        );
-        assert_eq!(diff.matches(PREVIEW_TRUNCATION_MARKER).count(), 1);
-        assert!(
-            diff.len() <= 2 * (MAX_RESULT_DIFF_SIDE_BYTES + PREVIEW_TRUNCATION_MARKER.len() + 3)
-        );
     }
 
     #[test]

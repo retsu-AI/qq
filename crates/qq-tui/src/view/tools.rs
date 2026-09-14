@@ -153,10 +153,13 @@ impl ToolRow {
                 false,
                 has_result.then(|| search_metric(result)),
             ),
+            // `edit ok files=<n> edits=<m>` heads the result; the arguments
+            // carry `edits: [{path, …}]`, whose first path (plus a count when
+            // several files) is the subject.
             "edit_file" => (
                 "Edit",
                 false,
-                string_argument("path").or_else(compact),
+                edit_subject(arguments.as_ref()).or_else(compact),
                 arguments.is_some(),
                 diff.as_deref()
                     .map(diff_metric)
@@ -326,13 +329,39 @@ fn search_metric(result: &str) -> String {
 }
 
 /// The header word a tool's result starts with: `read_file` writes `read`,
-/// `list_dir` writes `tree`, everything else its own name.
+/// `edit_file` writes `edit`, `write_file` writes `write`, `list_dir` writes
+/// `tree`, everything else its own name.
 fn header_word(name: &str) -> &str {
     match name {
         "read_file" => "read",
+        "edit_file" => "edit",
+        "write_file" => "write",
         "list_dir" => "tree",
         other => other,
     }
+}
+
+/// The subject of an `edit_file` row: the first edited path, with `+N files`
+/// when the batch spans several. Legacy single-path arguments still work.
+fn edit_subject(arguments: Option<&serde_json::Value>) -> Option<String> {
+    let arguments = arguments?;
+    if let Some(path) = arguments.get("path").and_then(|value| value.as_str()) {
+        return Some(path.to_owned());
+    }
+    let edits = arguments.get("edits")?.as_array()?;
+    let mut paths: Vec<&str> = Vec::new();
+    for edit in edits {
+        if let Some(path) = edit.get("path").and_then(|value| value.as_str())
+            && !paths.contains(&path)
+        {
+            paths.push(path);
+        }
+    }
+    let first = paths.first()?;
+    Some(match paths.len() {
+        1 => (*first).to_owned(),
+        n => format!("{first} +{} files", n - 1),
+    })
 }
 
 /// `<a>-<b> of <total> lines` from the `read` header; `unchanged`, `<n>

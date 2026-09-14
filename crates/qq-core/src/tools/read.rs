@@ -161,7 +161,7 @@ pub(super) fn read_file(
         && let Some(update) = update
     {
         file_state.record(update.path.clone(), update.hash.clone());
-        result.file_state = Some(update);
+        result.file_states.push(update);
     }
     result
 }

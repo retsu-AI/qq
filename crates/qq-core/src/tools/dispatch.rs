@@ -11,10 +11,7 @@ use tokio::sync::{Notify, mpsc};
 
 use qq_protocol::ToolCallDisplay;
 
-use crate::{
-    approval::edit_result_display,
-    workspace::{FileState, FileStateUpdate, Workspace, blocking_permits},
-};
+use crate::workspace::{FileState, FileStateUpdate, Workspace, blocking_permits};
 
 use super::{
     edit::edit_file,
@@ -223,9 +220,10 @@ pub(crate) struct ToolOutput {
     pub(crate) model_text: String,
     pub(crate) is_error: bool,
     pub(crate) ui_payload: Option<ToolCallDisplay>,
-    /// Set when the execution (re)recorded a file's content hash, so the
+    /// Every file whose content hash the execution (re)recorded, so the
     /// session store can persist the file-state map alongside the result.
-    pub(crate) file_state: Option<FileStateUpdate>,
+    /// Reads and writes record one; a batch edit records each file touched.
+    pub(crate) file_states: Vec<FileStateUpdate>,
     /// The complete masked text when bounding cut any of it, for the session
     /// store to keep under a handle the marker names. `None` when the model
     /// text is complete or the text exceeds what the store keeps.
@@ -282,7 +280,7 @@ impl ToolOutput {
             model_text: bounded.text,
             is_error,
             ui_payload: None,
-            file_state: None,
+            file_states: Vec::new(),
             spill,
         }
     }
@@ -295,7 +293,7 @@ impl ToolOutput {
             model_text: bound_text(text, bounds, None).text,
             is_error: false,
             ui_payload: None,
-            file_state: None,
+            file_states: Vec::new(),
             spill: None,
         }
     }
@@ -307,7 +305,7 @@ impl ToolOutput {
             model_text: message,
             is_error: true,
             ui_payload: None,
-            file_state: None,
+            file_states: Vec::new(),
             spill: None,
         }
     }
@@ -362,26 +360,16 @@ pub(super) fn execute_blocking(
             }),
         Some(BuiltInTool::Search) => deserialize(arguments)
             .map_or_else(ToolOutput::error, |args| search(workspace, args, cancelled)),
-        // The applied change is rendered once as a UI payload; the model gets
-        // the one-line summary, never the diff it just wrote.
-        Some(BuiltInTool::EditFile) => {
-            deserialize(arguments).map_or_else(ToolOutput::error, |args| {
-                let mut output = edit_file(workspace, file_state, &args, cancelled);
-                if !output.is_error {
-                    output.ui_payload = edit_result_display(name, arguments);
-                }
-                output
-            })
-        }
-        Some(BuiltInTool::WriteFile) => {
-            deserialize(arguments).map_or_else(ToolOutput::error, |args| {
-                let mut output = write_file(workspace, file_state, &args, cancelled);
-                if !output.is_error {
-                    output.ui_payload = edit_result_display(name, arguments);
-                }
-                output
-            })
-        }
+        // The applied change travels as a UI payload (the unified diff of what
+        // actually changed on disk); the model gets the header summary.
+        Some(BuiltInTool::EditFile) => deserialize(arguments)
+            .map_or_else(ToolOutput::error, |args| {
+                edit_file(workspace, file_state, &args, cancelled)
+            }),
+        Some(BuiltInTool::WriteFile) => deserialize(arguments)
+            .map_or_else(ToolOutput::error, |args| {
+                write_file(workspace, file_state, &args, cancelled)
+            }),
         Some(BuiltInTool::Shell) => ToolOutput::error("shell commands must execute asynchronously"),
         #[cfg(test)]
         Some(BuiltInTool::TestDelay) => {

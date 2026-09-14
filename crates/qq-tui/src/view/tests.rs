@@ -396,6 +396,46 @@ fn consecutive_call_only_turns_merge_into_one_folded_group() {
 }
 
 #[test]
+fn batch_edit_rows_name_the_first_path_and_the_file_count() {
+    for (arguments, expected) in [
+        (
+            r#"{"edits":[{"path":"a.rs","old":"x","new":"y"}]}"#,
+            "Edit a.rs",
+        ),
+        (
+            r#"{"edits":[{"path":"a.rs","old":"x","new":"y"},{"path":"b.rs","old":"x","new":"y"},{"path":"a.rs","old":"q","new":"r"}]}"#,
+            "Edit a.rs +1 files",
+        ),
+        (
+            r#"{"path":"legacy.rs","old_string":"x","new_string":"y"}"#,
+            "Edit legacy.rs",
+        ),
+    ] {
+        let call = tool_call_snapshot(
+            1,
+            "edit_file",
+            arguments,
+            ToolCallState::Completed,
+            Some("edit ok files=1 edits=1\na.rs h:0123456789ab L1 -1+1\n"),
+            false,
+        );
+        let rows = frame_rows(&render_tool_calls_simple(
+            &[&call],
+            &HashMap::new(),
+            SimpleDetail::Rows,
+            0,
+            120,
+            &|_, _| Vec::new(),
+        ));
+        assert!(squash(&rows[0]).contains(expected), "{arguments}: {rows:?}");
+        assert!(
+            !rows.iter().any(|row| row.contains("h:0123456789ab")),
+            "header hidden: {rows:?}"
+        );
+    }
+}
+
+#[test]
 fn completed_edit_results_color_diff_shaped_content_at_expanded_detail() {
     let diff_call = tool_call_snapshot(
         1,

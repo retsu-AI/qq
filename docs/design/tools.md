@@ -344,8 +344,11 @@ and keeps the schema for each tool in one place:
   only while `tree` is exposed.
 - `search` — ignore-aware content, name, definition, and reference search
   with an exact resume cursor (§ Read-Side Walk).
-- `edit_file` — exact-string replacement; the applied diff is the UI payload.
-- `write_file` — full-file create or overwrite; the content is the UI payload.
+- `edit_file` — a batch of up to 32 replace or insert edits across files,
+  applied atomically through a whitespace-forgiving matching cascade
+  (§ Edit Semantics); the unified diff of what changed is the UI payload.
+- `write_file` — create (parents made) or fully overwrite; `create_only`,
+  `if_hash`, and a `use_edit_file` hint when most lines are kept.
 - `shell` — command execution with a 16 KiB head+tail model bound.
 
 Each returns complete domain output within its own scan and count limits;
@@ -539,11 +542,75 @@ per-session grant, off by default.
 
 ### Edit Semantics
 
-`edit_file` takes an exact `old_string`/`new_string` pair rather than a
-unified diff. Exact-string replacement is what current models produce most
-reliably, validation is trivial (the string is present exactly once or the
-call fails), and a failed match returns a precise, retryable error instead of
-a mis-applied hunk. `write_file` covers new files and full rewrites.
+`edit_file` takes a batch of edits, each an exact `old`/`new` pair or an
+insertion relative to an anchor (`insert_before`/`insert_after` + `new`),
+rather than a unified diff. Exact strings are what models produce most
+reliably, validation is trivial, and a failed match returns a precise,
+retryable error instead of a mis-applied hunk. Rejected on the way here:
+unified-diff input (models mis-count hunks), line-range edits (numbers
+drift within a batch), diffs in `model_text`.
+
+```json
+{"edits":[
+  {"path":"src/a.rs","old":"fn one() {}","new":"fn one() { 1 }"},
+  {"path":"src/a.rs","insert_after":"fn one() { 1 }","new":"\nfn two() {}"},
+  {"path":"src/b.rs","old":"let y = 2;\n","new":"let y = 20;\n","if_hash":"h:3fa9c2d1e07b"}
+ ],"fuzzy":true,"dry_run":false}
+```
+
+**Two phases.** Phase 1, without the lock: group by path, read, prove
+currency (a recorded read of this exact content, or `if_hash` equal to the
+12-hex hash `read_file`'s header shows — the proof an `@`-mentioned file
+needs), and apply every edit in memory in order, so later edits see earlier
+results. A replacement whose match lands inside text an earlier edit wrote
+is `conflicting_edits{a, b}`: the model is rewriting its own edit. Phase 2,
+under `apply_lock` for microseconds: re-hash every file, then temp+rename
+each in path order. A rename failure midway is reported as
+`partial_apply{applied, failed}` — the applied files are written and their
+new hashes recorded, the rest are untouched. `dry_run` runs phase 1 only
+and returns the same result shape plus the diff.
+
+**Matching cascade** (`tools/matching.rs`). Each strategy is tried in order
+and the first with exactly one match wins; more than one match at any level
+is `ambiguous{count, lines}`, because a looser strategy must never choose
+between candidates a stricter one could not separate:
+
+| strategy | forgives |
+| --- | --- |
+| `exact` | nothing |
+| `line_trimmed` | trailing blanks, CRLF |
+| `whitespace_normalized` | runs of inner whitespace (indent kept) |
+| `indent_flexible` | indentation; `new` is re-indented by the delta |
+| `block_anchor` | a drifted middle: ≥ 3 lines, first/last trimmed lines anchor, middle ≥ 0.7 LCS similarity, size delta ≤ 25 % |
+
+A disproportionate guard refuses a `block_anchor` candidate spanning more
+than `max(old_lines + 3, 2·old_lines)` lines or `max(old_bytes + 500,
+4·old_bytes)` bytes; `block_anchor` is skipped above 20 000 lines and the
+cascade has a 2 s soft deadline. Fuzzy runs only when `fuzzy=true` (the
+default) and never for `replace_all` — the mass-edit accident the guard
+exists to prevent. Every non-exact match is named in the result
+(`via=indent_flexible`) so the model sees its own drift. `not_found` carries
+the closest line (`closest L<n> distance=0.08`) and a three-line excerpt so
+the retry needs no read.
+
+**Result.** `edit ok files=2 edits=3` then one line per file in path order:
+`<path> h:<new12> L96 -1+1 | L140 -0+6 via=indent_flexible` (`x3` marks a
+`replace_all` count). The unified diff of what changed on disk — not of
+what the model asked — rides in `ui_payload` for every file; the approval
+preview renders the request grouped by path with anchors as context.
+Failures abort the whole batch and name the edit index: `not_read`,
+`stale_file`, `not_found`, `ambiguous`, `disproportionate`,
+`conflicting_edits`, `invalid_edit`, `invalid_if_hash`, `too_large`,
+`not_utf8`, `not_a_file`, `path_*`, `partial_apply`.
+
+**`write_file`** creates missing parents (≤ 8 components, never through
+`..`), refuses an existing file under `create_only` (`exists`), accepts
+`if_hash` as currency proof without a prior read, and answers
+`write <path> created|replaced bytes= lines= h:<new12>`. When the new
+content keeps more than 80 % of the old file's lines (line LCS, both under
+4 000 lines) the header adds `hint=use_edit_file`: the rewrite would have
+cost a fraction of the tokens as an edit. Rejected: `append` (an
+`insert_after` EOF anchor covers it); multi-file write.
 
 ### Optimistic Concurrency, Not Locks
 
@@ -553,12 +620,12 @@ long-held locks:
 1. `read_file` records the file's content hash in the session's file-state
    map.
 2. `edit_file` and `write_file` (of an existing file) require a prior read in
-   the same session.
+   the same session, or an `if_hash` equal to the file's current hash.
 3. At apply time, under a short per-workspace exclusive section, the current
    content is re-hashed. If it no longer matches what the session last read,
    the call fails with a stale-file error and the agent re-reads.
-4. The apply itself validates `old_string` still matches, writes a temp file
-   in the same directory, preserves permissions, and renames atomically.
+4. The apply itself writes a temp file in the same directory, preserves
+   permissions, and renames atomically — per file, in path order for a batch.
 
 The exclusive section covers only the hash-check-and-rename — microseconds —
 so read-heavy parallelism across sessions is untouched and two writing

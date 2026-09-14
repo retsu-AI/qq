@@ -113,9 +113,9 @@ pub(crate) enum RuntimeEvent {
         id: ToolCallId,
         result: String,
         is_error: bool,
-        /// A file-state map entry recorded by this execution, persisted with
+        /// File-state map entries recorded by this execution, persisted with
         /// the result so the map can be rebuilt for later runs.
-        file_state: Option<FileStateUpdate>,
+        file_states: Vec<FileStateUpdate>,
         /// A UI-facing payload persisted with the result (the applied diff of
         /// a successful edit). Never enters model context.
         display: Option<ToolCallDisplay>,

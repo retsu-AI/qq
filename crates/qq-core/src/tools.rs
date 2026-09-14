@@ -1,6 +1,7 @@
 mod dispatch;
 mod edit;
 mod lang;
+mod matching;
 pub mod output;
 mod read;
 mod search;
@@ -13,7 +14,8 @@ mod write;
 #[cfg(test)]
 pub(crate) use dispatch::test_executions_started;
 
-/// Entry points for the `search_walk` bench. Not a public API.
+/// Entry points for the `search_walk` and `edit_batch` benches. Not a
+/// public API.
 pub mod bench_support {
     use std::{
         path::Path,
@@ -34,6 +36,34 @@ pub mod bench_support {
             &super::dispatch::ToolCancellation::new(Arc::new(AtomicBool::new(false))),
         )
         .model_text
+    }
+
+    /// A session's file-state map for a sequence of tool calls, so a bench
+    /// can read then edit the way a run does.
+    pub struct Session {
+        workspace: Workspace,
+        state: FileState,
+    }
+
+    impl Session {
+        pub fn open(workspace_root: &Path) -> Self {
+            Self {
+                workspace: Workspace::open(workspace_root).expect("workspace must open"),
+                state: FileState::default(),
+            }
+        }
+
+        /// Runs one built-in tool and returns `(is_error, model_text)`.
+        pub fn run(&self, name: &str, arguments: &str) -> (bool, String) {
+            let output = super::dispatch::execute_blocking(
+                &self.workspace,
+                &self.state,
+                name,
+                arguments,
+                &super::dispatch::ToolCancellation::new(Arc::new(AtomicBool::new(false))),
+            );
+            (output.is_error, output.model_text)
+        }
     }
 }
 pub(crate) use dispatch::{
@@ -186,7 +216,7 @@ mod tests {
             read.model_text,
             format!("read b.txt L2/3 h:{}\n2\ttwo\n", &hash[..12])
         );
-        let update = read.file_state.unwrap();
+        let update = read.file_states.into_iter().next().unwrap();
         assert_eq!(update.path, "b.txt");
         assert_eq!(update.hash, hash);
         assert_eq!(state.recorded("b.txt"), Some(update.hash));
@@ -233,7 +263,7 @@ mod tests {
             result.model_text.lines().last().unwrap()
         );
         // The whole file still hashes: the read is complete for the guard.
-        assert!(result.file_state.is_some());
+        assert!(!result.file_states.is_empty());
     }
 
     #[test]
@@ -329,7 +359,7 @@ mod tests {
             unchanged.model_text,
             format!("read a.rs unchanged h:{short} lines=1\n")
         );
-        assert_eq!(unchanged.file_state.as_ref().unwrap().hash, hash);
+        assert_eq!(unchanged.file_states[0].hash, hash);
         assert_eq!(state.recorded("a.rs"), Some(hash.clone()));
 
         fs::write(directory.path().join("a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
@@ -395,7 +425,7 @@ mod tests {
             ]
         );
         // Outline records the hash too: the model saw the file's shape.
-        assert!(outline.file_state.is_some());
+        assert!(!outline.file_states.is_empty());
 
         let unsupported = run_tool(
             &workspace,
@@ -531,7 +561,7 @@ mod tests {
             result.model_text
         );
         // Nothing is recorded for a file the guard could not hash whole.
-        assert!(result.file_state.is_none());
+        assert!(result.file_states.is_empty());
     }
 
     #[test]
@@ -561,7 +591,7 @@ mod tests {
         );
         assert!(result.model_text.ends_with("\n2\ty\n"));
         assert!(!result.model_text.contains(MARKER_PREFIX));
-        assert!(result.file_state.is_some());
+        assert!(!result.file_states.is_empty());
     }
 
     #[test]
@@ -1099,14 +1129,14 @@ mod tests {
             &workspace,
             &state,
             "edit_file",
-            r#"{"path":"main.rs","old_string":"fn one() {}","new_string":"fn one() { start() }"}"#,
+            r#"{"edits":[{"path":"main.rs","old":"fn one() {}","new":"fn one() { start() }"}]}"#,
         );
         assert!(!edited.is_error, "unexpected error: {}", edited.model_text);
         assert_eq!(
             fs::read_to_string(directory.path().join("main.rs")).unwrap(),
             "fn one() { start() }\nfn two() {}\n"
         );
-        let update = edited.file_state.unwrap();
+        let update = edited.file_states.into_iter().next().unwrap();
         assert_eq!(update.path, "main.rs");
         assert_eq!(
             update.hash,
@@ -1119,7 +1149,7 @@ mod tests {
             &workspace,
             &state,
             "edit_file",
-            r#"{"path":"main.rs","old_string":"fn two() {}","new_string":"fn two() { end() }"}"#,
+            r#"{"edits":[{"path":"main.rs","old":"fn two() {}","new":"fn two() { end() }"}]}"#,
         );
         assert!(
             !followup.is_error,
@@ -1144,10 +1174,17 @@ mod tests {
             &workspace,
             &state,
             "edit_file",
-            r#"{"path":"list.txt","old_string":"item","new_string":"entry","replace_all":true}"#,
+            r#"{"edits":[{"path":"list.txt","old":"item","new":"entry","replace_all":true}]}"#,
         );
         assert!(!edited.is_error, "unexpected error: {}", edited.model_text);
-        assert!(edited.model_text.contains("3 occurrence"));
+        assert!(
+            edited.model_text.ends_with(&format!(
+                "\nlist.txt h:{} L1 -1+1 x3\n",
+                &content_hash(b"entry\nentry\nentry\n")[..12]
+            )),
+            "{}",
+            edited.model_text
+        );
         assert_eq!(
             fs::read_to_string(directory.path().join("list.txt")).unwrap(),
             "entry\nentry\nentry\n"
@@ -1174,7 +1211,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "79171ee921430b0563d5150a98b37e4202f63784ec4d46c4168556daf8373f1c"
+            "59eacb034c206be74a0361c083baf0ad42b680492393f30cb90ea54fc457a3c3"
         );
     }
 
@@ -1281,7 +1318,7 @@ mod tests {
             &workspace,
             &state,
             "edit_file",
-            r#"{"path":"list.txt","old_string":"missing","new_string":"other"}"#,
+            r#"{"edits":[{"path":"list.txt","old":"missing","new":"other"}]}"#,
         );
         assert!(absent.is_error);
         assert!(
@@ -1294,11 +1331,13 @@ mod tests {
             &workspace,
             &state,
             "edit_file",
-            r#"{"path":"list.txt","old_string":"item","new_string":"entry"}"#,
+            r#"{"edits":[{"path":"list.txt","old":"item","new":"entry"}]}"#,
         );
         assert!(ambiguous.is_error);
         assert!(
-            ambiguous.model_text.contains("2 times")
+            ambiguous
+                .model_text
+                .starts_with("edit 0: ambiguous: 2 matches via exact at lines L1,L2")
                 && ambiguous.model_text.contains("replace_all"),
             "{}",
             ambiguous.model_text
@@ -1320,7 +1359,7 @@ mod tests {
             &workspace,
             &state,
             "edit_file",
-            r#"{"path":"note.txt","old_string":"content","new_string":"changed"}"#,
+            r#"{"edits":[{"path":"note.txt","old":"content","new":"changed"}]}"#,
         );
         assert!(edit.is_error);
         assert!(edit.model_text.contains("read_file"), "{}", edit.model_text);
@@ -1358,7 +1397,7 @@ mod tests {
             &workspace,
             &state,
             "edit_file",
-            r#"{"path":"note.txt","old_string":"original","new_string":"edited"}"#,
+            r#"{"edits":[{"path":"note.txt","old":"original","new":"edited"}]}"#,
         );
         assert!(stale.is_error);
         assert!(
@@ -1376,7 +1415,7 @@ mod tests {
             &workspace,
             &state,
             "edit_file",
-            r#"{"path":"note.txt","old_string":"external change","new_string":"edited"}"#,
+            r#"{"edits":[{"path":"note.txt","old":"external change","new":"edited"}]}"#,
         );
         assert!(
             !retried.is_error,
@@ -1403,7 +1442,7 @@ mod tests {
             &workspace,
             &winner,
             "edit_file",
-            r#"{"path":"shared.txt","old_string":"base","new_string":"winner"}"#,
+            r#"{"edits":[{"path":"shared.txt","old":"base","new":"winner"}]}"#,
         );
         assert!(!won.is_error, "unexpected error: {}", won.model_text);
 
@@ -1411,7 +1450,7 @@ mod tests {
             &workspace,
             &loser,
             "edit_file",
-            r#"{"path":"shared.txt","old_string":"base","new_string":"loser"}"#,
+            r#"{"edits":[{"path":"shared.txt","old":"base","new":"loser"}]}"#,
         );
         assert!(lost.is_error);
         assert!(
@@ -1425,7 +1464,7 @@ mod tests {
             &workspace,
             &loser,
             "edit_file",
-            r#"{"path":"shared.txt","old_string":"winner","new_string":"reconciled"}"#,
+            r#"{"edits":[{"path":"shared.txt","old":"winner","new":"reconciled"}]}"#,
         );
         assert!(
             !reconciled.is_error,
@@ -1455,7 +1494,7 @@ mod tests {
             &workspace,
             &state,
             "edit_file",
-            r#"{"path":"run.sh","old_string":"echo one","new_string":"echo two"}"#,
+            r#"{"edits":[{"path":"run.sh","old":"echo one","new":"echo two"}]}"#,
         );
         assert!(!edited.is_error, "unexpected error: {}", edited.model_text);
         assert_eq!(fs::read_to_string(&target).unwrap(), "echo two\n");
@@ -1511,12 +1550,18 @@ mod tests {
             "unexpected error: {}",
             created.model_text
         );
-        assert!(created.model_text.starts_with("Created"));
+        assert!(
+            created
+                .model_text
+                .starts_with("write docs/NOTES.md created bytes=6 lines=1 h:"),
+            "{}",
+            created.model_text
+        );
         assert_eq!(
             fs::read_to_string(directory.path().join("docs/NOTES.md")).unwrap(),
             "first\n"
         );
-        let update = created.file_state.unwrap();
+        let update = created.file_states.into_iter().next().unwrap();
         assert_eq!(update.path, "docs/NOTES.md");
         assert_eq!(update.hash, content_hash(b"first\n"));
 
@@ -1533,19 +1578,450 @@ mod tests {
             "unexpected error: {}",
             overwritten.model_text
         );
-        assert!(overwritten.model_text.starts_with("Wrote"));
+        assert!(
+            overwritten
+                .model_text
+                .starts_with("write docs/NOTES.md replaced bytes=7 lines=1 h:"),
+            "{}",
+            overwritten.model_text
+        );
         assert_eq!(
             fs::read_to_string(directory.path().join("docs/NOTES.md")).unwrap(),
             "second\n"
         );
 
-        let missing_parent = run_tool(
+        // Missing parents are created, up to eight deep; the path stays
+        // contained and `..` is refused outright.
+        let nested = run_tool(
             &workspace,
             &state,
             "write_file",
-            r#"{"path":"missing/NOTES.md","content":"first\n"}"#,
+            r#"{"path":"missing/a/b/NOTES.md","content":"first\n"}"#,
         );
-        assert!(missing_parent.is_error);
+        assert!(!nested.is_error, "{}", nested.model_text);
+        assert_eq!(
+            fs::read_to_string(directory.path().join("missing/a/b/NOTES.md")).unwrap(),
+            "first\n"
+        );
+        let too_deep = run_tool(
+            &workspace,
+            &state,
+            "write_file",
+            r#"{"path":"1/2/3/4/5/6/7/8/9/NOTES.md","content":"x"}"#,
+        );
+        assert!(
+            too_deep.model_text.starts_with("too_deep"),
+            "{}",
+            too_deep.model_text
+        );
+        let escape = run_tool(
+            &workspace,
+            &state,
+            "write_file",
+            r#"{"path":"missing/../../escape.md","content":"x"}"#,
+        );
+        assert!(escape.is_error);
+        assert!(!directory.path().join("../escape.md").exists());
+
+        // create_only refuses an existing file; if_hash proves currency
+        // without a recorded read.
+        let fresh = FileState::default();
+        let refused = run_tool(
+            &workspace,
+            &fresh,
+            "write_file",
+            r#"{"path":"docs/NOTES.md","content":"x","create_only":true}"#,
+        );
+        assert!(
+            refused.model_text.starts_with("exists"),
+            "{}",
+            refused.model_text
+        );
+        let unread = run_tool(
+            &workspace,
+            &fresh,
+            "write_file",
+            r#"{"path":"docs/NOTES.md","content":"third\n"}"#,
+        );
+        assert!(
+            unread.model_text.starts_with("not_read"),
+            "{}",
+            unread.model_text
+        );
+        let short = &content_hash(b"second\n")[..12];
+        let proven = run_tool(
+            &workspace,
+            &fresh,
+            "write_file",
+            &format!(r#"{{"path":"docs/NOTES.md","content":"third\n","if_hash":"h:{short}"}}"#),
+        );
+        assert!(!proven.is_error, "{}", proven.model_text);
+        let wrong = run_tool(
+            &workspace,
+            &fresh,
+            "write_file",
+            &format!(r#"{{"path":"docs/NOTES.md","content":"x","if_hash":"h:{short}"}}"#),
+        );
+        assert!(
+            wrong.model_text.starts_with("stale_file"),
+            "{}",
+            wrong.model_text
+        );
+    }
+
+    #[test]
+    fn write_file_hints_at_edit_file_when_most_lines_are_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let before: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+        fs::write(directory.path().join("big.txt"), &before).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        run_tool(&workspace, &state, "read_file", r#"{"path":"big.txt"}"#);
+
+        let mostly_same = before.replace("line 7\n", "LINE 7\n");
+        let hinted = run_tool(
+            &workspace,
+            &state,
+            "write_file",
+            &serde_json::json!({ "path": "big.txt", "content": mostly_same }).to_string(),
+        );
+        assert!(!hinted.is_error, "{}", hinted.model_text);
+        assert!(
+            hinted.model_text.contains(" hint=use_edit_file"),
+            "{}",
+            hinted.model_text
+        );
+        match hinted.ui_payload {
+            Some(qq_protocol::ToolCallDisplay::Diff { path, diff }) => {
+                assert_eq!(path, "big.txt");
+                assert!(diff.contains("-line 7\n+LINE 7\n"), "{diff}");
+            }
+            other => panic!("expected a diff payload, got {other:?}"),
+        }
+
+        let rewrite = run_tool(
+            &workspace,
+            &state,
+            "write_file",
+            r#"{"path":"big.txt","content":"totally\ndifferent\n"}"#,
+        );
+        assert!(
+            !rewrite.model_text.contains("hint="),
+            "{}",
+            rewrite.model_text
+        );
+    }
+
+    #[test]
+    fn edit_batches_apply_in_order_across_files_with_anchors_and_report_each() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("a.rs"),
+            "use std::fmt;\n\nfn one() {}\n\nfn three() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("b.rs"),
+            "    let x = 1;\n    let y = 2;\n",
+        )
+        .unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        run_tool(&workspace, &state, "read_file", r#"{"path":"a.rs"}"#);
+        run_tool(&workspace, &state, "read_file", r#"{"path":"b.rs"}"#);
+
+        // Four edits, two files, out of path order: a replace, an insert
+        // after an anchor, an insert before one, and a dedented (indent-
+        // flexible) replace whose replacement is re-indented.
+        let edited = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[
+                {"path":"b.rs","old":"\tlet y = 2;\n","new":"\tlet y = 20;\n\tlet z = 3;\n"},
+                {"path":"a.rs","old":"fn one() {}","new":"fn one() { 1 }"},
+                {"path":"a.rs","insert_after":"fn one() { 1 }","new":"\nfn two() {}"},
+                {"path":"a.rs","insert_before":"use std::fmt;","new":"//! crate docs"}
+            ]}"#,
+        );
+        assert!(!edited.is_error, "{}", edited.model_text);
+        let a_after =
+            "//! crate docs\nuse std::fmt;\n\nfn one() { 1 }\n\nfn two() {}\n\nfn three() {}\n";
+        let b_after = "    let x = 1;\n    let y = 20;\n    let z = 3;\n";
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.rs")).unwrap(),
+            a_after
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("b.rs")).unwrap(),
+            b_after
+        );
+        // Header, then one line per file in path order with a change per edit
+        // (line numbers as of that edit) and via= for the non-exact one.
+        assert_eq!(
+            edited.model_text,
+            format!(
+                "edit ok files=2 edits=4\na.rs h:{} L3 -1+1 | L4 +0+2 | L1 -0+1\nb.rs h:{} L2 -1+2 via=indent_flexible\n",
+                &content_hash(a_after.as_bytes())[..12],
+                &content_hash(b_after.as_bytes())[..12]
+            )
+            .replace("+0+2", "-0+2")
+        );
+        assert_eq!(edited.file_states.len(), 2);
+        assert_eq!(
+            state.recorded("a.rs"),
+            Some(content_hash(a_after.as_bytes()))
+        );
+        assert_eq!(
+            state.recorded("b.rs"),
+            Some(content_hash(b_after.as_bytes()))
+        );
+        match edited.ui_payload {
+            Some(qq_protocol::ToolCallDisplay::Diff { path, diff }) => {
+                assert_eq!(path, "a.rs");
+                assert!(diff.starts_with("--- a/a.rs\n+++ b/a.rs\n@@ "), "{diff}");
+                assert!(diff.contains("\n--- a/b.rs\n+++ b/b.rs\n"), "{diff}");
+                assert!(
+                    diff.contains("-    let y = 2;\n+    let y = 20;\n+    let z = 3;\n"),
+                    "{diff}"
+                );
+            }
+            other => panic!("expected a diff payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edit_batches_fail_whole_with_the_edit_index_and_write_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+        fs::write(directory.path().join("b.txt"), "one\ntwo\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        run_tool(&workspace, &state, "read_file", r#"{"path":"a.txt"}"#);
+        run_tool(&workspace, &state, "read_file", r#"{"path":"b.txt"}"#);
+
+        for (arguments, code) in [
+            // The second edit's old is gone after the first rewrote it.
+            (
+                r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma"},{"path":"a.txt","old":"beta","new":"delta"}]}"#,
+                "edit 1: not_found",
+            ),
+            (
+                r#"{"edits":[{"path":"a.txt","old":"x","new":"y"},{"path":"b.txt","old":"one","new":"uno"}]}"#,
+                "edit 0: not_found",
+            ),
+            (
+                r#"{"edits":[{"path":"a.txt","old":"alpha","new":"a","insert_after":"beta"}]}"#,
+                "edit 0: invalid_edit",
+            ),
+            (
+                r#"{"edits":[{"path":"a.txt","new":"a"}]}"#,
+                "edit 0: invalid_edit",
+            ),
+            (
+                r#"{"edits":[{"path":"a.txt","old":"alpha","new":"alpha"}]}"#,
+                "edit 0: invalid_edit",
+            ),
+            (
+                r#"{"edits":[{"path":"a.txt","insert_after":"alpha","new":"z","replace_all":true}]}"#,
+                "edit 0: invalid_edit",
+            ),
+            (
+                r#"{"edits":[{"path":"c.txt","old":"a","new":"b"}]}"#,
+                "edit 0: path_not_found",
+            ),
+            (
+                r#"{"edits":[{"path":".","old":"a","new":"b"}]}"#,
+                "edit 0: not_a_file",
+            ),
+            (
+                r#"{"edits":[{"path":"a.txt","old":"alpha","new":"b","if_hash":"h:zz"}]}"#,
+                "edit 0: invalid_if_hash",
+            ),
+            (
+                r#"{"edits":[{"path":"a.txt","old":"alpha","new":"b","if_hash":"h:000000000000"}]}"#,
+                "edit 0: stale_file",
+            ),
+            (r#"{"edits":[]}"#, "invalid_edit"),
+            // The second edit matches inside what the first wrote.
+            (
+                r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma delta"},{"path":"a.txt","old":"delta","new":"epsilon"}]}"#,
+                "edit 1: conflicting_edits: a=0 b=1",
+            ),
+        ] {
+            let failed = run_tool(&workspace, &state, "edit_file", arguments);
+            assert!(failed.is_error, "{arguments}");
+            assert!(
+                failed.model_text.starts_with(code),
+                "{arguments}: {}",
+                failed.model_text
+            );
+            assert!(failed.ui_payload.is_none());
+            assert!(failed.file_states.is_empty());
+        }
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+            "alpha\nbeta\n"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("b.txt")).unwrap(),
+            "one\ntwo\n"
+        );
+
+        // not_found carries the closest line so the retry needs no read.
+        let close = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.txt","old":"betta\n","new":"x"}]}"#,
+        );
+        assert!(
+            close.model_text.contains("closest L2 distance=0."),
+            "{}",
+            close.model_text
+        );
+        assert!(
+            close.model_text.contains("\nL2: beta"),
+            "{}",
+            close.model_text
+        );
+    }
+
+    #[test]
+    fn edit_dry_run_previews_without_writing_and_if_hash_replaces_a_read() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        // No read in this session: if_hash from a header stands in for it.
+        let state = FileState::default();
+        let short = &content_hash(b"alpha\nbeta\n")[..12];
+
+        let preview = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            &format!(
+                r#"{{"edits":[{{"path":"a.txt","old":"beta","new":"gamma","if_hash":"h:{short}"}}],"dry_run":true}}"#
+            ),
+        );
+        assert!(!preview.is_error, "{}", preview.model_text);
+        assert!(
+            preview
+                .model_text
+                .starts_with("edit dry_run files=1 edits=1\n"),
+            "{}",
+            preview.model_text
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+            "alpha\nbeta\n"
+        );
+        assert!(preview.file_states.is_empty());
+        assert!(matches!(
+            preview.ui_payload,
+            Some(qq_protocol::ToolCallDisplay::Diff { .. })
+        ));
+        assert_eq!(state.recorded("a.txt"), None);
+
+        let applied = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            &format!(
+                r#"{{"edits":[{{"path":"a.txt","old":"beta","new":"gamma","if_hash":"h:{short}"}}]}}"#
+            ),
+        );
+        assert!(!applied.is_error, "{}", applied.model_text);
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+            "alpha\ngamma\n"
+        );
+        assert_eq!(
+            state.recorded("a.txt"),
+            Some(content_hash(b"alpha\ngamma\n"))
+        );
+
+        // fuzzy=false refuses a whitespace drift the cascade would forgive.
+        let strict = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.txt","old":"gamma   ","new":"delta"}],"fuzzy":false}"#,
+        );
+        assert!(
+            strict.model_text.starts_with("edit 0: not_found"),
+            "{}",
+            strict.model_text
+        );
+        let forgiven = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.txt","old":"gamma   ","new":"delta"}]}"#,
+        );
+        assert!(!forgiven.is_error, "{}", forgiven.model_text);
+        assert!(
+            forgiven.model_text.contains(" via=line_trimmed"),
+            "{}",
+            forgiven.model_text
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rename_failure_midway_reports_partial_apply_and_records_what_landed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "alpha\n").unwrap();
+        fs::create_dir(directory.path().join("locked")).unwrap();
+        fs::write(directory.path().join("locked/b.txt"), "beta\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        run_tool(&workspace, &state, "read_file", r#"{"path":"a.txt"}"#);
+        run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"locked/b.txt"}"#,
+        );
+        // The second file's directory refuses new entries, so its temp file
+        // cannot be created after the first file has already been renamed.
+        fs::set_permissions(
+            directory.path().join("locked"),
+            fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+
+        let result = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.txt","old":"alpha","new":"ALPHA"},{"path":"locked/b.txt","old":"beta","new":"BETA"}]}"#,
+        );
+        fs::set_permissions(
+            directory.path().join("locked"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        assert!(result.is_error);
+        assert!(
+            result
+                .model_text
+                .starts_with("partial_apply: applied=[a.txt] failed=locked/b.txt"),
+            "{}",
+            result.model_text
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+            "ALPHA\n"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("locked/b.txt")).unwrap(),
+            "beta\n"
+        );
+        // The applied file's new hash is recorded so a retry of the rest
+        // does not trip the staleness guard on it.
+        assert_eq!(state.recorded("a.txt"), Some(content_hash(b"ALPHA\n")));
     }
 
     #[test]
@@ -1560,14 +2036,23 @@ mod tests {
             &workspace,
             &state,
             "edit_file",
-            r#"{"path":"a.txt","old_string":"beta","new_string":"gamma"}"#,
+            r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma"}]}"#,
         );
         assert!(!edited.is_error, "{}", edited.model_text);
-        assert_eq!(edited.model_text, "Edited a.txt: replaced 1 occurrence(s).");
+        assert_eq!(
+            edited.model_text,
+            format!(
+                "edit ok files=1 edits=1\na.txt h:{} L2 -1+1\n",
+                &content_hash(b"alpha\ngamma\n")[..12]
+            )
+        );
         match edited.ui_payload {
             Some(qq_protocol::ToolCallDisplay::Diff { path, diff }) => {
                 assert_eq!(path, "a.txt");
-                assert_eq!(diff, "- beta\n+ gamma\n");
+                assert_eq!(
+                    diff,
+                    "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n"
+                );
             }
             other => panic!("expected a diff payload, got {other:?}"),
         }
@@ -1589,7 +2074,7 @@ mod tests {
             &workspace,
             &state,
             "edit_file",
-            r#"{"path":"a.txt","old_string":"missing","new_string":"x"}"#,
+            r#"{"edits":[{"path":"a.txt","old":"missing","new":"x"}]}"#,
         );
         assert!(failed.is_error);
         assert!(failed.ui_payload.is_none());
@@ -1619,7 +2104,7 @@ mod tests {
         ));
         // The hash is of the file, not of the rendering.
         assert_eq!(
-            read.file_state.unwrap().hash,
+            read.file_states[0].hash,
             content_hash(b"AWS_KEY=AKIAIOSFODNN7EXAMPLE\nDB_PASSWORD=hunter2hunter2\nPORT=$PORT\n")
         );
 
@@ -2173,8 +2658,8 @@ mod tests {
         let state = FileState::default();
 
         for arguments in [
-            r#"{"path":"../victim.txt","old_string":"untouched","new_string":"changed"}"#,
-            r#"{"path":"/etc/hosts","old_string":"localhost","new_string":"changed"}"#,
+            r#"{"edits":[{"path":"../victim.txt","old":"untouched","new":"changed"}]}"#,
+            r#"{"edits":[{"path":"/etc/hosts","old":"localhost","new":"changed"}]}"#,
         ] {
             let result = run_tool(&workspace, &state, "edit_file", arguments);
             assert!(result.is_error, "escape accepted: {arguments}");
@@ -2207,7 +2692,7 @@ mod tests {
                 &workspace,
                 &state,
                 "edit_file",
-                r#"{"path":"link.txt","old_string":"untouched","new_string":"changed"}"#,
+                r#"{"edits":[{"path":"link.txt","old":"untouched","new":"changed"}]}"#,
             );
             assert!(onto_symlink.is_error);
         }
