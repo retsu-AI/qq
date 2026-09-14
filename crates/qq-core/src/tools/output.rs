@@ -173,7 +173,7 @@ const CLIP_SUFFIX_RESERVE_BYTES: usize = 16;
 /// clipping its content to `max_line_bytes` (or to what the budget allows)
 /// with `…+N`. Returns the escaped size appended and whether the line was
 /// clipped, or `None` when not even a prefix fits.
-fn push_line(
+pub(crate) fn push_line(
     out: &mut String,
     line: &str,
     max_line_bytes: usize,
@@ -354,6 +354,14 @@ impl Header {
 
     pub(crate) fn field(mut self, key: &str, value: impl std::fmt::Display) -> Self {
         let _ = write!(self.0, " {key}={value}");
+        debug_assert!(!self.0.ends_with(char::is_whitespace));
+        self
+    }
+
+    /// A bare token such as `unchanged`, `L1-40/120`, or `h:3f9a…`: no `=`,
+    /// no whitespace.
+    pub(crate) fn token(mut self, token: impl std::fmt::Display) -> Self {
+        let _ = write!(self.0, " {token}");
         debug_assert!(!self.0.ends_with(char::is_whitespace));
         self
     }

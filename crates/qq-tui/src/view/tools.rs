@@ -124,12 +124,14 @@ impl ToolRow {
             (!text.is_empty()).then_some(text)
         };
         let (verb, raw_name, subject, subject_is_path, metric) = match call.name.as_str() {
+            // `read <path> L<a>-<b>[,…]/<total> h:<hash>` heads the result;
+            // `unchanged`, `outline`, and `info` name the other shapes.
             "read_file" => (
                 "Read",
                 false,
                 string_argument("path").or_else(compact),
                 arguments.is_some(),
-                has_result.then(|| count_noun(content_lines(), "line", "lines")),
+                has_result.then(|| read_metric(result, content_lines())),
             ),
             // `tree <path> depth= entries=<shown>/<total> files= dirs=` heads
             // the result; `list_dir` is its alias.
@@ -314,6 +316,56 @@ fn search_metric(result: &str) -> String {
     metric
 }
 
+/// The header word a tool's result starts with: `read_file` writes `read`,
+/// `list_dir` writes `tree`, everything else its own name.
+fn header_word(name: &str) -> &str {
+    match name {
+        "read_file" => "read",
+        "list_dir" => "tree",
+        other => other,
+    }
+}
+
+/// `<a>-<b> of <total> lines` from the `read` header; `unchanged`, `<n>
+/// items` (outline), or `info` for the other shapes. Falls back to counting
+/// body lines when the result has no header.
+fn read_metric(result: &str, body_lines: usize) -> String {
+    let Some(header) = result.lines().next() else {
+        return count_noun(body_lines, "line", "lines");
+    };
+    let Some(rest) = header.strip_prefix("read ") else {
+        return count_noun(body_lines, "line", "lines");
+    };
+    let mut tokens = rest.split_whitespace().skip(1);
+    match tokens.next() {
+        Some("unchanged") => "unchanged".to_owned(),
+        Some("outline") => {
+            match header_field(result, "read", "items").and_then(|value| value.split_once('/')) {
+                Some((shown, total)) if shown != total => format!("{shown}/{total} items"),
+                Some((shown, _)) => count_noun(shown.parse().unwrap_or(0), "item", "items"),
+                None => "outline".to_owned(),
+            }
+        }
+        Some("info") => "info".to_owned(),
+        Some(window) => match window.strip_prefix('L').and_then(|w| w.split_once('/')) {
+            Some((shown, total)) => {
+                let total: usize = total.parse().unwrap_or(0);
+                let mut metric = if shown.contains(',') || shown.contains('-') {
+                    format!("L{shown} of {}", count_noun(total, "line", "lines"))
+                } else {
+                    format!("L{shown} of {total}")
+                };
+                if header_field(result, "read", "truncated").is_some() {
+                    metric.push_str(" · truncated");
+                }
+                metric
+            }
+            None => count_noun(body_lines.saturating_sub(1), "line", "lines"),
+        },
+        None => count_noun(body_lines.saturating_sub(1), "line", "lines"),
+    }
+}
+
 /// `<n> entries` from the `tree … entries=<shown>/<total>` header, with the
 /// total when entries were left unlisted.
 fn tree_metric(result: &str) -> String {
@@ -472,7 +524,10 @@ pub(super) fn render_tool_calls(
         if call.is_error
             && let Some(result) = call.result.as_deref()
         {
-            lines.extend(tool_error_lines(strip_header(result, &call.name), width));
+            lines.extend(tool_error_lines(
+                strip_header(result, header_word(&call.name)),
+                width,
+            ));
         }
         if context.expanded {
             lines.extend(tool_expanded_lines(call, context, width));
@@ -718,7 +773,7 @@ pub(super) fn tool_expanded_lines(
     let Some(result) = call.result.as_deref().filter(|_| !call.is_error) else {
         return lines;
     };
-    let result = strip_header(result, &call.name);
+    let result = strip_header(result, header_word(&call.name));
     match row.body {
         ResultBody::Head => {
             let total = result.lines().count();

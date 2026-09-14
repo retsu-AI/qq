@@ -18869,10 +18869,9 @@ mod tests {
         let focused = snapshot.focused.unwrap();
         assert_eq!(focused.tool_calls.len(), 1);
         assert_eq!(focused.tool_calls[0].state, ToolCallState::Completed);
-        assert_eq!(
-            focused.tool_calls[0].result.as_deref(),
-            Some("tool result\n")
-        );
+        let result = focused.tool_calls[0].result.as_deref().unwrap();
+        assert!(result.starts_with("read note.txt L1/1 h:"), "{result}");
+        assert!(result.ends_with("\n1\ttool result\n"), "{result}");
         assert_eq!(
             focused.runs[0].usage,
             Some(TokenUsage {
@@ -18924,7 +18923,7 @@ mod tests {
         assert!(matches!(
             requests[2].messages()[2].content(),
             [ContentBlock::ToolResult { call_id, content, .. }]
-                if call_id == "call_0" && content == "tool result\n"
+                if call_id == "call_0" && content.ends_with("\n1\ttool result\n")
         ));
     }
 
@@ -33964,7 +33963,7 @@ mod tests {
             "{result}"
         );
         assert!(
-            result.contains("[read_file result, user message #1 turn 1 call 1]\nkeep"),
+            result.contains("[read_file result, user message #1 turn 1 call 1]\nread "),
             "{result}"
         );
         assert!(!result.contains("noted: the parser"), "{result}");

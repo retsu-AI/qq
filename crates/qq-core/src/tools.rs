@@ -179,17 +179,21 @@ mod tests {
             "read_file",
             r#"{"path":"b.txt","offset":2,"limit":1}"#,
         );
-        assert_eq!(read.model_text, "two\n");
+        let hash = content_hash(b"one\ntwo\nthree\n");
+        assert_eq!(
+            read.model_text,
+            format!("read b.txt L2/3 h:{}\n2\ttwo\n", &hash[..12])
+        );
         let update = read.file_state.unwrap();
         assert_eq!(update.path, "b.txt");
-        assert_eq!(update.hash, content_hash(b"one\ntwo\nthree\n"));
+        assert_eq!(update.hash, hash);
         assert_eq!(state.recorded("b.txt"), Some(update.hash));
     }
 
     #[test]
-    fn read_file_marks_oversized_results_as_truncated() {
+    fn read_file_stops_at_its_byte_budget_and_names_the_resume_offset() {
         let directory = tempfile::tempdir().unwrap();
-        // 200 lines of 1 KiB: within the read limit, over the byte ceiling.
+        // 200 lines of 1 KiB: within the line limit, over the 32 KiB default.
         let line = format!("{}\n", "x".repeat(1_023));
         fs::write(directory.path().join("large.txt"), line.repeat(200)).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
@@ -202,11 +206,265 @@ mod tests {
         );
 
         assert!(!result.is_error);
-        assert!(result.model_text.len() <= MAX_MODEL_TEXT_BYTES);
-        assert!(result.model_text.starts_with(&line), "head was not kept");
-        assert!(result.model_text.ends_with(&line), "tail was not kept");
+        assert!(result.model_text.len() <= 32 * 1024);
+        let header = result.model_text.lines().next().unwrap();
+        assert!(header.starts_with("read large.txt L1-"), "{header}");
+        assert!(header.contains("/200 h:"), "{header}");
+        assert!(header.ends_with(" truncated=bytes"), "{header}");
+        // Whole lines only, in order, then one marker with the next offset.
+        let shown: Vec<&str> = result
+            .model_text
+            .lines()
+            .skip(1)
+            .filter(|line| !line.starts_with(MARKER_PREFIX))
+            .collect();
+        assert!(shown.len() > 20 && shown.len() < 40, "{}", shown.len());
+        for (index, row) in shown.iter().enumerate() {
+            assert_eq!(*row, format!("{:>3}\t{}", index + 1, "x".repeat(1_023)));
+        }
         assert_eq!(result.model_text.matches(MARKER_PREFIX).count(), 1);
-        assert!(result.model_text.contains("lines omitted"));
+        assert!(
+            result
+                .model_text
+                .contains(&format!("continue from offset={}", shown.len() + 1)),
+            "{}",
+            result.model_text.lines().last().unwrap()
+        );
+        // The whole file still hashes: the read is complete for the guard.
+        assert!(result.file_state.is_some());
+    }
+
+    #[test]
+    fn read_file_ranges_merge_align_and_report_bounds() {
+        let directory = tempfile::tempdir().unwrap();
+        let content: String = (1..=120).map(|n| format!("line {n}\n")).collect();
+        fs::write(directory.path().join("n.txt"), &content).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let hash = content_hash(content.as_bytes());
+
+        let read = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"n.txt","ranges":["100-101","3-4","2","119-"]}"#,
+        );
+        assert!(!read.is_error, "{}", read.model_text);
+        assert_eq!(
+            read.model_text,
+            format!(
+                "read n.txt L2-4,100-101,119-120/120 h:{}\n  2\tline 2\n  3\tline 3\n  4\tline 4\n--\n100\tline 100\n101\tline 101\n--\n119\tline 119\n120\tline 120\n",
+                &hash[..12]
+            )
+        );
+
+        // A range past the end is clipped when another range is in bounds…
+        let tail = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"n.txt","ranges":["118-500"]}"#,
+        );
+        assert!(tail.model_text.starts_with("read n.txt L118-120/120 h:"));
+        // …and a typed failure when nothing is.
+        let past = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"n.txt","offset":121}"#,
+        );
+        assert!(past.is_error);
+        assert_eq!(
+            past.model_text,
+            "range_out_of_bounds: n.txt has 120 lines (last_line=120)"
+        );
+        for (arguments, code) in [
+            (r#"{"path":"n.txt","ranges":["5-3"]}"#, "invalid_ranges"),
+            (r#"{"path":"n.txt","ranges":["a"]}"#, "invalid_ranges"),
+            (
+                r#"{"path":"n.txt","ranges":["1"],"offset":2}"#,
+                "invalid_ranges",
+            ),
+            (r#"{"path":"n.txt","ranges":["1-3000"]}"#, "invalid_ranges"),
+            (r#"{"path":"n.txt","offset":0}"#, "invalid_offset"),
+            (r#"{"path":"n.txt","limit":0}"#, "invalid_limit"),
+            (
+                r#"{"path":"n.txt","if_changed_since":"abc"}"#,
+                "invalid_if_changed_since",
+            ),
+            (r#"{"path":"."}"#, "not_a_file"),
+            (r#"{"path":"missing.txt"}"#, "path_not_found"),
+        ] {
+            let failed = run_tool(&workspace, &state, "read_file", arguments);
+            assert!(failed.is_error, "{arguments}");
+            assert!(
+                failed.model_text.starts_with(code),
+                "{arguments}: {}",
+                failed.model_text
+            );
+        }
+        // Failures record nothing.
+        assert_eq!(state.recorded("n.txt"), Some(hash));
+    }
+
+    #[test]
+    fn read_file_if_changed_since_skips_unchanged_content_but_still_records() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.rs"), "fn a() {}\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let hash = content_hash(b"fn a() {}\n");
+        let short = &hash[..12];
+
+        let unchanged = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            &format!(r#"{{"path":"a.rs","if_changed_since":"h:{short}"}}"#),
+        );
+        assert!(!unchanged.is_error);
+        assert_eq!(
+            unchanged.model_text,
+            format!("read a.rs unchanged h:{short} lines=1\n")
+        );
+        assert_eq!(unchanged.file_state.as_ref().unwrap().hash, hash);
+        assert_eq!(state.recorded("a.rs"), Some(hash.clone()));
+
+        fs::write(directory.path().join("a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        let changed = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            &format!(r#"{{"path":"a.rs","if_changed_since":"h:{short}"}}"#),
+        );
+        assert!(!changed.is_error);
+        assert!(
+            changed.model_text.starts_with("read a.rs L1-2/2 h:"),
+            "{}",
+            changed.model_text
+        );
+        assert!(!changed.model_text.contains(short));
+        assert!(
+            changed
+                .model_text
+                .ends_with("\n1\tfn a() {}\n2\tfn b() {}\n")
+        );
+        assert_eq!(
+            state.recorded("a.rs"),
+            Some(content_hash(b"fn a() {}\nfn b() {}\n"))
+        );
+    }
+
+    #[test]
+    fn read_file_outline_and_info_modes() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("lib.rs"),
+            "pub struct Foo;\n\nimpl Foo {\n    pub fn new() -> Self {\n        Foo\n    }\n}\n\nfn helper() {}\n",
+        )
+        .unwrap();
+        fs::write(directory.path().join("win.txt"), "a\r\nb\r\n").unwrap();
+        fs::write(directory.path().join("Makefile"), "all:\n\tmake\n").unwrap();
+        fs::write(directory.path().join("blob.bin"), b"\x00\xff\xfebinary").unwrap();
+        fs::write(directory.path().join("pic.png"), b"\x89PNG\r\n\x1a\n\x00").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+
+        let outline = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"lib.rs","mode":"outline"}"#,
+        );
+        assert!(!outline.is_error, "{}", outline.model_text);
+        let mut lines = outline.model_text.lines();
+        let header = lines.next().unwrap();
+        assert!(
+            header.starts_with("read lib.rs outline items=4/4 lines=9 h:"),
+            "{header}"
+        );
+        assert_eq!(
+            lines.collect::<Vec<_>>(),
+            [
+                "L1 struct Foo",
+                "L3 impl Foo",
+                "L4   fn new",
+                "L9 fn helper"
+            ]
+        );
+        // Outline records the hash too: the model saw the file's shape.
+        assert!(outline.file_state.is_some());
+
+        let unsupported = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"Makefile","mode":"outline"}"#,
+        );
+        assert!(unsupported.is_error);
+        assert!(unsupported.model_text.starts_with("outline_unsupported"));
+
+        let info = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"win.txt","mode":"info"}"#,
+        );
+        assert!(!info.is_error);
+        assert!(
+            info.model_text
+                .starts_with("read win.txt info size=6 lines=2 h:"),
+            "{}",
+            info.model_text
+        );
+        assert!(
+            info.model_text.contains(" utf8=true eol=crlf perms="),
+            "{}",
+            info.model_text
+        );
+        assert!(
+            info.model_text.ends_with(" binary=false\n"),
+            "{}",
+            info.model_text
+        );
+        // CRLF content renders without the CR; the hash is of the bytes.
+        let win = run_tool(&workspace, &state, "read_file", r#"{"path":"win.txt"}"#);
+        assert!(
+            win.model_text.ends_with("\n1\ta\n2\tb\n"),
+            "{}",
+            win.model_text
+        );
+
+        let binary = run_tool(&workspace, &state, "read_file", r#"{"path":"blob.bin"}"#);
+        assert!(binary.is_error);
+        assert!(
+            binary.model_text.starts_with("not_text"),
+            "{}",
+            binary.model_text
+        );
+        let binary_info = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"blob.bin","mode":"info"}"#,
+        );
+        assert!(!binary_info.is_error);
+        assert!(
+            binary_info.model_text.contains(" utf8=false eol=none "),
+            "{}",
+            binary_info.model_text
+        );
+        assert!(binary_info.model_text.ends_with(" binary=true\n"));
+
+        let image = run_tool(&workspace, &state, "read_file", r#"{"path":"pic.png"}"#);
+        assert!(!image.is_error);
+        assert!(
+            image
+                .model_text
+                .contains(" mime=image/png hint=image_unsupported_by_model"),
+            "{}",
+            image.model_text
+        );
     }
 
     #[test]
@@ -257,7 +515,9 @@ mod tests {
 
         assert!(!result.is_error, "unexpected error: {}", result.model_text);
         assert!(
-            result.model_text.starts_with("ab\n"),
+            result
+                .model_text
+                .starts_with("read split.txt L2/2 h:- scanned=4194304\n2\tab\n"),
             "{}",
             result.model_text
         );
@@ -268,6 +528,8 @@ mod tests {
             "{}",
             result.model_text
         );
+        // Nothing is recorded for a file the guard could not hash whole.
+        assert!(result.file_state.is_none());
     }
 
     #[test]
@@ -290,7 +552,14 @@ mod tests {
         );
 
         assert!(!result.is_error);
-        assert_eq!(result.model_text, "y");
+        assert!(
+            result.model_text.starts_with("read exact.txt L2/2 h:"),
+            "{}",
+            result.model_text
+        );
+        assert!(result.model_text.ends_with("\n2\ty\n"));
+        assert!(!result.model_text.contains(MARKER_PREFIX));
+        assert!(result.file_state.is_some());
     }
 
     #[test]
@@ -903,7 +1172,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "e24c05b41d2c0e11e7f3fb7c5756fa047f25a5d9113f2fc9b853e620c34a9056"
+            "79171ee921430b0563d5150a98b37e4202f63784ec4d46c4168556daf8373f1c"
         );
     }
 
@@ -1342,10 +1611,10 @@ mod tests {
 
         let read = run_tool(&workspace, &state, "read_file", r#"{"path":".env"}"#);
         assert!(!read.is_error);
-        assert_eq!(
-            read.model_text,
-            "AWS_KEY=[masked:aws_key]\nDB_PASSWORD=[masked:credential]\nPORT=$PORT\n"
-        );
+        assert!(read.model_text.starts_with("read .env L1-3/3 h:"));
+        assert!(read.model_text.ends_with(
+            "\n1\tAWS_KEY=[masked:aws_key]\n2\tDB_PASSWORD=[masked:credential]\n3\tPORT=$PORT\n"
+        ));
         // The hash is of the file, not of the rendering.
         assert_eq!(
             read.file_state.unwrap().hash,

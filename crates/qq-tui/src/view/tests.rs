@@ -984,6 +984,60 @@ fn quiet_runs_fold_into_a_single_counted_line() {
 }
 
 #[test]
+fn read_rows_take_their_metric_from_the_header_and_hide_it_when_expanded() {
+    let cases = [
+        (
+            "read a.rs L1-40/120 h:0123456789ab\n 1\tfn a() {}\n",
+            "Read a.rs L1-40 of 120 lines",
+        ),
+        (
+            "read a.rs L2-4,100-101/120 h:0123456789ab\n2\tx\n",
+            "Read a.rs L2-4,100-101 of 120 lines",
+        ),
+        (
+            "read a.rs L1-30/200 h:0123456789ab truncated=bytes\n1\tx\n",
+            "Read a.rs L1-30 of 200 lines · truncated",
+        ),
+        ("read a.rs L7/9 h:0123456789ab\n7\tx\n", "Read a.rs L7 of 9"),
+        (
+            "read a.rs unchanged h:0123456789ab lines=120\n",
+            "Read a.rs unchanged",
+        ),
+        (
+            "read a.rs outline items=3/3 lines=9 h:0123456789ab\nL1 struct Foo\n",
+            "Read a.rs 3 items",
+        ),
+        (
+            "read a.rs info size=6 lines=2 h:0123456789ab utf8=true eol=lf perms=644 binary=false\n",
+            "Read a.rs info",
+        ),
+    ];
+    for (result, expected) in cases {
+        let call = tool_call_snapshot(
+            1,
+            "read_file",
+            r#"{"path":"a.rs"}"#,
+            ToolCallState::Completed,
+            Some(result),
+            false,
+        );
+        let rows = frame_rows(&render_tool_calls_simple(
+            &[&call],
+            &HashMap::new(),
+            SimpleDetail::Expanded,
+            0,
+            120,
+            &|_, _| Vec::new(),
+        ));
+        assert_eq!(squash(&rows[0]), format!(" ● {expected}"), "{result}");
+        assert!(
+            !rows.iter().any(|row| row.contains("h:0123456789ab")),
+            "the header is not repeated in the body: {rows:?}"
+        );
+    }
+}
+
+#[test]
 fn expanding_a_read_shows_the_head_of_the_file_and_never_its_json() {
     let mut app = app_with_messages(1);
     let session_id = app.focused().unwrap();

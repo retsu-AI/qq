@@ -108,7 +108,7 @@ pub(crate) fn agent_system_prompt(
          \n\
          Working conventions:\n\
          - Determine observable completion criteria from the user's request before acting.\n\
-         - Read a file with read_file before editing or overwriting it; edits without a prior read in this session are rejected.\n\
+         - Read a file with read_file before editing or overwriting it; edits without a prior read in this session are rejected. Its header carries h:<hash>; pass if_changed_since to skip an unchanged re-read, ranges for several windows at once, and mode=outline to see a file's shape before reading it.\n\
          - Inspect existing state before changing it and preserve unrelated work.\n\
          - Prefer search over guessing file paths, and search/tree over shell grep, rg, find, and ls; search groups matches by file as L<n>: text and its header carries next=<cursor> when more exist.\n\
          - Give every tool path relative to the workspace root; absolute paths are rejected.\n\
