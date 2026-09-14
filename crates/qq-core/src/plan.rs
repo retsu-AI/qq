@@ -41,7 +41,7 @@ use crate::{
         EffectClass, HostContribution, StaticTool, ToolCatalog, ToolHost, select_tools_spec,
     },
     hosts::{ExternalToolHost, HostCatalog},
-    runtime::{AuditPolicy, read_tool_result_spec, search_history_spec},
+    runtime::{AuditPolicy, ShellPolicy, read_tool_result_spec, search_history_spec},
     tools,
     workspace::{
         SkillIndex, Workspace, WorkspaceInstructionError, WorkspaceInstructions,
@@ -114,6 +114,7 @@ pub struct AgentProfile {
     spawn_model_routes: Vec<String>,
     delegation: DelegationRoster,
     audit: AuditPolicy,
+    shell: ShellPolicy,
     adapter_build: String,
     provenance: Vec<String>,
     credential_epoch: CredentialEpoch,
@@ -144,6 +145,7 @@ impl AgentProfile {
             spawn_model_routes: Vec::new(),
             delegation: DelegationRoster::default(),
             audit: AuditPolicy::default(),
+            shell: ShellPolicy::default(),
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -175,6 +177,7 @@ impl AgentProfile {
             spawn_model_routes: runtime.spawn_model_routes.to_vec(),
             delegation: runtime.delegation.as_ref().clone(),
             audit: runtime.audit,
+            shell: runtime.shell.as_ref().clone(),
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -260,6 +263,13 @@ impl AgentProfile {
     #[must_use]
     pub const fn with_audit(mut self, audit: AuditPolicy) -> Self {
         self.audit = audit;
+        self
+    }
+
+    /// The shell environment allowlist and built-in preference.
+    #[must_use]
+    pub fn with_shell_policy(mut self, shell: ShellPolicy) -> Self {
+        self.shell = shell;
         self
     }
 
@@ -460,6 +470,7 @@ impl CompiledAgentPlan {
             spawn_model_routes,
             delegation,
             audit,
+            shell,
             adapter_build,
             provenance,
             credential_epoch,
@@ -483,7 +494,8 @@ impl CompiledAgentPlan {
         .with_context_window(resolved_model.context_window)
         .with_spawn_model_routes(spawn_model_routes)
         .with_delegation(delegation)
-        .with_audit(audit);
+        .with_audit(audit)
+        .with_shell_policy(shell);
         for source in context_sources {
             runtime = runtime.with_context_source(source);
         }
@@ -1222,7 +1234,7 @@ mod tests {
         // from a different encoding.
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "63c411dcf3391331a8b05f3e6a4a40536b033bdabe6731cc2aee2fecfe94c504"
+            "30957adfa08ae58c070b78d94af50d3b3a1470cdfde32495925694b0a3225658"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v6\0".len()..]).unwrap();

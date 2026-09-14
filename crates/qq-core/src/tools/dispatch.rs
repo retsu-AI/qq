@@ -141,6 +141,7 @@ impl Drop for CancelCallOnDrop {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute(
     workspace: Workspace,
     file_state: Arc<FileState>,
@@ -149,6 +150,7 @@ pub(crate) async fn execute(
     cancelled: Arc<AtomicBool>,
     output: Option<mpsc::Sender<String>>,
     tasks: ToolTasks,
+    shell_policy: Arc<crate::runtime::ShellPolicy>,
 ) -> ToolOutput {
     if arguments.len() > MAX_ARGUMENT_BYTES {
         return ToolOutput::error("tool arguments exceed the 64 KiB limit");
@@ -171,6 +173,7 @@ pub(crate) async fn execute(
             let mut lease = lease;
             run_shell(
                 &workspace,
+                &shell_policy,
                 &arguments,
                 &cancelled,
                 output.as_ref(),

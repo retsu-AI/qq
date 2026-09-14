@@ -998,6 +998,8 @@ pub struct EffectivePolicy {
     allow_literal_secrets: bool,
     allow_tools: Vec<String>,
     allow_shell_prefixes: Vec<String>,
+    shell_env: Vec<String>,
+    builtin_preference: BuiltinPreference,
     deny_tools: Vec<String>,
     deny_shell_prefixes: Vec<String>,
 }
@@ -1014,10 +1016,23 @@ impl Default for EffectivePolicy {
             allow_literal_secrets: true,
             allow_tools: Vec::new(),
             allow_shell_prefixes: Vec::new(),
+            shell_env: Vec::new(),
+            builtin_preference: BuiltinPreference::default(),
             deny_tools: Vec::new(),
             deny_shell_prefixes: Vec::new(),
         }
     }
+}
+
+/// How the runtime steers the model from shell habits toward the bounded
+/// built-ins. Layers may only tighten: `off < hint < strict`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinPreference {
+    Off,
+    #[default]
+    Hint,
+    Strict,
 }
 
 impl EffectivePolicy {
@@ -1072,6 +1087,19 @@ impl EffectivePolicy {
     #[must_use]
     pub fn allow_shell_prefixes(&self) -> &[String] {
         &self.allow_shell_prefixes
+    }
+
+    /// Environment variable names a `shell` call may pass through to its
+    /// child, beyond the base set the runtime always provides.
+    #[must_use]
+    pub fn shell_env(&self) -> &[String] {
+        &self.shell_env
+    }
+
+    /// How hard the runtime steers shell habits toward built-ins.
+    #[must_use]
+    pub const fn builtin_preference(&self) -> BuiltinPreference {
+        self.builtin_preference
     }
 
     /// Managed-only: exact tool names filtered out of the effective grants.
@@ -1307,6 +1335,7 @@ pub struct ConfigProvenance {
     packs: BTreeMap<String, SourceIdentity>,
     grant_tools: BTreeMap<String, SourceIdentity>,
     grant_shell_prefixes: BTreeMap<String, SourceIdentity>,
+    shell_env: BTreeMap<String, SourceIdentity>,
 }
 
 impl ConfigProvenance {

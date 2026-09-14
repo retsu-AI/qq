@@ -15,7 +15,10 @@ use super::{
     shell::MAX_SHELL_TIMEOUT_SECS,
     tree::{MAX_DEPTH, MAX_ENTRIES},
 };
-use crate::catalog::{EffectClass, StaticTool, ToolHost};
+use crate::{
+    catalog::{EffectClass, StaticTool, ToolHost},
+    runtime::MAX_SHELL_ENV_NAMES,
+};
 
 /// The sub-agent tool. Not a [`BuiltInTool`]: it is declared only for runs
 /// that may spawn (never for child sessions), and it dispatches to the
@@ -187,7 +190,7 @@ impl BuiltInTool {
             ),
             Self::Shell => ToolSpec::new(
                 "shell",
-                "Run one shell command in the workspace via `sh -c`, capturing combined stdout and stderr. The command runs with a timeout (120 s by default) and its whole process group is killed when the timeout expires or the run is cancelled.",
+                "Run one shell command in the workspace via `sh -c`, capturing combined stdout and stderr (head+tail; the full output is stored). The child starts from a cleared environment plus PATH HOME LANG TERM TMPDIR; name allowlisted variables in env. Timeout 120 s by default; the process group is killed on timeout or cancel.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -200,6 +203,11 @@ impl BuiltInTool {
                             "type": "integer",
                             "minimum": 1,
                             "maximum": MAX_SHELL_TIMEOUT_SECS
+                        },
+                        "env": {
+                            "type": "array",
+                            "maxItems": MAX_SHELL_ENV_NAMES,
+                            "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
                         }
                     },
                     "required": ["command"],

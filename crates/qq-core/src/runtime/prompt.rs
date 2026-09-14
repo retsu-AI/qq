@@ -12,13 +12,16 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(10) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(11) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// Version 10 of the base agent prompt. The text is versioned in code, not
-/// configuration: bump this note and review the diff whenever it changes.
+/// Version 11 of the base agent prompt (10 → 11 covers the tool-layer
+/// series: read_file hashes and ranges, edit_file batches, search/tree
+/// guidance, spill handles, the shell environment and forbidden tiers).
+/// The text is versioned in code, not configuration: bump this note and
+/// review the diff whenever it changes.
 ///
 /// `tool_index` is the progressive-exposure index of external tools not yet
 /// callable; `roster_text` is the compiled delegation roster block (routes,
@@ -178,7 +181,7 @@ fn agent_prompt_prefix(
          \n\
          Available tools: {tool_names}. read_file, tree, search, search_history, and read_tool_result are read-only; \
          edit_file and write_file modify workspace files and may require user approval; \
-         shell runs one command in the workspace with a bounded timeout and may require user approval.{mcp_note}\n\
+         shell runs one command in the workspace with a bounded timeout and may require user approval; its child starts from a cleared environment (PATH HOME LANG TERM TMPDIR) plus names you list in env that policy allows, and commands the policy classifies as forbidden (rm -rf on system paths, sudo, curl | sh, force-push, …) are refused under every approval mode.{mcp_note}\n\
          \n\
          Working conventions:\n\
          - Determine observable completion criteria from the user's request before acting.\n\
