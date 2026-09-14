@@ -19,7 +19,7 @@ dated entries appended below, newest last.
 | H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI | Planned | | |
 | HC1 | `--correlation`, `--session`, `u32` turns, model-less `config check` | Shipped (`abad2de`, #30) | `feat/hc1-headless-run-contract` | `PROTOCOL_VERSION` 17 → 18; `v17/` fixtures retained decode-only. Per-store owner lock on every open (ADR-0022). `SessionRuntime::abandon_for_test` added for crash-simulation tests |
 | HC3 | `--output-schema`, repair turns, `final_output` | Shipped (`24b6e5c`, #33) | `feat/hc3-typed-final-output` | `PROTOCOL_VERSION` 18 → 19 (`v19/` goldens; `v18/` decode-only); store schema 26 → 27. ADR-0014 accepted. Evidence `target/qq-perf/hc3-2026-09-12/` |
-| HC4 | Headless golden fixtures | In review | `feat/hc4-headless-goldens` | Record shapes in `qq_protocol::headless`; ten `v19/` golden streams + `v18/` decode-only; ADR-0023 accepted. No protocol or schema bump |
+| HC4 | Headless golden fixtures | In review | [#34](https://github.com/retsu-AI/qq/pull/34) `feat/hc4-headless-goldens` | Record shapes in `qq_protocol::headless`; ten `v19/` golden streams + `v18/` decode-only; ADR-0023 accepted. No protocol or schema bump |
 | H10 / H11 / H12 | Sandbox / adapters / qualification | Planned | | Gated; see plan |
 
 Shipped before this ledger existed (see the plan's Completed Phases table):
