@@ -2788,6 +2788,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tree-sitter",
+ "tree-sitter-bash",
 ]
 
 [[package]]

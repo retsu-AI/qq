@@ -10,8 +10,8 @@ newest last.
 | T2 | `search` v2 + `tree` (+ `list_dir` alias) | Shipped (#32, `8bb4050`) | `feat/tool-layer-t2-search-tree` | Evidence `target/qq-perf/t2-2026-09-12/` |
 | T3 | `read_file` v2 (gutter, ranges, outline, info, `if_changed_since`) | Shipped (#35, `eecc76b`) | `feat/tool-layer-t3-read-file` | Evidence `target/qq-perf/t3-2026-09-14/` |
 | T4 | Spill store + `read_tool_result` | Shipped (#36, `80e7396`) | `feat/tool-layer-t4-spill-store` | Evidence `target/qq-perf/t4-2026-09-14/`; ADR-0019 |
-| T5 | `edit_file` v2 batch/cascade/anchors/dry-run; `write_file` flags | In review | `feat/tool-layer-t5-edit-v2` | Started 2026-09-14; evidence `target/qq-perf/t5-2026-09-14/` |
-| T6 | Shell classifier + `Forbidden` decision | Planned | | Root request: promote `tree-sitter{,-bash}` to workspace deps; ADR reserved |
+| T5 | `edit_file` v2 batch/cascade/anchors/dry-run; `write_file` flags | Shipped (#37, `95fef1b`) | `feat/tool-layer-t5-edit-v2` | Evidence `target/qq-perf/t5-2026-09-14/` |
+| T6 | Shell classifier + `Forbidden` decision | In progress | `feat/tool-layer-t6-classifier` | Started 2026-09-14; baseline `target/qq-perf/t6-2026-09-14/` (`tool_dispatch` 51.1–53.5 µs pinned); `classify_command` bench is new. Root request done in-PR (tree-sitter rows promoted; no lock delta beyond the two edges). ADR-0020 reserved |
 | T7 | `exec`, env allowlist, prefer-built-in nudge | Planned | | |
 | T8 | `ask_user` + `Interactive` class | Planned | | ADR shared with T9 |
 | T9 | `fetch` + `Network` class | Planned | | |
@@ -106,3 +106,11 @@ Deviations: `line_trimmed` trims trailing whitespace only (indent kept) so `inde
 Docs: `docs/design/tools.md` § Built-In Tools, § Edit Semantics (rewritten), § Optimistic Concurrency.
 Open: a `ToolCallDisplay` variant with per-file diffs (protocol 20) when the changes pane needs it; T12 `@` can pass `if_hash`; T13 measures the cascade's real hit rate.
 Evidence: `target/qq-perf/t5-2026-09-14/` (untracked).
+
+### 2026-09-14 — T5 shipped; T6 in progress
+
+T5 merged as #37 (`95fef1b`). T6 on `feat/tool-layer-t6-classifier`
+(worktree `/tmp/opencode/qq-t6`). Baseline `tool_dispatch` 51.1–53.5 µs
+pinned (6 runs). `tree-sitter`/`tree-sitter-bash` promoted to the workspace
+table and `qq-tui` pointed at them; `qq-core` gains the two edges, the lock
+adds no package. Plan for the release: T6 → T7 → `v0.1.0`.

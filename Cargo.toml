@@ -77,6 +77,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 thiserror = "2"
+tree-sitter = "0.26"
+tree-sitter-bash = "0.25"
 tempfile = "3"
 time = { version = "0.3", features = ["parsing"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
