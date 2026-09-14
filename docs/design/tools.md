@@ -505,19 +505,56 @@ trip, and no approval — the user's own action needs no gate. Agent-driven
 discovery stays tool-based; `@` exists so the user never has to spend a
 turn telling the agent to go read a file they already have in mind.
 
-The client resolves references through the same capability containment as
-the tools — an `@` reference cannot escape the workspace either — and
-fuzzy completion reuses the `search` machinery rather than growing a
-second index. The file's content attaches to the user message as a
-content block, bounded and truncation-marked like a `read_file` result,
-persisted like any other message content, and counted against the session
-context budget.
+**Grammar** (`qq_protocol::parse_mentions`, pure, shared by the TUI and
+`qq run`; the server never sees `@` syntax):
 
-Attaching a file also records its content hash in the session's
-file-state map, exactly as `read_file` does. The read-before-write rule
-is therefore already satisfied for pinned files: the agent may edit an
-`@`-mentioned file without a redundant read, and the staleness CAS still
-protects the apply.
+```text
+mention     = "@" ( file-ref | special-ref )
+file-ref    = path [ ":" line [ "-" line ] ]     ; workspace-relative
+special-ref = ( "web" | "diff" | "sha" | "skill" ) ":" value
+```
+
+A mention is recognised only at message start or after whitespace, `(`, or
+`[`; it ends at whitespace, `)`, `]`, `,`, `;`; trailing `.:?!` are prose,
+not part of the reference; `@@` is a literal `@`; fenced code is never
+scanned; a bare word with no path character (`@user`, `@decorator`) and
+anything mid-word (`me@example.com`) are not mentions. A path the client
+cannot resolve is **left literal** and noted — the grammar never eats a
+word by mistake.
+
+**Resolution** (`qq_core::mentions::resolve_prompt`, blocking, run off the
+executor) goes through the same `cap-std` containment and ignore-aware
+walk the tools use, so an `@` reference cannot escape the workspace either
+and fuzzy completion reuses the walker rather than growing a second index:
+
+- `@path` → one `InputPart::WorkspaceFile` with `expected_hash` filled at
+  compose time (SHA-256 of the current bytes). `@path:12-40` adds `range`;
+  the runtime attaches only those lines (`<attached-file … lines="12-40/230">`)
+  but hashes and records the **whole** file, so the read-before-write rule
+  is satisfied and `edit_file` needs no redundant read.
+- `@dir/` and `@src/**/*.rs` expand through the walk to ≤ 8 attachments
+  (`MAX_INPUT_FILE_PARTS`), else the client refuses with "narrow the
+  directory". Generated directories and ignored files are skipped; files
+  over 256 KiB and binaries refuse.
+- `@diff` / `@diff:REF` / `@sha:REF` attach bounded `git diff -p --stat` /
+  `git show --stat` output (64 KiB / 16 KiB) as text from the user's own
+  tree — no policy hop, because it is the user's action, not the model's.
+- `@web:URL` does **not** fetch client-side: it becomes text asking the
+  model to `fetch`, so network authority passes server policy.
+- `@skill:name` at message start rewrites to `/name`.
+
+The text keeps the `@path` token so the model knows which attachment a
+sentence refers to; the transcript row shows the same placeholder; the
+model sees the file fenced after the text. Attached files are recorded in
+the session's file-state map exactly as `read_file` does.
+
+**Completion.** Typing on an `@` token asks the loop for candidates
+(`Effect::CompleteMention` → `complete_paths`, ≤ 150 ms, ≤ 12 results)
+ranked by name-prefix, then substring, then subsequence match, shorter
+paths first, with the session's recently edited files pulled to the front
+of their tier. Tab/Enter accepts (a directory keeps completing one level
+down); Esc closes. A client without the workspace tree (a remote TUI)
+leaves `@` as literal text.
 
 ## Safe File Editing
 

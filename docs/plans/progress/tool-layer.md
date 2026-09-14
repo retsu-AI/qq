@@ -17,7 +17,7 @@ newest last.
 | T9 | `fetch` + `Network` class | Planned | | |
 | T10 | `terminal` | Planned (gated) | | Ships only on R6-terminal evidence |
 | T11 | `view_image` + provider image block | Planned | | `vision` feature |
-| T12 | `@` mentions: grammar, `range` field, dirs/globs, `@diff`/`@sha`, completion | In progress | `feat/tool-layer-t12-mentions` | Started 2026-09-14; baseline `target/qq-perf/t12-2026-09-14/render-baseline.txt` (35.6 µs median frame) |
+| T12 | `@` mentions: grammar, `range` field, dirs/globs, `@diff`/`@sha`, completion | In review | `feat/tool-layer-t12-mentions` | 2026-09-14; evidence `target/qq-perf/t12-2026-09-14/` |
 | T13 | Ablation harness A0–A5 | Planned | | Runs after T7 and after T12 |
 | T14 | `select_tools` lexical index | Planned | | |
 
@@ -140,3 +140,12 @@ tagged. T12 on `feat/tool-layer-t12-mentions` (worktree
 `/tmp/opencode/qq-t12`). Baseline: `render` bench
 `sessions_200_with_sidebar_frame` median 35.6 µs (the TUI render gate the
 slice must leave unchanged).
+
+#### T12 receipt — 2026-09-14
+Commit(s): `cdbbc6d` grammar (`qq-protocol`), resolver + completion (`qq-core::mentions`), `range` field, TUI popup and submit path, `qq run` resolution.
+Tests: 4 grammar (files/ranges/boundaries/spans, non-mentions incl. fences and emails, special refs, bound); 5 resolver (files/ranges/dirs/globs with hashes + literal fallbacks + containment; directory over the part limit; special refs + skill lift; real `git init` `@diff`/`@sha` with a bad ref; completion ranking/ignore/recency); 1 `qq-core::input` (range slice + whole-file hash + out-of-bounds + inverted); 4 TUI (composer token, popup keys incl. stale-reply drop and directory descent, submit → `ResolveMentions` → parts and failure restore and skill rewrite, no-root literal); 1 headless end-to-end (range attached, unresolvable noted on stderr, placeholder in the transcript row). Workspace green: 1416 passed; wasm `qq-client` still builds.
+Gates: TUI `render` bench `sessions_200_with_sidebar_frame` 35.6 → 35.3 µs; `keystroke_to_frame` 28.6 µs (the `@` token check is an `rfind` on the composer).
+Deviations: the mention grammar lives in `qq-protocol` (pure, wasm-safe) and resolution in `qq-core::mentions` (pub module) rather than in `qq-tui` and `src/headless.rs`; `qq-tui` gains a `qq-core` dependency for the walk and the file read — the plan's "reuses the `search` machinery" could not be met from the TUI otherwise. The text keeps `@path` tokens in place (the plan did not say; keeping them lets the model tie a sentence to its attachment). `range` is a `LineRange { start, end }` struct rather than a tuple for a stable wire shape. `@skill` outside message start is left literal with a note. Steering with mentions resolves client-side too, but the server's steer path still renders `WorkspaceFile` as a placeholder (pre-existing; noted as open).
+Docs: `docs/design/tools.md` § File References In Prompts (rewritten); `docs/design/protocol.md` `workspace_file` row.
+Open: server-side resolution of `WorkspaceFile` parts on `SteerRun` and direct `ask`; a `Mode::Compose` hint row for pending resolution if it ever takes long enough to notice; T13's completion-usage counts.
+Evidence: `target/qq-perf/t12-2026-09-14/` (untracked).

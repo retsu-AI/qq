@@ -615,7 +615,7 @@ affects only sessions created afterwards.
 | `type` | Fields | Notes |
 | --- | --- | --- |
 | `text` | `text` | Verbatim user text |
-| `workspace_file` | `path`, optional `expected_hash` | A workspace-relative file attached by reference |
+| `workspace_file` | `path`, optional `expected_hash`, optional `range` | A workspace-relative file attached by reference; `range { start, end }` (1-based, inclusive) attaches only those lines while the whole file is hashed and recorded |
 
 Bounds, enforced by the transport before the handler and again by the runtime
 before durable admission: 1–32 parts; text totals ≤ 128 KiB and is not all
