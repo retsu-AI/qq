@@ -246,6 +246,36 @@ where
                     renderer.invalidate();
                     redraw = Some(Redraw::Immediate);
                 }
+                Effect::ResolveMentions(submit) => {
+                    // File reads and a possible git call: off the executor.
+                    let root = app.workspace_root.clone();
+                    let text = submit.text.clone();
+                    let resolved = match root {
+                        Some(root) => tokio::task::spawn_blocking(move || {
+                            qq_core::mentions::resolve_prompt(&root, &text)
+                        })
+                        .await
+                        .map_err(|_| "mention resolution stopped unexpectedly".to_owned()),
+                        None => Err("this client has no workspace tree".to_owned()),
+                    };
+                    queue.extend(app.apply_resolved_mentions(submit, resolved));
+                }
+                Effect::CompleteMention { query, recent } => {
+                    let Some(root) = app.workspace_root.clone() else {
+                        continue;
+                    };
+                    let walk_query = query.clone();
+                    let candidates = tokio::task::spawn_blocking(move || {
+                        qq_core::mentions::complete_paths(&root, &walk_query, &recent)
+                    })
+                    .await
+                    .unwrap_or_default();
+                    if app.apply_mention_completions(query, candidates) {
+                        redraw = Some(redraw.map_or(Redraw::Scheduled, |existing| {
+                            existing.max(Redraw::Scheduled)
+                        }));
+                    }
+                }
                 Effect::Attention(attention) => {
                     output.write_all(&attention_bytes(&attention)).await?;
                     output.flush().await?;

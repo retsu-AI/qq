@@ -135,6 +135,46 @@ impl Composer {
         text.len()
     }
 
+    /// The `@` token the cursor sits in or just after: its byte span (the `@`
+    /// included) and the text after the `@`. `None` when the cursor is not
+    /// on such a token, or the `@` is mid-word (an email) or escaped (`@@`).
+    pub(crate) fn mention_token(&self) -> Option<(std::ops::Range<usize>, &str)> {
+        let cursor = self.cursor();
+        let before = &self.text[..cursor];
+        let start = before.rfind('@')?;
+        let token = &before[start + 1..];
+        if token.contains(char::is_whitespace) || token.contains([')', ']', ',', ';']) {
+            return None;
+        }
+        let preceded_ok = start == 0
+            || before[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_whitespace() || matches!(c, '(' | '['));
+        if !preceded_ok || before[..start].ends_with('@') {
+            return None;
+        }
+        // The token ends at the cursor or the next boundary after it.
+        let after = &self.text[cursor..];
+        let end = cursor
+            + after
+                .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | ',' | ';'))
+                .unwrap_or(after.len());
+        Some((start..end, token))
+    }
+
+    /// Replace the byte span with `text` and leave the cursor after it, as
+    /// one undo step.
+    pub(crate) fn replace_span(&mut self, span: std::ops::Range<usize>, text: &str) {
+        if span.start > span.end || span.end > self.text.len() {
+            return;
+        }
+        self.snapshot();
+        self.text.replace_range(span.clone(), text);
+        self.cursor = Some(span.start + text.len());
+        self.preferred_column = None;
+    }
+
     /// Insert pasted content. Small pastes go in literally; larger ones are
     /// stored and represented by a placeholder. Returns whether text changed.
     pub(crate) fn paste(&mut self, content: &str) -> bool {

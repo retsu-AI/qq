@@ -532,6 +532,7 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
                     InputPart::WorkspaceFile {
                         path: "notes.md".to_owned(),
                         expected_hash: None,
+                        range: None,
                     },
                 ],
                 limits: RunLimits::default(),
@@ -605,6 +606,7 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
                 input: vec![InputPart::WorkspaceFile {
                     path: "notes.md".to_owned(),
                     expected_hash: Some(ContentHash::from_bytes([7; 32])),
+                    range: None,
                 }],
                 limits: RunLimits::default(),
                 correlation: Correlation::default(),
@@ -649,6 +651,7 @@ async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provi
                 input: vec![InputPart::WorkspaceFile {
                     path: "/etc/passwd".to_owned(),
                     expected_hash: None,
+                    range: None,
                 }],
                 limits: RunLimits::default(),
                 correlation: Correlation::default(),

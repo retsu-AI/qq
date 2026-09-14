@@ -16,11 +16,39 @@ pub(crate) enum Effect {
     Send(ClientRequest),
     /// Suspend the terminal and open the external editor with this draft.
     Editor(String),
+    /// Resolve `@` mentions in a prompt off the executor, then submit it.
+    /// The loop calls back with the resolved parts (or the failure).
+    ResolveMentions(PendingSubmit),
+    /// Complete the `@` token at the cursor: a bounded workspace walk off the
+    /// executor, delivered back as candidates for the popup.
+    CompleteMention {
+        query: String,
+        recent: Vec<String>,
+    },
     /// Ring the terminal for an event that happened while it was unfocused.
     Attention(Attention),
     /// Turn terminal mouse reporting on or off.
     MouseCapture(bool),
     Quit,
+}
+
+/// A prompt waiting on mention resolution: what the user typed and where it
+/// goes once the parts are known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingSubmit {
+    pub(crate) text: String,
+    pub(crate) target: SubmitTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubmitTarget {
+    Prompt {
+        session_id: qq_protocol::SessionId,
+    },
+    Steer {
+        run_id: qq_protocol::RunId,
+        interrupt: bool,
+    },
 }
 
 /// When the next frame is drawn relative to pending state changes.
@@ -39,6 +67,10 @@ pub(crate) enum Redraw {
 pub(crate) struct Effects(Vec<Effect>);
 
 impl Effects {
+    pub(crate) fn resolve_mentions(submit: PendingSubmit) -> Self {
+        Self(vec![Effect::ResolveMentions(submit)])
+    }
+
     #[must_use]
     pub(crate) const fn none() -> Self {
         Self(Vec::new())

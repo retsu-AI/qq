@@ -23,7 +23,7 @@ use crate::{
     Action, ClientFailure, ClientPort, ClientRequest, ClientUpdate, ConnectionState, Settings,
     commands::{self, Command, SlashAction, SlashEntry},
     composer::Composer,
-    effect::{Effect, Effects, Redraw},
+    effect::{Effect, Effects, PendingSubmit, Redraw, SubmitTarget},
     input::{Mode, Overlay, SessionConfirm, approval_mode_label},
     picker::Picker,
     terminal,
@@ -52,6 +52,9 @@ pub struct TuiOptions {
     /// Every selectable theme; the first is active at startup. An empty list
     /// means the compiled `qq` theme.
     pub themes: Vec<Theme>,
+    /// The canonical workspace root `@` mentions resolve against. `None`
+    /// (a remote client without the tree) leaves `@` as literal text.
+    pub workspace_root: Option<std::path::PathBuf>,
 }
 
 /// Runs the TUI to exit. Returns the session focused at exit, after the
@@ -162,6 +165,76 @@ pub(crate) enum ReasoningDetail {
     Expanded,
 }
 
+/// The `@` completion popup's state.
+#[derive(Debug, Default)]
+pub(crate) struct MentionCompletion {
+    pub(crate) candidates: Vec<String>,
+    /// The token the candidates answer.
+    pub(crate) query: Option<String>,
+    pub(crate) cursor: Picker,
+}
+
+impl MentionCompletion {
+    fn clear(&mut self) {
+        self.candidates.clear();
+        self.query = None;
+        self.cursor.select(0);
+    }
+
+    /// The token changed under the popup: keep showing the old list until
+    /// the new one arrives, but a stale accept must not fire.
+    fn invalidate(&mut self) {
+        self.query = None;
+    }
+}
+
+/// Paths this session's completed edits and writes touched, newest first,
+/// so `@` completion ranks the files the agent is working on ahead of the
+/// rest of the tree.
+fn recently_edited_paths(session: &qq_client::state::SessionView, limit: usize) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for call in session
+        .tool_calls
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .rev()
+    {
+        if !matches!(call.name.as_str(), "edit_file" | "write_file" | "read_file") {
+            continue;
+        }
+        let Ok(arguments) = serde_json::from_str::<serde_json::Value>(&call.arguments) else {
+            continue;
+        };
+        let mut found: Vec<&str> = Vec::new();
+        if let Some(path) = arguments.get("path").and_then(|v| v.as_str()) {
+            found.push(path);
+        }
+        if let Some(edits) = arguments.get("edits").and_then(|v| v.as_array()) {
+            found.extend(
+                edits
+                    .iter()
+                    .filter_map(|e| e.get("path").and_then(|p| p.as_str())),
+            );
+        }
+        for path in found {
+            if !paths.iter().any(|p| p == path) {
+                paths.push(path.to_owned());
+                if paths.len() >= limit {
+                    return paths;
+                }
+            }
+        }
+    }
+    paths
+}
+
+/// Whether a prompt needs mention resolution at all: an `@` that the grammar
+/// could accept. Cheap so plain prompts never pay for a blocking hop.
+fn has_mention_syntax(text: &str) -> bool {
+    !qq_protocol::parse_mentions(text).mentions.is_empty()
+}
+
 #[derive(Debug, Clone)]
 enum PendingIntent {
     Create,
@@ -215,6 +288,9 @@ pub(crate) struct App {
     pub approval_mode: ApprovalMode,
     pub workspace_id: Option<WorkspaceId>,
     pub workspace_path: String,
+    /// Local root for `@` mention resolution and completion, when this
+    /// client has the tree.
+    pub(crate) workspace_root: Option<std::path::PathBuf>,
     pub sessions: SessionStore,
     /// What the main area shows. Its session is the one the composer,
     /// approvals, footers, and tree navigation act on.
@@ -237,6 +313,12 @@ pub(crate) struct App {
     /// Cursor into the slash autocomplete list. The query is the composer
     /// text itself, so only the cursor lives here.
     slash: Picker,
+    /// The `@` completion popup: candidates for the token at the cursor and
+    /// the query they answer, so a stale reply is ignored.
+    pub(crate) mention: MentionCompletion,
+    /// Prompts whose `@` mentions are resolving off the executor. The
+    /// composer is already cleared; a failure puts the text back.
+    resolving: usize,
     /// Tick at which Esc was last pressed with nothing to dismiss; a second
     /// press within [`ESC_CANCEL_TICKS`] cancels the active run.
     esc_armed_at: Option<usize>,
@@ -300,6 +382,7 @@ impl App {
             models: options.models,
             workspace_id: None,
             workspace_path: String::new(),
+            workspace_root: options.workspace_root,
             sessions: SessionStore::with_sanitizer(terminal_safe_character),
             view: View::default(),
             viewport: Viewport::default(),
@@ -311,6 +394,8 @@ impl App {
             history_position: None,
             history_draft: None,
             slash: Picker::new(),
+            mention: MentionCompletion::default(),
+            resolving: 0,
             esc_armed_at: None,
             capabilities: None,
             connection: ConnectionState::Connecting,
@@ -965,6 +1050,9 @@ impl App {
         if key.code != KeyCode::Esc {
             self.esc_armed_at = None;
         }
+        if let Some(result) = self.handle_mention_key(key.code) {
+            return result;
+        }
         if let Some(result) = self.handle_slash_key(key.code) {
             return result;
         }
@@ -1066,6 +1154,10 @@ impl App {
                 if changed {
                     self.reset_history_browse();
                     self.slash.select(0);
+                    self.mention.invalidate();
+                    if self.composer.mention_token().is_some() {
+                        return self.request_mention_completion();
+                    }
                 }
                 Effects::changed_now(changed)
             }
@@ -1124,6 +1216,11 @@ impl App {
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 let changed = self.push_input(character);
+                // Typing on an `@` token asks for candidates; the reply is
+                // matched to the token as it stands when it arrives.
+                if changed && self.composer.mention_token().is_some() {
+                    return self.request_mention_completion();
+                }
                 Effects::changed_now(changed)
             }
             _ => Effects::none(),
@@ -1499,9 +1596,17 @@ impl App {
         };
         self.record_prompt(session_id, &text);
         self.composer.clear();
+        self.mention.clear();
         self.reset_history_browse();
         self.slash.select(0);
         self.esc_armed_at = None;
+        if self.workspace_root.is_some() && has_mention_syntax(&text) {
+            self.resolving += 1;
+            return Effects::resolve_mentions(PendingSubmit {
+                text,
+                target: SubmitTarget::Steer { run_id, interrupt },
+            });
+        }
         self.send(
             PendingIntent::Steer {
                 session_id,
@@ -1519,24 +1624,144 @@ impl App {
     fn submit_text(&mut self, session_id: SessionId, prompt: String) -> Effects {
         self.record_prompt(session_id, &prompt);
         self.composer.clear();
+        self.mention.clear();
         self.reset_history_browse();
         // Submitting a new prompt acknowledges any sticky failure notice.
         if self.status_level == NoticeLevel::Error && self.status_session_id == Some(session_id) {
             self.status = None;
         }
+        // `@` mentions resolve off the executor (file reads, a git call);
+        // the loop calls back with parts. Plain text goes straight out.
+        if self.workspace_root.is_some() && has_mention_syntax(&prompt) {
+            self.resolving += 1;
+            return Effects::resolve_mentions(PendingSubmit {
+                text: prompt,
+                target: SubmitTarget::Prompt { session_id },
+            });
+        }
+        self.submit_parts(
+            session_id,
+            prompt.clone(),
+            vec![qq_protocol::InputPart::text(prompt)],
+        )
+    }
+
+    /// Send resolved parts as a new run; `text` is what returns to the
+    /// composer if the server refuses the command.
+    fn submit_parts(
+        &mut self,
+        session_id: SessionId,
+        text: String,
+        input: Vec<qq_protocol::InputPart>,
+    ) -> Effects {
         self.send(
-            PendingIntent::Prompt {
-                session_id,
-                text: prompt.clone(),
-            },
+            PendingIntent::Prompt { session_id, text },
             SessionCommand::SubmitPrompt {
                 session_id,
-                input: vec![qq_protocol::InputPart::text(prompt)],
+                input,
                 limits: qq_protocol::RunLimits::default(),
                 correlation: qq_protocol::Correlation::default(),
                 output: None,
             },
         )
+    }
+
+    /// Mention resolution came back from the loop. Notes (a literal left in
+    /// place, a directory too wide) show as a warning; the prompt still goes
+    /// unless nothing resolvable remained.
+    pub(crate) fn apply_resolved_mentions(
+        &mut self,
+        submit: PendingSubmit,
+        resolved: Result<qq_core::mentions::ResolvedPrompt, String>,
+    ) -> Effects {
+        self.resolving = self.resolving.saturating_sub(1);
+        let resolved = match resolved {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.set_warning(format!("could not resolve mentions: {error}"));
+                if self.composer.text.is_empty() {
+                    self.composer.replace(submit.text);
+                }
+                return Effects::redraw(Redraw::Immediate);
+            }
+        };
+        if !resolved.notes.is_empty() {
+            self.set_warning(resolved.notes.join("; "));
+        }
+        let mut parts = resolved.parts;
+        // `@skill:name` at the start becomes a `/name` slash command.
+        if let Some(skill) = resolved.skill {
+            let rest: String = parts
+                .iter()
+                .filter_map(|part| match part {
+                    qq_protocol::InputPart::Text { text } => Some(text.as_str()),
+                    qq_protocol::InputPart::WorkspaceFile { .. } => None,
+                })
+                .collect();
+            let text = format!("/{skill}{rest}");
+            let mut rewritten = vec![qq_protocol::InputPart::text(text)];
+            rewritten.extend(
+                parts
+                    .into_iter()
+                    .filter(|part| matches!(part, qq_protocol::InputPart::WorkspaceFile { .. })),
+            );
+            parts = rewritten;
+        }
+        let attached = parts
+            .iter()
+            .filter(|part| matches!(part, qq_protocol::InputPart::WorkspaceFile { .. }))
+            .count();
+        if attached > 0 {
+            self.set_info(format!(
+                "attached {}",
+                if attached == 1 {
+                    "1 file".to_owned()
+                } else {
+                    format!("{attached} files")
+                }
+            ));
+        }
+        match submit.target {
+            SubmitTarget::Prompt { session_id } => {
+                self.submit_parts(session_id, submit.text, parts)
+            }
+            SubmitTarget::Steer { run_id, interrupt } => {
+                let Some(session_id) = self.focused() else {
+                    return Effects::redraw(Redraw::Immediate);
+                };
+                self.send(
+                    PendingIntent::Steer {
+                        session_id,
+                        text: submit.text,
+                    },
+                    SessionCommand::SteerRun {
+                        run_id,
+                        input: parts,
+                        interrupt,
+                    },
+                )
+            }
+        }
+    }
+
+    /// Candidates for the `@` token came back. Dropped when the composer's
+    /// token no longer matches the query they answer.
+    pub(crate) fn apply_mention_completions(
+        &mut self,
+        query: String,
+        candidates: Vec<String>,
+    ) -> bool {
+        let current = self
+            .composer
+            .mention_token()
+            .map(|(_, token)| token.to_owned());
+        if current.as_deref() != Some(query.as_str()) {
+            return false;
+        }
+        self.mention.candidates = candidates;
+        self.mention.query = Some(query);
+        self.mention.cursor.select(0);
+        true
     }
 
     /// Hold the composer text for the focused session until its run ends.
@@ -1877,6 +2102,7 @@ impl App {
         self.composer.insert(character);
         self.reset_history_browse();
         self.slash.select(0);
+        self.mention.invalidate();
         true
     }
 
@@ -1901,6 +2127,78 @@ impl App {
             self.slash.select(0);
         }
         changed
+    }
+
+    /// Up/Down/Tab/Enter on the `@` popup; Esc closes it. Returns `None`
+    /// when no popup is showing so the key falls through.
+    fn handle_mention_key(&mut self, code: KeyCode) -> Option<Effects> {
+        if self.mention.candidates.is_empty() || self.composer.mention_token().is_none() {
+            return None;
+        }
+        match code {
+            KeyCode::Up => {
+                self.mention.cursor.move_up();
+                Some(Effects::redraw(Redraw::Immediate))
+            }
+            KeyCode::Down => {
+                self.mention.cursor.move_down(self.mention.candidates.len());
+                Some(Effects::redraw(Redraw::Immediate))
+            }
+            KeyCode::Tab | KeyCode::Enter => {
+                let index = self.mention.cursor.selected(self.mention.candidates.len());
+                let candidate = self.mention.candidates[index].clone();
+                let (span, _) = self.composer.mention_token()?;
+                // A directory keeps the popup open one level deeper; a file
+                // closes it and adds the trailing space the grammar ends on.
+                let is_dir = candidate.ends_with('/');
+                let replacement = if is_dir {
+                    format!("@{candidate}")
+                } else {
+                    format!("@{candidate} ")
+                };
+                self.composer.replace_span(span, &replacement);
+                self.mention.clear();
+                if is_dir {
+                    return Some(self.request_mention_completion());
+                }
+                Some(Effects::redraw(Redraw::Immediate))
+            }
+            KeyCode::Esc => {
+                self.mention.clear();
+                Some(Effects::redraw(Redraw::Immediate))
+            }
+            _ => None,
+        }
+    }
+
+    /// Ask the loop for candidates for the `@` token at the cursor.
+    fn request_mention_completion(&mut self) -> Effects {
+        if self.workspace_root.is_none() {
+            return Effects::redraw(Redraw::Immediate);
+        }
+        let Some((_, token)) = self.composer.mention_token() else {
+            self.mention.clear();
+            return Effects::redraw(Redraw::Immediate);
+        };
+        // Special refs complete nothing.
+        if token.starts_with("web:")
+            || token.starts_with("skill:")
+            || token == "diff"
+            || token.starts_with("sha:")
+            || token.starts_with("diff:")
+        {
+            self.mention.clear();
+            return Effects::redraw(Redraw::Immediate);
+        }
+        let query = token.to_owned();
+        let recent = self
+            .focused()
+            .and_then(|id| self.sessions.get(&id))
+            .map(|session| recently_edited_paths(session, 8))
+            .unwrap_or_default();
+        let mut effects = Effects::redraw(Redraw::Immediate);
+        effects.push(Effect::CompleteMention { query, recent });
+        effects
     }
 
     fn handle_slash_key(&mut self, code: KeyCode) -> Option<Effects> {

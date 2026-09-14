@@ -36,11 +36,23 @@ pub enum InputPart {
     /// A file inside the session's workspace, attached by reference. The
     /// runtime reads it through the workspace capability when the run starts;
     /// when `expected_hash` is present the bytes must still hash to it.
+    /// `range` (1-based, inclusive, `start <= end`) attaches only those
+    /// lines; the whole file is still hashed and recorded so an edit needs
+    /// no redundant read.
     WorkspaceFile {
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_hash: Option<ContentHash>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<LineRange>,
     },
+}
+
+/// An inclusive 1-based line window of an attached file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LineRange {
+    pub start: u32,
+    pub end: u32,
 }
 
 impl InputPart {
@@ -48,6 +60,16 @@ impl InputPart {
     #[must_use]
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }
+    }
+
+    /// A whole-file attachment without a hash.
+    #[must_use]
+    pub fn workspace_file(path: impl Into<String>) -> Self {
+        Self::WorkspaceFile {
+            path: path.into(),
+            expected_hash: None,
+            range: None,
+        }
     }
 
     #[must_use]
@@ -95,6 +117,10 @@ pub enum InputError {
     PathHasNul { index: usize },
     #[error("workspace file part {index} path is absolute; paths are workspace-relative")]
     AbsolutePath { index: usize },
+    #[error(
+        "workspace file part {index} range is empty or inverted; lines are 1-based and start <= end"
+    )]
+    InvalidRange { index: usize },
 }
 
 /// Checks the syntactic bounds shared by prompts and steering input.
@@ -114,7 +140,7 @@ pub fn validate_input(parts: &[InputPart]) -> Result<(), InputError> {
                 text_bytes = text_bytes.saturating_add(text.len());
                 has_visible_text |= !text.trim().is_empty();
             }
-            InputPart::WorkspaceFile { path, .. } => {
+            InputPart::WorkspaceFile { path, range, .. } => {
                 files += 1;
                 if path.is_empty() {
                     return Err(InputError::EmptyPath { index });
@@ -127,6 +153,11 @@ pub fn validate_input(parts: &[InputPart]) -> Result<(), InputError> {
                 }
                 if path.starts_with('/') || path.starts_with('\\') {
                     return Err(InputError::AbsolutePath { index });
+                }
+                if let Some(range) = range
+                    && (range.start == 0 || range.end < range.start)
+                {
+                    return Err(InputError::InvalidRange { index });
                 }
             }
         }
@@ -256,6 +287,7 @@ mod tests {
         InputPart::WorkspaceFile {
             path: path.to_owned(),
             expected_hash: None,
+            range: None,
         }
     }
 
@@ -266,6 +298,7 @@ mod tests {
             InputPart::WorkspaceFile {
                 path: "src/lib.rs".to_owned(),
                 expected_hash: Some(ContentHash::from_bytes([0x11; 32])),
+                range: None,
             },
         ];
         let json = serde_json::to_string(&parts).unwrap();

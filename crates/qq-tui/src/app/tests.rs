@@ -12,7 +12,7 @@ use qq_protocol::{
 use super::*;
 use crate::{
     KeyChord,
-    effect::{Effect, Effects},
+    effect::{Effect, Effects, PendingSubmit, SubmitTarget},
     fixtures,
     input::SessionConfirm,
     viewport::View,
@@ -597,6 +597,7 @@ fn new_slash_command_creates_a_root_session_with_the_selected_model() {
         model: model.clone(),
         models: Vec::new(),
         themes: Vec::new(),
+        workspace_root: None,
     });
     app.apply_snapshot(snapshot());
     app.composer.text = "/new".to_owned();
@@ -930,6 +931,7 @@ fn context_meter_app() -> App {
             selection,
         }],
         themes: Vec::new(),
+        workspace_root: None,
     })
 }
 
@@ -1242,6 +1244,7 @@ fn model_refresh_preserves_the_open_picker_selection_by_identity() {
             selection: selection.clone(),
         }],
         themes: Vec::new(),
+        workspace_root: None,
     });
     app.apply_snapshot(snapshot());
     app.open_models();
@@ -1317,6 +1320,7 @@ fn model_picker_applies_to_the_focused_session_and_ctrl_n_creates() {
             selection: selection.clone(),
         }],
         themes: Vec::new(),
+        workspace_root: None,
     });
     app.apply_snapshot(snapshot());
     app.composer.text = "/models".to_owned();
@@ -1384,6 +1388,7 @@ fn model_picker_enter_without_a_focused_session_creates_one() {
             selection: selection.clone(),
         }],
         themes: Vec::new(),
+        workspace_root: None,
     });
     let mut empty = snapshot();
     empty.sessions.clear();
@@ -1434,6 +1439,7 @@ fn model_picker_selection_becomes_the_default_for_new_sessions() {
             selection: switched.clone(),
         }],
         themes: Vec::new(),
+        workspace_root: None,
     });
     app.apply_snapshot(snapshot());
     app.open_models();
@@ -2706,6 +2712,7 @@ fn themed_app() -> App {
             crate::Theme::from_roles("rose-pine", [crate::ThemeColor::Rgb(0xe0, 0xde, 0xf4); 8]),
             crate::Theme::from_roles("mono", [crate::ThemeColor::White; 8]),
         ],
+        workspace_root: None,
     });
     app.apply_snapshot(snapshot());
     app
@@ -3263,6 +3270,7 @@ fn profile_chosen_without_a_focused_session_applies_to_the_next_create() {
         model: selection.clone(),
         models: Vec::new(),
         themes: Vec::new(),
+        workspace_root: None,
     });
     let mut empty = snapshot();
     empty.sessions.clear();
@@ -3401,6 +3409,7 @@ fn approval_mode_chosen_without_a_focused_session_applies_to_the_next_create() {
         },
         models: Vec::new(),
         themes: Vec::new(),
+        workspace_root: None,
     });
     let mut empty = snapshot();
     empty.sessions.clear();
@@ -3541,4 +3550,184 @@ fn skills_picker_lists_indexed_guidance_and_accepts_like_completion() {
     assert!(requests.is_empty());
     assert!(app.overlay.is_none());
     assert_eq!(app.composer.text, "/ship ");
+}
+
+#[test]
+fn composer_finds_the_mention_token_at_the_cursor() {
+    let mut composer = Composer::default();
+    composer.replace("fix @src/li".to_owned());
+    assert_eq!(
+        composer
+            .mention_token()
+            .map(|(span, token)| (span, token.to_owned())),
+        Some((4..11, "src/li".to_owned()))
+    );
+    // Mid-word `@` (an email) and `@@` are not tokens.
+    composer.replace("me@example".to_owned());
+    assert!(composer.mention_token().is_none());
+    composer.replace("@@lit".to_owned());
+    assert!(composer.mention_token().is_none());
+    // A completed token followed by a space is no longer under the cursor.
+    composer.replace("@a.rs done".to_owned());
+    assert!(composer.mention_token().is_none());
+    // Replacing the span leaves the cursor after the insertion.
+    composer.replace("see @sr".to_owned());
+    let (span, _) = composer.mention_token().unwrap();
+    composer.replace_span(span, "@src/lib.rs ");
+    assert_eq!(composer.text, "see @src/lib.rs ");
+    assert_eq!(composer.cursor(), composer.text.len());
+}
+
+#[test]
+fn typing_an_at_token_requests_completion_and_tab_accepts_a_candidate() {
+    let mut app = App::new(TuiOptions {
+        workspace_root: Some(std::path::PathBuf::from("/work")),
+        ..TuiOptions::default()
+    });
+    app.apply_snapshot(snapshot());
+    for character in "see @sr".chars() {
+        let effects = app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        if character == 'r' {
+            assert!(
+                effects.iter().any(|effect| matches!(
+                    effect,
+                    Effect::CompleteMention { query, .. } if query == "sr"
+                )),
+                "{effects:?}"
+            );
+        }
+    }
+    // A stale reply (for an older query) is dropped; the current one lands.
+    assert!(!app.apply_mention_completions("s".to_owned(), vec!["src/".to_owned()]));
+    assert!(app.apply_mention_completions(
+        "sr".to_owned(),
+        vec!["src/".to_owned(), "srv.rs".to_owned()],
+    ));
+    assert_eq!(app.mention.candidates.len(), 2);
+    // Down selects the file; Tab inserts it with the trailing space and
+    // closes the popup.
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.composer.text, "see @srv.rs ");
+    assert!(app.mention.candidates.is_empty());
+    // Accepting a directory keeps completing one level down.
+    app.composer.replace("see @sr".to_owned());
+    assert!(app.apply_mention_completions("sr".to_owned(), vec!["src/".to_owned()]));
+    let effects = app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.composer.text, "see @src/");
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::CompleteMention { query, .. } if query == "src/"
+    )));
+    // Esc closes the popup without touching the text.
+    assert!(app.apply_mention_completions("src/".to_owned(), vec!["src/lib.rs".to_owned()]));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.mention.candidates.is_empty());
+    assert_eq!(app.composer.text, "see @src/");
+}
+
+#[test]
+fn prompts_with_mentions_resolve_off_the_loop_and_submit_the_parts() {
+    let mut app = App::new(TuiOptions {
+        workspace_root: Some(std::path::PathBuf::from("/work")),
+        ..TuiOptions::default()
+    });
+    app.apply_snapshot(snapshot());
+    let session_id = app.focused().unwrap();
+    // Plain text never pays for the blocking hop.
+    app.composer.replace("hello".to_owned());
+    let effects = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(effects.requests_anything());
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ResolveMentions(_)))
+    );
+
+    app.composer.replace("explain @src/lib.rs:1-3".to_owned());
+    let effects = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!effects.requests_anything());
+    let submit = effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::ResolveMentions(submit) => Some(submit),
+            _ => None,
+        })
+        .expect("a mention prompt resolves off the loop");
+    assert_eq!(submit.text, "explain @src/lib.rs:1-3");
+    assert_eq!(submit.target, SubmitTarget::Prompt { session_id });
+    assert!(app.composer.text.is_empty());
+
+    // The loop calls back with parts; they go out as the prompt.
+    let resolved = qq_core::mentions::ResolvedPrompt {
+        parts: vec![
+            qq_protocol::InputPart::text("explain @src/lib.rs:1-3"),
+            qq_protocol::InputPart::WorkspaceFile {
+                path: "src/lib.rs".to_owned(),
+                expected_hash: None,
+                range: Some(qq_protocol::LineRange { start: 1, end: 3 }),
+            },
+        ],
+        notes: vec![],
+        skill: None,
+    };
+    let requests = app
+        .apply_resolved_mentions(submit.clone(), Ok(resolved))
+        .into_requests();
+    assert!(matches!(
+        requests.as_slice(),
+        [ClientRequest::Command(CommandRequest {
+            command: SessionCommand::SubmitPrompt { input, .. },
+            ..
+        })] if input.len() == 2
+            && matches!(&input[1], qq_protocol::InputPart::WorkspaceFile { path, .. } if path == "src/lib.rs")
+    ));
+    assert_eq!(app.status.as_deref(), Some("attached 1 file"));
+
+    // A failure returns the text to the empty composer.
+    let requests = app
+        .apply_resolved_mentions(submit, Err("disk gone".to_owned()))
+        .into_requests();
+    assert!(requests.is_empty());
+    assert_eq!(app.composer.text, "explain @src/lib.rs:1-3");
+
+    // `@skill:name` at the start becomes a slash command.
+    let skilled = PendingSubmit {
+        text: "@skill:review this".to_owned(),
+        target: SubmitTarget::Prompt { session_id },
+    };
+    let requests = app
+        .apply_resolved_mentions(
+            skilled,
+            Ok(qq_core::mentions::ResolvedPrompt {
+                parts: vec![qq_protocol::InputPart::text(" this")],
+                notes: vec![],
+                skill: Some("review".to_owned()),
+            }),
+        )
+        .into_requests();
+    assert!(matches!(
+        requests.as_slice(),
+        [ClientRequest::Command(CommandRequest {
+            command: SessionCommand::SubmitPrompt { input, .. },
+            ..
+        })] if input.as_slice() == [qq_protocol::InputPart::text("/review this")]
+    ));
+}
+
+#[test]
+fn without_a_workspace_root_mentions_stay_literal_text() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    app.composer.replace("see @src/lib.rs".to_owned());
+    let requests = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .into_requests();
+    assert!(matches!(
+        requests.as_slice(),
+        [ClientRequest::Command(CommandRequest {
+            command: SessionCommand::SubmitPrompt { input, .. },
+            ..
+        })] if input.as_slice() == [qq_protocol::InputPart::text("see @src/lib.rs")]
+    ));
 }

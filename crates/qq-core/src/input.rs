@@ -39,6 +39,12 @@ pub(crate) enum InputResolutionError {
         expected: String,
         actual: String,
     },
+    #[error("workspace file {path:?} range starts at line {start} but the file has {lines} lines")]
+    RangeOutOfBounds {
+        path: String,
+        start: u32,
+        lines: usize,
+    },
     #[error("resolved input exceeds {MAX_RESOLVED_INPUT_BYTES} bytes")]
     TooLarge,
 }
@@ -87,6 +93,7 @@ pub(crate) fn resolve_blocking(
             InputPart::WorkspaceFile {
                 path,
                 expected_hash,
+                range,
             } => {
                 let contained = match workspace.contained_path(path) {
                     Ok(contained) => contained,
@@ -137,7 +144,34 @@ pub(crate) fn resolve_blocking(
                 };
                 let recorded = contained.to_string_lossy().into_owned();
                 file_state.record(recorded, actual);
-                render_attachment(&mut attachments, &contained, &content);
+                // A range attaches only those lines; the whole file was
+                // hashed and recorded above, so an edit needs no re-read.
+                match range {
+                    None => render_attachment(&mut attachments, &contained, &content, None),
+                    Some(range) => {
+                        let total = content.lines().count();
+                        let start = usize::try_from(range.start).unwrap_or(usize::MAX);
+                        if start > total.max(1) {
+                            return Err(InputResolutionError::RangeOutOfBounds {
+                                path: path.clone(),
+                                start: range.start,
+                                lines: total,
+                            });
+                        }
+                        let end = usize::try_from(range.end).unwrap_or(usize::MAX).min(total);
+                        let window: String = content
+                            .split_inclusive('\n')
+                            .skip(start - 1)
+                            .take(end - start + 1)
+                            .collect();
+                        render_attachment(
+                            &mut attachments,
+                            &contained,
+                            &window,
+                            Some((start, end, total)),
+                        );
+                    }
+                }
             }
         }
     }
@@ -153,14 +187,23 @@ pub(crate) fn resolve_blocking(
     Ok(text)
 }
 
-fn render_attachment(into: &mut String, path: &Path, content: &str) {
+fn render_attachment(
+    into: &mut String,
+    path: &Path,
+    content: &str,
+    window: Option<(usize, usize, usize)>,
+) {
     // A fence longer than any backtick run inside the file (and never shorter
     // than four) keeps the content unambiguous for the model.
     let longest_run = content.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     let fence = "`".repeat(longest_run.max(3) + 1);
     into.push_str("\n<attached-file path=\"");
     into.push_str(&path.to_string_lossy());
-    into.push_str("\">\n");
+    into.push('"');
+    if let Some((start, end, total)) = window {
+        into.push_str(&format!(" lines=\"{start}-{end}/{total}\""));
+    }
+    into.push_str(">\n");
     into.push_str(&fence);
     into.push('\n');
     into.push_str(content);
@@ -195,10 +238,12 @@ mod tests {
             InputPart::WorkspaceFile {
                 path: "notes.md".to_owned(),
                 expected_hash: None,
+                range: None,
             },
             InputPart::WorkspaceFile {
                 path: "./sub/data.txt".to_owned(),
                 expected_hash: None,
+                range: None,
             },
         ];
         let text = resolve_blocking(&parts, &workspace, &state).unwrap();
@@ -216,12 +261,64 @@ mod tests {
     }
 
     #[test]
+    fn a_range_attaches_only_those_lines_but_records_the_whole_file() {
+        let (_dir, workspace) = workspace();
+        let state = Arc::new(FileState::default());
+        let parts = vec![
+            InputPart::text("see"),
+            InputPart::WorkspaceFile {
+                path: "notes.md".to_owned(),
+                expected_hash: None,
+                range: Some(qq_protocol::LineRange { start: 3, end: 99 }),
+            },
+        ];
+        let text = resolve_blocking(&parts, &workspace, &state).unwrap();
+        assert!(
+            text.contains(
+                "<attached-file path=\"notes.md\" lines=\"3-3/3\">\n````\nuse ``` fences\n````\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("# Notes"));
+        // The hash is of the whole file: an edit after this needs no read.
+        assert_eq!(
+            state.recorded("notes.md").unwrap(),
+            content_hash(b"# Notes\n\nuse ``` fences\n")
+        );
+        let past = vec![InputPart::WorkspaceFile {
+            path: "notes.md".to_owned(),
+            expected_hash: None,
+            range: Some(qq_protocol::LineRange { start: 4, end: 4 }),
+        }];
+        assert!(matches!(
+            resolve_blocking(&past, &workspace, &state),
+            Err(InputResolutionError::RangeOutOfBounds {
+                start: 4,
+                lines: 3,
+                ..
+            })
+        ));
+        let inverted = vec![InputPart::WorkspaceFile {
+            path: "notes.md".to_owned(),
+            expected_hash: None,
+            range: Some(qq_protocol::LineRange { start: 0, end: 4 }),
+        }];
+        assert!(matches!(
+            resolve_blocking(&inverted, &workspace, &state),
+            Err(InputResolutionError::Invalid(
+                qq_protocol::InputError::InvalidRange { index: 0 }
+            ))
+        ));
+    }
+
+    #[test]
     fn every_failure_is_typed_and_happens_before_any_provider_work() {
         let (_dir, workspace) = workspace();
         let state = Arc::new(FileState::default());
         let file = |path: &str, hash: Option<[u8; 32]>| InputPart::WorkspaceFile {
             path: path.to_owned(),
             expected_hash: hash.map(qq_protocol::ContentHash::from_bytes),
+            range: None,
         };
         assert!(matches!(
             resolve_blocking(&[], &workspace, &state),
@@ -272,6 +369,7 @@ mod tests {
                 &[InputPart::WorkspaceFile {
                     path: "big.txt".to_owned(),
                     expected_hash: None,
+                    range: None,
                 }],
                 &workspace,
                 &state

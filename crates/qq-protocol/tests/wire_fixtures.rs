@@ -219,6 +219,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     InputPart::WorkspaceFile {
                         path: "src/auth.rs".to_owned(),
                         expected_hash: Some(hash(0x11)),
+                        range: None,
                     },
                 ],
                 limits: RunLimits {

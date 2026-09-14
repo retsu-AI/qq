@@ -8,7 +8,7 @@ mod search;
 mod shell;
 mod specs;
 mod tree;
-mod walk;
+pub(crate) mod walk;
 mod write;
 
 #[cfg(test)]

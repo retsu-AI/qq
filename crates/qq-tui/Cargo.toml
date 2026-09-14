@@ -11,6 +11,7 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util.workspace = true
 pulldown-cmark = "0.13"
 qq-client.workspace = true
+qq-core.workspace = true
 qq-protocol.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
