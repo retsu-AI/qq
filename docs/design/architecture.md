@@ -1025,7 +1025,10 @@ Three rules follow:
   belong in core, preserve default behavior when disabled, and require
   cancellation, budget, and performance acceptance.
 - The headless contract is public and pinned by fixtures in this repository so
-  a supervisor can test against it without reading QQ source.
+  a supervisor can test against it without reading QQ source: the record
+  shapes are `qq-protocol` types and
+  `crates/qq-protocol/tests/fixtures/headless/` holds a golden stream per
+  exit status for every retained `PROTOCOL_VERSION` (ADR-0023).
 
 ## Performance Discipline
 

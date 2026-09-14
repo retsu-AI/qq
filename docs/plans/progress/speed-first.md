@@ -18,8 +18,8 @@ dated entries appended below, newest last.
 | H21.2 | Mechanical `sessions.rs` split | Planned | | After HC3 behavioral changes; separate commit |
 | H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI | Planned | | |
 | HC1 | `--correlation`, `--session`, `u32` turns, model-less `config check` | Shipped (`abad2de`, #30) | `feat/hc1-headless-run-contract` | `PROTOCOL_VERSION` 17 → 18; `v17/` fixtures retained decode-only. Per-store owner lock on every open (ADR-0022). `SessionRuntime::abandon_for_test` added for crash-simulation tests |
-| HC3 | `--output-schema`, repair turns, `final_output` | In review | [#33](https://github.com/retsu-AI/qq/pull/33) `feat/hc3-typed-final-output` | `PROTOCOL_VERSION` 18 → 19 (`v19/` goldens; `v18/` decode-only); store schema 26 → 27. ADR-0014 accepted. Evidence `target/qq-perf/hc3-2026-09-12/` |
-| HC4 | Headless golden fixtures | Planned | | After HC1–HC3 |
+| HC3 | `--output-schema`, repair turns, `final_output` | Shipped (`24b6e5c`, #33) | `feat/hc3-typed-final-output` | `PROTOCOL_VERSION` 18 → 19 (`v19/` goldens; `v18/` decode-only); store schema 26 → 27. ADR-0014 accepted. Evidence `target/qq-perf/hc3-2026-09-12/` |
+| HC4 | Headless golden fixtures | In review | [#34](https://github.com/retsu-AI/qq/pull/34) `feat/hc4-headless-goldens` | Record shapes in `qq_protocol::headless`; ten `v19/` golden streams + `v18/` decode-only; ADR-0023 accepted. No protocol or schema bump |
 | H10 / H11 / H12 | Sandbox / adapters / qualification | Planned | | Gated; see plan |
 
 Shipped before this ledger existed (see the plan's Completed Phases table):
@@ -488,3 +488,49 @@ Evidence: `target/qq-perf/hc3-2026-09-12/` in the main checkout (untracked):
 
 Shipped: none this entry (branch in review). In progress: HC3 review.
 Blocked: none. Next: HC4.
+
+### 2026-09-13 — HC4 headless goldens on `feat/hc4-headless-goldens`
+
+Worktree `../qq-hc4` from `24b6e5c` (HC3 merged as #33). Owned paths:
+`crates/qq-protocol/src/headless.rs` (new), `lib.rs` exports,
+`tests/headless_fixtures.rs` (new), `tests/fixtures/headless/{v18,v19}/`,
+`src/headless.rs`, `src/main.rs` (exit-code call sites), ADR-0023,
+headless-contract/protocol/architecture, this ledger, `root.md`, the plan
+status block.
+
+Design as built (ADR-0023): the three record shapes and the two enums the
+contract table named became `qq-protocol` types with strict decoding
+(`deny_unknown_fields`, fail-closed `type`/`status`); the binary emits through
+`HeadlessRecordRef<'_>`, a borrowing mirror, so the streaming path still
+serializes the envelope by reference. `HeadlessStatus::code` is the single
+exit table. Identifiers and hashes are protocol types on the wire (encodings
+unchanged: they were already the same hex strings). Goldens are constructed,
+not recorded, and checked for framing as well as bytes.
+
+#### HC4 receipt — 2026-09-13
+Commits: `17e00d4` (protocol types + binary emission), `6372cbd` (goldens +
+strict round-trip in the binary's tests), + docs.
+Tests: +4 `qq_protocol::headless::tests` (owned/borrowed parity, fail-closed
+on unknown type/field/status, optionals omitted not null, exit table);
++3 `tests/headless_fixtures.rs` (ten v19 streams byte-exact and well-formed;
+v18 streams decode and are well-formed; exit table); the 38 existing headless
+tests now decode every stdout line as a strict `HeadlessRecord` and require
+identical re-encoding. Workspace: see PR body for the count; fmt; strict
+all-target Clippy; minimal provider profile.
+Gates: none named (no hot-path change; the emitted bytes are identical, and
+the event record still serializes by reference).
+Deviations: `HeadlessRecord` boxes its payloads (Clippy `large_enum_variant`);
+the binary never constructs the owned enum. `assert_well_formed` admits a
+trial-less stream only for `invalid_configuration`, matching the
+"unless startup fails before a session exists" clause of the contract table.
+Docs: `docs/adr/0023-headless-records-as-protocol.md`, `docs/adr/README.md`
+(0022 → Accepted, 0023 added), `headless-contract.md` (records intro, gap row
+Shipped, compatibility policy), `protocol.md` (new "Headless Records"
+section), `architecture.md` § Hosting Boundary, plan status block/task
+index/Phase 5b, `root.md`.
+Open: Phase 5b closes on merge; next is H18. The harbor adapter's Python
+fixtures (`benchmarks/harbor/tests/make_fixtures.py`, pinned at protocol 16)
+could be regenerated from the goldens when it next changes.
+
+Shipped: none this entry (branch in review). In progress: HC4 review.
+Blocked: none. Next: H18.

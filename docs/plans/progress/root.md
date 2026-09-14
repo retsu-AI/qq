@@ -19,7 +19,7 @@ may append a **request** row; only root changes a request's status.
 | 0011 | Shared commit discipline across store lanes (was: wake-driven control admission) | speed-first H20 | Accepted (merged in #22) |
 | 0012 | Structural settlement and teardown-before-terminal | speed-first H21 | Accepted (`refactor/h21-settle-run`, in review) |
 | 0013 | Context-source identity in the plan descriptor | speed-first H28 | Accepted (merged in #22) |
-| 0014 | Typed final output contract | speed-first HC3 | Accepted (`feat/hc3-typed-final-output`, in review) |
+| 0014 | Typed final output contract | speed-first HC3 | Accepted (merged in #33) |
 | 0015 | Remote client authentication: pairing-code enrollment, per-client credentials | multi-surface S2 | Proposed: `docs/adr/0015-pairing-code-client-enrollment.md` |
 | 0016 | Remote exposure: loopback default, TLS required off loopback, `tailscale serve` front | multi-surface S4 | Reserved |
 | 0017 | Client UI stack: Rust/WASM, framework chosen by the W1 spike | multi-surface W1/U1 | Reserved |
@@ -27,9 +27,10 @@ may append a **request** row; only root changes a request's status.
 | 0019 | Spill handles as durable session state; masked inline, exact on explicit read | tool-layer T4 | Reserved |
 | 0020 | Shell `Forbidden` as a policy decision with a CST classifier and self-tested rules | tool-layer T6 | Reserved |
 | 0021 | `Network` and `Interactive` effect classes | tool-layer T8/T9 | Reserved |
-| 0022 | One owner per session store: advisory lock before open and recovery | speed-first HC1 | Written (`feat/hc1-headless-run-contract`) |
+| 0022 | One owner per session store: advisory lock before open and recovery | speed-first HC1 | Accepted (merged in #30) |
+| 0023 | Headless JSONL records as protocol types pinned by goldens | speed-first HC4 | Accepted (`feat/hc4-headless-goldens`, in review) |
 
-Next free number: 0023. Reserve here before opening a PR that adds an ADR.
+Next free number: 0024. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 

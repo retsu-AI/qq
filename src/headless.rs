@@ -20,12 +20,12 @@ use futures_util::StreamExt;
 use qq_core::{SessionRuntime, SessionRuntimeError};
 use qq_protocol::{
     ApprovalDecision, ApprovalGrant, ApprovalMode, BudgetLimitKind, CommandId, CommandOutcome,
-    CommandReceipt, InputPart, MessageId, MessageRole, ModelSelection, RunId, RunLimits,
-    RunOutcome, RunPromptIdentity, SessionAccounting, SessionCommand, SessionEvent,
-    SessionEventEnvelope, SessionId, ShellCommandPreview, SnapshotRequest, SubscribeRequest,
-    TokenUsage, ToolCallState, WorkspaceId,
+    CommandReceipt, ContentHash, HeadlessOutcome, HeadlessRecordRef, HeadlessTrial, InputPart,
+    MessageId, MessageRole, ModelSelection, RunId, RunLimits, RunOutcome, RunPromptIdentity,
+    SessionAccounting, SessionCommand, SessionEvent, SessionEventEnvelope, SessionId,
+    ShellCommandPreview, SnapshotRequest, SubscribeRequest, TokenUsage, ToolCallState, WorkspaceId,
 };
-use serde::Serialize;
+pub use qq_protocol::{HeadlessApproval, HeadlessStatus};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
@@ -92,30 +92,12 @@ pub struct HeadlessOptions {
     pub arm: Option<String>,
 }
 
-/// Unattended approval policies. Interactive `ask` approval is unrepresentable
-/// here: a headless run must never wait for a human.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeadlessApproval {
-    ReadOnly,
-    Auto,
-    Full,
-}
-
-impl HeadlessApproval {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::ReadOnly => "read-only",
-            Self::Auto => "auto",
-            Self::Full => "full",
-        }
-    }
-
-    const fn approval_mode(self) -> ApprovalMode {
-        match self {
-            Self::ReadOnly => ApprovalMode::ReadOnly,
-            Self::Auto => ApprovalMode::Auto,
-            Self::Full => ApprovalMode::Full,
-        }
+/// The session approval mode a headless policy submits with.
+const fn approval_mode(approval: HeadlessApproval) -> ApprovalMode {
+    match approval {
+        HeadlessApproval::ReadOnly => ApprovalMode::ReadOnly,
+        HeadlessApproval::Auto => ApprovalMode::Auto,
+        HeadlessApproval::Full => ApprovalMode::Full,
     }
 }
 
@@ -125,109 +107,10 @@ pub enum HeadlessFormat {
     Jsonl,
 }
 
-/// The terminal status of one headless invocation. Exit codes distinguish
-/// success, task/model failure, invalid configuration, timeout or budget
-/// exhaustion, harness/persistence failure, and user interruption.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeadlessStatus {
-    Completed,
-    TaskFailed,
-    InvalidConfiguration,
-    TimedOut,
-    BudgetExhausted,
-    Interrupted,
-    HarnessFailure,
-}
-
-impl HeadlessStatus {
-    #[must_use]
-    pub const fn code(self) -> u8 {
-        match self {
-            Self::Completed => 0,
-            Self::TaskFailed => 1,
-            Self::InvalidConfiguration => 2,
-            Self::TimedOut | Self::BudgetExhausted => 3,
-            Self::HarnessFailure => 4,
-            Self::Interrupted => 130,
-        }
-    }
-
-    #[must_use]
-    pub fn exit_code(self) -> ExitCode {
-        ExitCode::from(self.code())
-    }
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Completed => "completed",
-            Self::TaskFailed => "task_failed",
-            Self::InvalidConfiguration => "invalid_configuration",
-            Self::TimedOut => "timed_out",
-            Self::BudgetExhausted => "budget_exhausted",
-            Self::Interrupted => "interrupted",
-            Self::HarnessFailure => "harness_failure",
-        }
-    }
-}
-
-/// One line of the JSONL trial stream: metadata, an ordered protocol event,
-/// or the single terminal outcome.
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum TrialRecord<'a> {
-    Trial {
-        qq_version: &'static str,
-        qq_source_revision: &'static str,
-        protocol_version: u16,
-        workspace_identity: &'a str,
-        model: &'a ModelSelection,
-        profile: &'a str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        context_window: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pricing_provenance: Option<&'a str>,
-        approval: &'static str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        timeout_seconds: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        max_turns: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        max_cost_usd_nanos: Option<u64>,
-        #[serde(skip_serializing_if = "qq_protocol::Correlation::is_empty")]
-        correlation: &'a qq_protocol::Correlation,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        arm: Option<&'a str>,
-        /// SHA-256 of the compact canonical encoding of the output schema,
-        /// and the repair allowance; present only with `--output-schema`.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        output_schema_sha256: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        output_repair_turns: Option<u8>,
-        workspace_id: String,
-        session_id: String,
-        run_id: String,
-    },
-    Event {
-        envelope: &'a SessionEventEnvelope,
-    },
-    Outcome {
-        status: &'static str,
-        exit_code: u8,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        message: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        usage: Option<TokenUsage>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        estimated_cost_usd_nanos: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        prompt_identity: Option<&'a RunPromptIdentity>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        audit: Option<&'a qq_protocol::AuditRecord>,
-        /// The typed-output verdict; present only for a completed run
-        /// submitted with `--output-schema`.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        final_output: Option<&'a qq_protocol::FinalOutput>,
-    },
+/// The process exit for a terminal status.
+#[must_use]
+pub fn exit_code(status: HeadlessStatus) -> ExitCode {
+    ExitCode::from(status.code())
 }
 
 /// Writes trial records to the optional trace file and, in JSONL format, to
@@ -251,11 +134,11 @@ impl RecordSink {
         })
     }
 
-    fn record(&mut self, stdout: &mut impl Write, record: &TrialRecord<'_>) -> io::Result<()> {
+    fn record(&mut self, stdout: &mut impl Write, record: HeadlessRecordRef<'_>) -> io::Result<()> {
         if self.trace.is_none() && !self.to_stdout {
             return Ok(());
         }
-        let line = serde_json::to_string(record).map_err(io::Error::other)?;
+        let line = serde_json::to_string(&record).map_err(io::Error::other)?;
         if let Some(trace) = &mut self.trace {
             trace.write_all(line.as_bytes())?;
             trace.write_all(b"\n")?;
@@ -424,44 +307,39 @@ pub async fn run(
     };
     let mut accepted = AcceptedRunGuard::new(sessions.clone(), handle.clone());
 
-    let workspace_identity = workspace_identity(&options.workspace);
+    // The contract compiled before submission, so its canonical encoding
+    // exists; an encoding failure here would be a serde_json bug.
     let output_schema_sha256 = options.output.as_deref().map(|contract| {
-        // The contract compiled before submission, so its canonical encoding
-        // exists; an encoding failure here would be a serde_json bug.
         let encoded = serde_json::to_vec(&contract.schema).unwrap_or_default();
-        Sha256::digest(&encoded)
-            .iter()
-            .fold(String::with_capacity(64), |mut hex, byte| {
-                use std::fmt::Write as _;
-                let _ = write!(hex, "{byte:02x}");
-                hex
-            })
+        ContentHash::from_bytes(Sha256::digest(&encoded).into())
     });
-    let trial = TrialRecord::Trial {
-        qq_version: env!("CARGO_PKG_VERSION"),
-        qq_source_revision: option_env!("QQ_SOURCE_REVISION").unwrap_or("unknown"),
+    let trial = HeadlessTrial {
+        qq_version: env!("CARGO_PKG_VERSION").to_owned(),
+        qq_source_revision: option_env!("QQ_SOURCE_REVISION")
+            .unwrap_or("unknown")
+            .to_owned(),
         protocol_version: qq_protocol::PROTOCOL_VERSION,
-        workspace_identity: &workspace_identity,
-        model: &options.model,
-        profile: options.profile.as_str(),
+        workspace_identity: workspace_identity(&options.workspace),
+        model: options.model.clone(),
+        profile: options.profile.clone(),
         context_window: options.context_window,
-        pricing_provenance: options.pricing_provenance.as_deref(),
-        approval: options.approval.as_str(),
+        pricing_provenance: options.pricing_provenance.clone(),
+        approval: options.approval,
         timeout_seconds: options.timeout.map(|timeout| timeout.as_secs()),
         max_turns: options.max_turns,
         max_cost_usd_nanos: options.max_cost_usd_nanos,
-        correlation: &options.correlation,
-        arm: options.arm.as_deref(),
+        correlation: options.correlation.clone(),
+        arm: options.arm.clone(),
         output_schema_sha256,
         output_repair_turns: options
             .output
             .as_deref()
             .map(|contract| contract.repair_turns),
-        workspace_id: handle.workspace_id.to_string(),
-        session_id: handle.session_id.to_string(),
-        run_id: handle.run_id.to_string(),
+        workspace_id: handle.workspace_id,
+        session_id: handle.session_id,
+        run_id: handle.run_id,
     };
-    if let Err(error) = sink.record(stdout, &trial) {
+    if let Err(error) = sink.record(stdout, HeadlessRecordRef::Trial(&trial)) {
         let _ = writeln!(stderr, "error: could not write the trial record: {error}");
         if let Err(failure) = accepted.settle().await {
             let _ = writeln!(stderr, "error: {}", failure.message);
@@ -487,33 +365,46 @@ pub async fn run(
         }
     };
 
-    let outcome = TrialRecord::Outcome {
-        status: end.status.as_str(),
-        exit_code: end.status.code(),
-        message: end.message.as_deref(),
-        usage: end.usage,
-        estimated_cost_usd_nanos: end.estimated_cost_usd_nanos,
-        prompt_identity: end.prompt_identity.as_deref(),
-        audit: end.audit.as_deref(),
-        final_output: end.final_output.as_deref(),
+    let RunEnd {
+        status,
+        message,
+        usage,
+        estimated_cost_usd_nanos,
+        prompt_identity,
+        audit,
+        final_output,
+        answer,
+    } = end;
+    let outcome = HeadlessOutcome {
+        status,
+        exit_code: status.code(),
+        message,
+        usage,
+        estimated_cost_usd_nanos,
+        prompt_identity,
+        audit,
+        final_output,
     };
-    if let Err(error) = sink.record(stdout, &outcome).and_then(|()| sink.finish()) {
+    if let Err(error) = sink
+        .record(stdout, HeadlessRecordRef::Outcome(&outcome))
+        .and_then(|()| sink.finish())
+    {
         let _ = writeln!(stderr, "error: could not write the outcome record: {error}");
         return HeadlessStatus::HarnessFailure;
     }
 
     if options.format == HeadlessFormat::Text {
-        match end.status {
+        match status {
             HeadlessStatus::Completed => {
                 let _ = writeln!(stderr);
                 // With a contract the validated document is the answer: a
                 // consumer piping stdout gets exactly the JSON, not a fence
                 // the model may have wrapped it in.
-                let mut answer = match end.final_output.as_deref() {
+                let mut answer = match outcome.final_output.as_deref() {
                     Some(qq_protocol::FinalOutput::Valid { value, .. }) => {
-                        serde_json::to_string_pretty(value).unwrap_or(end.answer)
+                        serde_json::to_string_pretty(value).unwrap_or(answer)
                     }
-                    Some(qq_protocol::FinalOutput::Invalid { .. }) | None => end.answer,
+                    Some(qq_protocol::FinalOutput::Invalid { .. }) | None => answer,
                 };
                 if !answer.ends_with('\n') {
                     answer.push('\n');
@@ -527,12 +418,12 @@ pub async fn run(
                 }
             }
             _ => {
-                if let Some(message) = &end.message {
+                if let Some(message) = &outcome.message {
                     let _ = writeln!(stderr, "error: {message}");
                 }
             }
         }
-    } else if let Some(message) = &end.message {
+    } else if let Some(message) = &outcome.message {
         let _ = writeln!(stderr, "error: {message}");
     }
     // The session persists whatever the outcome; an interrupted or exhausted
@@ -541,7 +432,7 @@ pub async fn run(
         let _ = write!(stderr, "\n{}", crate::cli::resume_hint(handle.session_id));
     }
 
-    end.status
+    status
 }
 
 /// Resolves the workspace, creates the session (or adopts the requested
@@ -571,7 +462,7 @@ async fn submit(
                     workspace_id,
                     parent_id: None,
                     model: options.model.clone(),
-                    approval_mode: options.approval.approval_mode(),
+                    approval_mode: approval_mode(options.approval),
                     profile: options.profile.clone(),
                     correlation: options.correlation.clone(),
                 },
@@ -659,12 +550,12 @@ async fn submit(
                 .await?;
                 after = receipt.committed_through;
             }
-            if summary.approval_mode != options.approval.approval_mode() {
+            if summary.approval_mode != approval_mode(options.approval) {
                 let receipt = send(
                     sessions,
                     SessionCommand::SetApprovalMode {
                         session_id,
-                        mode: options.approval.approval_mode(),
+                        mode: approval_mode(options.approval),
                     },
                 )
                 .await?;
@@ -821,7 +712,7 @@ async fn stream_run(
                         ));
                     }
                 };
-                sink.record(stdout, &TrialRecord::Event { envelope: &envelope })
+                sink.record(stdout, HeadlessRecordRef::Event { envelope: &envelope })
                     .map_err(|error| {
                         Failure::harness(format!("could not write an event record: {error}"))
                     })?;
@@ -997,14 +888,8 @@ fn inclusive_usage(
     }
 }
 
-fn workspace_identity(workspace: &Path) -> String {
-    let digest = Sha256::digest(workspace.as_os_str().as_encoded_bytes());
-    let mut identity = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(identity, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    identity
+fn workspace_identity(workspace: &Path) -> ContentHash {
+    ContentHash::from_bytes(Sha256::digest(workspace.as_os_str().as_encoded_bytes()).into())
 }
 
 async fn run_prompt_identity(
@@ -1911,10 +1796,17 @@ mod tests {
         )
     }
 
+    /// Every stdout line must be a strict `HeadlessRecord` that re-encodes
+    /// byte-for-byte: the binary emits exactly the protocol's vocabulary.
     fn parse_records(stdout: &str) -> Vec<serde_json::Value> {
         stdout
             .lines()
-            .map(|line| serde_json::from_str(line).expect("every stdout line must be JSON"))
+            .map(|line| {
+                let record: qq_protocol::HeadlessRecord = serde_json::from_str(line)
+                    .unwrap_or_else(|error| panic!("not a headless record: {error}: {line}"));
+                assert_eq!(serde_json::to_string(&record).unwrap(), line);
+                serde_json::from_str(line).expect("every stdout line must be JSON")
+            })
             .collect()
     }
 

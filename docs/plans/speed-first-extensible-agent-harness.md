@@ -4,13 +4,13 @@
 
 | | |
 | --- | --- |
-| Now | Phase 5b — HC3 in review (`feat/hc3-typed-final-output`, ADR-0014; `PROTOCOL_VERSION` 19, store schema 27). HC1 merged (#30). Next: HC4 |
-| Next | Phase 5b HC4; then H18, measured H19, mechanical H21.2 split (HC3 landed), structural H22.2 |
+| Now | Phase 5b — HC4 in review (`feat/hc4-headless-goldens`, ADR-0023): headless records as protocol types, golden streams per `PROTOCOL_VERSION`. Closes Phase 5b. HC3 merged (#33). Next: H18 |
+| Next | Phase 6: H18; measured H19; mechanical H21.2 split (HC3 landed); structural H22.2 |
 | Open gates carried | Eight-stream output service gap ≤20 ms at p95 (median met by H20; executable budget stays 50 ms until a quiet-host p95); Phase 5a full H0 tail acceptance on a quiet host; native Windows teardown beyond the targeted CI job |
-| Last closed | HC1, 2026-09-12 (#30 `abad2de`, ADR-0022); H21.1c, 2026-09-11 (#24, ADR-0012); H20, H27, H28, H22.1, H21.1a/b, 2026-09-11 (#22 `61682be`; ADR-0011, ADR-0013) |
+| Last closed | HC3, 2026-09-13 (#33 `24b6e5c`, ADR-0014); HC1, 2026-09-12 (#30 `abad2de`, ADR-0022); H21.1c, 2026-09-11 (#24, ADR-0012); H20, H27, H28, H22.1, H21.1a/b, 2026-09-11 (#22 `61682be`; ADR-0011, ADR-0013) |
 | Versions | `PROTOCOL_VERSION` 19 (HC3), `CAPABILITIES_VERSION` 1, `DESCRIPTOR_VERSION` 6, store schema 27 (HC3), H0 fixture version 4 |
 
-Updated 2026-09-12. The `Now` row is authoritative for what is being worked;
+Updated 2026-09-13. The `Now` row is authoritative for what is being worked;
 update it in the same PR that ships or reprioritizes work.
 
 This plan defines how QQ becomes an extremely fast, lightweight, customizable
@@ -491,8 +491,8 @@ imported in Phase 1.
 | H18 | Open | Shared transcript `Arc`, precompiled prompt prefix, `RawValue` schemas (D5) | H14 | `qq-core`, `qq-provider` |
 | H19 | Conditional | SSE framing (D10) only if the decoder baseline justifies it | H18, `sse_decode` baseline | `qq-provider`, `qq-client` |
 | HC1 | Done | `--correlation`, `--session` resume behind a per-store owner lock (ADR-0022), `u32` turn limits (`PROTOCOL_VERSION` 18), model-less `config check` | H3, H26 | Root, config, core, protocol |
-| HC3 | In review | `--output-schema`/`--output-repair-turns`; per-run `OutputContract` compiled at admission into a bounded reference-free schema subset, persisted (schema 27), judged after audit/steering with bounded repair turns; `FinalOutput` on `RunFinished`, `RunSnapshot`, and `outcome` (`PROTOCOL_VERSION` 19, ADR-0014) | H3, HC1 | Protocol, core, root |
-| HC4 | Open | Headless golden fixtures per `PROTOCOL_VERSION` and compatibility statement | HC1–HC3 | Protocol tests, docs |
+| HC3 | Done | `--output-schema`/`--output-repair-turns`; per-run `OutputContract` compiled at admission into a bounded reference-free schema subset, persisted (schema 27), judged after audit/steering with bounded repair turns; `FinalOutput` on `RunFinished`, `RunSnapshot`, and `outcome` (`PROTOCOL_VERSION` 19, ADR-0014) | H3, HC1 | Protocol, core, root |
+| HC4 | In review | `qq_protocol::headless` record types emitted by `qq run`; golden `.jsonl` streams per `PROTOCOL_VERSION` under `tests/fixtures/headless/` (v19 current, v18 decode-only) with framing checks; compatibility statement (ADR-0023) | HC1–HC3 | Protocol, root, docs |
 | H10 | Gated | First real OS process-sandbox adapter | R6, platform threat model | Core tools, root |
 | H11 | Gated | Optional ACP/OpenAI compatibility facade | H4, real consumer | Existing surface owner |
 | H12 | Gated | Crash, load, security, quality, and performance qualification | All shipped tasks and required R milestones | Workspace-wide |
@@ -541,8 +541,8 @@ Open items, tracked here until closed:
 ### Phase 5b — Headless Contract For Supervisors
 
 Status: HC2 shipped 2026-09-06 (`893e582`, squashed from `93ef6b8`); HC1
-merged 2026-09-12 (#30 `abad2de`); HC3 in review (`feat/hc3-typed-final-output`,
-ADR-0014); HC4 open. Design
+merged 2026-09-12 (#30 `abad2de`); HC3 merged 2026-09-13 (#33 `24b6e5c`,
+ADR-0014); HC4 in review (`feat/hc4-headless-goldens`, ADR-0023). Design
 authority, gap table, bounds, and acceptance criteria are in
 [`headless-contract.md`](../design/headless-contract.md); this section records
 only sequencing and the constraints that interact with Phase 6.
@@ -554,7 +554,11 @@ only sequencing and the constraints that interact with Phase 6.
   `PROTOCOL_VERSION` bump and fixtures; they bumped separately (18, 19; decision
   #4).
 - HC4 lands last and pins the whole under
-  `crates/qq-protocol/tests/fixtures/headless/v<PROTOCOL_VERSION>/`.
+  `crates/qq-protocol/tests/fixtures/headless/v<PROTOCOL_VERSION>/`. It
+  moved the record shapes into `qq-protocol` (`HeadlessRecord`,
+  `HeadlessTrial`, `HeadlessOutcome`, `HeadlessStatus`) so the goldens are
+  constructed from the types the binary emits; no `PROTOCOL_VERSION` bump,
+  because the encodings did not change.
 - Boundary rules: no supervisor-only mode or product vocabulary; QQ acquires
   no new authority; new JSONL fields are additive and optional; the default
   `qq run` payload is preserved after normalization.
@@ -576,8 +580,8 @@ workspace gates and default-path H0 regression gate pass.
 Status: active from 2026-09-08. H20 implemented 2026-09-09 (`ab6de6f`,
 `d05e474`; ADR-0011). H20, H27, H28, H22.1, and H21.1a/b merged in #22
 (`61682be`, 2026-09-11); H21.1c (`settle_run`, `TeardownComplete`,
-ADR-0012) merged in #24; HC1 merged in #30; HC3 in review. Order from here:
-HC4 (Phase 5b); then H18; then H19 after its decoder baseline; then the
+ADR-0012) merged in #24; HC1 merged in #30; HC3 in #33; HC4 in review closes
+Phase 5b. Order from here: H18; then H19 after its decoder baseline; then the
 mechanical H21.2 split (HC3's settlement change has landed) and the structural
 H22.2 items as separate commits. The H20 p95 qualification is a quiet-host recording, not code.
 

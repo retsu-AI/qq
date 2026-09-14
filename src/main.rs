@@ -161,16 +161,16 @@ async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode 
             drop(stdout);
             drop(stderr);
             match sessions.close().await {
-                Ok(()) => status.exit_code(),
+                Ok(()) => headless::exit_code(status),
                 Err(error) => {
                     eprintln!("error: could not close the session runtime: {error}");
-                    headless::HeadlessStatus::HarnessFailure.exit_code()
+                    headless::exit_code(headless::HeadlessStatus::HarnessFailure)
                 }
             }
         }
         Err((status, message)) => {
             eprintln!("error: {message}");
-            status.exit_code()
+            headless::exit_code(status)
         }
     }
 }

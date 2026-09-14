@@ -1729,6 +1729,16 @@ These types are not persisted session state. `qq ask` consumes them entirely
 in-process; use the workspace/session routes or `qq run` for work that must be
 durable, resumable, approval-capable, or shared across clients.
 
+## Headless Records
+
+`qq run --format jsonl` writes `HeadlessRecord`s (`qq_protocol::headless`,
+ADR-0023): one `trial`, the workspace's `event` envelopes, one `outcome`.
+The shapes, the exit table (`HeadlessStatus::code`), and the framing rules are
+specified in [`headless-contract.md`](./headless-contract.md) and pinned by
+the golden streams under `tests/fixtures/headless/v<PROTOCOL_VERSION>/`
+(`tests/headless_fixtures.rs`). They bump with `PROTOCOL_VERSION`, are
+additive-only, and decode strictly.
+
 ## Size And Validation Bounds
 
 Current server/client bounds that affect interoperability:
