@@ -3242,6 +3242,13 @@ fn shell_approvals_show_the_server_preview_not_the_arguments() {
         "{command_row}"
     );
     assert!(!command_row.contains("ignored"), "{command_row}");
+    // The classifier's reasons render under the command so the user knows
+    // why the gate is asking.
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("asks because: remove file")),
+        "{rows:?}"
+    );
 }
 
 #[test]

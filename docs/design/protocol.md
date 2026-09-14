@@ -46,7 +46,7 @@ Related documents:
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 19
+PROTOCOL_VERSION = 20
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -134,9 +134,14 @@ value above 65 535. Version 19 added the optional typed-output contract
 `max_output_schema_values`, and `max_output_repair_turns`. Every field is
 optional and omitted when absent, so a default-path version-18 record is
 byte-identical apart from the version; the version moves because event and
-snapshot decoders are strict. Golden fixtures live under
-`crates/qq-protocol/tests/fixtures/v19/`; the `v17` and `v18` directories are
-retained decode-only.
+snapshot decoders are strict. Version 20 added `verdict` and `reasons` to
+`ShellCommandPreview` on `tool_approval_requested` (ADR-0020): the shell
+classifier's tier (`allow | prompt | forbidden`) and the rule ids that
+produced it, so a client can show why the gate is asking. Both are optional
+and omitted when absent; the struct is `deny_unknown_fields`, so a
+version-19 client would reject a preview that carries them. Golden fixtures
+live under `crates/qq-protocol/tests/fixtures/v20/`; the `v17`–`v19`
+directories are retained decode-only.
 
 Clients and servers must agree on this value.
 
