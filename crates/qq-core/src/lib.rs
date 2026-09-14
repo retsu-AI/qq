@@ -2105,7 +2105,7 @@ impl plan::CompiledAgentPlan {
                         id: call.id,
                         result: result.model_text,
                         is_error: result.is_error,
-                        file_state: None,
+                        file_states: Vec::new(),
                         display: result.ui_payload,
                         spill: None,
                     };
@@ -2413,7 +2413,7 @@ impl plan::CompiledAgentPlan {
                             yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
                             return;
                         }
-                        let interrupted_here = result.model_text == INTERRUPTED_TOOL_RESULT && result.is_error && result.file_state.is_none() && steering.as_ref().is_some_and(|steering| *steering.interrupts.borrow() > handled_interrupt);
+                        let interrupted_here = result.model_text == INTERRUPTED_TOOL_RESULT && result.is_error && result.file_states.is_empty() && steering.as_ref().is_some_and(|steering| *steering.interrupts.borrow() > handled_interrupt);
                         // Chunks sent in the execution's final poll may still
                         // be buffered; drain them before the terminal event.
                         while let Ok(chunk) = deltas.try_recv() {
@@ -2436,7 +2436,7 @@ impl plan::CompiledAgentPlan {
                             id: call.id,
                             result: result.model_text,
                             is_error: result.is_error,
-                            file_state: result.file_state,
+                            file_states: result.file_states,
                             display: result.ui_payload,
                             spill: result.spill,
                         };
@@ -2485,7 +2485,7 @@ impl plan::CompiledAgentPlan {
                             id: call.id,
                             result: result.model_text,
                             is_error: result.is_error,
-                            file_state: result.file_state,
+                            file_states: result.file_states,
                             display: result.ui_payload,
                             spill: result.spill,
                         };
@@ -2517,7 +2517,7 @@ impl plan::CompiledAgentPlan {
                                 id: call.id,
                                 result: INTERRUPTED_TOOL_RESULT.to_owned(),
                                 is_error: true,
-                                file_state: None,
+                                file_states: Vec::new(),
                                 display: None,
                                 spill: None,
                             };
@@ -3370,7 +3370,7 @@ mod tests {
                         tool_turn(
                             "edit",
                             "edit_file",
-                            r#"{"path":"src/feature/note.txt","old_string":"before\n","new_string":"after\n"}"#,
+                            r#"{"edits":[{"path":"src/feature/note.txt","old":"before\n","new":"after\n"}]}"#,
                         )
                     }
                     6 => tool_turn(
@@ -6824,7 +6824,7 @@ mod tests {
                 turns: vec![
                     vec![(
                         "edit_file",
-                        r#"{"path":"note.txt","old_string":"before","new_string":"after"}"#
+                        r#"{"edits":[{"path":"note.txt","old":"before","new":"after"}]}"#
                             .to_owned(),
                     )],
                     Vec::new(),

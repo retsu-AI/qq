@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::{
+    edit::MAX_EDITS,
     read::MAX_READ_LINES,
     search::{
         MAX_CONTEXT, MAX_CURSOR_BYTES, MAX_GLOB_BYTES, MAX_GLOBS, MAX_LIMIT, MAX_PER_FILE,
@@ -141,27 +142,44 @@ impl BuiltInTool {
             ),
             Self::EditFile => ToolSpec::new(
                 "edit_file",
-                "Replace an exact string in a workspace file that was read earlier in this session. Fails if old_string is missing or ambiguous; set replace_all to replace every occurrence.",
+                "Apply one or more edits to files read earlier in this session, atomically. Each edit replaces old with new, or inserts new before/after an anchor. Fuzzy whitespace/indent matching is on unless fuzzy=false; the result names via=<strategy> when it was used. Set dry_run to preview.",
                 json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string" },
-                        "old_string": { "type": "string", "minLength": 1 },
-                        "new_string": { "type": "string" },
-                        "replace_all": { "type": "boolean" }
+                        "edits": {
+                            "type": "array", "minItems": 1, "maxItems": MAX_EDITS,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": { "type": "string" },
+                                    "old": { "type": "string" },
+                                    "new": { "type": "string" },
+                                    "insert_before": { "type": "string" },
+                                    "insert_after": { "type": "string" },
+                                    "replace_all": { "type": "boolean", "default": false },
+                                    "if_hash": { "type": "string", "pattern": "^h:[0-9a-f]{12}$" }
+                                },
+                                "required": ["path"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "fuzzy": { "type": "boolean", "default": true },
+                        "dry_run": { "type": "boolean", "default": false }
                     },
-                    "required": ["path", "old_string", "new_string"],
+                    "required": ["edits"],
                     "additionalProperties": false
                 }),
             ),
             Self::WriteFile => ToolSpec::new(
                 "write_file",
-                "Create a workspace file, or fully overwrite one that was read earlier in this session.",
+                "Create a workspace file (parents are created), or fully overwrite one read earlier in this session. create_only fails if it exists; if_hash proves currency without a prior read.",
                 json!({
                     "type": "object",
                     "properties": {
                         "path": { "type": "string" },
-                        "content": { "type": "string" }
+                        "content": { "type": "string" },
+                        "create_only": { "type": "boolean", "default": false },
+                        "if_hash": { "type": "string", "pattern": "^h:[0-9a-f]{12}$" }
                     },
                     "required": ["path", "content"],
                     "additionalProperties": false

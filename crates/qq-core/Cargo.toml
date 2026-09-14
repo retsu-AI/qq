@@ -59,3 +59,7 @@ harness = false
 [[bench]]
 name = "search_walk"
 harness = false
+
+[[bench]]
+name = "edit_batch"
+harness = false
