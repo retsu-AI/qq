@@ -7,8 +7,8 @@ newest last.
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | T1 | Cross-cutting primitives: `Bounds`, `bound_text`, `ToolOutput` split, header convention, masking, per-turn budget | Shipped (#31, `b0a18be`) | `feat/tool-layer-t1-output-bounds` | Evidence `target/qq-perf/t1-2026-09-11/` |
-| T2 | `search` v2 + `tree` (+ `list_dir` alias) | In review | `feat/tool-layer-t2-search-tree` | Started 2026-09-12; evidence `target/qq-perf/t2-2026-09-12/` |
-| T3 | `read_file` v2 | Planned | | |
+| T2 | `search` v2 + `tree` (+ `list_dir` alias) | Shipped (#32, `8bb4050`) | `feat/tool-layer-t2-search-tree` | Evidence `target/qq-perf/t2-2026-09-12/` |
+| T3 | `read_file` v2 (gutter, ranges, outline, info, `if_changed_since`) | In progress | `feat/tool-layer-t3-read-file` | Started 2026-09-14; baseline `target/qq-perf/t3-2026-09-14/tool_dispatch-baseline.txt` (41–47 µs pinned) |
 | T4 | Spill store + `read_tool_result` | Planned | | Touches `sessions/store`; second-agent review required |
 | T5 | `edit_file` v2 + `write_file` flags | Planned | | |
 | T6 | Shell classifier + `Forbidden` decision | Planned | | Root request: promote `tree-sitter{,-bash}` to workspace deps; ADR reserved |
@@ -57,3 +57,10 @@ Dependencies: `ignore` 0.4 (new: + `globset`, `bstr`, `crossbeam-deque`, `crossb
 Docs: `docs/design/tools.md` § Built-In Tools, § Read-Side Walk (new).
 Open: T3 reuses `lang` tables for `read_file mode=outline`; T4 gives search's `truncated=bytes` a spill handle; T12 reuses the walker for `@` completion. `MAX_SEARCH_BYTES` (16 MiB) is gone — the scan bound is now 64 MiB with `partial=bytes`.
 Evidence: `target/qq-perf/t2-2026-09-12/` (untracked).
+
+### 2026-09-14 — T2 shipped; T3 in progress
+
+T2 merged as #32 (`8bb4050`). T3 on `feat/tool-layer-t3-read-file`
+(worktree `/tmp/opencode/qq-t3`). Pre-change baseline: `tool_dispatch`
+(its loop is a `read_file` call) 41.2–46.7 µs/iter pinned to one core,
+6 runs — the only gate whose path T3 touches.
