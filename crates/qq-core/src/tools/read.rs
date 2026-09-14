@@ -7,7 +7,9 @@ use crate::workspace::{FileState, FileStateUpdate, Workspace, content_hash};
 use super::{
     dispatch::{ToolCancellation, ToolOutput},
     lang::Language,
-    output::{Bounds, Header, MARKER_PREFIX, MARKER_RESERVE_BYTES, MAX_LINE_BYTES, push_line},
+    output::{
+        Bounds, Header, MARKER_PREFIX, MARKER_RESERVE_BYTES, MAX_LINE_BYTES, escaped_len, push_line,
+    },
     search::path_error,
     walk::looks_binary,
 };
@@ -367,7 +369,8 @@ fn lines(
             let (cost, clipped) =
                 push_line(&mut body, content, MAX_LINE_BYTES, usize::MAX).unwrap_or((0, false));
             body.push('\n');
-            let row_cost = number_buffer.len() + cost + 1;
+            // The gutter's tab and the newline each escape to two bytes.
+            let row_cost = escaped_len(&number_buffer) + cost + 2;
             if body_escaped + row_cost > body_budget {
                 body.truncate(before);
                 stopped = true;

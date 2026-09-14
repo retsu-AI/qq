@@ -189,6 +189,15 @@ impl ToolRow {
                 false,
                 None,
             ),
+            // `read_tool_result <handle> L<a>-<b>/<total> [next=]` or
+            // `… query="…" matches=<shown>/<total>` heads the result.
+            "read_tool_result" => (
+                "Recall",
+                false,
+                string_argument("handle").or_else(compact),
+                false,
+                has_result.then(|| stored_output_metric(result)),
+            ),
             "web_fetch" => (
                 "Fetch",
                 false,
@@ -363,6 +372,35 @@ fn read_metric(result: &str, body_lines: usize) -> String {
             None => count_noun(body_lines.saturating_sub(1), "line", "lines"),
         },
         None => count_noun(body_lines.saturating_sub(1), "line", "lines"),
+    }
+}
+
+/// `L<a>-<b> of <n> lines` or `<shown>/<total> hits` from the
+/// `read_tool_result` header.
+fn stored_output_metric(result: &str) -> String {
+    if let Some((shown, total)) =
+        header_field(result, "read_tool_result", "matches").and_then(|value| value.split_once('/'))
+    {
+        return if shown == total {
+            count_noun(shown.parse().unwrap_or(0), "hit", "hits")
+        } else {
+            format!("{shown}/{total} hits")
+        };
+    }
+    let Some(header) = result.lines().next() else {
+        return String::new();
+    };
+    match header
+        .split_whitespace()
+        .nth(2)
+        .and_then(|window| window.strip_prefix('L'))
+        .and_then(|window| window.split_once('/'))
+    {
+        Some((shown, total)) => format!(
+            "L{shown} of {}",
+            count_noun(total.parse().unwrap_or(0), "line", "lines")
+        ),
+        None => String::new(),
     }
 }
 

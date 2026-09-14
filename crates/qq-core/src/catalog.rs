@@ -56,6 +56,7 @@ pub(crate) enum ToolHost {
     BuiltIn,
     SpawnAgent,
     SearchHistory,
+    ReadToolResult,
     SelectTools,
     LoadSkill,
     External { host: usize },
@@ -589,6 +590,7 @@ impl ToolCatalog {
                 match entry.host {
                     ToolHost::SpawnAgent => include.spawn_agent,
                     ToolHost::SearchHistory => include.search_history,
+                    ToolHost::ReadToolResult => include.read_tool_result,
                     ToolHost::LoadSkill => include.load_skill,
                     ToolHost::BuiltIn | ToolHost::SelectTools | ToolHost::External { .. } => true,
                 }
@@ -652,6 +654,7 @@ impl ToolCatalog {
 pub(crate) struct StaticFilter {
     pub(crate) spawn_agent: bool,
     pub(crate) search_history: bool,
+    pub(crate) read_tool_result: bool,
     pub(crate) load_skill: bool,
     /// The run's policy denies every mutating, shell, and non-read external
     /// call, so those schemas are withheld rather than offered and refused.
@@ -836,6 +839,7 @@ mod tests {
         let base = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
             search_history: true,
+            read_tool_result: true,
             load_skill: true,
             read_only: false,
         });
@@ -924,6 +928,7 @@ mod tests {
         let base = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
             search_history: true,
+            read_tool_result: true,
             load_skill: true,
             read_only: false,
         });
@@ -995,6 +1000,7 @@ mod tests {
         let without = catalog.base_specs(&StaticFilter {
             spawn_agent: false,
             search_history: true,
+            read_tool_result: true,
             load_skill: true,
             read_only: false,
         });
@@ -1002,6 +1008,7 @@ mod tests {
         let with = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
             search_history: true,
+            read_tool_result: true,
             load_skill: true,
             read_only: false,
         });
@@ -1039,6 +1046,7 @@ mod tests {
         let everything = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
             search_history: true,
+            read_tool_result: true,
             load_skill: true,
             read_only: false,
         });
@@ -1056,6 +1064,7 @@ mod tests {
         let read_only = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
             search_history: true,
+            read_tool_result: true,
             load_skill: true,
             read_only: true,
         });
@@ -1128,6 +1137,7 @@ mod measurement_tests {
         let base = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
             search_history: true,
+            read_tool_result: true,
             load_skill: true,
             read_only: false,
         });

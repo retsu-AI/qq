@@ -19,8 +19,14 @@ pub(crate) const MIN_MODEL_TEXT_BYTES: usize = 4 * 1024;
 /// Sum of model-facing text across one turn's tool calls.
 pub(crate) const MAX_TURN_TOOL_OUTPUT_BYTES: usize = 96 * 1024;
 const DEFAULT_HEAD_RATIO: u8 = 50;
-/// Escaped bytes reserved for the omission marker when computing the cut.
-pub(crate) const MARKER_RESERVE_BYTES: usize = 160;
+/// Escaped bytes reserved for the omission marker when computing the cut,
+/// sized for a finalized marker carrying a spill handle and resume offset.
+pub(crate) const MARKER_RESERVE_BYTES: usize = 224;
+/// Largest complete output the spill store keeps for one call.
+pub(crate) const MAX_SPILL_ITEM_BYTES: usize = 8 * 1024 * 1024;
+/// The marker's provisional tail; [`finalize_spill_marker`] replaces it once
+/// the runtime knows whether (and under which handle) the text was stored.
+const NOT_STORED: &str = "; not stored]…\n";
 /// Longest header line a pruning stub preserves.
 pub(crate) const MAX_STUB_HEADER_BYTES: usize = 512;
 /// Every marker line qq inserts into model text starts with this, so clients
@@ -96,6 +102,9 @@ pub(crate) struct BoundedText {
     pub(crate) omitted_lines: usize,
     /// Lines clipped to `max_line_bytes` with `…+N`.
     pub(crate) clipped_lines: usize,
+    /// 1-based line number of the first omitted line (the `offset` that
+    /// continues reading the stored output where the head stopped).
+    pub(crate) omitted_from_line: usize,
 }
 
 impl BoundedText {
@@ -238,7 +247,7 @@ fn push_marker(out: &mut String, omitted_bytes: usize, omitted_lines: usize, not
         out.push_str("; ");
         out.push_str(note);
     }
-    out.push_str("; not stored]…\n");
+    out.push_str(NOT_STORED);
 }
 
 /// Keeps `head_ratio` of the budget from the start and the rest from the end,
@@ -254,6 +263,7 @@ pub(crate) fn bound_text(text: String, bounds: &Bounds, note: Option<&str>) -> B
             omitted_bytes: 0,
             omitted_lines: 0,
             clipped_lines: 0,
+            omitted_from_line: 0,
         };
     }
     let ratio = usize::from(bounds.head_ratio.min(100));
@@ -268,6 +278,7 @@ pub(crate) fn bound_text(text: String, bounds: &Bounds, note: Option<&str>) -> B
     let mut head = String::with_capacity(head_bytes_budget.min(text.len()));
     let mut head_end = 0_usize;
     let mut head_bytes = 0_usize;
+    let mut head_lines = 0_usize;
     for line in text.split_inclusive('\n').take(head_lines_budget) {
         let Some((cost, clipped)) = push_line(
             &mut head,
@@ -279,6 +290,7 @@ pub(crate) fn bound_text(text: String, bounds: &Bounds, note: Option<&str>) -> B
         };
         head_bytes += cost;
         head_end += line.len();
+        head_lines += 1;
         clipped_lines += usize::from(clipped);
     }
 
@@ -322,7 +334,51 @@ pub(crate) fn bound_text(text: String, bounds: &Bounds, note: Option<&str>) -> B
         omitted_bytes,
         omitted_lines,
         clipped_lines,
+        omitted_from_line: if omitted_bytes == 0 {
+            0
+        } else {
+            head_lines + 1
+        },
     }
+}
+
+/// Rewrites the provisional `not stored` tail of the marker `bound_text`
+/// inserted. With a handle the marker names the stored output and, when
+/// `offset` is known, the line to continue from; without one it stays as
+/// written. Only the first provisional marker changes, so a later cut (the
+/// turn budget) can be finalized in turn. Returns whether a marker changed.
+pub(crate) fn finalize_spill_marker(
+    text: &mut String,
+    handle: Option<&str>,
+    offset: Option<usize>,
+) -> bool {
+    let Some(handle) = handle else {
+        return false;
+    };
+    let mut search_from = 0_usize;
+    while let Some(relative) = text[search_from..].find(MARKER_PREFIX) {
+        let start = search_from + relative;
+        if start != 0 && text.as_bytes()[start - 1] != b'\n' {
+            search_from = start + MARKER_PREFIX.len();
+            continue;
+        }
+        let end = text[start..]
+            .find('\n')
+            .map_or(text.len(), |index| start + index + 1);
+        if text[start..end].ends_with(NOT_STORED) {
+            let mut replacement = String::with_capacity(handle.len() + 48);
+            replacement.push_str("; full output ");
+            replacement.push_str(handle);
+            if let Some(offset) = offset {
+                let _ = write!(replacement, "; read_tool_result offset={offset}");
+            }
+            replacement.push_str("]…\n");
+            text.replace_range(end - NOT_STORED.len()..end, &replacement);
+            return true;
+        }
+        search_from = end;
+    }
+    false
 }
 
 /// `1234567` → `1,234,567`.
@@ -719,8 +775,9 @@ impl TurnOutputBudget {
     }
 
     /// Admits one result, shrinking it when the turn is nearly spent, and
-    /// charges what remains of it.
-    pub(crate) fn admit(&mut self, text: &mut String) -> bool {
+    /// charges what remains of it. When `spill` names the stored complete
+    /// output, the cut's marker points at it.
+    pub(crate) fn admit(&mut self, text: &mut String, spill: Option<&str>) -> bool {
         let allowed = self.remaining.max(MIN_MODEL_TEXT_BYTES);
         let mut cut = false;
         if text.len() > allowed {
@@ -728,6 +785,9 @@ impl TurnOutputBudget {
             let bounded = bound_text(std::mem::take(text), &bounds, Some("turn budget reached"));
             cut = bounded.truncated();
             *text = bounded.text;
+            if bounded.omitted_bytes > 0 {
+                finalize_spill_marker(text, spill, None);
+            }
         }
         self.remaining = self.remaining.saturating_sub(text.len());
         cut
@@ -859,6 +919,67 @@ mod tests {
             bounded
                 .text
                 .contains("omitted; turn budget reached; not stored]…")
+        );
+    }
+
+    #[test]
+    fn a_finalized_marker_names_the_handle_and_resume_offset() {
+        let bounded = bound_text(lines(40_000), &Bounds::new(16 * 1024, 4_000), None);
+        assert!(bounded.omitted_from_line > 1);
+        let mut text = bounded.text.clone();
+        assert!(finalize_spill_marker(
+            &mut text,
+            Some("t:shell:9f3a2c1d:b7e0d4a2"),
+            Some(bounded.omitted_from_line),
+        ));
+        let marker = text
+            .lines()
+            .find(|line| line.starts_with(MARKER_PREFIX))
+            .unwrap();
+        assert!(
+            marker.contains(
+                " lines omitted; full output t:shell:9f3a2c1d:b7e0d4a2; read_tool_result offset="
+            ),
+            "{marker}"
+        );
+        assert!(
+            marker.ends_with(&format!("offset={}]…", bounded.omitted_from_line)),
+            "{marker}"
+        );
+        assert!(!text.contains("not stored"));
+        assert!(
+            escaped_len(&text) <= 16 * 1024,
+            "the reserve covers the handle"
+        );
+        // Only one provisional marker; a second finalize finds nothing.
+        assert!(!finalize_spill_marker(
+            &mut text,
+            Some("t:x:00000000:00000000"),
+            None
+        ));
+        // No handle: the marker keeps saying `not stored`.
+        let mut untouched = bounded.text.clone();
+        assert!(!finalize_spill_marker(&mut untouched, None, None));
+        assert_eq!(untouched, bounded.text);
+        // A marker-looking line that is content (not at line start) is skipped.
+        let mut content = format!("x {MARKER_PREFIX}fake; not stored]…\n");
+        assert!(!finalize_spill_marker(
+            &mut content,
+            Some("t:a:00000000:00000000"),
+            None
+        ));
+    }
+
+    #[test]
+    fn the_turn_budget_marker_points_at_the_spill_when_one_exists() {
+        let mut budget = TurnOutputBudget::new();
+        let mut first = "x".repeat(90 * 1024);
+        budget.admit(&mut first, None);
+        let mut second = lines(4_000);
+        assert!(budget.admit(&mut second, Some("t:read_file:0123abcd:89ef0123")));
+        assert!(
+            second.contains("turn budget reached; full output t:read_file:0123abcd:89ef0123]…"),
+            "{second}"
         );
     }
 
@@ -1080,25 +1201,25 @@ mod tests {
     fn the_turn_budget_shrinks_late_results_to_the_remainder() {
         let mut budget = TurnOutputBudget::new();
         let mut first = "x".repeat(90 * 1024);
-        assert!(!budget.admit(&mut first));
+        assert!(!budget.admit(&mut first, None));
         assert_eq!(first.len(), 90 * 1024);
         assert_eq!(budget.remaining(), 6 * 1024);
 
         let mut second = lines(4_000);
         assert!(second.len() > 6 * 1024);
-        assert!(budget.admit(&mut second));
+        assert!(budget.admit(&mut second, None));
         assert!(second.len() <= 6 * 1024);
         assert!(second.contains("turn budget reached"));
         assert!(budget.remaining() < MIN_MODEL_TEXT_BYTES);
 
         // Never below the floor: a spent turn still gets a useful result.
         let mut third = lines(4_000);
-        assert!(budget.admit(&mut third));
+        assert!(budget.admit(&mut third, None));
         assert!(third.len() <= MIN_MODEL_TEXT_BYTES);
         assert!(third.len() > MIN_MODEL_TEXT_BYTES / 2);
 
         let mut small = "fits".to_owned();
-        assert!(!budget.admit(&mut small));
+        assert!(!budget.admit(&mut small, None));
         assert_eq!(small, "fits");
     }
 

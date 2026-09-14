@@ -7,7 +7,7 @@ use crate::sessions::{PersistenceFault, SessionRuntimeError};
 
 /// Current session store schema, stored as `metadata.schema_version`. Bump it
 /// with every migration step appended to `open_database`.
-pub const STORE_SCHEMA_VERSION: u16 = 27;
+pub const STORE_SCHEMA_VERSION: u16 = 28;
 
 /// Suffix of the sibling file whose advisory lock marks the store's owner.
 pub const OWNER_LOCK_SUFFIX: &str = ".lock";
@@ -381,7 +381,7 @@ pub(in crate::sessions) fn open_database(
         }
         Some(
             "10" | "11" | "12" | "13" | "14" | "15" | "16" | "17" | "18" | "19" | "20" | "21"
-            | "22" | "23" | "24" | "25" | "26" | "27",
+            | "22" | "23" | "24" | "25" | "26" | "27" | "28",
         ) => {}
         Some(_) => return Err(SessionRuntimeError::CONSTRAINT),
     }
@@ -404,6 +404,7 @@ pub(in crate::sessions) fn open_database(
                 | "25"
                 | "26"
                 | "27"
+                | "28"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -432,6 +433,7 @@ pub(in crate::sessions) fn open_database(
                 | "25"
                 | "26"
                 | "27"
+                | "28"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -459,6 +461,7 @@ pub(in crate::sessions) fn open_database(
                 | "25"
                 | "26"
                 | "27"
+                | "28"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -485,6 +488,7 @@ pub(in crate::sessions) fn open_database(
                 | "25"
                 | "26"
                 | "27"
+                | "28"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -511,6 +515,7 @@ pub(in crate::sessions) fn open_database(
                 | "25"
                 | "26"
                 | "27"
+                | "28"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -534,7 +539,20 @@ pub(in crate::sessions) fn open_database(
     validate_linear_streaming_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("16" | "17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27")
+        Some(
+            "16" | "17"
+                | "18"
+                | "19"
+                | "20"
+                | "21"
+                | "22"
+                | "23"
+                | "24"
+                | "25"
+                | "26"
+                | "27"
+                | "28"
+        )
     ) {
         let transaction = connection.transaction()?;
         add_runs_resolved_model_column(&transaction)?;
@@ -549,7 +567,7 @@ pub(in crate::sessions) fn open_database(
     }
     if !matches!(
         schema_version.as_deref(),
-        Some("17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27")
+        Some("17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27" | "28")
     ) {
         let transaction = connection.transaction()?;
         add_preparing_run_storage(&transaction)?;
@@ -563,7 +581,7 @@ pub(in crate::sessions) fn open_database(
     validate_preparing_run_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27")
+        Some("18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27" | "28")
     ) {
         let transaction = connection.transaction()?;
         add_context_occupancy_storage(&transaction)?;
@@ -577,7 +595,7 @@ pub(in crate::sessions) fn open_database(
     validate_context_occupancy_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27")
+        Some("19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27" | "28")
     ) {
         let transaction = connection.transaction()?;
         add_run_limits_storage(&transaction)?;
@@ -591,7 +609,7 @@ pub(in crate::sessions) fn open_database(
     validate_run_limits_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("20" | "21" | "22" | "23" | "24" | "25" | "26" | "27")
+        Some("20" | "21" | "22" | "23" | "24" | "25" | "26" | "27" | "28")
     ) {
         let transaction = connection.transaction()?;
         add_sessions_spawned_by_tool_call_column(&transaction)?;
@@ -603,7 +621,7 @@ pub(in crate::sessions) fn open_database(
     }
     if !matches!(
         schema_version.as_deref(),
-        Some("21" | "22" | "23" | "24" | "25" | "26" | "27")
+        Some("21" | "22" | "23" | "24" | "25" | "26" | "27" | "28")
     ) {
         let transaction = connection.transaction()?;
         add_contract_columns(&transaction)?;
@@ -615,7 +633,7 @@ pub(in crate::sessions) fn open_database(
     }
     if !matches!(
         schema_version.as_deref(),
-        Some("22" | "23" | "24" | "25" | "26" | "27")
+        Some("22" | "23" | "24" | "25" | "26" | "27" | "28")
     ) {
         let transaction = connection.transaction()?;
         add_output_truncation_columns(&transaction)?;
@@ -628,7 +646,7 @@ pub(in crate::sessions) fn open_database(
     validate_output_truncation_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("23" | "24" | "25" | "26" | "27")
+        Some("23" | "24" | "25" | "26" | "27" | "28")
     ) {
         let transaction = connection.transaction()?;
         add_session_depth_columns(&transaction)?;
@@ -639,7 +657,10 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_session_depth_schema(&connection)?;
-    if !matches!(schema_version.as_deref(), Some("24" | "25" | "26" | "27")) {
+    if !matches!(
+        schema_version.as_deref(),
+        Some("24" | "25" | "26" | "27" | "28")
+    ) {
         let transaction = connection.transaction()?;
         add_audit_columns(&transaction)?;
         transaction.execute(
@@ -649,7 +670,7 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_audit_schema(&connection)?;
-    if !matches!(schema_version.as_deref(), Some("25" | "26" | "27")) {
+    if !matches!(schema_version.as_deref(), Some("25" | "26" | "27" | "28")) {
         let transaction = connection.transaction()?;
         add_fast_path_columns(&transaction)?;
         transaction.execute(
@@ -659,7 +680,7 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_fast_path_schema(&connection)?;
-    if !matches!(schema_version.as_deref(), Some("26" | "27")) {
+    if !matches!(schema_version.as_deref(), Some("26" | "27" | "28")) {
         let transaction = connection.transaction()?;
         add_tool_call_effect_column(&transaction)?;
         transaction.execute(
@@ -669,7 +690,7 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_tool_call_effect_schema(&connection)?;
-    if schema_version.as_deref() != Some("27") {
+    if !matches!(schema_version.as_deref(), Some("27" | "28")) {
         let transaction = connection.transaction()?;
         add_output_contract_columns(&transaction)?;
         transaction.execute(
@@ -679,6 +700,16 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_output_contract_schema(&connection)?;
+    if schema_version.as_deref() != Some("28") {
+        let transaction = connection.transaction()?;
+        create_tool_spills_table(&transaction)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '28' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
+    }
+    validate_tool_spills_schema(&connection)?;
     debug_assert_eq!(
         connection
             .query_row(
@@ -1521,6 +1552,51 @@ fn validate_tool_call_effect_schema(connection: &Connection) -> Result<(), Sessi
         && column_shape(connection, "tool_calls", "effect")? != ("TEXT".to_owned(), false, None, 0)
     {
         return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    Ok(())
+}
+
+/// Complete tool outputs whose model-facing text was cut. One row per tool
+/// call, keyed by the call so the result row and its spill are written in
+/// the same transaction and deleted together. `digest` is the SHA-256 of
+/// `content`; the handle the marker carries is `t:<tool>:<call8>:<digest8>`.
+/// `evicted_at_ms` marks a row whose content the per-session cap reclaimed;
+/// the row stays so a read of the handle answers `spill_evicted`, not
+/// `spill_missing`.
+fn create_tool_spills_table(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    if has_table(connection, "tool_spills")? {
+        return Ok(());
+    }
+    connection
+        .execute_batch(
+            "CREATE TABLE tool_spills (
+                 tool_call_id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 run_id TEXT NOT NULL,
+                 tool TEXT NOT NULL,
+                 digest TEXT NOT NULL,
+                 content BLOB,
+                 content_bytes INTEGER NOT NULL,
+                 omitted_from_line INTEGER NOT NULL,
+                 created_at_ms INTEGER NOT NULL,
+                 evicted_at_ms INTEGER
+             );
+             CREATE INDEX tool_spills_session_created
+                 ON tool_spills(session_id, created_at_ms);",
+        )
+        .map_err(|_| SessionRuntimeError::CONSTRAINT)
+}
+
+fn validate_tool_spills_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    for (column, kind) in [
+        ("session_id", "TEXT"),
+        ("digest", "TEXT"),
+        ("content_bytes", "INTEGER"),
+        ("omitted_from_line", "INTEGER"),
+    ] {
+        if column_shape(connection, "tool_spills", column)? != (kind.to_owned(), true, None, 0) {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
     }
     Ok(())
 }

@@ -40,7 +40,10 @@ use crate::{
     RuntimeEvent, RuntimeToolCall, SpawnAgentFuture, SpawnAgentOutcome, SpawnAgentSpend,
     SpawnRequest, SubagentSpawner, ToolGate, ToolGateFuture, approval,
     catalog::EffectClass,
-    runtime::{HistoryMatch, HistorySearchFuture, HistorySearcher, excerpt_around},
+    runtime::{
+        HistoryMatch, HistorySearchFuture, HistorySearcher, SpillHandle, SpillReadFuture,
+        SpillReader, excerpt_around,
+    },
     workspace::{FileState, FileStateUpdate},
 };
 
@@ -114,6 +117,9 @@ const MAX_GRANT_BYTES: usize = 256;
 const MAX_SESSION_GRANTS: u32 = 256;
 const MAX_PENDING_GRANT_PROMOTIONS: u32 = 256;
 const MAX_SESSION_FILES: u32 = 4_096;
+/// Complete tool outputs one session keeps; the oldest rows of finished runs
+/// lose their content (never their handle) past this.
+const MAX_SESSION_SPILL_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 /// Child runs one parent run may hold in flight at once. Spawn calls beyond
@@ -141,8 +147,14 @@ const RUNTIME_NOTICE_GUIDANCE: &str = "Continue from the committed history above
 /// stubs when the call predates the stored effect class (schema 26): the
 /// agent can re-derive them on demand. Calls with a stored effect prune by
 /// that class instead; mutating, shell, and external results are never pruned.
-const PRUNABLE_READ_ONLY_TOOLS: [&str; 5] =
-    ["read_file", "tree", "list_dir", "search", "search_history"];
+const PRUNABLE_READ_ONLY_TOOLS: [&str; 6] = [
+    "read_file",
+    "tree",
+    "list_dir",
+    "search",
+    "search_history",
+    "read_tool_result",
+];
 /// Prefixes the latest compaction summary when assembly replays it as the
 /// conversation's opening message.
 const COMPACTION_SUMMARY_PREAMBLE: &str = "The earlier part of this conversation was compacted \
@@ -3288,11 +3300,12 @@ fn finish_tool_call(
     is_error: bool,
     file_state: Option<FileStateUpdate>,
     display: Option<ToolCallDisplay>,
+    spill: Option<crate::tools::SpillRecord>,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    let (provider_call_id, first_result_in_turn) = transaction
+    let (provider_call_id, tool_name, first_result_in_turn) = transaction
         .query_row(
-            "SELECT current.provider_call_id,
+            "SELECT current.provider_call_id, current.name,
                     NOT EXISTS(
                         SELECT 1 FROM tool_calls previous
                         WHERE previous.run_id = current.run_id
@@ -3302,7 +3315,13 @@ fn finish_tool_call(
              FROM tool_calls current
              WHERE current.id = ?1 AND current.run_id = ?2 AND current.state = 'running'",
             params![tool_call_id.to_string(), identity.run_id.to_string()],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
         )
         .optional()?
         .ok_or(SessionRuntimeError::ToolCallNotFound)?;
@@ -3339,6 +3358,11 @@ fn finish_tool_call(
     if let Some(update) = file_state {
         record_session_file(&transaction, identity.session_id, &update, now)?;
     }
+    // The complete output and the result whose marker cites it commit
+    // together: a marker never names a handle the store does not hold.
+    if let Some(spill) = spill {
+        store_tool_spill(&transaction, identity, tool_call_id, &tool_name, spill, now)?;
+    }
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     let event = append_event(
         &transaction,
@@ -3347,6 +3371,116 @@ fn finish_tool_call(
     )?;
     transaction.commit()?;
     Ok(event)
+}
+
+/// Writes one complete output under its call. Past the per-session cap, the
+/// oldest rows of runs that are no longer running lose their content; their
+/// rows remain so a later read of the handle says `spill_evicted`.
+fn store_tool_spill(
+    transaction: &Connection,
+    identity: RunIdentity,
+    tool_call_id: ToolCallId,
+    tool: &str,
+    spill: crate::tools::SpillRecord,
+    now: u64,
+) -> Result<(), SessionRuntimeError> {
+    let bytes = spill.text.len() as u64;
+    transaction.execute(
+        "INSERT INTO tool_spills(tool_call_id, session_id, run_id, tool, digest, content,
+                                 content_bytes, omitted_from_line, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            tool_call_id.to_string(),
+            identity.session_id.to_string(),
+            identity.run_id.to_string(),
+            tool,
+            spill.digest,
+            spill.text.as_bytes(),
+            bytes,
+            spill.omitted_from_line as u64,
+            now,
+        ],
+    )?;
+    let held: u64 = transaction.query_row(
+        "SELECT COALESCE(SUM(content_bytes), 0) FROM tool_spills
+         WHERE session_id = ?1 AND content IS NOT NULL",
+        [identity.session_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if held > MAX_SESSION_SPILL_BYTES {
+        let mut excess = held - MAX_SESSION_SPILL_BYTES;
+        let mut statement = transaction.prepare(
+            "SELECT s.tool_call_id, s.content_bytes FROM tool_spills s
+             JOIN runs r ON r.id = s.run_id
+             WHERE s.session_id = ?1 AND s.content IS NOT NULL
+               AND r.status NOT IN ('running', 'preparing')
+             ORDER BY s.created_at_ms ASC, s.tool_call_id ASC",
+        )?;
+        let candidates = statement
+            .query_map([identity.session_id.to_string()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (id, bytes) in candidates {
+            if excess == 0 {
+                break;
+            }
+            transaction.execute(
+                "UPDATE tool_spills SET content = NULL, evicted_at_ms = ?2 WHERE tool_call_id = ?1",
+                params![id, now],
+            )?;
+            excess = excess.saturating_sub(bytes);
+        }
+    }
+    Ok(())
+}
+
+/// One stored output for `read_tool_result`. The call-id prefix locates the
+/// row; the digest prefix must agree so a handle from another store cannot
+/// alias a row here; the session must be the caller's.
+fn read_tool_spill(
+    connection: &Connection,
+    session_id: SessionId,
+    tool_call_prefix: &str,
+    digest_prefix: &str,
+) -> Result<crate::runtime::SpillRead, SessionRuntimeError> {
+    use crate::runtime::SpillRead;
+    let mut upper = tool_call_prefix.to_owned();
+    upper.push('g');
+    let row = connection
+        .query_row(
+            "SELECT session_id, tool, digest, content, omitted_from_line FROM tool_spills
+             WHERE tool_call_id >= ?1 AND tool_call_id < ?2
+             ORDER BY tool_call_id LIMIT 1",
+            params![tool_call_prefix, upper],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((owner, tool, digest, content, omitted_from_line)) = row else {
+        return Ok(SpillRead::Missing);
+    };
+    if !digest.starts_with(digest_prefix) {
+        return Ok(SpillRead::Missing);
+    }
+    if owner != session_id.to_string() {
+        return Ok(SpillRead::ForeignSession);
+    }
+    let Some(content) = content else {
+        return Ok(SpillRead::Evicted);
+    };
+    Ok(SpillRead::Found {
+        tool,
+        text: String::from_utf8_lossy(&content).into_owned(),
+        omitted_from_line: usize::try_from(omitted_from_line).unwrap_or(0),
+    })
 }
 
 /// Upserts one file-state entry, evicting the least-recently recorded paths
@@ -6986,6 +7120,7 @@ fn delete_idle_session(
     // ends with that parent because its run rows are deleted below.
     for statement in [
         "UPDATE sessions SET parent_id = NULL, owner_run_id = NULL WHERE parent_id = ?1",
+        "DELETE FROM tool_spills WHERE session_id = ?1",
         "DELETE FROM tool_calls WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?1)",
         "DELETE FROM model_turns WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?1)",
         "DELETE FROM messages WHERE session_id = ?1",
@@ -11094,6 +11229,7 @@ mod tests {
             "session_grants",
             "session_files",
             "session_compactions",
+            "tool_spills",
         ] {
             let count: u32 = connection
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -11309,7 +11445,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         assert!(
             !connection
@@ -11436,7 +11572,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         assert!(has_column(&connection, "tool_calls", "display_json").unwrap());
         let (turn_ordinal, output, state) = connection
@@ -11504,7 +11640,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         let (display_json, result) = connection
             .query_row(
@@ -11563,7 +11699,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         assert!(has_column(&connection, "runs", "kind").unwrap());
         assert_eq!(
@@ -11628,7 +11764,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         assert!(has_column(&connection, "sessions", "context_tokens").unwrap());
         assert!(has_column(&connection, "sessions", "owner_run_id").unwrap());
@@ -11716,7 +11852,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         assert!(has_column(&connection, "sessions", "owner_run_id").unwrap());
         assert_eq!(
@@ -11772,7 +11908,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         assert!(has_column(&connection, "runs", "prompt_identity_json").unwrap());
         assert_eq!(
@@ -11816,7 +11952,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         for column in [
             "model_json",
@@ -11883,7 +12019,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         assert!(has_column(&connection, "message_chunks", "chunk_ordinal").unwrap());
         assert!(has_column(&connection, "message_chunks", "text").unwrap());
@@ -11957,7 +12093,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         let command_id_not_null: bool = connection
             .query_row(
@@ -11996,7 +12132,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         assert!(has_column(&connection, "message_chunks", "text").unwrap());
         assert!(has_column(&connection, "runs", "context_base_bytes").unwrap());
@@ -12066,7 +12202,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         assert!(has_column(&connection, "runs", "resolved_model_json").unwrap());
         assert_eq!(
@@ -12158,7 +12294,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         let preparing_shape: (String, bool, Option<String>) = connection
             .query_row(
@@ -12281,7 +12417,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         let occupancy_shape: (String, bool, Option<String>) = connection
             .query_row(
@@ -12387,7 +12523,7 @@ mod tests {
                         |row| row.get::<_, String>(0),
                     )
                     .unwrap(),
-                "27"
+                "28"
             );
         }
     }
@@ -12508,7 +12644,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         // A historical child keeps its parent run but has no recorded call:
         // the summary says so explicitly instead of inventing one.
@@ -12590,7 +12726,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         assert_eq!(
             connection
@@ -12716,7 +12852,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         // A historical call has no recorded effect: assembly falls back to
         // the name rather than guessing a class for it.
@@ -12758,7 +12894,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         let (contract, final_output): (Option<String>, Option<String>) = connection
             .query_row(
@@ -12769,6 +12905,292 @@ mod tests {
             .unwrap();
         assert_eq!(contract, None);
         assert_eq!(final_output, None);
+    }
+
+    #[test]
+    fn version_twenty_eight_migration_adds_the_spill_table_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let (connection, _) = open_database(&path).unwrap();
+        connection
+            .execute_batch(
+                "UPDATE metadata SET value = '27' WHERE key = 'schema_version';
+                 DROP TABLE tool_spills;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let (connection, _) = open_database(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "28"
+        );
+        let rows: u32 = connection
+            .query_row("SELECT COUNT(*) FROM tool_spills", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    /// Drives one `read_file` call through the store with a spill attached
+    /// and returns the store, the session, the call id, and the digest.
+    async fn store_with_one_spill(
+        directory: &std::path::Path,
+        text: &str,
+    ) -> (Store, SessionId, ToolCallId, String) {
+        let store = Store::open(directory.join("sessions.sqlite3"))
+            .await
+            .unwrap();
+        let resolved = store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::ResolveWorkspace {
+                    path: directory.to_str().unwrap().to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.receipt.outcome else {
+            panic!("unexpected receipt")
+        };
+        let created = store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::CreateSession {
+                    workspace_id,
+                    parent_id: None,
+                    model: ModelSelection {
+                        model: Some("test/model".to_owned()),
+                        max_output_tokens: Some(256),
+                        organization: None,
+                    },
+                    approval_mode: ApprovalMode::default(),
+                    profile: AgentProfileId::default(),
+                    correlation: Correlation::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::SessionCreated { session_id } = created.receipt.outcome else {
+            panic!("unexpected receipt")
+        };
+        let (tool_call_id, digest) = spill_one_call(&store, session_id, text, "first").await;
+        (store, session_id, tool_call_id, digest)
+    }
+
+    /// Submits a prompt, claims the run, records one `read_file` call whose
+    /// result cites a spill of `text`, and finishes the run.
+    async fn spill_one_call(
+        store: &Store,
+        session_id: SessionId,
+        text: &str,
+        prompt: &str,
+    ) -> (ToolCallId, String) {
+        store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::text(prompt.to_owned())],
+                    limits: qq_protocol::RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let claimed = store.claim_next_run(false).await.unwrap().unwrap();
+        let tool_call_id = ToolCallId::generate().unwrap();
+        let call = RuntimeToolCall {
+            id: tool_call_id,
+            turn_ordinal: 1,
+            call_ordinal: 1,
+            provider_call_id: "call_0".to_owned(),
+            name: "read_file".to_owned(),
+            effect: crate::catalog::EffectClass::ReadOnly,
+            arguments: r#"{"path":"big.txt"}"#.to_owned(),
+            rejection: None,
+        };
+        store
+            .persist_model_turn(
+                &claimed,
+                ModelTurnCommit {
+                    turn_ordinal: 1,
+                    message: Message::new(
+                        Role::Assistant,
+                        vec![ContentBlock::ToolCall {
+                            id: call.provider_call_id.clone(),
+                            name: call.name.clone(),
+                            arguments: serde_json::from_str(&call.arguments).unwrap(),
+                        }],
+                    ),
+                    calls: vec![call],
+                    turn_message: None,
+                    context_tokens: None,
+                    occupancy_basis: None,
+                    usage: None,
+                    estimated_cost_usd_nanos: None,
+                    accounting: None,
+                    truncated: false,
+                },
+            )
+            .await
+            .unwrap();
+        store.start_tool_call(&claimed, tool_call_id).await.unwrap();
+        let digest = crate::workspace::content_hash(text.as_bytes());
+        let handle = format!(
+            "t:read_file:{}:{}",
+            &tool_call_id.to_string()[..8],
+            &digest[..8]
+        );
+        store
+            .finish_tool_call(
+                &claimed,
+                tool_call_id,
+                format!("head\n…[qq: 9 bytes / 1 lines omitted; full output {handle}; read_tool_result offset=2]…\ntail\n"),
+                false,
+                None,
+                None,
+                Some(crate::tools::SpillRecord {
+                    text: text.to_owned(),
+                    digest: digest.clone(),
+                    omitted_from_line: 2,
+                }),
+            )
+            .await
+            .unwrap();
+        store
+            .finish_run(
+                &claimed,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        (tool_call_id, digest)
+    }
+
+    #[tokio::test]
+    async fn spills_commit_with_their_result_and_read_back_exactly_within_the_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let text = "AWS_KEY=AKIAIOSFODNN7EXAMPLE\nline 2\nline 3\n";
+        let (store, session_id, tool_call_id, digest) =
+            store_with_one_spill(directory.path(), text).await;
+        let call = tool_call_id.to_string();
+
+        // Same transaction: the result row and the spill row exist together
+        // and the persisted result cites the handle.
+        let connection = Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+        let (result, spilled, bytes): (String, u32, u64) = connection
+            .query_row(
+                "SELECT c.result,
+                        (SELECT COUNT(*) FROM tool_spills s WHERE s.tool_call_id = c.id),
+                        (SELECT content_bytes FROM tool_spills s WHERE s.tool_call_id = c.id)
+                 FROM tool_calls c WHERE c.id = ?1",
+                [&call],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(spilled, 1);
+        assert_eq!(bytes, text.len() as u64);
+        assert!(result.contains(&format!("t:read_file:{}:{}", &call[..8], &digest[..8])));
+        drop(connection);
+
+        // Exact, unmasked bytes come back for the owning session.
+        let found = store
+            .read_tool_spill(session_id, call[..8].to_owned(), digest[..8].to_owned())
+            .await
+            .unwrap();
+        assert_eq!(
+            found,
+            crate::runtime::SpillRead::Found {
+                tool: "read_file".to_owned(),
+                text: text.to_owned(),
+                omitted_from_line: 2,
+            }
+        );
+        // A digest that disagrees is not this output.
+        assert_eq!(
+            store
+                .read_tool_spill(session_id, call[..8].to_owned(), "00000000".to_owned())
+                .await
+                .unwrap(),
+            crate::runtime::SpillRead::Missing
+        );
+        assert_eq!(
+            store
+                .read_tool_spill(session_id, "ffffffff".to_owned(), digest[..8].to_owned())
+                .await
+                .unwrap(),
+            crate::runtime::SpillRead::Missing
+        );
+        // Another session holding the handle reads nothing.
+        let other = SessionId::generate().unwrap();
+        assert_eq!(
+            store
+                .read_tool_spill(other, call[..8].to_owned(), digest[..8].to_owned())
+                .await
+                .unwrap(),
+            crate::runtime::SpillRead::ForeignSession
+        );
+    }
+
+    #[tokio::test]
+    async fn spills_past_the_session_cap_evict_the_oldest_finished_content() {
+        let directory = tempfile::tempdir().unwrap();
+        // Three spills of 30 MiB against a 64 MiB cap: the third evicts the
+        // first; its row and handle stay, its content does not.
+        let big = "y".repeat(30 * 1024 * 1024);
+        let (store, session_id, first_call, first_digest) =
+            store_with_one_spill(directory.path(), &big).await;
+        let mut second = big.clone();
+        second.push('2');
+        let (second_call, second_digest) =
+            spill_one_call(&store, session_id, &second, "second").await;
+        let mut third = big.clone();
+        third.push('3');
+        let (third_call, third_digest) = spill_one_call(&store, session_id, &third, "third").await;
+
+        let prefix = |id: ToolCallId| id.to_string()[..8].to_owned();
+        assert_eq!(
+            store
+                .read_tool_spill(session_id, prefix(first_call), first_digest[..8].to_owned())
+                .await
+                .unwrap(),
+            crate::runtime::SpillRead::Evicted
+        );
+        for (call, digest, text) in [
+            (second_call, second_digest, second),
+            (third_call, third_digest, third),
+        ] {
+            match store
+                .read_tool_spill(session_id, prefix(call), digest[..8].to_owned())
+                .await
+                .unwrap()
+            {
+                crate::runtime::SpillRead::Found { text: stored, .. } => assert_eq!(stored, text),
+                other => panic!("expected the newer spill to survive: {other:?}"),
+            }
+        }
+        let connection = Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+        let held: u64 = connection
+            .query_row(
+                "SELECT COALESCE(SUM(content_bytes), 0) FROM tool_spills WHERE content IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(held <= MAX_SESSION_SPILL_BYTES, "{held}");
+        let rows: u32 = connection
+            .query_row("SELECT COUNT(*) FROM tool_spills", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 3, "evicted rows keep their handle");
     }
 
     /// D6: activity is a column written with its event, and the summary reads
@@ -12896,7 +13318,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         let message = load_message(&connection, message_id).unwrap();
         assert!(!message.truncated);
@@ -12983,7 +13405,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         let shape: (String, bool, Option<String>) = connection
             .query_row(
@@ -13065,7 +13487,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
     }
 
@@ -16501,6 +16923,15 @@ mod tests {
         /// Calls `search_history` with the query on the first turn, then
         /// streams the text.
         SearchHistoryThenText(String, String),
+        /// Runs `shell` with the command on the first turn; on the next turn
+        /// calls `read_tool_result` with the `t:` handle found in that
+        /// result's marker and the given JSON arguments, then streams the
+        /// text. The handle is discovered the way a model would.
+        ShellThenRecall {
+            command: String,
+            recall: serde_json::Value,
+            text: String,
+        },
         /// Fails the model stream with a transport error.
         Fail,
         /// Fails the model stream with a context-window overflow.
@@ -16578,6 +17009,17 @@ mod tests {
                     .iter()
                     .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
             });
+            // Every tool result so far, oldest first, for scripts that
+            // discover a handle the way a model would.
+            let prior_results: Vec<String> = request
+                .messages()
+                .iter()
+                .flat_map(|message| message.content().iter())
+                .filter_map(|block| match block {
+                    ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+                    _ => None,
+                })
+                .collect();
             self.requests.lock().unwrap().push(request);
             match &self.script {
                 AutoCompactScript::Text(text) => Box::pin(stream::iter([
@@ -16628,6 +17070,57 @@ mod tests {
                             }),
                             Ok(qq_provider::ProviderEvent::Completed { usage: None }),
                         ]))
+                    }
+                }
+                AutoCompactScript::ShellThenRecall {
+                    command,
+                    recall,
+                    text,
+                } => {
+                    let results = &prior_results;
+                    let handle = results.iter().find_map(|content| {
+                        let start = content.find("full output t:")?;
+                        let rest = &content[start + "full output ".len()..];
+                        let end = rest.find([';', ']'])?;
+                        Some(rest[..end].to_owned())
+                    });
+                    match (results.len(), handle) {
+                        (0, _) => Box::pin(stream::iter([
+                            Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                                id: "call_shell".to_owned(),
+                                name: "shell".to_owned(),
+                            }),
+                            Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                                id: "call_shell".to_owned(),
+                                json: serde_json::json!({ "command": command }).to_string(),
+                            }),
+                            Ok(qq_provider::ProviderEvent::ToolCallCompleted {
+                                id: "call_shell".to_owned(),
+                            }),
+                            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                        ])),
+                        (1, Some(handle)) => {
+                            let mut arguments = recall.clone();
+                            arguments["handle"] = serde_json::Value::String(handle);
+                            Box::pin(stream::iter([
+                                Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                                    id: "call_recall".to_owned(),
+                                    name: "read_tool_result".to_owned(),
+                                }),
+                                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                                    id: "call_recall".to_owned(),
+                                    json: arguments.to_string(),
+                                }),
+                                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
+                                    id: "call_recall".to_owned(),
+                                }),
+                                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                            ]))
+                        }
+                        _ => Box::pin(stream::iter([
+                            Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                            Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                        ])),
                     }
                 }
                 AutoCompactScript::Fail => Box::pin(stream::iter([Err(
@@ -19392,6 +19885,7 @@ mod tests {
                     false,
                     None,
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -19594,6 +20088,7 @@ mod tests {
                 completed_call_id,
                 "persisted result".to_owned(),
                 false,
+                None,
                 None,
                 None,
             )
@@ -21140,6 +21635,7 @@ mod tests {
                 tool_call_id,
                 "noted\n".to_owned(),
                 false,
+                None,
                 None,
                 None,
             )
@@ -33668,6 +34164,75 @@ mod tests {
             rollback(&harness).await,
             Err(SessionRuntimeError::NoCompactionToRollBack)
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cut_result_names_a_handle_the_model_can_page_and_search_exactly() {
+        // 1 500 lines of ~60 bytes (~90 KiB) of shell output: over the 16
+        // KiB shell bound, under the 128 KiB capture cap, so the inline
+        // result is head+tail with a marker and the complete capture spills.
+        // Line 1 000 carries a secret the inline preview masks.
+        let command = "for n in $(seq 1 1500); do if [ $n -eq 1000 ]; then echo \
+             'TOKEN=AKIAIOSFODNN7EXAMPLE and the rest of line one thousand'; \
+             else printf 'line %5d zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\\n' $n; fi; done";
+        let mut harness = auto_compact_harness(vec![AutoCompactScript::ShellThenRecall {
+            command: command.to_owned(),
+            recall: serde_json::json!({ "offset": 1000, "limit": 3 }),
+            text: "recalled".to_owned(),
+        }])
+        .await;
+
+        let run = queue_prompt(&harness.runtime, harness.session_id, "go".to_owned()).await;
+        let observed = collect_until(&mut harness.events, finished_for(run)).await;
+        let finished: Vec<&ToolCallSnapshot> = observed
+            .iter()
+            .filter_map(|event| match &event.event {
+                SessionEvent::ToolCallFinished { tool_call } => Some(tool_call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finished.len(), 2, "{finished:?}");
+        let shell = finished[0].result.as_deref().unwrap();
+        assert_eq!(finished[0].name, "shell");
+        assert!(!finished[0].is_error, "{shell}");
+        let marker = shell
+            .lines()
+            .find(|line| line.starts_with("…[qq: "))
+            .expect("the cut result carries a marker");
+        assert!(marker.contains("; full output t:shell:"), "{marker}");
+        assert!(marker.contains("; read_tool_result offset="), "{marker}");
+        assert!(!marker.contains("not stored"), "{marker}");
+        assert!(!shell.contains("AKIA"), "the inline preview is masked");
+        // The handle's call prefix is this call's id.
+        let call8 = &finished[0].id.to_string()[..8];
+        assert!(marker.contains(&format!("t:shell:{call8}:")), "{marker}");
+
+        let recall = finished[1];
+        assert_eq!(recall.name, "read_tool_result");
+        assert!(!recall.is_error, "{:?}", recall.result);
+        let page = recall.result.as_deref().unwrap();
+        let header = page.lines().next().unwrap();
+        assert!(header.starts_with("read_tool_result t:shell:"), "{header}");
+        // The stored output is the complete shell result: its own header
+        // line first, so stored line N+1 is output line N.
+        assert!(header.ends_with(" L1000-1002/1501 next=1003"), "{header}");
+        assert!(
+            page.contains("\n1001\tTOKEN=AKIAIOSFODNN7EXAMPLE and the rest"),
+            "explicit reads return exact, unmasked bytes: {page}"
+        );
+        {
+            let requests = harness.requests.lock().unwrap();
+            assert!(
+                requests
+                    .last()
+                    .unwrap()
+                    .tools()
+                    .iter()
+                    .any(|tool| tool.name() == "read_tool_result"),
+                "session runs declare read_tool_result"
+            );
+        }
     }
 
     #[tokio::test]

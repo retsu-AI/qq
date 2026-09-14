@@ -1221,6 +1221,9 @@ impl Store {
         .await
     }
 
+    /// Persists a tool result and, when the runtime kept the complete output
+    /// its marker cites, that spill in the same transaction.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn finish_tool_call(
         &self,
         claimed: &ClaimedRun,
@@ -1229,6 +1232,7 @@ impl Store {
         is_error: bool,
         file_state: Option<FileStateUpdate>,
         display: Option<ToolCallDisplay>,
+        spill: Option<crate::tools::SpillRecord>,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
@@ -1242,7 +1246,23 @@ impl Store {
                 is_error,
                 file_state,
                 display,
+                spill,
             )
+        })
+        .await
+    }
+
+    /// One stored complete output for `read_tool_result`, scoped to the
+    /// calling session. On the control lane so a saturated output queue
+    /// cannot starve a running tool call.
+    pub(super) async fn read_tool_spill(
+        &self,
+        session_id: SessionId,
+        tool_call_prefix: String,
+        digest_prefix: String,
+    ) -> Result<crate::runtime::SpillRead, SessionRuntimeError> {
+        self.call(Priority::AwaitControl, move |connection| {
+            read_tool_spill(connection, session_id, &tool_call_prefix, &digest_prefix)
         })
         .await
     }

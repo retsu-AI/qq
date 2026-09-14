@@ -228,15 +228,16 @@ with a hard cap, and control-dense content escapes up to 6:1.
 and inserts exactly one marker for what fell between:
 
 ```text
-…[qq: 41,207 bytes / 1,142 lines omitted; not stored]…
+…[qq: 41,207 bytes / 1,142 lines omitted; full output t:shell:9f3a2c1d:b7e0d4a2; read_tool_result offset=213]…
 ```
 
-The marker names the counts so the model knows what it did not see;
-`not stored` says so honestly until the spill store (T4) makes cut text
-reachable by handle. Every marker qq inserts into model text — omission,
-scan caps, unlisted directory entries — starts with `…[qq: `, so clients
-detect markers with one prefix check. Bounding is deterministic: the same
-text and bounds produce the same bytes.
+The marker names the counts so the model knows what it did not see and,
+in a session run, the handle under which the complete output is stored
+and the line to continue from (§ Spilled Outputs). A direct run has no
+store; its marker ends `; not stored]…`. Every marker qq inserts into
+model text — omission, scan caps, unlisted directory entries — starts with
+`…[qq: `, so clients detect markers with one prefix check. Bounding is
+deterministic: the same text and bounds produce the same bytes.
 
 **Headers.** A result whose tool follows the convention starts with one line
 `<tool> <subject> (<key>=<value>)*` — keys lowercase ASCII, values without
@@ -257,8 +258,54 @@ dependency); clean text is returned without allocation.
 **Per-turn budget.** The sum of `model_text` across one turn's tool calls is
 capped at 96 KiB (`MAX_TURN_TOOL_OUTPUT_BYTES`). Results enter context in
 call order; a result that would overshoot is re-bounded to the remainder
-(never below 4 KiB) and its marker adds `turn budget reached`. The persisted
-row keeps the call's own bounded text; only what the model sees shrinks.
+(never below 4 KiB) and its marker adds `turn budget reached` — and the
+same handle, when the call spilled. The persisted row keeps the call's own
+bounded text; only what the model sees shrinks.
+
+### Spilled Outputs
+
+When bounding cuts a result in a session run, the complete text is not
+lost: it travels with the result (`ToolOutput.spill`) and the store writes
+it to `tool_spills` **in the same transaction** as the `tool_calls` row,
+so replay and crash recovery see both or neither and never re-execute the
+call (ADR-0019). The marker names the row by handle:
+
+```text
+t:<tool>:<call8>:<digest8>
+```
+
+`call8` is the first eight hex digits of the tool-call id, `digest8` the
+first eight of the SHA-256 of the stored bytes. The runtime finalizes the
+marker before yielding the result, and only when a session store will
+receive the spill; the digest pins the bytes so a handle from another
+store or an earlier run cannot alias a different output.
+
+**`read_tool_result`** — "Page or search within a stored tool output by
+handle." `offset`/`limit` page it line-numbered like `read_file`
+(`read_tool_result <handle> L<a>-<b>/<total> [next=<n>]`); `query`
+(optionally `regex`) returns matching lines as `L<n>: text`
+(`… query="…" matches=<shown>/<total> lines=<n> [next=]`). A page stops
+on a whole line at 32 KiB and names the next offset. Explicit reads
+return **exact, unmasked bytes**: the model asked for a specific range of
+something it already produced, and masking there would make `.env`
+debugging impossible; the inline preview stays masked so secrets do not
+reach context by accident. The tool is declared only in session runs,
+where a `SpillReader` is installed; it is `ReadOnly`, concurrent, and
+prunable. Failures: `handle_invalid`, `spill_missing` (no row, or the
+digest disagrees), `spill_evicted`, `handle_foreign_session`,
+`invalid_regex`, `invalid_offset`, `invalid_limit`, `range_out_of_bounds`.
+
+**Bounds.** 8 MiB per item (`MAX_SPILL_ITEM_BYTES`; larger outputs are
+not spilled and the marker says `not stored`), 64 MiB per session
+(`MAX_SESSION_SPILL_BYTES`). Past the session cap the oldest rows of runs
+that are no longer running lose their `content` but keep their row and
+handle, so a later read says `spill_evicted` — the cap did its job —
+rather than `spill_missing`. Handles are session-scoped: a child session
+holding a parent's handle reads `handle_foreign_session`, never data.
+Spills delete with the session; `qq sessions prune` touches only sessions
+with no runs, which have none. Shell captures are cut at 128 KiB before
+they reach the boundary, so a shell spill is at most that until T6/T7
+raise the capture cap.
 
 ### Context Budget
 

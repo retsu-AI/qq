@@ -277,6 +277,7 @@ fn tool_verb(name: &str) -> &str {
         "read_file" => "read",
         "tree" | "list_dir" => "list",
         "search" => "search",
+        "read_tool_result" => "recall",
         "edit_file" => "edit",
         "write_file" => "write",
         "shell" => "run",

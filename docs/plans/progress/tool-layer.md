@@ -8,8 +8,8 @@ newest last.
 | --- | --- | --- | --- | --- |
 | T1 | Cross-cutting primitives: `Bounds`, `bound_text`, `ToolOutput` split, header convention, masking, per-turn budget | Shipped (#31, `b0a18be`) | `feat/tool-layer-t1-output-bounds` | Evidence `target/qq-perf/t1-2026-09-11/` |
 | T2 | `search` v2 + `tree` (+ `list_dir` alias) | Shipped (#32, `8bb4050`) | `feat/tool-layer-t2-search-tree` | Evidence `target/qq-perf/t2-2026-09-12/` |
-| T3 | `read_file` v2 (gutter, ranges, outline, info, `if_changed_since`) | In review | `feat/tool-layer-t3-read-file` | Started 2026-09-14; evidence `target/qq-perf/t3-2026-09-14/` |
-| T4 | Spill store + `read_tool_result` | Planned | | Touches `sessions/store`; second-agent review required |
+| T3 | `read_file` v2 (gutter, ranges, outline, info, `if_changed_since`) | Shipped (#35, `eecc76b`) | `feat/tool-layer-t3-read-file` | Evidence `target/qq-perf/t3-2026-09-14/` |
+| T4 | Spill store + `read_tool_result` | In review | `feat/tool-layer-t4-spill-store` | Started 2026-09-14; evidence `target/qq-perf/t4-2026-09-14/`. Touches `sessions/store`; second-agent review required. ADR-0019 written |
 | T5 | `edit_file` v2 + `write_file` flags | Planned | | |
 | T6 | Shell classifier + `Forbidden` decision | Planned | | Root request: promote `tree-sitter{,-bash}` to workspace deps; ADR reserved |
 | T7 | `exec`, env allowlist, prefer-built-in nudge | Planned | | |
@@ -73,3 +73,20 @@ Deviations: the model-facing default is 32 KiB as planned but the ceiling stays 
 Docs: `docs/design/tools.md` § Built-In Tools, § Reading Files (new).
 Open: T5's `edit_file` can use `h:` from the header as an optional precondition; T11 replaces the image hint; T12's `@` ranges reuse `parse_ranges`.
 Evidence: `target/qq-perf/t3-2026-09-14/` (untracked).
+
+### 2026-09-14 — T3 shipped; T4 in progress
+
+T3 merged as #35 (`eecc76b`). T4 on `feat/tool-layer-t4-spill-store`
+(worktree `/tmp/opencode/qq-t4`). Baselines: `tool_dispatch` 44.5–46.7
+µs/iter pinned (6 runs); `store_output_batch` 88 ms/batch (the store
+fairness gate the slice must leave unchanged). Schema 27 → 28 planned
+(`tool_spills` table). ADR-0019 to be written in the PR.
+
+#### T4 receipt — 2026-09-14
+Commit(s): `2fade34` spill store + `read_tool_result` + marker finalization + TUI/prompt wiring.
+Tests: 8 added (`finalize_spill_marker` handle/offset/idempotence/content-line skip; turn-budget marker points at the spill; `SpillHandle::parse` strictness; page/next-offset/out-of-bounds; query + regex + resume; whole-line stop at the byte budget; store: same-transaction commit + exact unmasked read + digest mismatch + foreign session; 3×30 MiB eviction keeps rows, nulls oldest finished content; schema 28 migration; session delete empties `tool_spills`) and 1 end-to-end session test (`a_cut_result_names_a_handle_the_model_can_page_and_search_exactly`: a 90 KiB shell capture is cut to 16 KiB, the marker names `t:shell:<call8>:<digest8>`, the next turn pages line 1 000 back exact and unmasked while the inline preview was masked). 22 migration tests bumped to `"28"`. Workspace green: 1363 passed.
+Gates: `tool_dispatch` A/B pinned core 10 pairs: base 45.2 → cand 44.7 µs median (the spill clone happens only when `text.len()` exceeds the bound, so the common path pays a length compare). `store_output_batch` 88 → 87 ms/batch (fairness gate unchanged; spill writes ride the existing `finish_tool_call` transaction).
+Deviations: the marker is written provisionally as `not stored` by `bound_text` and finalized by the runtime (`cite_spill`) before the yield, because the handle's digest is of the complete text and `bound_text` has no store knowledge — so direct runs keep the honest `not stored`. `read_tool_result`'s `query` mode has no `context` argument (the plan says `context 0`; it is fixed at 0). `MARKER_RESERVE_BYTES` 160 → 224 to fit the handle and offset. The 8 MiB item cap is enforced at the boundary (larger outputs are not spilled) rather than by the store. `search_history` does not search spills.
+Docs: `docs/design/tools.md` § Output Bounding (marker), § Spilled Outputs (new); ADR-0019; `docs/adr/README.md`; `root.md` ADR row.
+Open: T6/T7 may raise the 128 KiB shell capture cap now the bytes have a home; `search_history` over spills; client affordance to open a handle.
+Evidence: `target/qq-perf/t4-2026-09-14/` (untracked).

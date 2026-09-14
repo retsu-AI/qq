@@ -995,6 +995,7 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
                     | "shell"
                     | "spawn_agent"
                     | "search_history"
+                    | "read_tool_result"
                     | "select_tools"
                     | "load_skill"
             ) && !name.starts_with("mcp__")

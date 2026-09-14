@@ -41,7 +41,7 @@ use crate::{
         EffectClass, HostContribution, StaticTool, ToolCatalog, ToolHost, select_tools_spec,
     },
     hosts::{ExternalToolHost, HostCatalog},
-    runtime::{AuditPolicy, search_history_spec},
+    runtime::{AuditPolicy, read_tool_result_spec, search_history_spec},
     tools,
     workspace::{
         SkillIndex, Workspace, WorkspaceInstructionError, WorkspaceInstructions,
@@ -542,6 +542,11 @@ impl CompiledAgentPlan {
         static_tools.push(StaticTool::new(
             search_history_spec(),
             ToolHost::SearchHistory,
+            EffectClass::ReadOnly,
+        ));
+        static_tools.push(StaticTool::new(
+            read_tool_result_spec(),
+            ToolHost::ReadToolResult,
             EffectClass::ReadOnly,
         ));
         static_tools.push(StaticTool::new(
