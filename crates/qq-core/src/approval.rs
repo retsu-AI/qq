@@ -151,7 +151,7 @@ pub(crate) fn classify(effect: EffectClass, name: &str, arguments: &str) -> Tool
         EffectClass::ReadOnly if name == crate::tools::SPAWN_AGENT_TOOL => spawn_class(arguments),
         EffectClass::ReadOnly => ToolClass::ReadOnly,
         EffectClass::Mutating => ToolClass::Mutating,
-        EffectClass::Shell => shell_class(arguments),
+        EffectClass::Shell => shell_class(name, arguments),
         EffectClass::External => ToolClass::External,
     }
 }
@@ -276,13 +276,38 @@ fn spawn_class(arguments: &str) -> ToolClass {
     }
 }
 
-fn shell_class(arguments: &str) -> ToolClass {
+/// The shell class for `shell` (a command string) or `exec` (an argv). An
+/// `exec` call is rendered as the equivalent command line — each argument
+/// single-quoted when it holds shell metacharacters — so the classifier,
+/// prefix grants, and the approval preview see one shape for both tools.
+fn shell_class(name: &str, arguments: &str) -> ToolClass {
     #[derive(Deserialize)]
     struct ShellArguments {
         #[serde(default)]
         command: String,
         #[serde(default)]
         cwd: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct ExecArguments {
+        #[serde(default)]
+        program: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+    }
+    if name == "exec" {
+        return match serde_json::from_str::<ExecArguments>(arguments) {
+            Ok(arguments) => ToolClass::Shell {
+                command: exec_command_line(&arguments.program, &arguments.args),
+                cwd: arguments.cwd,
+            },
+            Err(_) => ToolClass::Shell {
+                command: String::new(),
+                cwd: None,
+            },
+        };
     }
     match serde_json::from_str::<ShellArguments>(arguments) {
         Ok(arguments) => ToolClass::Shell {
@@ -294,6 +319,36 @@ fn shell_class(arguments: &str) -> ToolClass {
             cwd: None,
         },
     }
+}
+
+/// `program arg…` with each word single-quoted when it contains anything
+/// the shell would interpret, so the rendering parses back to the same argv.
+pub(crate) fn exec_command_line(program: &str, args: &[String]) -> String {
+    fn quote(word: &str, out: &mut String) {
+        let plain = !word.is_empty()
+            && word.bytes().all(|b| {
+                b.is_ascii_alphanumeric()
+                    || matches!(
+                        b,
+                        b'-' | b'_' | b'.' | b'/' | b'=' | b':' | b'@' | b'%' | b'+' | b','
+                    )
+            });
+        if plain {
+            out.push_str(word);
+        } else {
+            out.push('\'');
+            out.push_str(&word.replace('\'', "'\\''"));
+            out.push('\'');
+        }
+    }
+    let mut out =
+        String::with_capacity(program.len() + args.iter().map(|a| a.len() + 3).sum::<usize>());
+    quote(program, &mut out);
+    for arg in args {
+        out.push(' ');
+        quote(arg, &mut out);
+    }
+    out
 }
 
 /// Whether a shell command is interrogative: a version-control or filesystem
@@ -592,6 +647,64 @@ mod tests {
                 "full mode must never prompt for {class:?}"
             );
         }
+    }
+
+    #[test]
+    fn exec_calls_classify_as_the_equivalent_command_line() {
+        let class = classify(
+            EffectClass::Shell,
+            "exec",
+            r#"{"program":"cargo","args":["test","-p","qq-core","--","--nocapture"],"cwd":"crates"}"#,
+        );
+        assert_eq!(
+            class,
+            ToolClass::Shell {
+                command: "cargo test -p qq-core -- --nocapture".to_owned(),
+                cwd: Some("crates".to_owned()),
+            }
+        );
+        // A grant on the prefix covers it; auto allows it.
+        assert_eq!(
+            evaluate(
+                ApprovalMode::Ask,
+                "exec",
+                &class,
+                &grants(&[], &["cargo test"])
+            ),
+            PolicyDecision::Execute
+        );
+        assert_eq!(
+            evaluate(ApprovalMode::Auto, "exec", &class, &grants(&[], &[])),
+            PolicyDecision::Execute
+        );
+        // Arguments with metacharacters are quoted so the classifier reads
+        // them as literal words: no pipe, no expansion, no forbidden shape.
+        let quoted = classify(
+            EffectClass::Shell,
+            "exec",
+            r#"{"program":"echo","args":["rm -rf /","$HOME","a b","it's"]}"#,
+        );
+        assert_eq!(
+            quoted,
+            ToolClass::Shell {
+                command: r#"echo 'rm -rf /' '$HOME' 'a b' 'it'\''s'"#.to_owned(),
+                cwd: None,
+            }
+        );
+        assert_eq!(
+            evaluate(ApprovalMode::Auto, "exec", &quoted, &grants(&[], &[])),
+            PolicyDecision::Execute
+        );
+        // The program itself is judged: sudo through exec is still sudo.
+        let sudo = classify(
+            EffectClass::Shell,
+            "exec",
+            r#"{"program":"sudo","args":["ls"]}"#,
+        );
+        assert!(matches!(
+            evaluate(ApprovalMode::Full, "exec", &sudo, &grants(&[], &[])),
+            PolicyDecision::Forbidden { .. }
+        ));
     }
 
     #[test]

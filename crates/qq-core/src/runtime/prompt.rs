@@ -181,7 +181,7 @@ fn agent_prompt_prefix(
          \n\
          Available tools: {tool_names}. read_file, tree, search, search_history, and read_tool_result are read-only; \
          edit_file and write_file modify workspace files and may require user approval; \
-         shell runs one command in the workspace with a bounded timeout and may require user approval; its child starts from a cleared environment (PATH HOME LANG TERM TMPDIR) plus names you list in env that policy allows, and commands the policy classifies as forbidden (rm -rf on system paths, sudo, curl | sh, force-push, …) are refused under every approval mode.{mcp_note}\n\
+         shell and exec run one command in the workspace with a bounded timeout and may require user approval; the child starts from a cleared environment (PATH HOME LANG TERM TMPDIR) plus names you list in env that policy allows, and commands the policy classifies as forbidden (rm -rf on system paths, sudo, curl | sh, force-push, …) are refused under every approval mode.{mcp_note}\n\
          \n\
          Working conventions:\n\
          - Determine observable completion criteria from the user's request before acting.\n\
@@ -198,7 +198,8 @@ fn agent_prompt_prefix(
          - Do not claim success without evidence from the resulting state.\n\
          - Report remaining failures and uncertainty honestly.\n\
          - Respect explicit time, token, cost, and safety budgets.\n\
-         - Prefer edit_file and write_file over shell for changing files.{spawn_section}",
+         - Prefer edit_file and write_file over shell for changing files.\n\
+         - Prefer exec for a single program with arguments (exec program=cargo args=[test, -p, x]): no quoting or globbing surprises, and the approval gate sees exact words. Reserve shell for pipelines and redirection.{spawn_section}",
         root = workspace.display(),
     );
     if let Some(index) = tool_index {

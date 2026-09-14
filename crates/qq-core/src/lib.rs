@@ -2171,13 +2171,15 @@ impl plan::CompiledAgentPlan {
                         // Strict built-in preference refuses a shell habit
                         // before execution: the benchmark arm for what shell
                         // costs. `hint` runs the command and appends a line.
-                        let strict_refusal = (call.name == "shell"
+                        let strict_refusal = (matches!(call.name.as_str(), "shell" | "exec")
                             && shell_policy.builtin_preference == runtime::BuiltinPreference::Strict)
                             .then(|| {
-                                let command = serde_json::from_str::<serde_json::Value>(&call.arguments)
-                                    .ok()
-                                    .and_then(|value| value.get("command").and_then(|c| c.as_str()).map(str::to_owned))
-                                    .unwrap_or_default();
+                                // The command text for either tool: exec's
+                                // argv rendered as the equivalent line.
+                                let command = match approval::classify(call.effect, &call.name, &call.arguments) {
+                                    approval::ToolClass::Shell { command, .. } => command,
+                                    _ => String::new(),
+                                };
                                 runtime::builtin_alternative(&command)
                             })
                             .flatten()
@@ -4149,7 +4151,7 @@ mod tests {
         );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].tools().len(), 6);
+        assert_eq!(requests[0].tools().len(), 7);
         let system = requests[0]
             .system()
             .expect("agent runs set a system prompt");
@@ -6004,7 +6006,7 @@ mod tests {
             !names.contains(&"rogue_tool"),
             "specs outside the mcp__ namespace must be discarded"
         );
-        assert_eq!(requests[0].tools().len(), 7);
+        assert_eq!(requests[0].tools().len(), 8);
         let system = requests[0].system().unwrap();
         assert!(system.contains("mcp__srv__ping"));
         assert!(system.contains("external tool hosts"));

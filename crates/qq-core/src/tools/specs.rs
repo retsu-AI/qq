@@ -12,7 +12,10 @@ use super::{
         MAX_CONTEXT, MAX_CURSOR_BYTES, MAX_GLOB_BYTES, MAX_GLOBS, MAX_LIMIT, MAX_PER_FILE,
         MAX_QUERY_BYTES,
     },
-    shell::MAX_SHELL_TIMEOUT_SECS,
+    shell::{
+        MAX_EXEC_ARG_BYTES, MAX_EXEC_ARGS, MAX_EXEC_PROGRAM_BYTES, MAX_EXEC_STDIN_BYTES,
+        MAX_SHELL_TIMEOUT_SECS,
+    },
     tree::{MAX_DEPTH, MAX_ENTRIES},
 };
 use crate::{
@@ -25,7 +28,7 @@ use crate::{
 /// session layer rather than to a workspace execution.
 pub(crate) const SPAWN_AGENT_TOOL: &str = "spawn_agent";
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BuiltInTool {
     ReadFile,
     Tree,
@@ -33,6 +36,7 @@ pub(super) enum BuiltInTool {
     EditFile,
     WriteFile,
     Shell,
+    Exec,
     /// Hidden alias for `tree depth=1`: dispatchable, never advertised.
     ListDir,
     #[cfg(test)]
@@ -44,13 +48,14 @@ pub(super) enum BuiltInTool {
 }
 
 impl BuiltInTool {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::ReadFile,
         Self::Tree,
         Self::Search,
         Self::EditFile,
         Self::WriteFile,
         Self::Shell,
+        Self::Exec,
     ];
 
     pub(super) fn from_name(name: &str) -> Option<Self> {
@@ -62,6 +67,7 @@ impl BuiltInTool {
             "edit_file" => Some(Self::EditFile),
             "write_file" => Some(Self::WriteFile),
             "shell" => Some(Self::Shell),
+            "exec" => Some(Self::Exec),
             #[cfg(test)]
             "__test_delay" => Some(Self::TestDelay),
             #[cfg(test)]
@@ -76,7 +82,7 @@ impl BuiltInTool {
         match self {
             Self::ReadFile | Self::Tree | Self::ListDir | Self::Search => EffectClass::ReadOnly,
             Self::EditFile | Self::WriteFile => EffectClass::Mutating,
-            Self::Shell => EffectClass::Shell,
+            Self::Shell | Self::Exec => EffectClass::Shell,
             #[cfg(test)]
             Self::TestDelay => EffectClass::ReadOnly,
             #[cfg(test)]
@@ -211,6 +217,35 @@ impl BuiltInTool {
                         }
                     },
                     "required": ["command"],
+                    "additionalProperties": false
+                }),
+            ),
+            Self::Exec => ToolSpec::new(
+                "exec",
+                "Run one program with an argument list; no shell interpretation (no quoting, globbing, $, or pipes). Prefer it over shell for a single program such as `cargo test -p x` or `python -m pytest tests/x.py`; reserve shell for pipelines. Same environment, timeout, and output rules as shell.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "program": { "type": "string", "minLength": 1, "maxLength": MAX_EXEC_PROGRAM_BYTES },
+                        "args": {
+                            "type": "array",
+                            "maxItems": MAX_EXEC_ARGS,
+                            "items": { "type": "string", "maxLength": MAX_EXEC_ARG_BYTES }
+                        },
+                        "cwd": { "type": "string" },
+                        "stdin": { "type": "string", "maxLength": MAX_EXEC_STDIN_BYTES },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": MAX_SHELL_TIMEOUT_SECS
+                        },
+                        "env": {
+                            "type": "array",
+                            "maxItems": MAX_SHELL_ENV_NAMES,
+                            "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+                        }
+                    },
+                    "required": ["program"],
                     "additionalProperties": false
                 }),
             ),

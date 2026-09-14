@@ -61,6 +61,83 @@ pub(super) struct ShellArgs {
     env: Vec<String>,
 }
 
+/// `exec`: one program with an argument list and no shell between the model
+/// and the process — no quoting, globbing, `$`, or pipes, so the classifier
+/// sees exact argv. Same bounds, capture, spill, and approval path as `shell`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ExecArgs {
+    pub(super) program: String,
+    #[serde(default)]
+    pub(super) args: Vec<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    stdin: Option<String>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    env: Vec<String>,
+}
+
+pub(super) const MAX_EXEC_ARGS: usize = 64;
+pub(super) const MAX_EXEC_ARG_BYTES: usize = 4096;
+pub(super) const MAX_EXEC_PROGRAM_BYTES: usize = 256;
+pub(super) const MAX_EXEC_STDIN_BYTES: usize = 64 * 1024;
+
+/// What to start: a shell string or an exact argv. Everything after spawn
+/// is shared.
+pub(super) enum Launch<'a> {
+    Shell(&'a ShellArgs),
+    Exec(&'a ExecArgs),
+}
+
+impl Launch<'_> {
+    fn cwd(&self) -> Option<&str> {
+        match self {
+            Self::Shell(args) => args.cwd.as_deref(),
+            Self::Exec(args) => args.cwd.as_deref(),
+        }
+    }
+
+    fn timeout_seconds(&self) -> Option<u64> {
+        match self {
+            Self::Shell(args) => args.timeout_seconds,
+            Self::Exec(args) => args.timeout_seconds,
+        }
+    }
+
+    fn env(&self) -> &[String] {
+        match self {
+            Self::Shell(args) => &args.env,
+            Self::Exec(args) => &args.env,
+        }
+    }
+
+    /// The text the built-in preference judges: the shell string, or the
+    /// argv joined so `exec grep …` gets the same hint as `shell grep …`.
+    fn nudge_text(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Shell(args) => std::borrow::Cow::Borrowed(&args.command),
+            Self::Exec(args) => {
+                let mut text = args.program.clone();
+                for arg in &args.args {
+                    text.push(' ');
+                    text.push_str(arg);
+                }
+                std::borrow::Cow::Owned(text)
+            }
+        }
+    }
+
+    fn header_tool(&self) -> &'static str {
+        match self {
+            Self::Shell(_) => "shell",
+            Self::Exec(_) => "exec",
+        }
+    }
+}
+
 /// The fate of one supervised shell command.
 enum ShellOutcome {
     Exited(std::io::Result<std::process::ExitStatus>),
@@ -77,7 +154,7 @@ enum ShellOutcome {
 pub(super) async fn run_shell(
     workspace: &Workspace,
     policy: &ShellPolicy,
-    arguments: &ShellArgs,
+    launch: Launch<'_>,
     cancelled: &ToolCancellation,
     output: Option<&mpsc::Sender<String>>,
     process_pending: &mut bool,
@@ -85,15 +162,49 @@ pub(super) async fn run_shell(
     if cancelled.is_cancelled() {
         return ToolOutput::error("tool execution was cancelled");
     }
-    if arguments.command.trim().is_empty() {
-        return ToolOutput::error("command must not be empty");
+    match &launch {
+        Launch::Shell(arguments) => {
+            if arguments.command.trim().is_empty() {
+                return ToolOutput::error("command must not be empty");
+            }
+        }
+        Launch::Exec(arguments) => {
+            if arguments.program.trim().is_empty()
+                || arguments.program.len() > MAX_EXEC_PROGRAM_BYTES
+            {
+                return ToolOutput::error(format!(
+                    "invalid_program: program must be 1 to {MAX_EXEC_PROGRAM_BYTES} bytes"
+                ));
+            }
+            if arguments.args.len() > MAX_EXEC_ARGS {
+                return ToolOutput::error(format!(
+                    "invalid_args: at most {MAX_EXEC_ARGS} arguments"
+                ));
+            }
+            if let Some(long) = arguments.args.iter().find(|a| a.len() > MAX_EXEC_ARG_BYTES) {
+                return ToolOutput::error(format!(
+                    "invalid_args: an argument is {} bytes; the limit is {MAX_EXEC_ARG_BYTES}",
+                    long.len()
+                ));
+            }
+            if arguments
+                .stdin
+                .as_ref()
+                .is_some_and(|s| s.len() > MAX_EXEC_STDIN_BYTES)
+            {
+                return ToolOutput::error(format!(
+                    "invalid_stdin: stdin exceeds {MAX_EXEC_STDIN_BYTES} bytes"
+                ));
+            }
+        }
     }
-    if arguments.env.len() > MAX_SHELL_ENV_NAMES {
+    let env_names = launch.env();
+    if env_names.len() > MAX_SHELL_ENV_NAMES {
         return ToolOutput::error(format!(
             "invalid_env: at most {MAX_SHELL_ENV_NAMES} environment names per call"
         ));
     }
-    for name in &arguments.env {
+    for name in env_names {
         if !crate::runtime::valid_env_name(name) {
             return ToolOutput::error(format!("invalid_env: {name:?} is not a variable name"));
         }
@@ -108,7 +219,7 @@ pub(super) async fn run_shell(
     // (see approval); here it can only be a hint appended to the result.
     let hint = match (
         policy.builtin_preference,
-        builtin_alternative(&arguments.command),
+        builtin_alternative(&launch.nudge_text()),
     ) {
         (BuiltinPreference::Off, _) | (_, None) => None,
         (BuiltinPreference::Hint | BuiltinPreference::Strict, Some((program, builtin))) => {
@@ -117,15 +228,15 @@ pub(super) async fn run_shell(
             ))
         }
     };
-    let timeout_seconds = arguments
-        .timeout_seconds
+    let timeout_seconds = launch
+        .timeout_seconds()
         .unwrap_or(DEFAULT_SHELL_TIMEOUT_SECS);
     if timeout_seconds == 0 || timeout_seconds > MAX_SHELL_TIMEOUT_SECS {
         return ToolOutput::error(format!(
             "timeout_seconds must be between 1 and {MAX_SHELL_TIMEOUT_SECS}"
         ));
     }
-    let cwd = match &arguments.cwd {
+    let cwd = match launch.cwd() {
         None => workspace.path().to_owned(),
         Some(requested) => {
             let relative = match workspace.contained_path(requested) {
@@ -139,7 +250,18 @@ pub(super) async fn run_shell(
         }
     };
 
-    let mut command = shell_command(&arguments.command);
+    let mut command = match &launch {
+        Launch::Shell(arguments) => shell_command(&arguments.command),
+        Launch::Exec(arguments) => {
+            let mut command = tokio::process::Command::new(&arguments.program);
+            command.args(&arguments.args);
+            command
+        }
+    };
+    let stdin_text = match &launch {
+        Launch::Exec(arguments) => arguments.stdin.clone(),
+        Launch::Shell(_) => None,
+    };
     // A cleared environment: the base names, then what the call asked for
     // and policy allows. Secrets the server holds never reach a child by
     // accident.
@@ -147,7 +269,7 @@ pub(super) async fn run_shell(
     for name in BASE_ENV
         .iter()
         .copied()
-        .chain(arguments.env.iter().map(String::as_str))
+        .chain(env_names.iter().map(String::as_str))
     {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
@@ -155,7 +277,11 @@ pub(super) async fn run_shell(
     }
     command
         .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
+        .stdin(if stdin_text.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
@@ -185,6 +311,15 @@ pub(super) async fn run_shell(
             let _ = hook.entered.send(child.id().unwrap());
             assert!(!hook.panic, "injected shell task panic after process spawn");
         }
+    }
+    // Stdin is written by its own task so a program that never reads it
+    // cannot stall the capture loop; the write end closes when done.
+    if let (Some(text), Some(mut stdin)) = (stdin_text, child.stdin.take()) {
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt as _;
+            let _ = stdin.write_all(text.as_bytes()).await;
+            let _ = stdin.shutdown().await;
+        });
     }
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
@@ -244,7 +379,13 @@ pub(super) async fn run_shell(
 
     let elapsed = started.elapsed();
     match outcome {
-        ShellOutcome::Exited(Ok(status)) => shell_result(capture, status, elapsed, hint.as_deref()),
+        ShellOutcome::Exited(Ok(status)) => shell_result(
+            launch.header_tool(),
+            capture,
+            status,
+            elapsed,
+            hint.as_deref(),
+        ),
         ShellOutcome::Exited(Err(error)) => {
             ToolOutput::error(format!("could not observe the command exit: {error}"))
         }
@@ -252,7 +393,7 @@ pub(super) async fn run_shell(
             if let Err(message) = stop_shell(&mut child, &mut guard, process_pending).await {
                 return ToolOutput::error(message);
             }
-            let mut content = Header::new("shell", None)
+            let mut content = Header::new(launch.header_tool(), None)
                 .field("exit", "timeout")
                 .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
                 .field("bytes", capture.total())
@@ -350,6 +491,7 @@ fn forward_shell_chunk(output: Option<&mpsc::Sender<String>>, streamed: &mut usi
 /// header carries the verdict so a pruned stub, a head-only glance, or a
 /// truncated tail all still tell the model how the command ended.
 fn shell_result(
+    tool: &str,
     capture: BoundedCapture,
     status: std::process::ExitStatus,
     elapsed: std::time::Duration,
@@ -362,7 +504,7 @@ fn shell_result(
     };
     #[cfg(not(unix))]
     let signal: Option<i32> = None;
-    let mut header = Header::new("shell", None);
+    let mut header = Header::new(tool, None);
     header = match (status.code(), signal) {
         (Some(code), _) => header.field("exit", code),
         (None, Some(signal)) => header.field("exit", format_args!("signal:{signal}")),

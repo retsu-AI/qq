@@ -349,7 +349,11 @@ and keeps the schema for each tool in one place:
   (§ Edit Semantics); the unified diff of what changed is the UI payload.
 - `write_file` — create (parents made) or fully overwrite; `create_only`,
   `if_hash`, and a `use_edit_file` hint when most lines are kept.
-- `shell` — command execution with a 16 KiB head+tail model bound.
+- `shell` — one command via `sh -c`, 16 KiB head+tail model bound, cleared
+  environment (§ Shell Execution).
+- `exec` — one program with an argument list and no shell between the model
+  and the process; same environment, timeout, output, and approval path as
+  `shell`, but the classifier sees exact argv.
 
 Each returns complete domain output within its own scan and count limits;
 the model-facing text is then bounded once at dispatch (§ Output Bounding).
@@ -666,6 +670,16 @@ get isolated worktrees later. Worktree orchestration stays deferred.
   and appends one `hint: use … instead of …` line; `strict` refuses before
   execution with `use_builtin` — the arm the ablation harness uses to
   measure what shell habit costs; `off` says nothing.
+
+**`exec`** runs one program with an argument list (`program`, `args` ≤ 64 ×
+4 KiB, optional `stdin` ≤ 64 KiB, `cwd`, `timeout_seconds`, `env`) with no
+shell in between: no quoting, globbing, `$`, or pipes. For policy it is
+rendered as the equivalent command line — each argument single-quoted when
+it holds metacharacters — so the classifier, prefix grants (`cargo test`
+covers `exec cargo [test, -p, x]`), and the approval preview see one shape
+for both tools, and an argument like `rm -rf /` is a literal word, never a
+command. The system prompt steers the model to `exec` for single programs
+and `shell` for pipelines. Its header is `exec exit=<code> …`.
 
 Shell is the one tool that cannot be contained by path checks — any command
 can touch anything the server process can. Containment is therefore the
