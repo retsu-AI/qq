@@ -17,8 +17,8 @@ use crate::{
     },
     limits::{ByteCounter, StreamLimits},
     providers::support::{
-        self, ToolCallLedger, UsageOnce, status_error_kind, subtract_cached_input_tokens,
-        value_as_status,
+        self, OwnedOrBorrowedText, ToolCallLedger, UsageOnce, status_error_kind,
+        subtract_cached_input_tokens, value_as_status,
     },
     request_auth::RequestAuthorizer,
     sanitize::sanitize_message,
@@ -287,7 +287,7 @@ impl<'a> From<&'a ModelRequest> for ChatCompletionsRequest<'a> {
         if let Some(system) = request.system() {
             messages.push(ChatMessage {
                 role: ChatRole::System,
-                content: Some(Cow::Borrowed(system)),
+                content: Some(OwnedOrBorrowedText(Cow::Borrowed(system))),
                 tool_calls: None,
                 tool_call_id: None,
             });
@@ -323,7 +323,7 @@ fn append_chat_messages<'a>(message: &'a Message, messages: &mut Vec<ChatMessage
     if let [ContentBlock::Text { text }] = message.content() {
         messages.push(ChatMessage {
             role,
-            content: Some(Cow::Borrowed(text.as_str())),
+            content: Some(OwnedOrBorrowedText(Cow::Borrowed(text.as_str()))),
             tool_calls: None,
             tool_call_id: None,
         });
@@ -355,7 +355,7 @@ fn append_chat_messages<'a>(message: &'a Message, messages: &mut Vec<ChatMessage
                 wrote_results = true;
                 messages.push(ChatMessage {
                     role: ChatRole::Tool,
-                    content: Some(Cow::Borrowed(content.as_str())),
+                    content: Some(OwnedOrBorrowedText(Cow::Borrowed(content.as_str()))),
                     tool_calls: None,
                     tool_call_id: Some(call_id),
                 });
@@ -367,7 +367,7 @@ fn append_chat_messages<'a>(message: &'a Message, messages: &mut Vec<ChatMessage
         let content = if text.is_empty() && !tool_calls.is_empty() {
             None
         } else {
-            Some(Cow::Owned(text))
+            Some(OwnedOrBorrowedText(Cow::Owned(text)))
         };
         messages.push(ChatMessage {
             role,
@@ -387,7 +387,7 @@ struct ChatStreamOptions {
 struct ChatMessage<'a> {
     role: ChatRole,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<Cow<'a, str>>,
+    content: Option<OwnedOrBorrowedText<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ChatToolCall<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]

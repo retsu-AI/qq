@@ -17,7 +17,7 @@ use crate::{
         ExchangeMessages, HttpExchange, HttpRejection, SafeHeaders, is_request_controlled_header,
     },
     limits::{ByteCounter, StreamLimits},
-    providers::support::{self, UsageOnce, status_error_kind, subtract_cached_input_tokens},
+    providers::support::{self, Text, UsageOnce, status_error_kind, subtract_cached_input_tokens},
     request_auth::RequestAuthorizer,
     sanitize::sanitize_message,
     sse::{SseDecoder, Utf8ErrorMessage},
@@ -329,7 +329,7 @@ impl<'a> GenerateContentRequest<'a> {
             let mut parts = Vec::with_capacity(message.content().len());
             for block in message.content() {
                 parts.push(match block {
-                    ContentBlock::Text { text } => GooglePart::Text { text },
+                    ContentBlock::Text { text } => GooglePart::Text { text: Text(text) },
                     ContentBlock::ToolCall {
                         name, arguments, ..
                     } => GooglePart::FunctionCall {
@@ -361,9 +361,9 @@ impl<'a> GenerateContentRequest<'a> {
                             function_response: FunctionResponsePart {
                                 name,
                                 response: if *is_error {
-                                    FunctionResponseBody::Error { error: content }
+                                    FunctionResponseBody::Error { error: Text(content) }
                                 } else {
-                                    FunctionResponseBody::Output { output: content }
+                                    FunctionResponseBody::Output { output: Text(content) }
                                 },
                             },
                         }
@@ -393,7 +393,7 @@ impl<'a> GenerateContentRequest<'a> {
 
         Ok(Self {
             system_instruction: request.system().map(|text| SystemInstruction {
-                parts: vec![GooglePart::Text { text }],
+                parts: vec![GooglePart::Text { text: Text(text) }],
             }),
             contents,
             tools,
@@ -419,7 +419,7 @@ enum GoogleRole {
 #[serde(untagged)]
 enum GooglePart<'a> {
     Text {
-        text: &'a str,
+        text: Text<'a>,
     },
     FunctionCall {
         #[serde(rename = "functionCall")]
@@ -446,8 +446,8 @@ struct FunctionResponsePart<'a> {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum FunctionResponseBody<'a> {
-    Output { output: &'a str },
-    Error { error: &'a str },
+    Output { output: Text<'a> },
+    Error { error: Text<'a> },
 }
 
 #[derive(Serialize)]

@@ -16,7 +16,7 @@ use crate::{
         ExchangeMessages, HttpExchange, HttpRejection, SafeHeaders, is_request_controlled_header,
     },
     limits::{ByteCounter, StreamLimits},
-    providers::support::{self, ToolCallLedger, UsageOnce, value_as_status},
+    providers::support::{self, Text, ToolCallLedger, UsageOnce, value_as_status},
     request_auth::RequestAuthorizer,
     sanitize::sanitize_message,
     sse::{SseDecoder, SseEvent, Utf8ErrorMessage},
@@ -372,7 +372,7 @@ fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
 pub(crate) struct MessagesRequest<'a> {
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<&'a str>,
+    system: Option<Text<'a>>,
     messages: Vec<AnthropicMessage<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool<'a>>,
@@ -384,7 +384,7 @@ impl<'a> From<&'a ModelRequest> for MessagesRequest<'a> {
     fn from(request: &'a ModelRequest) -> Self {
         Self {
             model: request.model(),
-            system: request.system(),
+            system: request.system().map(Text),
             messages: request
                 .messages()
                 .iter()
@@ -425,7 +425,7 @@ impl<'a> From<&'a Message> for AnthropicMessage<'a> {
         // A single text block serializes as a plain string so tool-less
         // requests keep their existing wire shape.
         let content = match message.content() {
-            [ContentBlock::Text { text }] => AnthropicContent::Text(text),
+            [ContentBlock::Text { text }] => AnthropicContent::Text(Text(text)),
             blocks => AnthropicContent::Blocks(blocks.iter().map(AnthropicBlock::from).collect()),
         };
         Self {
@@ -441,7 +441,7 @@ impl<'a> From<&'a Message> for AnthropicMessage<'a> {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum AnthropicContent<'a> {
-    Text(&'a str),
+    Text(Text<'a>),
     Blocks(Vec<AnthropicBlock<'a>>),
 }
 
@@ -449,7 +449,7 @@ enum AnthropicContent<'a> {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicBlock<'a> {
     Text {
-        text: &'a str,
+        text: Text<'a>,
     },
     ToolUse {
         id: &'a str,
@@ -458,7 +458,7 @@ enum AnthropicBlock<'a> {
     },
     ToolResult {
         tool_use_id: &'a str,
-        content: &'a str,
+        content: Text<'a>,
         is_error: bool,
     },
 }
@@ -466,7 +466,7 @@ enum AnthropicBlock<'a> {
 impl<'a> From<&'a ContentBlock> for AnthropicBlock<'a> {
     fn from(block: &'a ContentBlock) -> Self {
         match block {
-            ContentBlock::Text { text } => Self::Text { text },
+            ContentBlock::Text { text } => Self::Text { text: Text(text) },
             ContentBlock::ToolCall {
                 id,
                 name,
@@ -482,7 +482,7 @@ impl<'a> From<&'a ContentBlock> for AnthropicBlock<'a> {
                 is_error,
             } => Self::ToolResult {
                 tool_use_id: call_id,
-                content,
+                content: Text(content),
                 is_error: *is_error,
             },
         }

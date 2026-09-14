@@ -120,23 +120,36 @@ fn main() {
 
         // Adapter path heap: core's transcript is live; build the request,
         // clone it as `with_restart` does per attempt, encode. Peak above the
-        // transcript is the request's own cost.
+        // transcript is the request's own cost. Measured twice: from a
+        // caller that owns a `Vec` (copied into the request, as before D5)
+        // and from one that shares an `Arc` (the run loop after D5).
         let baseline = reset_peak();
         let request = ModelRequest::new("benchmark-model", transcript.clone(), 4096)
             .with_tools(tools.clone())
             .with_system("You are a benchmark.");
         let attempt = request.clone();
         let body = qq_provider::test_support::encode_body(protocol, &attempt);
-        let peak = PEAK.load(Ordering::Relaxed) - baseline;
+        let copied_peak = PEAK.load(Ordering::Relaxed) - baseline;
         black_box((&request, &attempt, &body));
-        drop(body);
-        drop(attempt);
-        drop(request);
+        drop((body, attempt, request));
+
+        let shared = std::sync::Arc::new(transcript.clone());
+        let baseline = reset_peak();
+        let request = ModelRequest::new("benchmark-model", std::sync::Arc::clone(&shared), 4096)
+            .with_tools(tools.clone())
+            .with_system("You are a benchmark.");
+        let attempt = request.clone();
+        let body = qq_provider::test_support::encode_body(protocol, &attempt);
+        let shared_peak = PEAK.load(Ordering::Relaxed) - baseline;
+        black_box((&request, &attempt, &body));
+        drop((body, attempt, request, shared));
 
         println!(
             "{name}: encode {encode_us} us/iteration ({iterations} iterations), body {body_bytes} \
-             bytes, request heap peak {peak} bytes ({:.2}x payload)",
-            peak as f64 / payload_bytes as f64
+             bytes, request heap peak {copied_peak} bytes ({:.2}x payload) from an owned Vec, \
+             {shared_peak} bytes ({:.2}x) from a shared Arc",
+            copied_peak as f64 / payload_bytes as f64,
+            shared_peak as f64 / payload_bytes as f64,
         );
     }
 }

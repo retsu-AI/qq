@@ -23,6 +23,126 @@ use crate::http::{build_client, build_direct_client};
 /// The message extracted from the decoded envelope — or, failing that, the
 /// non-empty body text — is sanitized against the rejection's redactions;
 /// `fallback` names the protocol for statuses without a canonical reason.
+/// A borrowed transcript string that writes its own JSON escaping.
+///
+/// The transcript is megabytes of text and its escape loop is the body
+/// encoder's hot path. `serde_json`'s loop is a per-byte table walk whose
+/// speed swung 1.5x between otherwise identical builds of this crate (same
+/// instruction count, different loop alignment), so the request codecs do
+/// not depend on it: this type scans for the next byte that needs escaping
+/// eight bytes at a time, writes the clean run in one copy, and writes the
+/// escape itself. The finished literal reaches `serde_json` through its
+/// raw-value hook, which is a plain `write_all`. Output is byte-identical
+/// to `serde_json`'s (a test pins every byte value at every lane).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Text<'a>(pub(crate) &'a str);
+
+impl serde::Serialize for Text<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut literal = String::with_capacity(self.0.len() + 2);
+        write_json_string(&mut literal, self.0);
+        // The literal is one complete JSON string token, which is the
+        // invariant the raw-value hook requires of what it writes verbatim.
+        serializer.serialize_newtype_struct(RAW_VALUE_TOKEN, &RawLiteral(&literal))
+    }
+}
+
+/// `serde_json::raw::TOKEN`: a struct so named serializes its one field's
+/// text verbatim. Stable since `RawValue` shipped; the unit test fails if it
+/// is ever renamed, because the literal would then be written as an escaped
+/// string.
+const RAW_VALUE_TOKEN: &str = "$serde_json::private::RawValue";
+
+struct RawLiteral<'a>(&'a str);
+
+impl serde::Serialize for RawLiteral<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+        let mut raw = serializer.serialize_struct(RAW_VALUE_TOKEN, 1)?;
+        raw.serialize_field(RAW_VALUE_TOKEN, self.0)?;
+        raw.end()
+    }
+}
+
+/// [`Text`] over a string a codec had to assemble (concatenated blocks).
+#[derive(Debug, Clone)]
+pub(crate) struct OwnedOrBorrowedText<'a>(pub(crate) std::borrow::Cow<'a, str>);
+
+impl serde::Serialize for OwnedOrBorrowedText<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Text(&self.0).serialize(serializer)
+    }
+}
+
+/// Appends `value` to `out` as a JSON string literal, byte-identical to
+/// `serde_json::to_string(value)`.
+pub(crate) fn write_json_string(out: &mut String, value: &str) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push('"');
+    let bytes = value.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() {
+        let run = clean_run_len(&bytes[start..]);
+        // Splitting only at ASCII bytes keeps every run valid UTF-8.
+        out.push_str(&value[start..start + run]);
+        start += run;
+        let Some(&byte) = bytes.get(start) else {
+            break;
+        };
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x08 => out.push_str("\\b"),
+            0x09 => out.push_str("\\t"),
+            0x0A => out.push_str("\\n"),
+            0x0C => out.push_str("\\f"),
+            0x0D => out.push_str("\\r"),
+            control => {
+                out.push_str("\\u00");
+                out.push(char::from(HEX[usize::from(control >> 4)]));
+                out.push(char::from(HEX[usize::from(control & 0x0F)]));
+            }
+        }
+        start += 1;
+    }
+    out.push('"');
+}
+
+/// Length of the prefix of `bytes` containing no quote, backslash, or
+/// control byte: eight bytes per step with word-parallel tests, then a byte
+/// tail.
+#[inline]
+fn clean_run_len(bytes: &[u8]) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    // With every lane's high bit cleared, `lane - n` borrows into that high
+    // bit exactly when the lane is below `n`; XOR with a repeated byte then
+    // `- 1` does the same for equality. Lanes that had their high bit set
+    // (UTF-8 lead and continuation bytes) are masked back out.
+    let needs_escape = |word: u64| -> bool {
+        let low = word & !HIGHS;
+        let below_space = low.wrapping_sub(ONES * 0x20);
+        let is_quote = (low ^ (ONES * u64::from(b'"'))).wrapping_sub(ONES);
+        let is_backslash = (low ^ (ONES * u64::from(b'\\'))).wrapping_sub(ONES);
+        ((below_space | is_quote | is_backslash) & !word & HIGHS) != 0
+    };
+    let mut index = 0;
+    while let Some(chunk) = bytes.get(index..index + 8) {
+        let word = u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
+        if needs_escape(word) {
+            break;
+        }
+        index += 8;
+    }
+    while let Some(&byte) = bytes.get(index) {
+        if byte < 0x20 || byte == b'"' || byte == b'\\' {
+            break;
+        }
+        index += 1;
+    }
+    index
+}
+
 pub(crate) fn api_error<E: DeserializeOwned>(
     rejection: HttpRejection,
     fallback: &str,
@@ -195,5 +315,74 @@ pub(crate) fn client_for_endpoint(
         build_direct_client()
     } else {
         build_client()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_escapes_exactly_as_serde_json_does() {
+        let mut sample = String::from("plain start ");
+        for byte in 0u8..0x20 {
+            sample.push(char::from(byte));
+            sample.push_str(" mid ");
+        }
+        sample.push_str("quote\" backslash\\ slash/ é 漢字 🎉 \u{7f} end");
+        for value in [
+            sample.as_str(),
+            "",
+            "\"",
+            "\\",
+            "\n",
+            "no escapes at all",
+            "é",
+        ] {
+            let expected = serde_json::to_string(value).unwrap();
+            let mut literal = String::new();
+            write_json_string(&mut literal, value);
+            assert_eq!(literal, expected, "{value:?}");
+            assert_eq!(serde_json::to_string(&Text(value)).unwrap(), expected);
+            assert_eq!(
+                serde_json::to_string(&OwnedOrBorrowedText(std::borrow::Cow::Owned(
+                    value.to_owned()
+                )))
+                .unwrap(),
+                expected
+            );
+        }
+        // Every byte value at every lane of a word agrees with the naive scan.
+        for lane in 0..8 {
+            for byte in 0u8..=0xff {
+                let mut sample = vec![b'a'; 16];
+                sample[lane] = byte;
+                sample[15] = b'"';
+                let naive = sample
+                    .iter()
+                    .position(|&b| b < 0x20 || b == b'"' || b == b'\\')
+                    .unwrap();
+                assert_eq!(
+                    clean_run_len(&sample),
+                    naive,
+                    "byte {byte:#x} at lane {lane}"
+                );
+            }
+        }
+        let clean = "é漢字🎉 no escapes";
+        assert_eq!(clean_run_len(clean.as_bytes()), clean.len());
+        #[derive(serde::Serialize)]
+        struct Wire<'a> {
+            content: Text<'a>,
+            parts: Vec<Text<'a>>,
+        }
+        assert_eq!(
+            serde_json::to_string(&Wire {
+                content: Text("a\"b"),
+                parts: vec![Text("x"), Text("\n")],
+            })
+            .unwrap(),
+            r#"{"content":"a\"b","parts":["x","\n"]}"#
+        );
     }
 }

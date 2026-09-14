@@ -16,7 +16,7 @@ use crate::{
         ExchangeMessages, HttpExchange, HttpRejection, SafeHeaders, is_request_controlled_header,
     },
     limits::{ByteCounter, StreamLimits},
-    providers::support::{self, ToolCallLedger},
+    providers::support::{self, Text, ToolCallLedger},
     request_auth::RequestAuthorizer,
     sanitize::sanitize_message,
     sse::{SseDecoder, Utf8ErrorMessage},
@@ -340,7 +340,7 @@ fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
 pub(crate) struct ResponsesRequest<'a> {
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    instructions: Option<&'a str>,
+    instructions: Option<Text<'a>>,
     input: Vec<InputItem<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ResponsesTool<'a>>,
@@ -365,7 +365,7 @@ impl<'a> ResponsesRequest<'a> {
                 input.push(match block {
                     ContentBlock::Text { text } => InputItem::Message {
                         role,
-                        content: text,
+                        content: Text(text),
                     },
                     ContentBlock::ToolCall {
                         id,
@@ -382,7 +382,7 @@ impl<'a> ResponsesRequest<'a> {
                         is_error: _,
                     } => InputItem::Function(FunctionItem::FunctionCallOutput {
                         call_id,
-                        output: content,
+                        output: Text(content),
                     }),
                 });
             }
@@ -390,7 +390,7 @@ impl<'a> ResponsesRequest<'a> {
 
         Self {
             model: request.model(),
-            instructions: request.system(),
+            instructions: request.system().map(Text),
             input,
             tools: request.tools().iter().map(ResponsesTool::from).collect(),
             max_output_tokens: matches!(kind, ResponsesRequestKind::Standard)
@@ -404,7 +404,7 @@ impl<'a> ResponsesRequest<'a> {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum InputItem<'a> {
-    Message { role: InputRole, content: &'a str },
+    Message { role: InputRole, content: Text<'a> },
     Function(FunctionItem<'a>),
 }
 
@@ -419,7 +419,7 @@ enum FunctionItem<'a> {
     },
     FunctionCallOutput {
         call_id: &'a str,
-        output: &'a str,
+        output: Text<'a>,
     },
 }
 
