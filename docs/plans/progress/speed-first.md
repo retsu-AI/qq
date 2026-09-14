@@ -13,7 +13,7 @@ dated entries appended below, newest last.
 | H27 | Superseded-generation accounting, atomic refresh admission, guard reclamation | Done | merged in #22 | Pinned LRU and admission already existed (`src/plan.rs`) |
 | H28 | Typed context-source capacity error; sources in descriptor | Done | merged in #22 | `DESCRIPTOR_VERSION` 5 → 6. ADR-0013 |
 | H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | Done | merged in #22 | Store schema 25 → 26 (`tool_calls.effect`). MCP permit ordering was already correct |
-| H18 | `Arc<Vec<Message>>`, prompt prefix, `RawValue` schemas | In progress | `perf/h18-shared-transcript-prompt-prefix` (worktree `../qq-hc4`) | Started 2026-09-13 from `43caaea` (HC4 merged #34). `provider_encode` bench + baseline first |
+| H18 | `Arc<Vec<Message>>`, prompt prefix, `RawValue` schemas | In review | `perf/h18-shared-transcript-prompt-prefix` | ADR-0024. `provider_encode` added: heap 4.4–4.7x → 1.55–1.80x (shared) / 2.7x (owned); encode 339–559 → 191–406 µs. No protocol or schema bump |
 | H19 | SSE framing, conditional | Planned | | Add `sse_decode` bench first; no-change decision acceptable |
 | H21.2 | Mechanical `sessions.rs` split | Planned | | After HC3 behavioral changes; separate commit |
 | H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI | Planned | | |
@@ -534,3 +534,69 @@ could be regenerated from the goldens when it next changes.
 
 Shipped: none this entry (branch in review). In progress: HC4 review.
 Blocked: none. Next: H18.
+
+### 2026-09-13 — H18 shared transcript and prompt prefix on `perf/h18-shared-transcript-prompt-prefix`
+
+Worktree `../qq-hc4` from `43caaea` (HC4 merged #34); rebased onto `95fef1b`
+(T3–T5) before review. Owned paths: `qq-provider` `model.rs`,
+`providers/{openai,openai_chat,anthropic,google,bedrock,support}.rs`,
+`test_support.rs` (`encode_body`), new `benches/provider_encode.rs`;
+`qq-core` `lib.rs` (run loop, tests), `plan.rs` (`PromptPrefixKey`,
+`prompt_prefix`), `catalog.rs` (schema text from specs), `runtime/prompt.rs`
+(`PromptPrefix`), `runtime/events.rs`, `sessions.rs` (persisted block codec);
+root `Cargo.toml` (`serde_json/raw_value`); ADR-0024, architecture, plan,
+this ledger, `root.md`. Struct-literal fan-out: `ContentBlock::tool_call`
+replaced `ToolCall { arguments: json!(..) }` in tests across provider and
+core; `qq-mcp` unchanged (`ToolSpec::new` still takes a `Value`).
+
+Design as built (ADR-0024): D5 as written, with two findings. The baseline
+was 4.4–4.7x heap, not ~3x: the tool-call `Value` trees and the
+Responses/Chat `to_string()` per request were uncounted. And with `RawValue`
+fields in the wire structs, `serde_json`'s per-byte string escape lost
+30–60% on the transcript in a way that flipped with unrelated codegen
+(same instruction count, loop alignment); the codecs now escape bulk strings
+through a SWAR scanner (`support::Text`), byte-identical, exhaustively
+tested per lane. The prefix is per capability set (32 keys), not per plan.
+
+#### H18 receipt — 2026-09-13
+Commits: `a16ca54` (bench + baseline), `08450a4` (provider types + codecs),
+`58a0e80` (run loop `Arc::make_mut`, catalog text, persisted codec),
+`2629bee` (`PromptPrefix` + continued digest), `aeb12e7` (`Text` scanner),
++ docs.
+Tests: +2 `qq_provider::model::tests` (request shares/releases the
+transcript; raw text preserved, `from_raw` == `new`), +1
+`providers::support::tests` (escape parity incl. every byte × every lane),
++2 `qq_core::tests` (same allocation across turns, provider holding only an
+address; prefix+suffix digest == whole-prompt digest across four capability
+sets and byte parity with the single-pass builder). Existing suites
+unchanged in behavior: 1,381 passed / 4 ignored after rebase; fmt; strict
+all-target Clippy; minimal provider profile.
+Gates (`provider_encode`, one MiB + 32 schemas, release, separate target
+dirs, interleaved vs `43caaea`; evidence
+`target/qq-perf/h18-2026-09-13/provider_encode-{baseline,final-ab}.txt`):
+request heap 4.49/4.73/4.37/4.40x → 2.70/2.93/2.68/2.70x from an owned
+`Vec`, 1.57/1.80/1.55/1.57x from the shared `Arc` (openai_responses /
+openai_chat / anthropic / google); encode 429/466/339/559 → 191/212/194/406
+µs median, two candidate builds (default, debuginfo) within 6%. D5 gates:
+heap ≤2x met on the run-loop path; encode ≤10 ms met by 25x.
+`provider_compiler` (10 pairs, 20k iters): +1.5/+2.9/+7.8/+0.4% on
+490/370/280/114 ns — mantle_recipe_compile's +20 ns is within the host's
+noise band (an earlier 6-pair run under load read +34% on a 2x-inflated
+baseline; a 10-pair quiet run read +7.8%). `plan_compile` +1.7% (22.1 →
+22.5 µs) for building the common prefix at compile; `plan_estimated_bytes`
+16,406 → 20,740 (the prefix). `compile-final-ab.txt`.
+Deviations: `ContentBlock`/`ToolSpecInner` `PartialEq` compare text (exact
+for canonical output). `PersistedContentBlock.arguments` stays `Value`
+(internally tagged enum buffering). Bedrock parses at request time (SDK
+`Document`). Hand-escaping through `RawValue::from_string` was tried and
+rejected as slower (re-validation). The 1 MiB / 512 KiB H0 ratio is not
+recorded here.
+Docs: `docs/adr/0024-…`, `docs/adr/README.md`, `architecture.md` § Compiled
+Agent Plans, plan status block/task index/D5 as-built note/Phase 6
+order/acceptance, `root.md`.
+Open: `persist_model_turn` re-measures the assistant message
+(`sessions.rs`) — fold into H21.2. Next: H19 after its `sse_decode`
+baseline.
+
+Shipped: none this entry (branch in review). In progress: H18 review.
+Blocked: none. Next: H19.

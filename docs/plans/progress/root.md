@@ -28,9 +28,10 @@ may append a **request** row; only root changes a request's status.
 | 0020 | Shell `Forbidden` as a policy decision with a CST classifier and self-tested rules | tool-layer T6 | Reserved |
 | 0021 | `Network` and `Interactive` effect classes | tool-layer T8/T9 | Reserved |
 | 0022 | One owner per session store: advisory lock before open and recovery | speed-first HC1 | Accepted (merged in #30) |
-| 0023 | Headless JSONL records as protocol types pinned by goldens | speed-first HC4 | Accepted (`feat/hc4-headless-goldens`, in review) |
+| 0023 | Headless JSONL records as protocol types pinned by goldens | speed-first HC4 | Accepted (merged in #34) |
+| 0024 | Shared transcript, raw tool JSON, precompiled prompt prefix (D5) | speed-first H18 | Accepted (`perf/h18-shared-transcript-prompt-prefix`, in review) |
 
-Next free number: 0024. Reserve here before opening a PR that adds an ADR.
+Next free number: 0025. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 

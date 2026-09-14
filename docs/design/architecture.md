@@ -331,6 +331,32 @@ generation: a run keeps the catalog it was admitted with, and a host that
 changes its catalog (an MCP `list_changed`, a reconnect, a shutdown) makes the
 plan stale so the next load recompiles.
 
+The plan also carries the plan-constant part of the system prompt (ADR-0024):
+the header with the tool list, the progressive-exposure index, the skill
+index, the workspace instructions, and the pack persona, as a `PromptPrefix`
+per capability set (which optional static tools the run may use, whether it
+may load guidance) together with the SHA-256 state of those bytes. The common
+set is built at compile; other sets on first use, bounded by the 32 possible
+keys. A run appends only its suffix — the selected command or skill document,
+context-source blocks, the output contract — and finalizes a clone of the
+prefix hasher over that suffix, so `system_prompt_hash` equals a digest of the
+whole prompt and the prompt body is neither rebuilt nor rehashed per run.
+
+Per-request work is likewise kept off the transcript. The run holds its
+messages as `Arc<Vec<Message>>`, hands the same allocation to each turn's
+`ModelRequest`, and drops the provider stream before appending through
+`Arc::make_mut`, so the per-attempt clone every adapter performs inside its
+restart loop copies nothing and a turn appends in place. Tool schemas
+(`ToolSpec.input_schema`) and the arguments of tool calls in history
+(`ContentBlock::ToolCall.arguments`) are kept as compact JSON text
+(`Box<RawValue>`): every HTTP codec embeds them verbatim (or as the string
+Responses and Chat Completions want) instead of walking a `Value` tree per
+request, the catalog measures and digests the same text without serializing,
+and only the Bedrock adapter parses, because its SDK wants a `Document`. The
+transcript's own strings are escaped by a word-parallel scanner
+(`providers::support::Text`) rather than `serde_json`'s per-byte loop, whose
+speed proved to depend on unrelated codegen; the output is byte-identical.
+
 The root builds a typed `AgentProfile` from configuration and compiles it; core
 never sees configuration documents, secret values, or the credential store. The
 plan's `AgentPlanDescriptor` is its secret-free canonical account: adapter

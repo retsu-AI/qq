@@ -30,6 +30,7 @@ written.
 | 0019 | [Spill handles are durable session state: cut tool outputs stored with their result, cited by a content-addressed handle, masked inline and exact on explicit read](0019-spill-handles.md) | Proposed (tool-layer T4) |
 | 0022 | [One owner per session store: an advisory lock precedes open and recovery](0022-single-store-owner.md) | Accepted |
 | 0023 | [Headless JSONL records are protocol types, pinned by golden streams per `PROTOCOL_VERSION`](0023-headless-records-as-protocol.md) | Accepted |
+| 0024 | [Shared transcript, raw tool JSON, and a precompiled prompt prefix on the request path](0024-shared-transcript-raw-json-prompt-prefix.md) | Accepted |
 
 ## When to write one
 
