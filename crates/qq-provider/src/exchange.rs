@@ -7,7 +7,7 @@
 //! ownership of their error body schema (via [`SseExchangeError::Rejected`])
 //! and of folding events into `ProviderEvent`s.
 
-use std::{collections::VecDeque, sync::Arc};
+use std::sync::Arc;
 
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
@@ -82,7 +82,10 @@ pub(crate) struct SseExchangeStream {
     redactions: Arc<[String]>,
     chunks: futures_core::stream::BoxStream<'static, Result<bytes::Bytes, ProviderError>>,
     decoder: SseDecoder,
-    pending: VecDeque<SseEvent>,
+    /// Events framed from the last chunk, yielded in order; the framer
+    /// appends straight into this buffer so a chunk costs no extra list.
+    pending: Vec<SseEvent>,
+    next: usize,
     decoded_any: bool,
 }
 
@@ -95,12 +98,23 @@ impl SseExchangeStream {
     /// Returns the next decoded SSE event, or `None` when the body ends.
     pub(crate) async fn next_event(&mut self) -> Result<Option<SseEvent>, ProviderError> {
         loop {
-            if let Some(event) = self.pending.pop_front() {
+            if self.next < self.pending.len() {
+                // Take without shifting; the buffer is reused once drained.
+                let event = std::mem::replace(
+                    &mut self.pending[self.next],
+                    SseEvent {
+                        name: None,
+                        data: String::new(),
+                    },
+                );
+                self.next += 1;
                 self.decoded_any = true;
                 return Ok(Some(event));
             }
+            self.pending.clear();
+            self.next = 0;
             match self.chunks.next().await {
-                Some(chunk) => self.pending.extend(self.decoder.push(&chunk?)?),
+                Some(chunk) => self.decoder.push_into(&chunk?, &mut self.pending)?,
                 None => return Ok(None),
             }
         }
@@ -154,7 +168,8 @@ pub(crate) async fn sse_exchange(
         redactions: Arc::from(response.redactions()),
         chunks: response.into_body(),
         decoder,
-        pending: VecDeque::new(),
+        pending: Vec::new(),
+        next: 0,
         decoded_any: false,
     })
 }
@@ -436,7 +451,8 @@ mod tests {
             redactions: Arc::from(Vec::<String>::new()),
             chunks: Box::pin(futures_util::stream::empty()),
             decoder: decoder(),
-            pending: VecDeque::new(),
+            pending: Vec::new(),
+            next: 0,
             decoded_any: false,
         };
         let before = empty.ended_early("stream ended before done");

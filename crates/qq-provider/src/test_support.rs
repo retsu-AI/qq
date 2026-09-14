@@ -197,8 +197,13 @@ pub fn decode_sse_body(protocol: crate::HttpProtocol, chunks: &[&[u8]], parse: b
         }
     };
     let mut parsed = 0;
+    let mut events = Vec::new();
     for chunk in chunks {
-        for event in decoder.push(chunk).expect("fixture body frames") {
+        events.clear();
+        decoder
+            .push_into(chunk, &mut events)
+            .expect("fixture body frames");
+        for event in events.drain(..) {
             if parse {
                 match protocol {
                     crate::HttpProtocol::AnthropicMessages => {

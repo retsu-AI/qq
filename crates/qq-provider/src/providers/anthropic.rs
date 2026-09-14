@@ -497,12 +497,6 @@ enum AnthropicRole {
 }
 
 #[derive(Deserialize)]
-struct EventEnvelope {
-    #[serde(rename = "type")]
-    event_type: String,
-}
-
-#[derive(Deserialize)]
 #[serde(tag = "type")]
 enum StreamingEvent {
     #[serde(rename = "content_block_delta")]
@@ -529,6 +523,25 @@ enum StreamingEvent {
     Ping,
     #[serde(other)]
     Other,
+}
+
+impl StreamingEvent {
+    /// The wire `type` this variant was decoded from, for checking the SSE
+    /// event name against the payload without a second parse. `None` for
+    /// types this adapter does not model, which any name may carry.
+    const fn wire_type(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::ContentBlockDelta { .. } => "content_block_delta",
+            Self::MessageDelta { .. } => "message_delta",
+            Self::MessageStop => "message_stop",
+            Self::Error { .. } => "error",
+            Self::MessageStart { .. } => "message_start",
+            Self::ContentBlockStart { .. } => "content_block_start",
+            Self::ContentBlockStop { .. } => "content_block_stop",
+            Self::Ping => "ping",
+            Self::Other => return None,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -644,28 +657,22 @@ pub(crate) fn decode_event(
         return Ok(DecodedEvent::Ignored);
     }
 
-    let envelope: EventEnvelope = serde_json::from_str(&event.data).map_err(|error| {
-        ProviderError::Protocol(sanitize_message(
-            &format!("could not decode Anthropic-compatible event envelope: {error}"),
-            redactions,
-        ))
-    })?;
-    if event
-        .name
-        .as_deref()
-        .is_some_and(|name| name != envelope.event_type)
-    {
-        return Err(ProviderError::Protocol(
-            "Anthropic-compatible SSE event name did not match its payload type".to_owned(),
-        ));
-    }
-
-    let event: StreamingEvent = serde_json::from_str(&event.data).map_err(|error| {
+    // One parse: the payload's `type` selects the variant, and the SSE
+    // event name (when the provider sent one) must agree with it.
+    let parsed: StreamingEvent = serde_json::from_str(&event.data).map_err(|error| {
         ProviderError::Protocol(sanitize_message(
             &format!("could not decode Anthropic-compatible event: {error}"),
             redactions,
         ))
     })?;
+    if let (Some(name), Some(wire_type)) = (event.name.as_deref(), parsed.wire_type())
+        && name != wire_type
+    {
+        return Err(ProviderError::Protocol(
+            "Anthropic-compatible SSE event name did not match its payload type".to_owned(),
+        ));
+    }
+    let event = parsed;
 
     match event {
         StreamingEvent::ContentBlockDelta {
@@ -1252,6 +1259,37 @@ mod tests {
         assert!(matches!(event_error, ProviderError::Protocol(_)));
         assert!(matches!(output_error, ProviderError::Protocol(_)));
         assert!(matches!(wire_error, ProviderError::Protocol(_)));
+    }
+
+    #[test]
+    fn the_event_name_is_checked_against_the_payload_in_one_parse() {
+        // A known type with the wrong name is refused.
+        assert!(matches!(
+            decode_data("content_block_delta", r#"{"type":"ping"}"#),
+            Err(ProviderError::Protocol(_))
+        ));
+        // Matching, and a payload without a name, decode.
+        assert_eq!(
+            decode_data("ping", r#"{"type":"ping"}"#).unwrap(),
+            DecodedEvent::Ignored
+        );
+        assert_eq!(
+            decode_event(
+                SseEvent {
+                    name: None,
+                    data: r#"{"type":"ping"}"#.to_owned(),
+                },
+                &[],
+            )
+            .unwrap(),
+            DecodedEvent::Ignored
+        );
+        // A type this adapter does not model is ignored under any name: the
+        // name check cannot apply to a payload whose type is not read.
+        assert_eq!(
+            decode_data("future_event", r#"{"type":"something_new","x":1}"#).unwrap(),
+            DecodedEvent::Ignored
+        );
     }
 
     #[tokio::test]
