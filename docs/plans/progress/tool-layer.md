@@ -9,8 +9,8 @@ newest last.
 | T1 | Cross-cutting primitives: `Bounds`, `bound_text`, `ToolOutput` split, header convention, masking, per-turn budget | Shipped (#31, `b0a18be`) | `feat/tool-layer-t1-output-bounds` | Evidence `target/qq-perf/t1-2026-09-11/` |
 | T2 | `search` v2 + `tree` (+ `list_dir` alias) | Shipped (#32, `8bb4050`) | `feat/tool-layer-t2-search-tree` | Evidence `target/qq-perf/t2-2026-09-12/` |
 | T3 | `read_file` v2 (gutter, ranges, outline, info, `if_changed_since`) | Shipped (#35, `eecc76b`) | `feat/tool-layer-t3-read-file` | Evidence `target/qq-perf/t3-2026-09-14/` |
-| T4 | Spill store + `read_tool_result` | In review | `feat/tool-layer-t4-spill-store` | Started 2026-09-14; evidence `target/qq-perf/t4-2026-09-14/`. Touches `sessions/store`; second-agent review required. ADR-0019 written |
-| T5 | `edit_file` v2 + `write_file` flags | Planned | | |
+| T4 | Spill store + `read_tool_result` | Shipped (#36, `80e7396`) | `feat/tool-layer-t4-spill-store` | Evidence `target/qq-perf/t4-2026-09-14/`; ADR-0019 |
+| T5 | `edit_file` v2 batch/cascade/anchors/dry-run; `write_file` flags | In progress | `feat/tool-layer-t5-edit-v2` | Started 2026-09-14; baseline `target/qq-perf/t5-2026-09-14/tool_dispatch-baseline.txt` (43.7–51.1 µs pinned); `edit_batch` bench is new |
 | T6 | Shell classifier + `Forbidden` decision | Planned | | Root request: promote `tree-sitter{,-bash}` to workspace deps; ADR reserved |
 | T7 | `exec`, env allowlist, prefer-built-in nudge | Planned | | |
 | T8 | `ask_user` + `Interactive` class | Planned | | ADR shared with T9 |
@@ -90,3 +90,10 @@ Deviations: the marker is written provisionally as `not stored` by `bound_text` 
 Docs: `docs/design/tools.md` § Output Bounding (marker), § Spilled Outputs (new); ADR-0019; `docs/adr/README.md`; `root.md` ADR row.
 Open: T6/T7 may raise the 128 KiB shell capture cap now the bytes have a home; `search_history` over spills; client affordance to open a handle.
 Evidence: `target/qq-perf/t4-2026-09-14/` (untracked).
+
+### 2026-09-14 — T4 shipped; T5 in progress
+
+T4 merged as #36 (`80e7396`). T5 on `feat/tool-layer-t5-edit-v2` (worktree
+`/tmp/opencode/qq-t5`). Baseline: `tool_dispatch` 43.7–51.1 µs pinned (6
+runs, noisy host). The `edit_batch` gate is new to this slice; its first
+recording is the candidate.
