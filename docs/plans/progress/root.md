@@ -24,7 +24,7 @@ may append a **request** row; only root changes a request's status.
 | 0016 | Remote exposure: loopback default, TLS required off loopback, `tailscale serve` front | multi-surface S4 | Reserved |
 | 0017 | Client UI stack: Rust/WASM, framework chosen by the W1 spike | multi-surface W1/U1 | Reserved |
 | 0018 | `apps/` as a separate Cargo workspace | multi-surface U1 | Reserved |
-| 0019 | Spill handles as durable session state; masked inline, exact on explicit read | tool-layer T4 | Reserved |
+| 0019 | Spill handles as durable session state; masked inline, exact on explicit read | tool-layer T4 | Written (T4 PR) |
 | 0020 | Shell `Forbidden` as a policy decision with a CST classifier and self-tested rules | tool-layer T6 | Reserved |
 | 0021 | `Network` and `Interactive` effect classes | tool-layer T8/T9 | Reserved |
 | 0022 | One owner per session store: advisory lock before open and recovery | speed-first HC1 | Accepted (merged in #30) |
