@@ -269,7 +269,7 @@ fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
 }
 
 #[derive(Serialize)]
-struct ChatCompletionsRequest<'a> {
+pub(crate) struct ChatCompletionsRequest<'a> {
     model: &'a str,
     messages: Vec<ChatMessage<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

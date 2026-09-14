@@ -301,7 +301,7 @@ fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GenerateContentRequest<'a> {
+pub(crate) struct GenerateContentRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     system_instruction: Option<SystemInstruction<'a>>,
     contents: Vec<GoogleContent<'a>>,
@@ -319,7 +319,10 @@ impl<'a> GenerateContentRequest<'a> {
     /// Builds the wire request, resolving each tool result back to the name of
     /// the call it answers. Gemini identifies function responses by name, so a
     /// result whose `call_id` matches no earlier tool call cannot be sent.
-    fn new(request: &'a ModelRequest, max_output_tokens: i32) -> Result<Self, ProviderError> {
+    pub(crate) fn new(
+        request: &'a ModelRequest,
+        max_output_tokens: i32,
+    ) -> Result<Self, ProviderError> {
         let messages = request.messages();
         let mut contents = Vec::with_capacity(messages.len());
         for (index, message) in messages.iter().enumerate() {

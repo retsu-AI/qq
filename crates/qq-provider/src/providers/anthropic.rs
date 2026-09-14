@@ -369,7 +369,7 @@ fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
 }
 
 #[derive(Serialize)]
-struct MessagesRequest<'a> {
+pub(crate) struct MessagesRequest<'a> {
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<&'a str>,

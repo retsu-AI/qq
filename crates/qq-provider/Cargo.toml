@@ -55,3 +55,8 @@ tokio = { workspace = true, features = ["test-util"] }
 [[bench]]
 name = "provider_compiler"
 harness = false
+
+[[bench]]
+name = "provider_encode"
+harness = false
+required-features = ["test-support"]

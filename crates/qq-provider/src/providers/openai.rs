@@ -42,7 +42,7 @@ pub(crate) enum ResponsesAuth {
 }
 
 #[derive(Clone, Copy)]
-enum ResponsesRequestKind {
+pub(crate) enum ResponsesRequestKind {
     Standard,
     Codex,
 }
@@ -337,7 +337,7 @@ fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
 }
 
 #[derive(Serialize)]
-struct ResponsesRequest<'a> {
+pub(crate) struct ResponsesRequest<'a> {
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<&'a str>,
@@ -351,7 +351,7 @@ struct ResponsesRequest<'a> {
 }
 
 impl<'a> ResponsesRequest<'a> {
-    fn new(request: &'a ModelRequest, kind: ResponsesRequestKind) -> Self {
+    pub(crate) fn new(request: &'a ModelRequest, kind: ResponsesRequestKind) -> Self {
         // Each content block becomes its own Responses input item; a text
         // block keeps the plain message shape so tool-less requests stay
         // wire-identical.
