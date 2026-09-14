@@ -369,13 +369,30 @@ pub enum WorkspaceGrantOutcome {
     Failed { message: String },
 }
 
-/// Shell details carried by an approval request so clients can decide in place.
+/// Shell details carried by an approval request so clients can decide in
+/// place: the command, its directory, and — since protocol 20 — why the
+/// gate is asking: the classifier's verdict and the rules that produced it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShellCommandPreview {
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<ShellVerdict>,
+    /// Rule identifiers (snake_case) in the order the classifier hit them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+}
+
+/// The classifier's tier for a shell command: `allow` runs unprompted under
+/// `auto`; `prompt` asks; `forbidden` is refused under every mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellVerdict {
+    Allow,
+    Prompt,
+    Forbidden,
 }
 
 /// Edit details carried by an approval request so clients can decide in place:
@@ -1968,6 +1985,8 @@ mod tests {
             shell: Some(ShellCommandPreview {
                 command: "cargo test".to_owned(),
                 cwd: Some("crates/qq-core".to_owned()),
+                verdict: Some(ShellVerdict::Prompt),
+                reasons: vec!["unlisted".to_owned()],
             }),
             edit: None,
         };

@@ -36,6 +36,7 @@ mod runtime;
 mod sessions;
 mod tools;
 
+pub use approval::bench_support as classify_bench;
 /// Entry points for the `tool_output` bench. Not a public API.
 #[doc(hidden)]
 pub use tools::bench_support as tool_bench;
@@ -565,6 +566,9 @@ impl ToolGate for StaticPolicyGate {
             approval::PolicyDecision::Execute => GateDecision::Execute,
             approval::PolicyDecision::Deny => GateDecision::Deny {
                 message: approval::POLICY_DENIED_RESULT.to_owned(),
+            },
+            approval::PolicyDecision::Forbidden { rules } => GateDecision::Deny {
+                message: approval::forbidden_result(&rules),
             },
             approval::PolicyDecision::RequireApproval => GateDecision::Deny {
                 message: approval::UNATTENDED_DENIED_RESULT.to_owned(),

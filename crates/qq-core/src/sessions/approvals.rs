@@ -53,10 +53,36 @@ impl ToolGate for SessionToolGate {
                         Err(error) => approval_persistence_failure(error),
                     }
                 }
+                approval::PolicyDecision::Forbidden { rules } => {
+                    let message = approval::forbidden_result(&rules);
+                    match inner
+                        .store
+                        .deny_tool_call(&claimed, call.id, message.clone())
+                        .await
+                    {
+                        Ok(_) => GateDecision::Deny { message },
+                        Err(error) => approval_persistence_failure(error),
+                    }
+                }
                 approval::PolicyDecision::RequireApproval => {
                     let shell = match class {
                         approval::ToolClass::Shell { command, cwd } => {
-                            Some(ShellCommandPreview { command, cwd })
+                            // Why the gate is asking, so the client can say so.
+                            let verdict = approval::classify_command(&command, None);
+                            Some(ShellCommandPreview {
+                                command,
+                                cwd,
+                                verdict: Some(match verdict.decision {
+                                    approval::Decision::Allow => ShellVerdict::Allow,
+                                    approval::Decision::Prompt => ShellVerdict::Prompt,
+                                    approval::Decision::Forbidden => ShellVerdict::Forbidden,
+                                }),
+                                reasons: verdict
+                                    .reasons
+                                    .iter()
+                                    .map(|rule| rule.name().to_owned())
+                                    .collect(),
+                            })
                         }
                         _ => None,
                     };

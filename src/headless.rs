@@ -1387,7 +1387,7 @@ mod tests {
                     }),
                     Ok(ProviderEvent::ToolCallArgumentsDelta {
                         id: "call_shell".to_owned(),
-                        json: r#"{"command":"printf ok > shelled.txt"}"#.to_owned(),
+                        json: r#"{"command":"cp note.txt shelled.txt"}"#.to_owned(),
                     }),
                     Ok(ProviderEvent::ToolCallCompleted {
                         id: "call_shell".to_owned(),
@@ -1943,7 +1943,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(fixture.workspace.join("shelled.txt")).unwrap(),
-            "ok"
+            "hello from qq\n"
         );
 
         let records = parse_records(&stdout);
@@ -1957,8 +1957,9 @@ mod tests {
         };
         assert_eq!(call_state("write_file"), "completed");
         assert_eq!(call_state("shell"), "completed");
-        // Under auto, edits and safe shell run directly: no approval
-        // round-trip happened and nothing waited for a human.
+        // Under auto, edits and shell commands the classifier allows (a
+        // workspace-relative `cp`) run directly: no approval round-trip
+        // happened and nothing waited for a human.
         assert!(
             event_records(&records)
                 .iter()
