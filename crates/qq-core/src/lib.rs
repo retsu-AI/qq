@@ -921,13 +921,17 @@ impl plan::CompiledAgentPlan {
     /// workspace.
     pub(crate) fn execute(
         self: &Arc<Self>,
-        mut messages: Vec<Message>,
+        messages: Vec<Message>,
         cancelled: Arc<AtomicBool>,
         gate: Arc<dyn ToolGate>,
         file_state: Arc<workspace::FileState>,
         capabilities: RunCapabilities,
     ) -> RuntimeStream {
         let plan = Arc::clone(self);
+        // The transcript is shared with each turn's request by reference
+        // count; once the provider stream is dropped the run is the only
+        // holder and appends in place (`Arc::make_mut` copies nothing).
+        let mut messages = Arc::new(messages);
         let provider = Arc::clone(&plan.runtime.provider);
         let model = Arc::clone(&plan.runtime.model);
         let model_max_output_tokens = plan.runtime.max_output_tokens;
@@ -976,7 +980,7 @@ impl plan::CompiledAgentPlan {
             // content (reasoning-only or a call-less empty completion). Live turns
             // already skip those; reconstructed history must too, or a follow-up
             // on a finished session fails before the provider is reached.
-            messages = usable_conversation(messages);
+            messages = Arc::new(usable_conversation(Arc::unwrap_or_clone(messages)));
             if messages.is_empty() {
                 yield RuntimeEvent::Failed {
                     kind: RunFailureKind::InvalidCommand,
@@ -986,7 +990,7 @@ impl plan::CompiledAgentPlan {
             }
 
             let parsed_invocation = match if allow_guidance && !slash_is_literal {
-                workspace::parse_invocation(&mut messages)
+                workspace::parse_invocation(Arc::make_mut(&mut messages).as_mut_slice())
             } else {
                 Ok(workspace::ParsedInvocation {
                     guidance: None,
@@ -1268,7 +1272,7 @@ impl plan::CompiledAgentPlan {
                 // can never duplicate output.
                 let request = ModelRequest::new(
                     Arc::clone(&model),
-                    messages.clone(),
+                    Arc::clone(&messages),
                     max_output_tokens,
                 );
                 let request = if request_has_tools {
@@ -1484,7 +1488,6 @@ impl plan::CompiledAgentPlan {
                                 provider_call_id: id,
                                 name,
                                 arguments: String::new(),
-                                parsed_arguments: None,
                                 rejection: None,
                                 completed: false,
                             });
@@ -1539,7 +1542,8 @@ impl plan::CompiledAgentPlan {
                             };
                             // Malformed argument JSON is the model's mistake, not a
                             // run failure: return a retryable tool error instead.
-                            let parsed = match serde_json::from_str(arguments) {
+                            let parsed: serde_json::Value = match serde_json::from_str(arguments)
+                            {
                                 Ok(arguments) => arguments,
                                 Err(error) => {
                                     call.rejection = Some(format!(
@@ -1550,7 +1554,6 @@ impl plan::CompiledAgentPlan {
                             };
                             call.arguments = serde_json::to_string(&parsed)
                                 .expect("a parsed JSON value must serialize");
-                            call.parsed_arguments = Some(parsed);
                             call.completed = true;
                         }
                         Ok(ProviderEvent::Completed { usage }) => {
@@ -1602,6 +1605,10 @@ impl plan::CompiledAgentPlan {
                     }
                 }
 
+                // The stream holds the transcript; release it before this
+                // turn appends so the append never copies.
+                drop(provider_events);
+
                 if !completed {
                     // The provider restarts a stream that ends before its
                     // first event; one that ends after events is its
@@ -1645,13 +1652,15 @@ impl plan::CompiledAgentPlan {
                         TurnBlock::Text(text) => Some(ContentBlock::Text { text }),
                         TurnBlock::ToolCall(index) => {
                             let call = &pending_calls[index];
+                            // `arguments` is canonical serde_json output once
+                            // the call completed, so it is a valid RawValue.
                             Some(ContentBlock::ToolCall {
                                 id: call.provider_call_id.clone(),
                                 name: call.name.clone(),
-                                arguments: call
-                                    .parsed_arguments
-                                    .clone()
-                                    .expect("completed calls have parsed arguments"),
+                                arguments: serde_json::value::RawValue::from_string(
+                                    call.arguments.clone(),
+                                )
+                                .expect("completed calls hold canonical JSON arguments"),
                             })
                         }
                     })
@@ -1740,10 +1749,10 @@ impl plan::CompiledAgentPlan {
                         if assistant.has_content() {
                             irreducible_message_bytes = irreducible_message_bytes
                                 .saturating_add(measure_message(&assistant));
-                            messages.push(assistant);
+                            Arc::make_mut(&mut messages).push(assistant);
                         }
                         if messages.last().is_some_and(|message| message.role() == Role::Assistant) {
-                            messages.push(Message::user(OUTPUT_TRUNCATED_CONTINUE_NOTICE));
+                            Arc::make_mut(&mut messages).push(Message::user(OUTPUT_TRUNCATED_CONTINUE_NOTICE));
                             irreducible_message_bytes = irreducible_message_bytes
                                 .saturating_add(measure_message(messages.last().expect("just pushed")));
                         }
@@ -1758,14 +1767,14 @@ impl plan::CompiledAgentPlan {
                     if assistant.has_content() {
                         irreducible_message_bytes = irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
-                        messages.push(assistant);
+                        Arc::make_mut(&mut messages).push(assistant);
                     }
                     // The interrupt exists to apply steering now. Nothing
                     // queued means the client raced a finishing run; continue
                     // with the next turn so the model resumes from its text.
                     if let Some(applied) = apply_steering(
                         &mut steering,
-                        &mut messages,
+                        Arc::make_mut(&mut messages),
                         &mut irreducible_message_bytes,
                         turn_ordinal.saturating_add(1),
                     ) {
@@ -1779,7 +1788,7 @@ impl plan::CompiledAgentPlan {
                     if messages.last().is_some_and(|message| message.role() == Role::Assistant) {
                         // Providers require alternation; an interrupted turn
                         // with no steering to inject cannot be resent as-is.
-                        messages.push(Message::user(INTERRUPT_CONTINUE_NOTICE));
+                        Arc::make_mut(&mut messages).push(Message::user(INTERRUPT_CONTINUE_NOTICE));
                         irreducible_message_bytes = irreducible_message_bytes
                             .saturating_add(measure_message(messages.last().expect("just pushed")));
                     }
@@ -1825,7 +1834,7 @@ impl plan::CompiledAgentPlan {
                 if calls.is_empty() && checkpoint_turn {
                     irreducible_message_bytes = irreducible_message_bytes
                         .saturating_add(measure_message(&assistant));
-                    messages.push(assistant);
+                    Arc::make_mut(&mut messages).push(assistant);
                     slice_tool_calls = 0;
                     continuing_slice = true;
                     continue;
@@ -1836,15 +1845,16 @@ impl plan::CompiledAgentPlan {
                     // completing, exactly as if the model had called a tool.
                     if let Some(applied) = apply_steering(
                         &mut steering,
-                        &mut messages,
+                        Arc::make_mut(&mut messages),
                         &mut irreducible_message_bytes,
                         turn_ordinal.saturating_add(1),
                     ) {
                         irreducible_message_bytes = irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
-                        let steering_messages = messages.split_off(messages.len() - applied.len());
-                        messages.push(assistant);
-                        messages.extend(steering_messages);
+                        let keep = messages.len() - applied.len();
+                        let steering_messages = Arc::make_mut(&mut messages).split_off(keep);
+                        Arc::make_mut(&mut messages).push(assistant);
+                        Arc::make_mut(&mut messages).extend(steering_messages);
                         for message_id in applied {
                             yield RuntimeEvent::SteeringApplied {
                                 message_id,
@@ -1930,9 +1940,9 @@ impl plan::CompiledAgentPlan {
                         if audit_interrupted {
                             handled_interrupt = steering.as_ref().map_or(handled_interrupt, |steering| *steering.interrupts.borrow());
                             irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
-                            messages.push(assistant);
+                            Arc::make_mut(&mut messages).push(assistant);
                             yield RuntimeEvent::Interrupted { turn_ordinal };
-                            if let Some(applied) = apply_steering(&mut steering, &mut messages, &mut irreducible_message_bytes, turn_ordinal.saturating_add(1)) {
+                            if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1)) {
                                 for message_id in applied {
                                     yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) };
                                 }
@@ -1943,24 +1953,25 @@ impl plan::CompiledAgentPlan {
                             audit_revisions += 1;
                             irreducible_message_bytes = irreducible_message_bytes
                                 .saturating_add(measure_message(&assistant));
-                            messages.push(assistant);
+                            Arc::make_mut(&mut messages).push(assistant);
                             let mut notice = String::from(runtime::AUDIT_REVISION_NOTICE);
                             for finding in &verdict.findings {
                                 notice.push_str("\n- ");
                                 notice.push_str(finding);
                             }
-                            messages.push(Message::user(notice));
+                            Arc::make_mut(&mut messages).push(Message::user(notice));
                             irreducible_message_bytes = irreducible_message_bytes
                                 .saturating_add(measure_message(messages.last().expect("just pushed")));
                             continue;
                         }
                     }
                     // Steering accepted while an audit ran still owns the next boundary.
-                    if let Some(applied) = apply_steering(&mut steering, &mut messages, &mut irreducible_message_bytes, turn_ordinal.saturating_add(1)) {
+                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1)) {
                         irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
-                        let queued = messages.split_off(messages.len() - applied.len());
-                        messages.push(assistant);
-                        messages.extend(queued);
+                        let keep = messages.len() - applied.len();
+                        let queued = Arc::make_mut(&mut messages).split_off(keep);
+                        Arc::make_mut(&mut messages).push(assistant);
+                        Arc::make_mut(&mut messages).extend(queued);
                         for message_id in applied { yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) }; }
                         continue;
                     }
@@ -1997,8 +2008,8 @@ impl plan::CompiledAgentPlan {
                                 };
                                 irreducible_message_bytes = irreducible_message_bytes
                                     .saturating_add(measure_message(&assistant));
-                                messages.push(assistant);
-                                messages.push(Message::user(output::repair_notice(errors)));
+                                Arc::make_mut(&mut messages).push(assistant);
+                                Arc::make_mut(&mut messages).push(Message::user(output::repair_notice(errors)));
                                 irreducible_message_bytes = irreducible_message_bytes
                                     .saturating_add(measure_message(messages.last().expect("just pushed")));
                                 continue;
@@ -2011,7 +2022,7 @@ impl plan::CompiledAgentPlan {
                 }
                 irreducible_message_bytes = irreducible_message_bytes
                     .saturating_add(measure_message(&assistant));
-                messages.push(assistant);
+                Arc::make_mut(&mut messages).push(assistant);
 
                 // Policy resolves sequentially in request order, after the
                 // turn and its `requested` call rows are persisted, so
@@ -2552,13 +2563,13 @@ impl plan::CompiledAgentPlan {
                 let tool_results = Message::tool_results(result_blocks);
                 irreducible_message_bytes = irreducible_message_bytes
                     .saturating_add(measure_message(&tool_results));
-                messages.push(tool_results);
+                Arc::make_mut(&mut messages).push(tool_results);
                 // The boundary: every result of this turn is in context, and
                 // the next request has not been built. Steering joins here as
                 // a user message after the tool results.
                 if let Some(applied) = apply_steering(
                     &mut steering,
-                    &mut messages,
+                    Arc::make_mut(&mut messages),
                     &mut irreducible_message_bytes,
                     turn_ordinal.saturating_add(1),
                 ) {
@@ -2707,7 +2718,7 @@ fn measure_message(message: &Message) -> u64 {
                 } => u64::try_from(id.len())
                     .unwrap_or(u64::MAX)
                     .saturating_add(u64::try_from(name.len()).unwrap_or(u64::MAX))
-                    .saturating_add(json_value_bytes(arguments)),
+                    .saturating_add(u64::try_from(arguments.get().len()).unwrap_or(u64::MAX)),
                 ContentBlock::ToolResult {
                     call_id, content, ..
                 } => u64::try_from(call_id.len())
@@ -2718,30 +2729,6 @@ fn measure_message(message: &Message) -> u64 {
                 .saturating_add(CONTEXT_BLOCK_FRAMING_BYTES)
                 .saturating_add(content)
         })
-}
-
-fn json_value_bytes(value: &serde_json::Value) -> u64 {
-    struct ByteCounter(u64);
-
-    impl std::io::Write for ByteCounter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self
-                .0
-                .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut counter = ByteCounter(0);
-    if serde_json::to_writer(&mut counter, value).is_err() {
-        u64::MAX
-    } else {
-        counter.0
-    }
 }
 
 fn append_turn_text(blocks: &mut Vec<TurnBlock>, text: &str) {
@@ -2836,6 +2823,92 @@ mod tests {
                 }),
             ]))
         }
+    }
+
+    /// D5: the run shares its transcript with each turn's request and, once
+    /// the provider stream is dropped, appends in place. The provider records
+    /// only the allocation's address (a `Weak` would itself force
+    /// `Arc::make_mut` to reallocate); turn two's request must then point at
+    /// the very allocation turn one saw, grown by two messages.
+    #[tokio::test]
+    async fn the_transcript_is_shared_with_each_request_and_grown_in_place() {
+        struct TwoTurnProvider {
+            seen: Arc<Mutex<Vec<(usize, usize, usize)>>>,
+        }
+
+        impl Provider for TwoTurnProvider {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let mut seen = self.seen.lock().unwrap();
+                let turn = seen.len();
+                let shared = request.shared_messages();
+                seen.push((
+                    Arc::as_ptr(shared).addr(),
+                    shared.len(),
+                    Arc::strong_count(shared),
+                ));
+                drop(request);
+                if turn == 0 {
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::ToolCallStarted {
+                            id: "c1".to_owned(),
+                            name: "list_dir".to_owned(),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: "c1".to_owned(),
+                            json: r#"{"path":"."}"#.to_owned(),
+                        }),
+                        Ok(ProviderEvent::ToolCallCompleted {
+                            id: "c1".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TwoTurnProvider {
+                seen: Arc::clone(&seen),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+
+        let events = runtime
+            .run_in_workspace(
+                RunCommand::new("List the workspace."),
+                directory.path().to_owned(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(events.last(), Some(RunEvent::Completed)));
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        let (first, first_len, first_holders) = &seen[0];
+        let (second, second_len, second_holders) = &seen[1];
+        assert_eq!(*first_len, 1, "turn one sees the prompt alone");
+        assert_eq!(
+            *second_len, 3,
+            "turn two sees prompt, assistant tool call, tool results"
+        );
+        // Exactly two holders at request time: the run and the request.
+        assert_eq!((*first_holders, *second_holders), (2, 2));
+        // Same allocation both turns: the append copied nothing.
+        assert_eq!(
+            first, second,
+            "the transcript must be grown in place between turns"
+        );
     }
 
     #[tokio::test]
@@ -7171,11 +7244,11 @@ mod tests {
             Message::user("continue"),
             Message::new(
                 Role::Assistant,
-                vec![ContentBlock::ToolCall {
-                    id: "c1".to_owned(),
-                    name: catalog::SELECT_TOOLS_TOOL.to_owned(),
-                    arguments: serde_json::json!({"query": "x"}),
-                }],
+                vec![ContentBlock::tool_call(
+                    "c1".to_owned(),
+                    catalog::SELECT_TOOLS_TOOL.to_owned(),
+                    &serde_json::json!({"query": "x"}),
+                )],
             ),
             Message::tool_results(vec![ContentBlock::ToolResult {
                 call_id: "c1".to_owned(),

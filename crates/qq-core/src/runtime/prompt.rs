@@ -149,11 +149,7 @@ pub(crate) struct ToolSchemaMeasurement {
 }
 
 pub(crate) fn tool_schema_measurement(specs: &[ToolSpec]) -> ToolSchemaMeasurement {
-    let schemas: Vec<String> = specs
-        .iter()
-        .map(|spec| spec.input_schema().to_string())
-        .collect();
-    measure_tool_schemas(specs.iter().zip(schemas.iter().map(String::as_str)))
+    measure_tool_schemas(specs.iter().map(|spec| (spec, spec.input_schema().get())))
 }
 
 /// Measures declarations whose schemas are already serialized, so callers

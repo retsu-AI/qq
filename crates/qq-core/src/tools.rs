@@ -1227,7 +1227,7 @@ mod tests {
             spec.description()
                 .contains("never guess, translate, or invent a route")
         );
-        let schema = spec.input_schema();
+        let schema: serde_json::Value = serde_json::from_str(spec.input_schema().get()).unwrap();
         assert_eq!(schema["required"], json!(["task"]));
         assert_eq!(schema["properties"]["model"]["enum"], json!(routes));
         let model = schema["properties"]["model"]["description"]
@@ -1271,7 +1271,7 @@ mod tests {
         // model may only name roster routes exactly.
         let every_route = ["openai/fast".to_owned(), "openai/other".to_owned()];
         let spec = spawn_agent_spec(&every_route, &roster());
-        let schema = spec.input_schema();
+        let schema: serde_json::Value = serde_json::from_str(spec.input_schema().get()).unwrap();
         assert_eq!(schema["required"], json!(["task"]));
         assert_eq!(
             schema["properties"]["role"]["enum"],
@@ -1300,7 +1300,7 @@ mod tests {
     #[test]
     fn spawn_agent_hides_model_override_without_authenticated_routes() {
         let spec = spawn_agent_spec(&[], &qq_protocol::DelegationRoster::default());
-        let schema = spec.input_schema();
+        let schema: serde_json::Value = serde_json::from_str(spec.input_schema().get()).unwrap();
         assert!(schema["properties"].get("model").is_none());
         assert!(schema["properties"].get("role").is_none());
         assert_eq!(schema["required"], json!(["task"]));

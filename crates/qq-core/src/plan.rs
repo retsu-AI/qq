@@ -526,7 +526,7 @@ impl CompiledAgentPlan {
         if !runtime.delegation.roster.is_empty() {
             let bytes = spawn_spec.name().len()
                 + spawn_spec.description().len()
-                + spawn_spec.input_schema().to_string().len();
+                + spawn_spec.input_schema().get().len();
             if bytes > tools::MAX_SPAWN_AGENT_SCHEMA_BYTES {
                 return Err(PlanCompileError::SpawnSchemaTooLarge {
                     bytes,
