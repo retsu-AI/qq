@@ -176,6 +176,46 @@ pub fn encode_body(protocol: crate::HttpProtocol, request: &crate::ModelRequest)
     encoded.expect("a wire request body must serialize")
 }
 
+/// Frames one SSE body chunk-by-chunk through a provider decoder and parses
+/// every event as its adapter would, without a transport. For the
+/// `sse_decode` benchmark. Returns the number of events parsed.
+///
+/// # Panics
+///
+/// Panics when the body is not a well-formed stream for the protocol; the
+/// bench fixtures are.
+pub fn decode_sse_body(protocol: crate::HttpProtocol, chunks: &[&[u8]], parse: bool) -> usize {
+    use crate::providers::{anthropic, openai};
+    let redactions: [String; 0] = [];
+    let mut decoder = match protocol {
+        crate::HttpProtocol::OpenAiResponses | crate::HttpProtocol::OpenAiChatCompletions => {
+            openai::sse_decoder(usize::MAX)
+        }
+        crate::HttpProtocol::AnthropicMessages => anthropic::sse_decoder(usize::MAX),
+        crate::HttpProtocol::GoogleGenerateContent => {
+            panic!("the sse_decode bench covers the OpenAI and Anthropic decoders")
+        }
+    };
+    let mut parsed = 0;
+    for chunk in chunks {
+        for event in decoder.push(chunk).expect("fixture body frames") {
+            if parse {
+                match protocol {
+                    crate::HttpProtocol::AnthropicMessages => {
+                        anthropic::decode_event(event, &redactions).expect("fixture event decodes");
+                    }
+                    _ => {
+                        openai::decode_event(&event.data, &redactions)
+                            .expect("fixture event decodes");
+                    }
+                }
+            }
+            parsed += 1;
+        }
+    }
+    parsed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

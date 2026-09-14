@@ -358,7 +358,7 @@ fn build_headers(
     Ok(headers.finish())
 }
 
-fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
+pub(crate) fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
     SseDecoder::named(
         max_event_bytes,
         "Anthropic-compatible SSE event size overflowed",
@@ -603,7 +603,7 @@ struct WireApiError {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum DecodedEvent {
+pub(crate) enum DecodedEvent {
     OutputText(String),
     MessageStart(Option<ProviderUsage>),
     MessageDelta {
@@ -636,7 +636,10 @@ enum DecodedEvent {
     Ignored,
 }
 
-fn decode_event(event: SseEvent, redactions: &[String]) -> Result<DecodedEvent, ProviderError> {
+pub(crate) fn decode_event(
+    event: SseEvent,
+    redactions: &[String],
+) -> Result<DecodedEvent, ProviderError> {
     if event.data.trim().is_empty() {
         return Ok(DecodedEvent::Ignored);
     }
