@@ -370,8 +370,8 @@ pub enum WorkspaceGrantOutcome {
 }
 
 /// Shell details carried by an approval request so clients can decide in
-/// place: the command, its directory, and — since protocol 20 — why the
-/// gate is asking: the classifier's verdict and the rules that produced it.
+/// place: the command, its directory, and (protocol 20) why the gate is
+/// asking: the classifier's verdict and the rules that produced it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShellCommandPreview {
@@ -2867,7 +2867,10 @@ mod tests {
         // `SubmitPrompt.output`, `RunFinished.final_output`, and
         // `RunSnapshot.final_output`; strict decoders reject the new fields
         // on older versions, so the version moves.
-        assert_eq!(crate::PROTOCOL_VERSION, 19);
+        // Version 20 added `verdict` and `reasons` to `ShellCommandPreview`
+        // (why the gate is asking) for the shell classifier; the struct is
+        // `deny_unknown_fields`, so older clients reject the new fields.
+        assert_eq!(crate::PROTOCOL_VERSION, 20);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

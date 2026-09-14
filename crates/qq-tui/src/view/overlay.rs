@@ -450,6 +450,18 @@ pub(super) fn approval_block(app: &App, width: usize) -> Vec<Line> {
             line.push(format!("  (in {cwd})"), muted());
         }
         lines.push(truncate_line(line, width));
+        // Why the gate is asking: the classifier's rule ids, as words.
+        if !shell.reasons.is_empty() {
+            let reasons: Vec<String> = shell
+                .reasons
+                .iter()
+                .take(3)
+                .map(|reason| reason.replace('_', " "))
+                .collect();
+            let mut line = Line::styled("         ", muted());
+            line.push(format!("asks because: {}", reasons.join(", ")), muted());
+            lines.push(truncate_line(line, width));
+        }
     }
     if let Some(edit) = preview.and_then(|preview| preview.edit.as_ref()) {
         let mut line = Line::styled("       ", muted());

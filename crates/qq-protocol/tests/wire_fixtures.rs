@@ -24,9 +24,9 @@ use qq_protocol::{
     ResolvedModelVersion, RunActivity, RunFailure, RunFailureKind, RunId, RunLimits, RunOutcome,
     RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus, ServerCapabilities, ServerInfo,
     SessionCommand, SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionId,
-    SessionStatus, SessionSummary, SkillCapabilities, SteeringCapabilities, StoreId, TokenUsage,
-    ToolCallId, ToolCapabilities, ToolExposure, ToolHostSummary, WorkspaceId,
-    WorkspaceToolCapabilities,
+    SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict, SkillCapabilities,
+    SteeringCapabilities, StoreId, TokenUsage, ToolCallId, ToolCallSnapshot, ToolCallState,
+    ToolCapabilities, ToolExposure, ToolHostSummary, WorkspaceId, WorkspaceToolCapabilities,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -168,7 +168,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 19);
+    assert_eq!(PROTOCOL_VERSION, 20);
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
@@ -409,6 +409,36 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 session: summary(),
                 run_id,
                 plan: Some(Box::new(plan_identity())),
+            },
+        ),
+    );
+    // Version 20: the shell preview says why the gate is asking.
+    check(
+        "event_tool_approval_requested_shell",
+        &envelope(
+            21,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: ToolCallSnapshot {
+                    id: ToolCallId::from_bytes([6; 16]),
+                    session_id,
+                    run_id,
+                    turn_ordinal: 1,
+                    call_ordinal: 1,
+                    provider_call_id: "call_0".to_owned(),
+                    name: "shell".to_owned(),
+                    arguments: r#"{"command":"rm -r target"}"#.to_owned(),
+                    state: ToolCallState::AwaitingApproval,
+                    result: None,
+                    is_error: false,
+                    display: None,
+                },
+                shell: Some(ShellCommandPreview {
+                    command: "rm -r target".to_owned(),
+                    cwd: None,
+                    verdict: Some(ShellVerdict::Prompt),
+                    reasons: vec!["remove_file".to_owned()],
+                }),
+                edit: None,
             },
         ),
     );
@@ -846,7 +876,7 @@ fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
 /// current encoding without invalidating what an older peer produced).
 #[test]
 fn historical_fixtures_still_decode() {
-    const RETAINED: &[u16] = &[17, 18];
+    const RETAINED: &[u16] = &[17, 18, 19];
     for &version in RETAINED {
         assert!(version < PROTOCOL_VERSION);
         let directory = fixture_dir(version);

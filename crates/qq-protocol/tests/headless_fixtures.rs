@@ -297,7 +297,7 @@ fn assert_well_formed<'a>(
 
 #[test]
 fn current_version_streams_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 19);
+    assert_eq!(PROTOCOL_VERSION, 20);
 
     let stream = |trial: HeadlessTrial, events: Vec<HeadlessRecord>, outcome: HeadlessOutcome| {
         let mut stream = Vec::with_capacity(events.len() + 2);
@@ -592,7 +592,7 @@ fn decode_stream(path: &std::path::Path) -> Vec<HeadlessRecord> {
 /// stream is a valid current stream with those fields absent.
 #[test]
 fn historical_streams_still_decode() {
-    const RETAINED: &[u16] = &[18];
+    const RETAINED: &[u16] = &[18, 19];
     for &version in RETAINED {
         assert!(version < PROTOCOL_VERSION);
         for path in stream_paths(version) {
