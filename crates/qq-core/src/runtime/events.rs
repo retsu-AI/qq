@@ -210,8 +210,11 @@ pub(crate) struct RuntimeToolCall {
 pub(crate) struct PendingToolCall {
     pub(crate) provider_call_id: String,
     pub(crate) name: String,
+    /// While streaming, the raw argument text as the provider sent it; once
+    /// completed, its compact canonical re-encoding (or `{}` when the text
+    /// was not JSON, with `rejection` set). The transcript embeds this text
+    /// verbatim, so it is never re-serialized.
     pub(crate) arguments: String,
-    pub(crate) parsed_arguments: Option<serde_json::Value>,
     pub(crate) rejection: Option<String>,
     pub(crate) completed: bool,
 }

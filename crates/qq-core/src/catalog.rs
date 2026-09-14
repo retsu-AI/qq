@@ -228,26 +228,18 @@ impl std::fmt::Debug for ToolCatalog {
     }
 }
 
-/// A static tool as the compiler receives it. `schema` is the serialized
-/// `input_schema`, computed once per process for built-ins whose declarations
-/// never change, so each plan compile does not re-serialize them.
+/// A static tool as the compiler receives it. The spec carries its schema as
+/// compact JSON text, so nothing is serialized at compile time.
 #[derive(Clone)]
 pub(crate) struct StaticTool {
     pub(crate) spec: ToolSpec,
     pub(crate) host: ToolHost,
     pub(crate) effect: EffectClass,
-    pub(crate) schema: Arc<str>,
 }
 
 impl StaticTool {
-    pub(crate) fn new(spec: ToolSpec, host: ToolHost, effect: EffectClass) -> Self {
-        let schema = Arc::from(spec.input_schema().to_string());
-        Self {
-            spec,
-            host,
-            effect,
-            schema,
-        }
+    pub(crate) const fn new(spec: ToolSpec, host: ToolHost, effect: EffectClass) -> Self {
+        Self { spec, host, effect }
     }
 }
 
@@ -259,18 +251,17 @@ impl ToolCatalog {
         let mut entries = Vec::with_capacity(static_tools.len() + 16);
         let mut names = BTreeSet::new();
         let mut static_order = Vec::with_capacity(static_tools.len());
-        let mut schemas: Vec<Arc<str>> = Vec::with_capacity(static_tools.len() + 16);
         for tool in static_tools {
             names.insert(tool.spec.name().to_owned());
             static_order.push(entries.len());
+            let schema_len = tool.spec.input_schema().get().len();
             entries.push(ToolEntry::new(
                 tool.spec,
                 tool.host,
                 tool.effect,
                 ToolHints::default(),
-                tool.schema.len(),
+                schema_len,
             ));
-            schemas.push(tool.schema);
         }
 
         let mut external_order = Vec::new();
@@ -306,7 +297,7 @@ impl ToolCatalog {
                     });
                     continue;
                 }
-                let schema = tool.spec.input_schema().to_string();
+                let schema = tool.spec.input_schema().get();
                 if schema.len() > MAX_TOOL_SCHEMA_BYTES {
                     excluded.push(ExcludedTool {
                         name: name.to_owned(),
@@ -341,14 +332,14 @@ impl ToolCatalog {
                 names.insert(name.to_owned());
                 external_order.push(entries.len());
                 admitted += 1;
+                let schema_len = schema.len();
                 entries.push(ToolEntry::new(
                     tool.spec,
                     ToolHost::External { host: host_index },
                     EffectClass::External,
                     tool.hints,
-                    schema.len(),
+                    schema_len,
                 ));
-                schemas.push(Arc::from(schema));
             }
             summaries.push(HostSummary {
                 name: host.name,
@@ -368,13 +359,9 @@ impl ToolCatalog {
             position_of[*original] = sorted_index;
         }
         let mut sorted = Vec::with_capacity(entries.len());
-        let mut sorted_schemas = Vec::with_capacity(entries.len());
-        let mut originals: Vec<Option<(ToolEntry, Arc<str>)>> =
-            entries.into_iter().zip(schemas).map(Some).collect();
+        let mut originals: Vec<Option<ToolEntry>> = entries.into_iter().map(Some).collect();
         for original in &permutation {
-            let (entry, schema) = originals[*original].take().expect("each index once");
-            sorted.push(entry);
-            sorted_schemas.push(schema);
+            sorted.push(originals[*original].take().expect("each index once"));
         }
         let static_order: Vec<usize> = static_order.iter().map(|i| position_of[*i]).collect();
         let external_order: Vec<usize> = external_order.iter().map(|i| position_of[*i]).collect();
@@ -415,7 +402,7 @@ impl ToolCatalog {
             .then(|| Arc::from(render_index(&sorted, &external_order, &summaries)));
         let measure = |indices: &mut dyn Iterator<Item = usize>| {
             crate::runtime::measure_tool_schemas(
-                indices.map(|index| (&sorted[index].spec, sorted_schemas[index].as_ref())),
+                indices.map(|index| (&sorted[index].spec, sorted[index].spec.input_schema().get())),
             )
         };
         let static_measurement = measure(&mut static_order.iter().copied().filter(|index| {
@@ -438,7 +425,8 @@ impl ToolCatalog {
 
         let mut digest = Sha256::new();
         digest.update(b"qq-tool-catalog-v1\0");
-        for (entry, schema) in sorted.iter().zip(&sorted_schemas) {
+        for entry in &sorted {
+            let schema = entry.spec.input_schema().get();
             for bytes in [
                 entry.spec.name().as_bytes(),
                 entry.spec.description().as_bytes(),
@@ -651,6 +639,7 @@ impl ToolCatalog {
 }
 
 /// Which optional static tools a run may see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StaticFilter {
     pub(crate) spawn_agent: bool,
     pub(crate) search_history: bool,

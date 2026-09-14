@@ -6090,6 +6090,11 @@ enum PersistedContentBlock {
     Text {
         text: String,
     },
+    /// `arguments` is stored as the JSON object itself, not a string. It is a
+    /// `Value` here because serde buffers the content of an internally tagged
+    /// enum, which a `RawValue` cannot survive; the transcript block keeps
+    /// the compact text and the conversion happens once at load, not per
+    /// request.
     ToolCall {
         id: String,
         name: String,
@@ -6113,7 +6118,10 @@ impl From<&ContentBlock> for PersistedContentBlock {
             } => Self::ToolCall {
                 id: id.clone(),
                 name: name.clone(),
-                arguments: arguments.clone(),
+                // The text is canonical serde_json output; parsing cannot
+                // fail, and a corrupted block must not be persisted silently.
+                arguments: serde_json::from_str(arguments.get())
+                    .expect("transcript tool-call arguments are valid JSON"),
             },
             ContentBlock::ToolResult {
                 call_id,
@@ -6136,11 +6144,7 @@ impl From<PersistedContentBlock> for ContentBlock {
                 id,
                 name,
                 arguments,
-            } => Self::ToolCall {
-                id,
-                name,
-                arguments,
-            },
+            } => Self::tool_call(id, name, &arguments),
             PersistedContentBlock::ToolResult {
                 call_id,
                 content,
@@ -14233,10 +14237,12 @@ mod tests {
 
     #[test]
     fn assembly_pruning_stubs_old_read_only_results_and_preserves_errors() {
-        let call = |id: &str, name: &str| ContentBlock::ToolCall {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            arguments: serde_json::json!({"path": "src/lib.rs"}),
+        let call = |id: &str, name: &str| {
+            ContentBlock::tool_call(
+                id.to_owned(),
+                name.to_owned(),
+                &serde_json::json!({"path": "src/lib.rs"}),
+            )
         };
         let result = |id: &str, is_error: bool| ContentBlock::ToolResult {
             call_id: id.to_owned(),
@@ -14296,10 +14302,12 @@ mod tests {
 
     #[test]
     fn pruning_stubs_keep_a_result_header_line() {
-        let call = |id: &str, name: &str| ContentBlock::ToolCall {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            arguments: serde_json::json!({"query": "needle"}),
+        let call = |id: &str, name: &str| {
+            ContentBlock::tool_call(
+                id.to_owned(),
+                name.to_owned(),
+                &serde_json::json!({"query": "needle"}),
+            )
         };
         let with_header = format!(
             "search \"needle\" matches=4/4 files=3 scanned=612\n{}",
@@ -14347,10 +14355,12 @@ mod tests {
 
     #[test]
     fn assembly_pruning_decides_from_the_stored_effect_class_not_the_tool_name() {
-        let call = |id: &str, name: &str| ContentBlock::ToolCall {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            arguments: serde_json::json!({"q": "x"}),
+        let call = |id: &str, name: &str| {
+            ContentBlock::tool_call(
+                id.to_owned(),
+                name.to_owned(),
+                &serde_json::json!({"q": "x"}),
+            )
         };
         let result = |id: &str| ContentBlock::ToolResult {
             call_id: id.to_owned(),
@@ -14420,16 +14430,16 @@ mod tests {
                     message: Message::new(
                         Role::Assistant,
                         vec![
-                            ContentBlock::ToolCall {
-                                id: "p1".to_owned(),
-                                name: "read_file".to_owned(),
-                                arguments: serde_json::json!({}),
-                            },
-                            ContentBlock::ToolCall {
-                                id: "p2".to_owned(),
-                                name: "shell".to_owned(),
-                                arguments: serde_json::json!({}),
-                            },
+                            ContentBlock::tool_call(
+                                "p1".to_owned(),
+                                "read_file".to_owned(),
+                                &serde_json::json!({}),
+                            ),
+                            ContentBlock::tool_call(
+                                "p2".to_owned(),
+                                "shell".to_owned(),
+                                &serde_json::json!({}),
+                            ),
                         ],
                     ),
                     calls: vec![
@@ -15140,11 +15150,11 @@ mod tests {
                     ContentBlock::Text {
                         text: "a".to_owned(),
                     },
-                    ContentBlock::ToolCall {
-                        id: call.provider_call_id.clone(),
-                        name: call.name.clone(),
-                        arguments: serde_json::from_str(&call.arguments).unwrap(),
-                    },
+                    ContentBlock::tool_call(
+                        call.provider_call_id.clone(),
+                        call.name.clone(),
+                        &serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
+                    ),
                     ContentBlock::Text {
                         text: "b".to_owned(),
                     },
@@ -15353,11 +15363,12 @@ mod tests {
                             turn_ordinal: 1,
                             message: Message::new(
                                 Role::Assistant,
-                                vec![ContentBlock::ToolCall {
-                                    id: call.provider_call_id.clone(),
-                                    name: call.name.clone(),
-                                    arguments: serde_json::from_str(&call.arguments).unwrap(),
-                                }],
+                                vec![ContentBlock::tool_call(
+                                    call.provider_call_id.clone(),
+                                    call.name.clone(),
+                                    &serde_json::from_str::<serde_json::Value>(&call.arguments)
+                                        .unwrap()
+                                )],
                             ),
                             calls: vec![call],
                             turn_message: Some(message_id),
@@ -19858,11 +19869,12 @@ mod tests {
                         turn_ordinal: 1,
                         message: Message::new(
                             Role::Assistant,
-                            vec![ContentBlock::ToolCall {
-                                id: call.provider_call_id.clone(),
-                                name: call.name.clone(),
-                                arguments: serde_json::from_str(&call.arguments).unwrap(),
-                            }],
+                            vec![ContentBlock::tool_call(
+                                call.provider_call_id.clone(),
+                                call.name.clone(),
+                                &serde_json::from_str::<serde_json::Value>(&call.arguments)
+                                    .unwrap(),
+                            )],
                         ),
                         calls: vec![call],
                         turn_message: None,
@@ -20059,10 +20071,13 @@ mod tests {
                         Role::Assistant,
                         calls
                             .iter()
-                            .map(|call| ContentBlock::ToolCall {
-                                id: call.provider_call_id.clone(),
-                                name: call.name.clone(),
-                                arguments: serde_json::from_str(&call.arguments).unwrap(),
+                            .map(|call| {
+                                ContentBlock::tool_call(
+                                    call.provider_call_id.clone(),
+                                    call.name.clone(),
+                                    &serde_json::from_str::<serde_json::Value>(&call.arguments)
+                                        .unwrap(),
+                                )
                             })
                             .collect(),
                     ),
@@ -21609,11 +21624,12 @@ mod tests {
                             ContentBlock::Text {
                                 text: "Checking. ".to_owned(),
                             },
-                            ContentBlock::ToolCall {
-                                id: call.provider_call_id.clone(),
-                                name: call.name.clone(),
-                                arguments: serde_json::from_str(&call.arguments).unwrap(),
-                            },
+                            ContentBlock::tool_call(
+                                call.provider_call_id.clone(),
+                                call.name.clone(),
+                                &serde_json::from_str::<serde_json::Value>(&call.arguments)
+                                    .unwrap(),
+                            ),
                         ],
                     ),
                     calls: vec![call],
@@ -21765,11 +21781,11 @@ mod tests {
                     turn_ordinal: 1,
                     message: Message::new(
                         Role::Assistant,
-                        vec![ContentBlock::ToolCall {
-                            id: call.provider_call_id.clone(),
-                            name: call.name.clone(),
-                            arguments: serde_json::from_str(&call.arguments).unwrap(),
-                        }],
+                        vec![ContentBlock::tool_call(
+                            call.provider_call_id.clone(),
+                            call.name.clone(),
+                            &serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
+                        )],
                     ),
                     calls: vec![call],
                     turn_message: None,
@@ -21920,11 +21936,11 @@ mod tests {
                     turn_ordinal: 1,
                     message: Message::new(
                         Role::Assistant,
-                        vec![ContentBlock::ToolCall {
-                            id: "orphan-call".to_owned(),
-                            name: "read_file".to_owned(),
-                            arguments: serde_json::json!({"path": "note.txt"}),
-                        }],
+                        vec![ContentBlock::tool_call(
+                            "orphan-call".to_owned(),
+                            "read_file".to_owned(),
+                            &serde_json::json!({"path": "note.txt"}),
+                        )],
                     ),
                     calls: Vec::new(),
                     turn_message: None,
@@ -26811,11 +26827,11 @@ mod tests {
                     turn_ordinal: 1,
                     message: Message::new(
                         Role::Assistant,
-                        vec![ContentBlock::ToolCall {
-                            id: call.provider_call_id.clone(),
-                            name: call.name.clone(),
-                            arguments: serde_json::from_str(&call.arguments).unwrap(),
-                        }],
+                        vec![ContentBlock::tool_call(
+                            call.provider_call_id.clone(),
+                            call.name.clone(),
+                            &serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
+                        )],
                     ),
                     calls: vec![call],
                     turn_message: None,

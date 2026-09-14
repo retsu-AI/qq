@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use async_stream::try_stream;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, value::RawValue};
 
 use crate::{
     ContentBlock, IncompleteReason, Message, ModelRequest, Provider, ProviderError,
@@ -17,7 +17,7 @@ use crate::{
         ExchangeMessages, HttpExchange, HttpRejection, SafeHeaders, is_request_controlled_header,
     },
     limits::{ByteCounter, StreamLimits},
-    providers::support::{self, UsageOnce, status_error_kind, subtract_cached_input_tokens},
+    providers::support::{self, Text, UsageOnce, status_error_kind, subtract_cached_input_tokens},
     request_auth::RequestAuthorizer,
     sanitize::sanitize_message,
     sse::{SseDecoder, Utf8ErrorMessage},
@@ -301,7 +301,7 @@ fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GenerateContentRequest<'a> {
+pub(crate) struct GenerateContentRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     system_instruction: Option<SystemInstruction<'a>>,
     contents: Vec<GoogleContent<'a>>,
@@ -319,14 +319,17 @@ impl<'a> GenerateContentRequest<'a> {
     /// Builds the wire request, resolving each tool result back to the name of
     /// the call it answers. Gemini identifies function responses by name, so a
     /// result whose `call_id` matches no earlier tool call cannot be sent.
-    fn new(request: &'a ModelRequest, max_output_tokens: i32) -> Result<Self, ProviderError> {
+    pub(crate) fn new(
+        request: &'a ModelRequest,
+        max_output_tokens: i32,
+    ) -> Result<Self, ProviderError> {
         let messages = request.messages();
         let mut contents = Vec::with_capacity(messages.len());
         for (index, message) in messages.iter().enumerate() {
             let mut parts = Vec::with_capacity(message.content().len());
             for block in message.content() {
                 parts.push(match block {
-                    ContentBlock::Text { text } => GooglePart::Text { text },
+                    ContentBlock::Text { text } => GooglePart::Text { text: Text(text) },
                     ContentBlock::ToolCall {
                         name, arguments, ..
                     } => GooglePart::FunctionCall {
@@ -358,9 +361,9 @@ impl<'a> GenerateContentRequest<'a> {
                             function_response: FunctionResponsePart {
                                 name,
                                 response: if *is_error {
-                                    FunctionResponseBody::Error { error: content }
+                                    FunctionResponseBody::Error { error: Text(content) }
                                 } else {
-                                    FunctionResponseBody::Output { output: content }
+                                    FunctionResponseBody::Output { output: Text(content) }
                                 },
                             },
                         }
@@ -390,7 +393,7 @@ impl<'a> GenerateContentRequest<'a> {
 
         Ok(Self {
             system_instruction: request.system().map(|text| SystemInstruction {
-                parts: vec![GooglePart::Text { text }],
+                parts: vec![GooglePart::Text { text: Text(text) }],
             }),
             contents,
             tools,
@@ -416,7 +419,7 @@ enum GoogleRole {
 #[serde(untagged)]
 enum GooglePart<'a> {
     Text {
-        text: &'a str,
+        text: Text<'a>,
     },
     FunctionCall {
         #[serde(rename = "functionCall")]
@@ -431,7 +434,7 @@ enum GooglePart<'a> {
 #[derive(Serialize)]
 struct FunctionCallPart<'a> {
     name: &'a str,
-    args: &'a Value,
+    args: &'a RawValue,
 }
 
 #[derive(Serialize)]
@@ -443,8 +446,8 @@ struct FunctionResponsePart<'a> {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum FunctionResponseBody<'a> {
-    Output { output: &'a str },
-    Error { error: &'a str },
+    Output { output: Text<'a> },
+    Error { error: Text<'a> },
 }
 
 #[derive(Serialize)]
@@ -457,7 +460,7 @@ struct GoogleTool<'a> {
 struct FunctionDeclaration<'a> {
     name: &'a str,
     description: &'a str,
-    parameters: &'a Value,
+    parameters: &'a RawValue,
 }
 
 impl<'a> From<&'a ToolSpec> for FunctionDeclaration<'a> {
@@ -871,16 +874,16 @@ mod tests {
                         ContentBlock::Text {
                             text: "Reading it now.".to_owned(),
                         },
-                        ContentBlock::ToolCall {
-                            id: "call_0_read_file".to_owned(),
-                            name: "read_file".to_owned(),
-                            arguments: serde_json::json!({"path": "config.ron"}),
-                        },
-                        ContentBlock::ToolCall {
-                            id: "call_1_list_dir".to_owned(),
-                            name: "list_dir".to_owned(),
-                            arguments: serde_json::json!({"path": "."}),
-                        },
+                        ContentBlock::tool_call(
+                            "call_0_read_file".to_owned(),
+                            "read_file".to_owned(),
+                            &serde_json::json!({"path": "config.ron"}),
+                        ),
+                        ContentBlock::tool_call(
+                            "call_1_list_dir".to_owned(),
+                            "list_dir".to_owned(),
+                            &serde_json::json!({"path": "."}),
+                        ),
                     ],
                 ),
                 Message::tool_results(vec![

@@ -145,6 +145,37 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
     request
 }
 
+/// Encodes the HTTP body an adapter for `protocol` would send for `request`,
+/// exactly as `sse_exchange` serializes it, without a transport. For the
+/// `provider_encode` benchmark and body-shape tests.
+///
+/// # Panics
+///
+/// Panics when the request cannot be encoded for the protocol (a Google
+/// tool result whose call is not in the transcript, or a body serde_json
+/// refuses); both are programming errors in a fixture.
+#[must_use]
+pub fn encode_body(protocol: crate::HttpProtocol, request: &crate::ModelRequest) -> Vec<u8> {
+    use crate::providers::{anthropic, google, openai, openai_chat};
+    let encoded = match protocol {
+        crate::HttpProtocol::OpenAiResponses => serde_json::to_vec(&openai::ResponsesRequest::new(
+            request,
+            openai::ResponsesRequestKind::Standard,
+        )),
+        crate::HttpProtocol::OpenAiChatCompletions => {
+            serde_json::to_vec(&openai_chat::ChatCompletionsRequest::from(request))
+        }
+        crate::HttpProtocol::AnthropicMessages => {
+            serde_json::to_vec(&anthropic::MessagesRequest::from(request))
+        }
+        crate::HttpProtocol::GoogleGenerateContent => serde_json::to_vec(
+            &google::GenerateContentRequest::new(request, 4096)
+                .expect("fixture requests must encode for Google"),
+        ),
+    };
+    encoded.expect("a wire request body must serialize")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

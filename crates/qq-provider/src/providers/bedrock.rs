@@ -318,9 +318,9 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
                 let specification = ToolSpecification::builder()
                     .name(tool.name())
                     .description(tool.description())
-                    .input_schema(ToolInputSchema::Json(document_from_value(
+                    .input_schema(ToolInputSchema::Json(document_from_raw(
                         tool.input_schema(),
-                    )))
+                    )?))
                     .build()
                     .map_err(|_| {
                         ProviderError::Configuration(
@@ -360,7 +360,7 @@ fn bedrock_content_block(block: &ContentBlock) -> Result<BedrockContentBlock, Pr
         } => ToolUseBlock::builder()
             .tool_use_id(id)
             .name(name)
-            .input(document_from_value(arguments))
+            .input(document_from_raw(arguments)?)
             .build()
             .map(BedrockContentBlock::ToolUse)
             .map_err(|_| {
@@ -389,6 +389,20 @@ fn bedrock_content_block(block: &ContentBlock) -> Result<BedrockContentBlock, Pr
                 })
         }
     }
+}
+
+/// The Converse SDK wants a `Document` tree, so this adapter alone parses
+/// the compact JSON the request carries. The text was produced by
+/// `serde_json`, so a parse failure is a programming error, reported rather
+/// than trusted.
+fn document_from_raw(raw: &serde_json::value::RawValue) -> Result<Document, ProviderError> {
+    serde_json::from_str::<Value>(raw.get())
+        .map(|value| document_from_value(&value))
+        .map_err(|error| {
+            ProviderError::Configuration(format!(
+                "could not parse JSON for an Amazon Bedrock document: {error}"
+            ))
+        })
 }
 
 fn document_from_value(value: &Value) -> Document {
@@ -921,11 +935,11 @@ mod tests {
                         ContentBlock::Text {
                             text: "Reading it now.".to_owned(),
                         },
-                        ContentBlock::ToolCall {
-                            id: "toolu_1".to_owned(),
-                            name: "read_file".to_owned(),
-                            arguments: json!({"path": "config.ron"}),
-                        },
+                        ContentBlock::tool_call(
+                            "toolu_1".to_owned(),
+                            "read_file".to_owned(),
+                            &json!({"path": "config.ron"}),
+                        ),
                     ],
                 ),
                 Message::tool_results(vec![

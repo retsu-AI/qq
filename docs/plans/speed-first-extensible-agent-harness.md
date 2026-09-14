@@ -4,10 +4,10 @@
 
 | | |
 | --- | --- |
-| Now | Phase 5b — HC4 in review (`feat/hc4-headless-goldens`, ADR-0023): headless records as protocol types, golden streams per `PROTOCOL_VERSION`. Closes Phase 5b. HC3 merged (#33). Next: H18 |
-| Next | Phase 6: H18; measured H19; mechanical H21.2 split (HC3 landed); structural H22.2 |
+| Now | Phase 6 — H18 in review (`perf/h18-shared-transcript-prompt-prefix`, ADR-0024): shared transcript, raw tool JSON, precompiled prompt prefix; `provider_encode` added. Phase 5b closed with HC4 (#34). Next: H19 |
+| Next | Phase 6: measured H19; mechanical H21.2 split (HC3 landed); structural H22.2 |
 | Open gates carried | Eight-stream output service gap ≤20 ms at p95 (median met by H20; executable budget stays 50 ms until a quiet-host p95); Phase 5a full H0 tail acceptance on a quiet host; native Windows teardown beyond the targeted CI job |
-| Last closed | HC3, 2026-09-13 (#33 `24b6e5c`, ADR-0014); HC1, 2026-09-12 (#30 `abad2de`, ADR-0022); H21.1c, 2026-09-11 (#24, ADR-0012); H20, H27, H28, H22.1, H21.1a/b, 2026-09-11 (#22 `61682be`; ADR-0011, ADR-0013) |
+| Last closed | HC4, 2026-09-13 (#34 `43caaea`, ADR-0023; Phase 5b complete); HC3, 2026-09-13 (#33 `24b6e5c`, ADR-0014); HC1, 2026-09-12 (#30 `abad2de`, ADR-0022); H21.1c, 2026-09-11 (#24, ADR-0012); H20, H27, H28, H22.1, H21.1a/b, 2026-09-11 (#22 `61682be`; ADR-0011, ADR-0013) |
 | Versions | `PROTOCOL_VERSION` 19 (HC3), `CAPABILITIES_VERSION` 1, `DESCRIPTOR_VERSION` 6, store schema 27 (HC3), H0 fixture version 4 |
 
 Updated 2026-09-13. The `Now` row is authoritative for what is being worked;
@@ -272,7 +272,10 @@ resolution, which is why H22 targets the config and auth load paths.
 Designs D1–D4, D6, and D7 shipped in Phase 5 and are described in
 `architecture.md`. D1 as written (a `tokio::broadcast` per workspace) was
 superseded on 2026-09-07 by a bounded sequence-indexed feed ring; the ring is
-the current design authority. The designs below remain to be implemented.
+the current design authority. D5 is implemented on
+`perf/h18-shared-transcript-prompt-prefix` (ADR-0024; see § Compiled Agent
+Plans in `architecture.md`) and is kept below until merge. The other designs
+below remain to be implemented.
 
 ### D5 — Shared Transcript And Precompiled Prompt Prefix (H18)
 
@@ -297,6 +300,17 @@ send. Tests: `Arc::strong_count == 1` after stream drop; prefix-plus-suffix
 digest equals the full digest (guards persisted `RunPromptIdentity`).
 Benchmark before: add `provider_encode` (one MiB plus 32 schemas, counting
 allocator) in `qq-provider`; rerun `provider_compiler` and `plan_compile`.
+
+As built (2026-09-13): the baseline measured 4.4–4.7x heap, not ~3x, because
+the tool-call `Value` trees and the Responses/Chat re-stringification were
+uncounted. Result: 1.55–1.80x from the shared `Arc` the run loop holds (2.7x
+for a caller that still owns a `Vec`), encode 190–410 µs. One addition the
+design did not foresee: with `RawValue` fields present, `serde_json`'s
+per-byte string escape lost 30–60% on the transcript depending on unrelated
+codegen, so the codecs escape bulk strings through a word-parallel scanner
+(`providers::support::Text`); output is byte-identical. The prefix is one
+per capability set (32 keys), not one per plan, because the tool-name header
+and skill index vary with the run's optional tools.
 
 ### D8 — Control Admission And Shared Commit (H20, implemented)
 
@@ -488,7 +502,7 @@ imported in Phase 1.
 | H27 | Done | Superseded active generations count toward entry/byte limits; a replacement is admitted before the old slot is removed; equivalent-plan evidence growth is admitted; completed per-key compile guards are reclaimed; `PlanKey` compares inline configuration exactly and redacts it | H2 | Root |
 | H28 | Done | `PlanCompileError::TooManyContextSources` for a ninth source; `AgentPlanDescriptor.context_sources` (name, version, budget, fail policy); `DESCRIPTOR_VERSION` 6 (ADR-0013) | H8 | Core, protocol |
 | H22 | H22.1 done; H22.2 open | Correctness bundle shipped (`notify(` 37→10, `tool_calls.effect` schema 26, MCP permit ordering verified); the structural bundle (route table, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI, `Notify` cancellation) remains | — | Per crate |
-| H18 | Open | Shared transcript `Arc`, precompiled prompt prefix, `RawValue` schemas (D5) | H14 | `qq-core`, `qq-provider` |
+| H18 | In review | Shared transcript `Arc<Vec<Message>>` appended in place; `RawValue` schemas and tool-call arguments embedded verbatim; `PromptPrefix` per capability set with a continued SHA-256; word-parallel string escaping; `provider_encode` bench (ADR-0024) | H14 | `qq-core`, `qq-provider` |
 | H19 | Conditional | SSE framing (D10) only if the decoder baseline justifies it | H18, `sse_decode` baseline | `qq-provider`, `qq-client` |
 | HC1 | Done | `--correlation`, `--session` resume behind a per-store owner lock (ADR-0022), `u32` turn limits (`PROTOCOL_VERSION` 18), model-less `config check` | H3, H26 | Root, config, core, protocol |
 | HC3 | Done | `--output-schema`/`--output-repair-turns`; per-run `OutputContract` compiled at admission into a bounded reference-free schema subset, persisted (schema 27), judged after audit/steering with bounded repair turns; `FinalOutput` on `RunFinished`, `RunSnapshot`, and `outcome` (`PROTOCOL_VERSION` 19, ADR-0014) | H3, HC1 | Protocol, core, root |
@@ -580,8 +594,9 @@ workspace gates and default-path H0 regression gate pass.
 Status: active from 2026-09-08. H20 implemented 2026-09-09 (`ab6de6f`,
 `d05e474`; ADR-0011). H20, H27, H28, H22.1, and H21.1a/b merged in #22
 (`61682be`, 2026-09-11); H21.1c (`settle_run`, `TeardownComplete`,
-ADR-0012) merged in #24; HC1 merged in #30; HC3 in #33; HC4 in review closes
-Phase 5b. Order from here: H18; then H19 after its decoder baseline; then the
+ADR-0012) merged in #24; HC1 merged in #30; HC3 in #33; HC4 in #34 closed
+Phase 5b; H18 in review (`perf/h18-shared-transcript-prompt-prefix`,
+ADR-0024). Order from here: H19 after its decoder baseline; then the
 mechanical H21.2 split (HC3's settlement change has landed) and the structural
 H22.2 items as separate commits. The H20 p95 qualification is a quiet-host recording, not code.
 
@@ -621,7 +636,10 @@ Acceptance:
   re-pin);
 - one MiB request heap is at most 2x the payload and encode is at most
   10 ms; the prefix-plus-suffix prompt digest equals the full digest; the
-  1 MiB / 512 KiB ratio stays at or below 2.2x and improves on 1.892x;
+  1 MiB / 512 KiB ratio stays at or below 2.2x and improves on 1.892x (H18:
+  1.55–1.80x from the run loop's shared `Arc`, 190–410 µs; digest equality
+  pinned across four capability sets; the 1 MiB / 512 KiB ratio is an H0
+  fixture measurement still to be recorded on a quiet host);
 - if H19 ships, it improves decoder-specific allocation/latency; a documented
   no-change decision is acceptable;
 - the `sessions.rs` split changes no behavior and lands as its own commit;
@@ -693,8 +711,8 @@ state.
 Performance tests that exist: `provider_compiler`, `plan_compile`/`plan_for`,
 `store_output_batch`, `child_admission`, the H0 suite (fan-out, replay,
 cancellation, load, RSS, size), the R4 fairness matrix, and the
-`provider_retry_amplification_milli` counter. To add: `provider_encode`
-(H18), `sse_decode` (H19), cancellation under 256 queued control jobs (H20),
+`provider_retry_amplification_milli` counter, and `provider_encode` (H18).
+To add: `sse_decode` (H19), cancellation under 256 queued control jobs (H20),
 static/MCP/embedded tool-dispatch comparison, context-source cold/warm,
 persistent terminal (R6), TUI render.
 

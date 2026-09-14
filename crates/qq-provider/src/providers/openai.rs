@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_stream::try_stream;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::value::RawValue;
 
 use crate::{
     ContentBlock, IncompleteReason, ModelRequest, Provider, ProviderError, ProviderErrorKind,
@@ -16,7 +16,7 @@ use crate::{
         ExchangeMessages, HttpExchange, HttpRejection, SafeHeaders, is_request_controlled_header,
     },
     limits::{ByteCounter, StreamLimits},
-    providers::support::{self, ToolCallLedger},
+    providers::support::{self, Text, ToolCallLedger},
     request_auth::RequestAuthorizer,
     sanitize::sanitize_message,
     sse::{SseDecoder, Utf8ErrorMessage},
@@ -42,7 +42,7 @@ pub(crate) enum ResponsesAuth {
 }
 
 #[derive(Clone, Copy)]
-enum ResponsesRequestKind {
+pub(crate) enum ResponsesRequestKind {
     Standard,
     Codex,
 }
@@ -337,10 +337,10 @@ fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
 }
 
 #[derive(Serialize)]
-struct ResponsesRequest<'a> {
+pub(crate) struct ResponsesRequest<'a> {
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    instructions: Option<&'a str>,
+    instructions: Option<Text<'a>>,
     input: Vec<InputItem<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ResponsesTool<'a>>,
@@ -351,7 +351,7 @@ struct ResponsesRequest<'a> {
 }
 
 impl<'a> ResponsesRequest<'a> {
-    fn new(request: &'a ModelRequest, kind: ResponsesRequestKind) -> Self {
+    pub(crate) fn new(request: &'a ModelRequest, kind: ResponsesRequestKind) -> Self {
         // Each content block becomes its own Responses input item; a text
         // block keeps the plain message shape so tool-less requests stay
         // wire-identical.
@@ -365,7 +365,7 @@ impl<'a> ResponsesRequest<'a> {
                 input.push(match block {
                     ContentBlock::Text { text } => InputItem::Message {
                         role,
-                        content: text,
+                        content: Text(text),
                     },
                     ContentBlock::ToolCall {
                         id,
@@ -374,7 +374,7 @@ impl<'a> ResponsesRequest<'a> {
                     } => InputItem::Function(FunctionItem::FunctionCall {
                         call_id: id,
                         name,
-                        arguments: arguments.to_string(),
+                        arguments: arguments.get(),
                     }),
                     ContentBlock::ToolResult {
                         call_id,
@@ -382,7 +382,7 @@ impl<'a> ResponsesRequest<'a> {
                         is_error: _,
                     } => InputItem::Function(FunctionItem::FunctionCallOutput {
                         call_id,
-                        output: content,
+                        output: Text(content),
                     }),
                 });
             }
@@ -390,7 +390,7 @@ impl<'a> ResponsesRequest<'a> {
 
         Self {
             model: request.model(),
-            instructions: request.system(),
+            instructions: request.system().map(Text),
             input,
             tools: request.tools().iter().map(ResponsesTool::from).collect(),
             max_output_tokens: matches!(kind, ResponsesRequestKind::Standard)
@@ -404,7 +404,7 @@ impl<'a> ResponsesRequest<'a> {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum InputItem<'a> {
-    Message { role: InputRole, content: &'a str },
+    Message { role: InputRole, content: Text<'a> },
     Function(FunctionItem<'a>),
 }
 
@@ -414,11 +414,12 @@ enum FunctionItem<'a> {
     FunctionCall {
         call_id: &'a str,
         name: &'a str,
-        arguments: String,
+        /// Responses carries tool arguments as a JSON-encoded string.
+        arguments: &'a str,
     },
     FunctionCallOutput {
         call_id: &'a str,
-        output: &'a str,
+        output: Text<'a>,
     },
 }
 
@@ -428,7 +429,7 @@ struct ResponsesTool<'a> {
     tool_type: &'static str,
     name: &'a str,
     description: &'a str,
-    parameters: &'a Value,
+    parameters: &'a RawValue,
 }
 
 impl<'a> From<&'a ToolSpec> for ResponsesTool<'a> {
@@ -916,11 +917,11 @@ mod tests {
                         ContentBlock::Text {
                             text: "Reading it now.".to_owned(),
                         },
-                        ContentBlock::ToolCall {
-                            id: "call_1".to_owned(),
-                            name: "read_file".to_owned(),
-                            arguments: json!({"path": "config.ron"}),
-                        },
+                        ContentBlock::tool_call(
+                            "call_1".to_owned(),
+                            "read_file".to_owned(),
+                            &json!({"path": "config.ron"}),
+                        ),
                     ],
                 ),
                 Message::tool_results(vec![ContentBlock::ToolResult {

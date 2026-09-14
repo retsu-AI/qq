@@ -25,8 +25,10 @@ pub(crate) use history::{
     HistoryMatch, HistorySearchFuture, HistorySearcher, MAX_HISTORY_MATCHES, SearchHistoryArgs,
     excerpt_around, render_history_matches, search_history_spec,
 };
+#[cfg(test)]
+pub(crate) use prompt::agent_system_prompt;
 pub(crate) use prompt::{
-    AGENT_PROMPT_VERSION, PromptSections, ToolSchemaMeasurement, agent_system_prompt,
+    AGENT_PROMPT_VERSION, PromptPrefix, PromptSections, ToolSchemaMeasurement,
     delegation_roster_text, measure_tool_schemas, tool_schema_measurement,
 };
 pub(crate) use spill::{

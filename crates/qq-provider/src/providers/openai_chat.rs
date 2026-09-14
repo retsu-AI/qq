@@ -5,7 +5,7 @@ use std::{borrow::Cow, sync::Arc};
 use async_stream::try_stream;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, value::RawValue};
 
 use crate::{
     ContentBlock, IncompleteReason, Message, ModelRequest, Provider, ProviderError,
@@ -17,8 +17,8 @@ use crate::{
     },
     limits::{ByteCounter, StreamLimits},
     providers::support::{
-        self, ToolCallLedger, UsageOnce, status_error_kind, subtract_cached_input_tokens,
-        value_as_status,
+        self, OwnedOrBorrowedText, ToolCallLedger, UsageOnce, status_error_kind,
+        subtract_cached_input_tokens, value_as_status,
     },
     request_auth::RequestAuthorizer,
     sanitize::sanitize_message,
@@ -269,7 +269,7 @@ fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
 }
 
 #[derive(Serialize)]
-struct ChatCompletionsRequest<'a> {
+pub(crate) struct ChatCompletionsRequest<'a> {
     model: &'a str,
     messages: Vec<ChatMessage<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -287,7 +287,7 @@ impl<'a> From<&'a ModelRequest> for ChatCompletionsRequest<'a> {
         if let Some(system) = request.system() {
             messages.push(ChatMessage {
                 role: ChatRole::System,
-                content: Some(Cow::Borrowed(system)),
+                content: Some(OwnedOrBorrowedText(Cow::Borrowed(system))),
                 tool_calls: None,
                 tool_call_id: None,
             });
@@ -323,7 +323,7 @@ fn append_chat_messages<'a>(message: &'a Message, messages: &mut Vec<ChatMessage
     if let [ContentBlock::Text { text }] = message.content() {
         messages.push(ChatMessage {
             role,
-            content: Some(Cow::Borrowed(text.as_str())),
+            content: Some(OwnedOrBorrowedText(Cow::Borrowed(text.as_str()))),
             tool_calls: None,
             tool_call_id: None,
         });
@@ -344,7 +344,7 @@ fn append_chat_messages<'a>(message: &'a Message, messages: &mut Vec<ChatMessage
                 id,
                 function: ChatFunctionCall {
                     name,
-                    arguments: arguments.to_string(),
+                    arguments: arguments.get(),
                 },
             }),
             ContentBlock::ToolResult {
@@ -355,7 +355,7 @@ fn append_chat_messages<'a>(message: &'a Message, messages: &mut Vec<ChatMessage
                 wrote_results = true;
                 messages.push(ChatMessage {
                     role: ChatRole::Tool,
-                    content: Some(Cow::Borrowed(content.as_str())),
+                    content: Some(OwnedOrBorrowedText(Cow::Borrowed(content.as_str()))),
                     tool_calls: None,
                     tool_call_id: Some(call_id),
                 });
@@ -367,7 +367,7 @@ fn append_chat_messages<'a>(message: &'a Message, messages: &mut Vec<ChatMessage
         let content = if text.is_empty() && !tool_calls.is_empty() {
             None
         } else {
-            Some(Cow::Owned(text))
+            Some(OwnedOrBorrowedText(Cow::Owned(text)))
         };
         messages.push(ChatMessage {
             role,
@@ -387,7 +387,7 @@ struct ChatStreamOptions {
 struct ChatMessage<'a> {
     role: ChatRole,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<Cow<'a, str>>,
+    content: Option<OwnedOrBorrowedText<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ChatToolCall<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -407,7 +407,7 @@ enum ChatToolCall<'a> {
 struct ChatFunctionCall<'a> {
     name: &'a str,
     /// Chat Completions carries tool arguments as a JSON-encoded string.
-    arguments: String,
+    arguments: &'a str,
 }
 
 #[derive(Serialize)]
@@ -432,7 +432,7 @@ impl<'a> From<&'a ToolSpec> for ChatTool<'a> {
 struct ChatFunction<'a> {
     name: &'a str,
     description: &'a str,
-    parameters: &'a Value,
+    parameters: &'a RawValue,
 }
 
 #[derive(Serialize)]
@@ -1102,11 +1102,11 @@ mod tests {
                         ContentBlock::Text {
                             text: "Reading it now.".to_owned(),
                         },
-                        ContentBlock::ToolCall {
-                            id: "call_1".to_owned(),
-                            name: "read_file".to_owned(),
-                            arguments: json!({"path": "config.ron"}),
-                        },
+                        ContentBlock::tool_call(
+                            "call_1".to_owned(),
+                            "read_file".to_owned(),
+                            &json!({"path": "config.ron"}),
+                        ),
                     ],
                 ),
                 Message::tool_results(vec![
