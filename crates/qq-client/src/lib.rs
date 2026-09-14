@@ -287,6 +287,7 @@ impl SessionClient {
         let output = stream! {
             let mut chunks = response.bytes_stream();
             let mut decoder = SseDecoder::<SessionEventEnvelope>::default();
+            let mut decoded = Vec::new();
             let mut sequence = after.sequence;
             loop {
                 let chunk = match time::timeout(SSE_IDLE_TIMEOUT, chunks.next()).await {
@@ -304,28 +305,24 @@ impl SessionClient {
                         return;
                     }
                 };
-                for byte in chunk {
-                    match decoder.feed_byte(byte) {
-                        Ok(Some(decoded)) => {
-                            if !session_event_cursor_is_next(
-                                decoded.id.as_deref(),
-                                &decoded.event.cursor,
-                                workspace_id,
-                                after.store_id,
-                                sequence,
-                            ) {
-                                yield Err(ClientError::InvalidCursor);
-                                return;
-                            }
-                            sequence = decoded.event.cursor.sequence;
-                            yield Ok(decoded.event);
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            yield Err(error);
-                            return;
-                        }
+                decoded.clear();
+                if let Err(error) = decoder.feed(&chunk, &mut decoded) {
+                    yield Err(error);
+                    return;
+                }
+                for decoded in decoded.drain(..) {
+                    if !session_event_cursor_is_next(
+                        decoded.id.as_deref(),
+                        &decoded.event.cursor,
+                        workspace_id,
+                        after.store_id,
+                        sequence,
+                    ) {
+                        yield Err(ClientError::InvalidCursor);
+                        return;
                     }
+                    sequence = decoded.event.cursor.sequence;
+                    yield Ok(decoded.event);
                 }
             }
             match decoder.finish() {
@@ -500,12 +497,20 @@ struct DecodedSse<T> {
     event: T,
 }
 
+/// Frames the `/events` stream into decoded envelopes.
+///
+/// Mirrors the provider crate's framer (duplicated rather than shared: the
+/// client must not depend on `qq-provider`). `feed` scans a chunk for line
+/// ends once and parses lines in place; only a line a chunk boundary splits
+/// is buffered. Line and event bounds are enforced on the bytes as they
+/// arrive, before an oversized event could terminate.
 struct SseDecoder<T> {
-    line: Vec<u8>,
+    /// Bytes of a line split by a chunk boundary.
+    partial: Vec<u8>,
     data: Vec<u8>,
     id: Option<String>,
     event_bytes: usize,
-    first_line: bool,
+    at_start: bool,
     skip_lf: bool,
     marker: PhantomData<T>,
 }
@@ -513,11 +518,11 @@ struct SseDecoder<T> {
 impl<T> Default for SseDecoder<T> {
     fn default() -> Self {
         Self {
-            line: Vec::new(),
+            partial: Vec::new(),
             data: Vec::new(),
             id: None,
             event_bytes: 0,
-            first_line: true,
+            at_start: true,
             skip_lf: false,
             marker: PhantomData,
         }
@@ -528,70 +533,107 @@ impl<T> SseDecoder<T>
 where
     T: DeserializeOwned,
 {
-    fn feed_byte(&mut self, byte: u8) -> Result<Option<DecodedSse<T>>, ClientError> {
+    /// Frames every complete event in `bytes`, appending them to `events`.
+    fn feed(
+        &mut self,
+        mut bytes: &[u8],
+        events: &mut Vec<DecodedSse<T>>,
+    ) -> Result<(), ClientError> {
+        if self.at_start {
+            let held = self.partial.len();
+            let take = (3 - held).min(bytes.len());
+            self.partial.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+            if b"\xef\xbb\xbf".starts_with(&self.partial) {
+                if self.partial.len() < 3 {
+                    return Ok(());
+                }
+                self.partial.clear();
+                self.at_start = false;
+            } else {
+                self.at_start = false;
+                let held = std::mem::take(&mut self.partial);
+                self.feed(&held, events)?;
+            }
+        }
         if self.skip_lf {
             self.skip_lf = false;
-            if byte == b'\n' {
-                return Ok(None);
+            if let Some((b'\n', rest)) = bytes.split_first() {
+                bytes = rest;
             }
         }
-
-        match byte {
-            b'\r' => {
-                self.skip_lf = true;
-                self.finish_line()
+        while !bytes.is_empty() {
+            let Some(end) = bytes
+                .iter()
+                .position(|&byte| byte == b'\n' || byte == b'\r')
+            else {
+                self.count(bytes.len())?;
+                self.partial.extend_from_slice(bytes);
+                return Ok(());
+            };
+            self.count(end)?;
+            let terminator = bytes[end];
+            let tail = &bytes[..end];
+            bytes = &bytes[end + 1..];
+            if terminator == b'\r' {
+                match bytes.split_first() {
+                    Some((b'\n', rest)) => bytes = rest,
+                    Some(_) => {}
+                    None => self.skip_lf = true,
+                }
             }
-            b'\n' => self.finish_line(),
-            byte => {
-                self.event_bytes = self
-                    .event_bytes
-                    .checked_add(1)
-                    .ok_or(ClientError::EventTooLarge)?;
-                if self.event_bytes > MAX_SSE_WIRE_EVENT_BYTES {
-                    return Err(ClientError::EventTooLarge);
-                }
-                if self.line.len() >= MAX_SSE_LINE_BYTES {
-                    return Err(ClientError::EventTooLarge);
-                }
-                self.line.push(byte);
-                Ok(None)
+            if self.partial.is_empty() {
+                self.line(tail, events)?;
+            } else {
+                let mut line = std::mem::take(&mut self.partial);
+                line.extend_from_slice(tail);
+                let result = self.line(&line, events);
+                line.clear();
+                self.partial = line;
+                result?;
             }
         }
+        Ok(())
     }
 
+    /// The body ended: a final line and event without their terminators
+    /// still count.
     fn finish(mut self) -> Result<Option<DecodedSse<T>>, ClientError> {
-        let line_event = if self.line.is_empty() {
-            None
-        } else {
-            self.finish_line()?
-        };
-        if line_event.is_some() {
-            return Ok(line_event);
+        let mut events = Vec::new();
+        if !self.partial.is_empty() {
+            let line = std::mem::take(&mut self.partial);
+            self.line(&line, &mut events)?;
+            if let Some(event) = events.pop() {
+                return Ok(Some(event));
+            }
         }
-        self.dispatch_event()
+        self.dispatch()
     }
 
-    fn finish_line(&mut self) -> Result<Option<DecodedSse<T>>, ClientError> {
-        if self.line.is_empty() {
-            self.first_line = false;
-            self.event_bytes = 0;
-            return self.dispatch_event();
+    fn count(&mut self, bytes: usize) -> Result<(), ClientError> {
+        self.event_bytes = self
+            .event_bytes
+            .checked_add(bytes)
+            .ok_or(ClientError::EventTooLarge)?;
+        if self.event_bytes > MAX_SSE_WIRE_EVENT_BYTES
+            || self.partial.len().saturating_add(bytes) > MAX_SSE_LINE_BYTES
+        {
+            return Err(ClientError::EventTooLarge);
         }
+        Ok(())
+    }
 
-        let line = std::mem::take(&mut self.line);
-        let line = std::str::from_utf8(&line).map_err(|_| ClientError::MalformedSse)?;
-        let line = if self.first_line {
-            self.first_line = false;
-            line.strip_prefix('\u{feff}').unwrap_or(line)
-        } else {
-            line
-        };
+    fn line(&mut self, line: &[u8], events: &mut Vec<DecodedSse<T>>) -> Result<(), ClientError> {
         if line.is_empty() {
             self.event_bytes = 0;
-            return self.dispatch_event();
+            if let Some(event) = self.dispatch()? {
+                events.push(event);
+            }
+            return Ok(());
         }
+        let line = std::str::from_utf8(line).map_err(|_| ClientError::MalformedSse)?;
         if line.starts_with(':') {
-            return Ok(None);
+            return Ok(());
         }
         let (field, value) = line.split_once(':').unwrap_or((line, ""));
         let value = value.strip_prefix(' ').unwrap_or(value);
@@ -607,19 +649,20 @@ where
             }
             self.id = Some(value.to_owned());
         }
-        Ok(None)
+        Ok(())
     }
 
-    fn dispatch_event(&mut self) -> Result<Option<DecodedSse<T>>, ClientError> {
+    fn dispatch(&mut self) -> Result<Option<DecodedSse<T>>, ClientError> {
         if self.data.is_empty() {
             return Ok(None);
         }
         self.data.pop();
-        let data = std::mem::take(&mut self.data);
-        let event = serde_json::from_slice(&data).map_err(|_| ClientError::MalformedEvent)?;
+        // Parse from the buffer in place and keep its allocation.
+        let event = serde_json::from_slice(&self.data).map_err(|_| ClientError::MalformedEvent);
+        self.data.clear();
         Ok(Some(DecodedSse {
             id: self.id.take(),
-            event,
+            event: event?,
         }))
     }
 }
@@ -862,18 +905,37 @@ mod decode_tests {
 
     fn decode_fragments(fragments: &[&[u8]]) -> Result<Vec<TestEvent>, ClientError> {
         let mut decoder = SseDecoder::<TestEvent>::default();
-        let mut events = Vec::new();
+        let mut decoded = Vec::new();
         for fragment in fragments {
-            for byte in *fragment {
-                if let Some(event) = decoder.feed_byte(*byte)? {
-                    events.push(event.event);
-                }
-            }
+            decoder.feed(fragment, &mut decoded)?;
         }
         if let Some(event) = decoder.finish()? {
-            events.push(event.event);
+            decoded.push(event);
         }
-        Ok(events)
+        Ok(decoded.into_iter().map(|event| event.event).collect())
+    }
+
+    /// Every chunking of the body frames identically to one feed.
+    #[test]
+    fn framing_is_independent_of_chunk_boundaries() {
+        let body: &[u8] = b"\xef\xbb\xbf: heartbeat\r\nid: 7\ndata: {\"type\":\r\ndata: \"started\"}\r\n\r\nretry: 1\ndata: {\"type\":\"completed\"}\n\n";
+        let whole = decode_fragments(&[body]).unwrap();
+        assert_eq!(whole, vec![TestEvent::Started, TestEvent::Completed]);
+        for split in 0..=body.len() {
+            assert_eq!(
+                decode_fragments(&[&body[..split], &body[split..]]).unwrap(),
+                whole,
+                "split at {split}"
+            );
+        }
+        for size in 1..=body.len() {
+            let chunks: Vec<&[u8]> = body.chunks(size).collect();
+            assert_eq!(
+                decode_fragments(&chunks).unwrap(),
+                whole,
+                "chunks of {size}"
+            );
+        }
     }
 
     #[test]
@@ -909,12 +971,11 @@ mod decode_tests {
     #[test]
     fn bounds_sse_lines_and_events() {
         let mut decoder = SseDecoder::<TestEvent>::default();
-        for _ in 0..MAX_SSE_LINE_BYTES {
-            decoder.feed_byte(b'x').unwrap();
-        }
-
+        let mut events = Vec::new();
+        let line = vec![b'x'; MAX_SSE_LINE_BYTES];
+        decoder.feed(&line, &mut events).unwrap();
         assert_eq!(
-            decoder.feed_byte(b'x').unwrap_err(),
+            decoder.feed(b"x", &mut events).unwrap_err(),
             ClientError::EventTooLarge
         );
 
@@ -923,7 +984,15 @@ mod decode_tests {
             ..SseDecoder::default()
         };
         assert_eq!(
-            decoder.feed_byte(b'x').unwrap_err(),
+            decoder.feed(b"x", &mut events).unwrap_err(),
+            ClientError::EventTooLarge
+        );
+
+        // The bound applies even when the oversized line never ends.
+        let mut decoder = SseDecoder::<TestEvent>::default();
+        let big = vec![b'x'; MAX_SSE_WIRE_EVENT_BYTES + 1];
+        assert_eq!(
+            decoder.feed(&big, &mut events).unwrap_err(),
             ClientError::EventTooLarge
         );
     }
