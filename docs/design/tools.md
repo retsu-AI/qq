@@ -654,13 +654,48 @@ get isolated worktrees later. Worktree orchestration stays deferred.
   long build log is what the model should page into deliberately, not read
   by default. `exit` is `signal:<n>` or `timeout` when there is no code.
 - No login/profile shell initialization on the hot path.
+- A **cleared environment**: the child starts with `PATH HOME LANG TERM
+  TMPDIR` only, plus variables the call names in `env` (≤ 16) that
+  `policy.shell_env` allows. A name outside the allowlist fails the call
+  (`env_not_allowed`) before anything runs. Secrets the server holds never
+  reach a child by accident.
+- A **built-in preference nudge** (`policy.builtin_preference`): when the
+  command's first program has a bounded built-in (`grep|rg` → `search`,
+  `cat|head|tail|sed -n` → `read_file`, `find|fd` → `search mode=names`,
+  `ls|tree` → `tree`, `curl|wget` → `fetch`), `hint` (the default) runs it
+  and appends one `hint: use … instead of …` line; `strict` refuses before
+  execution with `use_builtin` — the arm the ablation harness uses to
+  measure what shell habit costs; `off` says nothing.
 
 Shell is the one tool that cannot be contained by path checks — any command
 can touch anything the server process can. Containment is therefore the
-approval policy's job, and the honest framing is that `shell` approval trusts
-the command. OS-level sandboxing (Landlock on Linux) is a worthwhile
-hardening layer, but it is not a substitute for policy and is intentionally
-deferred.
+approval policy's job (§ Shell Classification), and the honest framing is
+that `shell` approval trusts the command. OS-level sandboxing (Landlock on
+Linux) is a worthwhile hardening layer, but it is not a substitute for
+policy and is intentionally deferred.
+
+### Shell Classification
+
+Before policy sees a shell command, the classifier parses it with
+`tree-sitter-bash` and judges it on a three-tier lattice, strictest verdict
+over every simple command anywhere in the tree (ADR-0020):
+
+| tier | reached by | under `auto` | under `full` |
+| --- | --- | --- | --- |
+| `Allow` | a word-only sequence (`cmd (&& \|\| ; \|) cmd…` of literal words, harmless redirects only) whose every command is a listed read/build shape with workspace-relative operands | executes | executes |
+| `Prompt` | everything else: parse errors, `$VAR`/globs/`$(…)`, constructs, unlisted programs, and the explicit list (deletions, git mutations and remotes, mode changes, `sed -i`, installs, containers, downloads, signals, `xargs`/`tee`, writing redirects, inline interpreters, operands outside the workspace) | asks (a grant lifts it) | executes |
+| `Forbidden` | `rm -rf` on root, home, or outside the workspace; `sudo|doas|su|pkexec`; raw device writes; `mkfs|fdisk|parted|wipefs`; power state; `git push --force|+ref|--delete|--mirror`; `chmod|chown -R … /`; download piped to an interpreter; dynamic `eval`; fork bomb; `history -c|shred|crontab -r`; writes to shell profiles, `~/.ssh`, `/etc`; reverse shells; `LD_PRELOAD|PATH|GIT_SSH_COMMAND|BASH_ENV`-class env prefixes | refused | **refused** |
+
+`Forbidden` is refused under every mode as a tool error naming the rule and
+an alternative; only a grant that quotes the exact command string lifts it
+(prefix grants lift `Prompt` alone). Wrappers are peeled ≤ 8 deep (`env
+nice nohup time timeout stdbuf xargs sudo`; `sh -c STRING` is reparsed) so
+the inner command is judged too. Commands over 16 KiB skip parsing and
+prompt. The rules are a static table in `approval/rules.rs` whose
+`match`/`not_match` examples run as one unit test. `ShellCommandPreview`
+carries `verdict` and `reasons` (rule ids) so a client can show why it is
+asking. Cost: 3–10 µs on ordinary commands, ~165 µs on a 1 KiB one-liner
+(`classify_command` bench; gate 200 µs).
 
 ## Version Control
 
@@ -807,14 +842,16 @@ Each session has an approval mode:
 - `ask` — workspace-contained edits, writes, shell, and non-allowlisted MCP
   calls each request approval.
 - `auto` (default) — workspace-contained edits, writes, and MCP calls execute
-  without prompting; shell commands matching the allowlist or carrying no
-  dangerous pattern execute; destructive or externally visible shell commands
-  ask (or are adjudicated by the configured reviewer model).
+  without prompting; shell commands the classifier allows or a grant covers
+  execute; everything it would prompt for asks (or is adjudicated by the
+  configured reviewer model); `Forbidden` shapes are refused.
 - `supervised` — every mutating, shell, and MCP call is held and adjudicated
   by the reviewer model regardless of grants; a reviewer denial is final and a
   reviewer escalation reaches the human. Only spawned write children run here;
   a client cannot select it directly.
-- `full` — everything executes without prompting.
+- `full` — everything executes without prompting, except shell commands the
+  classifier marks `Forbidden` (§ Shell Classification): `full` is
+  unrestricted authority over the workspace, not over the machine.
 
 The allowlist is deliberately simple: exact commands or command prefixes
 (`cargo test`, `git status`), plus per-tool grants for MCP. No pattern DSL
@@ -870,6 +907,10 @@ fields stay managed-only:
     policy: (
         allow_tools: ["edit_file", "mcp__executor__execute"],
         allow_shell_prefixes: ["cargo test", "git status"],
+        // Variables a `shell` call may request into its cleared environment.
+        shell_env: ["CARGO_HOME", "DATABASE_URL"],
+        // off | hint (default) | strict; later layers may only tighten.
+        builtin_preference: hint,
     ),
 )
 
@@ -887,8 +928,12 @@ fields stay managed-only:
   (built-in names, or `mcp__<server>__<tool>` with the server segment
   obeying the MCP name rules). `allow_shell_prefixes` entries are word-
   granularity command prefixes: non-empty, no control characters, no
-  surrounding whitespace. Duplicates within one list are rejected;
-  across layers the sets dedupe naturally.
+  surrounding whitespace. `shell_env` entries are variable names
+  (`[A-Za-z_][A-Za-z0-9_]*`, ≤ 128 bytes, ≤ 64 names); it is
+  authority-bearing and trust-gated like the grants. Duplicates within
+  one list are rejected; across layers the sets dedupe naturally.
+  `builtin_preference` is a scalar that may only tighten across layers
+  (`off < hint < strict`), so a managed `strict` cannot be undone.
 - **Layering.** Later layers extend the accumulated set, and
   `Remove("name")` deletes a grant declared by an earlier layer — the
   same removal-marker idiom `mcp` and `providers` use.
