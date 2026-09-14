@@ -14,7 +14,7 @@ dated entries appended below, newest last.
 | H28 | Typed context-source capacity error; sources in descriptor | Done | merged in #22 | `DESCRIPTOR_VERSION` 5 → 6. ADR-0013 |
 | H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | Done | merged in #22 | Store schema 25 → 26 (`tool_calls.effect`). MCP permit ordering was already correct |
 | H18 | `Arc<Vec<Message>>`, prompt prefix, `RawValue` schemas | Shipped (`a13fbfd`, #38) | `perf/h18-shared-transcript-prompt-prefix` | ADR-0024. `provider_encode` added: heap 4.4–4.7x → 1.55–1.80x (shared) / 2.7x (owned); encode 339–559 → 191–406 µs. No protocol or schema bump |
-| H19 | SSE framing, conditional | In progress | `perf/h19-sse-framing` (worktree `../qq-hc4`) | Started 2026-09-14 from `a13fbfd` (H18 merged #38). `sse_decode` bench + baseline first; decision follows the numbers |
+| H19 | SSE framing, conditional | In review | `perf/h19-sse-framing` | Baseline: framing 55–72 % of decode → implemented (ADR-0025). Framing 0.21–0.23x, decode 0.40–0.42x, allocs ÷3.7–5.5. No protocol or schema bump |
 | H21.2 | Mechanical `sessions.rs` split | Planned | | After HC3 behavioral changes; separate commit |
 | H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI | Planned | | |
 | HC1 | `--correlation`, `--session`, `u32` turns, model-less `config check` | Shipped (`abad2de`, #30) | `feat/hc1-headless-run-contract` | `PROTOCOL_VERSION` 17 → 18; `v17/` fixtures retained decode-only. Per-store owner lock on every open (ADR-0022). `SessionRuntime::abandon_for_test` added for crash-simulation tests |
@@ -600,3 +600,58 @@ baseline.
 
 Shipped: none this entry (branch in review). In progress: H18 review.
 Blocked: none. Next: H19.
+
+### 2026-09-14 — H19 SSE framing on `perf/h19-sse-framing`
+
+Worktree `../qq-hc4` from `a13fbfd` (H18 merged #38). Owned paths:
+`crates/qq-provider/src/sse.rs`, `exchange.rs` (`SseExchangeStream`),
+`providers/anthropic.rs` (single parse), `providers/openai.rs`
+(visibility for the bench), `test_support.rs` (`decode_sse_body`), new
+`benches/sse_decode.rs`; `crates/qq-client/src/lib.rs` (`SseDecoder`);
+ADR-0025, architecture, plan, this ledger, `root.md`.
+
+The conditional: D10 said implement only if the decoder baseline justifies
+it. `sse_decode` (realistic text-delta streams, 16 KiB chunks, counting
+allocator) read framing at 55–72 % of framing-plus-parse, ~11 allocations
+per event (a `Vec` per line plus `name`/`data` strings), 2.9–3.7 ms per
+MiB. Implemented.
+
+Design as built (ADR-0025): per-chunk scan, lines parsed in place, only a
+boundary-split line buffered, one reusable `data` buffer moved into each
+event; the exchange stream's pending buffer is the framer's output. Anthropic
+reads the type from its one parse (`wire_type`) and checks the SSE name
+against it. Client decoder mirrors the shape (duplicated; no dependency
+edge). Two departures: owned `SseEvent` rather than `SseEventRef<'a>` (the
+stream yields across awaits), and tool-call ids stay `String` (the ledger
+clone is not worth widening a public type into core on this evidence).
+One relaxation: a payload of an unmodelled type is ignored under any SSE
+name rather than refused on a name mismatch; a test names it.
+
+#### H19 receipt — 2026-09-14
+Commits: `a2c6824` (bench + baseline), `1b3ad22` (provider framer + single
+parse), `cba0d42` (client framer), + docs.
+Tests: +3 `qq_provider::sse::tests` (`framing_is_independent_of_chunk_boundaries`
+— every split point and every chunk size of a body with BOM, CR/LF/CRLF,
+comments, multi-line data, `id:`, unknown fields; split-BOM and non-BOM
+prefix; invalid data UTF-8; size bound spanning lines and resetting per
+event), +1 `anthropic::tests::the_event_name_is_checked_against_the_payload_in_one_parse`,
++1 `qq_client` property test, client bound test extended to an unterminated
+oversized line. Workspace: 1,386 passed / 4 ignored; fmt; strict all-target
+Clippy; minimal provider profile 169 passed.
+Gates (`sse_decode`, 5 interleaved pairs vs `a2c6824`, release, separate
+target dirs; evidence `target/qq-perf/h19-2026-09-14/sse_decode-{baseline,final-ab}.txt`):
+framing 64 KiB / 512 KiB / 1 MiB — OpenAI 184/1470/2867 → 41/312/620 µs
+(0.22x), Anthropic 220/1844/3790 → 50/399/793 µs (0.21–0.23x); framing
+allocations 75.4k → 13.6k (OpenAI 1 MiB), 91.6k → 24.9k (Anthropic);
+framing-plus-parse 3963 → 1644 µs and 6397 → 2636 µs (0.40–0.42x). Framing
+is now 30–40 % of decode; the rest is the payload parse.
+Deviations: see design paragraph. `SseDecoder::push` (Vec-returning) is
+test-only; the hot path uses `push_into`.
+Docs: `docs/adr/0025-sse-chunk-framing.md`, `docs/adr/README.md`,
+`architecture.md` § Provider Compilation, plan status block/task index/D10
+as-built/Phase 6 order/acceptance/bench inventory, `root.md`.
+Open: none from this slice. Next: H21.2 (mechanical `sessions.rs` split),
+which also absorbs the `persist_model_turn` re-measure noted under H18.
+
+Shipped: none this entry (branch in review). In progress: H19 review.
+Blocked: none. Next: H21.2.

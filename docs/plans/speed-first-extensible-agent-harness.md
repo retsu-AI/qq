@@ -4,10 +4,10 @@
 
 | | |
 | --- | --- |
-| Now | Phase 6 — H18 in review (`perf/h18-shared-transcript-prompt-prefix`, ADR-0024): shared transcript, raw tool JSON, precompiled prompt prefix; `provider_encode` added. Phase 5b closed with HC4 (#34). Next: H19 |
-| Next | Phase 6: measured H19; mechanical H21.2 split (HC3 landed); structural H22.2 |
+| Now | Phase 6 — H19 in review (`perf/h19-sse-framing`, ADR-0025): `sse_decode` bench settled the conditional (framing 55–72 % of decode); per-chunk framing in provider and client, Anthropic parses once. H18 merged (#38). Next: H21.2 |
+| Next | Phase 6: mechanical H21.2 split; structural H22.2 |
 | Open gates carried | Eight-stream output service gap ≤20 ms at p95 (median met by H20; executable budget stays 50 ms until a quiet-host p95); Phase 5a full H0 tail acceptance on a quiet host; native Windows teardown beyond the targeted CI job |
-| Last closed | HC4, 2026-09-13 (#34 `43caaea`, ADR-0023; Phase 5b complete); HC3, 2026-09-13 (#33 `24b6e5c`, ADR-0014); HC1, 2026-09-12 (#30 `abad2de`, ADR-0022); H21.1c, 2026-09-11 (#24, ADR-0012); H20, H27, H28, H22.1, H21.1a/b, 2026-09-11 (#22 `61682be`; ADR-0011, ADR-0013) |
+| Last closed | H18, 2026-09-14 (#38 `a13fbfd`, ADR-0024); HC4, 2026-09-13 (#34 `43caaea`, ADR-0023; Phase 5b complete); HC3, 2026-09-13 (#33 `24b6e5c`, ADR-0014); HC1, 2026-09-12 (#30 `abad2de`, ADR-0022); H21.1c, 2026-09-11 (#24, ADR-0012); H20, H27, H28, H22.1, H21.1a/b, 2026-09-11 (#22 `61682be`; ADR-0011, ADR-0013) |
 | Versions | `PROTOCOL_VERSION` 19 (HC3), `CAPABILITIES_VERSION` 1, `DESCRIPTOR_VERSION` 6, store schema 27 (HC3), H0 fixture version 4 |
 
 Updated 2026-09-13. The `Now` row is authoritative for what is being worked;
@@ -272,10 +272,10 @@ resolution, which is why H22 targets the config and auth load paths.
 Designs D1–D4, D6, and D7 shipped in Phase 5 and are described in
 `architecture.md`. D1 as written (a `tokio::broadcast` per workspace) was
 superseded on 2026-09-07 by a bounded sequence-indexed feed ring; the ring is
-the current design authority. D5 is implemented on
-`perf/h18-shared-transcript-prompt-prefix` (ADR-0024; see § Compiled Agent
-Plans in `architecture.md`) and is kept below until merge. The other designs
-below remain to be implemented.
+the current design authority. D5 shipped in #38 (ADR-0024) and D10 is
+implemented on `perf/h19-sse-framing` (ADR-0025); both are described in
+`architecture.md` and kept below for the record. The other designs remain
+to be implemented.
 
 ### D5 — Shared Transcript And Precompiled Prompt Prefix (H18)
 
@@ -391,6 +391,16 @@ no-change decision is acceptable when the benefit is insufficient. Tests:
 property test splitting events at every byte boundary; CRLF; multi-line data;
 oversized rejection.
 
+As built (2026-09-14): the baseline read framing at 55–72 % of the decode
+path (~11 allocations per event), so the conditional resolved to implement.
+Framing 0.21–0.23x, framing-plus-parse 0.40–0.42x, allocations ÷3.7–5.5.
+Two departures from the design: events stay owned (`SseEvent { name, data }`,
+one allocation) rather than `SseEventRef<'a>`, because the exchange stream
+yields events across awaits and a borrowed event cannot outlive its chunk;
+and `ProviderEvent` tool-call ids stay `String`, the ledger clone being one
+small allocation per delta against the delta's own parse and the `Arc<str>`
+change widening a public type into core.
+
 ### Bundled Fixes (H22)
 
 Cold-path and structural items; none shipped yet except where noted.
@@ -502,8 +512,8 @@ imported in Phase 1.
 | H27 | Done | Superseded active generations count toward entry/byte limits; a replacement is admitted before the old slot is removed; equivalent-plan evidence growth is admitted; completed per-key compile guards are reclaimed; `PlanKey` compares inline configuration exactly and redacts it | H2 | Root |
 | H28 | Done | `PlanCompileError::TooManyContextSources` for a ninth source; `AgentPlanDescriptor.context_sources` (name, version, budget, fail policy); `DESCRIPTOR_VERSION` 6 (ADR-0013) | H8 | Core, protocol |
 | H22 | H22.1 done; H22.2 open | Correctness bundle shipped (`notify(` 37→10, `tool_calls.effect` schema 26, MCP permit ordering verified); the structural bundle (route table, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI, `Notify` cancellation) remains | — | Per crate |
-| H18 | In review | Shared transcript `Arc<Vec<Message>>` appended in place; `RawValue` schemas and tool-call arguments embedded verbatim; `PromptPrefix` per capability set with a continued SHA-256; word-parallel string escaping; `provider_encode` bench (ADR-0024) | H14 | `qq-core`, `qq-provider` |
-| H19 | Conditional | SSE framing (D10) only if the decoder baseline justifies it | H18, `sse_decode` baseline | `qq-provider`, `qq-client` |
+| H18 | Done | Shared transcript `Arc<Vec<Message>>` appended in place; `RawValue` schemas and tool-call arguments embedded verbatim; `PromptPrefix` per capability set with a continued SHA-256; word-parallel string escaping; `provider_encode` bench (ADR-0024) | H14 | `qq-core`, `qq-provider` |
+| H19 | In review | `sse_decode` baseline: framing 55–72 % of decode → implemented. Per-chunk framing with one allocation per event in `qq-provider` and `qq-client`; Anthropic single parse; tool-call ids stay `String` (ADR-0025) | H18 | `qq-provider`, `qq-client` |
 | HC1 | Done | `--correlation`, `--session` resume behind a per-store owner lock (ADR-0022), `u32` turn limits (`PROTOCOL_VERSION` 18), model-less `config check` | H3, H26 | Root, config, core, protocol |
 | HC3 | Done | `--output-schema`/`--output-repair-turns`; per-run `OutputContract` compiled at admission into a bounded reference-free schema subset, persisted (schema 27), judged after audit/steering with bounded repair turns; `FinalOutput` on `RunFinished`, `RunSnapshot`, and `outcome` (`PROTOCOL_VERSION` 19, ADR-0014) | H3, HC1 | Protocol, core, root |
 | HC4 | In review | `qq_protocol::headless` record types emitted by `qq run`; golden `.jsonl` streams per `PROTOCOL_VERSION` under `tests/fixtures/headless/` (v19 current, v18 decode-only) with framing checks; compatibility statement (ADR-0023) | HC1–HC3 | Protocol, root, docs |
@@ -596,9 +606,9 @@ Status: active from 2026-09-08. H20 implemented 2026-09-09 (`ab6de6f`,
 (`61682be`, 2026-09-11); H21.1c (`settle_run`, `TeardownComplete`,
 ADR-0012) merged in #24; HC1 merged in #30; HC3 in #33; HC4 in #34 closed
 Phase 5b; H18 in review (`perf/h18-shared-transcript-prompt-prefix`,
-ADR-0024). Order from here: H19 after its decoder baseline; then the
-mechanical H21.2 split (HC3's settlement change has landed) and the structural
-H22.2 items as separate commits. The H20 p95 qualification is a quiet-host recording, not code.
+ADR-0024) merged in #38; H19 in review (`perf/h19-sse-framing`, ADR-0025).
+Order from here: the mechanical H21.2 split (HC3's settlement change has
+landed) and the structural H22.2 items as separate commits. The H20 p95 qualification is a quiet-host recording, not code.
 
 Benchmarks to record before each change:
 
@@ -641,7 +651,8 @@ Acceptance:
   pinned across four capability sets; the 1 MiB / 512 KiB ratio is an H0
   fixture measurement still to be recorded on a quiet host);
 - if H19 ships, it improves decoder-specific allocation/latency; a documented
-  no-change decision is acceptable;
+  no-change decision is acceptable (shipped: framing 0.21–0.23x,
+  allocations ÷3.7–5.5, end-to-end decode 0.40–0.42x on `sse_decode`);
 - the `sessions.rs` split changes no behavior and lands as its own commit;
 - the H22 route-table equality test passes between client and server; and
 - the default path stays within the regression gate for every H0 metric
@@ -711,8 +722,8 @@ state.
 Performance tests that exist: `provider_compiler`, `plan_compile`/`plan_for`,
 `store_output_batch`, `child_admission`, the H0 suite (fan-out, replay,
 cancellation, load, RSS, size), the R4 fairness matrix, and the
-`provider_retry_amplification_milli` counter, and `provider_encode` (H18).
-To add: `sse_decode` (H19), cancellation under 256 queued control jobs (H20),
+`provider_retry_amplification_milli` counter, `provider_encode` (H18), and
+`sse_decode` (H19). To add: cancellation under 256 queued control jobs (H20),
 static/MCP/embedded tool-dispatch comparison, context-source cold/warm,
 persistent terminal (R6), TUI render.
 

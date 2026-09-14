@@ -272,6 +272,14 @@ Provider compilation follows these performance rules:
 - Immutable model identifiers use shared storage so each command does not
   allocate another model string.
 - Provider identity must not cause branching in the request hot path.
+- Streamed bodies are framed per chunk, not per byte (ADR-0025). The SSE
+  decoder scans each received chunk for line ends once, parses lines in place
+  from the chunk, buffers only a line a chunk boundary splits, and moves one
+  reusable data buffer into each dispatched event, so an event costs one
+  allocation and a chunk costs one pass. Adapters parse each event's JSON
+  once (the Anthropic adapter checks the SSE name against the type read by
+  that parse). The client's `/events` decoder has the same shape, duplicated
+  so `qq-client` keeps no dependency on `qq-provider`.
 
 For each run, the root composition layer also projects effective configuration
 and model metadata into one immutable, secret-free `ResolvedModel`. The value
