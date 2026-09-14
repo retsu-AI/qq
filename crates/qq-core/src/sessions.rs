@@ -23,10 +23,10 @@ use qq_protocol::{
     ReasoningEvent, ResolvedModel, RunActivity, RunFailure, RunFailureKind, RunId, RunLimits,
     RunOutcome, RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting,
     SessionCommand, SessionEvent, SessionEventEnvelope, SessionId, SessionPurpose, SessionSnapshot,
-    SessionStatus, SessionSummary, ShellCommandPreview, SnapshotRequest, SpawnOrigin, StoreId,
-    SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallId, ToolCallSnapshot,
-    ToolCallState, WorkspaceGrantOutcome, WorkspaceId, WorkspaceSnapshot, WorkspaceSummary,
-    validate_input,
+    SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict, SnapshotRequest, SpawnOrigin,
+    StoreId, SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallId,
+    ToolCallSnapshot, ToolCallState, WorkspaceGrantOutcome, WorkspaceId, WorkspaceSnapshot,
+    WorkspaceSummary, validate_input,
 };
 use qq_provider::{ContentBlock, Message, Role};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -17187,6 +17187,13 @@ mod tests {
     }
 
     async fn auto_compact_harness_with_loader(loader: AutoCompactLoader) -> AutoCompactHarness {
+        auto_compact_harness_with_loader_and_mode(loader, ApprovalMode::default()).await
+    }
+
+    async fn auto_compact_harness_with_loader_and_mode(
+        loader: AutoCompactLoader,
+        approval_mode: ApprovalMode,
+    ) -> AutoCompactHarness {
         let directory = tempfile::tempdir().unwrap();
         let requests = Arc::clone(&loader.requests);
         let runtime = SessionRuntime::open(
@@ -17197,7 +17204,7 @@ mod tests {
         .unwrap();
         let workspace_path = directory.path().to_owned();
         let (workspace_id, _) = resolve_workspace(&runtime, &workspace_path).await;
-        let created = create_session(&runtime, workspace_id, None).await;
+        let created = create_session_with_mode(&runtime, workspace_id, None, approval_mode).await;
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
             panic!("unexpected receipt")
         };
@@ -25815,11 +25822,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_approval_requests_carry_the_command_and_auto_mode_asks_for_dangerous_shell() {
+    async fn shell_approval_requests_carry_the_command_and_auto_mode_asks_for_prompt_tier_shell() {
         let mut harness = approval_harness(
             ApprovalMode::Auto,
             "__test_shell",
-            r#"{"command":"git push --force origin main","cwd":"crates"}"#,
+            r#"{"command":"git push origin main","cwd":"crates"}"#,
             1,
             DEFAULT_APPROVAL_TIMEOUT,
         )
@@ -25832,7 +25839,7 @@ mod tests {
                 _ => None,
             })
             .expect("shell approval requests carry the command");
-        assert_eq!(shell.command, "git push --force origin main");
+        assert_eq!(shell.command, "git push origin main");
         assert_eq!(shell.cwd.as_deref(), Some("crates"));
 
         respond_approval(
@@ -25911,7 +25918,7 @@ mod tests {
         let mut harness = approval_harness_with_reviewer(
             ApprovalMode::Auto,
             "__test_shell",
-            r#"{"command":"git push --force origin main"}"#,
+            r#"{"command":"git push origin main"}"#,
             1,
             DEFAULT_APPROVAL_TIMEOUT,
             None,
@@ -25951,7 +25958,7 @@ mod tests {
                 .shell
                 .as_ref()
                 .map(|shell| shell.command.as_str()),
-            Some("git push --force origin main")
+            Some("git push origin main")
         );
     }
 
@@ -25964,7 +25971,7 @@ mod tests {
         let mut harness = approval_harness_with_reviewer(
             ApprovalMode::Auto,
             "__test_shell",
-            r#"{"command":"git push --force origin main"}"#,
+            r#"{"command":"git push origin main"}"#,
             1,
             DEFAULT_APPROVAL_TIMEOUT,
             None,
@@ -25999,7 +26006,7 @@ mod tests {
         let mut harness = approval_harness_with_reviewer(
             ApprovalMode::Auto,
             "__test_shell",
-            r#"{"command":"git push --force origin main"}"#,
+            r#"{"command":"git push origin main"}"#,
             1,
             DEFAULT_APPROVAL_TIMEOUT,
             None,
@@ -26036,7 +26043,7 @@ mod tests {
         let mut harness = approval_harness_with_reviewer(
             ApprovalMode::Auto,
             "__test_shell",
-            r#"{"command":"git push --force origin main"}"#,
+            r#"{"command":"git push origin main"}"#,
             1,
             DEFAULT_APPROVAL_TIMEOUT,
             None,
@@ -34202,11 +34209,23 @@ mod tests {
         let command = "for n in $(seq 1 1500); do if [ $n -eq 1000 ]; then echo \
              'TOKEN=AKIAIOSFODNN7EXAMPLE and the rest of line one thousand'; \
              else printf 'line %5d zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\\n' $n; fi; done";
-        let mut harness = auto_compact_harness(vec![AutoCompactScript::ShellThenRecall {
-            command: command.to_owned(),
-            recall: serde_json::json!({ "offset": 1000, "limit": 3 }),
-            text: "recalled".to_owned(),
-        }])
+        // A shell loop is a Prompt-tier command; the session runs under
+        // `full` so no approval is waited on.
+        let mut harness = auto_compact_harness_with_loader_and_mode(
+            AutoCompactLoader {
+                requests: Arc::new(StdMutex::new(Vec::new())),
+                scripts: vec![AutoCompactScript::ShellThenRecall {
+                    command: command.to_owned(),
+                    recall: serde_json::json!({ "offset": 1000, "limit": 3 }),
+                    text: "recalled".to_owned(),
+                }],
+                loads: StdMutex::new(0),
+                context_window: None,
+                max_output_tokens: 256,
+                provider_identity: true,
+            },
+            ApprovalMode::Full,
+        )
         .await;
 
         let run = queue_prompt(&harness.runtime, harness.session_id, "go".to_owned()).await;

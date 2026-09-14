@@ -12,14 +12,14 @@ use serde::{
 use sha2::{Digest, Sha256};
 
 use super::{
-    AgentProfileConfig, AuditConfig, AuditMode, AwsAuth, BedrockAuth, ConfigError, ConfigKey,
-    ConfigProvenance, ConfigSnapshot, ConfigSources, Connection, DEFAULT_MAX_OUTPUT_TOKENS,
-    DEFAULT_MCP_CALL_TIMEOUT_SECONDS, DEFAULT_MCP_MAX_CONCURRENT_CALLS, DelegationConfig,
-    DelegationEntry, DelegationRole, EffectivePolicy, HttpAccess, HttpCredential, InputModality,
-    MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH, MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER,
-    MAX_MCP_CALL_TIMEOUT_SECONDS, MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES,
-    McpServerConfig, McpTransport, ModelMetadata, ModelPricing, ModelRoute, PolicyGrants,
-    ProfileApprovalMode, ProviderAccess, ProviderApi, ProviderConfig, ProviderKind,
+    AgentProfileConfig, AuditConfig, AuditMode, AwsAuth, BedrockAuth, BuiltinPreference,
+    ConfigError, ConfigKey, ConfigProvenance, ConfigSnapshot, ConfigSources, Connection,
+    DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MCP_CALL_TIMEOUT_SECONDS, DEFAULT_MCP_MAX_CONCURRENT_CALLS,
+    DelegationConfig, DelegationEntry, DelegationRole, EffectivePolicy, HttpAccess, HttpCredential,
+    InputModality, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH, MAX_DELEGATION_NOTE_BYTES,
+    MAX_DELEGATION_ROSTER, MAX_MCP_CALL_TIMEOUT_SECONDS, MAX_MCP_MAX_CONCURRENT_CALLS,
+    MAX_PROFILE_NAME_BYTES, McpServerConfig, McpTransport, ModelMetadata, ModelPricing, ModelRoute,
+    PolicyGrants, ProfileApprovalMode, ProviderAccess, ProviderApi, ProviderConfig, ProviderKind,
     RuntimeOverrides, SecretRef, SourceIdentity, SourceKind, SourceReport, WorkspaceGrant,
 };
 
@@ -453,6 +453,13 @@ struct PolicyPatch {
     /// Approval grants: shell command prefixes matched at word granularity.
     /// Declarable by ordinary (workspace/user) sources.
     allow_shell_prefixes: Option<Vec<GrantEntry>>,
+    /// Environment variable names a `shell` call may pass through to its
+    /// child (beyond PATH HOME LANG TERM TMPDIR). Authority-bearing like a
+    /// grant: gated by workspace trust, layered with `Remove(...)`.
+    shell_env: Option<Vec<GrantEntry>>,
+    /// How hard the runtime steers the model from shell habits to built-ins:
+    /// `off`, `hint` (default), or `strict` (refuse before execution).
+    builtin_preference: Option<BuiltinPreference>,
     /// Managed-only: exact tool names filtered out of the effective grant set
     /// no matter which lower layer declared them.
     deny_tools: Option<Vec<String>>,
@@ -476,7 +483,9 @@ impl PolicyPatch {
 
     /// Approval grants any source may declare, gated by workspace trust.
     fn has_grants(&self) -> bool {
-        self.allow_tools.is_some() || self.allow_shell_prefixes.is_some()
+        self.allow_tools.is_some()
+            || self.allow_shell_prefixes.is_some()
+            || self.shell_env.is_some()
     }
 }
 
@@ -672,6 +681,8 @@ impl Document {
             allow_tools: Option<&'a Vec<GrantEntry>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             allow_shell_prefixes: Option<&'a Vec<GrantEntry>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            shell_env: Option<&'a Vec<GrantEntry>>,
         }
 
         #[derive(Serialize)]
@@ -722,6 +733,7 @@ impl Document {
                 .map(|policy| GrantsProjection {
                     allow_tools: policy.allow_tools.as_ref(),
                     allow_shell_prefixes: policy.allow_shell_prefixes.as_ref(),
+                    shell_env: policy.shell_env.as_ref(),
                 }),
         };
         let canonical =
@@ -1055,6 +1067,27 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
             }
         }
     }
+    if let Some(entries) = &policy.shell_env {
+        if entries.len() > MAX_SHELL_ENV_ENTRIES {
+            return Err(invalid(format!(
+                "policy field shell_env lists more than {MAX_SHELL_ENV_ENTRIES} names"
+            )));
+        }
+        let mut unique = BTreeSet::new();
+        for entry in entries {
+            let name = entry.name();
+            if !valid_env_name(name) {
+                return Err(invalid(format!(
+                    "policy field shell_env: {name:?} is not an environment variable name ([A-Za-z_][A-Za-z0-9_]*, at most 128 bytes)"
+                )));
+            }
+            if !unique.insert(name) {
+                return Err(invalid(format!(
+                    "policy field shell_env contains duplicate value {name:?}"
+                )));
+            }
+        }
+    }
     for (field, values, tool_shaped) in [
         ("deny_tools", policy.deny_tools.as_deref(), true),
         (
@@ -1095,6 +1128,19 @@ fn validate_grant_value(value: &str, tool_shaped: bool) -> Result<(), String> {
 /// digits, hyphens, or underscores. Names starting with `mcp__` must complete
 /// the `mcp__<server>__<tool>` grammar, with the server segment obeying the
 /// MCP server-name rules.
+/// Names the shell env allowlist may hold.
+const MAX_SHELL_ENV_ENTRIES: usize = 64;
+
+/// `[A-Za-z_][A-Za-z0-9_]*`, at most 128 bytes.
+fn valid_env_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.as_bytes()[0].is_ascii_digit()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 pub(super) fn validate_tool_grant_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > MAX_TOOL_GRANT_NAME_BYTES {
         return Err(format!(
@@ -1702,6 +1748,17 @@ impl MergeState {
             &mut self.provenance.grant_shell_prefixes,
             source,
         );
+        apply_grant_entries(
+            patch.shell_env.as_deref(),
+            &mut self.policy.shell_env,
+            &mut self.provenance.shell_env,
+            source,
+        );
+        // Later layers may only tighten the preference: `hint` over `off`,
+        // `strict` over either. A managed source that says strict wins.
+        if let Some(incoming) = patch.builtin_preference {
+            self.policy.builtin_preference = self.policy.builtin_preference.max(incoming);
+        }
         // Denies are monotonic across layers, like denied_providers.
         if let Some(incoming) = &patch.deny_tools {
             let mut combined: BTreeSet<_> = self.policy.deny_tools.iter().cloned().collect();

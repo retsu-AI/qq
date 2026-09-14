@@ -785,6 +785,14 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
         "  shell prefixes: {}",
         join_or_none(grants.shell_prefixes())
     );
+    println!(
+        "  shell env: {}",
+        join_or_none(snapshot.policy().shell_env())
+    );
+    println!(
+        "  builtin preference: {:?}",
+        snapshot.policy().builtin_preference()
+    );
     if !snapshot.packs().is_empty() {
         println!("packs:");
         for pack in snapshot.packs().values() {

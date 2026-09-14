@@ -674,11 +674,13 @@ impl RuntimeFactory {
             .collect();
         let delegation = delegation_roster(&snapshot, snapshot.model());
         let audit = audit_policy(snapshot.audit());
+        let shell = shell_policy(snapshot.policy());
         let mut profile =
             AgentProfile::new(provider, descriptor, resolved_model, workspace.to_owned())
                 .with_spawn_model_routes(spawn_model_routes)
                 .with_delegation(delegation)
                 .with_audit(audit)
+                .with_shell_policy(shell)
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone());
@@ -1967,6 +1969,19 @@ fn delegation_roster(
         default_role: delegation_role(config.default_role()),
         max_depth: config.max_depth(),
         write_children: config.write_children(),
+    }
+}
+
+/// Translates the configured shell policy: the environment allowlist and
+/// the built-in preference.
+fn shell_policy(policy: &qq_config::EffectivePolicy) -> qq_core::ShellPolicy {
+    qq_core::ShellPolicy {
+        env_allowlist: policy.shell_env().to_vec().into(),
+        builtin_preference: match policy.builtin_preference() {
+            qq_config::BuiltinPreference::Off => qq_core::BuiltinPreference::Off,
+            qq_config::BuiltinPreference::Hint => qq_core::BuiltinPreference::Hint,
+            qq_config::BuiltinPreference::Strict => qq_core::BuiltinPreference::Strict,
+        },
     }
 }
 

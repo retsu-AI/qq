@@ -1211,7 +1211,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "59eacb034c206be74a0361c083baf0ad42b680492393f30cb90ea54fc457a3c3"
+            "bc0dfb77dd633970bcc698b5627081b2edcb8dc9fdf4b1ec934afbc96b1b54da"
         );
     }
 
@@ -2140,6 +2140,7 @@ mod tests {
             cancelled,
             output,
             ToolTasks::default(),
+            Arc::new(crate::runtime::ShellPolicy::default()),
         )
         .await
     }
@@ -2159,6 +2160,7 @@ mod tests {
             Arc::clone(&cancelled),
             None,
             tasks.clone(),
+            Arc::new(crate::runtime::ShellPolicy::default()),
         ));
         assert!(futures_util::poll!(execution.as_mut()).is_pending());
         tokio::time::timeout(std::time::Duration::from_secs(5), entered)
@@ -2201,6 +2203,7 @@ mod tests {
             Arc::clone(&cancelled),
             Some(output),
             tasks.clone(),
+            Arc::new(crate::runtime::ShellPolicy::default()),
         ));
         assert!(futures_util::poll!(execution.as_mut()).is_pending());
         let first = tokio::time::timeout(std::time::Duration::from_secs(5), chunks.recv())
@@ -2240,6 +2243,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             None,
             tasks.clone(),
+            Arc::new(crate::runtime::ShellPolicy::default()),
         )
         .await;
         assert!(result.is_error);
@@ -2268,6 +2272,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Some(output),
             tasks.clone(),
+            Arc::new(crate::runtime::ShellPolicy::default()),
         ));
         assert!(futures_util::poll!(execution.as_mut()).is_pending());
         tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
@@ -2309,6 +2314,7 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
                 None,
                 tasks.clone(),
+                Arc::new(crate::runtime::ShellPolicy::default()),
             ),
         )
         .await
@@ -2464,6 +2470,141 @@ mod tests {
             .await;
             assert!(result.is_error, "invalid arguments accepted: {arguments}");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_children_start_from_a_cleared_environment_plus_allowlisted_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        // The test process's own environment stands in for the server's:
+        // CARGO_MANIFEST_DIR is always set under `cargo test` and must not
+        // reach a child unless requested and allowed.
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let run = |arguments: &'static str, policy: crate::runtime::ShellPolicy| {
+            let workspace = workspace.clone();
+            async move {
+                execute(
+                    workspace,
+                    Arc::new(FileState::default()),
+                    "shell".to_owned(),
+                    arguments.to_owned(),
+                    Arc::new(AtomicBool::new(false)),
+                    None,
+                    ToolTasks::default(),
+                    Arc::new(policy),
+                )
+                .await
+            }
+        };
+        let default = crate::runtime::ShellPolicy::default();
+        let allowing = crate::runtime::ShellPolicy {
+            env_allowlist: std::sync::Arc::from(["CARGO_MANIFEST_DIR".to_owned()]),
+            builtin_preference: crate::runtime::BuiltinPreference::Hint,
+        };
+
+        let leaked = run(
+            r#"{"command":"echo v=${CARGO_MANIFEST_DIR:-unset} path=${PATH:+set}"}"#,
+            default.clone(),
+        )
+        .await;
+        assert!(!leaked.is_error, "{}", leaked.model_text);
+        assert!(
+            leaked.model_text.contains("v=unset path=set"),
+            "{}",
+            leaked.model_text
+        );
+
+        // Not requested: not present, even though policy allows it.
+        let unrequested = run(
+            r#"{"command":"echo v=${CARGO_MANIFEST_DIR:-unset}"}"#,
+            allowing.clone(),
+        )
+        .await;
+        assert!(
+            unrequested.model_text.contains("v=unset"),
+            "{}",
+            unrequested.model_text
+        );
+        // Requested and allowed: present.
+        let requested = run(
+            r#"{"command":"echo v=${CARGO_MANIFEST_DIR:-unset}","env":["CARGO_MANIFEST_DIR"]}"#,
+            allowing.clone(),
+        )
+        .await;
+        assert!(
+            requested.model_text.contains("v=/"),
+            "{}",
+            requested.model_text
+        );
+        // Requested but not allowed: a typed refusal, nothing runs.
+        let refused = run(
+            r#"{"command":"echo v=$CARGO_MANIFEST_DIR","env":["CARGO_MANIFEST_DIR"]}"#,
+            default.clone(),
+        )
+        .await;
+        assert!(refused.is_error);
+        assert!(
+            refused
+                .model_text
+                .starts_with("env_not_allowed: CARGO_MANIFEST_DIR"),
+            "{}",
+            refused.model_text
+        );
+        let invalid = run(r#"{"command":"true","env":["1BAD"]}"#, allowing.clone()).await;
+        assert!(
+            invalid.model_text.starts_with("invalid_env"),
+            "{}",
+            invalid.model_text
+        );
+        // Base names never need listing.
+        let base = run(
+            r#"{"command":"echo h=${HOME:+set}","env":["HOME"]}"#,
+            default,
+        )
+        .await;
+        assert!(base.model_text.contains("h=set"), "{}", base.model_text);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_hints_at_the_built_in_for_the_first_program_unless_off() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "alpha\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let run = |policy: crate::runtime::BuiltinPreference| {
+            let workspace = workspace.clone();
+            async move {
+                execute(
+                    workspace,
+                    Arc::new(FileState::default()),
+                    "shell".to_owned(),
+                    r#"{"command":"cat a.txt"}"#.to_owned(),
+                    Arc::new(AtomicBool::new(false)),
+                    None,
+                    ToolTasks::default(),
+                    Arc::new(crate::runtime::ShellPolicy {
+                        env_allowlist: std::sync::Arc::from([]),
+                        builtin_preference: policy,
+                    }),
+                )
+                .await
+            }
+        };
+        let hinted = run(crate::runtime::BuiltinPreference::Hint).await;
+        assert!(!hinted.is_error);
+        assert!(
+            hinted.model_text.contains("alpha\n"),
+            "{}",
+            hinted.model_text
+        );
+        assert!(
+            hinted.model_text.ends_with("hint: use read_file instead of cat; it is bounded, ignore-aware, and needs no approval\n"),
+            "{}",
+            hinted.model_text
+        );
+        let quiet = run(crate::runtime::BuiltinPreference::Off).await;
+        assert!(!quiet.model_text.contains("hint:"), "{}", quiet.model_text);
     }
 
     #[cfg(unix)]

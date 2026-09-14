@@ -36,6 +36,7 @@ mod runtime;
 mod sessions;
 mod tools;
 
+pub use approval::bench_support as classify_bench;
 /// Entry points for the `tool_output` bench. Not a public API.
 #[doc(hidden)]
 pub use tools::bench_support as tool_bench;
@@ -63,8 +64,9 @@ pub use hosts::{
 };
 pub use runtime::{
     AUDIT_TOOL_CALL_THRESHOLD, AuditMode, AuditPolicy, AuditRequest, AuditVerdict, AuditedAction,
-    MAX_AUDIT_ACTION_BYTES, MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS,
-    MAX_PENDING_STEERING,
+    BASE_ENV, BuiltinPreference, MAX_AUDIT_ACTION_BYTES, MAX_AUDIT_ANSWER_BYTES,
+    MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, MAX_SHELL_ENV_ALLOWLIST,
+    MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
 };
 pub use sessions::{
     ApprovalReviewer, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, MAX_CHILD_DEPTH,
@@ -566,6 +568,9 @@ impl ToolGate for StaticPolicyGate {
             approval::PolicyDecision::Deny => GateDecision::Deny {
                 message: approval::POLICY_DENIED_RESULT.to_owned(),
             },
+            approval::PolicyDecision::Forbidden { rules } => GateDecision::Deny {
+                message: approval::forbidden_result(&rules),
+            },
             approval::PolicyDecision::RequireApproval => GateDecision::Deny {
                 message: approval::UNATTENDED_DENIED_RESULT.to_owned(),
             },
@@ -592,6 +597,8 @@ pub struct Runtime {
     pub(crate) delegation: Arc<DelegationRoster>,
     /// When a root run's final answer is audited before completion.
     pub(crate) audit: runtime::AuditPolicy,
+    /// Environment allowlist and built-in preference for `shell` calls.
+    pub(crate) shell: Arc<runtime::ShellPolicy>,
 }
 
 impl Runtime {
@@ -628,6 +635,7 @@ impl Runtime {
             spawn_model_routes: Arc::from([]),
             delegation: Arc::new(DelegationRoster::default()),
             audit: runtime::AuditPolicy::default(),
+            shell: Arc::new(runtime::ShellPolicy::default()),
         })
     }
 
@@ -728,6 +736,13 @@ impl Runtime {
     #[must_use]
     pub const fn with_audit(mut self, audit: runtime::AuditPolicy) -> Self {
         self.audit = audit;
+        self
+    }
+
+    /// Sets the shell environment allowlist and built-in preference.
+    #[must_use]
+    pub fn with_shell_policy(mut self, shell: runtime::ShellPolicy) -> Self {
+        self.shell = Arc::new(shell);
         self
     }
 
@@ -943,6 +958,7 @@ impl plan::CompiledAgentPlan {
         let context_cache = Arc::clone(&plan.runtime.context_cache);
         let profile_name = plan.descriptor().profile.as_str().to_owned();
         let delegation = Arc::clone(&plan.runtime.delegation);
+        let shell_policy = Arc::clone(&plan.runtime.shell);
         Box::pin(stream! {
             let RunCapabilities {
                 spawner,
@@ -2141,6 +2157,7 @@ impl plan::CompiledAgentPlan {
                     let history = history.clone();
                     let spills = spills.clone();
                     let delegation = Arc::clone(&delegation);
+                    let shell_policy = Arc::clone(&shell_policy);
                     // Under progressive exposure only pinned externals were
                     // offered; a call to one that was not is refused with the
                     // way to make it available.
@@ -2151,7 +2168,25 @@ impl plan::CompiledAgentPlan {
                         // spend) is charged to the parent's budgets.
                         let mut child_spend: Option<SpawnAgentSpend> = None;
                         let host = catalog.lookup(&call.name).map(|entry| entry.host);
-                        let result = match call.rejection.clone() {
+                        // Strict built-in preference refuses a shell habit
+                        // before execution: the benchmark arm for what shell
+                        // costs. `hint` runs the command and appends a line.
+                        let strict_refusal = (call.name == "shell"
+                            && shell_policy.builtin_preference == runtime::BuiltinPreference::Strict)
+                            .then(|| {
+                                let command = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                                    .ok()
+                                    .and_then(|value| value.get("command").and_then(|c| c.as_str()).map(str::to_owned))
+                                    .unwrap_or_default();
+                                runtime::builtin_alternative(&command)
+                            })
+                            .flatten()
+                            .map(|(program, builtin)| {
+                                format!(
+                                    "use_builtin: {program} is refused under policy.builtin_preference=strict; use {builtin} instead"
+                                )
+                            });
+                        let result = match call.rejection.clone().or(strict_refusal) {
                             Some(error) => tools::ToolOutput::verbatim_error(error),
                             // spawn_agent dispatches to the session layer. A
                             // run without a spawner rejects the call outright:
@@ -2347,6 +2382,7 @@ impl plan::CompiledAgentPlan {
                                     cancelled,
                                     output,
                                     tool_tasks,
+                                    shell_policy,
                                 )
                                 .await
                             }
@@ -4242,6 +4278,7 @@ mod tests {
             Arc::clone(&cancelled),
             None,
             tools::ToolTasks::default(),
+            Arc::new(runtime::ShellPolicy::default()),
         ));
         while tools::test_executions_started() == started {
             tokio::task::yield_now().await;

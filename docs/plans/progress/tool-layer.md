@@ -10,8 +10,8 @@ newest last.
 | T2 | `search` v2 + `tree` (+ `list_dir` alias) | Shipped (#32, `8bb4050`) | `feat/tool-layer-t2-search-tree` | Evidence `target/qq-perf/t2-2026-09-12/` |
 | T3 | `read_file` v2 (gutter, ranges, outline, info, `if_changed_since`) | Shipped (#35, `eecc76b`) | `feat/tool-layer-t3-read-file` | Evidence `target/qq-perf/t3-2026-09-14/` |
 | T4 | Spill store + `read_tool_result` | Shipped (#36, `80e7396`) | `feat/tool-layer-t4-spill-store` | Evidence `target/qq-perf/t4-2026-09-14/`; ADR-0019 |
-| T5 | `edit_file` v2 batch/cascade/anchors/dry-run; `write_file` flags | In review | `feat/tool-layer-t5-edit-v2` | Started 2026-09-14; evidence `target/qq-perf/t5-2026-09-14/` |
-| T6 | Shell classifier + `Forbidden` decision | Planned | | Root request: promote `tree-sitter{,-bash}` to workspace deps; ADR reserved |
+| T5 | `edit_file` v2 batch/cascade/anchors/dry-run; `write_file` flags | Shipped (#37, `95fef1b`) | `feat/tool-layer-t5-edit-v2` | Evidence `target/qq-perf/t5-2026-09-14/` |
+| T6 | Shell classifier + `Forbidden` decision; shell v2 env/cleared environment; builtin preference | In review | `feat/tool-layer-t6-classifier` | Started 2026-09-14; evidence `target/qq-perf/t6-2026-09-14/`; ADR-0020 written; tree-sitter promoted |
 | T7 | `exec`, env allowlist, prefer-built-in nudge | Planned | | |
 | T8 | `ask_user` + `Interactive` class | Planned | | ADR shared with T9 |
 | T9 | `fetch` + `Network` class | Planned | | |
@@ -106,3 +106,20 @@ Deviations: `line_trimmed` trims trailing whitespace only (indent kept) so `inde
 Docs: `docs/design/tools.md` § Built-In Tools, § Edit Semantics (rewritten), § Optimistic Concurrency.
 Open: a `ToolCallDisplay` variant with per-file diffs (protocol 20) when the changes pane needs it; T12 `@` can pass `if_hash`; T13 measures the cascade's real hit rate.
 Evidence: `target/qq-perf/t5-2026-09-14/` (untracked).
+
+### 2026-09-14 — T5 shipped; T6 in progress
+
+T5 merged as #37 (`95fef1b`). T6 on `feat/tool-layer-t6-classifier`
+(worktree `/tmp/opencode/qq-t6`). Baseline `tool_dispatch` 51.1–53.5 µs
+pinned (6 runs). `tree-sitter`/`tree-sitter-bash` promoted to the workspace
+table and `qq-tui` pointed at them; `qq-core` gains the two edges, the lock
+adds no package. Plan for the release: T6 → T7 → `v0.1.0`.
+
+#### T6 receipt — 2026-09-14
+Commit(s): `d78c2f8` tree-sitter promotion · `656c883` CST classifier + Forbidden + rules + preview verdict · `1bf6459` shell v2 (cleared env, `env` allowlist, `policy.shell_env`, `policy.builtin_preference`, prompt v11).
+Tests: classifier 4 unit (collection across constructs, wrapper peeling + `sh -c` reparse, dynamic words, word-only sequences); rules 4 (the ~250-example `rule_examples_hold` table, reasons naming, `path_escapes`, alternatives for every Forbidden rule); approval 1 new (`forbidden_commands_are_refused_under_every_mode_unless_quoted_exactly`) + 3 updated (Forbidden vs Prompt fixtures); shell 2 new (cleared environment + allowlist + typed refusals; hint on/off); config 1 new (`shell_env` layering, trust, `builtin_preference` tightening) + validation cases; `shell_policy` 2 unit. Fixtures: `ShellCommandPreview` gained `verdict`/`reasons` (2 sites); tests that used `rm -rf /` as a Prompt-tier example moved to `rm -rf target`/`git push origin main`; the T4 end-to-end shell test runs under `full`; headless smoke's `printf > file` became a `cp` (a writing redirect now asks under `auto`, correctly). Workspace green: 1389 passed.
+Gates: `classify_command` (new): simple 3.4 µs, pipeline 10.3 µs, wrapped-forbidden 9.6 µs, 1 KiB one-liner 166 µs (≤ 200 µs gate), over-limit 4 ns. `tool_dispatch` A/B 12 pairs: 46.9 → 47.5 µs median (+1.4 %, noise; the read loop never classifies).
+Deviations: `PolicyDecision::Forbidden { rules }` is a separate variant rather than `Deny { reason }` — `Deny` stays the mode refusal and the two are handled at the same three sites. The `Allow` table is broader than the plan's abridged list (linters, compilers, infra CLIs in read shapes) and correspondingly stricter on argument shapes (`apply|delete|push|…` words prompt). `cut -d: /etc/passwd` prompts (path outside the workspace) — the plan's example listed it under Allow. `exec` (the argv tool) is T7. The ~120-rule estimate landed as ~40 rule ids with argv predicates. `AGENT_PROMPT_VERSION` 10 → 11 covers the whole T2–T6 prompt drift. Protocol: `ShellCommandPreview` fields are additive with `skip_serializing_if`; the version bump is deferred to the release PR so one bump covers T6+T7.
+Docs: ADR-0020; `docs/design/tools.md` § Shell Execution (env, nudge), § Shell Classification (new), § Approval Policy (`auto`/`full` wording), § Workspace Grant Configuration (`shell_env`, `builtin_preference`).
+Open: T7 `exec`; T13 tunes the allow table from the `auto` prompt rate; configurable rule overrides deferred until asked for.
+Evidence: `target/qq-perf/t6-2026-09-14/` (untracked).

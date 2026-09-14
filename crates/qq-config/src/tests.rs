@@ -2042,6 +2042,57 @@ fn policy_grant_declarations_are_scoped_by_source_kind() {
 }
 
 #[test]
+fn shell_env_layers_like_a_grant_and_builtin_preference_only_tightens() {
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(
+            version: 1,
+            policy: (shell_env: ["CARGO_HOME", "RUSTUP_HOME"], builtin_preference: off),
+        )"#,
+    );
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(
+            version: 1,
+            policy: (shell_env: ["DATABASE_URL", Remove("RUSTUP_HOME")], builtin_preference: hint),
+        )"#,
+    );
+    let request = tree.request();
+    // An env allowlist is authority: the workspace layer needs trust.
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    tree.loader().grant_pending_trust(&request).unwrap();
+    let snapshot = tree.loader().load(&request).unwrap();
+    assert_eq!(
+        snapshot.policy().shell_env(),
+        ["CARGO_HOME", "DATABASE_URL"]
+    );
+    // off (global) then hint (workspace): hint wins; a later `off` could not
+    // loosen it back.
+    assert_eq!(
+        snapshot.policy().builtin_preference(),
+        BuiltinPreference::Hint
+    );
+
+    tree.write(
+        "managed/managed.ron",
+        r#"(version: 1, policy: (builtin_preference: strict))"#,
+    );
+    let snapshot = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(
+        snapshot.policy().builtin_preference(),
+        BuiltinPreference::Strict
+    );
+    assert_eq!(
+        EffectivePolicy::default().builtin_preference(),
+        BuiltinPreference::Hint
+    );
+}
+
+#[test]
 fn rejects_invalid_policy_grant_declarations() {
     let origin = SourceIdentity::virtual_source(SourceKind::Managed, "managed test");
     let parse = |policy: &str| {
@@ -2058,6 +2109,10 @@ fn rejects_invalid_policy_grant_declarations() {
     };
 
     expect_message(r#"allow_tools: ["bad name"]"#, "ASCII");
+    expect_message(r#"shell_env: ["1BAD"]"#, "environment variable name");
+    expect_message(r#"shell_env: ["A-B"]"#, "environment variable name");
+    expect_message(r#"shell_env: ["A", "A"]"#, "duplicate");
+    expect_message(r#"builtin_preference: loud"#, "loud");
     expect_message(r#"allow_tools: [""]"#, "1-128");
     expect_message(r#"allow_tools: ["mcp__executor"]"#, "mcp__<server>__<tool>");
     expect_message(

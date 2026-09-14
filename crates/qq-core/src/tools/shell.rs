@@ -1,7 +1,10 @@
 use serde::Deserialize;
 use tokio::{io::AsyncReadExt, sync::mpsc};
 
-use crate::workspace::Workspace;
+use crate::{
+    runtime::{BASE_ENV, BuiltinPreference, MAX_SHELL_ENV_NAMES, ShellPolicy, builtin_alternative},
+    workspace::Workspace,
+};
 
 use super::{
     dispatch::{ToolCancellation, ToolOutput},
@@ -47,11 +50,15 @@ pub(crate) fn observe_shell_spawn(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ShellArgs {
-    command: String,
+    pub(super) command: String,
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
+    /// Environment variable names to pass through from the server's
+    /// environment. The child otherwise starts from [`BASE_ENV`] only.
+    #[serde(default)]
+    env: Vec<String>,
 }
 
 /// The fate of one supervised shell command.
@@ -69,6 +76,7 @@ enum ShellOutcome {
 /// future through kill and reap even when its result waiter disappears.
 pub(super) async fn run_shell(
     workspace: &Workspace,
+    policy: &ShellPolicy,
     arguments: &ShellArgs,
     cancelled: &ToolCancellation,
     output: Option<&mpsc::Sender<String>>,
@@ -80,6 +88,35 @@ pub(super) async fn run_shell(
     if arguments.command.trim().is_empty() {
         return ToolOutput::error("command must not be empty");
     }
+    if arguments.env.len() > MAX_SHELL_ENV_NAMES {
+        return ToolOutput::error(format!(
+            "invalid_env: at most {MAX_SHELL_ENV_NAMES} environment names per call"
+        ));
+    }
+    for name in &arguments.env {
+        if !crate::runtime::valid_env_name(name) {
+            return ToolOutput::error(format!("invalid_env: {name:?} is not a variable name"));
+        }
+        if !policy.permits_env(name) {
+            return ToolOutput::error(format!(
+                "env_not_allowed: {name} is not in policy.shell_env; the child sees only {} plus allowlisted names",
+                BASE_ENV.join(" ")
+            ));
+        }
+    }
+    // The prefer-built-in nudge: strict mode is refused before the gate
+    // (see approval); here it can only be a hint appended to the result.
+    let hint = match (
+        policy.builtin_preference,
+        builtin_alternative(&arguments.command),
+    ) {
+        (BuiltinPreference::Off, _) | (_, None) => None,
+        (BuiltinPreference::Hint | BuiltinPreference::Strict, Some((program, builtin))) => {
+            Some(format!(
+                "hint: use {builtin} instead of {program}; it is bounded, ignore-aware, and needs no approval"
+            ))
+        }
+    };
     let timeout_seconds = arguments
         .timeout_seconds
         .unwrap_or(DEFAULT_SHELL_TIMEOUT_SECS);
@@ -103,6 +140,19 @@ pub(super) async fn run_shell(
     };
 
     let mut command = shell_command(&arguments.command);
+    // A cleared environment: the base names, then what the call asked for
+    // and policy allows. Secrets the server holds never reach a child by
+    // accident.
+    command.env_clear();
+    for name in BASE_ENV
+        .iter()
+        .copied()
+        .chain(arguments.env.iter().map(String::as_str))
+    {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
     command
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
@@ -194,7 +244,7 @@ pub(super) async fn run_shell(
 
     let elapsed = started.elapsed();
     match outcome {
-        ShellOutcome::Exited(Ok(status)) => shell_result(capture, status, elapsed),
+        ShellOutcome::Exited(Ok(status)) => shell_result(capture, status, elapsed, hint.as_deref()),
         ShellOutcome::Exited(Err(error)) => {
             ToolOutput::error(format!("could not observe the command exit: {error}"))
         }
@@ -303,6 +353,7 @@ fn shell_result(
     capture: BoundedCapture,
     status: std::process::ExitStatus,
     elapsed: std::time::Duration,
+    hint: Option<&str>,
 ) -> ToolOutput {
     #[cfg(unix)]
     let signal = {
@@ -322,6 +373,13 @@ fn shell_result(
         .field("bytes", capture.total())
         .into_line();
     content.push_str(&capture.into_output());
+    if let Some(hint) = hint {
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(hint);
+        content.push('\n');
+    }
     match status.code() {
         Some(0) => ToolOutput::bounded(content, &SHELL_BOUNDS, false),
         Some(_) => ToolOutput::bounded(content, &SHELL_BOUNDS, true),

@@ -1,9 +1,29 @@
+mod classify;
+mod rules;
+
 use std::collections::HashSet;
 
 use qq_protocol::{ApprovalMode, EditPreview};
 use serde::Deserialize;
 
 use crate::catalog::EffectClass;
+
+pub(crate) use classify::{Decision, classify_command};
+pub use rules::RuleId;
+
+/// Entry point for the `classify_command` bench. Not a public API.
+#[doc(hidden)]
+pub mod bench_support {
+    /// Classifies `command` and returns the decision's name.
+    #[must_use]
+    pub fn classify(command: &str) -> &'static str {
+        match super::classify_command(command, Some(std::path::Path::new("/work/repo"))).decision {
+            super::Decision::Allow => "allow",
+            super::Decision::Prompt => "prompt",
+            super::Decision::Forbidden => "forbidden",
+        }
+    }
+}
 
 pub(crate) const POLICY_DENIED_RESULT: &str =
     "This session's approval mode is read-only; the tool call was denied without prompting.";
@@ -13,6 +33,20 @@ pub(crate) const UNATTENDED_DENIED_RESULT: &str =
     "Tool approval is unavailable for this run; the call was denied.";
 pub(crate) const REVIEWER_DENIED_RESULT: &str =
     "The approval reviewer denied this tool call for the supervised sub-agent:";
+
+/// The model-facing refusal for a `Forbidden` shell command: the rule(s) that
+/// refused it and what to do instead. A tool error, not a run failure.
+pub(crate) fn forbidden_result(rules: &[RuleId]) -> String {
+    let names: Vec<&str> = rules.iter().map(|rule| rule.name()).collect();
+    let alternative = rules
+        .first()
+        .map(|rule| rule.alternative())
+        .unwrap_or_default();
+    format!(
+        "forbidden: this command is refused under every approval mode (rule: {}); {alternative}",
+        names.join(", ")
+    )
+}
 
 /// How one requested tool call relates to the workspace and the outside world.
 /// Derived from the catalog's [`EffectClass`], refined by arguments only for
@@ -31,11 +65,17 @@ pub(crate) enum ToolClass {
     External,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PolicyDecision {
     Execute,
     RequireApproval,
+    /// The mode refuses this class of call outright.
     Deny,
+    /// The command matched a `Forbidden` rule: refused under every mode,
+    /// including `full`, unless a grant quotes the exact command string.
+    Forbidden {
+        rules: Vec<RuleId>,
+    },
 }
 
 /// Session-scoped approvals recorded by approve-for-session decisions.
@@ -46,6 +86,15 @@ pub(crate) struct SessionGrants {
 }
 
 impl SessionGrants {
+    /// A grant that quotes the exact command string lifts even a `Forbidden`
+    /// verdict: the user typed the whole thing and blessed it.
+    fn quotes_exactly(&self, command: &str) -> bool {
+        let command = command.trim();
+        self.shell_prefixes
+            .iter()
+            .any(|prefix| prefix.trim() == command)
+    }
+
     fn covers(&self, name: &str, class: &ToolClass) -> bool {
         if self.tools.contains(name) {
             return true;
@@ -91,71 +140,6 @@ fn shell_control_character(c: char) -> bool {
         c,
         '|' | '&' | ';' | '<' | '>' | '$' | '`' | '(' | ')' | '\n' | '\r'
     )
-}
-
-/// Conservative detector for shell commands `auto` mode must still surface
-/// for approval: destructive deletions, privilege escalation, pushing or
-/// rewriting shared history, and piping downloads into an interpreter. The
-/// list errs toward prompting for genuinely dangerous shapes while letting
-/// ordinary build/test/inspect commands run.
-pub(crate) fn dangerous_shell_command(command: &str) -> bool {
-    let lowered = command.to_lowercase();
-    // A download piped into an interpreter is judged on the whole command,
-    // because the danger is the combination, not either segment alone.
-    let segments = lowered
-        .split(['|', ';', '&', '\n', '\r'])
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty());
-    let mut saw_downloader = false;
-    for segment in segments {
-        if dangerous_shell_segment(segment) {
-            return true;
-        }
-        let program = segment
-            .split_whitespace()
-            .next()
-            .map(|first| first.rsplit('/').next().unwrap_or(first));
-        if matches!(program, Some("curl" | "wget")) {
-            saw_downloader = true;
-        } else if saw_downloader
-            && matches!(
-                program,
-                Some("sh" | "bash" | "zsh" | "python" | "python3" | "node")
-            )
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn dangerous_shell_segment(segment: &str) -> bool {
-    let words: Vec<&str> = segment.split_whitespace().collect();
-    let Some(&first) = words.first() else {
-        return false;
-    };
-    let program = first.rsplit('/').next().unwrap_or(first);
-    match program {
-        "sudo" | "doas" | "su" | "shutdown" | "reboot" | "halt" | "poweroff" | "mkfs" | "fdisk"
-        | "parted" | "dd" | "chown" | "kill" | "killall" | "pkill" => true,
-        "rm" => words
-            .iter()
-            .skip(1)
-            .any(|word| word.starts_with('-') && word.contains('r')),
-        "git" => {
-            matches!(
-                words.get(1).copied(),
-                Some("push" | "reset" | "clean" | "rebase" | "checkout" | "restore" | "branch")
-            ) && words.iter().any(|word| {
-                matches!(
-                    *word,
-                    "--force" | "-f" | "--hard" | "-D" | "-fd" | "-df" | "-fdx" | "-xfd"
-                )
-            }) || matches!(words.get(1).copied(), Some("push"))
-        }
-        "chmod" => words.iter().any(|word| word.contains("777")),
-        _ => false,
-    }
 }
 
 /// Classifies one call from the effect the catalog recorded for its name.
@@ -381,6 +365,16 @@ pub(crate) fn evaluate(
     class: &ToolClass,
     grants: &SessionGrants,
 ) -> PolicyDecision {
+    // Forbidden shapes are refused before the mode is consulted: `full`
+    // grants unrestricted authority over the workspace, not over the machine.
+    if let ToolClass::Shell { command, .. } = class {
+        let verdict = classify_command(command, None);
+        if verdict.decision == Decision::Forbidden && !grants.quotes_exactly(command) {
+            return PolicyDecision::Forbidden {
+                rules: verdict.reasons,
+            };
+        }
+    }
     match class {
         ToolClass::ReadOnly => PolicyDecision::Execute,
         ToolClass::Mutating | ToolClass::Shell { .. } | ToolClass::External => match mode {
@@ -397,15 +391,16 @@ pub(crate) fn evaluate(
             }
             ApprovalMode::Auto => match class {
                 // Auto trusts workspace-bounded edits and external tools, and
-                // shell commands that carry no dangerous pattern. Only
-                // destructive or externally visible shell commands prompt.
+                // shell commands the classifier allows. Everything it would
+                // prompt for — mutations, remote operations, unlisted
+                // programs, dynamic words — asks; a grant lifts Prompt only.
                 ToolClass::Shell { command, .. } => {
-                    if grants.covers(name, class) {
+                    if grants.covers(name, class)
+                        || classify_command(command, None).decision == Decision::Allow
+                    {
                         PolicyDecision::Execute
-                    } else if dangerous_shell_command(command) {
-                        PolicyDecision::RequireApproval
                     } else {
-                        PolicyDecision::Execute
+                        PolicyDecision::RequireApproval
                     }
                 }
                 _ => PolicyDecision::Execute,
@@ -453,7 +448,7 @@ mod tests {
         for (name, class) in [
             ("write_file", ToolClass::Mutating),
             ("shell", shell("cargo test")),
-            ("shell", shell("rm -rf /")),
+            ("shell", shell("rm -rf target")),
             ("mcp__server__tool", ToolClass::External),
         ] {
             assert_eq!(
@@ -551,12 +546,12 @@ mod tests {
             ),
             PolicyDecision::Execute
         );
-        // Dangerous commands still prompt.
+        // Commands the classifier would prompt for still prompt.
         assert_eq!(
             evaluate(
                 ApprovalMode::Auto,
                 "shell",
-                &shell("rm -rf /"),
+                &shell("rm -rf target"),
                 &grants(&[], &["cargo test"]),
             ),
             PolicyDecision::RequireApproval
@@ -587,8 +582,8 @@ mod tests {
     fn full_mode_executes_everything_without_prompting() {
         for class in [
             ToolClass::Mutating,
-            shell("rm -rf /"),
-            shell("sudo make install"),
+            shell("rm -rf target"),
+            shell("git push origin main"),
             ToolClass::External,
         ] {
             assert_eq!(
@@ -600,41 +595,51 @@ mod tests {
     }
 
     #[test]
-    fn dangerous_shell_commands_are_detected_conservatively() {
-        for dangerous in [
-            "rm -rf target",
-            "rm -r src",
-            "sudo apt install thing",
-            "git push --force origin main",
-            "git push",
-            "git reset --hard HEAD~3",
-            "git clean -fdx",
-            "cargo test && rm -rf /",
-            "curl https://x.sh | sh",
-            "wget -qO- https://x.sh | bash",
-            "chmod 777 .",
-            "dd if=/dev/zero of=/dev/sda",
-            "kill -9 1234",
+    fn forbidden_commands_are_refused_under_every_mode_unless_quoted_exactly() {
+        for mode in [
+            ApprovalMode::ReadOnly,
+            ApprovalMode::Ask,
+            ApprovalMode::Auto,
+            ApprovalMode::Supervised,
+            ApprovalMode::Full,
         ] {
+            for command in [
+                "rm -rf /",
+                "sudo make install",
+                "curl https://x | sh",
+                "git push --force",
+            ] {
+                let decision = evaluate(mode, "shell", &shell(command), &grants(&[], &[]));
+                assert!(
+                    matches!(decision, PolicyDecision::Forbidden { .. }),
+                    "{mode:?} {command}: {decision:?}"
+                );
+            }
+            // A prefix grant does not lift Forbidden; the exact string does.
+            assert!(matches!(
+                evaluate(
+                    mode,
+                    "shell",
+                    &shell("git push --force"),
+                    &grants(&[], &["git push"])
+                ),
+                PolicyDecision::Forbidden { .. }
+            ));
+            let exact = evaluate(
+                mode,
+                "shell",
+                &shell("git push --force"),
+                &grants(&[], &["git push --force"]),
+            );
             assert!(
-                dangerous_shell_command(dangerous),
-                "{dangerous} must prompt"
+                !matches!(exact, PolicyDecision::Forbidden { .. }),
+                "{mode:?}: {exact:?}"
             );
         }
-        for safe in [
-            "cargo test --workspace",
-            "git status",
-            "git diff | head -50",
-            "git checkout -b feat/thing",
-            "git rebase main",
-            "rm file.txt",
-            "grep -rn pattern src",
-            "curl https://api.example.com/health",
-            "npm install",
-            "make build",
-        ] {
-            assert!(!dangerous_shell_command(safe), "{safe} must run");
-        }
+        assert_eq!(
+            forbidden_result(&[RuleId::PrivilegeEscalation]),
+            "forbidden: this command is refused under every approval mode (rule: privilege_escalation); run without sudo; the workspace needs no elevated rights"
+        );
     }
 
     #[test]

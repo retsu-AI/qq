@@ -3226,6 +3226,8 @@ fn shell_approvals_show_the_server_preview_not_the_arguments() {
                 shell: Some(qq_protocol::ShellCommandPreview {
                     command: "rm -rf ./build".to_owned(),
                     cwd: Some("crates/qq-tui".to_owned()),
+                    verdict: Some(qq_protocol::ShellVerdict::Prompt),
+                    reasons: vec!["remove_file".to_owned()],
                 }),
                 edit: None,
             },

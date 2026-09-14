@@ -4,6 +4,7 @@ mod events;
 mod gate;
 mod history;
 mod prompt;
+mod shell_policy;
 mod spill;
 mod steering;
 mod subagent;
@@ -30,6 +31,11 @@ pub(crate) use prompt::agent_system_prompt;
 pub(crate) use prompt::{
     AGENT_PROMPT_VERSION, PromptPrefix, PromptSections, ToolSchemaMeasurement,
     delegation_roster_text, measure_tool_schemas, tool_schema_measurement,
+};
+pub(crate) use shell_policy::builtin_alternative;
+pub use shell_policy::{
+    BASE_ENV, BuiltinPreference, MAX_SHELL_ENV_ALLOWLIST, MAX_SHELL_ENV_NAMES, ShellPolicy,
+    valid_env_name,
 };
 pub(crate) use spill::{
     READ_TOOL_RESULT_BOUNDS, ReadToolResultArgs, SpillHandle, SpillRead, SpillReadFuture,
