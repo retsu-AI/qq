@@ -158,16 +158,16 @@ fn transcript() -> Vec<Message> {
                 ContentBlock::Text {
                     text: format!("Looking at turn {turn}. {}", lorem(400)),
                 },
-                ContentBlock::ToolCall {
-                    id: format!("call_{turn}"),
-                    name: format!("tool_{}", turn as usize % TOOL_COUNT),
-                    arguments: serde_json::json!({
+                ContentBlock::tool_call(
+                    format!("call_{turn}"),
+                    format!("tool_{}", turn as usize % TOOL_COUNT),
+                    &serde_json::json!({
                         "path": format!("src/module_{turn}.rs"),
                         "query": lorem(120),
                         "limit": 200,
                         "flags": ["a", "b", "c"],
                     }),
-                },
+                ),
             ],
         );
         let result = Message::tool_results(vec![ContentBlock::ToolResult {
@@ -220,7 +220,7 @@ fn message_bytes(message: &Message) -> usize {
                 id,
                 name,
                 arguments,
-            } => id.len() + name.len() + arguments.to_string().len(),
+            } => id.len() + name.len() + arguments.get().len(),
             ContentBlock::ToolResult {
                 call_id, content, ..
             } => call_id.len() + content.len(),

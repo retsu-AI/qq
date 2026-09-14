@@ -5,7 +5,7 @@ use std::{borrow::Cow, sync::Arc};
 use async_stream::try_stream;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, value::RawValue};
 
 use crate::{
     ContentBlock, IncompleteReason, Message, ModelRequest, Provider, ProviderError,
@@ -344,7 +344,7 @@ fn append_chat_messages<'a>(message: &'a Message, messages: &mut Vec<ChatMessage
                 id,
                 function: ChatFunctionCall {
                     name,
-                    arguments: arguments.to_string(),
+                    arguments: arguments.get(),
                 },
             }),
             ContentBlock::ToolResult {
@@ -407,7 +407,7 @@ enum ChatToolCall<'a> {
 struct ChatFunctionCall<'a> {
     name: &'a str,
     /// Chat Completions carries tool arguments as a JSON-encoded string.
-    arguments: String,
+    arguments: &'a str,
 }
 
 #[derive(Serialize)]
@@ -432,7 +432,7 @@ impl<'a> From<&'a ToolSpec> for ChatTool<'a> {
 struct ChatFunction<'a> {
     name: &'a str,
     description: &'a str,
-    parameters: &'a Value,
+    parameters: &'a RawValue,
 }
 
 #[derive(Serialize)]
@@ -1102,11 +1102,11 @@ mod tests {
                         ContentBlock::Text {
                             text: "Reading it now.".to_owned(),
                         },
-                        ContentBlock::ToolCall {
-                            id: "call_1".to_owned(),
-                            name: "read_file".to_owned(),
-                            arguments: json!({"path": "config.ron"}),
-                        },
+                        ContentBlock::tool_call(
+                            "call_1".to_owned(),
+                            "read_file".to_owned(),
+                            &json!({"path": "config.ron"}),
+                        ),
                     ],
                 ),
                 Message::tool_results(vec![

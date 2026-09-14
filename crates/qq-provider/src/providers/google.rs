@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use async_stream::try_stream;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, value::RawValue};
 
 use crate::{
     ContentBlock, IncompleteReason, Message, ModelRequest, Provider, ProviderError,
@@ -434,7 +434,7 @@ enum GooglePart<'a> {
 #[derive(Serialize)]
 struct FunctionCallPart<'a> {
     name: &'a str,
-    args: &'a Value,
+    args: &'a RawValue,
 }
 
 #[derive(Serialize)]
@@ -460,7 +460,7 @@ struct GoogleTool<'a> {
 struct FunctionDeclaration<'a> {
     name: &'a str,
     description: &'a str,
-    parameters: &'a Value,
+    parameters: &'a RawValue,
 }
 
 impl<'a> From<&'a ToolSpec> for FunctionDeclaration<'a> {
@@ -874,16 +874,16 @@ mod tests {
                         ContentBlock::Text {
                             text: "Reading it now.".to_owned(),
                         },
-                        ContentBlock::ToolCall {
-                            id: "call_0_read_file".to_owned(),
-                            name: "read_file".to_owned(),
-                            arguments: serde_json::json!({"path": "config.ron"}),
-                        },
-                        ContentBlock::ToolCall {
-                            id: "call_1_list_dir".to_owned(),
-                            name: "list_dir".to_owned(),
-                            arguments: serde_json::json!({"path": "."}),
-                        },
+                        ContentBlock::tool_call(
+                            "call_0_read_file".to_owned(),
+                            "read_file".to_owned(),
+                            &serde_json::json!({"path": "config.ron"}),
+                        ),
+                        ContentBlock::tool_call(
+                            "call_1_list_dir".to_owned(),
+                            "list_dir".to_owned(),
+                            &serde_json::json!({"path": "."}),
+                        ),
                     ],
                 ),
                 Message::tool_results(vec![

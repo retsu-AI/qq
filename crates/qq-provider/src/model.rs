@@ -3,13 +3,19 @@
 use std::sync::Arc;
 
 use qq_reasoning::ReasoningKind;
+use serde_json::value::RawValue;
 use thiserror::Error;
 
 /// A provider-neutral model generation request.
+///
+/// The transcript is shared with its owner: a run holds the same messages
+/// across turns and appends to them, so the request borrows the list by
+/// reference count and the per-attempt clone every adapter performs inside
+/// its restart loop copies nothing. Cloning a request is cheap.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelRequest {
     model: Arc<str>,
-    messages: Vec<Message>,
+    messages: Arc<Vec<Message>>,
     tools: Arc<[ToolSpec]>,
     system: Option<Arc<str>>,
     max_output_tokens: u32,
@@ -17,10 +23,14 @@ pub struct ModelRequest {
 
 impl ModelRequest {
     #[must_use]
-    pub fn new(model: impl Into<Arc<str>>, messages: Vec<Message>, max_output_tokens: u32) -> Self {
+    pub fn new(
+        model: impl Into<Arc<str>>,
+        messages: impl Into<Arc<Vec<Message>>>,
+        max_output_tokens: u32,
+    ) -> Self {
         Self {
             model: model.into(),
-            messages,
+            messages: messages.into(),
             tools: Arc::from([]),
             system: None,
             max_output_tokens,
@@ -55,6 +65,13 @@ impl ModelRequest {
         &self.messages
     }
 
+    /// The shared transcript handle, for a caller that appends to the same
+    /// list after this request completes without copying it.
+    #[must_use]
+    pub fn shared_messages(&self) -> &Arc<Vec<Message>> {
+        &self.messages
+    }
+
     #[must_use]
     pub fn tools(&self) -> &[ToolSpec] {
         &self.tools
@@ -75,17 +92,29 @@ impl ModelRequest {
 ///
 /// Specs are immutable once built and travel with every request, catalog,
 /// and plan, so the payload is shared: cloning is a reference count bump,
-/// never a deep copy of the schema.
+/// never a deep copy of the schema. The schema is kept in its compact JSON
+/// encoding: every request writes it verbatim, so nothing is re-serialized
+/// per turn, and its byte length is the wire cost.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolSpec {
     inner: Arc<ToolSpecInner>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 struct ToolSpecInner {
     name: String,
     description: String,
-    input_schema: serde_json::Value,
+    input_schema: Box<RawValue>,
+}
+
+// `RawValue` has no `PartialEq`; two schemas are equal when their compact
+// encodings are, which is exact for text `serde_json` produced (sorted keys).
+impl PartialEq for ToolSpecInner {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.description == other.description
+            && self.input_schema.get() == other.input_schema.get()
+    }
 }
 
 impl ToolSpec {
@@ -94,6 +123,21 @@ impl ToolSpec {
         name: impl Into<String>,
         description: impl Into<String>,
         input_schema: serde_json::Value,
+    ) -> Self {
+        // A `Value` always has a JSON encoding; `to_raw_value` fails only on
+        // a non-string map key, which `Value` cannot hold.
+        let input_schema = serde_json::value::to_raw_value(&input_schema)
+            .expect("a serde_json::Value always encodes as JSON");
+        Self::from_raw(name, description, input_schema)
+    }
+
+    /// A spec whose schema is already compact JSON text (an MCP server's
+    /// declaration, a persisted catalog entry). No parse, no re-encode.
+    #[must_use]
+    pub fn from_raw(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: Box<RawValue>,
     ) -> Self {
         Self {
             inner: Arc::new(ToolSpecInner {
@@ -114,8 +158,9 @@ impl ToolSpec {
         &self.inner.description
     }
 
+    /// The schema as compact JSON. Serializes verbatim; `.get()` is the text.
     #[must_use]
-    pub fn input_schema(&self) -> &serde_json::Value {
+    pub fn input_schema(&self) -> &RawValue {
         &self.inner.input_schema
     }
 }
@@ -185,16 +230,19 @@ impl Message {
 }
 
 /// One ordered unit of message content.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum ContentBlock {
     Text {
         text: String,
     },
-    /// A model-requested tool invocation, valid in assistant messages.
+    /// A model-requested tool invocation, valid in assistant messages. The
+    /// arguments are kept as the compact JSON text the run validated: wire
+    /// codecs that want an object embed it verbatim and codecs that want a
+    /// string send `.get()`, so history is never re-serialized per request.
     ToolCall {
         id: String,
         name: String,
-        arguments: serde_json::Value,
+        arguments: Box<RawValue>,
     },
     /// The result of one tool invocation, valid in user messages.
     ToolResult {
@@ -202,6 +250,57 @@ pub enum ContentBlock {
         content: String,
         is_error: bool,
     },
+}
+
+impl PartialEq for ContentBlock {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Text { text }, Self::Text { text: other }) => text == other,
+            (
+                Self::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                },
+                Self::ToolCall {
+                    id: other_id,
+                    name: other_name,
+                    arguments: other_arguments,
+                },
+            ) => id == other_id && name == other_name && arguments.get() == other_arguments.get(),
+            (
+                Self::ToolResult {
+                    call_id,
+                    content,
+                    is_error,
+                },
+                Self::ToolResult {
+                    call_id: other_call_id,
+                    content: other_content,
+                    is_error: other_is_error,
+                },
+            ) => call_id == other_call_id && content == other_content && is_error == other_is_error,
+            (Self::Text { .. } | Self::ToolCall { .. } | Self::ToolResult { .. }, _) => false,
+        }
+    }
+}
+
+impl ContentBlock {
+    /// A tool-call block from a parsed argument value; for fixtures and for
+    /// callers that build arguments structurally.
+    #[must_use]
+    pub fn tool_call(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: &serde_json::Value,
+    ) -> Self {
+        Self::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: serde_json::value::to_raw_value(arguments)
+                .expect("a serde_json::Value always encodes as JSON"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,4 +445,56 @@ pub enum ProviderErrorKind {
     Api,
     Response,
     Protocol,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_request_shares_the_transcript_and_releases_it_when_dropped() {
+        let transcript = Arc::new(vec![Message::user("hello")]);
+        let request = ModelRequest::new("m", Arc::clone(&transcript), 16);
+        // The adapter's per-attempt clone is a reference-count bump.
+        let attempt = request.clone();
+        assert_eq!(Arc::strong_count(&transcript), 3);
+        assert!(Arc::ptr_eq(attempt.shared_messages(), &transcript));
+        drop(attempt);
+        drop(request);
+        // Once every stream is gone the owner appends in place.
+        assert_eq!(Arc::strong_count(&transcript), 1);
+    }
+
+    #[test]
+    fn tool_call_arguments_and_schemas_keep_their_compact_text() {
+        let block = ContentBlock::tool_call(
+            "call_1",
+            "read_file",
+            &serde_json::json!({"path": "a.rs", "n": 1}),
+        );
+        let ContentBlock::ToolCall { arguments, .. } = &block else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(arguments.get(), r#"{"n":1,"path":"a.rs"}"#);
+        assert_eq!(block, block.clone());
+
+        let spec = ToolSpec::new(
+            "read_file",
+            "Reads",
+            serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        );
+        assert_eq!(
+            spec.input_schema().get(),
+            r#"{"properties":{"path":{"type":"string"}},"type":"object"}"#
+        );
+        let raw = ToolSpec::from_raw(
+            "read_file",
+            "Reads",
+            serde_json::value::RawValue::from_string(
+                r#"{"properties":{"path":{"type":"string"}},"type":"object"}"#.to_owned(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(spec, raw);
+    }
 }

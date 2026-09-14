@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_stream::try_stream;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, value::RawValue};
 
 use crate::{
     ContentBlock, IncompleteReason, Message, ModelRequest, Provider, ProviderError,
@@ -401,7 +401,7 @@ impl<'a> From<&'a ModelRequest> for MessagesRequest<'a> {
 struct AnthropicTool<'a> {
     name: &'a str,
     description: &'a str,
-    input_schema: &'a Value,
+    input_schema: &'a RawValue,
 }
 
 impl<'a> From<&'a ToolSpec> for AnthropicTool<'a> {
@@ -454,7 +454,7 @@ enum AnthropicBlock<'a> {
     ToolUse {
         id: &'a str,
         name: &'a str,
-        input: &'a Value,
+        input: &'a RawValue,
     },
     ToolResult {
         tool_use_id: &'a str,
@@ -1363,11 +1363,11 @@ mod tests {
                         ContentBlock::Text {
                             text: "Reading it now.".to_owned(),
                         },
-                        ContentBlock::ToolCall {
-                            id: "toolu_1".to_owned(),
-                            name: "read_file".to_owned(),
-                            arguments: json!({"path": "config.ron"}),
-                        },
+                        ContentBlock::tool_call(
+                            "toolu_1".to_owned(),
+                            "read_file".to_owned(),
+                            &json!({"path": "config.ron"}),
+                        ),
                     ],
                 ),
                 Message::tool_results(vec![ContentBlock::ToolResult {

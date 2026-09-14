@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_stream::try_stream;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::value::RawValue;
 
 use crate::{
     ContentBlock, IncompleteReason, ModelRequest, Provider, ProviderError, ProviderErrorKind,
@@ -374,7 +374,7 @@ impl<'a> ResponsesRequest<'a> {
                     } => InputItem::Function(FunctionItem::FunctionCall {
                         call_id: id,
                         name,
-                        arguments: arguments.to_string(),
+                        arguments: arguments.get(),
                     }),
                     ContentBlock::ToolResult {
                         call_id,
@@ -414,7 +414,8 @@ enum FunctionItem<'a> {
     FunctionCall {
         call_id: &'a str,
         name: &'a str,
-        arguments: String,
+        /// Responses carries tool arguments as a JSON-encoded string.
+        arguments: &'a str,
     },
     FunctionCallOutput {
         call_id: &'a str,
@@ -428,7 +429,7 @@ struct ResponsesTool<'a> {
     tool_type: &'static str,
     name: &'a str,
     description: &'a str,
-    parameters: &'a Value,
+    parameters: &'a RawValue,
 }
 
 impl<'a> From<&'a ToolSpec> for ResponsesTool<'a> {
@@ -916,11 +917,11 @@ mod tests {
                         ContentBlock::Text {
                             text: "Reading it now.".to_owned(),
                         },
-                        ContentBlock::ToolCall {
-                            id: "call_1".to_owned(),
-                            name: "read_file".to_owned(),
-                            arguments: json!({"path": "config.ron"}),
-                        },
+                        ContentBlock::tool_call(
+                            "call_1".to_owned(),
+                            "read_file".to_owned(),
+                            &json!({"path": "config.ron"}),
+                        ),
                     ],
                 ),
                 Message::tool_results(vec![ContentBlock::ToolResult {
