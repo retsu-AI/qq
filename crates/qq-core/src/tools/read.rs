@@ -1,6 +1,5 @@
 use std::fmt::Write as _;
 
-use cap_std::fs::PermissionsExt as _;
 use serde::Deserialize;
 
 use crate::workspace::{FileState, FileStateUpdate, Workspace, content_hash};
@@ -60,7 +59,9 @@ struct Loaded {
     size: u64,
     /// `Some` when the full content was scanned and may be recorded.
     hash: Option<String>,
-    mode_bits: u32,
+    /// Octal mode bits on Unix; `ro`/`rw` elsewhere, where that is all the
+    /// filesystem reports.
+    perms: String,
 }
 
 #[inline]
@@ -109,7 +110,7 @@ pub(super) fn read_file(
                 .token(format_args!("h:{short}"))
                 .field("utf8", std::str::from_utf8(&loaded.bytes).is_ok())
                 .field("eol", eol(&loaded.bytes))
-                .field("perms", format_args!("{:o}", loaded.mode_bits & 0o777))
+                .field("perms", &loaded.perms)
                 .field("binary", binary);
             if image {
                 header = header.field("mime", image_mime(&loaded.path));
@@ -280,7 +281,7 @@ fn load(workspace: &Workspace, requested: &str) -> Result<Loaded, String> {
         size: metadata.len().max(bytes.len() as u64),
         bytes,
         hash,
-        mode_bits: metadata.permissions().mode(),
+        perms: permissions(&metadata.permissions()),
     })
 }
 
@@ -494,6 +495,17 @@ fn outline(loaded: &Loaded, short: &str, total_lines: usize) -> ToolOutput {
     let mut out = header.into_line();
     out.push_str(&body);
     ToolOutput::bounded(out, &READ_BOUNDS, false)
+}
+
+#[cfg(unix)]
+fn permissions(permissions: &cap_std::fs::Permissions) -> String {
+    use cap_std::fs::PermissionsExt as _;
+    format!("{:o}", permissions.mode() & 0o777)
+}
+
+#[cfg(not(unix))]
+fn permissions(permissions: &cap_std::fs::Permissions) -> String {
+    if permissions.readonly() { "ro" } else { "rw" }.to_owned()
 }
 
 fn count_lines(bytes: &[u8]) -> usize {
