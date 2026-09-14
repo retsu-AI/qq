@@ -4,13 +4,13 @@
 
 | | |
 | --- | --- |
-| Now | Phase 6 — H19 in review (`perf/h19-sse-framing`, ADR-0025): `sse_decode` bench settled the conditional (framing 55–72 % of decode); per-chunk framing in provider and client, Anthropic parses once. H18 merged (#38). Next: H21.2 |
-| Next | Phase 6: mechanical H21.2 split; structural H22.2 |
+| Now | Phase 6 — H21.2 in review (`refactor/h21-2-sessions-split`): the mechanical `sessions.rs` split into ten concern modules and a tests tree; no behavior change, 1,401 tests unchanged. H19 merged (#39, ADR-0025); v0.1.0 cut (#42). Next: H22.2 |
+| Next | Phase 6: structural H22.2 (last Phase 6 slice) |
 | Open gates carried | Eight-stream output service gap ≤20 ms at p95 (median met by H20; executable budget stays 50 ms until a quiet-host p95); Phase 5a full H0 tail acceptance on a quiet host; native Windows teardown beyond the targeted CI job |
-| Last closed | H18, 2026-09-14 (#38 `a13fbfd`, ADR-0024); HC4, 2026-09-13 (#34 `43caaea`, ADR-0023; Phase 5b complete); HC3, 2026-09-13 (#33 `24b6e5c`, ADR-0014); HC1, 2026-09-12 (#30 `abad2de`, ADR-0022); H21.1c, 2026-09-11 (#24, ADR-0012); H20, H27, H28, H22.1, H21.1a/b, 2026-09-11 (#22 `61682be`; ADR-0011, ADR-0013) |
+| Last closed | H19, 2026-09-14 (#39 `53bca7d`, ADR-0025); H18, 2026-09-14 (#38 `a13fbfd`, ADR-0024); HC4, 2026-09-13 (#34 `43caaea`, ADR-0023; Phase 5b complete); HC3, 2026-09-13 (#33 `24b6e5c`, ADR-0014); HC1, 2026-09-12 (#30 `abad2de`, ADR-0022); H21.1c, 2026-09-11 (#24, ADR-0012); H20, H27, H28, H22.1, H21.1a/b, 2026-09-11 (#22 `61682be`; ADR-0011, ADR-0013) |
 | Versions | `PROTOCOL_VERSION` 19 (HC3), `CAPABILITIES_VERSION` 1, `DESCRIPTOR_VERSION` 6, store schema 27 (HC3), H0 fixture version 4 |
 
-Updated 2026-09-13. The `Now` row is authoritative for what is being worked;
+Updated 2026-09-14. The `Now` row is authoritative for what is being worked;
 update it in the same PR that ships or reprioritizes work.
 
 This plan defines how QQ becomes an extremely fast, lightweight, customizable
@@ -274,8 +274,9 @@ Designs D1–D4, D6, and D7 shipped in Phase 5 and are described in
 superseded on 2026-09-07 by a bounded sequence-indexed feed ring; the ring is
 the current design authority. D5 shipped in #38 (ADR-0024) and D10 is
 implemented on `perf/h19-sse-framing` (ADR-0025); both are described in
-`architecture.md` and kept below for the record. The other designs remain
-to be implemented.
+`architecture.md` and kept below for the record. D9's mechanical split
+(H21.2) is on `refactor/h21-2-sessions-split`. The other designs remain to
+be implemented.
 
 ### D5 — Shared Transcript And Precompiled Prompt Prefix (H18)
 
@@ -363,6 +364,18 @@ into `sessions/{codec, events, snapshots, transcript, claim, streaming,
 tool_calls, settlement, compaction, commands}.rs` with tests under
 `sessions/tests/`, as a separate mechanical commit after HC3's behavioral
 changes.
+
+As built (H21.2, 2026-09-14): the ten modules above, each `pub(super)` and
+glob-imported from `sessions.rs` so the body's internal references are
+unchanged; the constants stay in `sessions.rs`. Tests: the shared harness
+(scripted loaders/providers, fixtures, collectors; ~5k lines) in
+`sessions/tests.rs`, the 292 tests in thirteen theme modules under
+`sessions/tests/` (`accounting`, `approvals`, `budgets`, `commands`,
+`compaction`, `context_capacity`, `contract`, `delegation`, `feeds`,
+`migrations`, `runs`, `settlement`, `streaming`). The move is text-identical
+apart from visibility and the dedent; the line count is flat (34,608 →
+34,649) because the ~700-line saving named below was an estimate for
+deduplicating fixtures, which a mechanical commit does not do.
 
 Gates: none directly; correctness plus roughly 700 fewer lines. Tests:
 settling an already-settled run through the previously unguarded path is a
@@ -508,12 +521,12 @@ imported in Phase 1.
 | H26 | Done | Bounded workspace-feed admission and lifecycle; feed ring | H15 | `qq-core`, server |
 | HC2 | Done | Positive tool exposure via optional `policy.exposed_tools` | H6, H13 | Config, core plan |
 | H20 | Done (p95 open) | Lifecycle store calls wait for admission (13 loops deleted); control writes share the output group commit; scheduler claim no longer closes groups (D8, ADR-0011). Gap median 20 ms; quiet-host p95 qualification and the 50→20 ms budget tightening remain | H16, H23–H26 | `qq-core` |
-| **H21** | **H21.1 done; H21.2 next after HC3** | `RunIdentity`, `PersistenceFault`, one guarded `settle_run`, `TeardownComplete` (D9, ADR-0012) shipped; the mechanical `sessions.rs` split (H21.2) remains | H15–H17, H20 | `qq-core` |
+| **H21** | **H21.1 done; H21.2 in review** | `RunIdentity`, `PersistenceFault`, one guarded `settle_run`, `TeardownComplete` (D9, ADR-0012) shipped; `sessions.rs` split into `claim`, `codec`, `commands`, `compaction`, `events`, `settlement`, `snapshots`, `streaming`, `tool_calls`, `transcript` and a `tests/` tree (H21.2) | H15–H17, H20 | `qq-core` |
 | H27 | Done | Superseded active generations count toward entry/byte limits; a replacement is admitted before the old slot is removed; equivalent-plan evidence growth is admitted; completed per-key compile guards are reclaimed; `PlanKey` compares inline configuration exactly and redacts it | H2 | Root |
 | H28 | Done | `PlanCompileError::TooManyContextSources` for a ninth source; `AgentPlanDescriptor.context_sources` (name, version, budget, fail policy); `DESCRIPTOR_VERSION` 6 (ADR-0013) | H8 | Core, protocol |
 | H22 | H22.1 done; H22.2 open | Correctness bundle shipped (`notify(` 37→10, `tool_calls.effect` schema 26, MCP permit ordering verified); the structural bundle (route table, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI, `Notify` cancellation) remains | — | Per crate |
 | H18 | Done | Shared transcript `Arc<Vec<Message>>` appended in place; `RawValue` schemas and tool-call arguments embedded verbatim; `PromptPrefix` per capability set with a continued SHA-256; word-parallel string escaping; `provider_encode` bench (ADR-0024) | H14 | `qq-core`, `qq-provider` |
-| H19 | In review | `sse_decode` baseline: framing 55–72 % of decode → implemented. Per-chunk framing with one allocation per event in `qq-provider` and `qq-client`; Anthropic single parse; tool-call ids stay `String` (ADR-0025) | H18 | `qq-provider`, `qq-client` |
+| H19 | Done | `sse_decode` baseline: framing 55–72 % of decode → implemented. Per-chunk framing with one allocation per event in `qq-provider` and `qq-client`; Anthropic single parse; tool-call ids stay `String` (ADR-0025) | H18 | `qq-provider`, `qq-client` |
 | HC1 | Done | `--correlation`, `--session` resume behind a per-store owner lock (ADR-0022), `u32` turn limits (`PROTOCOL_VERSION` 18), model-less `config check` | H3, H26 | Root, config, core, protocol |
 | HC3 | Done | `--output-schema`/`--output-repair-turns`; per-run `OutputContract` compiled at admission into a bounded reference-free schema subset, persisted (schema 27), judged after audit/steering with bounded repair turns; `FinalOutput` on `RunFinished`, `RunSnapshot`, and `outcome` (`PROTOCOL_VERSION` 19, ADR-0014) | H3, HC1 | Protocol, core, root |
 | HC4 | In review | `qq_protocol::headless` record types emitted by `qq run`; golden `.jsonl` streams per `PROTOCOL_VERSION` under `tests/fixtures/headless/` (v19 current, v18 decode-only) with framing checks; compatibility statement (ADR-0023) | HC1–HC3 | Protocol, root, docs |
@@ -606,9 +619,9 @@ Status: active from 2026-09-08. H20 implemented 2026-09-09 (`ab6de6f`,
 (`61682be`, 2026-09-11); H21.1c (`settle_run`, `TeardownComplete`,
 ADR-0012) merged in #24; HC1 merged in #30; HC3 in #33; HC4 in #34 closed
 Phase 5b; H18 in review (`perf/h18-shared-transcript-prompt-prefix`,
-ADR-0024) merged in #38; H19 in review (`perf/h19-sse-framing`, ADR-0025).
-Order from here: the mechanical H21.2 split (HC3's settlement change has
-landed) and the structural H22.2 items as separate commits. The H20 p95 qualification is a quiet-host recording, not code.
+ADR-0024) merged in #38; H19 (ADR-0025) merged in #39; H21.2 in review
+(`refactor/h21-2-sessions-split`). Order from here: the structural H22.2
+items as separate commits. The H20 p95 qualification is a quiet-host recording, not code.
 
 Benchmarks to record before each change:
 

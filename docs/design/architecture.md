@@ -160,7 +160,15 @@ xtask/
 - `qq-core` contains the agent loop, session behavior, tool integration, and
   persistence behavior. It consumes the command and event vocabulary from
   `qq-protocol` and exposes a small interface that hides orchestration details
-  from clients.
+  from clients. `sessions.rs` is the composition point for the session
+  runtime: `runtime`, `scheduler`, and `execution` drive runs; `store` owns
+  the SQLite worker; the persistence body is split by concern into `claim`
+  (reservation and identity), `commands` (command application), `streaming`
+  (the running turn's writes), `tool_calls`, `settlement` (the one guarded
+  `settle_run` and recovery), `compaction`, `transcript` (context assembly),
+  `snapshots` (read projections), `events` (the journal), and `codec`
+  (column forms). These modules import each other through globs in
+  `sessions.rs`; they are one body divided for navigation, not a layering.
 - `qq-provider` contains the provider-neutral model interface and concrete
   model-provider adapters. `lib.rs`, `model.rs`, and `compiler.rs` form its
   public facade; concrete adapters live privately under `providers/`. It also
