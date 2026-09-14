@@ -8,8 +8,8 @@ newest last.
 | --- | --- | --- | --- | --- |
 | T1 | Cross-cutting primitives: `Bounds`, `bound_text`, `ToolOutput` split, header convention, masking, per-turn budget | Shipped (#31, `b0a18be`) | `feat/tool-layer-t1-output-bounds` | Evidence `target/qq-perf/t1-2026-09-11/` |
 | T2 | `search` v2 + `tree` (+ `list_dir` alias) | Shipped (#32, `8bb4050`) | `feat/tool-layer-t2-search-tree` | Evidence `target/qq-perf/t2-2026-09-12/` |
-| T3 | `read_file` v2 (gutter, ranges, outline, info, `if_changed_since`) | In review | `feat/tool-layer-t3-read-file` | Started 2026-09-14; evidence `target/qq-perf/t3-2026-09-14/` |
-| T4 | Spill store + `read_tool_result` | Planned | | Touches `sessions/store`; second-agent review required |
+| T3 | `read_file` v2 (gutter, ranges, outline, info, `if_changed_since`) | Shipped (#35, `eecc76b`) | `feat/tool-layer-t3-read-file` | Evidence `target/qq-perf/t3-2026-09-14/` |
+| T4 | Spill store + `read_tool_result` | In progress | `feat/tool-layer-t4-spill-store` | Started 2026-09-14; baselines `target/qq-perf/t4-2026-09-14/` (`tool_dispatch` 44.5–46.7 µs pinned; `store_output_batch` 88 ms/batch, 43 µs/delta). Touches `sessions/store`; second-agent review required. ADR-0019 reserved |
 | T5 | `edit_file` v2 + `write_file` flags | Planned | | |
 | T6 | Shell classifier + `Forbidden` decision | Planned | | Root request: promote `tree-sitter{,-bash}` to workspace deps; ADR reserved |
 | T7 | `exec`, env allowlist, prefer-built-in nudge | Planned | | |
@@ -73,3 +73,11 @@ Deviations: the model-facing default is 32 KiB as planned but the ceiling stays 
 Docs: `docs/design/tools.md` § Built-In Tools, § Reading Files (new).
 Open: T5's `edit_file` can use `h:` from the header as an optional precondition; T11 replaces the image hint; T12's `@` ranges reuse `parse_ranges`.
 Evidence: `target/qq-perf/t3-2026-09-14/` (untracked).
+
+### 2026-09-14 — T3 shipped; T4 in progress
+
+T3 merged as #35 (`eecc76b`). T4 on `feat/tool-layer-t4-spill-store`
+(worktree `/tmp/opencode/qq-t4`). Baselines: `tool_dispatch` 44.5–46.7
+µs/iter pinned (6 runs); `store_output_batch` 88 ms/batch (the store
+fairness gate the slice must leave unchanged). Schema 27 → 28 planned
+(`tool_spills` table). ADR-0019 to be written in the PR.
