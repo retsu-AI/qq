@@ -324,7 +324,13 @@ fn lines(
     let body_budget = READ_BOUNDS
         .max_bytes
         .saturating_sub(HEADER_RESERVE_BYTES + MARKER_RESERVE_BYTES);
-    let mut body = String::with_capacity(body_budget.min(64 * 1024));
+    // Sized to the file, not the budget: most reads are small and a 32 KiB
+    // allocation per call is measurable on the tool loop.
+    let mut body = String::with_capacity(
+        text.len()
+            .saturating_add(total_lines.saturating_mul(width + 1))
+            .min(body_budget),
+    );
     let mut body_escaped = 0_usize;
     let mut shown = Vec::with_capacity(ranges.len());
     let mut clipped_lines = 0_usize;
