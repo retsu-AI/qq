@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 mod capabilities;
+mod headless;
 mod ids;
 mod input;
 mod limits;
@@ -17,6 +18,10 @@ pub use capabilities::{
     DelegationRole, DelegationRoster, DelegationRosterEntry, EventCapabilities, LimitCapabilities,
     PackSummary, ServerCapabilities, SkillCapabilities, SkillSummary, SteeringCapabilities,
     ToolCapabilities, ToolHostSummary, WorkspaceToolCapabilities,
+};
+pub use headless::{
+    HeadlessApproval, HeadlessOutcome, HeadlessRecord, HeadlessRecordRef, HeadlessStatus,
+    HeadlessTrial,
 };
 pub use ids::{CommandId, IdError, MessageId, RunId, SessionId, StoreId, ToolCallId, WorkspaceId};
 pub use input::{
