@@ -60,3 +60,8 @@ harness = false
 name = "provider_encode"
 harness = false
 required-features = ["test-support"]
+
+[[bench]]
+name = "sse_decode"
+harness = false
+required-features = ["test-support"]

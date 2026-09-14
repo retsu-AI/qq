@@ -327,7 +327,7 @@ fn sse_spec(request_kind: ResponsesRequestKind) -> SseExchangeSpec {
     }
 }
 
-fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
+pub(crate) fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
     SseDecoder::data_only(
         max_event_bytes,
         "OpenAI event size overflowed",
@@ -550,7 +550,7 @@ struct ApiError {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum DecodedEvent {
+pub(crate) enum DecodedEvent {
     OutputTextDelta(String),
     RefusalDelta(String),
     ToolCallStarted {
@@ -573,7 +573,10 @@ enum DecodedEvent {
     Ignored,
 }
 
-fn decode_event(data: &str, redactions: &[String]) -> Result<DecodedEvent, ProviderError> {
+pub(crate) fn decode_event(
+    data: &str,
+    redactions: &[String],
+) -> Result<DecodedEvent, ProviderError> {
     let event: StreamingEvent = serde_json::from_str(data).map_err(|error| {
         // Include a short sanitized payload snippet so live Codex/OpenAI
         // decode failures remain diagnosable without logging the full stream.

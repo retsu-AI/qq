@@ -31,6 +31,7 @@ written.
 | 0022 | [One owner per session store: an advisory lock precedes open and recovery](0022-single-store-owner.md) | Accepted |
 | 0023 | [Headless JSONL records are protocol types, pinned by golden streams per `PROTOCOL_VERSION`](0023-headless-records-as-protocol.md) | Accepted |
 | 0024 | [Shared transcript, raw tool JSON, and a precompiled prompt prefix on the request path](0024-shared-transcript-raw-json-prompt-prefix.md) | Accepted |
+| 0025 | [SSE bodies are framed per chunk with one allocation per event; adapters parse once](0025-sse-chunk-framing.md) | Accepted |
 
 ## When to write one
 
