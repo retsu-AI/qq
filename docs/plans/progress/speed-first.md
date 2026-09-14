@@ -13,7 +13,7 @@ dated entries appended below, newest last.
 | H27 | Superseded-generation accounting, atomic refresh admission, guard reclamation | Done | merged in #22 | Pinned LRU and admission already existed (`src/plan.rs`) |
 | H28 | Typed context-source capacity error; sources in descriptor | Done | merged in #22 | `DESCRIPTOR_VERSION` 5 → 6. ADR-0013 |
 | H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | Done | merged in #22 | Store schema 25 → 26 (`tool_calls.effect`). MCP permit ordering was already correct |
-| H18 | `Arc<Vec<Message>>`, prompt prefix, `RawValue` schemas | In review | `perf/h18-shared-transcript-prompt-prefix` | ADR-0024. `provider_encode` added: heap 4.4–4.7x → 1.55–1.80x (shared) / 2.7x (owned); encode 339–559 → 191–406 µs. No protocol or schema bump |
+| H18 | `Arc<Vec<Message>>`, prompt prefix, `RawValue` schemas | In review | [#38](https://github.com/retsu-AI/qq/pull/38) `perf/h18-shared-transcript-prompt-prefix` | ADR-0024. `provider_encode` added: heap 4.4–4.7x → 1.55–1.80x (shared) / 2.7x (owned); encode 339–559 → 191–406 µs. No protocol or schema bump |
 | H19 | SSE framing, conditional | Planned | | Add `sse_decode` bench first; no-change decision acceptable |
 | H21.2 | Mechanical `sessions.rs` split | Planned | | After HC3 behavioral changes; separate commit |
 | H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI | Planned | | |
