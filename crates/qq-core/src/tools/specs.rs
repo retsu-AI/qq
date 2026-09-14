@@ -86,13 +86,16 @@ impl BuiltInTool {
         match self {
             Self::ReadFile => ToolSpec::new(
                 "read_file",
-                "Read a UTF-8 file in the workspace by line, with a 1-based offset and bounded line count.",
+                "Read a workspace file by line range(s), or get its outline or info. The header carries the content hash; pass if_changed_since to skip unchanged content.",
                 json!({
                     "type": "object",
                     "properties": {
                         "path": { "type": "string" },
+                        "ranges": { "type": "array", "maxItems": 8, "items": { "type": "string", "pattern": "^[0-9]+(-[0-9]*)?$" } },
                         "offset": { "type": "integer", "minimum": 1 },
-                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_READ_LINES }
+                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_READ_LINES, "default": 200 },
+                        "mode": { "enum": ["lines", "outline", "info"], "default": "lines" },
+                        "if_changed_since": { "type": "string", "pattern": "^h:[0-9a-f]{12}$" }
                     },
                     "required": ["path"],
                     "additionalProperties": false

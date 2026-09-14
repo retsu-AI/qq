@@ -3234,7 +3234,7 @@ mod tests {
                                 content,
                                 is_error: false,
                             }]) if call_id == "read-src-policy"
-                                && content == "Follow src fallback.\n"
+                                && content.ends_with("\n1\tFollow src fallback.\n")
                         ));
                         tool_turn("list-feature", "list_dir", r#"{"path":"src/feature"}"#)
                     }
@@ -3263,7 +3263,7 @@ mod tests {
                                 content,
                                 is_error: false,
                             }]) if call_id == "read-feature-policy"
-                                && content == "Follow feature policy.\n"
+                                && content.ends_with("\n1\tFollow feature policy.\n")
                         ));
                         tool_turn(
                             "read-before",
@@ -3278,7 +3278,7 @@ mod tests {
                                 call_id,
                                 content,
                                 is_error: false,
-                            }]) if call_id == "read-before" && content == "before\n"
+                            }]) if call_id == "read-before" && content.ends_with("\n1\tbefore\n")
                         ));
                         tool_turn(
                             "edit",
@@ -3298,7 +3298,7 @@ mod tests {
                                 call_id,
                                 content,
                                 is_error: false,
-                            }]) if call_id == "read-after" && content == "after\n"
+                            }]) if call_id == "read-after" && content.ends_with("\n1\tafter\n")
                         ));
                         Box::pin(stream::iter([
                             Ok(ProviderEvent::OutputTextDelta {
@@ -3818,7 +3818,8 @@ mod tests {
                     is_error: false,
                 }
             ] if call_id == "read"
-                && content == "contents\n"
+                && content.starts_with("read note.txt L1/1 h:")
+                && content.ends_with("\n1\tcontents\n")
                 && second_id == "list"
                 && second_content == "tree . depth=1 entries=1/1 files=1 dirs=0\nnote.txt 9\n"
         ));
@@ -3937,10 +3938,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_turns_tool_output_is_capped_and_persisted_results_stay_whole() {
-        // Three reads of 40 KiB each: per call every one fits its own bound,
-        // together they exceed the 96 KiB turn budget. The third result the
-        // model sees is re-bounded to the remainder; the events (what the
-        // store persists) keep each call's full bounded text.
+        // Four reads of ~28 KiB each: per call every one fits its own 32 KiB
+        // bound, together they exceed the 96 KiB turn budget. The fourth
+        // result the model sees is re-bounded to the remainder; the events
+        // (what the store persists) keep each call's full bounded text.
         struct ThreeReadsProvider {
             turn: Mutex<usize>,
             requests: Arc<Mutex<Vec<ModelRequest>>>,
@@ -3957,7 +3958,7 @@ mod tests {
                     return Box::pin(stream::iter([Ok(ProviderEvent::Completed { usage: None })]));
                 }
                 let mut events = Vec::new();
-                for index in 0..3 {
+                for index in 0..4 {
                     let id = format!("read-{index}");
                     events.push(Ok(ProviderEvent::ToolCallStarted {
                         id: id.clone(),
@@ -3976,10 +3977,10 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let line = format!("{}\n", "z".repeat(63));
-        for index in 0..3 {
+        for index in 0..4 {
             std::fs::write(
                 directory.path().join(format!("big-{index}.txt")),
-                line.repeat(640),
+                line.repeat(420),
             )
             .unwrap();
         }
@@ -4009,7 +4010,10 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(persisted, [40 * 1024, 40 * 1024, 40 * 1024]);
+        assert_eq!(persisted.len(), 4);
+        for length in &persisted {
+            assert!((27 * 1024..=29 * 1024).contains(length), "{length}");
+        }
 
         let requests = requests.lock().unwrap();
         let in_context = requests[1].messages()[2]
@@ -4020,16 +4024,23 @@ mod tests {
                 other => panic!("unexpected block {other:?}"),
             })
             .collect::<Vec<_>>();
-        assert_eq!(in_context[0].len(), 40 * 1024);
-        assert_eq!(in_context[1].len(), 40 * 1024);
-        assert!(in_context[2].len() <= 16 * 1024, "{}", in_context[2].len());
+        assert_eq!(in_context[0].len(), persisted[0]);
+        assert_eq!(in_context[1].len(), persisted[1]);
+        assert_eq!(in_context[2].len(), persisted[2]);
+        assert!(in_context[3].len() <= 16 * 1024, "{}", in_context[3].len());
         assert!(
-            in_context[2].contains("turn budget reached"),
+            in_context[3].contains("turn budget reached"),
             "{}",
-            in_context[2]
+            in_context[3]
         );
-        assert!(in_context[2].starts_with(&line), "the head survives");
-        assert!(in_context[2].ends_with(&line), "the tail survives");
+        assert!(
+            in_context[3].starts_with("read big-3.txt L1-420/420 h:"),
+            "the header survives"
+        );
+        assert!(
+            in_context[3].ends_with(&format!("420\t{line}")),
+            "the tail survives"
+        );
         let total: usize = in_context.iter().map(|content| content.len()).sum();
         assert!(
             total <= tools::output::MAX_TURN_TOOL_OUTPUT_BYTES,
