@@ -365,6 +365,10 @@ pub struct CompiledAgentPlan {
     pub(crate) roster_text: Option<Arc<str>>,
     /// Host handles indexed as `ToolHost::External { host }` names them.
     pub(crate) hosts: Arc<[Arc<dyn ExternalToolHost>]>,
+    /// The plan-constant system prompt per capability set, built on first
+    /// use and shared by every later run with the same set. Bounded by the
+    /// number of `PromptPrefixKey` values (32).
+    prompt_prefixes: std::sync::Mutex<Vec<(PromptPrefixKey, Arc<crate::runtime::PromptPrefix>)>>,
     resolved_model: Arc<ResolvedModel>,
     descriptor: Arc<AgentPlanDescriptor>,
     descriptor_json: Arc<str>,
@@ -374,6 +378,56 @@ pub struct CompiledAgentPlan {
     /// must `stat` to revalidate the workspace side of this plan.
     sources: Vec<SourceFingerprint>,
     estimated_bytes: usize,
+}
+
+/// What varies the plan-constant prompt between runs of one plan: which
+/// static tools the run may use and whether it may load guidance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PromptPrefixKey {
+    pub(crate) tools: Option<crate::catalog::StaticFilter>,
+    pub(crate) guidance: bool,
+}
+
+impl CompiledAgentPlan {
+    /// The system prompt prefix for `key`, built once per key. `base_specs`
+    /// must be `catalog.base_specs(filter)` for the key's filter (or empty
+    /// without tools); the caller already has it and the prefix names those
+    /// tools, so the two must agree.
+    pub(crate) fn prompt_prefix(
+        &self,
+        key: PromptPrefixKey,
+        base_specs: &[qq_provider::ToolSpec],
+    ) -> Arc<crate::runtime::PromptPrefix> {
+        // Never held across an await; a poisoned lock means a panic while
+        // building a prefix, which is a bug worth surfacing, not masking.
+        let mut prefixes = self
+            .prompt_prefixes
+            .lock()
+            .expect("prompt prefix cache lock poisoned");
+        if let Some((_, prefix)) = prefixes.iter().find(|(existing, _)| *existing == key) {
+            return Arc::clone(prefix);
+        }
+        let prefix = Arc::new(crate::runtime::PromptPrefix::new(
+            self.workspace.path(),
+            base_specs,
+            crate::runtime::PromptSections {
+                tool_index: self.catalog.index_text().map(Arc::as_ref),
+                roster: self.roster_text.as_deref(),
+                // Disclosure follows the guidance capability: restricted runs
+                // (compaction, model-authored child tasks) neither list nor
+                // load skills.
+                skill_index: if key.guidance {
+                    self.skills.disclosure_text()
+                } else {
+                    None
+                },
+            },
+            &self.instructions,
+            self.persona.as_deref(),
+        ));
+        prefixes.push((key, Arc::clone(&prefix)));
+        prefix
+    }
 }
 
 impl fmt::Debug for CompiledAgentPlan {
@@ -667,19 +721,46 @@ impl CompiledAgentPlan {
                 });
             }
         };
+        let roster_text: Option<Arc<str>> = crate::runtime::delegation_roster_text(
+            &resolved_model.route,
+            resolved_model.context_window,
+            &runtime.delegation,
+        )
+        .map(Arc::from);
+        // The common session run (every static tool, guidance allowed) gets
+        // its prefix now, off the run path; other capability sets build
+        // theirs on first use. One prefix is counted for cache admission: a
+        // variant differs by at most the tool-name list and skill index, and
+        // the prefix copies instructions and persona already counted above.
+        let full_key = PromptPrefixKey {
+            tools: Some(crate::catalog::StaticFilter {
+                spawn_agent: true,
+                search_history: true,
+                read_tool_result: true,
+                load_skill: true,
+                read_only: false,
+            }),
+            guidance: true,
+        };
+        let full_prefix = Arc::new(crate::runtime::PromptPrefix::new(
+            opened.path(),
+            &catalog.base_specs(&full_key.tools.expect("full key has a filter")),
+            crate::runtime::PromptSections {
+                tool_index: catalog.index_text().map(Arc::as_ref),
+                roster: roster_text.as_deref(),
+                skill_index: skills.disclosure_text(),
+            },
+            &instructions,
+            persona.as_deref(),
+        ));
         let estimated_bytes = descriptor_json.len()
             + descriptor.canonical_bytes()?.len()
             + instructions.content_len()
             + persona.as_ref().map_or(0, |persona| persona.text.len())
             + catalog.estimated_bytes()
             + skills.estimated_bytes()
+            + full_prefix.len()
             + std::mem::size_of::<Self>();
-        let roster_text = crate::runtime::delegation_roster_text(
-            &resolved_model.route,
-            resolved_model.context_window,
-            &runtime.delegation,
-        )
-        .map(Arc::from);
         Ok(Arc::new(Self {
             runtime,
             workspace: opened,
@@ -690,6 +771,7 @@ impl CompiledAgentPlan {
             persona,
             roster_text,
             hosts: host_handles,
+            prompt_prefixes: std::sync::Mutex::new(vec![(full_key, full_prefix)]),
             resolved_model: Arc::new(resolved_model),
             descriptor_json: Arc::from(descriptor_json),
             descriptor: Arc::new(descriptor),

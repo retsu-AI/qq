@@ -47,7 +47,7 @@ use runtime::{
     HistorySearcher, PendingToolCall, PreparedRequestWeight, PreparedStaticPrefix,
     ReadToolResultArgs, RuntimeEvent, RuntimeToolCall, SPAWN_UNAVAILABLE_RESULT, SearchHistoryArgs,
     SpawnAgentFuture, SpawnAgentOutcome, SpawnAgentSpend, SpawnRequest, SubagentSpawner, ToolGate,
-    ToolGateFuture, TurnBlock, agent_system_prompt, render_history_matches, render_tool_result,
+    ToolGateFuture, TurnBlock, render_history_matches, render_tool_result,
 };
 
 pub use approval::shell_prefix_matches;
@@ -937,9 +937,7 @@ impl plan::CompiledAgentPlan {
         let model_max_output_tokens = plan.runtime.max_output_tokens;
         let catalog = Arc::clone(&plan.catalog);
         let skills = Arc::clone(&plan.skills);
-        let roster_text = plan.roster_text.clone();
         let pack_roots = Arc::clone(&plan.pack_roots);
-        let persona = plan.persona.clone();
         let hosts = Arc::clone(&plan.hosts);
         let context_sources = Arc::clone(&plan.runtime.context_sources);
         let context_cache = Arc::clone(&plan.runtime.context_cache);
@@ -1093,16 +1091,16 @@ impl plan::CompiledAgentPlan {
             // for durable session runs) plus every external tool under full
             // exposure. Under progressive exposure the model pins external
             // tools with `select_tools`; pins extend this base list.
-            let base_specs: Arc<[ToolSpec]> = if allow_tools {
-                catalog.base_specs(&catalog::StaticFilter {
-                    spawn_agent: spawner.is_some(),
-                    search_history: history.is_some(),
-                    read_tool_result: spills.is_some(),
-                    load_skill: allow_guidance,
-                    read_only,
-                })
-            } else {
-                Arc::from([])
+            let static_filter = allow_tools.then_some(catalog::StaticFilter {
+                spawn_agent: spawner.is_some(),
+                search_history: history.is_some(),
+                read_tool_result: spills.is_some(),
+                load_skill: allow_guidance,
+                read_only,
+            });
+            let base_specs: Arc<[ToolSpec]> = match &static_filter {
+                Some(filter) => catalog.base_specs(filter),
+                None => Arc::from([]),
             };
             let mut pins = catalog::PinSet::default();
             // A recovered run re-pins what its earlier `select_tools` calls
@@ -1115,33 +1113,31 @@ impl plan::CompiledAgentPlan {
             } else {
                 catalog.specs_with_pins(&base_specs, &pins)
             };
-            let system: Arc<str> = Arc::from({
-                let mut system = agent_system_prompt(
-                    workspace.path(),
-                    &base_specs,
-                    runtime::PromptSections {
-                        tool_index: catalog.index_text().map(Arc::as_ref),
-                        roster: roster_text.as_deref(),
-                        // Disclosure follows the guidance capability: restricted
-                        // runs (compaction, model-authored child tasks) neither
-                        // list nor load skills.
-                        skill_index: if allow_guidance { skills.disclosure_text() } else { None },
-                    },
-                    workspace_instructions,
-                    persona.as_deref(),
-                    selected_guidance.as_ref(),
-                );
-                system.push_str(&context_blocks);
-                if let Some(output) = &output {
-                    system.push_str("\n\n");
-                    system.push_str(output::OUTPUT_CONTRACT_SYSTEM_NOTICE);
-                    system.push_str(output.schema_json());
-                    system.push_str("\n```\n");
+            // The plan-constant prefix is built once per capability set and
+            // its SHA-256 state continued over this run's suffix, so neither
+            // the prompt body nor its hash is recomputed per run.
+            let prompt_prefix = plan.prompt_prefix(
+                plan::PromptPrefixKey {
+                    tools: static_filter,
+                    guidance: allow_guidance,
+                },
+                &base_specs,
+            );
+            let (system, system_prompt_hash) = {
+                let mut suffix = String::new();
+                if let Some(guidance) = &selected_guidance {
+                    guidance.append_to_prompt(&mut suffix);
                 }
-                system
-            });
+                suffix.push_str(&context_blocks);
+                if let Some(output) = &output {
+                    suffix.push_str("\n\n");
+                    suffix.push_str(output::OUTPUT_CONTRACT_SYSTEM_NOTICE);
+                    suffix.push_str(output.schema_json());
+                    suffix.push_str("\n```\n");
+                }
+                prompt_prefix.complete(&suffix)
+            };
             let mut tool_schema = catalog.schema_measurement(&tool_specs);
-            let system_prompt_hash = ContentHash::from_bytes(Sha256::digest(system.as_bytes()).into());
             let mut prompt_identity = Some(Arc::new(RunPromptIdentity {
                     version: AGENT_PROMPT_VERSION,
                     instruction_hash: workspace_instructions.hash(),
@@ -2909,6 +2905,166 @@ mod tests {
             first, second,
             "the transcript must be grown in place between turns"
         );
+    }
+
+    /// D5: the run's `system_prompt_hash` is the SHA-256 of the full prompt
+    /// even though the plan-constant prefix was hashed once at compile and
+    /// only the per-run suffix (guidance, output contract) per run. The full
+    /// text must also equal what the one-shot builder produces, across the
+    /// capability sets that vary the prefix, so persisted identities are
+    /// unchanged by the split.
+    #[tokio::test]
+    async fn prefix_plus_suffix_digest_equals_the_full_prompt_digest() {
+        struct SystemCapture(Arc<Mutex<Vec<Arc<str>>>>);
+
+        impl Provider for SystemCapture {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.0.lock().unwrap().push(Arc::from(
+                    request.system().expect("every run has a system prompt"),
+                ));
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "{\"ok\":true}".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("AGENTS.md"),
+            "Keep every change small.\n",
+        )
+        .unwrap();
+        let skill = directory.path().join(".qq/skills/review");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "Review for regressions.\n").unwrap();
+        let systems = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(SystemCapture(Arc::clone(&systems)), "test-model", 256).unwrap();
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                &runtime, workspace,
+            ))
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let contract = Arc::new(
+            output::CompiledOutputSchema::compile(&qq_protocol::OutputContract {
+                schema: serde_json::json!({"type": "object"}),
+                repair_turns: 0,
+            })
+            .unwrap(),
+        );
+
+        // (capabilities, prompt) pairs: the default set with a skill and a
+        // contract (both suffix), a read-only guidance-less child, a tool-less
+        // compaction-style run, and the default set with no suffix at all.
+        let cases: Vec<(RunCapabilities, &str)> = vec![
+            (
+                RunCapabilities::user(None).with_output(Some(Arc::clone(&contract))),
+                "/review the change",
+            ),
+            (
+                RunCapabilities {
+                    allow_guidance: false,
+                    ..RunCapabilities::user(None)
+                }
+                .read_only(),
+                "summarize",
+            ),
+            (
+                RunCapabilities {
+                    allow_guidance: false,
+                    ..RunCapabilities::user(None)
+                }
+                .without_tools(),
+                "compact",
+            ),
+            (RunCapabilities::user(None), "hello"),
+        ];
+        let mut identities = Vec::new();
+        for (capabilities, prompt) in cases {
+            let events = plan
+                .execute(
+                    vec![Message::user(prompt)],
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(StaticPolicyGate {
+                        mode: ApprovalMode::ReadOnly,
+                        grants: approval::SessionGrants::default(),
+                    }),
+                    Arc::new(workspace::FileState::default()),
+                    capabilities,
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                "{events:?}"
+            );
+            let identity = events
+                .iter()
+                .find_map(|event| match event {
+                    RuntimeEvent::Prepared {
+                        identity: Some(identity),
+                        ..
+                    } => Some(Arc::clone(identity)),
+                    _ => None,
+                })
+                .expect("the first turn publishes the prompt identity");
+            identities.push(identity);
+        }
+
+        let systems = systems.lock().unwrap();
+        assert_eq!(systems.len(), 4);
+        for (system, identity) in systems.iter().zip(&identities) {
+            let full = ContentHash::from_bytes(Sha256::digest(system.as_bytes()).into());
+            assert_eq!(
+                identity.system_prompt_hash,
+                Some(full),
+                "the continued prefix digest must equal the whole-prompt digest"
+            );
+        }
+        // The suffix landed where the one-shot builder would have put it.
+        assert!(systems[0].contains("Selected skill `review`"));
+        assert!(
+            systems[0].ends_with("\n```\n"),
+            "output contract closes the prompt"
+        );
+        assert!(systems[0].contains("## Output contract"));
+        assert!(!systems[1].contains("Selected skill"));
+        assert!(
+            !systems[1].contains("edit_file, "),
+            "read-only runs are not offered edits"
+        );
+        assert!(!systems[2].contains("Available tools: read_file"));
+        assert!(systems[3].contains("--- BEGIN WORKSPACE INSTRUCTIONS ---"));
+        // Byte-for-byte parity with the single-pass builder for the plain case.
+        let expected = runtime::agent_system_prompt(
+            plan.workspace.path(),
+            &plan.catalog.base_specs(&catalog::StaticFilter {
+                spawn_agent: false,
+                search_history: false,
+                read_tool_result: false,
+                load_skill: true,
+                read_only: false,
+            }),
+            runtime::PromptSections {
+                tool_index: plan.catalog.index_text().map(Arc::as_ref),
+                roster: plan.roster_text.as_deref(),
+                skill_index: plan.skills.disclosure_text(),
+            },
+            &plan.instructions,
+            plan.persona.as_deref(),
+            None,
+        );
+        assert_eq!(systems[3].as_ref(), expected.as_str());
+        // Distinct capability sets produced distinct prefixes; the two
+        // default-set runs shared one.
+        assert_ne!(systems[1], systems[2]);
+        assert_ne!(systems[1], systems[3]);
     }
 
     #[tokio::test]
@@ -6489,7 +6645,7 @@ mod tests {
     fn agent_prompt_teaches_delegation_only_when_spawn_agent_is_declared() {
         let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
-        let without = agent_system_prompt(
+        let without = runtime::agent_system_prompt(
             workspace,
             &tools::specs(),
             runtime::PromptSections::default(),
@@ -6502,7 +6658,7 @@ mod tests {
 
         let mut specs = tools::specs();
         specs.push(tools::spawn_agent_spec(&[], &DelegationRoster::default()));
-        let with = agent_system_prompt(
+        let with = runtime::agent_system_prompt(
             workspace,
             &specs,
             runtime::PromptSections::default(),
@@ -6648,7 +6804,7 @@ mod tests {
         let instructions = workspace::WorkspaceInstructions::empty();
         let mut specs = tools::specs();
         specs.push(tools::spawn_agent_spec(&[], &roster));
-        let prompt = agent_system_prompt(
+        let prompt = runtime::agent_system_prompt(
             workspace,
             &specs,
             runtime::PromptSections {

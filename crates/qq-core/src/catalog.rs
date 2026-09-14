@@ -639,6 +639,7 @@ impl ToolCatalog {
 }
 
 /// Which optional static tools a run may see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StaticFilter {
     pub(crate) spawn_agent: bool,
     pub(crate) search_history: bool,

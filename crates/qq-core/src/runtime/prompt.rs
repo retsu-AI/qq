@@ -1,12 +1,15 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use qq_protocol::{ContentHash, DelegationRoster, PromptVersion};
 use qq_provider::ToolSpec;
+use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use crate::workspace::SelectedGuidance;
 use crate::{
     hosts::{EMBEDDED_TOOL_PREFIX, MCP_TOOL_PREFIX},
     tools::SPAWN_AGENT_TOOL,
-    workspace::{SelectedGuidance, WorkspaceInstructions},
+    workspace::WorkspaceInstructions,
 };
 
 pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(10) {
@@ -33,6 +36,7 @@ pub(crate) struct PromptSections<'a> {
     pub(crate) skill_index: Option<&'a str>,
 }
 
+#[cfg(test)]
 pub(crate) fn agent_system_prompt(
     workspace: &Path,
     specs: &[ToolSpec],
@@ -40,6 +44,76 @@ pub(crate) fn agent_system_prompt(
     workspace_instructions: &WorkspaceInstructions,
     persona: Option<&crate::plan::Persona>,
     selected_guidance: Option<&SelectedGuidance>,
+) -> String {
+    let mut prompt =
+        agent_prompt_prefix(workspace, specs, sections, workspace_instructions, persona);
+    if let Some(guidance) = selected_guidance {
+        guidance.append_to_prompt(&mut prompt);
+    }
+    prompt
+}
+
+/// The plan-constant part of the system prompt: everything
+/// [`agent_system_prompt`] emits before per-run guidance. A plan builds it
+/// once per tool filter and every run appends its suffix (guidance, context
+/// blocks, output contract) to a copy, so the header, tool index, skill
+/// index, workspace instructions, and persona are neither rebuilt nor
+/// re-hashed per run. `hasher` continues the SHA-256 of these
+/// bytes so the run's `system_prompt_hash` equals a digest of the full text.
+#[derive(Debug, Clone)]
+pub(crate) struct PromptPrefix {
+    text: Arc<str>,
+    hasher: Sha256,
+}
+
+impl PromptPrefix {
+    pub(crate) fn new(
+        workspace: &Path,
+        specs: &[ToolSpec],
+        sections: PromptSections<'_>,
+        workspace_instructions: &WorkspaceInstructions,
+        persona: Option<&crate::plan::Persona>,
+    ) -> Self {
+        let text = agent_prompt_prefix(workspace, specs, sections, workspace_instructions, persona);
+        let mut hasher = Sha256::new();
+        hasher.update(text.as_bytes());
+        Self {
+            text: Arc::from(text),
+            hasher,
+        }
+    }
+
+    /// Bytes of prefix text, for plan-cache admission.
+    pub(crate) fn len(&self) -> usize {
+        self.text.len()
+    }
+
+    /// The full prompt and its digest for one run: the prefix followed by
+    /// `suffix`, hashed by continuing the prefix's SHA-256 state over the
+    /// suffix alone. Equals `Sha256::digest(prefix ++ suffix)`; a test pins
+    /// that against [`agent_system_prompt`].
+    pub(crate) fn complete(&self, suffix: &str) -> (Arc<str>, ContentHash) {
+        let mut hasher = self.hasher.clone();
+        hasher.update(suffix.as_bytes());
+        let hash = ContentHash::from_bytes(hasher.finalize().into());
+        let text = if suffix.is_empty() {
+            Arc::clone(&self.text)
+        } else {
+            let mut text = String::with_capacity(self.text.len() + suffix.len());
+            text.push_str(&self.text);
+            text.push_str(suffix);
+            Arc::from(text)
+        };
+        (text, hash)
+    }
+}
+
+fn agent_prompt_prefix(
+    workspace: &Path,
+    specs: &[ToolSpec],
+    sections: PromptSections<'_>,
+    workspace_instructions: &WorkspaceInstructions,
+    persona: Option<&crate::plan::Persona>,
 ) -> String {
     let PromptSections {
         tool_index,
@@ -135,9 +209,6 @@ pub(crate) fn agent_system_prompt(
     workspace_instructions.append_to_prompt(&mut prompt);
     if let Some(persona) = persona {
         persona.append_to_prompt(&mut prompt);
-    }
-    if let Some(guidance) = selected_guidance {
-        guidance.append_to_prompt(&mut prompt);
     }
     prompt
 }
