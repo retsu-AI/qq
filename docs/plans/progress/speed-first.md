@@ -14,8 +14,8 @@ dated entries appended below, newest last.
 | H28 | Typed context-source capacity error; sources in descriptor | Done | merged in #22 | `DESCRIPTOR_VERSION` 5 → 6. ADR-0013 |
 | H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | Done | merged in #22 | Store schema 25 → 26 (`tool_calls.effect`). MCP permit ordering was already correct |
 | H18 | `Arc<Vec<Message>>`, prompt prefix, `RawValue` schemas | Shipped (`a13fbfd`, #38) | `perf/h18-shared-transcript-prompt-prefix` | ADR-0024. `provider_encode` added: heap 4.4–4.7x → 1.55–1.80x (shared) / 2.7x (owned); encode 339–559 → 191–406 µs. No protocol or schema bump |
-| H19 | SSE framing, conditional | In review | [#39](https://github.com/retsu-AI/qq/pull/39) `perf/h19-sse-framing` | Baseline: framing 55–72 % of decode → implemented (ADR-0025). Framing 0.21–0.23x, decode 0.40–0.42x, allocs ÷3.7–5.5. No protocol or schema bump |
-| H21.2 | Mechanical `sessions.rs` split | Planned | | After HC3 behavioral changes; separate commit |
+| H19 | SSE framing, conditional | Shipped (`53bca7d`, #39) | [#39](https://github.com/retsu-AI/qq/pull/39) | Baseline: framing 55–72 % of decode → implemented (ADR-0025). Framing 0.21–0.23x, decode 0.40–0.42x, allocs ÷3.7–5.5. No protocol or schema bump |
+| H21.2 | Mechanical `sessions.rs` split | In review | [#44](https://github.com/retsu-AI/qq/pull/44) `refactor/h21-2-sessions-split` | Ten concern modules + `tests/` tree; text-identical move, 1,401 tests unchanged, no ADR (D9/ADR-0012 already cover the design) |
 | H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI | Planned | | |
 | HC1 | `--correlation`, `--session`, `u32` turns, model-less `config check` | Shipped (`abad2de`, #30) | `feat/hc1-headless-run-contract` | `PROTOCOL_VERSION` 17 → 18; `v17/` fixtures retained decode-only. Per-store owner lock on every open (ADR-0022). `SessionRuntime::abandon_for_test` added for crash-simulation tests |
 | HC3 | `--output-schema`, repair turns, `final_output` | Shipped (`24b6e5c`, #33) | `feat/hc3-typed-final-output` | `PROTOCOL_VERSION` 18 → 19 (`v19/` goldens; `v18/` decode-only); store schema 26 → 27. ADR-0014 accepted. Evidence `target/qq-perf/hc3-2026-09-12/` |
@@ -655,3 +655,45 @@ which also absorbs the `persist_model_turn` re-measure noted under H18.
 
 Shipped: none this entry (branch in review). In progress: H19 review.
 Blocked: none. Next: H21.2.
+
+### 2026-09-14 — H21.2 `sessions.rs` split on `refactor/h21-2-sessions-split`
+
+Worktree `../qq-hc4` from `e5892a8` (v0.1.0; H19 merged #39, T6/T7 #40/#41). Owned paths:
+`crates/qq-core/src/sessions.rs` and the new files under
+`crates/qq-core/src/sessions/`; architecture crate map, plan, this ledger.
+
+Scripted, not hand-moved: a Python pass split the file at top-level items
+(attributes and doc comments attach forward), mapped each body item to a
+module by name, each test to a theme by position, and rewrote only
+visibility (`pub(super)` on moved items, their fields and inherent methods).
+Verification of the "mechanical" claim: a token multiset diff of old vs new
+(ignoring whitespace and `pub(super)`) differs only by the new `mod`/`use`
+lines and the `mod tests {}` braces. rustfmt then reflowed 25 signatures
+the 4-space dedent brought under 100 columns.
+
+One naming decision: the delegation tests are `tests::delegation`, not
+`tests::subagents`, because a `subagents` theme module would shadow the
+sibling `sessions::subagents` those tests name by path.
+
+#### H21.2 receipt — 2026-09-14
+Commits: `8ea550c` (split, regenerated on `e5892a8` after the v0.1.0 stack landed), + docs.
+Tests: 556 `qq-core` lib tests before and after (292 of them under
+`sessions::tests`); workspace 1,401 passed / 4 ignored; fmt; strict
+all-target Clippy; `cargo build --workspace`.
+Gates: none for this slice (no behavior). Line count 34,608 → 34,649 (`wc -l`, one trailing newline each); the
+plan's "~700 fewer lines" assumed fixture deduplication, not done here.
+Deviations: none from D9's module list. `ChildAdmission` (added by the
+tool-layer work after D9 was written) went to `commands` with the other
+child-run types.
+Docs: `architecture.md` crate map (`qq-core` entry), plan status block/task
+index/D9 as-built/Phase 6 order, this ledger. No ADR: the design is
+ADR-0012's; this is its filing.
+Open: the H18 follow-up (`persist_model_turn` re-measures the assistant
+message the loop already measured) was inspected and left: the loop's
+`measure_message` sums block lengths for the context meter, while the store
+needs the non-text remainder after streamed text was already reserved —
+the same fold, but carrying it across `AssistantTurnCompleted` adds a field
+to a public event for one `O(blocks)` pass. Not worth it. Closed as won't-do.
+
+Shipped: none this entry (branch in review). In progress: H21.2 review.
+Blocked: none. Next: H22.2.
