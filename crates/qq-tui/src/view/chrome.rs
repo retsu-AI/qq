@@ -596,6 +596,43 @@ pub(super) fn slash_autocomplete(app: &App, width: usize, height: usize) -> Vec<
     lines
 }
 
+/// The `@` completion menu: workspace paths for the token at the cursor,
+/// same box as the slash menu so the two read as one affordance.
+pub(super) fn mention_autocomplete(app: &App, width: usize, height: usize) -> Vec<Line> {
+    let candidates = &app.mention.candidates;
+    if candidates.is_empty() || app.composer.mention_token().is_none() || height < 2 {
+        return Vec::new();
+    }
+    let selected = app.mention.cursor.selected(candidates.len());
+    let visible = height
+        .saturating_sub(1)
+        .min(MAX_SLASH_ROWS)
+        .min(candidates.len());
+    let start = selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(candidates.len().saturating_sub(visible));
+    let mut lines = Vec::with_capacity(visible + 1);
+    let mut rule = Line::styled("─".repeat(width.min(2)), muted());
+    rule.push(" files ", muted());
+    let used = rule.width();
+    rule.push("─".repeat(width.saturating_sub(used)), muted());
+    lines.push(truncate_line(rule, width));
+    for (index, candidate) in candidates.iter().enumerate().skip(start).take(visible) {
+        let mut line = Line::styled(if index == selected { " > " } else { "   " }, accent());
+        let style = if index == selected {
+            normal().bold()
+        } else if candidate.ends_with('/') {
+            muted()
+        } else {
+            normal()
+        };
+        line.push(elide_path(candidate, width.saturating_sub(4)), style);
+        pad_line(&mut line, width);
+        lines.push(truncate_line(line, width));
+    }
+    lines
+}
+
 pub(super) fn overlay_slash_autocomplete(body: &mut [Line], autocomplete: Vec<Line>) {
     let start = body.len().saturating_sub(autocomplete.len());
     for (target, line) in body[start..].iter_mut().zip(autocomplete) {

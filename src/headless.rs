@@ -298,7 +298,42 @@ pub async fn run(
         }
     };
 
-    let handle = match submit(sessions, &options).await {
+    // `@` mentions resolve here, in the client, exactly as the TUI does:
+    // the server never sees the syntax. Notes are advisory and go to stderr.
+    let input = {
+        let workspace = options.workspace.clone();
+        let prompt = options.prompt.clone();
+        let resolved = tokio::task::spawn_blocking(move || {
+            qq_core::mentions::resolve_prompt(&workspace, &prompt)
+        })
+        .await
+        .unwrap_or_else(|_| qq_core::mentions::ResolvedPrompt {
+            parts: vec![qq_protocol::InputPart::text(options.prompt.clone())],
+            notes: vec!["mention resolution stopped unexpectedly".to_owned()],
+            skill: None,
+        });
+        for note in &resolved.notes {
+            let _ = writeln!(stderr, "note: {note}");
+        }
+        let mut parts = resolved.parts;
+        if let Some(skill) = resolved.skill {
+            let rest: String = parts
+                .iter()
+                .filter_map(|part| match part {
+                    qq_protocol::InputPart::Text { text } => Some(text.as_str()),
+                    qq_protocol::InputPart::WorkspaceFile { .. } => None,
+                })
+                .collect();
+            let files: Vec<_> = parts
+                .into_iter()
+                .filter(|part| matches!(part, qq_protocol::InputPart::WorkspaceFile { .. }))
+                .collect();
+            parts = vec![qq_protocol::InputPart::text(format!("/{skill}{rest}"))];
+            parts.extend(files);
+        }
+        parts
+    };
+    let handle = match submit(sessions, &options, input).await {
         Ok(handle) => handle,
         Err(failure) => {
             let _ = writeln!(stderr, "error: {}", failure.message);
@@ -441,6 +476,7 @@ pub async fn run(
 async fn submit(
     sessions: &SessionRuntime,
     options: &HeadlessOptions,
+    input: Vec<qq_protocol::InputPart>,
 ) -> Result<RunHandle, Failure> {
     let workspace = options.workspace.display().to_string();
     let resolved = send(
@@ -571,7 +607,7 @@ async fn submit(
         sessions,
         SessionCommand::SubmitPrompt {
             session_id,
-            input: vec![qq_protocol::InputPart::text(options.prompt.clone())],
+            input,
             limits: RunLimits {
                 max_duration_ms: options
                     .timeout
@@ -2255,6 +2291,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn at_mentions_in_the_prompt_attach_workspace_files_client_side() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let fixture = {
+            let requests = Arc::clone(&requests);
+            fixture(move || RecordingTextProvider {
+                requests: Arc::clone(&requests),
+            })
+            .await
+        };
+        std::fs::write(fixture.workspace.join("notes.md"), "alpha\nbeta\ngamma\n").unwrap();
+        std::fs::write(fixture.workspace.join("other.rs"), "fn x() {}\n").unwrap();
+        let options = HeadlessOptions {
+            prompt: "compare @notes.md:2-3 with @other.rs; ignore me@example.com and @missing.txt"
+                .to_owned(),
+            ..options(&fixture.workspace)
+        };
+
+        let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
+        // The unresolvable mention is reported, not fatal, and left literal.
+        assert!(stderr.contains("note: @missing.txt"), "{stderr}");
+        let requests = requests.lock().unwrap();
+        let prompt = requests[0]
+            .messages()
+            .iter()
+            .flat_map(|message| message.content())
+            .find_map(|block| match block {
+                qq_provider::ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            prompt.starts_with(
+                "compare @notes.md:2-3 with @other.rs; ignore me@example.com and @missing.txt"
+            ),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "<attached-file path=\"notes.md\" lines=\"2-3/3\">\n````\nbeta\ngamma\n````"
+            ),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("<attached-file path=\"other.rs\">"),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains("alpha"),
+            "the range excludes line 1: {prompt}"
+        );
+        // The transcript row keeps the placeholder form.
+        let records = parse_records(&stdout);
+        let queued = event_records(&records)
+            .into_iter()
+            .find(|record| record["envelope"]["event"]["type"] == "prompt_queued")
+            .unwrap();
+        let output = queued["envelope"]["event"]["message"]["output"]
+            .as_str()
+            .unwrap();
+        assert!(output.contains("@notes.md"), "{output}");
+    }
+
+    #[tokio::test]
     async fn session_resume_submits_into_the_idle_session_and_applies_the_invocation() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let fixture = {
@@ -2501,6 +2602,7 @@ mod tests {
                 prompt: "hang".to_owned(),
                 ..options(&workspace)
             },
+            vec![qq_protocol::InputPart::text("hang")],
         )
         .await
         .unwrap();

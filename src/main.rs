@@ -473,6 +473,7 @@ async fn interactive(
         .map(Into::into)
         .collect::<Vec<qq_tui::ModelOption>>();
     let workspace = std::fs::canonicalize(std::env::current_dir()?)?;
+    let workspace_root = workspace.clone();
     let configured_model = qq_protocol::ModelSelection {
         model: Some(snapshot.model().as_str().to_owned()),
         max_output_tokens: Some(snapshot.max_output_tokens()),
@@ -550,6 +551,7 @@ async fn interactive(
             model: model.unwrap_or_default(),
             models,
             themes,
+            workspace_root: Some(workspace_root),
         },
     )
     .await;

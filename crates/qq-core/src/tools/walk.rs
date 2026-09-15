@@ -35,7 +35,7 @@ pub(super) const MAX_FILE_SCAN_BYTES: u64 = 4 * 1024 * 1024;
 pub(super) const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum EntryKind {
+pub(crate) enum EntryKind {
     File { size: u64 },
     Dir,
     Symlink,
@@ -45,13 +45,13 @@ pub(super) enum EntryKind {
 /// One directory child. `path` is workspace-relative with `/` separators and
 /// no leading `./`, so it is both the cursor key and the display form.
 #[derive(Debug, Clone)]
-pub(super) struct Child {
-    pub(super) name: String,
-    pub(super) path: String,
-    pub(super) kind: EntryKind,
+pub(crate) struct Child {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) kind: EntryKind,
     /// Excluded by the generated-directory list, an ignore file, or being
     /// hidden. Listed so `tree` can show `…ignored`; never descended.
-    pub(super) ignored: bool,
+    pub(crate) ignored: bool,
 }
 
 impl Child {
@@ -68,7 +68,7 @@ impl Child {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum ListError {
+pub(crate) enum ListError {
     #[error("could not list {path}: {source}")]
     ReadDir {
         path: String,
@@ -104,7 +104,7 @@ impl StopReason {
 /// Gitignore matchers for the directory being listed and every ancestor up
 /// to the workspace root, deepest last. A deeper file overrides a shallower
 /// one and, within one file, the last matching pattern wins, as in git.
-pub(super) struct IgnoreStack {
+pub(crate) struct IgnoreStack {
     matchers: Vec<Option<Gitignore>>,
     include_ignored: bool,
 }
@@ -114,7 +114,7 @@ impl IgnoreStack {
     /// ancestor of `root` (`"."` for the workspace root), so a walk rooted
     /// below the workspace root still honours the root `.gitignore`. The
     /// root directory's own files are loaded when it is listed.
-    pub(super) fn open(workspace: &Workspace, root: &str, include_ignored: bool) -> Self {
+    pub(crate) fn open(workspace: &Workspace, root: &str, include_ignored: bool) -> Self {
         let mut stack = Self {
             matchers: Vec::new(),
             include_ignored,
@@ -165,7 +165,7 @@ impl IgnoreStack {
     }
 
     /// Undoes the push made by [`list_children`] for a directory.
-    pub(super) fn leave(&mut self) {
+    pub(crate) fn leave(&mut self) {
         if !self.include_ignored {
             self.matchers.pop();
         }
@@ -204,7 +204,7 @@ fn add_ignore_file(workspace: &Workspace, builder: &mut GitignoreBuilder, path: 
 /// Symlinks are reported and never followed. Names that are not UTF-8 are
 /// counted in `unreadable` and dropped: no cursor or later call could
 /// address them.
-pub(super) fn list_children(
+pub(crate) fn list_children(
     workspace: &Workspace,
     dir: &str,
     stack: &mut IgnoreStack,
@@ -297,18 +297,18 @@ pub(super) fn relative_string(path: &std::path::Path) -> String {
 /// Include/exclude globs in gitignore syntax, matched against the
 /// workspace-relative path. Directories always pass so the walk still
 /// descends to find matching files.
-pub(super) struct PathFilter(Option<Override>);
+pub(crate) struct PathFilter(Option<Override>);
 
 #[derive(Debug, thiserror::Error)]
 #[error("bad_glob {glob:?}: {source}")]
-pub(super) struct GlobError {
+pub(crate) struct GlobError {
     glob: String,
     #[source]
     source: ignore::Error,
 }
 
 impl PathFilter {
-    pub(super) fn new(include: &[String], exclude: &[String]) -> Result<Self, GlobError> {
+    pub(crate) fn new(include: &[String], exclude: &[String]) -> Result<Self, GlobError> {
         if include.is_empty() && exclude.is_empty() {
             return Ok(Self(None));
         }
@@ -335,7 +335,7 @@ impl PathFilter {
 
     /// With only excludes an unmatched file is admitted; with any include an
     /// unmatched file is not (`Override` reports it as ignored).
-    pub(super) fn admits_file(&self, path: &str) -> bool {
+    pub(crate) fn admits_file(&self, path: &str) -> bool {
         match &self.0 {
             None => true,
             Some(overrides) => !matches!(overrides.matched(path, false), Match::Ignore(_)),

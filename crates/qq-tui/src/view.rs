@@ -222,10 +222,13 @@ impl FrameRenderer {
             Mode::Approval => self.body(app, body_width, body_height),
             Mode::Compose => {
                 let mut body = self.body(app, body_width, body_height);
-                overlay_slash_autocomplete(
-                    &mut body,
-                    slash_autocomplete(app, body_width, body_height),
-                );
+                let menu = mention_autocomplete(app, body_width, body_height);
+                let menu = if menu.is_empty() {
+                    slash_autocomplete(app, body_width, body_height)
+                } else {
+                    menu
+                };
+                overlay_slash_autocomplete(&mut body, menu);
                 body
             }
         };
