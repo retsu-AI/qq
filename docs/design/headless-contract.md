@@ -195,6 +195,7 @@ unknown `status` fails; a supervisor should do the same.
 | `timed_out` | 3 | `max_duration_ms` limit reached |
 | `budget_exhausted` | 3 | Any other run limit reached (turns, cost, tokens, tool calls) |
 | `harness_failure` | 4 | QQ itself failed (store, provider protocol, internal) |
+| `needs_input` | 5 | The model asked the user a question (`ask_user`) and no client could answer; the run was cancelled at the question, which the stream's `tool_approval_requested` event and `outcome.message` carry |
 | `interrupted` | 130 | Signal or cancellation |
 
 Exit `3` is shared by two statuses. A supervisor must read `outcome.status`
@@ -217,6 +218,13 @@ Approval classification uses the catalog effect class (`crates/qq-core/src/appro
   dangerous (`sudo`, recursive `rm`, `git push`, `curl | sh`, and similar);
   those are held and answered by `--allow-tool`/`--allow-shell` grants.
 - `full`: everything executes; grants are redundant.
+
+`ask_user` is outside this ladder: it executes nothing and is held under
+every mode for an answer. Headless has no answerer, so the run ends
+`needs_input` (exit 5) at the first question rather than stalling until the
+approval timeout or fabricating an answer; a supervisor resumes the session
+with the answer as the next prompt. A spawned child's question is declined
+on the spot so the child proceeds on its own judgement.
 
 `--allow-tool` and `--allow-shell` therefore **widen** what a held call may
 do; they are not an allowlist that narrows the catalog. Configuration

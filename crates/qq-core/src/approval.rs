@@ -31,6 +31,10 @@ pub(crate) const USER_DENIED_RESULT: &str = "The user denied this tool call.";
 pub(crate) const TIMEOUT_DENIED_RESULT: &str = "No client resolved this tool approval within the configured wait; the call was denied by timeout.";
 pub(crate) const UNATTENDED_DENIED_RESULT: &str =
     "Tool approval is unavailable for this run; the call was denied.";
+pub(crate) const UNATTENDED_QUESTION_RESULT: &str =
+    "No user is available to answer questions in this run; decide without asking.";
+pub(crate) const DECLINED_QUESTION_RESULT: &str =
+    "The user declined to answer; proceed with your best judgement.";
 pub(crate) const REVIEWER_DENIED_RESULT: &str =
     "The approval reviewer denied this tool call for the supervised sub-agent:";
 
@@ -63,12 +67,23 @@ pub(crate) enum ToolClass {
     /// An MCP or embedded-host tool. Host hints never grant authority, so
     /// every external call is gated like a mutation.
     External,
+    /// `ask_user`: a question for the human. Well-formed arguments carry the
+    /// parsed preview; malformed ones fall through to dispatch, which
+    /// returns the contract error to the model.
+    Interactive {
+        question: Option<qq_protocol::QuestionPreview>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PolicyDecision {
     Execute,
     RequireApproval,
+    /// Hold the call until a client answers the question; the answer, not
+    /// an execution, becomes the result. Every mode allows asking.
+    AskUser {
+        question: qq_protocol::QuestionPreview,
+    },
     /// The mode refuses this class of call outright.
     Deny,
     /// The command matched a `Forbidden` rule: refused under every mode,
@@ -104,7 +119,10 @@ impl SessionGrants {
                 .shell_prefixes
                 .iter()
                 .any(|prefix| shell_prefix_matches(prefix, command)),
-            ToolClass::ReadOnly | ToolClass::Mutating | ToolClass::External => false,
+            ToolClass::ReadOnly
+            | ToolClass::Mutating
+            | ToolClass::External
+            | ToolClass::Interactive { .. } => false,
         }
     }
 }
@@ -153,6 +171,9 @@ pub(crate) fn classify(effect: EffectClass, name: &str, arguments: &str) -> Tool
         EffectClass::Mutating => ToolClass::Mutating,
         EffectClass::Shell => shell_class(name, arguments),
         EffectClass::External => ToolClass::External,
+        EffectClass::Interactive => ToolClass::Interactive {
+            question: crate::tools::ask::parse(arguments).ok(),
+        },
     }
 }
 
@@ -432,6 +453,14 @@ pub(crate) fn evaluate(
     }
     match class {
         ToolClass::ReadOnly => PolicyDecision::Execute,
+        // Asking is never dangerous: the reviewer under `supervised` sees the
+        // question too, and a read-only session may still consult its user.
+        ToolClass::Interactive {
+            question: Some(question),
+        } => PolicyDecision::AskUser {
+            question: question.clone(),
+        },
+        ToolClass::Interactive { question: None } => PolicyDecision::Execute,
         ToolClass::Mutating | ToolClass::Shell { .. } | ToolClass::External => match mode {
             ApprovalMode::ReadOnly => PolicyDecision::Deny,
             // Supervised holds everything, grants included: the whole point is
@@ -523,6 +552,52 @@ mod tests {
                 "read_file",
                 &ToolClass::ReadOnly,
                 &grants(&[], &[])
+            ),
+            PolicyDecision::Execute
+        );
+    }
+
+    #[test]
+    fn interactive_calls_are_held_for_an_answer_under_every_mode() {
+        let question =
+            crate::tools::ask::parse(r#"{"questions":[{"prompt":"Which?","options":["a","b"]}]}"#)
+                .unwrap();
+        let class = classify(
+            EffectClass::Interactive,
+            "ask_user",
+            r#"{"questions":[{"prompt":"Which?","options":["a","b"]}]}"#,
+        );
+        assert_eq!(
+            class,
+            ToolClass::Interactive {
+                question: Some(question.clone())
+            }
+        );
+        for mode in [
+            ApprovalMode::ReadOnly,
+            ApprovalMode::Ask,
+            ApprovalMode::Auto,
+            ApprovalMode::Supervised,
+            ApprovalMode::Full,
+        ] {
+            assert_eq!(
+                evaluate(mode, "ask_user", &class, &grants(&[], &[])),
+                PolicyDecision::AskUser {
+                    question: question.clone()
+                },
+                "{mode:?} must put the question to the user"
+            );
+        }
+        // Malformed arguments carry no question and pass to dispatch, which
+        // reports the contract error; grants never make a question skippable.
+        let malformed = classify(EffectClass::Interactive, "ask_user", "{}");
+        assert_eq!(malformed, ToolClass::Interactive { question: None });
+        assert_eq!(
+            evaluate(
+                ApprovalMode::ReadOnly,
+                "ask_user",
+                &malformed,
+                &grants(&["ask_user"], &[])
             ),
             PolicyDecision::Execute
         );

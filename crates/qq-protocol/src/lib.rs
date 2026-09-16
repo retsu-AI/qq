@@ -57,16 +57,16 @@ pub use sessions::{
     MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MessageRole, MessageSnapshot, MessageState,
     ModelCatalogRequest, ModelDescriptor, ModelPricing, ModelPricingTier, ModelSelection,
     OutputContract, PromptCacheCapabilities, PromptVersion, ProviderRequestShapeIdentity,
-    ProviderRequestShapeVersion, ResolvedModel, ResolvedModelVersion, RunActivity, RunFailure,
-    RunLimits, RunOutcome, RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting,
-    SessionCommand, SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionPurpose,
-    SessionSnapshot, SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict,
-    SnapshotRequest, SpawnOrigin, SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay,
-    ToolCallSnapshot, ToolCallState, ToolExposure, WorkspaceGrantOutcome, WorkspaceSnapshot,
-    WorkspaceSummary,
+    ProviderRequestShapeVersion, Question, QuestionPreview, ResolvedModel, ResolvedModelVersion,
+    RunActivity, RunFailure, RunLimits, RunOutcome, RunPromptIdentity, RunSnapshot, RunStatus,
+    SessionAccounting, SessionCommand, SessionCommandKind, SessionEvent, SessionEventEnvelope,
+    SessionPurpose, SessionSnapshot, SessionStatus, SessionSummary, ShellCommandPreview,
+    ShellVerdict, SnapshotRequest, SpawnOrigin, SubscribeRequest, TextChannel, TokenUsage,
+    ToolCallDisplay, ToolCallSnapshot, ToolCallState, ToolExposure, WorkspaceGrantOutcome,
+    WorkspaceSnapshot, WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 20;
+pub const PROTOCOL_VERSION: u16 = 21;
 
 /// Slash commands owned by interactive clients rather than the shared
 /// runtime. Keeping this vocabulary in the transport-neutral protocol avoids

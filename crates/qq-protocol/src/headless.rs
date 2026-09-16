@@ -138,19 +138,24 @@ pub enum HeadlessStatus {
     BudgetExhausted,
     /// QQ itself failed: store, provider protocol, internal.
     HarnessFailure,
+    /// The model asked the user a question (`ask_user`) and no client was
+    /// present to answer; the run was cancelled at the question (protocol
+    /// 21). The question is in the stream's `tool_approval_requested` event.
+    NeedsInput,
     /// Signal or cancellation.
     Interrupted,
 }
 
 impl HeadlessStatus {
     /// Every status in exit-code order; the contract's exit table.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Completed,
         Self::TaskFailed,
         Self::InvalidConfiguration,
         Self::TimedOut,
         Self::BudgetExhausted,
         Self::HarnessFailure,
+        Self::NeedsInput,
         Self::Interrupted,
     ];
 
@@ -163,6 +168,7 @@ impl HeadlessStatus {
             Self::InvalidConfiguration => 2,
             Self::TimedOut | Self::BudgetExhausted => 3,
             Self::HarnessFailure => 4,
+            Self::NeedsInput => 5,
             Self::Interrupted => 130,
         }
     }
@@ -177,6 +183,7 @@ impl HeadlessStatus {
             Self::TimedOut => "timed_out",
             Self::BudgetExhausted => "budget_exhausted",
             Self::HarnessFailure => "harness_failure",
+            Self::NeedsInput => "needs_input",
             Self::Interrupted => "interrupted",
         }
     }
@@ -350,6 +357,7 @@ mod tests {
                 ("timed_out", 3),
                 ("budget_exhausted", 3),
                 ("harness_failure", 4),
+                ("needs_input", 5),
                 ("interrupted", 130),
             ]
         );

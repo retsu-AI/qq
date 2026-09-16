@@ -1,3 +1,4 @@
+pub(crate) mod ask;
 mod dispatch;
 mod edit;
 mod lang;
@@ -1203,6 +1204,7 @@ mod tests {
                 "write_file",
                 "shell",
                 "exec",
+                "ask_user",
             ]
         );
         assert!(!specs.iter().any(|spec| spec.name() == SPAWN_AGENT_TOOL));
@@ -1211,7 +1213,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "2f34c2a528dfc420743ee2943a07ebba87cca8bba1d6870323411036d402070d"
+            "7d90f4a0c0201e2ca045c22bdc2faebc962a9b2bb6d71a25090f4b8eb15bf4c4"
         );
     }
 

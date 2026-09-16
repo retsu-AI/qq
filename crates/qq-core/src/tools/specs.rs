@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::{
+    ask::{MAX_OPTION_BYTES, MAX_OPTIONS, MAX_QUESTION_BYTES, MAX_QUESTIONS, MIN_OPTIONS},
     edit::MAX_EDITS,
     read::MAX_READ_LINES,
     search::{
@@ -37,6 +38,7 @@ pub(super) enum BuiltInTool {
     WriteFile,
     Shell,
     Exec,
+    AskUser,
     /// Hidden alias for `tree depth=1`: dispatchable, never advertised.
     ListDir,
     #[cfg(test)]
@@ -48,7 +50,7 @@ pub(super) enum BuiltInTool {
 }
 
 impl BuiltInTool {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::ReadFile,
         Self::Tree,
         Self::Search,
@@ -56,6 +58,7 @@ impl BuiltInTool {
         Self::WriteFile,
         Self::Shell,
         Self::Exec,
+        Self::AskUser,
     ];
 
     pub(super) fn from_name(name: &str) -> Option<Self> {
@@ -68,6 +71,7 @@ impl BuiltInTool {
             "write_file" => Some(Self::WriteFile),
             "shell" => Some(Self::Shell),
             "exec" => Some(Self::Exec),
+            "ask_user" => Some(Self::AskUser),
             #[cfg(test)]
             "__test_delay" => Some(Self::TestDelay),
             #[cfg(test)]
@@ -83,6 +87,7 @@ impl BuiltInTool {
             Self::ReadFile | Self::Tree | Self::ListDir | Self::Search => EffectClass::ReadOnly,
             Self::EditFile | Self::WriteFile => EffectClass::Mutating,
             Self::Shell | Self::Exec => EffectClass::Shell,
+            Self::AskUser => EffectClass::Interactive,
             #[cfg(test)]
             Self::TestDelay => EffectClass::ReadOnly,
             #[cfg(test)]
@@ -246,6 +251,37 @@ impl BuiltInTool {
                         }
                     },
                     "required": ["program"],
+                    "additionalProperties": false
+                }),
+            ),
+            Self::AskUser => ToolSpec::new(
+                "ask_user",
+                "Ask the user 1-4 questions and wait for their answers. Use only when the task is genuinely ambiguous and a wrong guess would be costly; offer 2-6 concrete options per question, or free_text for open answers.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "questions": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": MAX_QUESTIONS,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "prompt": { "type": "string", "minLength": 1, "maxLength": MAX_QUESTION_BYTES },
+                                    "options": {
+                                        "type": "array",
+                                        "minItems": MIN_OPTIONS,
+                                        "maxItems": MAX_OPTIONS,
+                                        "items": { "type": "string", "minLength": 1, "maxLength": MAX_OPTION_BYTES }
+                                    },
+                                    "free_text": { "type": "boolean", "default": false }
+                                },
+                                "required": ["prompt"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["questions"],
                     "additionalProperties": false
                 }),
             ),

@@ -857,30 +857,33 @@ pub(super) fn execute_command(
             tool_call_id,
             decision,
         } => {
-            let (call_run, state, resolution, provider_call_id, first_result_in_turn) = transaction
-                .query_row(
-                    "SELECT current.run_id, current.state, current.approval_resolution,
+            let (call_run, state, resolution, provider_call_id, first_result_in_turn, arguments) =
+                transaction
+                    .query_row(
+                        "SELECT current.run_id, current.state, current.approval_resolution,
                             current.provider_call_id,
                             NOT EXISTS(
                                 SELECT 1 FROM tool_calls previous
                                 WHERE previous.run_id = current.run_id
                                   AND previous.turn_ordinal = current.turn_ordinal
                                   AND previous.result IS NOT NULL
-                            )
+                            ),
+                            current.arguments_json
                      FROM tool_calls current WHERE current.id = ?1",
-                    [tool_call_id.to_string()],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Option<String>>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, bool>(4)?,
-                        ))
-                    },
-                )
-                .optional()?
-                .ok_or(SessionRuntimeError::ToolCallNotFound)?;
+                        [tool_call_id.to_string()],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                                row.get::<_, String>(3)?,
+                                row.get::<_, bool>(4)?,
+                                row.get::<_, String>(5)?,
+                            ))
+                        },
+                    )
+                    .optional()?
+                    .ok_or(SessionRuntimeError::ToolCallNotFound)?;
             if parse_id::<RunId>(&call_run)? != run_id {
                 return Err(SessionRuntimeError::ToolCallNotFound);
             }
@@ -926,6 +929,7 @@ pub(super) fn execute_command(
                         ApprovalResolution::ApprovedForWorkspace
                     }
                     ApprovalDecision::Deny => ApprovalResolution::Denied,
+                    ApprovalDecision::Answer { .. } => ApprovalResolution::Answered,
                 };
                 match &decision {
                     ApprovalDecision::ApproveOnce
@@ -960,6 +964,39 @@ pub(super) fn execute_command(
                             params![
                                 tool_call_id.to_string(),
                                 approval::USER_DENIED_RESULT,
+                                approval_resolution_str(resolution),
+                                now,
+                            ],
+                        )?;
+                    }
+                    // An answer settles the call as completed: the rendered
+                    // questions and answers are its result. Answering a call
+                    // that asked nothing (or an empty answer set) declines.
+                    ApprovalDecision::Answer { answers } => {
+                        let preview = crate::tools::ask::parse(&arguments)
+                            .map_err(|_| SessionRuntimeError::ApprovalNotPending)?;
+                        let declined = answers.iter().all(|answer| answer.trim().is_empty());
+                        let result = if declined {
+                            approval::DECLINED_QUESTION_RESULT.to_owned()
+                        } else {
+                            crate::tools::ask::render_answers(&preview, answers)
+                        };
+                        reserve_tool_result_capacity(
+                            &transaction,
+                            run_id,
+                            &provider_call_id,
+                            &result,
+                            first_result_in_turn,
+                        )?;
+                        transaction.execute(
+                            "UPDATE tool_calls
+                                 SET state = 'completed', result = ?2, is_error = 0,
+                                     approval_resolution = ?3, resolved_at_ms = ?4,
+                                     finished_at_ms = ?4
+                                 WHERE id = ?1 AND state = 'awaiting_approval'",
+                            params![
+                                tool_call_id.to_string(),
+                                result,
                                 approval_resolution_str(resolution),
                                 now,
                             ],

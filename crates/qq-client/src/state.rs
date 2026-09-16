@@ -16,9 +16,9 @@ use std::{
 
 use qq_protocol::{
     AgentProfileId, EditPreview, MessageId, MessageRole, MessageSnapshot, MessageState,
-    ModelDescriptor, RunActivity, RunId, RunOutcome, RunPlanIdentity, SessionId, SessionSnapshot,
-    SessionStatus, SessionSummary, ShellCommandPreview, SnapshotRequest, TokenUsage, ToolCallId,
-    ToolCallSnapshot, ToolCallState, WorkspaceId,
+    ModelDescriptor, QuestionPreview, RunActivity, RunId, RunOutcome, RunPlanIdentity, SessionId,
+    SessionSnapshot, SessionStatus, SessionSummary, ShellCommandPreview, SnapshotRequest,
+    TokenUsage, ToolCallId, ToolCallSnapshot, ToolCallState, WorkspaceId,
 };
 
 mod reduce;
@@ -695,6 +695,9 @@ pub struct LiveStatus {
 pub struct ApprovalPreview {
     pub shell: Option<ShellCommandPreview>,
     pub edit: Option<EditPreview>,
+    /// Present when the hold is an `ask_user` question rather than a
+    /// permission: the client collects answers instead of a yes/no.
+    pub question: Option<QuestionPreview>,
 }
 
 /// One session as the client sees it: the summary every surface lists, and

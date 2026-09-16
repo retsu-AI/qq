@@ -64,6 +64,39 @@ impl ToolGate for SessionToolGate {
                         Err(error) => approval_persistence_failure(error),
                     }
                 }
+                approval::PolicyDecision::AskUser { question } => {
+                    // A question is a hold without a permission: same
+                    // registration, persistence, and wait as an approval;
+                    // no reviewer (there is nothing to adjudicate).
+                    let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
+                    match inner
+                        .store
+                        .request_tool_approval(&claimed, call.id, None, None, Some(question))
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(error) => {
+                            inner.remove_approval(call.id);
+                            return approval_persistence_failure(error);
+                        }
+                    }
+                    let deadline = tokio::time::Instant::now() + inner.approval_timeout;
+                    let timed_out = tokio::select! {
+                        biased;
+                        changed = cancellation.changed() => {
+                            let _ = changed;
+                            inner.remove_approval(call.id);
+                            return GateDecision::Deny {
+                                message: "The run stopped before this question was answered."
+                                    .to_owned(),
+                            };
+                        }
+                        result = &mut resolved => result.is_err(),
+                        () = tokio::time::sleep_until(deadline) => true,
+                    };
+                    inner.remove_approval(call.id);
+                    conclude(&inner, &claimed, call.id, timed_out, None).await
+                }
                 approval::PolicyDecision::RequireApproval => {
                     let shell = match class {
                         approval::ToolClass::Shell { command, cwd } => {
@@ -92,7 +125,7 @@ impl ToolGate for SessionToolGate {
                     let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
                     match inner
                         .store
-                        .request_tool_approval(&claimed, call.id, shell.clone(), edit.clone())
+                        .request_tool_approval(&claimed, call.id, shell.clone(), edit.clone(), None)
                         .await
                     {
                         Ok(_) => {}
@@ -233,28 +266,37 @@ impl ToolGate for SessionToolGate {
                         }
                     };
                     inner.remove_approval(call.id);
-                    match inner
-                        .store
-                        .conclude_tool_approval(&claimed, call.id, timed_out)
-                        .await
-                    {
-                        Ok(ConcludedApproval::Approved) => {
-                            reviewed(GateDecision::Execute, review_spend)
-                        }
-                        Ok(ConcludedApproval::Denied { message }) => {
-                            reviewed(GateDecision::Deny { message }, review_spend)
-                        }
-                        Ok(ConcludedApproval::StillWaiting) => GateDecision::Fail {
-                            kind: RunFailureKind::Server,
-                            message:
-                                "tool approval resolution disappeared before it could be applied"
-                                    .to_owned(),
-                        },
-                        Err(error) => approval_persistence_failure(error),
-                    }
+                    conclude(&inner, &claimed, call.id, timed_out, review_spend).await
                 }
             }
         })
+    }
+}
+
+/// Reads the durable outcome of a hold once the wait ended and turns it into
+/// the gate's decision; a timeout is written here if nothing else resolved.
+async fn conclude(
+    inner: &SessionRuntimeInner,
+    claimed: &ClaimedRun,
+    call_id: ToolCallId,
+    timed_out: bool,
+    review_spend: Option<ReviewSpend>,
+) -> GateDecision {
+    match inner
+        .store
+        .conclude_tool_approval(claimed, call_id, timed_out)
+        .await
+    {
+        Ok(ConcludedApproval::Approved) => reviewed(GateDecision::Execute, review_spend),
+        Ok(ConcludedApproval::Denied { message }) => {
+            reviewed(GateDecision::Deny { message }, review_spend)
+        }
+        Ok(ConcludedApproval::Answered { result }) => GateDecision::Answered { result },
+        Ok(ConcludedApproval::StillWaiting) => GateDecision::Fail {
+            kind: RunFailureKind::Server,
+            message: "tool approval resolution disappeared before it could be applied".to_owned(),
+        },
+        Err(error) => approval_persistence_failure(error),
     }
 }
 
@@ -273,7 +315,14 @@ fn approval_persistence_failure(error: SessionRuntimeError) -> GateDecision {
 
 pub(super) enum ConcludedApproval {
     Approved,
-    Denied { message: String },
+    Denied {
+        message: String,
+    },
+    /// The user answered an `ask_user` hold; `result` is the settled call's
+    /// persisted result text.
+    Answered {
+        result: String,
+    },
     StillWaiting,
 }
 

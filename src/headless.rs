@@ -674,6 +674,9 @@ async fn stream_run(
     let mut interrupt = pin!(interrupt);
     let mut interrupt_armed = true;
     let mut interrupted = false;
+    // Set when the model asked the user a question nobody here can answer:
+    // the run is cancelled and settles as `needs_input`, naming the question.
+    let mut needs_input: Option<String> = None;
     let mut shutdown_at: Option<Instant> = None;
 
     // The final answer is the text of the last assistant message that starts
@@ -806,7 +809,46 @@ async fn stream_run(
                             let _ = writeln!(stderr, "[tool] {} {verdict}", tool_call.name);
                         }
                     }
-                    SessionEvent::ToolApprovalRequested { tool_call, shell, .. } => {
+                    SessionEvent::ToolApprovalRequested { tool_call, question: Some(question), .. }
+                        if ours && envelope.run_id == Some(handle.run_id) =>
+                    {
+                        // No human is attached to a headless run: rather
+                        // than hang or fake an answer, stop at the question
+                        // so a supervisor can resume with the answer.
+                        if needs_input.is_none() {
+                            let first = question
+                                .questions
+                                .first()
+                                .map(|item| item.prompt.clone())
+                                .unwrap_or_default();
+                            if text {
+                                let _ = writeln!(
+                                    stderr,
+                                    "[tool] {} needs input: {first}",
+                                    tool_call.name
+                                );
+                            }
+                            needs_input = Some(first);
+                            request_cancel(sessions, handle.run_id).await?;
+                            shutdown_at = Some(Instant::now() + SHUTDOWN_GRACE);
+                        }
+                    }
+                    SessionEvent::ToolApprovalRequested { tool_call, shell, question, .. } => {
+                        // A child session's question has no answerer either;
+                        // declining lets the child proceed on its judgement.
+                        if question.is_some() {
+                            if let Some(run_id) = envelope.run_id {
+                                respond_approval(
+                                    sessions,
+                                    run_id,
+                                    tool_call.id,
+                                    ApprovalDecision::Answer { answers: Vec::new() },
+                                    stderr,
+                                )
+                                .await;
+                            }
+                            continue;
+                        }
                         // The headless invocation is the approval client.
                         // An explicit allowlist answers first, as a session
                         // grant so the same tool or prefix is not held again.
@@ -875,7 +917,15 @@ async fn stream_run(
                             session.accounting,
                             session.estimated_cost_usd_nanos,
                         );
-                        let (status, message) = settle(outcome, final_output.as_deref(), interrupted);
+                        let (status, message) = match (&needs_input, outcome) {
+                            (Some(question), RunOutcome::Cancelled) => (
+                                HeadlessStatus::NeedsInput,
+                                Some(format!(
+                                    "the model asked the user a question and no client could answer: {question}"
+                                )),
+                            ),
+                            _ => settle(outcome, final_output.as_deref(), interrupted),
+                        };
                         if text
                             && matches!(
                                 status,
@@ -1466,6 +1516,45 @@ mod tests {
                         json: format!(r#"{{"command":"rm -r scratch{current}"}}"#),
                     }),
                     Ok(ProviderEvent::ToolCallCompleted { id }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            } else {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "done".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+    }
+
+    /// Turn one asks the user a question; a second turn would answer, but a
+    /// headless run never gets there.
+    struct AskingProvider {
+        turn: Mutex<usize>,
+    }
+
+    impl Provider for AskingProvider {
+        fn stream(&self, _request: ModelRequest) -> ProviderStream {
+            let mut turn = self.turn.lock().unwrap();
+            let current = *turn;
+            *turn += 1;
+            drop(turn);
+            if current == 0 {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::ToolCallStarted {
+                        id: "call_ask".to_owned(),
+                        name: "ask_user".to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: "call_ask".to_owned(),
+                        json: r#"{"questions":[{"prompt":"Which crate?","options":["qq-core","qq-tui"]}]}"#
+                            .to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallCompleted {
+                        id: "call_ask".to_owned(),
+                    }),
                     Ok(ProviderEvent::Completed { usage: None }),
                 ]))
             } else {
@@ -2201,6 +2290,47 @@ mod tests {
         );
     }
 
+    /// A question with nobody to answer it ends the run at the question with
+    /// its own status, rather than hanging until the approval timeout or
+    /// faking an answer. The stream carries the question for a supervisor.
+    #[tokio::test]
+    async fn a_question_with_no_client_ends_the_run_as_needs_input() {
+        let fixture = fixture(|| AskingProvider {
+            turn: Mutex::new(0),
+        })
+        .await;
+        let mut options = options(&fixture.workspace);
+        options.approval = HeadlessApproval::Full;
+        let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+        assert_eq!(status, HeadlessStatus::NeedsInput);
+        let records = parse_records(&stdout);
+        let outcome = records.last().unwrap();
+        assert_eq!(outcome["type"], "outcome");
+        assert_eq!(outcome["status"], "needs_input");
+        assert_eq!(outcome["exit_code"], 5);
+        assert_eq!(
+            outcome["message"],
+            "the model asked the user a question and no client could answer: Which crate?"
+        );
+        let question = event_records(&records)
+            .into_iter()
+            .find(|record| record["envelope"]["event"]["type"] == "tool_approval_requested")
+            .expect("the question is on the stream");
+        assert_eq!(
+            question["envelope"]["event"]["question"]["questions"][0]["prompt"],
+            "Which crate?"
+        );
+        // The cancel interrupts the held call; the model never got a second
+        // turn, so nothing was answered on its behalf.
+        let finished = finished_tool_calls(&records);
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0]["state"], "interrupted");
+        assert!(
+            stderr.contains("no client could answer: Which crate?"),
+            "{stderr}"
+        );
+    }
+
     #[tokio::test]
     async fn read_only_mode_denies_mutations_without_stalling() {
         let fixture = fixture(MutatingProvider::new).await;
@@ -2927,7 +3057,7 @@ mod tests {
         assert_eq!(outcomes.len(), 1, "exactly one terminal outcome");
         assert_eq!(outcomes[0]["status"], "completed");
         assert_eq!(outcomes[0]["exit_code"], 0);
-        assert_eq!(outcomes[0]["prompt_identity"]["version"], 11);
+        assert_eq!(outcomes[0]["prompt_identity"]["version"], 12);
         assert!(outcomes[0]["prompt_identity"]["system_prompt_hash"].is_string());
         assert!(outcomes[0]["prompt_identity"]["tool_schema_hash"].is_string());
         assert_eq!(

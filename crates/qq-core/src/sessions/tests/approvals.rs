@@ -2031,7 +2031,7 @@ async fn recovery_marks_awaiting_approval_calls_interrupted() {
         .await
         .unwrap();
     let awaiting = store
-        .request_tool_approval(&claimed, tool_call_id, None, None)
+        .request_tool_approval(&claimed, tool_call_id, None, None, None)
         .await
         .unwrap();
     store.close().await.unwrap();
@@ -2064,4 +2064,185 @@ async fn recovery_marks_awaiting_approval_calls_interrupted() {
             ..
         }
     ));
+}
+
+const ASK_ARGUMENTS: &str =
+    r#"{"questions":[{"prompt":"Which crate?","options":["qq-core","qq-tui"]},{"prompt":"Why?"}]}"#;
+
+#[tokio::test]
+async fn ask_user_holds_under_read_only_and_the_answers_become_the_result() {
+    // Read-only would deny any other non-read call; a question is not an
+    // action, so it is put to the user under every mode.
+    let mut harness = approval_harness(
+        ApprovalMode::ReadOnly,
+        "ask_user",
+        ASK_ARGUMENTS,
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+    )
+    .await;
+    let (observed, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    let question = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::ToolApprovalRequested {
+                question,
+                shell,
+                edit,
+                ..
+            } => {
+                assert!(shell.is_none() && edit.is_none());
+                question.clone()
+            }
+            _ => None,
+        })
+        .expect("the hold carries the parsed questions");
+    assert_eq!(question.questions.len(), 2);
+    assert_eq!(question.questions[0].options, ["qq-core", "qq-tui"]);
+    assert!(!question.questions[0].free_text);
+    assert!(question.questions[1].free_text);
+
+    respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        tool_call.id,
+        ApprovalDecision::Answer {
+            answers: vec!["qq-core".to_owned(), "it owns the runtime".to_owned()],
+        },
+    )
+    .await
+    .unwrap();
+
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolApprovalResolved {
+            tool_call,
+            resolution: ApprovalResolution::Answered,
+        } if tool_call.state == ToolCallState::Completed && !tool_call.is_error
+    )));
+    // Nothing executed: no start, no finish beyond the resolution.
+    assert!(!observed.iter().any(|event| matches!(
+        event.event,
+        SessionEvent::ToolCallStarted { .. } | SessionEvent::ToolCallFinished { .. }
+    )));
+    assert!(matches!(
+        &observed.last().unwrap().event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::Completed,
+            ..
+        }
+    ));
+    let result = {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        match requests[1].messages()[2].content() {
+            [
+                ContentBlock::ToolResult {
+                    content,
+                    is_error: false,
+                    ..
+                },
+            ] => content.clone(),
+            other => panic!("unexpected tool result content {other:?}"),
+        }
+    };
+    assert_eq!(
+        result,
+        "ask_user answered=2/2\nQ1: Which crate?\nA: qq-core\nQ2: Why?\nA: it owns the runtime\n"
+    );
+}
+
+#[tokio::test]
+async fn declining_a_question_settles_it_as_answered_with_the_decline_text() {
+    let mut harness = approval_harness(
+        ApprovalMode::Ask,
+        "ask_user",
+        ASK_ARGUMENTS,
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+    )
+    .await;
+    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        tool_call.id,
+        ApprovalDecision::Answer {
+            answers: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolApprovalResolved {
+            tool_call,
+            resolution: ApprovalResolution::Answered,
+        } if tool_call.result.as_deref() == Some(approval::DECLINED_QUESTION_RESULT)
+    )));
+    // A second answer is the idempotent replay of the first.
+    let receipt = respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        tool_call.id,
+        ApprovalDecision::Answer {
+            answers: vec!["late".to_owned()],
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        receipt.outcome,
+        CommandOutcome::ToolApprovalResolved {
+            resolution: ApprovalResolution::Answered,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn an_unanswered_question_times_out_like_an_approval() {
+    let mut harness = approval_harness(
+        ApprovalMode::Auto,
+        "ask_user",
+        ASK_ARGUMENTS,
+        1,
+        Duration::from_millis(50),
+    )
+    .await;
+    let (_, _) = collect_until_approval_requested(&mut harness.events).await;
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolApprovalResolved {
+            tool_call,
+            resolution: ApprovalResolution::DeniedTimeout,
+        } if tool_call.state == ToolCallState::Denied
+    )));
+}
+
+#[tokio::test]
+async fn malformed_ask_user_arguments_are_a_tool_error_without_a_hold() {
+    let mut harness = approval_harness(
+        ApprovalMode::Ask,
+        "ask_user",
+        r#"{"questions":[{"prompt":"a","options":["only one"]}]}"#,
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+    )
+    .await;
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. }))
+    );
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolCallFinished { tool_call }
+            if tool_call.is_error
+                && tool_call.result.as_deref().is_some_and(|result| result.contains("needs 2-6 options"))
+    )));
 }

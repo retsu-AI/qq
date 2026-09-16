@@ -907,6 +907,7 @@ fn server_capabilities(
             "approve_for_session".to_owned(),
             "approve_for_workspace".to_owned(),
             "deny".to_owned(),
+            "answer".to_owned(),
         ],
         approval_modes: vec![
             ApprovalMode::ReadOnly,

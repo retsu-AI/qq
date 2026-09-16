@@ -1763,7 +1763,9 @@ async fn execute_started_run(
             }
             // Approval transitions (including denials) are persisted and
             // published by the tool gate before this event is emitted.
-            RunInput::Event(Some(RuntimeEvent::ToolCallDenied { .. })) => {}
+            RunInput::Event(Some(
+                RuntimeEvent::ToolCallDenied { .. } | RuntimeEvent::ToolCallAnswered { .. },
+            )) => {}
             // The audit record is durable on the run before the run settles
             // or revises. Its spend is stored on the audit child and included
             // by subtree accounting, never duplicated in the parent's direct totals.

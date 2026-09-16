@@ -19,10 +19,10 @@ use qq_protocol::{
     AgentProfileId, ApprovalMode, AuditOutcome, AuditRecord, BudgetExhaustion, BudgetLimitKind,
     ContentHash, Correlation, EventCursor, FinalOutput, HeadlessApproval, HeadlessOutcome,
     HeadlessRecord, HeadlessStatus, HeadlessTrial, InstructionHash, MessageId, MessageRole,
-    MessageSnapshot, MessageState, ModelSelection, PROTOCOL_VERSION, PromptVersion, RunActivity,
-    RunFailure, RunFailureKind, RunId, RunOutcome, RunPromptIdentity, SessionEvent,
-    SessionEventEnvelope, SessionId, SessionPurpose, SessionStatus, SessionSummary, StoreId,
-    TextChannel, TokenUsage, WorkspaceId,
+    MessageSnapshot, MessageState, ModelSelection, PROTOCOL_VERSION, PromptVersion, Question,
+    QuestionPreview, RunActivity, RunFailure, RunFailureKind, RunId, RunOutcome, RunPromptIdentity,
+    SessionEvent, SessionEventEnvelope, SessionId, SessionPurpose, SessionStatus, SessionSummary,
+    StoreId, TextChannel, TokenUsage, ToolCallId, ToolCallSnapshot, ToolCallState, WorkspaceId,
 };
 
 const WORKSPACE: WorkspaceId = WorkspaceId::from_bytes([0xab; 16]);
@@ -297,7 +297,7 @@ fn assert_well_formed<'a>(
 
 #[test]
 fn current_version_streams_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 20);
+    assert_eq!(PROTOCOL_VERSION, 21);
 
     let stream = |trial: HeadlessTrial, events: Vec<HeadlessRecord>, outcome: HeadlessOutcome| {
         let mut stream = Vec::with_capacity(events.len() + 2);
@@ -506,6 +506,69 @@ fn current_version_streams_match_their_goldens() {
         ),
     );
 
+    // Protocol 21: the model asked the user and nobody was there. The
+    // question is on the stream; the run is cancelled at that point.
+    check(
+        "needs_input",
+        &stream(
+            trial(),
+            vec![
+                run_events(RunOutcome::Completed, None).swap_remove(0),
+                HeadlessRecord::Event {
+                    envelope: Box::new(envelope(
+                        2,
+                        SessionEvent::ToolApprovalRequested {
+                            tool_call: ToolCallSnapshot {
+                                id: ToolCallId::from_bytes([0x33; 16]),
+                                session_id: SESSION,
+                                run_id: RUN,
+                                turn_ordinal: 1,
+                                call_ordinal: 1,
+                                provider_call_id: "call_0".to_owned(),
+                                name: "ask_user".to_owned(),
+                                arguments: r#"{"questions":[{"prompt":"Which crate?","options":["qq-core","qq-tui"]}]}"#
+                                    .to_owned(),
+                                state: ToolCallState::AwaitingApproval,
+                                result: None,
+                                is_error: false,
+                                display: None,
+                            },
+                            shell: None,
+                            edit: None,
+                            question: Some(Box::new(QuestionPreview {
+                                questions: vec![Question {
+                                    prompt: "Which crate?".to_owned(),
+                                    options: vec!["qq-core".to_owned(), "qq-tui".to_owned()],
+                                    free_text: false,
+                                }],
+                            })),
+                        },
+                    )),
+                },
+                HeadlessRecord::Event {
+                    envelope: Box::new(envelope(
+                        3,
+                        SessionEvent::RunFinished {
+                            session: Box::new(summary(SessionStatus::Idle, false)),
+                            run_id: RUN,
+                            outcome: RunOutcome::Cancelled,
+                            usage: None,
+                            context_tokens: None,
+                            final_output: None,
+                        },
+                    )),
+                },
+            ],
+            HeadlessOutcome {
+                message: Some("the model asked the user a question and no client could answer: Which crate?".to_owned()),
+                usage: None,
+                estimated_cost_usd_nanos: None,
+                prompt_identity: None,
+                ..outcome(HeadlessStatus::NeedsInput)
+            },
+        ),
+    );
+
     // QQ itself failed after the run was accepted: the stream still closes.
     check(
         "harness_failure",
@@ -592,7 +655,7 @@ fn decode_stream(path: &std::path::Path) -> Vec<HeadlessRecord> {
 /// stream is a valid current stream with those fields absent.
 #[test]
 fn historical_streams_still_decode() {
-    const RETAINED: &[u16] = &[18, 19];
+    const RETAINED: &[u16] = &[18, 19, 20];
     for &version in RETAINED {
         assert!(version < PROTOCOL_VERSION);
         for path in stream_paths(version) {
@@ -620,6 +683,7 @@ fn the_exit_table_matches_the_contract() {
             ("timed_out", 3),
             ("budget_exhausted", 3),
             ("harness_failure", 4),
+            ("needs_input", 5),
             ("interrupted", 130),
         ]
     );

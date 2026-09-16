@@ -20,13 +20,14 @@ use qq_protocol::{
     Correlation, CredentialEpoch, EventCapabilities, EventCursor, FinalOutput,
     GenerationCapabilities, InputPart, InputPartKind, InstructionHash, LimitCapabilities,
     MessageId, MessageRole, MessageSnapshot, MessageState, ModelSelection, OutputContract,
-    PROTOCOL_VERSION, PackSummary, PromptCacheCapabilities, PromptVersion, ResolvedModel,
-    ResolvedModelVersion, RunActivity, RunFailure, RunFailureKind, RunId, RunLimits, RunOutcome,
-    RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus, ServerCapabilities, ServerInfo,
-    SessionCommand, SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionId,
-    SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict, SkillCapabilities,
-    SteeringCapabilities, StoreId, TokenUsage, ToolCallId, ToolCallSnapshot, ToolCallState,
-    ToolCapabilities, ToolExposure, ToolHostSummary, WorkspaceId, WorkspaceToolCapabilities,
+    PROTOCOL_VERSION, PackSummary, PromptCacheCapabilities, PromptVersion, Question,
+    QuestionPreview, ResolvedModel, ResolvedModelVersion, RunActivity, RunFailure, RunFailureKind,
+    RunId, RunLimits, RunOutcome, RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus,
+    ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind, SessionEvent,
+    SessionEventEnvelope, SessionId, SessionStatus, SessionSummary, ShellCommandPreview,
+    ShellVerdict, SkillCapabilities, SteeringCapabilities, StoreId, TokenUsage, ToolCallId,
+    ToolCallSnapshot, ToolCallState, ToolCapabilities, ToolExposure, ToolHostSummary, WorkspaceId,
+    WorkspaceToolCapabilities,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -168,7 +169,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 20);
+    assert_eq!(PROTOCOL_VERSION, 21);
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
@@ -300,6 +301,20 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     grant: ApprovalGrant::ShellPrefix {
                         prefix: "cargo test".to_owned(),
                     },
+                },
+            },
+        ),
+    );
+    // Version 21: the answer to an `ask_user` question.
+    check(
+        "command_respond_tool_approval_answer",
+        &command(
+            0x26,
+            SessionCommand::RespondToolApproval {
+                run_id,
+                tool_call_id: ToolCallId::from_bytes([7; 16]),
+                decision: ApprovalDecision::Answer {
+                    answers: vec!["qq-core".to_owned()],
                 },
             },
         ),
@@ -440,6 +455,40 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     reasons: vec!["remove_file".to_owned()],
                 }),
                 edit: None,
+                question: None,
+            },
+        ),
+    );
+    // Version 21: an `ask_user` hold carries its questions.
+    check(
+        "event_tool_approval_requested_question",
+        &envelope(
+            22,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: ToolCallSnapshot {
+                    id: ToolCallId::from_bytes([7; 16]),
+                    session_id,
+                    run_id,
+                    turn_ordinal: 1,
+                    call_ordinal: 1,
+                    provider_call_id: "call_0".to_owned(),
+                    name: "ask_user".to_owned(),
+                    arguments: r#"{"questions":[{"prompt":"Which crate?","options":["qq-core","qq-tui"]}]}"#
+                        .to_owned(),
+                    state: ToolCallState::AwaitingApproval,
+                    result: None,
+                    is_error: false,
+                    display: None,
+                },
+                shell: None,
+                edit: None,
+                question: Some(Box::new(QuestionPreview {
+                    questions: vec![Question {
+                        prompt: "Which crate?".to_owned(),
+                        options: vec!["qq-core".to_owned(), "qq-tui".to_owned()],
+                        free_text: false,
+                    }],
+                })),
             },
         ),
     );
@@ -696,6 +745,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 "approve_for_session".to_owned(),
                 "approve_for_workspace".to_owned(),
                 "deny".to_owned(),
+                "answer".to_owned(),
             ],
             approval_modes: vec![
                 ApprovalMode::ReadOnly,
@@ -877,7 +927,7 @@ fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
 /// current encoding without invalidating what an older peer produced).
 #[test]
 fn historical_fixtures_still_decode() {
-    const RETAINED: &[u16] = &[17, 18, 19];
+    const RETAINED: &[u16] = &[17, 18, 19, 20];
     for &version in RETAINED {
         assert!(version < PROTOCOL_VERSION);
         let directory = fixture_dir(version);

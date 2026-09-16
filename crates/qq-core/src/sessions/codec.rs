@@ -243,6 +243,7 @@ pub(super) const fn approval_resolution_str(resolution: ApprovalResolution) -> &
         ApprovalResolution::Denied => "denied",
         ApprovalResolution::DeniedTimeout => "denied_timeout",
         ApprovalResolution::DeniedByReviewer => "denied_by_reviewer",
+        ApprovalResolution::Answered => "answered",
     }
 }
 
@@ -257,6 +258,7 @@ pub(super) fn parse_approval_resolution(
         "denied" => Ok(ApprovalResolution::Denied),
         "denied_timeout" => Ok(ApprovalResolution::DeniedTimeout),
         "denied_by_reviewer" => Ok(ApprovalResolution::DeniedByReviewer),
+        "answered" => Ok(ApprovalResolution::Answered),
         _ => Err(SessionRuntimeError::CONSTRAINT),
     }
 }

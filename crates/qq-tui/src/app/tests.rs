@@ -269,6 +269,106 @@ fn approve_for_workspace_sends_the_decision_and_surfaces_the_promotion() {
 }
 
 #[test]
+fn a_question_hold_collects_one_answer_per_question_and_sends_them_together() {
+    let mut app = App::new(TuiOptions::default());
+    let initial = snapshot();
+    let session_id = initial.focused.as_ref().unwrap().summary.id;
+    app.apply_snapshot(initial);
+    let run_id = id(4, RunId::from_bytes);
+    let tool_call = ToolCallSnapshot {
+        run_id,
+        call_ordinal: 1,
+        provider_call_id: "call_0".to_owned(),
+        arguments: "{}".to_owned(),
+        state: ToolCallState::AwaitingApproval,
+        ..fixtures::tool_call(id(7, ToolCallId::from_bytes), session_id, "ask_user")
+    };
+    let hold = |tool_call: ToolCallSnapshot| SessionEventEnvelope {
+        run_id: Some(run_id),
+        occurred_at_ms: 2,
+        ..fixtures::envelope(
+            2,
+            session_id,
+            SessionEvent::ToolApprovalRequested {
+                tool_call,
+                shell: None,
+                edit: None,
+                question: Some(Box::new(qq_protocol::QuestionPreview {
+                    questions: vec![
+                        qq_protocol::Question {
+                            prompt: "Which crate?".to_owned(),
+                            options: vec!["qq-core".to_owned(), "qq-tui".to_owned()],
+                            free_text: false,
+                        },
+                        qq_protocol::Question {
+                            prompt: "Why?".to_owned(),
+                            options: Vec::new(),
+                            free_text: true,
+                        },
+                    ],
+                })),
+            },
+        )
+    };
+    app.apply_live_event(hold(tool_call.clone()));
+    assert!(app.pending_question().is_some());
+
+    // The first question takes a digit; `y` is not an approval key here.
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+        .split();
+    assert!(requests.is_empty());
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))
+        .split();
+    assert!(requests.is_empty(), "one more question to answer");
+    assert_eq!(app.question_answers, ["qq-tui"]);
+
+    // The second is free text through the composer; Enter submits both.
+    for character in "speed".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    assert_eq!(app.composer.text, "speed");
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    let ClientRequest::Command(request) = requests.into_iter().next().unwrap() else {
+        panic!("expected a command")
+    };
+    assert_eq!(
+        request.command,
+        SessionCommand::RespondToolApproval {
+            run_id,
+            tool_call_id: tool_call.id,
+            decision: ApprovalDecision::Answer {
+                answers: vec!["qq-tui".to_owned(), "speed".to_owned()],
+            },
+        }
+    );
+    assert!(app.question_answers.is_empty());
+    assert!(app.composer.text.is_empty());
+    assert!(app.pending_approval().is_none());
+
+    // Esc on a fresh hold declines with an empty answer set.
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    app.apply_live_event(hold(tool_call.clone()));
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .split();
+    let ClientRequest::Command(request) = requests.into_iter().next().unwrap() else {
+        panic!("expected a command")
+    };
+    assert!(matches!(
+        request.command,
+        SessionCommand::RespondToolApproval {
+            decision: ApprovalDecision::Answer { answers },
+            ..
+        } if answers.is_empty()
+    ));
+}
+
+#[test]
 fn approval_previews_are_kept_only_while_the_approval_is_pending() {
     let mut app = App::new(TuiOptions::default());
     let initial = snapshot();
@@ -298,6 +398,7 @@ fn approval_previews_are_kept_only_while_the_approval_is_pending() {
                 path: "note.txt".to_owned(),
                 diff: "-old\n+new".to_owned(),
             }),
+            question: None,
         },
     ));
     assert_eq!(
@@ -2196,6 +2297,7 @@ fn live_status_tracks_cold_sessions_and_activity_seeds_from_snapshots() {
         tool_call: call.clone(),
         shell: None,
         edit: None,
+        question: None,
     }));
 
     let live = &app.sessions[&child.id].live;
@@ -2816,6 +2918,7 @@ fn attention_is_requested_only_while_the_terminal_is_unfocused() {
         },
         shell: None,
         edit: None,
+        question: None,
     }));
     assert!(matches!(
         attention(effects),

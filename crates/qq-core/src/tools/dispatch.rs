@@ -405,6 +405,13 @@ pub(super) fn execute_blocking(
         Some(BuiltInTool::Shell | BuiltInTool::Exec) => {
             ToolOutput::error("shell commands must execute asynchronously")
         }
+        // A well-formed `ask_user` never reaches dispatch: the gate holds it
+        // and the answer is its result. Only malformed calls fall through,
+        // so this is where the model learns what was wrong.
+        Some(BuiltInTool::AskUser) => match super::ask::parse(arguments) {
+            Ok(_) => ToolOutput::error("ask_user was not put to the user"),
+            Err(error) => ToolOutput::error(error.to_string()),
+        },
         #[cfg(test)]
         Some(BuiltInTool::TestDelay) => {
             let arguments: TestDelayArgs = match deserialize(arguments) {
