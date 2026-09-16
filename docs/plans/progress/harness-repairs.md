@@ -23,3 +23,19 @@ after; no new tail budget. Other findings remain unstarted in this repair series
   and team ENG, then created and read ENG-781. AGENTS.md's DEV key is stale.
 - No runtime changes yet. Public test seam: SessionRuntime commands and the
   model requests delivered to a scripted Provider.
+
+### F01 implementation and verification
+
+- Reproduced successful result replaced by a later turn's error, then a
+  shell result pruned using a later read's arguments. Both regressions pass
+  with run/turn/call lookup and turn-local pruning metadata.
+- Added legacy missing-result, restart, compaction input, and post-compaction
+  history coverage; explicit stored effects override legacy-name fallback.
+- Independent spec/standards review approved source/tests/docs; fixed its
+  identified eager-copy regression before qualification.
+- Workspace: 1,443 passed / 5 ignored; fmt, all-feature Clippy, build passed.
+  Tests need loopback sockets and `env -u NO_COLOR TERM=xterm-256color`;
+  initial restricted-environment failures are not code-fix claims.
+- Performance comparison pending. Deviation: the baseline is built from
+  pristine production sources at `20d4f6b` after implementation, with only
+  the identical test fixture added; no pre-edit timing was captured.

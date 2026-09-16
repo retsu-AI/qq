@@ -40,6 +40,19 @@ Rejected alternative: segment markers inside the single message's output
 string. A flat string with positional markers is fragile under streaming
 appends and pushes parsing into every client.
 
+### Model Context Replay
+
+Model-context replay identifies each tool result by run, turn ordinal, and
+provider call ID. Providers may reuse IDs in later turns or runs; a later
+result cannot fill an earlier missing result. A missing stored result is
+reconstructed as an interrupted error without rerunning the tool.
+
+Pruning uses that result's stored effect and its own turn's tool name and
+arguments. Explicit non-read-only effects preserve the output. Only results
+without stored effect metadata use the legacy built-in-name fallback.
+These are assembly rules: persisted history is unchanged, including when
+it is retrieved through history search or supplied to a compaction request.
+
 ### Client Assembly
 
 The TUI orders a run's items by `turn_ordinal`, rendering each turn's
