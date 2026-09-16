@@ -2,7 +2,7 @@
 
 | Slice | Goal | Status | Branch / PR | Inputs |
 | --- | --- | --- | --- | --- |
-| F02 / ENG-782 | One execution deadline through preparation and all work, then safe drain | In progress | `fix/eng-782-f02-run-deadline` | main `b75ebac`; independent of F01 PR #55 |
+| F02 / ENG-782 | One execution deadline through preparation and all work, then safe drain | In review | [PR #57](https://github.com/retsu-AI/qq/pull/57), `fix/eng-782-f02-run-deadline` | main `b75ebac`; independent of F01 PR #55 |
 
 ## Acceptance and ownership
 
@@ -59,7 +59,7 @@ do not interpret loaded-host timing as quiet-host tail qualification.
 
 #### F02 verification receipt — 2026-09-16
 
-Base `b75ebac`; red-first commit `94b269d`; implementation commit follows.
+Base `b75ebac`; red-first commit `94b269d`; implementation commit `99675cb`.
 Tests: 12 added, plus inherited-child write-drain case; final workspace 1,470 passed / 4 ignored.
 Commands: `env -u NO_COLOR TERM=xterm-256color cargo test --workspace --quiet`;
 `cargo fmt --all -- --check`; workspace all-targets/all-features Clippy `-D warnings`; workspace build.
@@ -72,4 +72,5 @@ Deviation: supplemental benchmark baseline reconstructed after edits; original r
 Initial full-suite cost-budget test hit its 2 s timeout; exact rerun 0.21 s and two full reruns passed; cause unproven.
 Docs: architecture budget/cleanup boundary. No dependency, schema, descriptor or wire change.
 Evidence: `target/qq-perf/f02-2026-09-16/`; full logs `/tmp/qq-f02-{workspace-final,clippy,build}.log`.
-Open: PR/hosted CI; native platform execution and quiet-host performance stay separate qualification gates.
+Published: PR #57; hosted CI pending at publication. Not merged.
+Open: native platform execution and quiet-host performance stay separate qualification gates.
