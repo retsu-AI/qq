@@ -364,6 +364,33 @@ mod tests {
         assert!(matches!(error, ReleaseError::VersionLineMissing), "{error}");
     }
 
+    /// `main` carries the version of the last release until the next bump PR.
+    /// A branch cut before a release and merged after it can quietly carry the
+    /// old manifest back onto `main` (this happened in #46: 0.1.0 → 0.0.0), so
+    /// the workspace version must never be below the newest `v*` tag.
+    #[test]
+    fn workspace_version_is_not_behind_the_newest_release_tag() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let Some(tags) = git_output(&root, &["tag", "--list", "v*"]) else {
+            // A shallow or tagless checkout has nothing to compare against.
+            return;
+        };
+        let newest = tags
+            .lines()
+            .filter_map(|tag| Version::parse(tag.trim().strip_prefix('v')?))
+            .max();
+        let Some(newest) = newest else {
+            return;
+        };
+        let manifest = include_str!("../../Cargo.toml");
+        let (_, current) =
+            bump_workspace_version(manifest, Version::parse("0.0.0").unwrap()).unwrap();
+        assert!(
+            current >= newest,
+            "Cargo.toml says {current} but v{newest} is released; a stale branch reverted the bump"
+        );
+    }
+
     #[test]
     fn real_manifest_round_trips() {
         let manifest = include_str!("../../Cargo.toml");
