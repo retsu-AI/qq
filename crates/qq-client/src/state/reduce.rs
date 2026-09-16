@@ -163,7 +163,7 @@ impl SessionStore {
                 self.upsert_summary((**session).clone(), context.models, 0);
             }
             SessionEvent::RunActivityChanged { run_id, activity } => {
-                if let Some(session) = self.get_mut(&session_id) {
+                if let Some(session) = self.body_mut(&session_id) {
                     session.activity = Some((*run_id, *activity));
                 }
             }
@@ -171,12 +171,12 @@ impl SessionStore {
             // transcript. It accumulates per run for warm sessions so the
             // collapsed row above the run's message can expand on demand.
             SessionEvent::ReasoningStarted { run_id, .. } => {
-                if let Some(session) = self.get_mut(&session_id).filter(|s| s.is_warm()) {
+                if let Some(session) = self.body_mut(&session_id).filter(|s| s.is_warm()) {
                     session.reasoning.entry(*run_id).or_default().streaming = true;
                 }
             }
             SessionEvent::ReasoningDelta { run_id, text, .. } => {
-                if let Some(session) = self.get_mut(&session_id).filter(|s| s.is_warm()) {
+                if let Some(session) = self.body_mut(&session_id).filter(|s| s.is_warm()) {
                     let reasoning = session.reasoning.entry(*run_id).or_default();
                     reasoning.streaming = true;
                     reasoning.append(text);
@@ -184,7 +184,7 @@ impl SessionStore {
             }
             SessionEvent::ReasoningCompleted { run_id, .. } => {
                 if let Some(reasoning) = self
-                    .get_mut(&session_id)
+                    .body_mut(&session_id)
                     .and_then(|session| session.reasoning.get_mut(run_id))
                 {
                     reasoning.streaming = false;
@@ -201,7 +201,7 @@ impl SessionStore {
                     message.turn_ordinal.saturating_sub(1),
                 );
                 let sanitizer = self.sanitizer;
-                if let Some(view) = self.get_mut(&session_id) {
+                if let Some(view) = self.body_mut(&session_id) {
                     if !shown {
                         view.unread += 1;
                     }
@@ -215,7 +215,7 @@ impl SessionStore {
                 text,
             } => {
                 let sanitizer = self.sanitizer;
-                if let Some(view) = self.get_mut(&session_id) {
+                if let Some(view) = self.body_mut(&session_id) {
                     if let Some(run_id) = envelope.run_id {
                         let stats = view.runs.entry(run_id).or_default();
                         if stats.first_token_at_ms.is_none() {
@@ -266,7 +266,7 @@ impl SessionStore {
                 tool_call_id,
                 chunk,
             } => {
-                if let Some(session) = self.get_mut(&session_id) {
+                if let Some(session) = self.body_mut(&session_id) {
                     session.append_live_tool_output(*tool_call_id, chunk);
                     session
                         .tool_timing
@@ -279,7 +279,7 @@ impl SessionStore {
             | SessionEvent::ToolApprovalResolved { tool_call, .. }
             | SessionEvent::ToolCallStarted { tool_call }
             | SessionEvent::ToolCallFinished { tool_call } => {
-                if let Some(view) = self.get_mut(&session_id) {
+                if let Some(view) = self.body_mut(&session_id) {
                     let timing = view.tool_timing.entry(tool_call.id).or_default();
                     match &envelope.event {
                         SessionEvent::ToolCallStarted { .. } => {
@@ -325,7 +325,7 @@ impl SessionStore {
                     _ => MessageState::Cancelled,
                 };
                 if let Some(messages) = self
-                    .get_mut(&session_id)
+                    .body_mut(&session_id)
                     .and_then(|session| session.messages.as_mut())
                     && let Some(message) = messages
                         .iter_mut()
@@ -367,7 +367,7 @@ impl SessionStore {
                 continuation,
             } => {
                 if let Some(messages) = self
-                    .get_mut(&session_id)
+                    .body_mut(&session_id)
                     .and_then(|session| session.messages.as_mut())
                     && let Some(message) = messages.iter_mut().rev().find(|message| {
                         message.run_id == *run_id
@@ -454,7 +454,7 @@ impl SessionStore {
                 estimated_cost_usd_nanos,
                 ..
             } => {
-                if let Some(view) = self.get_mut(&session_id) {
+                if let Some(view) = self.body_mut(&session_id) {
                     let stats = view.runs.entry(*run_id).or_default();
                     // The turn names the route it ran on, which a profile may
                     // have overridden away from the session's selection.

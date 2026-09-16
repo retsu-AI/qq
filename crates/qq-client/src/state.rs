@@ -168,8 +168,19 @@ impl SessionStore {
         self.sessions.get(id)
     }
 
+    /// Mutable access that may change the tree: the summary's parent, origin,
+    /// timestamp, or title. Drops the derived index.
     pub fn get_mut(&mut self, id: &SessionId) -> Option<&mut SessionView> {
         self.index.take();
+        self.sessions.get_mut(id)
+    }
+
+    /// Mutable access for body state only — messages, live tail, tool
+    /// output, reasoning, timings, unread counters, run stats. The tree index
+    /// is derived from the summary alone, so it survives. Every streaming
+    /// delta lands here; taking the index on each would rebuild the sidebar
+    /// order on every frame while a run streams.
+    pub fn body_mut(&mut self, id: &SessionId) -> Option<&mut SessionView> {
         self.sessions.get_mut(id)
     }
 
@@ -447,10 +458,10 @@ impl SessionStore {
 
     /// Replace or append a tool call in its session's warm body.
     pub fn upsert_tool_call(&mut self, tool_call: ToolCallSnapshot) {
-        let Some(tool_calls) = self
-            .get_mut(&tool_call.session_id)
-            .and_then(|session| session.tool_calls.as_mut())
-        else {
+        let Some(session) = self.body_mut(&tool_call.session_id) else {
+            return;
+        };
+        let Some(tool_calls) = session.tool_calls.as_mut() else {
             return;
         };
         // Updates target recent calls; scan from the tail.
@@ -462,7 +473,11 @@ impl SessionStore {
             *existing = tool_call;
         } else {
             tool_calls.push(tool_call);
-            retain_recent_tool_calls(tool_calls);
+            // Timings are bounded with the calls they describe: a call that
+            // left the retained window takes its timing row with it.
+            for evicted in retain_recent_tool_calls(tool_calls) {
+                session.tool_timing.remove(&evicted);
+            }
         }
     }
 
@@ -474,7 +489,7 @@ impl SessionStore {
         session_id: SessionId,
         message_id: MessageId,
     ) -> Option<&mut MessageSnapshot> {
-        self.get_mut(&session_id)?
+        self.body_mut(&session_id)?
             .messages
             .as_mut()?
             .iter_mut()
@@ -569,10 +584,13 @@ pub fn retain_recent_messages(messages: &mut Vec<MessageSnapshot>) {
 }
 
 /// Trim a warm body's tool calls to the retained window, oldest first.
-pub fn retain_recent_tool_calls(tool_calls: &mut Vec<ToolCallSnapshot>) {
+/// Returns the ids of the calls dropped, oldest first.
+pub fn retain_recent_tool_calls(tool_calls: &mut Vec<ToolCallSnapshot>) -> Vec<ToolCallId> {
     let excess = tool_calls.len().saturating_sub(MAX_RECENT_TOOL_CALLS);
     if excess > 0 {
-        tool_calls.drain(..excess);
+        tool_calls.drain(..excess).map(|call| call.id).collect()
+    } else {
+        Vec::new()
     }
 }
 
