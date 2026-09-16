@@ -13,6 +13,7 @@ mod commands;
 mod compaction;
 mod context_capacity;
 mod contract;
+mod deadlines;
 mod delegation;
 mod feeds;
 mod migrations;
