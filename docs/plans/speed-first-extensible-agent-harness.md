@@ -4,13 +4,13 @@
 
 | | |
 | --- | --- |
-| Now | Phase 6 — H21.2 in review (`refactor/h21-2-sessions-split`): the mechanical `sessions.rs` split into ten concern modules and a tests tree; no behavior change, 1,401 tests unchanged. H19 merged (#39, ADR-0025); v0.1.0 cut (#42). Next: H22.2 |
-| Next | Phase 6: structural H22.2 (last Phase 6 slice) |
+| Now | Phase 6 — H22.2 in review as a stack: `refactor/h22-2-structural-bundle` (route table + equality test, the acceptance gate; 29 structural items across eight crates, one commit per crate) then `perf/h22-2-notify-cancellation` on top (the `ExternalToolHost::call` change). H21.2 merged (#44). Phase 6 closes when both land |
+| Next | Phase 7 (H10) is gated on R6 and a threat model; the H22 deferrals below are the only open Phase 6 items |
 | Open gates carried | Eight-stream output service gap ≤20 ms at p95 (median met by H20; executable budget stays 50 ms until a quiet-host p95); Phase 5a full H0 tail acceptance on a quiet host; native Windows teardown beyond the targeted CI job |
-| Last closed | H19, 2026-09-14 (#39 `53bca7d`, ADR-0025); H18, 2026-09-14 (#38 `a13fbfd`, ADR-0024); HC4, 2026-09-13 (#34 `43caaea`, ADR-0023; Phase 5b complete); HC3, 2026-09-13 (#33 `24b6e5c`, ADR-0014); HC1, 2026-09-12 (#30 `abad2de`, ADR-0022); H21.1c, 2026-09-11 (#24, ADR-0012); H20, H27, H28, H22.1, H21.1a/b, 2026-09-11 (#22 `61682be`; ADR-0011, ADR-0013) |
+| Last closed | H21.2, 2026-09-15 (#44 `f905d68`); H19, 2026-09-14 (#39 `53bca7d`, ADR-0025); H18, 2026-09-14 (#38 `a13fbfd`, ADR-0024); HC4, 2026-09-13 (#34 `43caaea`, ADR-0023; Phase 5b complete); HC3, 2026-09-13 (#33 `24b6e5c`, ADR-0014); HC1, 2026-09-12 (#30 `abad2de`, ADR-0022); H21.1c, 2026-09-11 (#24, ADR-0012); H20, H27, H28, H22.1, H21.1a/b, 2026-09-11 (#22 `61682be`; ADR-0011, ADR-0013) |
 | Versions | `PROTOCOL_VERSION` 19 (HC3), `CAPABILITIES_VERSION` 1, `DESCRIPTOR_VERSION` 6, store schema 27 (HC3), H0 fixture version 4 |
 
-Updated 2026-09-14. The `Now` row is authoritative for what is being worked;
+Updated 2026-09-15. The `Now` row is authoritative for what is being worked;
 update it in the same PR that ships or reprioritizes work.
 
 This plan defines how QQ becomes an extremely fast, lightweight, customizable
@@ -275,8 +275,7 @@ superseded on 2026-09-07 by a bounded sequence-indexed feed ring; the ring is
 the current design authority. D5 shipped in #38 (ADR-0024) and D10 is
 implemented on `perf/h19-sse-framing` (ADR-0025); both are described in
 `architecture.md` and kept below for the record. D9's mechanical split
-(H21.2) is on `refactor/h21-2-sessions-split`. The other designs remain to
-be implemented.
+(H21.2) merged in #44. The other designs remain to be implemented.
 
 ### D5 — Shared Transcript And Precompiled Prompt Prefix (H18)
 
@@ -416,7 +415,36 @@ change widening a public type into core.
 
 ### Bundled Fixes (H22)
 
-Cold-path and structural items; none shipped yet except where noted.
+Cold-path and structural items. H22.1 shipped the correctness items in #22.
+H22.2 (2026-09-15, `refactor/h22-2-structural-bundle` + stacked
+`perf/h22-2-notify-cancellation`) shipped the rest of the list below except
+the items marked *deferred*, each with its reason:
+
+- *deferred* `StaticHttpAuth` replacing the `HttpAuth` arms and four
+  `build_headers` copies: `HttpAuth` is public and re-exported; collapsing it
+  is a compatibility change to the provider recipe surface, and the four
+  copies differ in the per-protocol header-safety checks they enforce. Worth
+  its own slice with an ADR, not a line in a bundle.
+- *deferred* headless output off the Tokio worker: `headless::run` and
+  `output::render` take `&mut impl Write` and 1,300 lines of tests drive them
+  with `Vec<u8>`; moving to a writer task changes exit-code-on-write-failure
+  and stdout/stderr interleave semantics. Needs its own contract test.
+- *deferred* config parse-once-per-load: three `Document::parse` calls per
+  project source (organization, trust, merge) with ordering and trust-gating
+  logic between them; restructuring is a correctness risk for a cold path.
+- *deferred* reviewer through `PlanCache`: the reviewer's own epoch-keyed
+  cache ignores config-file changes until a credential rotates; routing it
+  through `PlanCache` fixes that but is a behavior change, not structure.
+- *deferred* `TurnMode`/`StreamEnd` enums and parse-tool-arguments-once: both
+  live in the 1,600-line `execute` body and the argument text is embedded
+  verbatim in the transcript; do them when the run loop is next opened for a
+  behavioral change.
+- *deferred* `Arc<[RuntimeToolCall]>` for `ModelTurnCommit.calls`: one clone
+  per model turn; the store worker needs owned data regardless.
+- *not done, by measurement* the approval-wait `sleep_until` per iteration:
+  that loop iterates once per reviewer verdict, not per tick.
+
+The original list, for the record:
 
 - `qq-core`: delete the ~37 `notify(` call sites now redundant with the feed
   (the watch remains as a wake for `subagents.rs`); stale-result pruning by a
@@ -521,10 +549,10 @@ imported in Phase 1.
 | H26 | Done | Bounded workspace-feed admission and lifecycle; feed ring | H15 | `qq-core`, server |
 | HC2 | Done | Positive tool exposure via optional `policy.exposed_tools` | H6, H13 | Config, core plan |
 | H20 | Done (p95 open) | Lifecycle store calls wait for admission (13 loops deleted); control writes share the output group commit; scheduler claim no longer closes groups (D8, ADR-0011). Gap median 20 ms; quiet-host p95 qualification and the 50→20 ms budget tightening remain | H16, H23–H26 | `qq-core` |
-| **H21** | **H21.1 done; H21.2 in review** | `RunIdentity`, `PersistenceFault`, one guarded `settle_run`, `TeardownComplete` (D9, ADR-0012) shipped; `sessions.rs` split into `claim`, `codec`, `commands`, `compaction`, `events`, `settlement`, `snapshots`, `streaming`, `tool_calls`, `transcript` and a `tests/` tree (H21.2) | H15–H17, H20 | `qq-core` |
+| **H21** | **Done** | `RunIdentity`, `PersistenceFault`, one guarded `settle_run`, `TeardownComplete` (D9, ADR-0012) shipped; `sessions.rs` split into `claim`, `codec`, `commands`, `compaction`, `events`, `settlement`, `snapshots`, `streaming`, `tool_calls`, `transcript` and a `tests/` tree (H21.2) | H15–H17, H20 | `qq-core` |
 | H27 | Done | Superseded active generations count toward entry/byte limits; a replacement is admitted before the old slot is removed; equivalent-plan evidence growth is admitted; completed per-key compile guards are reclaimed; `PlanKey` compares inline configuration exactly and redacts it | H2 | Root |
 | H28 | Done | `PlanCompileError::TooManyContextSources` for a ninth source; `AgentPlanDescriptor.context_sources` (name, version, budget, fail policy); `DESCRIPTOR_VERSION` 6 (ADR-0013) | H8 | Core, protocol |
-| H22 | H22.1 done; H22.2 open | Correctness bundle shipped (`notify(` 37→10, `tool_calls.effect` schema 26, MCP permit ordering verified); the structural bundle (route table, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI, `Notify` cancellation) remains | — | Per crate |
+| H22 | H22.1 done; H22.2 in review | Correctness bundle shipped (`notify(` 37→10, `tool_calls.effect` schema 26, MCP permit ordering verified). Structural bundle on `refactor/h22-2-structural-bundle`: route table + equality test, `Box<SessionSummary>` (event 536→328 B), hash macro, shared limits, `decode_bounded`, borrowed `PlanKey`, sized request body (heap 1.57→1.40x), enum authorizer, one bounded read, slim tool-result retention, LazyLock presets, memoized ancestors, shared read locks, `body_mut`, visible-row sidebar. `Notify` cancellation stacked on top. Deferred with reasons in § Bundled Fixes | — | Per crate |
 | H18 | Done | Shared transcript `Arc<Vec<Message>>` appended in place; `RawValue` schemas and tool-call arguments embedded verbatim; `PromptPrefix` per capability set with a continued SHA-256; word-parallel string escaping; `provider_encode` bench (ADR-0024) | H14 | `qq-core`, `qq-provider` |
 | H19 | Done | `sse_decode` baseline: framing 55–72 % of decode → implemented. Per-chunk framing with one allocation per event in `qq-provider` and `qq-client`; Anthropic single parse; tool-call ids stay `String` (ADR-0025) | H18 | `qq-provider`, `qq-client` |
 | HC1 | Done | `--correlation`, `--session` resume behind a per-store owner lock (ADR-0022), `u32` turn limits (`PROTOCOL_VERSION` 18), model-less `config check` | H3, H26 | Root, config, core, protocol |
@@ -619,9 +647,10 @@ Status: active from 2026-09-08. H20 implemented 2026-09-09 (`ab6de6f`,
 (`61682be`, 2026-09-11); H21.1c (`settle_run`, `TeardownComplete`,
 ADR-0012) merged in #24; HC1 merged in #30; HC3 in #33; HC4 in #34 closed
 Phase 5b; H18 in review (`perf/h18-shared-transcript-prompt-prefix`,
-ADR-0024) merged in #38; H19 (ADR-0025) merged in #39; H21.2 in review
-(`refactor/h21-2-sessions-split`). Order from here: the structural H22.2
-items as separate commits. The H20 p95 qualification is a quiet-host recording, not code.
+ADR-0024) merged in #38; H19 (ADR-0025) merged in #39; H21.2 merged in
+#44; H22.2 in review as a two-PR stack (structural bundle, then `Notify`
+cancellation). The H20 p95 qualification is a quiet-host recording, not
+code.
 
 Benchmarks to record before each change:
 
