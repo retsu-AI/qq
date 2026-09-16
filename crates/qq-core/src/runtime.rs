@@ -1,5 +1,6 @@
 mod audit;
 mod budget;
+mod deadline;
 mod events;
 mod gate;
 mod history;
@@ -15,6 +16,7 @@ pub use audit::{
     MAX_AUDIT_ACTION_BYTES, MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS,
 };
 pub(crate) use budget::{BUDGET_FINAL_RESPONSE_NOTICE, BudgetDecision, BudgetMeter, ChildBudget};
+pub(crate) use deadline::RunDeadline;
 pub(crate) use events::{
     PendingToolCall, PreparedRequestWeight, PreparedStaticPrefix, RuntimeEvent, RuntimeToolCall,
     TurnBlock,

@@ -420,6 +420,7 @@ pub(crate) struct RunCapabilities {
     /// measurable. Admission rejects a cost cap without pricing before this
     /// struct is built.
     limits: RunLimits,
+    execution_started: Option<tokio::time::Instant>,
     pricing: Option<ModelPricing>,
     /// Full-transcript recall for `search_history`. Session runs install one;
     /// direct runs have no durable history to search.
@@ -450,6 +451,7 @@ impl RunCapabilities {
             read_only: false,
             max_output_tokens: None,
             limits: RunLimits::default(),
+            execution_started: None,
             pricing: None,
             history: None,
             spills: None,
@@ -487,6 +489,11 @@ impl RunCapabilities {
     pub(crate) fn with_limits(mut self, limits: RunLimits, pricing: Option<ModelPricing>) -> Self {
         self.limits = limits;
         self.pricing = pricing;
+        self
+    }
+
+    pub(crate) fn with_execution_started(mut self, started: tokio::time::Instant) -> Self {
+        self.execution_started = Some(started);
         self
     }
 
@@ -547,6 +554,7 @@ impl RunCapabilities {
                 max_children: None,
                 max_concurrent_children: None,
             },
+            execution_started: None,
             pricing: None,
             history: None,
             spills: None,
@@ -859,18 +867,33 @@ impl Runtime {
         cancelled: RunCancellation,
         gate: Arc<dyn ToolGate>,
         file_state: Arc<workspace::FileState>,
-        capabilities: RunCapabilities,
+        mut capabilities: RunCapabilities,
     ) -> RuntimeStream {
         let runtime = self.clone();
         Box::pin(stream! {
+            let started = capabilities.execution_started.unwrap_or_else(tokio::time::Instant::now);
+            capabilities.execution_started = Some(started);
+            let deadline = runtime::RunDeadline::new(capabilities.limits, started);
             let _cancel_on_drop = CancelOnDrop(cancelled.clone());
             yield RuntimeEvent::Started;
-            let (opened, _instructions) = match workspace::prepare_workspace(
+            let preparation = workspace::prepare_workspace(
                 workspace,
                 cancelled.clone(),
-            )
-            .await
-            {
+            );
+            tokio::pin!(preparation);
+            let prepared = tokio::select! {
+                biased;
+                () = runtime::RunDeadline::wait(deadline) => {
+                    cancelled.cancel();
+                    let _ = preparation.await;
+                    yield RuntimeEvent::BudgetExhausted {
+                        exhaustion: deadline.expect("only a finite deadline wakes").exhaustion(),
+                    };
+                    return;
+                }
+                result = &mut preparation => result,
+            };
+            let (opened, _instructions) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error @ (workspace::WorkspacePreparationError::Canonicalize { .. }
                     | workspace::WorkspacePreparationError::Open { .. })) => {
@@ -894,12 +917,23 @@ impl Runtime {
             // per run, the same filesystem work it always did.
             let profile_runtime = runtime.clone();
             let workspace_path = opened.path().to_owned();
-            let compiled = match tokio::task::spawn_blocking(move || {
+            let mut compilation = tokio::task::spawn_blocking(move || {
                 let profile = plan::AgentProfile::embedded(&profile_runtime, workspace_path);
                 plan::CompiledAgentPlan::compile_blocking(profile)
-            })
-            .await
-            {
+            });
+            let compiled = tokio::select! {
+                biased;
+                () = runtime::RunDeadline::wait(deadline) => {
+                    cancelled.cancel();
+                    let _ = compilation.await;
+                    yield RuntimeEvent::BudgetExhausted {
+                        exhaustion: deadline.expect("only a finite deadline wakes").exhaustion(),
+                    };
+                    return;
+                }
+                result = &mut compilation => result,
+            };
+            let compiled = match compiled {
                 Ok(Ok(plan)) => plan,
                 Ok(Err(error)) => {
                     yield RuntimeEvent::Failed {
@@ -965,8 +999,21 @@ impl plan::CompiledAgentPlan {
         cancelled: RunCancellation,
         gate: Arc<dyn ToolGate>,
         file_state: Arc<workspace::FileState>,
-        capabilities: RunCapabilities,
+        mut capabilities: RunCapabilities,
     ) -> RuntimeStream {
+        let started = capabilities
+            .execution_started
+            .unwrap_or_else(tokio::time::Instant::now);
+        let deadline = runtime::RunDeadline::new(capabilities.limits, started);
+        let deadline_resources = deadline.map(|_| {
+            let tools = capabilities.tool_tasks.get_or_insert_with(Default::default);
+            (
+                cancelled.clone(),
+                tools.clone(),
+                capabilities.spawner.clone(),
+                capabilities.audit_hook.clone(),
+            )
+        });
         let plan = Arc::clone(self);
         // The transcript is shared with each turn's request by reference
         // count; once the provider stream is dropped the run is the only
@@ -985,7 +1032,7 @@ impl plan::CompiledAgentPlan {
         let delegation = Arc::clone(&plan.runtime.delegation);
         let shell_policy = Arc::clone(&plan.runtime.shell);
         let network_policy = Arc::clone(&plan.runtime.network);
-        Box::pin(stream! {
+        let events: RuntimeStream = Box::pin(stream! {
             let RunCapabilities {
                 spawner,
                 allow_guidance,
@@ -994,6 +1041,7 @@ impl plan::CompiledAgentPlan {
                 read_only,
                 max_output_tokens,
                 limits,
+                execution_started: _,
                 pricing,
                 history,
                 spills,
@@ -1010,9 +1058,9 @@ impl plan::CompiledAgentPlan {
             let max_output_tokens = max_output_tokens
                 .unwrap_or(model_max_output_tokens)
                 .min(model_max_output_tokens);
-            // The wall clock starts at admission, before workspace preparation
-            // and provider selection, so caller time bounds mean what they say.
-            let mut budget = BudgetMeter::new(limits, pricing, tokio::time::Instant::now());
+            // The session owner supplies the original execution admission,
+            // including time spent loading or automatically compacting.
+            let mut budget = BudgetMeter::new(limits, pricing, started);
             let _cancel_on_drop = CancelOnDrop(cancelled.clone());
             yield RuntimeEvent::Started;
 
@@ -1056,6 +1104,7 @@ impl plan::CompiledAgentPlan {
                     Arc::clone(&skills),
                     cancelled.clone(),
                     request,
+                    &tool_tasks,
                 )
                 .await
                 {
@@ -1332,12 +1381,7 @@ impl plan::CompiledAgentPlan {
                 let mut open_reasoning = None;
                 let mut interrupted_turn = false;
                 let mut truncated_turn = false;
-                let deadline = budget.deadline();
-
                 loop {
-                    // The wall clock bounds a hanging provider too: an
-                    // elapsed deadline settles the run without waiting for a
-                    // stream event that may never arrive.
                     // An interrupting steer ends the stream here. Text that
                     // already streamed is kept as the partial turn; tool
                     // calls the model had begun are dropped, because their
@@ -1357,20 +1401,6 @@ impl plan::CompiledAgentPlan {
                     };
                     let event = tokio::select! {
                         biased;
-                        () = async {
-                            match deadline {
-                                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                                None => std::future::pending().await,
-                            }
-                        } => {
-                            let exhaustion = budget.exhaustion(
-                                BudgetLimitKind::Duration,
-                                false,
-                                tokio::time::Instant::now(),
-                            );
-                            yield RuntimeEvent::BudgetExhausted { exhaustion };
-                            return;
-                        }
                         () = interrupt => StreamStep::Interrupted,
                         event = provider_events.next() => StreamStep::Event(event),
                     };
@@ -2366,6 +2396,7 @@ impl plan::CompiledAgentPlan {
                                         skills,
                                         cancelled,
                                         arguments.name.trim().to_owned(),
+                                        &tool_tasks,
                                     )
                                     .await
                                     {
@@ -2649,7 +2680,13 @@ impl plan::CompiledAgentPlan {
                 kind: RunFailureKind::Policy,
                 message: "run exhausted the durable u32 model-turn ordinal space".to_owned(),
             };
-        })
+        });
+        match (deadline, deadline_resources) {
+            (Some(deadline), Some((cancelled, tools, spawner, audit_hook))) => {
+                deadline.enforce(events, cancelled, tools, spawner, audit_hook)
+            }
+            _ => events,
+        }
     }
 }
 
@@ -5173,6 +5210,51 @@ mod tests {
                 message,
             }) if message.contains("256 tokens") && message.contains("4 consecutive turns")
         ));
+    }
+
+    #[tokio::test]
+    async fn completed_limited_stream_stays_finished_when_polled_after_its_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(
+            ScriptedProvider {
+                request: Arc::new(Mutex::new(None)),
+                fails: false,
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let mut events = runtime.run_loop_with_spawner(
+            vec![Message::user("finish")],
+            directory.path().to_owned(),
+            RunCancellation::new(),
+            Arc::new(StaticPolicyGate {
+                mode: ApprovalMode::ReadOnly,
+                grants: approval::SessionGrants::default(),
+                network: Arc::default(),
+            }),
+            Arc::new(workspace::FileState::default()),
+            RunCapabilities::user(None).with_limits(
+                RunLimits {
+                    max_duration_ms: Some(500),
+                    ..RunLimits::default()
+                },
+                None,
+            ),
+        );
+        loop {
+            match events.next().await.expect("completion") {
+                RuntimeEvent::Completed { .. } => break,
+                RuntimeEvent::Failed { message, .. } => panic!("{message}"),
+                RuntimeEvent::BudgetExhausted { .. } => panic!("expired before completion"),
+                _ => {}
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(
+            events.next().await.is_none(),
+            "a finished stream must not produce a second terminal"
+        );
     }
 
     #[tokio::test]
