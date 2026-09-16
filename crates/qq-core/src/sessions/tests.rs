@@ -3033,7 +3033,7 @@ async fn project_terminal_run_with_tool_boundaries(
         .await
         .unwrap();
     store
-        .request_tool_approval(&claimed, awaiting_call_id, None, None, None)
+        .request_tool_approval(&claimed, awaiting_call_id, ApprovalPreviews::default())
         .await
         .unwrap();
     let finished = store

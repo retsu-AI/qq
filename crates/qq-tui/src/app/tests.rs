@@ -269,6 +269,66 @@ fn approve_for_workspace_sends_the_decision_and_surfaces_the_promotion() {
 }
 
 #[test]
+fn a_fetch_hold_renders_the_url_and_grants_the_host_for_the_session() {
+    let mut app = App::new(TuiOptions::default());
+    let initial = snapshot();
+    let session_id = initial.focused.as_ref().unwrap().summary.id;
+    app.apply_snapshot(initial);
+    let run_id = id(4, RunId::from_bytes);
+    let tool_call = ToolCallSnapshot {
+        run_id,
+        call_ordinal: 1,
+        provider_call_id: "call_0".to_owned(),
+        arguments: r#"{"url":"https://docs.rs/axum/latest/axum/"}"#.to_owned(),
+        state: ToolCallState::AwaitingApproval,
+        ..fixtures::tool_call(id(7, ToolCallId::from_bytes), session_id, "fetch")
+    };
+    app.apply_live_event(SessionEventEnvelope {
+        run_id: Some(run_id),
+        occurred_at_ms: 2,
+        ..fixtures::envelope(
+            2,
+            session_id,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: tool_call.clone(),
+                shell: None,
+                edit: None,
+                question: None,
+                fetch: Some(Box::new(qq_protocol::FetchPreview {
+                    url: "https://docs.rs/axum/latest/axum/".to_owned(),
+                    host: "docs.rs".to_owned(),
+                    method: None,
+                })),
+            },
+        )
+    });
+    assert_eq!(
+        app.pending_approval_preview()
+            .and_then(|preview| preview.fetch.as_ref())
+            .map(|fetch| fetch.host.as_str()),
+        Some("docs.rs")
+    );
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+        .split();
+    let ClientRequest::Command(request) = requests.into_iter().next().unwrap() else {
+        panic!("expected a command")
+    };
+    assert_eq!(
+        request.command,
+        SessionCommand::RespondToolApproval {
+            run_id,
+            tool_call_id: tool_call.id,
+            decision: ApprovalDecision::ApproveForSession {
+                grant: ApprovalGrant::Host {
+                    host: "docs.rs".to_owned(),
+                },
+            },
+        }
+    );
+}
+
+#[test]
 fn a_question_hold_collects_one_answer_per_question_and_sends_them_together() {
     let mut app = App::new(TuiOptions::default());
     let initial = snapshot();
@@ -307,6 +367,7 @@ fn a_question_hold_collects_one_answer_per_question_and_sends_them_together() {
                         },
                     ],
                 })),
+                fetch: None,
             },
         )
     };
@@ -399,6 +460,7 @@ fn approval_previews_are_kept_only_while_the_approval_is_pending() {
                 diff: "-old\n+new".to_owned(),
             }),
             question: None,
+            fetch: None,
         },
     ));
     assert_eq!(
@@ -2298,6 +2360,7 @@ fn live_status_tracks_cold_sessions_and_activity_seeds_from_snapshots() {
         shell: None,
         edit: None,
         question: None,
+        fetch: None,
     }));
 
     let live = &app.sessions[&child.id].live;
@@ -2919,6 +2982,7 @@ fn attention_is_requested_only_while_the_terminal_is_unfocused() {
         shell: None,
         edit: None,
         question: None,
+        fetch: None,
     }));
     assert!(matches!(
         attention(effects),

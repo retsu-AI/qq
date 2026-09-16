@@ -2176,13 +2176,14 @@ impl App {
         };
         let tool_call_id = tool_call.id;
         let run_id = tool_call.run_id;
+        let preview = self.pending_approval_preview();
         let decision = match choice {
             ApprovalChoice::Once => ApprovalDecision::ApproveOnce,
             ApprovalChoice::Session => ApprovalDecision::ApproveForSession {
-                grant: approval_grant(tool_call),
+                grant: approval_grant(tool_call, preview),
             },
             ApprovalChoice::Workspace => ApprovalDecision::ApproveForWorkspace {
-                grant: approval_grant(tool_call),
+                grant: approval_grant(tool_call, preview),
             },
             ApprovalChoice::Deny => ApprovalDecision::Deny,
             ApprovalChoice::Answer(answers) => ApprovalDecision::Answer { answers },
@@ -2520,8 +2521,17 @@ pub(crate) enum ApprovalChoice {
 }
 
 /// Derives the approve-for-session grant from the pending call: shell calls
-/// allowlist their exact command as a prefix, everything else grants the tool.
-fn approval_grant(tool_call: &ToolCallSnapshot) -> ApprovalGrant {
+/// allowlist their exact command as a prefix, fetch calls grant the host the
+/// server judged, everything else grants the tool.
+fn approval_grant(
+    tool_call: &ToolCallSnapshot,
+    preview: Option<&ApprovalPreview>,
+) -> ApprovalGrant {
+    if let Some(fetch) = preview.and_then(|preview| preview.fetch.as_ref()) {
+        return ApprovalGrant::Host {
+            host: fetch.host.clone(),
+        };
+    }
     if tool_call.name == "shell"
         && let Ok(arguments) = serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
         && let Some(command) = arguments.get("command").and_then(|value| value.as_str())

@@ -46,7 +46,7 @@ Related documents:
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 21
+PROTOCOL_VERSION = 22
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -145,9 +145,12 @@ the `ask_user` question round trip (ADR-0021): optional `question` on
 `tool_approval_requested`, the `answer` decision, and the `answered`
 resolution. Every field is optional and omitted when absent; the version
 moves because `InputPart` and the previews are `deny_unknown_fields` and
-older peers would reject the new decision and resolution tags. Golden
-fixtures live under `crates/qq-protocol/tests/fixtures/v21/`; the
-`v17`–`v20` directories are retained decode-only.
+older peers would reject the new decision and resolution tags. Version 22
+added the network tool (ADR-0021): the `host` grant shape and an optional
+`fetch` preview (`url`, `host`, `method`) on `tool_approval_requested`; the
+`shell` preview is now boxed in memory, which is wire-identical. Golden
+fixtures live under `crates/qq-protocol/tests/fixtures/v22/`; the
+`v17`–`v21` directories are retained decode-only.
 
 Clients and servers must agree on this value.
 
@@ -827,6 +830,15 @@ Decision variants:
 }
 ```
 
+```json
+{ "type": "approve_for_session", "grant": { "type": "host", "host": "*.docs.rs" } }
+```
+
+Grant shapes: `tool` (exact name), `shell_prefix` (word-granularity
+prefix), and `host` (protocol 22; exact lowercase name or one leading `*.`
+wildcard covering subdomains, never the apex). A held `fetch` names its
+judged host in the `fetch` preview, the natural grant value.
+
 Outcome:
 
 ```json
@@ -1291,7 +1303,7 @@ Every streamed payload is a `SessionEventEnvelope`:
 | `text_appended` | `message_id`, `channel`, `text` | Output or refusal delta |
 | `model_turn_completed` | `run_id`, `turn_ordinal`, `model`, optional `usage`, optional `estimated_cost_usd_nanos` | A provider inference and its accounting committed |
 | `tool_call_requested` | `tool_call` | Model finished requesting a tool call |
-| `tool_approval_requested` | `tool_call`, optional `shell`, optional `edit`, optional `question` | Policy needs a human decision, or (`question`) the model asked one |
+| `tool_approval_requested` | `tool_call`, optional `shell`, optional `edit`, optional `question`, optional `fetch` | Policy needs a human decision, or (`question`) the model asked one |
 | `tool_approval_resolved` | `tool_call`, `resolution` | Approval decision recorded |
 | `workspace_grant_promoted` | `grant`, `outcome` | An approve-for-workspace promotion finished (`written`, `already_present`, or non-fatal `failed`) |
 | `tool_call_started` | `tool_call` | Execution began |
@@ -1573,10 +1585,20 @@ context, and the `result` string remains authoritative.
 }
 ```
 
+```json
+{
+  "fetch": {
+    "url": "https://docs.rs/axum/latest/axum/",
+    "host": "docs.rs"
+  }
+}
+```
+
 Previews are advisory UI aids. The authoritative call remains `tool_call`.
 `question` is the exception in kind: it is not a permission but the model's
 question (`ask_user`), answered with the `answer` decision; `free_text` is
-omitted when false.
+omitted when false. `fetch` (protocol 22) carries the lowercase host the
+server's network policy judged and `method` only when it is `HEAD`.
 
 ### Run outcomes and failures
 

@@ -174,6 +174,7 @@ async fn prepare_execution(
             Arc::clone(inner),
             claimed.clone(),
             cancellation.clone(),
+            loaded.plan.network_policy(),
         ))
     };
     // The claim carried the session's file hashes, so nothing here waits on

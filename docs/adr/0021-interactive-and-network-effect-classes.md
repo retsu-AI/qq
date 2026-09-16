@@ -1,6 +1,6 @@
 # ADR-0021 — `Interactive` and `Network` effect classes: a question is a hold, not a permission; a fetch is authority over the outside, not the workspace
 
-**Status:** Proposed (`Interactive` shipped in T8; `Network` lands in T9)
+**Status:** Proposed (`Interactive` shipped in T8, `Network` in T9)
 **Date:** 2026-09-15
 **Deciders:** tool-layer plan T8/T9
 **Implements:** [`tool-layer.md` § D7](../plans/tool-layer.md#d7--fetch-ask_user-view_image-select_tools-t8-t9-t11),
@@ -36,8 +36,8 @@ the decision table.
 
 Both tools are additive protocol changes: the reused approval wait gains a
 `question`, the decision gains `answer`, the resolution gains `answered`, and
-the grant gains `host`. Protocol 21 carries the first three (with T12's
-`range`); T9 adds the grant.
+the grant gains `host` with a `fetch` preview. Protocol 21 carries the first
+three (with T12's `range`); protocol 22 carries the grant and preview.
 
 ## Decision
 
@@ -67,14 +67,20 @@ gate deny with a fixed "no user is available" result. The prompt tells the
 model to ask once, offer concrete options, and never ask what a tool could
 find out.
 
-**`Network` (T9) is denied under `read-only`, asks under `ask` and
-`supervised`, executes under `auto` only for a public or allow-listed host,
-and executes under `full`** — but the SSRF list (loopback, RFC 1918,
-link-local, ULA, `.local`, `.internal`, cloud metadata) and managed
-`deny_hosts` are refused under every mode, exactly like a shell `Forbidden`.
-Grants gain `Host { host }`; `PolicyDecision::Deny` gains a reason so the
-model learns whether the mode, a managed deny, or a host rule refused it.
-Redirects are re-checked; resolve-then-connect pinning defeats DNS rebinding.
+**`Network` is denied under `read-only`, asks under `ask` and `supervised`,
+executes under `auto` only when a grant covers the host, and executes under
+`full`** — but the SSRF set (loopback, RFC 1918, shared, link-local, ULA,
+IPv4-mapped and NAT64 forms, `.local`/`.internal`/single-label names, cloud
+metadata) and managed `deny_hosts` are refused under every mode, exactly
+like a shell `Forbidden`. The name is judged at classification, before the
+gate; the resolved addresses are judged at dispatch and the client is pinned
+to them (`resolve_to_addrs`), so a second lookup cannot rebind; every
+redirect repeats both. Grants gain `Host { host }` (exact or one leading
+`*.` wildcard, never the apex); `PolicyDecision::Deny` gains a `DenyReason`
+so the model learns whether the mode or a host rule refused it. `auto` does
+not execute an ungranted public host: the plan's "public or allowed" collapsed
+to "allowed" because a public/private judgement by name alone is exactly the
+rebinding gap, and one approval per site is cheap.
 
 `ReadOnly` still runs concurrently; `Interactive`, like every other class,
 is sequential in request order so a question is asked at a boundary the
@@ -96,8 +102,16 @@ model reasoned about.
 - The `ask_user` schema is one more declaration in every request (schema
   hash pinned). Its cost is offset the first time it prevents a wrong-guess
   loop; T13 measures whether models over-ask.
-- `Network` remains reserved until T9; nothing in T8 depends on it beyond
-  this document.
+- `fetch` adds `reqwest`, `url`, `ipnet`, and `htmd` (html5ever) to
+  `qq-core`; `reqwest` was already in the binary through `qq-provider`, and
+  the minimal `qq-provider` profile is unaffected. The `html2text`/`htmd`
+  bake-off on documentation and navigation-heavy fixtures chose `htmd` for
+  fenced code with language tags, pipe tables, inline links, and roughly half
+  the output bytes.
+- Fixture servers for tests sit on loopback, which the policy refuses; a
+  test-only `allow_private_for_tests` flag on `NetworkPolicy` admits
+  loopback and RFC 1918 (never metadata) and is unreachable from
+  configuration.
 
 ## Alternatives considered
 

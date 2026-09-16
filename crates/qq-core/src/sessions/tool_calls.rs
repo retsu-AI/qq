@@ -314,8 +314,9 @@ pub(super) fn insert_seed_grants(
         .shell_prefixes
         .iter()
         .map(|value| ("shell_prefix", value));
+    let hosts = seed.hosts.iter().map(|value| ("host", value));
     let mut remaining = MAX_SESSION_GRANTS;
-    for (kind, value) in tools.chain(prefixes) {
+    for (kind, value) in tools.chain(prefixes).chain(hosts) {
         let value = value.trim();
         if value.is_empty() || value.len() > MAX_GRANT_BYTES {
             continue;
@@ -361,6 +362,7 @@ pub(super) fn load_approval_policy(
                 grants.tools.insert(value);
             }
             "shell_prefix" => grants.shell_prefixes.push(value),
+            "host" => grants.hosts.push(value),
             _ => return Err(SessionRuntimeError::CONSTRAINT),
         }
     }
@@ -423,15 +425,29 @@ pub(super) fn deny_tool_call(
     Ok(event)
 }
 
+/// What a hold tells the client about the call, by kind. At most one is set
+/// for a given call; the event carries each as its own optional field.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ApprovalPreviews {
+    pub(crate) shell: Option<ShellCommandPreview>,
+    pub(crate) edit: Option<EditPreview>,
+    pub(crate) question: Option<QuestionPreview>,
+    pub(crate) fetch: Option<FetchPreview>,
+}
+
 pub(super) fn request_tool_approval(
     connection: &mut Connection,
     store_id: StoreId,
     identity: RunIdentity,
     tool_call_id: ToolCallId,
-    shell: Option<ShellCommandPreview>,
-    edit: Option<EditPreview>,
-    question: Option<QuestionPreview>,
+    previews: ApprovalPreviews,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+    let ApprovalPreviews {
+        shell,
+        edit,
+        question,
+        fetch,
+    } = previews;
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
     let updated = transaction.execute(
@@ -448,9 +464,10 @@ pub(super) fn request_tool_approval(
         EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolApprovalRequested {
             tool_call,
-            shell,
+            shell: shell.map(Box::new),
             edit,
             question: question.map(Box::new),
+            fetch: fetch.map(Box::new),
         },
     )?;
     transaction.commit()?;

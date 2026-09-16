@@ -70,6 +70,9 @@ pub struct HeadlessOptions {
     /// Shell prefixes (word-boundary, as the policy matches them) whose held
     /// commands are approved for the session on first request.
     pub allow_shell_prefixes: Vec<String>,
+    /// Hosts (exact or `*.suffix`) whose held `fetch` calls are approved for
+    /// the session on first request.
+    pub allow_hosts: Vec<String>,
     pub timeout: Option<Duration>,
     pub max_turns: Option<u32>,
     pub max_cost_usd_nanos: Option<u64>,
@@ -836,7 +839,7 @@ async fn stream_run(
                             shutdown_at = Some(Instant::now() + SHUTDOWN_GRACE);
                         }
                     }
-                    SessionEvent::ToolApprovalRequested { tool_call, shell, question, .. } => {
+                    SessionEvent::ToolApprovalRequested { tool_call, shell, question, fetch, .. } => {
                         // A child session's question has no answerer either;
                         // declining lets the child proceed on its judgement.
                         if question.is_some() {
@@ -867,7 +870,12 @@ async fn stream_run(
                         // headless root only supplies the unattended fallback
                         // (a deferred deny), never a blanket approve. The
                         // allowlist still applies: the human declared it.
-                        let granted = allowlisted_grant(options, &tool_call.name, shell.as_ref());
+                        let granted = allowlisted_grant(
+                            options,
+                            &tool_call.name,
+                            shell.as_deref(),
+                            fetch.as_deref(),
+                        );
                         let approval = if ours {
                             options.approval
                         } else {
@@ -1149,11 +1157,21 @@ fn allowlisted_grant(
     options: &HeadlessOptions,
     tool_name: &str,
     shell: Option<&ShellCommandPreview>,
+    fetch: Option<&qq_protocol::FetchPreview>,
 ) -> Option<ApprovalGrant> {
     if options.allow_tools.iter().any(|name| name == tool_name) {
         return Some(ApprovalGrant::Tool {
             name: tool_name.to_owned(),
         });
+    }
+    if let Some(fetch) = fetch {
+        return options
+            .allow_hosts
+            .iter()
+            .find(|grant| qq_core::host_grant_matches(grant, &fetch.host))
+            .map(|grant| ApprovalGrant::Host {
+                host: grant.clone(),
+            });
     }
     let command = shell.map(|preview| preview.command.as_str())?;
     options
@@ -1571,6 +1589,43 @@ mod tests {
         }
     }
 
+    /// Turn one fetches a reserved (never-resolving) host; turn two answers.
+    struct FetchingProvider {
+        turn: Mutex<usize>,
+    }
+
+    impl Provider for FetchingProvider {
+        fn stream(&self, _request: ModelRequest) -> ProviderStream {
+            let mut turn = self.turn.lock().unwrap();
+            let current = *turn;
+            *turn += 1;
+            drop(turn);
+            if current == 0 {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::ToolCallStarted {
+                        id: "call_fetch".to_owned(),
+                        name: "fetch".to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: "call_fetch".to_owned(),
+                        json: r#"{"url":"https://docs.invalid/x"}"#.to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallCompleted {
+                        id: "call_fetch".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            } else {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "done".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+    }
+
     /// Turn one requests a read, holding its completion until released, so a
     /// steering line sent meanwhile lands at the boundary before turn two.
     /// Turn two answers and records the request it saw.
@@ -1885,6 +1940,7 @@ mod tests {
             reviewer_configured: false,
             allow_tools: Vec::new(),
             allow_shell_prefixes: Vec::new(),
+            allow_hosts: Vec::new(),
             timeout: None,
             max_turns: None,
             max_cost_usd_nanos: None,
@@ -2290,6 +2346,71 @@ mod tests {
                 })
             }),
             "turn two carries the steering text"
+        );
+    }
+
+    /// `--allow-host` answers a held `fetch` with a session host grant; the
+    /// grant is the matching pattern, not the request's host, so a wildcard
+    /// covers the site's other names too.
+    #[tokio::test]
+    async fn allow_host_grants_a_held_fetch_for_the_session() {
+        let fixture = fixture(|| FetchingProvider {
+            turn: Mutex::new(0),
+        })
+        .await;
+        let mut options = options(&fixture.workspace);
+        options.approval = HeadlessApproval::Auto;
+        options.allow_hosts = vec!["*.invalid".to_owned()];
+        let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+        assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
+        let records = parse_records(&stdout);
+        let resolved = event_records(&records)
+            .into_iter()
+            .find(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
+            .expect("the allowlist resolves the hold");
+        assert_eq!(
+            resolved["envelope"]["event"]["resolution"],
+            "approved_for_session"
+        );
+        let requested = event_records(&records)
+            .into_iter()
+            .find(|record| record["envelope"]["event"]["type"] == "tool_approval_requested")
+            .unwrap();
+        assert_eq!(
+            requested["envelope"]["event"]["fetch"]["host"],
+            "docs.invalid"
+        );
+        // The approved call ran and failed at resolution: a tool error, not
+        // a denial, and the run still completed.
+        let finished = finished_tool_calls(&records);
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0]["state"], "failed");
+        assert!(
+            finished[0]["result"]
+                .as_str()
+                .is_some_and(|result| result.contains("could not resolve docs.invalid")),
+            "{}",
+            finished[0]["result"]
+        );
+
+        // Without the allowlist, auto denies the unattended hold.
+        let bare = self::fixture(|| FetchingProvider {
+            turn: Mutex::new(0),
+        })
+        .await;
+        let mut bare_options = self::options(&bare.workspace);
+        bare_options.approval = HeadlessApproval::Auto;
+        let (status, stdout, _) = run_to_end(&bare, bare_options, std::future::pending()).await;
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        let resolved = event_records(&records)
+            .into_iter()
+            .find(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
+            .unwrap();
+        assert_eq!(resolved["envelope"]["event"]["resolution"], "denied");
+        assert_eq!(
+            resolved["envelope"]["event"]["tool_call"]["state"],
+            "denied"
         );
     }
 
@@ -3060,7 +3181,7 @@ mod tests {
         assert_eq!(outcomes.len(), 1, "exactly one terminal outcome");
         assert_eq!(outcomes[0]["status"], "completed");
         assert_eq!(outcomes[0]["exit_code"], 0);
-        assert_eq!(outcomes[0]["prompt_identity"]["version"], 12);
+        assert_eq!(outcomes[0]["prompt_identity"]["version"], 13);
         assert!(outcomes[0]["prompt_identity"]["system_prompt_hash"].is_string());
         assert!(outcomes[0]["prompt_identity"]["tool_schema_hash"].is_string());
         assert_eq!(

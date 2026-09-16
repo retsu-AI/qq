@@ -998,10 +998,12 @@ pub struct EffectivePolicy {
     allow_literal_secrets: bool,
     allow_tools: Vec<String>,
     allow_shell_prefixes: Vec<String>,
+    allow_hosts: Vec<String>,
     shell_env: Vec<String>,
     builtin_preference: BuiltinPreference,
     deny_tools: Vec<String>,
     deny_shell_prefixes: Vec<String>,
+    deny_hosts: Vec<String>,
 }
 
 impl Default for EffectivePolicy {
@@ -1016,10 +1018,12 @@ impl Default for EffectivePolicy {
             allow_literal_secrets: true,
             allow_tools: Vec::new(),
             allow_shell_prefixes: Vec::new(),
+            allow_hosts: Vec::new(),
             shell_env: Vec::new(),
             builtin_preference: BuiltinPreference::default(),
             deny_tools: Vec::new(),
             deny_shell_prefixes: Vec::new(),
+            deny_hosts: Vec::new(),
         }
     }
 }
@@ -1089,6 +1093,13 @@ impl EffectivePolicy {
         &self.allow_shell_prefixes
     }
 
+    /// Hosts granted to `fetch` across layers, before deny filtering.
+    /// Prefer [`ConfigSnapshot::grants`] for the resolved set.
+    #[must_use]
+    pub fn allow_hosts(&self) -> &[String] {
+        &self.allow_hosts
+    }
+
     /// Environment variable names a `shell` call may pass through to its
     /// child, beyond the base set the runtime always provides.
     #[must_use]
@@ -1114,6 +1125,13 @@ impl EffectivePolicy {
     pub fn deny_shell_prefixes(&self) -> &[String] {
         &self.deny_shell_prefixes
     }
+
+    /// Managed-only: hosts `fetch` refuses under every approval mode. Exact
+    /// names or `*.suffix` wildcards; also filters matching host grants.
+    #[must_use]
+    pub fn deny_hosts(&self) -> &[String] {
+        &self.deny_hosts
+    }
 }
 
 /// The resolved workspace grant set: exact tool names (with per-MCP-server
@@ -1124,13 +1142,19 @@ impl EffectivePolicy {
 pub struct PolicyGrants {
     tools: Vec<String>,
     shell_prefixes: Vec<String>,
+    hosts: Vec<String>,
 }
 
 impl PolicyGrants {
-    pub(crate) const fn new(tools: Vec<String>, shell_prefixes: Vec<String>) -> Self {
+    pub(crate) const fn new(
+        tools: Vec<String>,
+        shell_prefixes: Vec<String>,
+        hosts: Vec<String>,
+    ) -> Self {
         Self {
             tools,
             shell_prefixes,
+            hosts,
         }
     }
 
@@ -1146,9 +1170,16 @@ impl PolicyGrants {
         &self.shell_prefixes
     }
 
+    /// Hosts `fetch` may reach without prompting under `auto`: exact names
+    /// or `*.suffix` wildcards, sorted and deduped.
+    #[must_use]
+    pub fn hosts(&self) -> &[String] {
+        &self.hosts
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty() && self.shell_prefixes.is_empty()
+        self.tools.is_empty() && self.shell_prefixes.is_empty() && self.hosts.is_empty()
     }
 }
 
@@ -1159,13 +1190,15 @@ impl PolicyGrants {
 pub enum WorkspaceGrant {
     Tool(String),
     ShellPrefix(String),
+    /// A host `fetch` may reach without prompting (exact or `*.suffix`).
+    Host(String),
 }
 
 impl WorkspaceGrant {
     #[must_use]
     pub fn value(&self) -> &str {
         match self {
-            Self::Tool(value) | Self::ShellPrefix(value) => value,
+            Self::Tool(value) | Self::ShellPrefix(value) | Self::Host(value) => value,
         }
     }
 }
@@ -1335,6 +1368,7 @@ pub struct ConfigProvenance {
     packs: BTreeMap<String, SourceIdentity>,
     grant_tools: BTreeMap<String, SourceIdentity>,
     grant_shell_prefixes: BTreeMap<String, SourceIdentity>,
+    grant_hosts: BTreeMap<String, SourceIdentity>,
     shell_env: BTreeMap<String, SourceIdentity>,
 }
 

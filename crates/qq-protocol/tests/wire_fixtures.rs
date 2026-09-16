@@ -17,7 +17,7 @@ use qq_protocol::{
     AgentPlanDigest, AgentProfileId, AgentProfileSummary, ApprovalDecision, ApprovalGrant,
     ApprovalMode, BudgetExhaustion, BudgetLimitKind, CAPABILITIES_VERSION, CapabilitiesRequest,
     CapabilitySupport, CommandId, CommandOutcome, CommandReceipt, CommandRequest, ContentHash,
-    Correlation, CredentialEpoch, EventCapabilities, EventCursor, FinalOutput,
+    Correlation, CredentialEpoch, EventCapabilities, EventCursor, FetchPreview, FinalOutput,
     GenerationCapabilities, InputPart, InputPartKind, InstructionHash, LimitCapabilities,
     MessageId, MessageRole, MessageSnapshot, MessageState, ModelSelection, OutputContract,
     PROTOCOL_VERSION, PackSummary, PromptCacheCapabilities, PromptVersion, Question,
@@ -205,7 +205,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 21);
+    assert_eq!(PROTOCOL_VERSION, 22);
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
@@ -336,6 +336,22 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 decision: ApprovalDecision::ApproveForSession {
                     grant: ApprovalGrant::ShellPrefix {
                         prefix: "cargo test".to_owned(),
+                    },
+                },
+            },
+        ),
+    );
+    // Version 22: a host grant for `fetch`.
+    check(
+        "command_respond_tool_approval_host",
+        &command(
+            0x27,
+            SessionCommand::RespondToolApproval {
+                run_id,
+                tool_call_id: ToolCallId::from_bytes([8; 16]),
+                decision: ApprovalDecision::ApproveForSession {
+                    grant: ApprovalGrant::Host {
+                        host: "*.docs.rs".to_owned(),
                     },
                 },
             },
@@ -484,14 +500,15 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     is_error: false,
                     display: None,
                 },
-                shell: Some(ShellCommandPreview {
+                shell: Some(Box::new(ShellCommandPreview {
                     command: "rm -r target".to_owned(),
                     cwd: None,
                     verdict: Some(ShellVerdict::Prompt),
                     reasons: vec!["remove_file".to_owned()],
-                }),
+                })),
                 edit: None,
                 question: None,
+                fetch: None,
             },
         ),
     );
@@ -524,6 +541,38 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                         options: vec!["qq-core".to_owned(), "qq-tui".to_owned()],
                         free_text: false,
                     }],
+                })),
+                fetch: None,
+            },
+        ),
+    );
+    // Version 22: a held `fetch` carries the URL and the host a grant names.
+    check(
+        "event_tool_approval_requested_fetch",
+        &envelope(
+            23,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: ToolCallSnapshot {
+                    id: ToolCallId::from_bytes([8; 16]),
+                    session_id,
+                    run_id,
+                    turn_ordinal: 1,
+                    call_ordinal: 1,
+                    provider_call_id: "call_0".to_owned(),
+                    name: "fetch".to_owned(),
+                    arguments: r#"{"url":"https://docs.rs/axum/latest/axum/"}"#.to_owned(),
+                    state: ToolCallState::AwaitingApproval,
+                    result: None,
+                    is_error: false,
+                    display: None,
+                },
+                shell: None,
+                edit: None,
+                question: None,
+                fetch: Some(Box::new(FetchPreview {
+                    url: "https://docs.rs/axum/latest/axum/".to_owned(),
+                    host: "docs.rs".to_owned(),
+                    method: None,
                 })),
             },
         ),

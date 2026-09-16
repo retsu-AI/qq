@@ -303,6 +303,7 @@ async fn config_grants_seed_new_sessions_and_cover_calls_without_prompting() {
         WorkspaceGrantSeed {
             tools: vec!["mcp__notes__search".to_owned()],
             shell_prefixes: vec!["cargo test".to_owned()],
+            hosts: Vec::new(),
         },
         WorkspaceGrantOutcome::Failed {
             message: "unused".to_owned(),
@@ -2031,7 +2032,7 @@ async fn recovery_marks_awaiting_approval_calls_interrupted() {
         .await
         .unwrap();
     let awaiting = store
-        .request_tool_approval(&claimed, tool_call_id, None, None, None)
+        .request_tool_approval(&claimed, tool_call_id, ApprovalPreviews::default())
         .await
         .unwrap();
     store.close().await.unwrap();
@@ -2244,5 +2245,108 @@ async fn malformed_ask_user_arguments_are_a_tool_error_without_a_hold() {
         SessionEvent::ToolCallFinished { tool_call }
             if tool_call.is_error
                 && tool_call.result.as_deref().is_some_and(|result| result.contains("needs 2-6 options"))
+    )));
+}
+
+#[tokio::test]
+async fn fetch_holds_with_a_host_preview_and_a_host_grant_covers_the_next_call() {
+    // `invalid.` is reserved (RFC 6761) and never resolves, so the approved
+    // call fails at resolution — a tool error, not a policy event — while
+    // everything this test asserts happens before dispatch.
+    let mut harness = approval_harness(
+        ApprovalMode::Auto,
+        "fetch",
+        r#"{"url":"https://docs.invalid/axum"}"#,
+        2,
+        DEFAULT_APPROVAL_TIMEOUT,
+    )
+    .await;
+    let (observed, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    let preview = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::ToolApprovalRequested {
+                fetch, shell, edit, ..
+            } => {
+                assert!(shell.is_none() && edit.is_none());
+                fetch.clone()
+            }
+            _ => None,
+        })
+        .expect("the hold carries the fetch preview");
+    assert_eq!(preview.url, "https://docs.invalid/axum");
+    assert_eq!(preview.host, "docs.invalid");
+    assert!(preview.method.is_none());
+
+    respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        tool_call.id,
+        ApprovalDecision::ApproveForSession {
+            grant: ApprovalGrant::Host {
+                host: "*.invalid".to_owned(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. })),
+        "the host grant must cover the second call"
+    );
+    let finished: Vec<_> = observed
+        .iter()
+        .filter_map(|event| match &event.event {
+            SessionEvent::ToolCallFinished { tool_call } => Some(tool_call),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finished.len(), 2);
+    for call in finished {
+        assert!(call.is_error);
+        assert!(
+            call.result
+                .as_deref()
+                .is_some_and(|result| result.contains("could not resolve docs.invalid")),
+            "{:?}",
+            call.result
+        );
+    }
+    let (_, grants) = harness
+        .runtime
+        .inner
+        .store
+        .approval_policy(harness.session_id)
+        .await
+        .unwrap();
+    assert_eq!(grants.hosts, ["*.invalid"]);
+}
+
+#[tokio::test]
+async fn fetch_to_a_blocked_host_is_denied_under_full_without_a_hold() {
+    let mut harness = approval_harness(
+        ApprovalMode::Full,
+        "fetch",
+        r#"{"url":"http://169.254.169.254/latest/meta-data/"}"#,
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+    )
+    .await;
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. }))
+    );
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolCallFinished { tool_call }
+            if tool_call.state == ToolCallState::Denied
+                && tool_call.result.as_deref().is_some_and(|result| {
+                    result.starts_with("fetch refused: host 169.254.169.254 resolves to a private")
+                })
     )));
 }

@@ -8,6 +8,7 @@ use serde_json::json;
 use super::{
     ask::{MAX_OPTION_BYTES, MAX_OPTIONS, MAX_QUESTION_BYTES, MAX_QUESTIONS, MIN_OPTIONS},
     edit::MAX_EDITS,
+    fetch::MAX_URL_BYTES,
     read::MAX_READ_LINES,
     search::{
         MAX_CONTEXT, MAX_CURSOR_BYTES, MAX_GLOB_BYTES, MAX_GLOBS, MAX_LIMIT, MAX_PER_FILE,
@@ -39,6 +40,7 @@ pub(super) enum BuiltInTool {
     Shell,
     Exec,
     AskUser,
+    Fetch,
     #[cfg(test)]
     TestDelay,
     #[cfg(test)]
@@ -48,7 +50,7 @@ pub(super) enum BuiltInTool {
 }
 
 impl BuiltInTool {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::ReadFile,
         Self::Tree,
         Self::Search,
@@ -57,6 +59,7 @@ impl BuiltInTool {
         Self::Shell,
         Self::Exec,
         Self::AskUser,
+        Self::Fetch,
     ];
 
     pub(super) fn from_name(name: &str) -> Option<Self> {
@@ -69,6 +72,7 @@ impl BuiltInTool {
             "shell" => Some(Self::Shell),
             "exec" => Some(Self::Exec),
             "ask_user" => Some(Self::AskUser),
+            "fetch" => Some(Self::Fetch),
             #[cfg(test)]
             "__test_delay" => Some(Self::TestDelay),
             #[cfg(test)]
@@ -85,6 +89,7 @@ impl BuiltInTool {
             Self::EditFile | Self::WriteFile => EffectClass::Mutating,
             Self::Shell | Self::Exec => EffectClass::Shell,
             Self::AskUser => EffectClass::Interactive,
+            Self::Fetch => EffectClass::Network,
             #[cfg(test)]
             Self::TestDelay => EffectClass::ReadOnly,
             #[cfg(test)]
@@ -279,6 +284,19 @@ impl BuiltInTool {
                         }
                     },
                     "required": ["questions"],
+                    "additionalProperties": false
+                }),
+            ),
+            Self::Fetch => ToolSpec::new(
+                "fetch",
+                "Fetch a public http(s) URL (GET, or method=HEAD for headers only). HTML is converted to markdown, JSON is formatted; the body is bounded and spills when long. Private, link-local, and managed-denied hosts are refused.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "minLength": 1, "maxLength": MAX_URL_BYTES },
+                        "method": { "enum": ["GET", "HEAD"], "default": "GET" }
+                    },
+                    "required": ["url"],
                     "additionalProperties": false
                 }),
             ),

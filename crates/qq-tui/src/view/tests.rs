@@ -654,6 +654,7 @@ fn question_holds_render_numbered_options_and_the_answered_questions() {
                         },
                     ],
                 })),
+                fetch: None,
             },
         )
     }));
@@ -738,6 +739,7 @@ fn approval_prompts_render_edit_previews_as_colored_diffs() {
                     diff: "@@ -1 +1 @@\n-old\n+new".to_owned(),
                 }),
                 question: None,
+                fetch: None,
             },
         )
     }));
@@ -2256,6 +2258,7 @@ fn background_approvals_surface_a_banner_that_ctrl_g_jumps_to() {
             shell: None,
             edit: None,
             question: None,
+            fetch: None,
         },
     ));
 
@@ -2828,6 +2831,7 @@ fn app_with_child_awaiting_approval() -> (App, SessionId, SessionId, RunId, Tool
                 shell: None,
                 edit: None,
                 question: None,
+                fetch: None,
             },
         )
     }));
@@ -3322,14 +3326,15 @@ fn shell_approvals_show_the_server_preview_not_the_arguments() {
             session_id,
             SessionEvent::ToolApprovalRequested {
                 tool_call,
-                shell: Some(qq_protocol::ShellCommandPreview {
+                shell: Some(Box::new(qq_protocol::ShellCommandPreview {
                     command: "rm -rf ./build".to_owned(),
                     cwd: Some("crates/qq-tui".to_owned()),
                     verdict: Some(qq_protocol::ShellVerdict::Prompt),
                     reasons: vec!["remove_file".to_owned()],
-                }),
+                })),
                 edit: None,
                 question: None,
+                fetch: None,
             },
         )
     }));

@@ -453,6 +453,10 @@ struct PolicyPatch {
     /// Approval grants: shell command prefixes matched at word granularity.
     /// Declarable by ordinary (workspace/user) sources.
     allow_shell_prefixes: Option<Vec<GrantEntry>>,
+    /// Approval grants: hosts `fetch` may reach without prompting under
+    /// `auto`. Exact lowercase host names or `*.suffix` wildcards.
+    /// Declarable by ordinary (workspace/user) sources.
+    allow_hosts: Option<Vec<GrantEntry>>,
     /// Environment variable names a `shell` call may pass through to its
     /// child (beyond PATH HOME LANG TERM TMPDIR). Authority-bearing like a
     /// grant: gated by workspace trust, layered with `Remove(...)`.
@@ -466,6 +470,9 @@ struct PolicyPatch {
     /// Managed-only: shell prefixes whose word-granularity overlap filters
     /// lower-layer shell grants out of the effective grant set.
     deny_shell_prefixes: Option<Vec<String>>,
+    /// Managed-only: hosts `fetch` is refused under every approval mode;
+    /// also filters matching lower-layer host grants. Same host grammar.
+    deny_hosts: Option<Vec<String>>,
 }
 
 impl PolicyPatch {
@@ -479,12 +486,14 @@ impl PolicyPatch {
             || self.allow_literal_secrets.is_some()
             || self.deny_tools.is_some()
             || self.deny_shell_prefixes.is_some()
+            || self.deny_hosts.is_some()
     }
 
     /// Approval grants any source may declare, gated by workspace trust.
     fn has_grants(&self) -> bool {
         self.allow_tools.is_some()
             || self.allow_shell_prefixes.is_some()
+            || self.allow_hosts.is_some()
             || self.shell_env.is_some()
     }
 }
@@ -682,6 +691,8 @@ impl Document {
             #[serde(skip_serializing_if = "Option::is_none")]
             allow_shell_prefixes: Option<&'a Vec<GrantEntry>>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            allow_hosts: Option<&'a Vec<GrantEntry>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             shell_env: Option<&'a Vec<GrantEntry>>,
         }
 
@@ -733,6 +744,7 @@ impl Document {
                 .map(|policy| GrantsProjection {
                     allow_tools: policy.allow_tools.as_ref(),
                     allow_shell_prefixes: policy.allow_shell_prefixes.as_ref(),
+                    allow_hosts: policy.allow_hosts.as_ref(),
                     shell_env: policy.shell_env.as_ref(),
                 }),
         };
@@ -847,6 +859,7 @@ impl Document {
         let (entries, value) = match grant {
             WorkspaceGrant::Tool(name) => (policy.allow_tools.as_ref(), name),
             WorkspaceGrant::ShellPrefix(prefix) => (policy.allow_shell_prefixes.as_ref(), prefix),
+            WorkspaceGrant::Host(host) => (policy.allow_hosts.as_ref(), host),
         };
         let Some(entries) = entries else {
             return false;
@@ -868,6 +881,7 @@ impl Document {
         &self,
         deny_tools: &mut Vec<String>,
         deny_shell_prefixes: &mut Vec<String>,
+        deny_hosts: &mut Vec<String>,
     ) {
         let Some(policy) = &self.policy else {
             return;
@@ -877,6 +891,9 @@ impl Document {
         }
         if let Some(prefixes) = &policy.deny_shell_prefixes {
             deny_shell_prefixes.extend(prefixes.iter().cloned());
+        }
+        if let Some(hosts) = &policy.deny_hosts {
+            deny_hosts.extend(hosts.iter().cloned());
         }
     }
 }
@@ -1006,6 +1023,7 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
                     | "shell"
                     | "exec"
                     | "ask_user"
+                    | "fetch"
                     | "spawn_agent"
                     | "search_history"
                     | "read_tool_result"
@@ -1045,12 +1063,21 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
             }
         }
     }
-    for (field, entries, tool_shaped) in [
-        ("allow_tools", policy.allow_tools.as_deref(), true),
+    for (field, entries, shape) in [
+        (
+            "allow_tools",
+            policy.allow_tools.as_deref(),
+            GrantShape::Tool,
+        ),
         (
             "allow_shell_prefixes",
             policy.allow_shell_prefixes.as_deref(),
-            false,
+            GrantShape::ShellPrefix,
+        ),
+        (
+            "allow_hosts",
+            policy.allow_hosts.as_deref(),
+            GrantShape::Host,
         ),
     ] {
         let Some(entries) = entries else {
@@ -1059,7 +1086,7 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
         let mut unique = BTreeSet::new();
         for entry in entries {
             let name = entry.name();
-            validate_grant_value(name, tool_shaped)
+            validate_grant_value(name, shape)
                 .map_err(|message| invalid(format!("policy field {field}: {message}")))?;
             if !unique.insert(name) {
                 return Err(invalid(format!(
@@ -1089,20 +1116,21 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
             }
         }
     }
-    for (field, values, tool_shaped) in [
-        ("deny_tools", policy.deny_tools.as_deref(), true),
+    for (field, values, shape) in [
+        ("deny_tools", policy.deny_tools.as_deref(), GrantShape::Tool),
         (
             "deny_shell_prefixes",
             policy.deny_shell_prefixes.as_deref(),
-            false,
+            GrantShape::ShellPrefix,
         ),
+        ("deny_hosts", policy.deny_hosts.as_deref(), GrantShape::Host),
     ] {
         let Some(values) = values else {
             continue;
         };
         let mut unique = BTreeSet::new();
         for value in values {
-            validate_grant_value(value, tool_shaped)
+            validate_grant_value(value, shape)
                 .map_err(|message| invalid(format!("policy field {field}: {message}")))?;
             if !unique.insert(value) {
                 return Err(invalid(format!(
@@ -1116,13 +1144,61 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
 
 const MAX_TOOL_GRANT_NAME_BYTES: usize = 128;
 const MAX_SHELL_PREFIX_GRANT_BYTES: usize = 512;
+const MAX_HOST_GRANT_BYTES: usize = 253;
 
-fn validate_grant_value(value: &str, tool_shaped: bool) -> Result<(), String> {
-    if tool_shaped {
-        validate_tool_grant_name(value)
-    } else {
-        validate_shell_prefix_grant(value)
+#[derive(Clone, Copy)]
+enum GrantShape {
+    Tool,
+    ShellPrefix,
+    Host,
+}
+
+fn validate_grant_value(value: &str, shape: GrantShape) -> Result<(), String> {
+    match shape {
+        GrantShape::Tool => validate_tool_grant_name(value),
+        GrantShape::ShellPrefix => validate_shell_prefix_grant(value),
+        GrantShape::Host => validate_host_grant(value),
     }
+}
+
+/// Host grants are lowercase DNS names (`docs.rs`) or one leading wildcard
+/// label (`*.github.com`) matching any subdomain but not the apex. No
+/// scheme, port, path, or IP literal: a grant names a site, and the SSRF
+/// rules judge addresses at fetch time.
+pub(super) fn validate_host_grant(host: &str) -> Result<(), String> {
+    if host.is_empty() || host.len() > MAX_HOST_GRANT_BYTES {
+        return Err(format!(
+            "host {host:?} must be 1-{MAX_HOST_GRANT_BYTES} bytes"
+        ));
+    }
+    let name = host.strip_prefix("*.").unwrap_or(host);
+    if name.is_empty() || name.contains('*') {
+        return Err(format!(
+            "host {host:?} may use one leading `*.` wildcard label only"
+        ));
+    }
+    let labels: Vec<&str> = name.split('.').collect();
+    let valid_label = |label: &str| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    };
+    if !labels.iter().all(|label| valid_label(label)) {
+        return Err(format!(
+            "host {host:?} must be a lowercase DNS name (letters, digits, hyphens, dots) without scheme, port, or path"
+        ));
+    }
+    if labels
+        .iter()
+        .all(|label| label.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(format!("host {host:?} must be a name, not an IP address"));
+    }
+    Ok(())
 }
 
 /// Tool grants follow tool declaration names: 1-128 bytes of ASCII letters,
@@ -1750,6 +1826,12 @@ impl MergeState {
             source,
         );
         apply_grant_entries(
+            patch.allow_hosts.as_deref(),
+            &mut self.policy.allow_hosts,
+            &mut self.provenance.grant_hosts,
+            source,
+        );
+        apply_grant_entries(
             patch.shell_env.as_deref(),
             &mut self.policy.shell_env,
             &mut self.provenance.shell_env,
@@ -1771,6 +1853,11 @@ impl MergeState {
                 self.policy.deny_shell_prefixes.iter().cloned().collect();
             combined.extend(incoming.iter().cloned());
             self.policy.deny_shell_prefixes = combined.into_iter().collect();
+        }
+        if let Some(incoming) = &patch.deny_hosts {
+            let mut combined: BTreeSet<_> = self.policy.deny_hosts.iter().cloned().collect();
+            combined.extend(incoming.iter().cloned());
+            self.policy.deny_hosts = combined.into_iter().collect();
         }
     }
 
@@ -2088,7 +2175,42 @@ fn resolve_policy_grants(
         })
         .cloned()
         .collect();
-    PolicyGrants::new(tools, shell_prefixes)
+    // Like shell prefixes, a host deny removes both the narrower grants it
+    // covers and the broader grants that would cover it: the config layer
+    // cannot partially subtract a wildcard. The runtime still refuses the
+    // denied hosts themselves at fetch time whatever grants remain.
+    let hosts = policy
+        .allow_hosts
+        .iter()
+        .filter(|granted| {
+            !policy
+                .deny_hosts
+                .iter()
+                .any(|denied| hosts_overlap(denied, granted))
+        })
+        .cloned()
+        .collect();
+    PolicyGrants::new(tools, shell_prefixes, hosts)
+}
+
+/// Whether two host patterns (exact or `*.suffix`) admit a common host.
+pub(super) fn hosts_overlap(a: &str, b: &str) -> bool {
+    host_pattern_covers(a, b) || host_pattern_covers(b, a)
+}
+
+/// Whether every host `candidate` admits is also admitted by `pattern`.
+fn host_pattern_covers(pattern: &str, candidate: &str) -> bool {
+    if pattern == candidate {
+        return true;
+    }
+    let Some(suffix) = pattern.strip_prefix("*.") else {
+        return false;
+    };
+    let candidate_name = candidate.strip_prefix("*.").unwrap_or(candidate);
+    // `*.corp` covers `*.a.corp` and `x.corp`, never the apex `corp`.
+    candidate_name
+        .strip_suffix(suffix)
+        .is_some_and(|head| head.ends_with('.'))
 }
 
 fn apply_optional<T: Clone>(field: &Field<T>, current: &mut Option<T>) -> bool {

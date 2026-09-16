@@ -2129,9 +2129,53 @@ fn rejects_invalid_policy_grant_declarations() {
     expect_message(r#"allow_shell_prefixes: ["git\tstatus"]"#, "control");
     expect_message(r#"deny_tools: ["bad name"]"#, "ASCII");
     expect_message(r#"deny_shell_prefixes: ["cargo", "cargo"]"#, "duplicate");
+    expect_message(r#"allow_hosts: ["Docs.rs"]"#, "lowercase");
+    expect_message(r#"allow_hosts: ["https://docs.rs"]"#, "lowercase");
+    expect_message(r#"allow_hosts: ["docs.rs:443"]"#, "lowercase");
+    expect_message(r#"allow_hosts: ["*.*.rs"]"#, "wildcard");
+    expect_message(r#"allow_hosts: ["a.*.rs"]"#, "wildcard");
+    expect_message(r#"allow_hosts: ["10.0.0.1"]"#, "IP address");
+    expect_message(r#"allow_hosts: [""]"#, "1-253");
+    expect_message(r#"deny_hosts: ["docs.rs", "docs.rs"]"#, "duplicate");
 
     assert!(parse(r#"allow_tools: ["mcp__executor__execute", "edit_file"]"#).is_ok());
     assert!(parse(r#"allow_shell_prefixes: ["cargo test -p qq"]"#).is_ok());
+    assert!(parse(r#"allow_hosts: ["docs.rs", "*.github.com", "localhost"]"#).is_ok());
+    assert!(parse(r#"deny_hosts: ["*.example.com"]"#).is_ok());
+}
+
+#[test]
+fn host_grants_layer_like_shell_prefixes_and_managed_denies_filter_overlaps() {
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, policy: (allow_hosts: ["docs.rs", "*.example.com", "crates.io"]))"#,
+    );
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, policy: (allow_hosts: ["*.github.com", Remove("crates.io")]))"#,
+    );
+    tree.write(
+        "managed/managed.ron",
+        r#"(version: 1, policy: (deny_hosts: ["api.example.com"]))"#,
+    );
+    let request = tree.request();
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    tree.loader().grant_pending_trust(&request).unwrap();
+    let snapshot = tree.loader().load(&request).unwrap();
+    assert_eq!(
+        snapshot.policy().allow_hosts(),
+        ["*.example.com", "*.github.com", "docs.rs"]
+    );
+    assert_eq!(snapshot.policy().deny_hosts(), ["api.example.com"]);
+    // The deny of one subdomain removes the wildcard grant that would cover
+    // it (the layer cannot subtract part of a wildcard); the runtime still
+    // refuses api.example.com itself whatever the grants say.
+    assert_eq!(snapshot.grants().hosts(), ["*.github.com", "docs.rs"]);
+    assert!(!snapshot.grants().is_empty());
 }
 
 #[test]
@@ -2381,6 +2425,40 @@ fn promotion_is_refused_when_managed_policy_denies_the_grant() {
             )
             .is_ok()
     );
+
+    // Hosts: a managed wildcard deny refuses the apex's subdomains and any
+    // wildcard that overlaps it; the apex itself and other sites promote.
+    let tree = TempTree::new();
+    tree.write(
+        "managed/managed.ron",
+        r#"(version: 1, policy: (deny_hosts: ["*.example.com"]))"#,
+    );
+    let loader = tree.loader();
+    let workspace = tree.path("work");
+    for host in ["api.example.com", "*.example.com", "*.api.example.com"] {
+        assert!(
+            matches!(
+                loader.promote_workspace_grant(&workspace, &WorkspaceGrant::Host(host.to_owned())),
+                Err(ConfigError::GrantDeniedByManaged {
+                    rule: "deny_hosts",
+                    ..
+                })
+            ),
+            "{host}"
+        );
+    }
+    for host in ["example.com", "docs.rs"] {
+        assert!(
+            loader
+                .promote_workspace_grant(&workspace, &WorkspaceGrant::Host(host.to_owned()))
+                .is_ok(),
+            "{host}"
+        );
+    }
+    let written = fs::read_to_string(tree.path("work/.qq/config.ron")).unwrap();
+    assert!(written.contains("allow_hosts"), "{written}");
+    let snapshot = loader.load(&tree.request()).unwrap();
+    assert_eq!(snapshot.grants().hosts(), ["docs.rs", "example.com"]);
 }
 
 #[test]

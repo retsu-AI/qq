@@ -115,6 +115,7 @@ pub struct AgentProfile {
     delegation: DelegationRoster,
     audit: AuditPolicy,
     shell: ShellPolicy,
+    network: crate::tools::network::NetworkPolicy,
     adapter_build: String,
     provenance: Vec<String>,
     credential_epoch: CredentialEpoch,
@@ -146,6 +147,7 @@ impl AgentProfile {
             delegation: DelegationRoster::default(),
             audit: AuditPolicy::default(),
             shell: ShellPolicy::default(),
+            network: crate::tools::network::NetworkPolicy::default(),
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -178,6 +180,7 @@ impl AgentProfile {
             delegation: runtime.delegation.as_ref().clone(),
             audit: runtime.audit,
             shell: runtime.shell.as_ref().clone(),
+            network: runtime.network.as_ref().clone(),
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -270,6 +273,13 @@ impl AgentProfile {
     #[must_use]
     pub fn with_shell_policy(mut self, shell: ShellPolicy) -> Self {
         self.shell = shell;
+        self
+    }
+
+    /// The managed host denies `fetch` refuses under every mode.
+    #[must_use]
+    pub fn with_network_policy(mut self, network: crate::tools::network::NetworkPolicy) -> Self {
+        self.network = network;
         self
     }
 
@@ -471,6 +481,7 @@ impl CompiledAgentPlan {
             delegation,
             audit,
             shell,
+            network,
             adapter_build,
             provenance,
             credential_epoch,
@@ -495,7 +506,8 @@ impl CompiledAgentPlan {
         .with_spawn_model_routes(spawn_model_routes)
         .with_delegation(delegation)
         .with_audit(audit)
-        .with_shell_policy(shell);
+        .with_shell_policy(shell)
+        .with_network_policy(network);
         for source in context_sources {
             runtime = runtime.with_context_source(source);
         }
@@ -811,6 +823,11 @@ impl CompiledAgentPlan {
     }
 
     /// The opened workspace capability, for resolving input attachments.
+    /// The network policy the plan's `fetch` calls are judged by.
+    pub(crate) fn network_policy(&self) -> Arc<crate::tools::network::NetworkPolicy> {
+        Arc::clone(&self.runtime.network)
+    }
+
     pub(crate) fn workspace_handle(&self) -> Workspace {
         self.workspace.clone()
     }
@@ -1208,7 +1225,7 @@ mod tests {
         // from a different encoding.
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "0503b5022f800095fb82dfd8270dd47fc57d7132fdc282a543e704ac54fbccfd"
+            "daf00e7bf6f95655f3e53eaf428e98e4cc015d0e1052c2857d699e7b432e7507"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v6\0".len()..]).unwrap();

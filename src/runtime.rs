@@ -675,12 +675,14 @@ impl RuntimeFactory {
         let delegation = delegation_roster(&snapshot, snapshot.model());
         let audit = audit_policy(snapshot.audit());
         let shell = shell_policy(snapshot.policy());
+        let network = network_policy(snapshot.policy());
         let mut profile =
             AgentProfile::new(provider, descriptor, resolved_model, workspace.to_owned())
                 .with_spawn_model_routes(spawn_model_routes)
                 .with_delegation(delegation)
                 .with_audit(audit)
                 .with_shell_policy(shell)
+                .with_network_policy(network)
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone());
@@ -1242,6 +1244,7 @@ impl WorkspaceGrantAuthority for RuntimeFactory {
                 Some(WorkspaceGrantSeed {
                     tools: grants.tools().to_vec(),
                     shell_prefixes: grants.shell_prefixes().to_vec(),
+                    hosts: grants.hosts().to_vec(),
                 })
             })
             .await;
@@ -1258,6 +1261,7 @@ impl WorkspaceGrantAuthority for RuntimeFactory {
         let grant = match grant {
             ApprovalGrant::Tool { name } => WorkspaceGrant::Tool(name.clone()),
             ApprovalGrant::ShellPrefix { prefix } => WorkspaceGrant::ShellPrefix(prefix.clone()),
+            ApprovalGrant::Host { host } => WorkspaceGrant::Host(host.clone()),
         };
         Box::pin(async move {
             let config = factory.inner.config.clone();
@@ -1974,6 +1978,14 @@ fn delegation_roster(
 
 /// Translates the configured shell policy: the environment allowlist and
 /// the built-in preference.
+/// Translates the managed host denies into the runtime's network policy.
+fn network_policy(policy: &qq_config::EffectivePolicy) -> qq_core::NetworkPolicy {
+    qq_core::NetworkPolicy {
+        deny_hosts: policy.deny_hosts().to_vec().into(),
+        allow_private_for_tests: false,
+    }
+}
+
 fn shell_policy(policy: &qq_config::EffectivePolicy) -> qq_core::ShellPolicy {
     qq_core::ShellPolicy {
         env_allowlist: policy.shell_env().to_vec().into(),
