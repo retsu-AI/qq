@@ -1223,7 +1223,10 @@ impl Store {
 
     /// Persists a tool result and, when the runtime kept the complete output
     /// its marker cites, that spill in the same transaction.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one persisted row update; bundling the columns adds nothing"
+    )]
     pub(super) async fn finish_tool_call(
         &self,
         claimed: &ClaimedRun,

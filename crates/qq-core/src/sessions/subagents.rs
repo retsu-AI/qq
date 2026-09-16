@@ -271,8 +271,10 @@ pub(super) async fn spawn_child_run(
                 biased;
                 () = expires => {
                     deadline_cancel.send_replace(true);
-                    // Cancellation retains the H23 owner through accepted
-                    // creation, started loader work, and execution teardown.
+                    // Cancellation keeps the child's owner (the parent run's
+                    // retained ownership record) through accepted creation,
+                    // started loader work, and execution teardown, so a
+                    // deadline can never orphan a child that was admitted.
                     let mut outcome = execution.await;
                     outcome.content = "the sub-agent could not finish: its duration budget is spent".to_owned();
                     outcome.is_error = true;

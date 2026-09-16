@@ -1154,7 +1154,6 @@ async fn approval_harness_with_authority(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn approval_harness_with_reviewer(
     mode: ApprovalMode,
     tool: &'static str,

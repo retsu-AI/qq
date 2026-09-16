@@ -44,7 +44,6 @@ impl FixtureServer {
     }
 }
 
-#[allow(clippy::field_reassign_with_default)]
 fn tool(name: &str) -> Tool {
     let mut tool = Tool::default();
     tool.name = name.to_owned().into();
@@ -53,7 +52,6 @@ fn tool(name: &str) -> Tool {
 }
 
 impl rmcp::ServerHandler for FixtureServer {
-    #[allow(clippy::field_reassign_with_default)]
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder()

@@ -655,9 +655,25 @@ fn decode_stream(path: &std::path::Path) -> Vec<HeadlessRecord> {
 /// stream is a valid current stream with those fields absent.
 #[test]
 fn historical_streams_still_decode() {
-    const RETAINED: &[u16] = &[18, 19, 20];
-    for &version in RETAINED {
-        assert!(version < PROTOCOL_VERSION);
+    // Same retention rule as `wire_fixtures.rs`: every `v<N>/` directory
+    // present with `N < PROTOCOL_VERSION` must decode, and `N - 1` must exist.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/headless");
+    let mut versions: Vec<u16> = std::fs::read_dir(&root)
+        .unwrap()
+        .filter_map(|entry| {
+            let entry = entry.unwrap();
+            entry
+                .file_type()
+                .unwrap()
+                .is_dir()
+                .then_some(entry.file_name())
+        })
+        .filter_map(|name| name.to_str()?.strip_prefix('v')?.parse::<u16>().ok())
+        .filter(|version| *version < PROTOCOL_VERSION)
+        .collect();
+    versions.sort_unstable();
+    assert_eq!(versions.last().copied(), Some(PROTOCOL_VERSION - 1));
+    for version in versions {
         for path in stream_paths(version) {
             let stream = decode_stream(&path);
             if let Some(trial) = assert_well_formed(&path, &stream) {

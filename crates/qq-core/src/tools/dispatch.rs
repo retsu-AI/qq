@@ -155,7 +155,10 @@ impl Drop for CancelCallOnDrop {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one dispatch per call; every argument is a distinct capability the tool receives"
+)]
 pub(crate) async fn execute(
     workspace: Workspace,
     file_state: Arc<FileState>,

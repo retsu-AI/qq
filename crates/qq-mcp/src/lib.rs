@@ -216,7 +216,6 @@ impl ClientHandler for QqClientHandler {
         self.catalog_generation.fetch_add(1, Ordering::AcqRel);
     }
 
-    #[allow(clippy::field_reassign_with_default)]
     fn get_info(&self) -> ClientInfo {
         let mut info = ClientInfo::default();
         info.client_info.name = "qq".to_owned();

@@ -12,10 +12,18 @@ Repository automation for QQ is available through `cargo xtask`.
   category.
 - `cargo xtask eval report ...` verifies fixed trial identity and emits the
   baseline scorecard.
+- `cargo xtask eval compare ...` pairs two compatible jobs task by task with a
+  bootstrap confidence interval on the pass-rate difference.
 - `cargo xtask perf baseline ...` records the optimized Linux Phase 0 size,
   startup, RSS, runtime, replay, tool, streaming, and isolated load profiles.
 - `cargo xtask perf check ...` rejects compatible candidate reports that exceed
   the checked-in regression budgets.
+  (`perf` also has hidden `load-worker`, `r4-worker`, and `feed-worker`
+  subcommands that `baseline` spawns as isolated processes; they are not
+  entry points.)
+- `cargo xtask release X.Y.Z` bumps the workspace version and commits it for a
+  PR; `cargo xtask release --tag` tags the merged `main`
+  (`docs/runbooks/release.md`).
 
 See `benchmarks/harbor/README.md` for the reproducible evaluation workflow and
 `benchmarks/perf/README.md` for the performance protocol and metric inventory.
