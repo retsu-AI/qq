@@ -739,7 +739,7 @@ pub(super) fn start_reserved_run(
         &transaction,
         EventContext::for_run(store_id, identity, now).uncaused(),
         SessionEvent::RunStarted {
-            session: summary,
+            session: Box::new(summary),
             run_id: identity.run_id,
             plan: Some(Box::new(audit.plan_identity.clone())),
         },

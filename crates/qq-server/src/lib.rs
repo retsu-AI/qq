@@ -38,12 +38,13 @@ use qq_protocol::{
     EventCapabilities, InputPartKind, LimitCapabilities, LocalConnectionError,
     LocalServerConnection, MAX_CORRELATION_ENTRIES, MAX_EVENT_BYTES, MAX_INPUT_FILE_BYTES,
     MAX_INPUT_FILE_PARTS, MAX_INPUT_PARTS, MAX_INPUT_TEXT_BYTES, MAX_MODEL_BYTES,
-    MAX_ORGANIZATION_BYTES, MAX_OUTPUT_REPAIR_TURNS, MAX_OUTPUT_SCHEMA_BYTES,
-    MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MAX_REQUEST_BYTES, MAX_WORKSPACE_BYTES,
-    ModelCatalogRequest, ModelDescriptor, PROTOCOL_VERSION, ServerCapabilities, ServerInfo,
-    SessionCommand, SessionCommandKind, SnapshotRequest, SteeringCapabilities, StoreId,
-    SubscribeRequest, ToolCapabilities, WorkspaceId, WorkspaceSnapshot, WorkspaceToolCapabilities,
-    sanitize_display_name, valid_process_version, validate_input,
+    MAX_MODEL_CATALOG_BYTES, MAX_ORGANIZATION_BYTES, MAX_OUTPUT_REPAIR_TURNS,
+    MAX_OUTPUT_SCHEMA_BYTES, MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MAX_REQUEST_BYTES,
+    MAX_WORKSPACE_BYTES, ModelCatalogRequest, ModelDescriptor, PROTOCOL_VERSION,
+    ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind, SnapshotRequest,
+    SteeringCapabilities, StoreId, SubscribeRequest, ToolCapabilities, WorkspaceId,
+    WorkspaceSnapshot, WorkspaceToolCapabilities, sanitize_display_name, valid_process_version,
+    validate_input,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -60,7 +61,6 @@ const LOCK_FILE_NAME: &str = "server.lock";
 const DEFAULT_BIND_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 const MAX_METADATA_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_HEALTH_BYTES: usize = 16 * 1024;
-const MAX_MODEL_CATALOG_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const STARTUP_RETRIES: usize = 8;
 const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(25);

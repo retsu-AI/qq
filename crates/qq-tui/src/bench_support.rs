@@ -77,7 +77,7 @@ impl BenchHarness {
         self.apply(
             index,
             SessionEvent::RunStarted {
-                session: summary(session_id(index), SessionStatus::Running),
+                session: Box::new(summary(session_id(index), SessionStatus::Running)),
                 run_id,
                 plan: None,
             },
@@ -344,7 +344,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::PromptQueued {
-                session: summary(session, SessionStatus::Queued),
+                session: Box::new(summary(session, SessionStatus::Queued)),
                 message: prompt,
                 run: Box::new(fixtures::run(
                     run_id,
@@ -357,7 +357,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunStarted {
-                session: summary(session, SessionStatus::Running),
+                session: Box::new(summary(session, SessionStatus::Running)),
                 run_id,
                 plan: None,
             },

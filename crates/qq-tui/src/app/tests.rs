@@ -483,7 +483,7 @@ fn session_compacted_events_surface_the_shrink_in_the_status_line() {
             2,
             session.id,
             SessionEvent::SessionCompacted {
-                session,
+                session: Box::new(session),
                 summary: Some("intent: keep going".to_owned()),
                 before_bytes: 3_250_586,
                 after_bytes: 245_760,
@@ -504,7 +504,7 @@ fn session_compacted_events_surface_the_shrink_in_the_status_line() {
             3,
             session.id,
             SessionEvent::SessionCompacted {
-                session: session.clone(),
+                session: Box::new(session.clone()),
                 summary: Some("word ".repeat(80)),
                 before_bytes: 2048,
                 after_bytes: 1024,
@@ -520,7 +520,7 @@ fn session_compacted_events_surface_the_shrink_in_the_status_line() {
             4,
             session.id,
             SessionEvent::SessionCompacted {
-                session,
+                session: Box::new(session),
                 summary: None,
                 before_bytes: 2048,
                 after_bytes: 1024,
@@ -904,7 +904,9 @@ fn session_updated_event_repoints_the_session_model() {
         ..fixtures::envelope(
             2,
             session_id,
-            SessionEvent::SessionUpdated { session: updated },
+            SessionEvent::SessionUpdated {
+                session: Box::new(updated),
+            },
         )
     }));
 
@@ -988,7 +990,7 @@ fn context_usage_uses_last_turn_tokens_live_updates_and_the_model_limit() {
             3,
             session_id,
             SessionEvent::RunFinished {
-                session: summary,
+                session: Box::new(summary),
                 run_id: id(8, RunId::from_bytes),
                 outcome: RunOutcome::Completed,
                 usage: Some(TokenUsage {
@@ -1030,7 +1032,7 @@ fn prompt_start_and_streaming_do_not_recalculate_session_context() {
     app.apply_live_event(envelope(
         2,
         SessionEvent::PromptQueued {
-            session: summary.clone(),
+            session: Box::new(summary.clone()),
             message: MessageSnapshot {
                 run_id,
                 turn_ordinal: 0,
@@ -1051,7 +1053,7 @@ fn prompt_start_and_streaming_do_not_recalculate_session_context() {
     app.apply_live_event(envelope(
         3,
         SessionEvent::RunStarted {
-            session: summary,
+            session: Box::new(summary),
             run_id,
             plan: None,
         },
@@ -1160,7 +1162,7 @@ fn compaction_run_usage_does_not_become_session_context() {
             2,
             session_id,
             SessionEvent::RunFinished {
-                session: compacted.clone(),
+                session: Box::new(compacted.clone()),
                 run_id: id(8, RunId::from_bytes),
                 outcome: RunOutcome::Completed,
                 usage: Some(TokenUsage {
@@ -1186,7 +1188,7 @@ fn compaction_run_usage_does_not_become_session_context() {
             3,
             session_id,
             SessionEvent::SessionCompacted {
-                session: compacted,
+                session: Box::new(compacted),
                 summary: Some("short summary".to_owned()),
                 before_bytes: 200_000,
                 after_bytes: 1_000,
@@ -2048,7 +2050,7 @@ fn creating_a_session_adopts_it_without_a_snapshot_round_trip() {
             2,
             created,
             SessionEvent::SessionCreated {
-                session: summary.clone(),
+                session: Box::new(summary.clone()),
             },
         )
     }));
@@ -2327,7 +2329,7 @@ fn enter_during_a_run_queues_the_draft_and_it_submits_when_the_run_ends() {
     summary.active_run_id = None;
     let requests = app
         .apply_client_update(event(SessionEvent::RunFinished {
-            session: summary,
+            session: Box::new(summary),
             run_id,
             outcome: RunOutcome::Completed,
             usage: None,
@@ -2768,11 +2770,11 @@ fn a_single_theme_makes_the_picker_a_notice_instead() {
 fn attention_is_requested_only_while_the_terminal_is_unfocused() {
     let (mut app, session_id, run_id, mut event) = running_app();
     let finish = |run_id| SessionEvent::RunFinished {
-        session: SessionSummary {
+        session: Box::new(SessionSummary {
             status: SessionStatus::Idle,
             active_run_id: None,
             ..summary_named(2, "Deploy")
-        },
+        }),
         run_id,
         outcome: RunOutcome::Completed,
         usage: None,
@@ -2911,7 +2913,7 @@ fn the_reducer_returns_notices_and_attention_as_effects_instead_of_mutating_them
             2,
             session_id,
             SessionEvent::RunFinished {
-                session: summary,
+                session: Box::new(summary),
                 run_id,
                 outcome: RunOutcome::Failed {
                     failure: qq_protocol::RunFailure {
@@ -3386,7 +3388,9 @@ fn approval_picker_sets_the_focused_session_mode_and_the_summary_update_lands() 
     app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
         2,
         focused,
-        SessionEvent::SessionUpdated { session: summary },
+        SessionEvent::SessionUpdated {
+            session: Box::new(summary),
+        },
     )));
     assert_eq!(app.effective_approval_mode(), ApprovalMode::ReadOnly);
 

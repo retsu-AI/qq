@@ -212,7 +212,7 @@ fn replaying_the_wire_fixtures_matches_the_golden_projection() {
     let SessionEvent::PromptQueued { session, .. } = &envelopes[0].event else {
         panic!("the first fixture in cursor order is the queued prompt");
     };
-    store.upsert_summary(session.clone(), &models, 0);
+    store.upsert_summary((**session).clone(), &models, 0);
     store.warm_empty(session.id);
 
     let mut effects = Vec::new();
@@ -299,7 +299,7 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
             5,
             session_id,
             SessionEvent::RunFinished {
-                session: idle.clone(),
+                session: Box::new(idle.clone()),
                 run_id,
                 outcome: RunOutcome::Completed,
                 usage: None,
@@ -330,7 +330,7 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
             6,
             session_id,
             SessionEvent::RunFinished {
-                session: idle,
+                session: Box::new(idle),
                 run_id,
                 outcome: RunOutcome::Completed,
                 usage: None,

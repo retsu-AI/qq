@@ -469,7 +469,7 @@ async fn loop_rings_the_terminal_for_an_unfocused_run_finish_only() {
         ClientUpdate::Event(envelope(
             sequence,
             SessionEvent::RunFinished {
-                session: fixtures::session_summary(fixtures::SESSION),
+                session: Box::new(fixtures::session_summary(fixtures::SESSION)),
                 run_id: fixtures::run_id(9),
                 outcome: qq_protocol::RunOutcome::Completed,
                 usage: None,

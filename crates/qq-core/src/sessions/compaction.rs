@@ -142,7 +142,7 @@ pub(super) fn start_auto_compaction(
             now,
         ),
         SessionEvent::RunStarted {
-            session: summary,
+            session: Box::new(summary),
             run_id,
             plan: Some(Box::new(audit.plan_identity.clone())),
         },
@@ -354,7 +354,7 @@ pub(super) fn complete_compaction(
             &transaction,
             EventContext::for_run(store_id, claimed.identity, now),
             SessionEvent::SessionCompacted {
-                session,
+                session: Box::new(session),
                 summary: Some(truncate_utf8(summary, MAX_EVENT_SUMMARY_BYTES)),
                 before_bytes: u64::try_from(before_bytes).unwrap_or(u64::MAX),
                 after_bytes: u64::try_from(after_bytes).unwrap_or(u64::MAX),

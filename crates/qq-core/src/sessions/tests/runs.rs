@@ -458,10 +458,7 @@ async fn streams_committed_run_events_and_snapshots_the_result() {
     assert!(matches!(
         &observed.last().unwrap().event,
         SessionEvent::RunFinished {
-            session: SessionSummary {
-                context_tokens: Some(13),
-                ..
-            },
+            session,
             usage: Some(TokenUsage {
                 input_tokens: 10,
                 cache_read_input_tokens: 2,
@@ -471,7 +468,7 @@ async fn streams_committed_run_events_and_snapshots_the_result() {
             }),
             context_tokens: Some(13),
             ..
-        }
+        } if session.context_tokens == Some(13)
     ));
     assert!(observed.iter().any(|event| matches!(
         event.event,
@@ -673,15 +670,12 @@ async fn unmeasured_new_prompt_clears_stale_session_context() {
     assert!(second.iter().any(|event| matches!(
         &event.event,
         SessionEvent::RunFinished {
-            session: SessionSummary {
-                context_tokens: None,
-                ..
-            },
+            session,
             run_id,
             usage: None,
             context_tokens: None,
             ..
-        } if *run_id == second_run
+        } if *run_id == second_run && session.context_tokens.is_none()
     )));
 
     let snapshot = runtime
@@ -754,13 +748,10 @@ async fn cancellation_before_a_model_turn_preserves_known_session_cost() {
     assert!(observed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::RunFinished {
-            session: SessionSummary {
-                estimated_cost_usd_nanos: Some(0),
-                ..
-            },
+            session,
             outcome: RunOutcome::Cancelled,
             ..
-        }
+        } if session.estimated_cost_usd_nanos == Some(0)
     )));
 }
 

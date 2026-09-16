@@ -163,14 +163,11 @@ async fn compaction_runs_account_usage_and_cost_but_join_no_transcript() {
     assert!(observed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::RunFinished {
-            session: SessionSummary {
-                context_tokens: None,
-                ..
-            },
+            session,
             run_id,
             context_tokens: Some(13),
             ..
-        } if *run_id == compaction_run
+        } if *run_id == compaction_run && session.context_tokens.is_none()
     )));
     let (before_bytes, after_bytes, summary_excerpt, context_tokens) = observed
         .iter()

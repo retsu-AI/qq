@@ -1605,13 +1605,7 @@ async fn set_session_model_applies_to_the_next_run_but_not_the_active_one() {
     );
     assert!(finished_old_model.iter().any(|event| matches!(
         &event.event,
-        SessionEvent::RunFinished {
-            session: SessionSummary {
-                context_tokens: None,
-                ..
-            },
-            ..
-        }
+        SessionEvent::RunFinished { session, .. } if session.context_tokens.is_none()
     )));
 
     let queued = harness

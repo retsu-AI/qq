@@ -1174,71 +1174,93 @@ impl PromptVersion {
     }
 }
 
-/// SHA-256 identity of ordered workspace-instruction paths and bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct InstructionHash([u8; 32]);
+/// A 32-byte SHA-256 identity with a fixed 64-character lowercase hex wire
+/// form. Two are declared below; they are distinct types on purpose so an
+/// instruction hash cannot be passed where a content hash is expected.
+macro_rules! sha256_identity {
+    ($(#[$doc:meta])* $name:ident, $error:ident, $message:literal) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct $name([u8; 32]);
 
-impl InstructionHash {
-    #[must_use]
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
+        impl $name {
+            #[must_use]
+            pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+                Self(bytes)
+            }
 
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
-impl fmt::Display for InstructionHash {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
+            #[must_use]
+            pub const fn as_bytes(&self) -> &[u8; 32] {
+                &self.0
+            }
         }
-        Ok(())
-    }
-}
 
-impl FromStr for InstructionHash {
-    type Err = InstructionHashError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() != 64 {
-            return Err(InstructionHashError);
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                for byte in self.0 {
+                    write!(formatter, "{byte:02x}")?;
+                }
+                Ok(())
+            }
         }
-        let mut bytes = [0_u8; 32];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-            let high = hex_nibble(pair[0]).ok_or(InstructionHashError)?;
-            let low = hex_nibble(pair[1]).ok_or(InstructionHashError)?;
-            bytes[index] = (high << 4) | low;
+
+        impl FromStr for $name {
+            type Err = $error;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                if value.len() != 64 {
+                    return Err($error);
+                }
+                let mut bytes = [0_u8; 32];
+                for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+                    let high = hex_nibble(pair[0]).ok_or($error)?;
+                    let low = hex_nibble(pair[1]).ok_or($error)?;
+                    bytes[index] = (high << 4) | low;
+                }
+                Ok(Self(bytes))
+            }
         }
-        Ok(Self(bytes))
-    }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.collect_str(self)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                String::deserialize(deserializer)?
+                    .parse()
+                    .map_err(de::Error::custom)
+            }
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+        #[error($message)]
+        pub struct $error;
+    };
 }
 
-impl Serialize for InstructionHash {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.collect_str(self)
-    }
-}
+sha256_identity!(
+    /// SHA-256 identity of ordered workspace-instruction paths and bytes.
+    InstructionHash,
+    InstructionHashError,
+    "instruction hash must be exactly 64 lowercase hexadecimal characters"
+);
 
-impl<'de> Deserialize<'de> for InstructionHash {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-#[error("instruction hash must be exactly 64 lowercase hexadecimal characters")]
-pub struct InstructionHashError;
+sha256_identity!(
+    /// Validated SHA-256 identity for a prompt, tool declaration set, or selected
+    /// guidance document.
+    ContentHash,
+    ContentHashError,
+    "content hash must be exactly 64 lowercase hexadecimal characters"
+);
 
 const fn hex_nibble(byte: u8) -> Option<u8> {
     match byte {
@@ -1247,73 +1269,6 @@ const fn hex_nibble(byte: u8) -> Option<u8> {
         _ => None,
     }
 }
-
-/// Validated SHA-256 identity for a prompt, tool declaration set, or selected
-/// guidance document.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ContentHash([u8; 32]);
-
-impl ContentHash {
-    #[must_use]
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
-impl fmt::Display for ContentHash {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
-
-impl FromStr for ContentHash {
-    type Err = ContentHashError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() != 64 {
-            return Err(ContentHashError);
-        }
-        let mut bytes = [0_u8; 32];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-            let high = hex_nibble(pair[0]).ok_or(ContentHashError)?;
-            let low = hex_nibble(pair[1]).ok_or(ContentHashError)?;
-            bytes[index] = (high << 4) | low;
-        }
-        Ok(Self(bytes))
-    }
-}
-
-impl Serialize for ContentHash {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.collect_str(self)
-    }
-}
-
-impl<'de> Deserialize<'de> for ContentHash {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-#[error("content hash must be exactly 64 lowercase hexadecimal characters")]
-pub struct ContentHashError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1549,13 +1504,13 @@ pub struct SessionEventEnvelope {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
     SessionCreated {
-        session: SessionSummary,
+        session: Box<SessionSummary>,
     },
     /// A non-run mutation of the session row (today: its model selection).
     /// Carries the full updated summary so clients re-render without a
     /// round trip.
     SessionUpdated {
-        session: SessionSummary,
+        session: Box<SessionSummary>,
     },
     /// The session and every row it owned were deleted. Earlier events for
     /// the session remain in the workspace log; replaying them and then this
@@ -1564,13 +1519,13 @@ pub enum SessionEvent {
         session_id: SessionId,
     },
     PromptQueued {
-        session: SessionSummary,
+        session: Box<SessionSummary>,
         message: MessageSnapshot,
         run: Box<RunSnapshot>,
         queue_position: u16,
     },
     RunStarted {
-        session: SessionSummary,
+        session: Box<SessionSummary>,
         run_id: RunId,
         /// Fixed behavioral identity of the run. Absent only on envelopes
         /// written before plan identity was recorded.
@@ -1706,7 +1661,7 @@ pub enum SessionEvent {
         tool_call: ToolCallSnapshot,
     },
     CancellationRequested {
-        session: SessionSummary,
+        session: Box<SessionSummary>,
         run_id: RunId,
     },
     /// A compaction committed: the session's context assembly now starts from
@@ -1714,7 +1669,7 @@ pub enum SessionEvent {
     /// finished by the time this is published), a bounded excerpt of the
     /// summary text, and the assembled context size before and after.
     SessionCompacted {
-        session: SessionSummary,
+        session: Box<SessionSummary>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
         before_bytes: u64,
@@ -1724,7 +1679,7 @@ pub enum SessionEvent {
     /// apply; assembly now reads the newest of them, or the full transcript
     /// when none remain. The session meter is unknown until the next prompt.
     SessionCompactionRolledBack {
-        session: SessionSummary,
+        session: Box<SessionSummary>,
         remaining: u16,
     },
     /// A measured model turn committed mid-run: the run's per-turn context
@@ -1744,7 +1699,7 @@ pub enum SessionEvent {
         context_tokens: Option<u64>,
     },
     RunFinished {
-        session: SessionSummary,
+        session: Box<SessionSummary>,
         run_id: RunId,
         outcome: RunOutcome,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1765,6 +1720,24 @@ pub enum SessionEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The summary-carrying variants are boxed so the event enum stays small:
+    /// every event is cloned into each subscriber's replay ring and queue.
+    /// Unboxed, the enum was 536 bytes (the 408-byte summary plus the
+    /// `RunFinished` tail); boxed it is bounded by `ToolApprovalRequested`.
+    #[test]
+    fn session_events_are_bounded_by_the_boxed_summary() {
+        assert!(
+            std::mem::size_of::<SessionSummary>() > 256,
+            "SessionSummary is {} bytes; if it shrank below the event body, unbox it",
+            std::mem::size_of::<SessionSummary>()
+        );
+        assert!(
+            std::mem::size_of::<SessionEvent>() <= 336,
+            "SessionEvent is {} bytes",
+            std::mem::size_of::<SessionEvent>()
+        );
+    }
 
     #[test]
     fn command_routes_are_distinct_versioned_paths_in_declaration_order() {
@@ -2360,7 +2333,7 @@ mod tests {
         );
 
         let event = SessionEvent::SessionCompacted {
-            session: SessionSummary {
+            session: Box::new(SessionSummary {
                 activity: None,
                 spawned_by: None,
                 purpose: SessionPurpose::Task,
@@ -2380,7 +2353,7 @@ mod tests {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 11,
                 last_outcome: Some(RunOutcome::Completed),
-            },
+            }),
             summary: Some("intent: ship compaction".to_owned()),
             before_bytes: 3_200_000,
             after_bytes: 240_000,
@@ -2418,7 +2391,7 @@ mod tests {
     fn session_update_and_deletion_events_round_trip_with_stable_tags() {
         let session_id = id::<SessionId>(3);
         let updated = SessionEvent::SessionUpdated {
-            session: SessionSummary {
+            session: Box::new(SessionSummary {
                 activity: None,
                 spawned_by: None,
                 purpose: SessionPurpose::Task,
@@ -2438,7 +2411,7 @@ mod tests {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 11,
                 last_outcome: None,
-            },
+            }),
         };
         let encoded = serde_json::to_value(&updated).unwrap();
         assert_eq!(encoded["type"], "session_updated");
@@ -2475,7 +2448,7 @@ mod tests {
         let workspace_id = id::<WorkspaceId>(2);
         let session_id = id::<SessionId>(3);
         let event = SessionEvent::RunFinished {
-            session: SessionSummary {
+            session: Box::new(SessionSummary {
                 activity: None,
                 spawned_by: None,
                 purpose: SessionPurpose::Task,
@@ -2495,7 +2468,7 @@ mod tests {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 11,
                 last_outcome: Some(RunOutcome::Completed),
-            },
+            }),
             run_id: id(4),
             outcome: RunOutcome::Completed,
             usage: None,
@@ -2704,7 +2677,7 @@ mod tests {
         );
 
         let finished = SessionEvent::RunFinished {
-            session: SessionSummary {
+            session: Box::new(SessionSummary {
                 activity: None,
                 spawned_by: None,
                 purpose: SessionPurpose::Task,
@@ -2724,7 +2697,7 @@ mod tests {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 11,
                 last_outcome: Some(RunOutcome::Completed),
-            },
+            }),
             run_id: id(4),
             outcome: RunOutcome::Completed,
             usage: Some(TokenUsage {

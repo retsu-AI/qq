@@ -116,14 +116,14 @@ impl SessionStore {
         let session_id = envelope.session_id;
         match &envelope.event {
             SessionEvent::SessionCreated { session } => {
-                self.upsert_summary(session.clone(), context.models, 0);
+                self.upsert_summary((**session).clone(), context.models, 0);
                 if context.caused_by_me {
                     self.warm_empty(session.id);
                     effects.push(StateEffect::AdoptCreated(session.id));
                 }
             }
             SessionEvent::SessionUpdated { session } => {
-                self.upsert_summary(session.clone(), context.models, 0);
+                self.upsert_summary((**session).clone(), context.models, 0);
             }
             SessionEvent::SessionDeleted { session_id } => {
                 effects.extend(self.remove_session(*session_id, context));
@@ -131,7 +131,7 @@ impl SessionStore {
             SessionEvent::PromptQueued {
                 session, message, ..
             } => {
-                self.upsert_summary(session.clone(), context.models, 0);
+                self.upsert_summary((**session).clone(), context.models, 0);
                 self.push_message(message.clone());
             }
             SessionEvent::RunStarted {
@@ -139,7 +139,7 @@ impl SessionStore {
                 run_id,
                 plan,
             } => {
-                self.upsert_summary(session.clone(), context.models, 0);
+                self.upsert_summary((**session).clone(), context.models, 0);
                 if let Some(view) = self.get_mut(&session_id) {
                     let cost_before = view
                         .summary
@@ -160,7 +160,7 @@ impl SessionStore {
                 }
             }
             SessionEvent::CancellationRequested { session, .. } => {
-                self.upsert_summary(session.clone(), context.models, 0);
+                self.upsert_summary((**session).clone(), context.models, 0);
             }
             SessionEvent::RunActivityChanged { run_id, activity } => {
                 if let Some(session) = self.get_mut(&session_id) {
@@ -417,7 +417,7 @@ impl SessionStore {
                 before_bytes,
                 after_bytes,
             } => {
-                self.upsert_summary(session.clone(), context.models, 0);
+                self.upsert_summary((**session).clone(), context.models, 0);
                 // The excerpt is the model's own statement of what it kept;
                 // one bounded line of it tells the user what the compaction
                 // preserved without opening anything.
@@ -437,7 +437,7 @@ impl SessionStore {
                 });
             }
             SessionEvent::SessionCompactionRolledBack { session, remaining } => {
-                self.upsert_summary(session.clone(), context.models, 0);
+                self.upsert_summary((**session).clone(), context.models, 0);
                 effects.push(StateEffect::Notice {
                     session: Some(session_id),
                     level: NoticeLevel::Info,
@@ -489,7 +489,7 @@ impl SessionStore {
                     .get(&session_id)
                     .and_then(|view| view.runs.get(run_id))
                     .and_then(|stats| stats.cost_usd_nanos);
-                self.upsert_summary(session.clone(), context.models, 0);
+                self.upsert_summary((**session).clone(), context.models, 0);
                 if !context.attentive {
                     effects.push(StateEffect::Attention(Attention::RunFinished {
                         session_title: session.title.clone(),

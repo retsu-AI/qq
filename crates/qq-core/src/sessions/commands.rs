@@ -222,7 +222,7 @@ pub(super) fn create_child_run(
             now,
         ),
         SessionEvent::SessionCreated {
-            session: session.clone(),
+            session: Box::new(session.clone()),
         },
     )?;
     let message = load_message(&transaction, user_message_id)?;
@@ -238,7 +238,7 @@ pub(super) fn create_child_run(
             now,
         ),
         SessionEvent::PromptQueued {
-            session,
+            session: Box::new(session),
             message,
             run: Box::new(run),
             queue_position: 1,
@@ -461,7 +461,9 @@ pub(super) fn execute_command(
                     Some(command_id),
                     now,
                 ),
-                SessionEvent::SessionCreated { session: summary },
+                SessionEvent::SessionCreated {
+                    session: Box::new(summary),
+                },
             )?;
             (
                 CommandReceipt {
@@ -621,7 +623,7 @@ pub(super) fn execute_command(
                     now,
                 ),
                 SessionEvent::PromptQueued {
-                    session: summary,
+                    session: Box::new(summary),
                     message,
                     run: Box::new(run),
                     queue_position: next_queued,
@@ -799,7 +801,7 @@ pub(super) fn execute_command(
                         now,
                     ),
                     SessionEvent::CancellationRequested {
-                        session: summary,
+                        session: Box::new(summary),
                         run_id,
                     },
                 )?;
@@ -1083,7 +1085,9 @@ pub(super) fn execute_command(
                     Some(command_id),
                     now,
                 ),
-                SessionEvent::SessionUpdated { session: summary },
+                SessionEvent::SessionUpdated {
+                    session: Box::new(summary),
+                },
             )?;
             (
                 CommandReceipt {
@@ -1131,7 +1135,9 @@ pub(super) fn execute_command(
                     Some(command_id),
                     now,
                 ),
-                SessionEvent::SessionUpdated { session: summary },
+                SessionEvent::SessionUpdated {
+                    session: Box::new(summary),
+                },
             )?;
             (
                 CommandReceipt {
@@ -1165,7 +1171,9 @@ pub(super) fn execute_command(
                     Some(command_id),
                     now,
                 ),
-                SessionEvent::SessionUpdated { session: summary },
+                SessionEvent::SessionUpdated {
+                    session: Box::new(summary),
+                },
             )?;
             (
                 CommandReceipt {
@@ -1314,7 +1322,9 @@ pub(super) fn execute_command(
                     Some(command_id),
                     now,
                 ),
-                SessionEvent::SessionUpdated { session: summary },
+                SessionEvent::SessionUpdated {
+                    session: Box::new(summary),
+                },
             )?;
             (
                 CommandReceipt {
@@ -1385,7 +1395,7 @@ pub(super) fn execute_command(
                     now,
                 ),
                 SessionEvent::SessionCompactionRolledBack {
-                    session: summary,
+                    session: Box::new(summary),
                     remaining,
                 },
             )?;
@@ -1649,7 +1659,9 @@ pub(super) fn delete_idle_session(
     append_event(
         transaction,
         EventContext::for_session(store_id, workspace_id, parent_id, Some(command_id), now),
-        SessionEvent::SessionUpdated { session },
+        SessionEvent::SessionUpdated {
+            session: Box::new(session),
+        },
     )
 }
 
