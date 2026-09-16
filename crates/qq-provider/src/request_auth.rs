@@ -120,14 +120,18 @@ pub(crate) enum RequestCredentialKindExpected {
     Codex,
 }
 
+/// How each attempt of a request is authorized at send time. Exactly one
+/// mechanism applies to a compiled provider; static headers need none.
 #[derive(Clone, Default)]
-pub(crate) struct RequestAuthorizer {
+pub(crate) enum RequestAuthorizer {
+    #[default]
+    None,
     #[cfg(feature = "provider-bedrock")]
-    sigv4: Option<Arc<SigV4Authorizer>>,
-    credentials: Option<(
+    SigV4(Arc<SigV4Authorizer>),
+    Credential(
         SharedRequestCredentialProvider,
         RequestCredentialKindExpected,
-    )>,
+    ),
 }
 
 impl RequestAuthorizer {
@@ -136,10 +140,7 @@ impl RequestAuthorizer {
         region: impl Into<Arc<str>>,
         credentials: AwsCredentialLease,
     ) -> Self {
-        Self {
-            sigv4: Some(Arc::new(SigV4Authorizer::new(region, credentials))),
-            credentials: None,
-        }
+        Self::SigV4(Arc::new(SigV4Authorizer::new(region, credentials)))
     }
 
     pub(crate) fn request_time_bearer(credentials: SharedRequestCredentialProvider) -> Self {
@@ -150,42 +151,40 @@ impl RequestAuthorizer {
         Self::request_credentials(credentials, RequestCredentialKindExpected::Codex)
     }
 
-    fn request_credentials(
+    const fn request_credentials(
         credentials: SharedRequestCredentialProvider,
         expected: RequestCredentialKindExpected,
     ) -> Self {
-        Self {
-            #[cfg(feature = "provider-bedrock")]
-            sigv4: None,
-            credentials: Some((credentials, expected)),
-        }
+        Self::Credential(credentials, expected)
     }
 
     #[cfg(all(test, feature = "provider-bedrock"))]
     pub(crate) fn with_sigv4_for_test(authorizer: SigV4Authorizer) -> Self {
-        Self {
-            sigv4: Some(Arc::new(authorizer)),
-            credentials: None,
-        }
+        Self::SigV4(Arc::new(authorizer))
     }
 
+    /// Authorizes one attempt and returns any secret bytes it placed on the
+    /// request, for redaction. Empty for the static and SigV4 cases.
     pub(crate) async fn authorize(
         &self,
         request: &mut reqwest::Request,
     ) -> Result<Vec<String>, ProviderError> {
-        #[cfg(feature = "provider-bedrock")]
-        if let Some(authorizer) = &self.sigv4 {
-            authorizer.sign(request).await?;
+        match self {
+            Self::None => Ok(Vec::new()),
+            #[cfg(feature = "provider-bedrock")]
+            Self::SigV4(authorizer) => {
+                authorizer.sign(request).await?;
+                Ok(Vec::new())
+            }
+            Self::Credential(provider, expected) => {
+                let credential = provider
+                    .0
+                    .credential()
+                    .await
+                    .map_err(request_credential_error)?;
+                apply_request_credential(request, credential, *expected)
+            }
         }
-        let Some((provider, expected)) = &self.credentials else {
-            return Ok(Vec::new());
-        };
-        let credential = provider
-            .0
-            .credential()
-            .await
-            .map_err(request_credential_error)?;
-        apply_request_credential(request, credential, *expected)
     }
 }
 

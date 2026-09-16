@@ -52,7 +52,7 @@ pub(crate) enum ChatCompletionsAuth {
 pub(crate) struct OpenAiChatCompletions {
     pub(crate) exchange: HttpExchange,
     endpoint: reqwest::Url,
-    headers: HeaderMap,
+    headers: Arc<HeaderMap>,
 }
 
 #[cfg(test)]
@@ -113,7 +113,7 @@ impl OpenAiChatCompletions {
         Ok(Self {
             exchange: HttpExchange::new(client, authorizer, Arc::from(redactions)),
             endpoint,
-            headers,
+            headers: Arc::new(headers),
         })
     }
 }
@@ -134,8 +134,8 @@ impl Provider for OpenAiChatCompletions {
                 let body = ChatCompletionsRequest::from(&request);
                 let mut sse = sse_exchange(
                     &exchange,
-                    (endpoint, headers),
-                    &body,
+                    (endpoint, HeaderMap::clone(&headers)),
+                    (&body, request.wire_size_hint()),
                     sse_decoder(limits.event),
                     limits.wire,
                     SSE_SPEC,
