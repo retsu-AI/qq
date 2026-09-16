@@ -1,0 +1,42 @@
+# Ledger — context usability
+
+Plan: [`../context-usability.md`](../context-usability.md). Only the agent
+working this plan edits this file. Current state on top; dated entries
+appended below, newest last.
+
+| Slice | Goal | Status | Branch / PR | Notes |
+| --- | --- | --- | --- | --- |
+| C1 | 4 bytes/token estimate; summarizer planned against storage only; actionable rejection text | In review | `fix/context-usability-1-estimator` | Regression: 730 KB / 200k window sends; window-triggered auto-compaction and `/compact` past the window both run |
+| C2 | Proactive and in-run compaction | Planned | stacked on C1 | |
+| C3 | Audit default off; bounded audit child | Planned | stacked on C2 | |
+| C4 | Anthropic/Bedrock cache breakpoints | Planned | stacked on C3 | |
+| C5 | Concurrent read-only subset; soft 16-call cap; batching guidance | Planned | stacked on C4 | |
+| C6 | Occupancy survives pruning and checkpoints | Planned | stacked on C5 | |
+
+## Entries
+
+### 2026-09-16 — plan opened; C1
+
+Motivation: a user-reported `729498 input tokens` rejection on a ~730 KB
+transcript, plus five read-only investigations (QQ, Codex, pi, fx, OpenCode)
+recorded in the plan's table. Branch from `b75ebac`.
+
+C1: `ESTIMATED_BYTES_PER_TOKEN = 4` with `estimate_tokens` (ceil) and
+`bytes_for_tokens` in `sessions/context.rs`; the in-run delta seed
+(`lib.rs`) and the cross-run seed (`claim.rs::compatible_context_tokens`)
+charge appended bytes at the same ratio. New
+`CompactionDisposition::Summarizing`: the summarizer's request skips the
+model-window check (both the reducible and the irreducible branch) and keeps
+the storage backstop; used at the three compaction plan sites in
+`execution.rs`. Rejection text rewritten: says "estimated", shows bytes, and
+every reason names `/compact` or a new session; the false "already attempted"
+wording is gone.
+Tests: `context.rs` unit tests rescaled by the ratio (+3: ratio arithmetic
+with the reported 729,498 case, summarizer-against-storage, recovery text);
+`tests/compaction.rs` +2 regressions (window-triggered auto-compaction
+completes; manual compaction past the window completes); two existing
+window fixtures scaled ×4; two occupancy-delta assertions updated.
+`cargo test -p qq-core`: 597 passed / 2 ignored.
+Docs: `architecture.md` § run loop step 3.
+
+Shipped: none. In progress: C1 (review). Blocked: none. Next: C2.

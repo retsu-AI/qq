@@ -672,6 +672,13 @@ One durable run follows a guarded loop:
    eligible. The store restores `synchronous=FULL` before returning.
 3. Prepare the runtime and conservatively plan the complete provider request
    under the acquired permit; cancellation remains durable and observable.
+   The plan estimates input tokens at four request bytes per token (rounded
+   up; `sessions::context::ESTIMATED_BYTES_PER_TOKEN`) unless a compatible
+   provider measurement covers the request, and adds the output reserve. An
+   estimated model-window overflow compacts or fails closed; the independent
+   4 MiB per-session storage backstop is measured in bytes. The summarizer's
+   own request is planned against storage only: it carries the transcript
+   that overflowed, so the provider adjudicates its fit.
 4. In one guarded transaction, persist the resolved model, prompt identity,
    exact request measurement, running/session/message state, and `RunStarted`.
 5. Re-read cancellation, then poll the provider only after that transaction

@@ -1158,11 +1158,11 @@ async fn exceeding_the_hard_budget_compacts_once_and_the_prompt_proceeds() {
 async fn a_prompt_still_over_budget_after_compacting_fails_with_the_policy_outcome() {
     let mut harness = auto_compact_harness_with_window(
         vec![
-            AutoCompactScript::Text("x".repeat(20 * 1024)),
+            AutoCompactScript::Text("x".repeat(20 * 1024 * 4)),
             // Pathological summarizer: the summary is as large as the
             // transcript it replaces. Validation rejects it, so no marker
             // commits and the retry is still past the model window.
-            AutoCompactScript::Text(valid_summary(&"s".repeat(20 * 1024))),
+            AutoCompactScript::Text(valid_summary(&"s".repeat(20 * 1024 * 4))),
         ],
         Some(32 * 1024),
     )
@@ -1170,7 +1170,12 @@ async fn a_prompt_still_over_budget_after_compacting_fails_with_the_policy_outco
     let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
 
-    let second = queue_prompt(&harness.runtime, harness.session_id, "y".repeat(10 * 1024)).await;
+    let second = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "y".repeat(10 * 1024 * 4),
+    )
+    .await;
     let observed = collect_until(&mut harness.events, finished_for(second)).await;
     // The one attempt happened and was rejected for not shrinking...
     assert!(
@@ -1311,10 +1316,10 @@ async fn a_failed_auto_compaction_does_not_strand_the_queued_prompt() {
 async fn a_compaction_that_does_not_shrink_the_assembly_never_loops() {
     let mut harness = auto_compact_harness_with_window(
         vec![
-            AutoCompactScript::Text("x".repeat(20 * 1024)),
+            AutoCompactScript::Text("x".repeat(20 * 1024 * 4)),
             // The summary itself stays past the threshold: the guard must
             // reject the prompt after the single attempt.
-            AutoCompactScript::Text(valid_summary(&"s".repeat(20 * 1024))),
+            AutoCompactScript::Text(valid_summary(&"s".repeat(20 * 1024 * 4))),
             AutoCompactScript::Text("done".to_owned()),
         ],
         Some(32 * 1024),
@@ -1323,7 +1328,12 @@ async fn a_compaction_that_does_not_shrink_the_assembly_never_loops() {
     let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
 
-    let second = queue_prompt(&harness.runtime, harness.session_id, "y".repeat(10 * 1024)).await;
+    let second = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "y".repeat(10 * 1024 * 4),
+    )
+    .await;
     let observed = collect_until(&mut harness.events, finished_for(second)).await;
     let compactions = observed
         .iter()
@@ -2120,4 +2130,105 @@ async fn search_history_recalls_compacted_transcript_with_bounded_citations() {
                 && tool_call.result.as_deref()
                     == Some("No history matches for \"zzz-absent\".")
     )));
+}
+
+#[tokio::test]
+async fn a_window_overflow_compacts_even_though_the_summarizer_reads_the_same_transcript() {
+    // Regression: the summarizer request carries the very transcript that
+    // overflowed the model window. Planning it against the window refused
+    // every window-triggered compaction and reported "already attempted"
+    // for a compaction that never started. With the summarizer planned
+    // against storage only, the compaction runs and the prompt proceeds.
+    let window: u32 = 32 * 1024;
+    let mut harness = auto_compact_harness_with_window(
+        vec![
+            // ~30k estimated tokens of history: inside the window alone,
+            // past it once the system prompt and the prompt below join.
+            AutoCompactScript::Text("x".repeat(30 * 1024 * 4)),
+            AutoCompactScript::Text(valid_summary("the summary")),
+            AutoCompactScript::Text("done".to_owned()),
+        ],
+        Some(window),
+    )
+    .await;
+    let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(first)).await;
+
+    let second = queue_prompt(&harness.runtime, harness.session_id, "y".repeat(4 * 1024)).await;
+    let observed = collect_until(&mut harness.events, finished_for(second)).await;
+    let compaction = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunStarted { run_id, .. } if *run_id != second => Some(*run_id),
+            _ => None,
+        })
+        .expect("the window overflow must start an automatic compaction");
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. }
+            if *run_id == compaction
+    )));
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+    );
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. }
+            if *run_id == second
+    )));
+    // Three provider requests: the seed, the summarizer, the prompt.
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        request_texts(&requests[1])
+            .last()
+            .unwrap()
+            .starts_with("Summarize this conversation")
+    );
+}
+
+#[tokio::test]
+async fn manual_compaction_runs_when_the_estimate_already_exceeds_the_window() {
+    // A session whose byte estimate is past the model window is exactly the
+    // one a user reaches for /compact on. The summarizer must send.
+    let mut harness = auto_compact_harness_with_window(
+        vec![
+            AutoCompactScript::Text("x".repeat(40 * 1024 * 4)),
+            AutoCompactScript::Text(valid_summary("recovered")),
+        ],
+        Some(32 * 1024),
+    )
+    .await;
+    let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(first)).await;
+
+    let compaction = compact_session(&harness.runtime, harness.session_id).await;
+    // `SessionCompacted` follows the compaction's `RunFinished`.
+    let observed = collect_until(&mut harness.events, |event| {
+        matches!(event, SessionEvent::SessionCompacted { .. })
+            || matches!(
+                event,
+                SessionEvent::RunFinished { run_id, outcome: RunOutcome::Failed { .. }, .. }
+                    if *run_id == compaction
+            )
+    })
+    .await;
+    let outcome = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, outcome, ..
+            } if *run_id == compaction => Some(outcome.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+    );
+    assert_eq!(harness.requests.lock().unwrap().len(), 2);
 }

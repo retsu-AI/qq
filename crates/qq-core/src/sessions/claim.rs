@@ -243,8 +243,8 @@ pub(super) fn context_occupancy_basis(
 
 /// Seeds the next request's occupancy from a measured one. Requires a known
 /// provider identity, the exact shape and static prefix, and an append-only
-/// (byte-monotonic) transcript; the growth is charged conservatively at one
-/// token per byte.
+/// (byte-monotonic) transcript; the growth is charged at the byte-ratio
+/// estimate.
 pub(super) fn compatible_context_tokens(
     occupancy: ContextOccupancy,
     shape: ContextRequestShape,
@@ -258,7 +258,9 @@ pub(super) fn compatible_context_tokens(
         .then(|| {
             occupancy
                 .context_tokens
-                .saturating_add(request_bytes - basis.request_bytes)
+                .saturating_add(context::estimate_tokens(
+                    request_bytes - basis.request_bytes,
+                ))
         })
 }
 

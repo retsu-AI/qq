@@ -516,9 +516,9 @@ pub(super) async fn execute_run(
             reducible_message_bytes: prepared.audit.weight.reducible_message_bytes,
             irreducible_message_bytes: prepared.audit.weight.irreducible_message_bytes,
             compatible_input_tokens: prepared.audit.weight.compatible_input_tokens,
-            compaction: if claimed.identity.kind == RunKind::Compaction
-                || claimed.context_compaction_attempted
-            {
+            compaction: if claimed.identity.kind == RunKind::Compaction {
+                context::CompactionDisposition::Summarizing
+            } else if claimed.context_compaction_attempted {
                 context::CompactionDisposition::AlreadyAttempted
             } else {
                 context::CompactionDisposition::Eligible
@@ -778,7 +778,7 @@ async fn run_auto_compaction(
         reducible_message_bytes: prepared.audit.weight.reducible_message_bytes,
         irreducible_message_bytes: prepared.audit.weight.irreducible_message_bytes,
         compatible_input_tokens: prepared.audit.weight.compatible_input_tokens,
-        compaction: context::CompactionDisposition::AlreadyAttempted,
+        compaction: context::CompactionDisposition::Summarizing,
     });
     if !matches!(plan, context::ContextPlan::Send { .. }) {
         finish_prepared_run(
@@ -1437,10 +1437,11 @@ async fn execute_started_run(
                     compatible_input_tokens: weight.compatible_input_tokens,
                     // Compaction is only legal between runs. The second slice
                     // will turn the first-turn Compact result into a reserved
-                    // auto-compaction; later turns and compaction runs must
-                    // fail closed without polling the provider.
+                    // auto-compaction; later turns must fail closed without
+                    // polling the provider. The summarizer's own request is
+                    // planned against storage only.
                     compaction: if internal {
-                        context::CompactionDisposition::AlreadyAttempted
+                        context::CompactionDisposition::Summarizing
                     } else {
                         context::CompactionDisposition::BetweenRunsOnly
                     },
