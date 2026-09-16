@@ -27,14 +27,15 @@ written.
 | 0013 | [Context sources are part of plan identity; excess sources fail compilation](0013-context-sources-in-descriptor.md) | Accepted |
 | 0014 | [Typed final output: a per-run contract compiled at admission, judged at the completion boundary, repaired within a bounded allowance](0014-typed-final-output.md) | Accepted |
 | 0015 | [Enroll remote clients with a pairing code and issue per-client credentials](0015-pairing-code-client-enrollment.md) | Proposed (multi-surface S2) |
-| 0019 | [Spill handles are durable session state: cut tool outputs stored with their result, cited by a content-addressed handle, masked inline and exact on explicit read](0019-spill-handles.md) | Proposed (tool-layer T4) |
-| 0020 | [Shell `Forbidden` is a policy decision above every approval mode, produced by a CST classifier whose rules are self-tested data](0020-shell-forbidden-classifier.md) | Proposed (tool-layer T6) |
+| 0019 | [Spill handles are durable session state: cut tool outputs stored with their result, cited by a content-addressed handle, masked inline and exact on explicit read](0019-spill-handles.md) | Accepted |
+| 0020 | [Shell `Forbidden` is a policy decision above every approval mode, produced by a CST classifier whose rules are self-tested data](0020-shell-forbidden-classifier.md) | Accepted |
 | 0021 | [`Interactive` and `Network` effect classes: a question is a hold, not a permission; a fetch is authority over the outside, not the workspace](0021-interactive-and-network-effect-classes.md) | Proposed (tool-layer T8/T9) |
 | 0022 | [One owner per session store: an advisory lock precedes open and recovery](0022-single-store-owner.md) | Accepted |
 | 0023 | [Headless JSONL records are protocol types, pinned by golden streams per `PROTOCOL_VERSION`](0023-headless-records-as-protocol.md) | Accepted |
 | 0024 | [Shared transcript, raw tool JSON, and a precompiled prompt prefix on the request path](0024-shared-transcript-raw-json-prompt-prefix.md) | Accepted |
 | 0025 | [SSE bodies are framed per chunk with one allocation per event; adapters parse once](0025-sse-chunk-framing.md) | Accepted |
 | 0026 | [Run cancellation is a token that wakes waiters, not a flag that is polled](0026-run-cancellation-token.md) | Accepted |
+| 0027 | [`qq-core` is a public embedding API; its exports are a contract, not leakage](0027-qq-core-public-embedding-api.md) | Accepted |
 
 ## When to write one
 

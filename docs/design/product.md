@@ -172,8 +172,11 @@ The initial implementation and its supporting specifications should cover:
 
 Do not create these products or scaffolds during the initial Rust work:
 
-- Web or React frontend.
-- Mobile application.
+- Web or React frontend and mobile application — deferred, not refused:
+  [`docs/plans/multi-surface-clients.md`](../plans/multi-surface-clients.md)
+  is the approved route (a Rust/WASM client over `qq-client`, then desktop
+  and mobile shells) and its Phase 1–2 groundwork has shipped; nothing above
+  `qq-client` exists yet.
 - JavaScript or TypeScript workspace.
 - Hosted SaaS or multi-user system.
 - Distributed execution workers.

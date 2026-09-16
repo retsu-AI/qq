@@ -1,7 +1,14 @@
 # Multi-Surface Clients Over Many Headless Servers
 
-Status: proposed 2026-09-10; approved for Phases 1–2 the same day. No slice
-shipped. Ledger: [`progress/multi-surface-clients.md`](./progress/multi-surface-clients.md).
+Status: approved for Phases 1–2 on 2026-09-10. Shipped: W1 (transport-agnostic
+`qq-client`, `wasm32` build, #15), W2 (reducer extracted to `qq-client::state`,
+#19), S1 (stable `ServerId`, #14), S3 (CORS, #16). Open: S2 enrollment
+(ADR-0015), S4 remote exposure with TLS (ADR-0016), W3 multi-server model, S5,
+S6, then the U/D/M surfaces. Ledger:
+[`progress/multi-surface-clients.md`](./progress/multi-surface-clients.md).
+The "Current state" and "Gaps" sections below describe the repository as of
+2026-09-10, when the plan was written; items marked *(shipped)* have since
+closed.
 
 This plan delivers a web app, a desktop app, and (later) a mobile app that
 drive the same agent harness the TUI drives today, and lets one client attach
@@ -35,8 +42,9 @@ server's remote readiness and the fact that client state lives in the TUI.
 Reusable as-is:
 
 - Versioned HTTP command API, workspace snapshot, capabilities, model catalog
-  (`crates/qq-server/src/lib.rs`, `docs/design/protocol.md`,
-  `PROTOCOL_VERSION = 16`, fixtures under `crates/qq-protocol/tests/fixtures/v16/`).
+  (`crates/qq-server/src/lib.rs`, `docs/design/protocol.md`; `PROTOCOL_VERSION`
+  was 16 when this plan was written and is 20 as of v0.1.0, fixtures under
+  `crates/qq-protocol/tests/fixtures/v<N>/`).
 - Cursor-addressed SSE with gapless replay and unbounded retention
   (ADR-0006). Moving between devices needs no client-state transfer.
 - Idempotent commands keyed by `command_id`.
@@ -44,8 +52,9 @@ Reusable as-is:
 - `qq-protocol` depends only on `serde`, `getrandom`, `thiserror`, and
   `qq-reasoning`: it compiles for `wasm32`.
 - The `ClientPort` seam (`crates/qq-client/src/port.rs`).
-- The reducer and client model (`crates/qq-tui/src/app/reduce.rs`,
-  `crates/qq-tui/src/model.rs`) depend on `std` and `qq_protocol` only.
+- The reducer and client model (now `crates/qq-client/src/state.rs` and
+  `state/reduce.rs` after W2; originally TUI-private) depend on `std` and
+  `qq_protocol` only.
 - `SseDecoder` and cursor validation in `qq-client` are transport-agnostic;
   the reconnect loop in `interactive.rs` is bound to `tokio::time` and native
   `reqwest`.
@@ -58,12 +67,12 @@ Gaps:
 1. Non-loopback bind is rejected in `qq-server::reserve`,
    `qq_protocol::LocalServerConnection::new`, and `MetadataFile::into_connection`.
 2. One shared bearer token per host; no per-client identity or revocation.
-3. No CORS; axum is built without `tower-http`.
-4. `ServerInfo` carries no stable identity, so a client cannot key a server
-   profile across endpoint changes.
+3. *(shipped, S3)* No CORS; axum is built without `tower-http`.
+4. *(shipped, S1)* `ServerInfo` carries no stable identity, so a client cannot
+   key a server profile across endpoint changes.
 5. No workspace listing; clients must know a filesystem path.
-6. Client state and reducer are TUI-private; `qq-client` transport is
-   native-only.
+6. *(shipped, W1/W2)* Client state and reducer are TUI-private; `qq-client`
+   transport is native-only.
 7. `docs/design/architecture.md` and `product.md` defer web and mobile.
 
 One hard constraint follows from hosting the web app separately: a page served

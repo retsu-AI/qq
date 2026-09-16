@@ -1,7 +1,14 @@
 # QQ Harness Reliability, Cost, And Terminal-Bench Readiness
 
-Status: active. Re-baselined against `main` on 2026-08-04. Phase 4 completed
-and qualified on 2026-09-01; Phase 5 completed and qualified on 2026-09-02.
+Status: Phases 1–5 shipped and qualified (Phase 4 2026-09-01, Phase 5
+2026-09-02). Phase 6's candidate designs shipped through
+[`tool-layer.md`](./tool-layer.md) T2/T5 (search, edit batch) with the
+persistent terminal (T10) gated on the ablation evidence Phase 6's method
+still owns; Phases 7 and 8 (R7, R8) are open. Ledger:
+[`progress/terminal-bench.md`](./progress/terminal-bench.md). Phases 1–5
+below are retained in full because `tools.md` and `architecture.md` cite
+their contract sections by name; extracting those contracts into `design/`
+and collapsing the phases is a docs slice not yet scheduled.
 
 This plan turns QQ into a trustworthy autonomous terminal harness before
 optimizing it against Terminal-Bench. It covers the failures found in the
@@ -1026,70 +1033,15 @@ For each candidate tool contract:
    efficiency without a capability loss.
 5. Remove experimental code and schemas for rejected variants.
 
-### Search Candidate
+### Candidates
 
-Compare the current search with an ignore-aware implementation supporting:
-
-- File-name and content modes.
-- Literal and regular-expression matching.
-- Glob/path filters.
-- Deterministic path and line ordering.
-- Bounded context lines, result count, file count, and bytes.
-- Explicit truncation and continuation information.
-- `.gitignore` and common generated-directory handling.
-
-Acceptance target:
-
-- Complete recall on adversarial fixtures within declared bounds.
-- At least 25% fewer discovery tool calls on repository-navigation tasks.
-- No unbounded index or cache.
-
-### Patch Candidate
-
-Compare exact replacement with a validated patch operation:
-
-- Workspace capability containment.
-- Prior-read and stale-hash checks.
-- Exact hunk matching with actionable rejects.
-- Atomic temp-file-and-rename application.
-- Permission preservation.
-- Bounded patch and output sizes.
-- Persisted UI diff separate from compact model-facing output.
-
-Keep exact replacement even if patch wins; they solve different concrete
-cases. Do not add a generic editor registry.
-
-### Persistent Terminal Candidate
-
-Keep `shell` as the fast one-shot path. Add one `terminal` tool interface only
-if stdin, background-service, or interactive-task failures are present in
-trajectories.
-
-The proposed actions are:
-
-```text
-start(command, cwd, terminal_mode, timeout)
-poll(process_id, output_cursor, wait)
-write(process_id, bytes, eof)
-stop(process_id)
-```
-
-The terminal supervisor implementation must:
-
-- Bind process ownership to a run/session.
-- Bound active processes, output bytes, poll wait, input bytes, and lifetime.
-- Use output cursors and a bounded ring or spool so the model does not resend
-  all prior output on every poll.
-- Return exit status and elapsed time.
-- Kill the entire process group on stop, cancellation, timeout, crash
-  recovery, or owner deletion.
-- Prevent one process from being controlled by another session.
-- Use pipes first when sufficient; add PTY support only when the ablation
-  proves that terminal emulation changes task outcomes.
-- Keep blocking work off Tokio workers.
-
-Protocol events should reuse ordinary tool activity. A persistent process is a
-tool implementation detail until its lifecycle must be displayed separately.
+The search and patch candidates shipped as `tool-layer.md` T2 (`search` v2,
+`tree`) and T5 (`edit_file` v2 with the matching cascade); their contracts are
+in `tools.md` §§ Read-Side Walk and Edit Semantics. The persistent terminal
+candidate is `tool-layer.md` D6 / T10 and ships only if the T13 ablation and
+R6-terminal trajectories show stdin, background-service, or interactive
+failures the one-shot `shell` and `exec` cannot cover. The paired evaluation
+that decides all three is `tool-layer.md` T13, run with this section's method.
 
 ### Acceptance
 
@@ -1248,7 +1200,8 @@ Official references:
 
 ## Delivery Sequence
 
-Each row should be one narrow issue and normally one focused PR.
+Each row should be one narrow issue and normally one focused PR. Rows 1–13
+shipped with Phases 1–5; 16–19 are R7/R8 and open.
 
 | Order | Proposed change | Depends on | Milestone |
 | ---: | --- | --- | --- |
@@ -1265,8 +1218,8 @@ Each row should be one narrow issue and normally one focused PR.
 | 11 | `feat(runtime): plan context and enforce run budgets` | 9, 10 | Model-aware runtime |
 | 12 | `feat(runtime): validate compaction and add history recall` | 11 | Durable long sessions |
 | 13 | `perf(provider): add measured generation and cache controls` | 10, 11 | Cost frontier |
-| 14 | `test(tools): run search edit and terminal contract ablations` | 2, 6 | Tool evidence |
-| 15 | `feat(tools): ship winning tool contracts` | 14 | Tool capability |
+| 14 | `test(tools): run search edit and terminal contract ablations` — now `tool-layer.md` T13 | 2, 6 | Tool evidence |
+| 15 | `feat(tools): ship winning tool contracts` — shipped as `tool-layer.md` T1–T7 (v0.1.0) ahead of the ablation; T13 measures them | 14 | Tool capability |
 | 16 | `perf(runtime): configure worker models and roll up child cost` | 4, 10 | Sub-agent economics |
 | 17 | `perf(runtime): cache resolved runtimes and credential leases` | 6 | Warm path |
 | 18 | `perf(runtime): add provider-aware scheduling from trace evidence` | 16, 17 | Concurrent efficiency |

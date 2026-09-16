@@ -4,13 +4,13 @@
 
 | | |
 | --- | --- |
-| Now | Phase 6 — H22.2 in review as a stack: `refactor/h22-2-structural-bundle` (route table + equality test, the acceptance gate; 29 structural items across eight crates, one commit per crate) then `perf/h22-2-notify-cancellation` on top (the `ExternalToolHost::call` change). H21.2 merged (#44). Phase 6 closes when both land |
-| Next | Phase 7 (H10) is gated on R6 and a threat model; the H22 deferrals below are the only open Phase 6 items |
-| Open gates carried | Eight-stream output service gap ≤20 ms at p95 (median met by H20; executable budget stays 50 ms until a quiet-host p95); Phase 5a full H0 tail acceptance on a quiet host; native Windows teardown beyond the targeted CI job |
-| Last closed | H21.2, 2026-09-15 (#44 `f905d68`); H19, 2026-09-14 (#39 `53bca7d`, ADR-0025); H18, 2026-09-14 (#38 `a13fbfd`, ADR-0024); HC4, 2026-09-13 (#34 `43caaea`, ADR-0023; Phase 5b complete); HC3, 2026-09-13 (#33 `24b6e5c`, ADR-0014); HC1, 2026-09-12 (#30 `abad2de`, ADR-0022); H21.1c, 2026-09-11 (#24, ADR-0012); H20, H27, H28, H22.1, H21.1a/b, 2026-09-11 (#22 `61682be`; ADR-0011, ADR-0013) |
-| Versions | `PROTOCOL_VERSION` 19 (HC3), `CAPABILITIES_VERSION` 1, `DESCRIPTOR_VERSION` 6, store schema 27 (HC3), H0 fixture version 4 |
+| Now | No implementation phase is active. Phases 0–6 are closed (see Completed Phases). Phase 7 (H10) waits on R6 in `terminal-bench-readiness.md` and a platform threat model; Phase 8 (H11) waits on a real client; Phase 9 (H12) waits on both |
+| Next | Quiet-host recordings, not code: the Phase 5a H0 tail comparison and the H20 eight-stream p95 (then tighten the executable budget 50→20 ms). The seven H22 deferrals in § Bundled Fixes are the only unscheduled code items from this plan |
+| Open gates carried | Eight-stream output service gap ≤20 ms at p95 (median met by H20); Phase 5a full H0 tail acceptance on a quiet host; native Windows full-workspace run (carried to Phase 7 per decision #3) |
+| Last closed | Phase 6, 2026-09-16 (#46 `486926b`, #47 `c7fd5c4`, ADR-0026) |
+| Versions | Authoritative in [`protocol.md`](../design/protocol.md) § Versioning; at close of Phase 6 (2026-09-16, before T8's bump to 21): `PROTOCOL_VERSION` 20, `CAPABILITIES_VERSION` 1, `DESCRIPTOR_VERSION` 6, store schema 28, H0 fixture version 4 |
 
-Updated 2026-09-15. The `Now` row is authoritative for what is being worked;
+Updated 2026-09-16. The `Now` row is authoritative for what is being worked;
 update it in the same PR that ships or reprioritizes work.
 
 This plan defines how QQ becomes an extremely fast, lightweight, customizable
@@ -269,13 +269,14 @@ resolution, which is why H22 targets the config and auth load paths.
 
 ## Open Designs
 
-Designs D1–D4, D6, and D7 shipped in Phase 5 and are described in
-`architecture.md`. D1 as written (a `tokio::broadcast` per workspace) was
-superseded on 2026-09-07 by a bounded sequence-indexed feed ring; the ring is
-the current design authority. D5 shipped in #38 (ADR-0024) and D10 is
-implemented on `perf/h19-sse-framing` (ADR-0025); both are described in
-`architecture.md` and kept below for the record. D9's mechanical split
-(H21.2) merged in #44. The other designs remain to be implemented.
+Every design in this plan has shipped. D1–D4, D6, and D7 shipped in Phase 5;
+D1 as written (a `tokio::broadcast` per workspace) was superseded on
+2026-09-07 by the bounded sequence-indexed feed ring (ADR-0006). D5, D8,
+D9, and D10 shipped in Phase 6 and are recorded as built in ADR-0024,
+ADR-0011, ADR-0012, and ADR-0025 respectively. `architecture.md` describes
+the shipped shape. The sections below keep each design's problem statement
+and the departures from it that the ADRs record, for a reader tracing why
+the code looks as it does; the as-built detail lives in the ADRs.
 
 ### D5 — Shared Transcript And Precompiled Prompt Prefix (H18)
 
@@ -301,46 +302,26 @@ digest equals the full digest (guards persisted `RunPromptIdentity`).
 Benchmark before: add `provider_encode` (one MiB plus 32 schemas, counting
 allocator) in `qq-provider`; rerun `provider_compiler` and `plan_compile`.
 
-As built (2026-09-13): the baseline measured 4.4–4.7x heap, not ~3x, because
-the tool-call `Value` trees and the Responses/Chat re-stringification were
-uncounted. Result: 1.55–1.80x from the shared `Arc` the run loop holds (2.7x
-for a caller that still owns a `Vec`), encode 190–410 µs. One addition the
-design did not foresee: with `RawValue` fields present, `serde_json`'s
-per-byte string escape lost 30–60% on the transcript depending on unrelated
-codegen, so the codecs escape bulk strings through a word-parallel scanner
-(`providers::support::Text`); output is byte-identical. The prefix is one
-per capability set (32 keys), not one per plan, because the tool-name header
-and skill index vary with the run's optional tools.
+As built: ADR-0024. The baseline measured 4.4–4.7x heap, not ~3x; result
+1.55–1.80x from the run loop's shared `Arc`, encode 190–410 µs. One addition
+the design did not foresee: a word-parallel string escaper
+(`providers::support::Text`) for the `RawValue` codec path. The prefix is per
+capability set, not per plan.
 
-### D8 — Control Admission And Shared Commit (H20, implemented)
+### D8 — Control Admission And Shared Commit (H20)
 
-Status: implemented 2026-09-09 (`ab6de6f`, `d05e474`); design authority is
-[ADR-0011](../adr/0011-shared-commit-across-lanes.md) and
-`architecture.md` § Persistence. Retained here only for the acceptance list.
+Design authority is ADR-0011 and `architecture.md` § Persistence. As written,
+D8 assumed the eight-stream output gap was scheduler wake latency from
+thirteen `sleep(1 ms)` overload loops; deleting them was correct and shipped
+first, but the gap was fsync-bound and the fix was `worker::Joins` (control
+writes join a forming output group as savepoints). Result: gap 24 / 28 →
+20 / 33 ms med / p95; the median meets the 20 ms target and the p95 tail is
+not reproduced by a same-binary A/A control.
 
-As written, D8 assumed the eight-stream output gap was scheduler wake latency
-from thirteen `sleep(1 ms)` overload loops. Deleting the loops and making
-runtime-issued store calls wait for a `control_slots` permit
-(`Priority::AwaitControl`) was correct and shipped first, but a worker probe
-showed the gap is fsync-bound: one commit per output group plus one fsync per
-interleaved control write, with the scheduler's claim read cutting almost
-every group to one job. The fix is `worker::Joins`: control writes join a
-forming group as savepoints and settle on its commit; client reads run alone
-and close the group; the scheduler's claim runs after the group without
-closing it. Persist-before-publish and control-lane FIFO order are unchanged.
-
-Result (30 interleaved pairs, med / p95): gap 24 / 28 → 20 / 33 ms with 27
-of 30 samples at 18–22 ms; completion 284 / 310 → 210 / 228 ms; control
-latency 19.7 / 24.2 → 15.9 / 18.4 ms. The median meets the 20 ms target;
-the p95 tail is bimodal and not reproduced by a same-binary A/A control.
-
-Remaining acceptance: qualify p95 ≤20 ms on a quiet host, then tighten the
-executable budget from 50 ms to 20 ms. The 50 ms cancellation polls in
-`qq-mcp`, `hosts/embedded.rs`, and `tools/shell.rs` polled an
-`Arc<AtomicBool>`; H22.2 replaced them with the `RunCancellation` token
-(ADR-0026, `perf/h22-2-notify-cancellation`): cancel → `Cancelled` for an
-in-flight host call went from 48 ms median to 251 ns, and the conformance
-suite now bounds it at 40 ms so a host cannot revert to polling.
+Open: qualify p95 ≤20 ms on a quiet host, then tighten the executable budget
+from 50 ms to 20 ms. The 50 ms cancellation polls this section once named
+were replaced in H22.2 by the `RunCancellation` token (ADR-0026): cancel →
+`Cancelled` for an in-flight host call went from 48 ms median to 251 ns.
 
 ### D9 — Store Identity, Settlement, And Error Consolidation (H21)
 
@@ -366,17 +347,11 @@ tool_calls, settlement, compaction, commands}.rs` with tests under
 `sessions/tests/`, as a separate mechanical commit after HC3's behavioral
 changes.
 
-As built (H21.2, 2026-09-14): the ten modules above, each `pub(super)` and
-glob-imported from `sessions.rs` so the body's internal references are
-unchanged; the constants stay in `sessions.rs`. Tests: the shared harness
-(scripted loaders/providers, fixtures, collectors; ~5k lines) in
-`sessions/tests.rs`, the 292 tests in thirteen theme modules under
-`sessions/tests/` (`accounting`, `approvals`, `budgets`, `commands`,
-`compaction`, `context_capacity`, `contract`, `delegation`, `feeds`,
-`migrations`, `runs`, `settlement`, `streaming`). The move is text-identical
-apart from visibility and the dedent; the line count is flat (34,608 →
-34,649) because the ~700-line saving named below was an estimate for
-deduplicating fixtures, which a mechanical commit does not do.
+As built: ADR-0012 (H21.1) and the H21.2 receipt in the ledger. The ten
+modules landed as listed; tests moved to a shared harness plus thirteen theme
+modules under `sessions/tests/`. The line count was flat because the
+"~700 fewer lines" below assumed fixture deduplication, which the mechanical
+commit did not do.
 
 Gates: none directly; correctness plus roughly 700 fewer lines. Tests:
 settling an already-settled run through the previously unguarded path is a
@@ -405,22 +380,18 @@ no-change decision is acceptable when the benefit is insufficient. Tests:
 property test splitting events at every byte boundary; CRLF; multi-line data;
 oversized rejection.
 
-As built (2026-09-14): the baseline read framing at 55–72 % of the decode
-path (~11 allocations per event), so the conditional resolved to implement.
-Framing 0.21–0.23x, framing-plus-parse 0.40–0.42x, allocations ÷3.7–5.5.
-Two departures from the design: events stay owned (`SseEvent { name, data }`,
-one allocation) rather than `SseEventRef<'a>`, because the exchange stream
-yields events across awaits and a borrowed event cannot outlive its chunk;
-and `ProviderEvent` tool-call ids stay `String`, the ledger clone being one
-small allocation per delta against the delta's own parse and the `Arc<str>`
-change widening a public type into core.
+As built: ADR-0025. Framing was 55–72 % of decode, so the conditional
+resolved to implement: framing 0.21–0.23x, end-to-end decode 0.40–0.42x.
+Two departures: owned `SseEvent` rather than `SseEventRef<'a>` (the exchange
+stream yields across awaits), and tool-call ids stay `String`.
 
 ### Bundled Fixes (H22)
 
-Cold-path and structural items. H22.1 shipped the correctness items in #22.
-H22.2 (2026-09-15, `refactor/h22-2-structural-bundle` + stacked
-`perf/h22-2-notify-cancellation`) shipped the rest of the list below except
-the items marked *deferred*, each with its reason:
+Cold-path and structural items. H22.1 shipped the correctness items in #22;
+H22.2 shipped the rest in #46 and #47 (receipts in the ledger), except the
+items below, each deferred with its reason. These are the only unscheduled
+code items left in this plan; each is small enough to be its own slice when
+a reason to open that code appears.
 
 - *deferred* `StaticHttpAuth` replacing the `HttpAuth` arms and four
   `build_headers` copies: `HttpAuth` is public and re-exported; collapsing it
@@ -457,11 +428,9 @@ The original list, for the record:
   serialize the descriptor once at compile; gate file-state eviction on a
   counter; borrow when persisting model turns.
 - `qq-mcp`, `hosts/embedded.rs`, `tools/shell.rs`: replace the three 50 ms
-  cancellation polls of the run's `Arc<AtomicBool>` with a shared `Notify`
-  (changes `ExternalToolHost::call`; moved here from H20; shipped as
-  `RunCancellation`, ADR-0026). `qq-mcp`: release the call permit before
-  awaiting the connect mutex. (`ToolSpec` sharing by
-  `Arc` shipped in Phase 4.)
+  cancellation polls with a shared `Notify` (shipped as `RunCancellation`,
+  ADR-0026). `qq-mcp`: release the call permit before awaiting the connect
+  mutex (was already so; verified in H22.1).
 - `qq-protocol`: box `SessionSummary` in the summary-carrying event variants
   (wire-neutral); one hash newtype macro for the two identical 32-byte hash
   types; move client body limits into `limits.rs`.
@@ -551,16 +520,16 @@ imported in Phase 1.
 | H25 | Done | Live provider/MCP credential binding invalidation without secret-bearing identity | H2, H7 | Root, auth, MCP |
 | H26 | Done | Bounded workspace-feed admission and lifecycle; feed ring | H15 | `qq-core`, server |
 | HC2 | Done | Positive tool exposure via optional `policy.exposed_tools` | H6, H13 | Config, core plan |
-| H20 | Done (p95 open) | Lifecycle store calls wait for admission (13 loops deleted); control writes share the output group commit; scheduler claim no longer closes groups (D8, ADR-0011). Gap median 20 ms; quiet-host p95 qualification and the 50→20 ms budget tightening remain | H16, H23–H26 | `qq-core` |
+| H20 | Done (quiet-host p95 open) | Lifecycle store calls wait for admission (13 loops deleted); control writes share the output group commit; scheduler claim no longer closes groups (D8, ADR-0011). Gap median 20 ms; quiet-host p95 qualification and the 50→20 ms budget tightening remain | H16, H23–H26 | `qq-core` |
 | **H21** | **Done** | `RunIdentity`, `PersistenceFault`, one guarded `settle_run`, `TeardownComplete` (D9, ADR-0012) shipped; `sessions.rs` split into `claim`, `codec`, `commands`, `compaction`, `events`, `settlement`, `snapshots`, `streaming`, `tool_calls`, `transcript` and a `tests/` tree (H21.2) | H15–H17, H20 | `qq-core` |
 | H27 | Done | Superseded active generations count toward entry/byte limits; a replacement is admitted before the old slot is removed; equivalent-plan evidence growth is admitted; completed per-key compile guards are reclaimed; `PlanKey` compares inline configuration exactly and redacts it | H2 | Root |
 | H28 | Done | `PlanCompileError::TooManyContextSources` for a ninth source; `AgentPlanDescriptor.context_sources` (name, version, budget, fail policy); `DESCRIPTOR_VERSION` 6 (ADR-0013) | H8 | Core, protocol |
-| H22 | H22.1 done; H22.2 in review | Correctness bundle shipped (`notify(` 37→10, `tool_calls.effect` schema 26, MCP permit ordering verified). Structural bundle on `refactor/h22-2-structural-bundle`: route table + equality test, `Box<SessionSummary>` (event 536→328 B), hash macro, shared limits, `decode_bounded`, borrowed `PlanKey`, sized request body (heap 1.57→1.40x), enum authorizer, one bounded read, slim tool-result retention, LazyLock presets, memoized ancestors, shared read locks, `body_mut`, visible-row sidebar. `Notify` cancellation stacked on top. Deferred with reasons in § Bundled Fixes | — | Per crate |
+| H22 | Done (7 deferrals) | H22.1 (#22): `notify(` 37→11, `tool_calls.effect` schema 26. H22.2 (#46, #47): `COMMAND_ROUTES` + equality test, `Box<SessionSummary>` (event 536→328 B), hash macro, shared limits, `decode_bounded`, borrowed `PlanKey`, sized request body (heap 1.57→1.40x), enum authorizer, one bounded read, slim tool-result retention, LazyLock presets, memoized ancestors, shared read locks, `body_mut`, visible-row sidebar, `RunCancellation` (48 ms → 251 ns; ADR-0026). Deferrals in § Bundled Fixes | — | Per crate |
 | H18 | Done | Shared transcript `Arc<Vec<Message>>` appended in place; `RawValue` schemas and tool-call arguments embedded verbatim; `PromptPrefix` per capability set with a continued SHA-256; word-parallel string escaping; `provider_encode` bench (ADR-0024) | H14 | `qq-core`, `qq-provider` |
 | H19 | Done | `sse_decode` baseline: framing 55–72 % of decode → implemented. Per-chunk framing with one allocation per event in `qq-provider` and `qq-client`; Anthropic single parse; tool-call ids stay `String` (ADR-0025) | H18 | `qq-provider`, `qq-client` |
 | HC1 | Done | `--correlation`, `--session` resume behind a per-store owner lock (ADR-0022), `u32` turn limits (`PROTOCOL_VERSION` 18), model-less `config check` | H3, H26 | Root, config, core, protocol |
 | HC3 | Done | `--output-schema`/`--output-repair-turns`; per-run `OutputContract` compiled at admission into a bounded reference-free schema subset, persisted (schema 27), judged after audit/steering with bounded repair turns; `FinalOutput` on `RunFinished`, `RunSnapshot`, and `outcome` (`PROTOCOL_VERSION` 19, ADR-0014) | H3, HC1 | Protocol, core, root |
-| HC4 | In review | `qq_protocol::headless` record types emitted by `qq run`; golden `.jsonl` streams per `PROTOCOL_VERSION` under `tests/fixtures/headless/` (v19 current, v18 decode-only) with framing checks; compatibility statement (ADR-0023) | HC1–HC3 | Protocol, root, docs |
+| HC4 | Done | `qq_protocol::headless` record types emitted by `qq run`; golden `.jsonl` streams per `PROTOCOL_VERSION` under `tests/fixtures/headless/` (v19 current, v18 decode-only) with framing checks; compatibility statement (ADR-0023) | HC1–HC3 | Protocol, root, docs |
 | H10 | Gated | First real OS process-sandbox adapter | R6, platform threat model | Core tools, root |
 | H11 | Gated | Optional ACP/OpenAI compatibility facade | H4, real consumer | Existing surface owner |
 | H12 | Gated | Crash, load, security, quality, and performance qualification | All shipped tasks and required R milestones | Workspace-wide |
@@ -575,6 +544,8 @@ imported in Phase 1.
 | 3 — Backend contract | H3, H4 fixtures | 2026-09-03 | `dfaebb9` | Protocol 13, schema 21: `InputPart`, `Correlation`, `AgentProfileId`, `RunPlanIdentity`, `SteerRun`, `SetSessionProfile`, expanded `RunLimits`, `ServerCapabilities`, config `profiles`, 24 golden fixtures |
 | 4 — Extensions | H5–H9 | 2026-09-03 | `f02cfc9` | Protocol 14: immutable `ToolCatalog` with progressive exposure; `ExternalToolHost` with `EmbeddedToolHost` and a shared conformance suite; `pack.ron` packs; bounded `ContextSource`; `qq-client::observer`; `ToolSpec` behind `Arc` |
 | 5 — Correct the hot path | H13–H17 | 2026-09-04 | `ea5a6af`…`70166bd` | Effect-classified approval; provider-owned retry (descriptor 4→5); published-event outbox; output-lane group commit with a 128-statement cache; schema 25 with `runs.activity`, command counter, grouped snapshot accounting, two-hop claim, joined context assembly. Amplification measured 1.000; fan-out to slowest of 32 26.4→14.9 ms; `store_output_batch` 236→138 ms. The ≤20 ms service-gap gate was **not met** (29–45 ms) and is carried to H20 |
+| 5b — Headless contract | HC1–HC4 | 2026-09-13 | `abad2de`, `24b6e5c`, `43caaea` | `--correlation`/`--session` behind a per-store owner lock (ADR-0022), `u32` turn limits (protocol 18); `--output-schema` with a bounded schema subset compiled at admission and judged after audit/steering, `FinalOutput` on `RunFinished` (protocol 19, schema 27, ADR-0014); headless record types in `qq-protocol` with golden JSONL per protocol version (ADR-0023). HC2 (`policy.exposed_tools`) shipped earlier in `893e582`. Gate file: `progress/g-phase-5b.md` |
+| 6 — Finish fairness, shrink per-run work, consolidate | H18–H22, H27, H28 | 2026-09-16 | `61682be`…`c7fd5c4` | H20 control admission + shared commit (gap median 20 ms; ADR-0011); H27 plan-cache generation accounting; H28 context sources in the descriptor (descriptor 6, ADR-0013); H21 `RunIdentity`/`PersistenceFault`/one guarded `settle_run` (ADR-0012) and the mechanical `sessions.rs` split; H18 shared transcript, raw tool JSON, prompt prefix (heap 4.5x→1.6x; ADR-0024); H19 per-chunk SSE framing (decode 0.4x; ADR-0025); H22 correctness and structural bundles with `RunCancellation` (ADR-0026). Route-table equality test is the acceptance gate. Open: quiet-host p95 and the seven H22 deferrals. Gate file: `progress/g-phase-6.md` |
 | 5a — Repair shipped contracts | H23–H26 | 2026-09-07 (tail acceptance open) | `1e6a901`, `f482b37`, `893e582` | H23 child ownership across admission/overload/steering/cleanup with fail-closed teardown; H24 per-admission child budgets, deadline carry, owned-descendant spend, `child_admission` bench; H25 exact redacted live credential bindings separate from durable identity, eager MCP after admission, pre-read source evidence; H26 validate-then-attach feeds with lease reclamation (retained RSS after 4096 rejected subscribes 135 MB→0), then the sequence-indexed feed ring (`cursor_replay` 22.6→0.87 µs median, 2001→1 store reads) and release profile (`strip`, `codegen-units = 1`, thin LTO; minimal binary −30.5%, default −33.0%; budgets tightened to 41/48 MB). Focused R4/shell/cache comparisons pass their gates; full H0 tail gates are not repeatable on the shared host (A/A fails the same set) and remain retained, not waived. Native Windows teardown runs as a targeted CI job (`windows-teardown`); full native qualification is not claimed |
 
 Retained decisions from those receipts:
@@ -594,114 +565,19 @@ Retained decisions from those receipts:
 - The `feed_attach_replay` focused fixture subscribes from the initial cursor
   and measures only the cold path; correcting it is follow-up work under H22.
 
-### Phase 5a — Remaining Acceptance
+### Open Recordings (Phases 5a And 6)
 
-Status: implemented; tail qualification open. No further code is scheduled.
+No code is scheduled. Two quiet-host recordings remain (I/O pressure
+`some avg10` well under 20 %); each closes with one line in its Completed
+Phases row:
 
-Open items, tracked here until closed:
+- Phase 5a: the full version-4 H0 baseline/candidate comparison, baseline
+  `1c08cef` (pre-H23 `main`), candidate current `main`.
+- Phase 6: the eight-stream mixed control/output fixture, p95 ≤20 ms; then
+  tighten the executable budget in `budgets-v1.json` from 50 ms to 20 ms.
 
-- Repeat the full version-4 H0 baseline/candidate comparison on a quiet host
-  (I/O pressure `some avg10` well under 20%). Baseline `1c08cef` (pre-H23 `main`), candidate
-  `main`. Record the result as one line in the Completed Phases row.
-- Native Windows teardown: the targeted CI job passes; a full Windows
-  workspace run has not been executed and is not claimed.
-
-### Phase 5b — Headless Contract For Supervisors
-
-Status: HC2 shipped 2026-09-06 (`893e582`, squashed from `93ef6b8`); HC1
-merged 2026-09-12 (#30 `abad2de`); HC3 merged 2026-09-13 (#33 `24b6e5c`,
-ADR-0014); HC4 in review (`feat/hc4-headless-goldens`, ADR-0023). Design
-authority, gap table, bounds, and acceptance criteria are in
-[`headless-contract.md`](../design/headless-contract.md); this section records
-only sequencing and the constraints that interact with Phase 6.
-
-- HC1 and HC3 are independent of Phase 6 except that HC3's settlement and
-  prompt-identity changes must land before the mechanical H21 `sessions.rs`
-  split and coordinate with H18's prompt prefix and H28's descriptor change.
-  HC1's `u16→u32` turn-limit widening and HC3's `final_output` each need a
-  `PROTOCOL_VERSION` bump and fixtures; they bumped separately (18, 19; decision
-  #4).
-- HC4 lands last and pins the whole under
-  `crates/qq-protocol/tests/fixtures/headless/v<PROTOCOL_VERSION>/`. It
-  moved the record shapes into `qq-protocol` (`HeadlessRecord`,
-  `HeadlessTrial`, `HeadlessOutcome`, `HeadlessStatus`) so the goldens are
-  constructed from the types the binary emits; no `PROTOCOL_VERSION` bump,
-  because the encodings did not change.
-- Boundary rules: no supervisor-only mode or product vocabulary; QQ acquires
-  no new authority; new JSONL fields are additive and optional; the default
-  `qq run` payload is preserved after normalization.
-- HC3 records enabled schema-compilation, validation, and repair measurements
-  before acceptance; the cold-path classification does not exempt opt-in
-  runtime work from performance and resource acceptance.
-- HC2 receipt: optional `policy.exposed_tools` intersects across layers and
-  with profile/pack exposure before trust-sensitive grants; static names and
-  MCP name syntax validate in `config check`, MCP membership at plan
-  compilation; grants cannot restore an excluded tool. Workspace suite 1207
-  passed; combined default-path H0 qualification rides with Phase 5a.
-
-Phase 5b is complete when HC1–HC4 acceptance fixtures are green, every gap
-row in `headless-contract.md` reads Shipped with its commit, and the
-workspace gates and default-path H0 regression gate pass.
-
-### Phase 6 — Finish Fairness, Shrink Per-Run Work, And Consolidate
-
-Status: active from 2026-09-08. H20 implemented 2026-09-09 (`ab6de6f`,
-`d05e474`; ADR-0011). H20, H27, H28, H22.1, and H21.1a/b merged in #22
-(`61682be`, 2026-09-11); H21.1c (`settle_run`, `TeardownComplete`,
-ADR-0012) merged in #24; HC1 merged in #30; HC3 in #33; HC4 in #34 closed
-Phase 5b; H18 in review (`perf/h18-shared-transcript-prompt-prefix`,
-ADR-0024) merged in #38; H19 (ADR-0025) merged in #39; H21.2 merged in
-#44; H22.2 in review as a two-PR stack (structural bundle, then `Notify`
-cancellation). The H20 p95 qualification is a quiet-host recording, not
-code.
-
-Benchmarks to record before each change:
-
-- H20: cancellation under 256 queued control jobs and the eight-stream mixed
-  control/output fixture, with queue admission/dequeue/commit timing (the
-  pre-change attribution baseline recorded in `893e582` is the reference);
-- H18: `provider_encode` (one MiB plus 32 schemas, counting allocator) in
-  `qq-provider`, plus reruns of `provider_compiler`, `plan_compile`, and warm
-  `plan_for`;
-- H19: `sse_decode` at 64 KiB / 512 KiB / 1 MiB in `qq-provider`, plus
-  allocations and latency through a deterministic local HTTP/SSE pipeline;
-- H22: the H0 cold `plan_for` measurement and the TUI 200-session sidebar
-  case.
-
-Acceptance:
-
-- cancellation is at most 100 ms with 256 queued control jobs and no site
-  polls the store (met: 23 / 27 ms med / p95; zero `sleep(1 ms)` loops);
-- the eight-stream output service gap is at most 20 ms under mixed
-  control/output load with no relaxation of cancellation or durability
-  (median met at 20 ms; p95 33 ms with a non-repeatable tail — qualify on a
-  quiet host, then tighten the executable budget from 50 ms to 20 ms);
-- settling an already-settled run through any path is a no-op; every
-  `PersistenceFault` variant is reachable in tests; successful teardown is a
-  structural prerequisite of terminal publication;
-- active and superseded plan generations obey entry/byte limits; a rejected
-  refresh leaves the previous generation intact, including an equivalent-plan
-  refresh whose source evidence grows; completed per-key compile guards are
-  reclaimed under distinct-key churn without admitting concurrent same-key
-  compiles; explicit configuration in request keys is compared privately,
-  redacted in diagnostics, and never hashed;
-- excess required context sources fail compilation with a typed capacity
-  error before provider work; changing source identity, version, budget, or
-  fail policy changes the plan digest (`DESCRIPTOR_VERSION` bump with fixture
-  re-pin);
-- one MiB request heap is at most 2x the payload and encode is at most
-  10 ms; the prefix-plus-suffix prompt digest equals the full digest; the
-  1 MiB / 512 KiB ratio stays at or below 2.2x and improves on 1.892x (H18:
-  1.55–1.80x from the run loop's shared `Arc`, 190–410 µs; digest equality
-  pinned across four capability sets; the 1 MiB / 512 KiB ratio is an H0
-  fixture measurement still to be recorded on a quiet host);
-- if H19 ships, it improves decoder-specific allocation/latency; a documented
-  no-change decision is acceptable (shipped: framing 0.21–0.23x,
-  allocations ÷3.7–5.5, end-to-end decode 0.40–0.42x on `sse_decode`);
-- the `sessions.rs` split changes no behavior and lands as its own commit;
-- the H22 route-table equality test passes between client and server; and
-- the default path stays within the regression gate for every H0 metric
-  against the Phase 5a reference.
+Native Windows: the targeted CI job (`windows-teardown`) passes; a full
+Windows workspace run is carried to Phase 7 (decision #3).
 
 ### Phase 7 — Execution Quality And Isolation
 

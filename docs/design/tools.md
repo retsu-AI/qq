@@ -303,9 +303,9 @@ handle, so a later read says `spill_evicted` — the cap did its job —
 rather than `spill_missing`. Handles are session-scoped: a child session
 holding a parent's handle reads `handle_foreign_session`, never data.
 Spills delete with the session; `qq sessions prune` touches only sessions
-with no runs, which have none. Shell captures are cut at 128 KiB before
-they reach the boundary, so a shell spill is at most that until T6/T7
-raise the capture cap.
+with no runs, which have none. Shell captures are cut at 128 KiB
+(`MAX_SHELL_OUTPUT_BYTES`) before they reach the boundary, so a shell spill
+is at most that.
 
 ### Context Budget
 
@@ -338,10 +338,9 @@ and keeps the schema for each tool in one place:
   `ranges`, or the file's `outline` or `info`, over a 4 MiB scan; the header
   carries the content hash the staleness guard records (§ Reading Files).
 - `tree` — depth-bounded, ignore-aware directory tree with sizes and
-  per-directory counts (§ Read-Side Walk). `list_dir` is its hidden alias
-  (`tree depth=1`, ignored entries included) for one release so persisted
-  transcripts and grants keep resolving; it is never advertised and resolves
-  only while `tree` is exposed.
+  per-directory counts (§ Read-Side Walk). `list_dir`, the pre-v0.1.0 name,
+  is not a tool: persisted transcripts that carry it still render and still
+  prune as read-only, but a call to it is unknown.
 - `search` — ignore-aware content, name, definition, and reference search
   with an exact resume cursor (§ Read-Side Walk).
 - `edit_file` — a batch of up to 32 replace or insert edits across files,
@@ -524,8 +523,9 @@ lines.
 **`mode=info`.** `read <path> info size= lines= h: utf8= eol=lf|crlf|none
 perms= binary=[ mime=]`, one line, for any file including binaries (which
 `lines` and `outline` refuse with `not_text`). Images (`png jpg gif webp`)
-answer `info` plus `hint=image_unsupported_by_model` from every mode until
-T11 attaches an image block for models that accept one.
+answer `info` plus `hint=image_unsupported_by_model` from every mode; a
+`view_image` tool and provider image content block are proposed in
+`docs/plans/tool-layer.md` (T11).
 
 Failures are typed: `invalid_ranges`, `invalid_offset`, `invalid_limit`,
 `invalid_if_changed_since`, `range_out_of_bounds` (with `last_line=`),

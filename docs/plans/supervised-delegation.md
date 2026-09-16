@@ -1,18 +1,15 @@
 # Supervised Delegation, Continuation, And Audit
 
-Status: proposed 2026-09-03. D1–D5 and D6a implemented 2026-09-03; the D6b
-arm overlays and runbook are in `benchmarks/arms/`; the paid paired runs and
-the default decisions they feed have not been made. This plan is a companion to
-[`speed-first-extensible-agent-harness.md`](./speed-first-extensible-agent-harness.md)
-and requires the amendments listed in [Amendments](#amendments-to-existing-plans)
-before D4 or D5 may land.
-
-The 2026-09-04 follow-up review reopened D4 ownership (H23) and D2 remaining
-budget admission (H24), scheduled by the backend plan's Phase 5a. Both H23
-ownership slices are implemented and locally validated on Linux; native Windows
-teardown remains unqualified. H24's admission and accounting repair is implemented
-2026-09-05; its validation and performance receipt is in the backend plan. The
-next implementation slice is H25 live credential binding.
+Status: D1–D5 and D6a shipped (2026-09-03; the H23/H24 ownership and
+budget repairs reopened by the 2026-09-04 review shipped in speed-first
+Phase 5a, `1e6a901`/`f482b37`). Open: D6b — the paid paired runs whose arm
+overlays and runbook are in `benchmarks/arms/`, and the delegation-depth and
+worker-model defaults they decide. Ledger:
+[`progress/supervised-delegation.md`](./progress/supervised-delegation.md).
+This plan is a companion to
+[`speed-first-extensible-agent-harness.md`](./speed-first-extensible-agent-harness.md);
+the amendments it required of other documents are all applied (see
+[Amendments](#amendments-to-existing-plans)).
 
 This plan covers four related runtime behaviors:
 
@@ -577,33 +574,14 @@ D1, D2, and D6a are independent and may proceed in parallel worktrees.
 
 ## Amendments To Existing Plans
 
-These must be applied, with the reasoning recorded, before D4 or D5 lands.
-
-1. `speed-first-extensible-agent-harness.md` §Non-Goals, "editing sub-agents
-   before snapshots, isolation, and conflict semantics are implemented" →
-   "parallel or unsupervised editing sub-agents before snapshots, isolation,
-   and conflict semantics are implemented; one serialized `Supervised` write
-   child per run is permitted by `supervised-delegation.md`."
-2. `terminal-bench-readiness.md` R7, "Keep depth one and current read-only
-   semantics" → "Depth is configurable up to a ceiling of three, default one
-   until the A3 arm wins; write authority is limited to serialized
-   `Supervised` depth-one children." "Do not add editing sub-agents,
-   automatic swarms, or worktree orchestration" → keep swarms and worktree
-   orchestration; strike "editing sub-agents".
-3. `terminal-bench-readiness.md` guardrail (forced final verification only
-   after paired evidence) → "A heuristic-triggered audit may ship default
-   `Heuristic` provided the B1 arm runs before the next published baseline
-   and the default becomes `Off` if it loses."
-4. `architecture.md` "When editing subagents are introduced, each receives an
-   isolated Git worktree or sandbox" → scope to parallel editing subagents;
-   a serialized supervised child shares the checkout because its parent is
-   blocked and sibling writers serialize.
-5. Retired 2026-09-04: the sub-agent and model-reviewed-approval plans were
-   removed; this plan is the owner of mutating children, depth, and the
-   widened reviewer request.
-6. Retired with item 5.
-7. `docs/design/tools.md` and `protocol.md` still state `ask` is the default
-   approval mode; code defaults to `auto`. Fix alongside D4.
+All applied by 2026-09-16. For the record: (1) speed-first § Non-Goals permits
+one serialized `Supervised` write child per run; (2–3) the readiness plan's R7
+depth and audit-guardrail text was replaced (depth configurable to a ceiling of
+three, default one; heuristic audit may ship default `Heuristic` pending the B1
+arm); (4) `architecture.md` scopes isolated worktrees to *parallel* editing
+subagents; (5–6) the sub-agent and model-reviewed-approval plans were retired
+into this one; (7) `tools.md` and `protocol.md` state `auto` as the default
+approval mode.
 
 ## Architecture Review Answers
 

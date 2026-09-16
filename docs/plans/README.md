@@ -20,11 +20,11 @@ system boundaries and [`workflow.md`](./workflow.md) before starting a slice.
 | File | Purpose |
 | --- | --- |
 | [`workflow.md`](./workflow.md) | Slice protocol, ledger rules, review, escalation, dispatch skeletons |
-| [`speed-first-extensible-agent-harness.md`](./speed-first-extensible-agent-harness.md) | Backend plan: compiled plan, protocol, extension lanes, hot path, perf gates; Phases 5a–9 and HC1–HC4 |
+| [`speed-first-extensible-agent-harness.md`](./speed-first-extensible-agent-harness.md) | Backend plan: compiled plan, protocol, extension lanes, hot path, perf gates. Phases 0–6 closed; Phases 7–9 gated; two quiet-host recordings open |
 | [`terminal-bench-readiness.md`](./terminal-bench-readiness.md) | Harness reliability and Terminal-Bench program; R6–R8 open (R6 candidate designs moved to `tool-layer.md`) |
-| [`tool-layer.md`](./tool-layer.md) | Slim, safe, token-efficient built-ins: bounding/spill primitives, `search`/`read_file`/`tree`/`edit_file` v2, shell classifier and `exec`, `fetch`, `ask_user`, `@` mentions; T1–T14 |
+| [`tool-layer.md`](./tool-layer.md) | Slim, safe, token-efficient built-ins. T1–T8 and T12 shipped (v0.1.0, #45, #49); open: T9 `fetch`, T11 `view_image`, T13 ablations, T14 `select_tools` index; T10 `terminal` gated |
 | [`supervised-delegation.md`](./supervised-delegation.md) | Continuation, roster, supervised children, audit; D6b open |
-| [`multi-surface-clients.md`](./multi-surface-clients.md) | Web, desktop, and mobile clients over many headless servers; client-core W1–W3, server readiness S1–S6, then U/D/M |
+| [`multi-surface-clients.md`](./multi-surface-clients.md) | Web, desktop, and mobile clients over many headless servers. W1, W2, S1, S3 shipped; open: S2 enrollment, S4 exposure, W3, then U/D/M |
 | [`run-snapshots.md`](./run-snapshots.md) | Proposed: reversible mutating-run state |
 | [`lsp-diagnostics.md`](./lsp-diagnostics.md) | Proposed: diagnostics integration |
 | [`templates/`](./templates/) | Slice header, pre-flight, receipt, PR body; review checklist |
@@ -34,14 +34,15 @@ system boundaries and [`workflow.md`](./workflow.md) before starting a slice.
 
 | # | Next slice | Plan | Why now |
 | ---: | --- | --- | --- |
-| 1 | Phase 6 — H20 control admission first, then behavioral H21/H27/H28 and correctness H22, then H18, measured H19, and mechanical consolidation | `speed-first-…` | Closes the carried eight-stream service-gap gate (23–28 ms vs the 20 ms target), removes the 13 `sleep(1 ms)` overload loops, repairs cache accounting and context-source identity, then moves the 1 MiB heap and cold `plan_for` gates |
-| 2 | Phase 5b — HC1, HC3, HC4 headless contract (parallel worktree) | `speed-first-…` and [`../design/headless-contract.md`](../design/headless-contract.md) | HC2 shipped; HC3 must land before the mechanical `sessions.rs` split |
+| 1 | T9 `fetch` (`Network` class; completes ADR-0021) | `tool-layer.md` | T8 shipped `Interactive` (#49); `Network` completes the approval lattice the classifier introduced, and `fetch` is the last catalog gap from the 2026-09 audit |
+| 2 | T13 ablation harness (A0–A4s arms) | `tool-layer.md` | Every tool-layer target (≥25 % fewer calls, ≥35 % fewer tokens) is unmeasured until this runs; it also feeds R6's evidence gate for T10 and H10 |
 | 3 | D6b paired evaluation (paid runs) and the default decisions it feeds | `supervised-delegation.md` | Decides delegation depth and worker-model defaults with evidence |
-| 4 | T1–T4 tool-layer "token" release (primitives, `search`/`tree`, `read_file` v2, spill store), then T5–T7 "safety" release; R7 sub-agent economics; R8 remaining warm-path candidates | `tool-layer.md`, `terminal-bench-readiness.md` | Largest measured token and safety gaps in the 2026-09 catalog; replaces the R6 candidates and feeds H10 |
-| 5 | Phase 7 — H10 process sandbox | `speed-first-…` | Gated on R6 and a platform threat model |
-| 6 | Phase 8 — H11 product adapters; Phase 9 — H12 qualification | `speed-first-…` | H11 needs a real consumer; H12 closes the story |
-| 3a | Multi-surface Phases 1–2 — W1, S1 first, then W2, S2, S3; tracer bullet before Phase 3 | `multi-surface-clients.md` | Touches `qq-client`, `qq-server`, and `qq-tui` extraction, not the store hot path; can run in a parallel worktree beside Phase 6 |
-| — | Phase 5a quiet-host H0 tail acceptance; full Windows run | `speed-first-…` | Implemented; tails not repeatable on the shared host; retained, not waived |
+| 4 | Multi-surface S2 enrollment (ADR-0015) and S4 exposure (ADR-0016); then W3 | `multi-surface-clients.md` | W1/W2/S1/S3 shipped; a remote client is blocked on authentication |
+| 5 | T14 `select_tools` index; T11 `view_image` | `tool-layer.md` | Small; T11 needs the provider image content block |
+| 6 | Phase 7 — H10 process sandbox | `speed-first-…` | Gated on R6 (T13 evidence, T10 decision) and a platform threat model |
+| 7 | Phase 8 — H11 product adapters; Phase 9 — H12 qualification | `speed-first-…` | H11 needs a real consumer; H12 closes the story |
+| — | Quiet-host recordings: Phase 5a H0 tail comparison; H20 eight-stream p95 then the 50→20 ms budget | `speed-first-…` | Implemented; tails not repeatable on the shared host; retained, not waived |
+| — | Seven H22 deferrals (`StaticHttpAuth`, headless writer, config parse-once, reviewer via `PlanCache`, run-loop enums, args-parse-once, `Arc` calls) | `speed-first-…` § Bundled Fixes | Each is its own slice when that code is next opened |
 | — | Run snapshots, LSP diagnostics | proposed plans | No scheduled slice |
 
 ## Ownership
@@ -58,12 +59,6 @@ system boundaries and [`workflow.md`](./workflow.md) before starting a slice.
 | Reference audit of Codex, OpenCode, Pi, fx, and the Hermes boundary | [`../design/harness-audit-2026-08.md`](../design/harness-audit-2026-08.md) (research, not a plan) |
 | Per-feature harness catalog and ranked QQ gaps | [`../design/harness-catalog-2026-09.md`](../design/harness-catalog-2026-09.md) (research, not a plan) |
 | Shared files, dependency and toolchain bumps, ADR numbering | [`progress/root.md`](./progress/root.md) |
-
-Shipped and removed 2026-09-04: TUI rearchitecture and refinement, compaction,
-model-reviewed approvals, read-only sub-agents (Phases A–C), provider
-rearchitecture, client parity (Tiers 1–2), the proposed `qq-core` physical
-extraction (superseded by D9), and the Terminal-Bench baseline-repair tranche
-(folded into readiness Phase 6 gates).
 
 ## Conventions
 

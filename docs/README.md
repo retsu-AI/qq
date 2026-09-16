@@ -19,8 +19,9 @@
 - [`headless-contract.md`](design/headless-contract.md) — `qq run` JSONL/exit
   contract and the supervisor boundary.
 - [`providers.md`](design/providers.md) — provider validation standard.
-- [`tools.md`](design/tools.md) — tool loop, containment, approvals, shell,
-  MCP.
+- [`tools.md`](design/tools.md) — tool loop, built-in tools and their
+  bounding/spill boundary, containment, edit semantics, shell classification,
+  `@` mentions, approvals, MCP and embedded hosts.
 - [`transcript.md`](design/transcript.md), [`theme.md`](design/theme.md) —
   TUI rendering.
 - [`harness-audit-2026-08.md`](design/harness-audit-2026-08.md) — reference

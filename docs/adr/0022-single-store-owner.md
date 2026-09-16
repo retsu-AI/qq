@@ -1,6 +1,6 @@
 # ADR-0022 — One owner per session store: an advisory lock is taken before the database is opened and before recovery runs
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-11
 **Deciders:** speed-first plan HC1 (headless contract)
 **Implements:** [`architecture.md` § Persistence](../design/architecture.md#persistence),

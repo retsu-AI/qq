@@ -13,11 +13,11 @@ newest last.
 | T5 | `edit_file` v2 batch/cascade/anchors/dry-run; `write_file` flags | Shipped (#37, `95fef1b`) | `feat/tool-layer-t5-edit-v2` | Evidence `target/qq-perf/t5-2026-09-14/` |
 | T6 | Shell classifier + `Forbidden` decision; shell v2 env/cleared environment; builtin preference | Shipped (#40, `91809b2`) | `feat/tool-layer-t6-classifier` | Evidence `target/qq-perf/t6-2026-09-14/`; ADR-0020 |
 | T7 | `exec`, env allowlist, prefer-built-in nudge, `builtin_preference` | Shipped (#41, `c3b5088`) | `feat/tool-layer-t7-exec` | env/nudge landed in T6 |
-| T8 | `ask_user` + `Interactive` class + protocol 21 + headless `needs_input` | In review | `feat/tool-layer-t8-ask-user` | 2026-09-15; ADR-0021 (shared with T9); evidence `target/qq-perf/t8-2026-09-15/` |
+| T8 | `ask_user` + `Interactive` class + protocol 21 + headless `needs_input` | Shipped (#49, `7956e8e`) | [#49](https://github.com/retsu-AI/qq/pull/49) | 2026-09-15; ADR-0021 (shared with T9); evidence `target/qq-perf/t8-2026-09-15/` |
 | T9 | `fetch` + `Network` class | Planned | | |
 | T10 | `terminal` | Planned (gated) | | Ships only on R6-terminal evidence |
 | T11 | `view_image` + provider image block | Planned | | `vision` feature |
-| T12 | `@` mentions: grammar, `range` field, dirs/globs, `@diff`/`@sha`, completion | Shipped (#45, `896ea93`) | `feat/tool-layer-t12-mentions` | Evidence `target/qq-perf/t12-2026-09-14/`; protocol bump folded into T8 |
+| T12 | `@` mentions: grammar, `range` field, dirs/globs, `@diff`/`@sha`, completion | Shipped (#45, `896ea93`) | [#45](https://github.com/retsu-AI/qq/pull/45) | Evidence `target/qq-perf/t12-2026-09-14/`; protocol bump folded into T8 |
 | T13 | Ablation harness A0–A5 | Planned | | Runs after T7 and after T12 |
 | T14 | `select_tools` lexical index | Planned | | |
 
@@ -26,8 +26,8 @@ newest last.
 ### 2026-09-11 — plan opened
 
 Research landed in `docs/design/harness-catalog-2026-09.md`; plan written from
-it. No slice in progress. Pending root requests: workspace dependency
-promotion for T6; ADR numbers for T4, T6, T8/T9 (see `root.md`).
+it. No slice in progress. Root requests (workspace dependency promotion for
+T6; ADR numbers for T4, T6, T8/T9) were all granted; see `root.md`.
 
 ### 2026-09-11 — T1 in progress → in review
 
@@ -40,7 +40,7 @@ Tests: 26 added (21 `tools::output`, 2 dispatch, 1 turn budget, 1 pruning stub, 
 Gates: `tool_dispatch` A/B 15 pairs median 51.5 → 51.4 µs; A/A control 49.9 / 48.4 µs (Δ inside noise). New `tool_output` bench: fits-no-op 8 KiB 2.0 µs; shell 16 KiB from 128 KiB 21 µs; 128 KiB from 1 MiB 122 µs; mask 128 KiB source-like 35 µs, x-filled worst case 101 µs. `r4-worker --case shell` passes on the new contract (completion 93 ms).
 Deviations: masking is a hand-rolled byte matcher, not `regex` — no new dependency, no root request; the `regex` row in the plan's dependency table is deferred to T2/T6. Spill handle field on `ToolOutput` waits for T4 (marker says `not stored`). Shell `cwd` already existed.
 Docs: `docs/design/tools.md` § Output Bounding (new), § Built-In Tools, § Shell Execution, § Context Budget.
-Open: T4 replaces `not stored` with a handle; TUI still renders `list_dir`/`search` counts from body lines until T2 headers land.
+Open (closed by T2/T4): T4 replaced `not stored` with a handle; T2's headers replaced the TUI's body-line counts.
 Evidence: `target/qq-perf/t1-2026-09-11/` (untracked).
 
 ### 2026-09-12 — T1 shipped; T2 in progress → in review

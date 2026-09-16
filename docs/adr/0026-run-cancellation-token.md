@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-09-15
 **Deciders:** speed-first plan H22.2 (deferred from D8 / H20)
-**Implements:** [`speed-first-extensible-agent-harness.md` § D8](../plans/speed-first-extensible-agent-harness.md#d8--control-admission-and-shared-commit-h20-implemented)
+**Implements:** [`speed-first-extensible-agent-harness.md` § D8](../plans/speed-first-extensible-agent-harness.md#d8--control-admission-and-shared-commit-h20)
 (remaining acceptance), [`architecture.md` § Runtime](../design/architecture.md#runtime)
 
 ## Context

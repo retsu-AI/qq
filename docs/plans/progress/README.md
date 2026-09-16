@@ -7,14 +7,14 @@ under `target/qq-perf/` and never committed.
 
 | File | Owner | Covers |
 | --- | --- | --- |
-| [`speed-first.md`](./speed-first.md) | agent on the speed-first plan | H and HC slices; Phases 5a acceptance, 5b, 6–9 |
+| [`speed-first.md`](./speed-first.md) | agent on the speed-first plan | H and HC slices; two open quiet-host recordings; Phases 7–9 when gated |
 | [`terminal-bench.md`](./terminal-bench.md) | agent on the readiness plan | R6–R8 and the Terminal-Bench evaluation program |
 | [`supervised-delegation.md`](./supervised-delegation.md) | agent on the delegation plan | D6b paired evaluation and default decisions |
 | [`multi-surface-clients.md`](./multi-surface-clients.md) | agent on the multi-surface plan | W, S, U, D, M slices and the tracer-bullet gate |
 | [`tool-layer.md`](./tool-layer.md) | agent on the tool-layer plan | T1–T14 built-in tool slices and the A0–A5 ablation |
 | [`root.md`](./root.md) | lead | Shared-file changes, dependency and toolchain bumps, ADR number allocation, cross-plan requests |
 | [`decisions-needed.md`](./decisions-needed.md) | anyone appends; lead resolves | Open questions with the conservative default taken |
-| `g-<name>.md` | lead | Phase gate runs on `main` with exact SHA, commands, counts, and what was not tested |
+| [`g-phase-5b.md`](./g-phase-5b.md), [`g-phase-6.md`](./g-phase-6.md), `g-<name>.md` | lead | Phase gate runs on `main` with exact SHA, commands, counts, and what was not tested |
 
 Status vocabulary: `Planned` · `In progress` · `In review` · `Shipped (sha)`
 · `Blocked (reason)` · `Dropped (reason)`.

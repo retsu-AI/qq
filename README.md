@@ -3,8 +3,11 @@ A composable toolkit for building, running, and orchestrating AI agents.
 
 Running `qq` with no subcommand opens the interactive TUI against a
 user-scoped background server (`qq serve` runs one in the foreground).
-Agents read, search, and edit workspace files, run shell commands, and
-call MCP tools — every mutating action gated by an approval policy.
+Agents read, search, and edit workspace files, run shell commands (each
+classified by a real parser into allow / prompt / forbidden), call MCP and
+embedded tools, page through their own oversized outputs, and ask the user a
+question — every mutating action gated by an approval policy. `@path:10-20`
+in a prompt attaches those lines.
 Documentation lives in `docs/` (`design/` for the system as built, `adr/`
 for decisions, `plans/` for what is next; see `docs/README.md`).
 
@@ -104,16 +107,20 @@ the request URL.
 
 Sessions run under an approval mode: `read-only` (only read-only tools
 execute), `ask` (edits, writes, shell, and MCP calls each request
-approval), or `auto` (workspace-contained edits and allowlisted shell
-prefixes run unprompted). Approval prompts show the exact command or an
-edit diff, and "approve for session" records a grant — shell grants are
-command prefixes matched at word granularity. Nonzero exits and denials
+approval), `auto` (workspace-contained edits, allowlisted shell prefixes,
+and shell commands the classifier rates `allow` run unprompted; `prompt`-tier
+commands still ask), `supervised` (a configured reviewer model adjudicates
+each held call), or `full` (everything runs except `forbidden` shell shapes,
+which no mode executes). Approval prompts show the exact command, the
+classifier's verdict and the rules behind it, or an edit diff; "approve for
+session" records a grant — shell grants are command prefixes matched at word
+granularity. Nonzero exits and denials
 return to the model as tool errors, not run failures. See
 `docs/design/tools.md` for the full policy design.
 
 Headless runs answer approvals themselves: `qq run --approval read-only`
-denies every held call, `auto` denies only what the policy escalated (dangerous
-shell), and `full` approves everything. Between `auto` and `full`,
+denies every held call, `auto` denies what the classifier rated `prompt`,
+and `full` approves everything but `forbidden` shapes. Between `auto` and `full`,
 `--allow-tool <name>` and `--allow-shell "<prefix>"` (both repeatable) approve
 a held call for the session with the same word-boundary prefix rule the
 interactive "approve for session" uses, so `--allow-shell "cargo test"` covers
