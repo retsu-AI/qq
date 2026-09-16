@@ -39,3 +39,19 @@ after; no new tail budget. Other findings remain unstarted in this repair series
 - Performance comparison pending. Deviation: the baseline is built from
   pristine production sources at `20d4f6b` after implementation, with only
   the identical test fixture added; no pre-edit timing was captured.
+
+### F01 local receipt — 2026-09-16
+
+- Commits: red regression `72877e9`; implementation `977d28b`.
+- Workspace: 1,443 passed / 5 ignored; fmt, Clippy all targets/features, build pass.
+- Release regressions: baseline 0/3 pass; candidate 3/3 pass.
+- Review: independent spec and standards approve; no blocking code findings.
+- Release comparison: 30 alternating pairs; 900 follow-ups per case/arm.
+- Prunable reads median: 50.983 → 50.674 ms; retained shell: 51.404 → 50.802 ms.
+- I/O `some avg10` 27.37–46.50%; same-binary adjacent median variation up to
+  147%. Timing is inconclusive; no speedup or quiet-host qualification claimed.
+- No new tail budget. Quiet-host latency qualification remains open (audit F15).
+- Raw logs, binaries, hashes, summary: `target/qq-perf/f01-2026-09-16/`.
+- Upstream fetch PR #50 landed during measurement; merge-tree with `b75ebac`
+  is clean. Measurements compare this repair on the pinned pre-fetch base.
+- Protocol, descriptor, schema, dependency graph unchanged by this repair.
