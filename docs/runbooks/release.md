@@ -65,10 +65,12 @@ Choosing the product number: any contract bump → `MINOR` while `0.x`
 
 ```text
 qq 0.2.0 (151fe94 2026-09-09)
-protocol 16, capabilities 1, descriptor 5, store schema 25
+protocol 21, capabilities 1, descriptor 6, store schema 28
 ```
 
-The server reports the same build as `0.2.0+151fe94.2026-09-09` (semver build
+(Illustrative; `docs/design/protocol.md` § Versioning carries the current
+contract numbers.) The server reports the same build as
+`0.2.0+151fe94.2026-09-09` (semver build
 metadata, no spaces) in `/v1/health`, the discovery file, and capabilities.
 A long-running `qq serve` left over from before an upgrade is therefore
 distinguishable from the TUI that connects to it even when the protocol

@@ -1,6 +1,6 @@
 # Headless Contract And Hosting Boundary
 
-Status: design document, 2026-09-05. Describes the contract an external
+Describes the contract an external
 supervisor consumes when it runs `qq` non-interactively, and the boundary
 between what belongs in this repository and what belongs to a product that
 hosts it. Companion to [`architecture.md`](./architecture.md), which owns crate
@@ -325,7 +325,7 @@ validation and repair turns, with bounded work and measured performance.
 | Typed final output | **Shipped** 2026-09-12 (`feat/hc3-typed-final-output`; ADR-0014). `--output-schema PATH` and `--output-repair-turns N` compile a bounded, reference-free JSON Schema subset before configuration loads; the contract rides `submit_prompt.output`, is persisted on the run row and re-enforced after restart; core validates the answer that survived audit and steering, repairs within the allowance, and settles `Completed` with `final_output` (`valid` with the parsed value, or `invalid` with bounded `<pointer>: <message>` errors) written in the settlement transaction and published on `run_finished` and `outcome`. `PROTOCOL_VERSION` 18 → 19, store schema 26 → 27. Valid JSON is not a correct answer; the supervisor still verifies | — | HC3 |
 | Pinning the contract | **Shipped** 2026-09-13 (`feat/hc4-headless-goldens`; ADR-0023). The record shapes moved into `qq-protocol` as `HeadlessRecord`/`HeadlessTrial`/`HeadlessOutcome`/`HeadlessStatus`; the binary emits through a borrowing view whose encoding a test pins to the owned type. `crates/qq-protocol/tests/fixtures/headless/v19/` holds ten complete streams (every exit status, the default payload, every optional trial field, both `final_output` verdicts) checked byte-for-byte and for framing; `v18/` holds the default-path streams decode-only. The binary's own tests decode every stdout line strictly and require it to re-encode identically | — | HC4 |
 | Exit code `3` ambiguity | Shared by `timed_out` and `budget_exhausted` | Keep the codes; the status field is authoritative and the fixtures pin that. Splitting the code is a breaking change with no consumer asking for it. Revisit only with a real request | none |
-| Static binary | musl build fails in Cargo build scripts | Packaging, not contract. Tracked outside this document | none |
+| Static binary | **Shipped**: the release workflow builds `x86_64`/`aarch64-unknown-linux-musl` (`.github/workflows/release.yml`) | — | release runbook |
 
 HC3 accepts at most 64 KiB of schema JSON, 32 nesting levels, and 4096 JSON
 values, including enum values. It rejects unsupported keywords and all
@@ -355,12 +355,13 @@ unchanged (`read_tool_loop` median 54.8 → 52.2 µs, within noise).
   and event vocabulary. The JSONL record shapes above are part of that
   contract and bump with it (ADR-0023); their golden streams live under
   `crates/qq-protocol/tests/fixtures/headless/v<PROTOCOL_VERSION>/` and
-  every retained earlier directory must still decode. Version 19 added the
-  optional `submit_prompt.output`, `run_finished.final_output`, and the
-  trial/outcome fields above; every default-path version-18 stream is
-  byte-identical after the version field changes (the `v18/` and `v19/`
-  default-path goldens differ only there), and `capabilities.limits` gained
-  four declared bounds.
+  every retained earlier directory must still decode (`protocol.md`
+  § Versioning is the per-version changelog). Version 19 added the optional
+  `submit_prompt.output`, `run_finished.final_output`, and the trial/outcome
+  fields above; every default-path version-18 stream is byte-identical after
+  the version field changes, and `capabilities.limits` gained four declared
+  bounds. Version 21 added the `needs_input` status (exit code 5) for a run
+  that stopped at an unanswered `ask_user` question.
 - New fields are additive and optional and are omitted, never `null`, when
   absent. A supervisor may ignore unknown fields and must fail closed on
   unknown `type` or `status` values; `qq_protocol::HeadlessRecord` itself

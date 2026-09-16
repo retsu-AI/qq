@@ -1,9 +1,9 @@
 # ADR-0020 — Shell `Forbidden` is a policy decision above every approval mode, produced by a CST classifier whose rules are self-tested data
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-14
 **Deciders:** tool-layer plan T6
-**Implements:** [`tool-layer.md` § D5](../plans/tool-layer.md#d5--shell-v2-exec-and-the-command-classifier-t6-t7),
+**Implements:** [`tools.md` § Shell Classification](../design/tools.md#shell-classification) (design as built; the plan's D5 is a pointer to it),
 [`tools.md` § Approval Policy](../design/tools.md#approval-policy)
 
 ## Context

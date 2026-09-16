@@ -1,9 +1,9 @@
 # ADR-0019 — Spill handles are durable session state: cut tool outputs are stored with their result, cited by a content-addressed handle, masked inline and exact on explicit read
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-14
 **Deciders:** tool-layer plan T4
-**Implements:** [`tool-layer.md` § D4](../plans/tool-layer.md#d4--spill-store-and-read_tool_result-t4),
+**Implements:** [`tools.md` § Spilled Outputs](../design/tools.md#spilled-outputs) (design as built; the plan's D4 is a pointer to it),
 [`tools.md` § Output Bounding](../design/tools.md#output-bounding)
 
 ## Context

@@ -189,8 +189,10 @@ xtask/
   line). Its session model is `qq_client::state::SessionStore`, constructed
   with `terminal_safe_character` as the sanitizer; `App::reduce_event` maps
   `StateEffect`s onto terminal effects, pending-intent bookkeeping, and the
-  session picker. It communicates through `qq-client` and the protocol and
-  does not depend directly on `qq-core` or application configuration. Rendering is retained:
+  session picker. It communicates through `qq-client` and the protocol; its
+  one `qq-core` dependency is `qq_core::mentions`, which resolves `@`
+  references through the same contained walk and bounded read the tools use
+  (T12). It does not depend on application configuration. Rendering is retained:
   one `TranscriptCache` holds laid-out messages keyed by width for the shown
   session, streaming messages lay out only their open block,
   syntax highlighting runs off the render tick, and frames are diffed by row
@@ -726,8 +728,11 @@ message and per turn. Assembly stubs read-only tool results older than the
 last four model turns; a result is prunable when its `tool_calls.effect`
 column (the catalog effect class the call was admitted under, schema 26) is
 `read_only`, with rows recorded before that column falling back to the
-built-in read-only names. Workspace path canonicalization runs on a blocking
-thread before the command reaches the store worker.
+built-in read-only names. Tool outputs the bounding boundary cut are stored in
+`tool_spills` (schema 28) in the same transaction as the result row, so a
+handle cited in a result always resolves after a crash or never appears.
+Workspace path canonicalization runs on a blocking thread before the command
+reaches the store worker.
 
 Caller budgets are core-owned. `submit_prompt.limits` carries a versioned
 `RunLimits` (wall clock, model turns, tool calls, total tokens, cost) that is
@@ -1001,12 +1006,13 @@ the workspace defaults to the canonical current working directory. Tool paths
 must remain within the selected workspace unless the user explicitly grants
 wider access.
 
-The first useful tool set is deliberately small:
-
-- Read files and directories.
-- Search file names and contents.
-- Apply explicit file changes.
-- Execute bounded shell commands.
+The built-in tool set is deliberately small and is specified in `tools.md`
+§ Built-In Tools: `read_file`, `tree`, `search`, `edit_file`, `write_file`,
+`shell`, `exec`, plus `read_tool_result` over spilled outputs and the durable
+`search_history`. Every result passes one bounding boundary (bytes, lines,
+per-turn budget; anything cut is stored under a content-addressed handle,
+ADR-0019); shell and `exec` commands are classified by a CST parser into
+`Allow`/`Prompt`/`Forbidden` before policy (ADR-0020).
 
 Tool calls and results are persisted and streamed so the user can understand
 what the agent did. Destructive or externally visible operations require an
@@ -1097,8 +1103,10 @@ must be supported by a benchmark and must not make routine development hostile.
 The initial repository is pure Rust. Do not create or scaffold any of the
 following yet:
 
-- React or other web frontend.
-- Native or cross-platform mobile application.
+- Web and mobile client surfaces beyond `qq-client`'s transport and state
+  (W1/W2 shipped). Their plan is
+  [`docs/plans/multi-surface-clients.md`](../plans/multi-surface-clients.md);
+  a browser client waits on remote enrollment and exposure (ADR-0015, S4).
 - JavaScript/TypeScript packages or package workspace.
 - Separate server executable.
 - Distributed workers or cloud control plane. These belong to a supervisor

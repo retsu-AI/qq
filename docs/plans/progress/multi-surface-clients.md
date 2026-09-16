@@ -7,7 +7,7 @@ dated entries appended below, newest last.
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | W1 | Transport-agnostic `qq-client`; `wasm32` build | Done | [#15](https://github.com/retsu-AI/qq/pull/15) `5080f85` | `native`/`wasm` features; `ServerConnection` |
-| W2 | Extract reducer into `qq-client::state` | In review | `feat/multi-surface-w2-client-state` | `ReduceContext`/`StateEffect` seam |
+| W2 | Extract reducer into `qq-client::state` | Done | [#19](https://github.com/retsu-AI/qq/pull/19) `e0c8121` | `ReduceContext`/`StateEffect` seam |
 | W3 | Multi-server client model | Planned | | Needs W1, W2, S1 |
 | S1 | Stable `ServerId`; protocol 17 | Done | [#14](https://github.com/retsu-AI/qq/pull/14) `fff4ec8` | Reuses the store id as the server identity |
 | S2 | Client enrollment | Planned | | ADR-0015 drafting; second review required |
@@ -121,3 +121,9 @@ removed; notices are absorbed inside `App::reduce_event`.
 Docs: `docs/design/architecture.md` (`qq-client`, `qq-tui` paragraphs, tree),
 `AGENTS.md` repository map, plan W2 fixture path v16→v17.
 Open: `ClientPort: Send` bound (port.rs) is still native-only shaped; W3.
+
+### 2026-09-16 — W2 recorded shipped
+
+W2 merged as #19 (`e0c8121`) on 2026-09-10; the row above had stayed at "In
+review". Phase A (W1, S1, S3) and W2 are the shipped set; S2 and S4 wait on
+ADR-0015/0016 and the rustls root request. No slice in progress.

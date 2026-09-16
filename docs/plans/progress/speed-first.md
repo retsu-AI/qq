@@ -7,8 +7,8 @@ dated entries appended below, newest last.
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | 5a-accept | Full version-4 H0 comparison on a quiet host | Planned | | Baseline `1c08cef`, candidate `main`. Prior recordings on the shared host: A/A fails the same tail gates as A/B; retained, not waived |
-| 5a-windows | Full native Windows workspace run | Planned | | Targeted `windows-teardown` CI job passes; full qualification not claimed |
-| H20 | Wake-driven control admission; delete 13 `sleep(1 ms)` loops; ≤20 ms output gap | Done; p95 open | merged in #22 (`61682be`; slices `ab6de6f`, `d05e474`) | Gap median 24 → 20 ms, p95 28 → 33 ms (bimodal tail, 27/30 samples ≤22 ms). Executable budget stays 50 ms until a quiet-host p95 qualifies. ADR-0011 |
+| 5a-windows | Full native Windows workspace run | Carried to Phase 7 | | Decision #3 resolved 2026-09-16: the targeted `windows-teardown` CI job is the Phase 6 evidence; a full run gates H10, whose sandbox adapter is the next platform-specific work |
+| H20 | Wake-driven control admission; delete 13 `sleep(1 ms)` loops; ≤20 ms output gap | Done; quiet-host p95 open | merged in #22 (`61682be`; slices `ab6de6f`, `d05e474`) | Gap median 24 → 20 ms, p95 28 → 33 ms (bimodal tail, 27/30 samples ≤22 ms). Executable budget stays 50 ms until a quiet-host p95 qualifies. ADR-0011 |
 | H21.1 | Behavioral settlement: `RunIdentity`, `RunSettlement`, `PersistenceFault`, teardown-before-terminal structural | Done | a+b merged in #22 (`a67b186`, `83647e0`); c merged in #24 (`e6a1399`) | Part c: `settle_run` null guard, `TeardownComplete`, ADR-0012 accepted, 2 regression tests |
 | H27 | Superseded-generation accounting, atomic refresh admission, guard reclamation | Done | merged in #22 | Pinned LRU and admission already existed (`src/plan.rs`) |
 | H28 | Typed context-source capacity error; sources in descriptor | Done | merged in #22 | `DESCRIPTOR_VERSION` 5 → 6. ADR-0013 |
@@ -16,7 +16,7 @@ dated entries appended below, newest last.
 | H18 | `Arc<Vec<Message>>`, prompt prefix, `RawValue` schemas | Shipped (`a13fbfd`, #38) | `perf/h18-shared-transcript-prompt-prefix` | ADR-0024. `provider_encode` added: heap 4.4–4.7x → 1.55–1.80x (shared) / 2.7x (owned); encode 339–559 → 191–406 µs. No protocol or schema bump |
 | H19 | SSE framing, conditional | Shipped (`53bca7d`, #39) | [#39](https://github.com/retsu-AI/qq/pull/39) | Baseline: framing 55–72 % of decode → implemented (ADR-0025). Framing 0.21–0.23x, decode 0.40–0.42x, allocs ÷3.7–5.5. No protocol or schema bump |
 | H21.2 | Mechanical `sessions.rs` split | Shipped (`f905d68`, #44) | [#44](https://github.com/retsu-AI/qq/pull/44) | Ten concern modules + `tests/` tree; text-identical move, 1,401 tests unchanged, no ADR (D9/ADR-0012 already cover the design) |
-| H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, config/auth load, TUI; `Notify` cancellation stacked | In review | [#46](https://github.com/retsu-AI/qq/pull/46) `refactor/h22-2-structural-bundle` → [#47](https://github.com/retsu-AI/qq/pull/47) `perf/h22-2-notify-cancellation` | 29 items across 8 crates, one commit per crate; `StaticHttpAuth`, headless writer, config parse-once, reviewer-via-PlanCache deferred with reasons in the plan |
+| H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, config/auth load, TUI; `Notify` cancellation stacked | Shipped (`486926b` #46, `c7fd5c4` #47) | [#46](https://github.com/retsu-AI/qq/pull/46) → [#47](https://github.com/retsu-AI/qq/pull/47) | 29 items across 8 crates, one commit per crate; `StaticHttpAuth`, headless writer, config parse-once, reviewer-via-PlanCache deferred with reasons in the plan |
 | HC1 | `--correlation`, `--session`, `u32` turns, model-less `config check` | Shipped (`abad2de`, #30) | `feat/hc1-headless-run-contract` | `PROTOCOL_VERSION` 17 → 18; `v17/` fixtures retained decode-only. Per-store owner lock on every open (ADR-0022). `SessionRuntime::abandon_for_test` added for crash-simulation tests |
 | HC3 | `--output-schema`, repair turns, `final_output` | Shipped (`24b6e5c`, #33) | `feat/hc3-typed-final-output` | `PROTOCOL_VERSION` 18 → 19 (`v19/` goldens; `v18/` decode-only); store schema 26 → 27. ADR-0014 accepted. Evidence `target/qq-perf/hc3-2026-09-12/` |
 | HC4 | Headless golden fixtures | Shipped (`43caaea`, #34) | `feat/hc4-headless-goldens` | Record shapes in `qq_protocol::headless`; ten `v19/` golden streams + `v18/` decode-only; ADR-0023 accepted. No protocol or schema bump |
@@ -794,3 +794,26 @@ Open: none. Phase 6 closes when #46 and this PR merge.
 Shipped: none this entry (stack in review). In progress: H22.2 stack.
 Blocked: none. Next: Phase 7 is gated on R6; the seven H22 deferrals are
 the only open Phase 6 items.
+
+### 2026-09-16 — Phase 6 closed
+
+#46 (`486926b`) and #47 (`c7fd5c4`) merged. Phase 6 acceptance: every code
+item met (route-table equality test passes; `settle_run` no-op on every path;
+`PersistenceFault` variants reachable; plan-cache limits and refresh
+atomicity; `TooManyContextSources`; 1 MiB heap ≤2x at 1.39–1.60x; digest
+equality; `sse_decode` 0.4x; `sessions.rs` split behavior-free). Two items
+are quiet-host recordings and stay open in the plan's § Open Recordings: the
+eight-stream p95 and the Phase 5a H0 tail comparison. Gate file
+`g-phase-6.md`; `g-phase-5b.md` written retroactively for HC1–HC4.
+
+Docs reconciled in the same PR (`docs/close-phase-6-reconcile`): plan status
+block, Phases 5b and 6 collapsed to Completed Phases rows, as-built blocks
+reduced to ADR pointers, ADR-0012/0019/0020/0022/0026 statuses, ADR-0027
+(`qq-core` is a public embedding API), `plans/README.md` priorities, decision
+#3 carried to Phase 7. One regression found and fixed in the stacked PR
+below it: #46 had reverted `Cargo.toml` to 0.0.0 (branch cut before v0.1.0,
+merged after); restored with a test that the manifest is never behind the
+newest tag.
+
+Shipped: H22.2. In progress: none. Blocked: none. Next: quiet-host
+recordings; Phase 7 on R6.
