@@ -6,7 +6,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -36,8 +36,8 @@ use thiserror::Error;
 use tokio::sync::{RwLock, Semaphore, mpsc, oneshot, watch};
 
 use crate::{
-    GateDecision, PreparedRequestWeight, PreparedStaticPrefix, RunCapabilities, Runtime,
-    RuntimeEvent, RuntimeToolCall, SpawnAgentFuture, SpawnAgentOutcome, SpawnAgentSpend,
+    GateDecision, PreparedRequestWeight, PreparedStaticPrefix, RunCancellation, RunCapabilities,
+    Runtime, RuntimeEvent, RuntimeToolCall, SpawnAgentFuture, SpawnAgentOutcome, SpawnAgentSpend,
     SpawnRequest, SubagentSpawner, ToolGate, ToolGateFuture, approval,
     catalog::EffectClass,
     runtime::{

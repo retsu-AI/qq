@@ -17,12 +17,12 @@ pub(crate) use dispatch::test_executions_started;
 /// Entry points for the `search_walk` and `edit_batch` benches. Not a
 /// public API.
 pub mod bench_support {
-    use std::{
-        path::Path,
-        sync::{Arc, atomic::AtomicBool},
-    };
+    use std::path::Path;
 
-    use crate::workspace::{FileState, Workspace};
+    use crate::{
+        RunCancellation,
+        workspace::{FileState, Workspace},
+    };
 
     /// Runs one built-in read-side tool against `workspace_root` and returns
     /// its model-facing text.
@@ -33,7 +33,7 @@ pub mod bench_support {
             &FileState::default(),
             name,
             arguments,
-            &super::dispatch::ToolCancellation::new(Arc::new(AtomicBool::new(false))),
+            &super::dispatch::ToolCancellation::new(RunCancellation::new()),
         )
         .model_text
     }
@@ -60,7 +60,7 @@ pub mod bench_support {
                 &self.state,
                 name,
                 arguments,
-                &super::dispatch::ToolCancellation::new(Arc::new(AtomicBool::new(false))),
+                &super::dispatch::ToolCancellation::new(RunCancellation::new()),
             );
             (output.is_error, output.model_text)
         }
@@ -82,6 +82,8 @@ pub(crate) use specs::{
 pub(crate) use specs::{specs, test_tool_effect};
 
 #[cfg(test)]
+use crate::RunCancellation;
+#[cfg(test)]
 use crate::workspace::{FileState, Workspace, content_hash};
 #[cfg(test)]
 use dispatch::{ToolCancellation, execute_blocking};
@@ -96,10 +98,7 @@ use shell::BoundedCapture;
 #[cfg(all(test, unix))]
 use shell::SHELL_BOUNDS;
 #[cfg(test)]
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::mpsc;
 
@@ -182,7 +181,7 @@ mod tests {
             state,
             name,
             arguments,
-            &ToolCancellation::new(Arc::new(AtomicBool::new(false))),
+            &ToolCancellation::new(RunCancellation::new()),
         )
     }
 
@@ -1086,7 +1085,7 @@ mod tests {
             &FileState::default(),
             "read_file",
             r#"{"path":"note.txt"}"#,
-            &ToolCancellation::new(Arc::new(AtomicBool::new(true))),
+            &ToolCancellation::new(RunCancellation::already_cancelled()),
         );
         assert!(result.is_error);
         assert!(result.model_text.contains("cancelled"));
@@ -2130,7 +2129,7 @@ mod tests {
     async fn run_shell_tool(
         workspace: Workspace,
         arguments: &'static str,
-        cancelled: Arc<AtomicBool>,
+        cancelled: RunCancellation,
         output: Option<mpsc::Sender<String>>,
     ) -> ToolOutput {
         execute(
@@ -2151,14 +2150,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         let tasks = ToolTasks::default();
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = RunCancellation::new();
         let (entered, release) = hold_tool_apply(workspace.path());
         let mut execution = Box::pin(execute(
             workspace,
             Arc::new(FileState::default()),
             "write_file".to_owned(),
             r#"{"path":"result.txt","content":"committed locally"}"#.to_owned(),
-            Arc::clone(&cancelled),
+            cancelled.clone(),
             None,
             tasks.clone(),
             Arc::new(crate::runtime::ShellPolicy::default()),
@@ -2185,7 +2184,7 @@ mod tests {
             fs::read_to_string(directory.path().join("result.txt")).unwrap(),
             "committed locally"
         );
-        assert!(!cancelled.load(Ordering::Acquire));
+        assert!(!cancelled.is_cancelled());
     }
 
     #[cfg(unix)]
@@ -2194,14 +2193,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         let tasks = ToolTasks::default();
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = RunCancellation::new();
         let (output, mut chunks) = mpsc::channel::<String>(1);
         let mut execution = Box::pin(execute(
             workspace,
             Arc::new(FileState::default()),
             "shell".to_owned(),
             r#"{"command":"echo pid:$$; while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done"}"#.to_owned(),
-            Arc::clone(&cancelled),
+            cancelled.clone(),
             Some(output),
             tasks.clone(),
             Arc::new(crate::runtime::ShellPolicy::default()),
@@ -2226,7 +2225,7 @@ mod tests {
             .unwrap();
         let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
         assert!(rustix::process::test_kill_process(pid).is_err());
-        assert!(!cancelled.load(Ordering::Acquire));
+        assert!(!cancelled.is_cancelled());
     }
 
     #[cfg(any(unix, windows))]
@@ -2241,7 +2240,7 @@ mod tests {
             Arc::new(FileState::default()),
             "shell".to_owned(),
             PANIC_SHELL_ARGUMENTS.to_owned(),
-            Arc::new(AtomicBool::new(false)),
+            RunCancellation::new(),
             None,
             tasks.clone(),
             Arc::new(crate::runtime::ShellPolicy::default()),
@@ -2270,7 +2269,7 @@ mod tests {
             Arc::new(FileState::default()),
             "shell".to_owned(),
             r#"{"command":"for /L %i in (1,1,2147483647) do @echo waiting"}"#.to_owned(),
-            Arc::new(AtomicBool::new(false)),
+            RunCancellation::new(),
             Some(output),
             tasks.clone(),
             Arc::new(crate::runtime::ShellPolicy::default()),
@@ -2312,7 +2311,7 @@ mod tests {
                 Arc::new(FileState::default()),
                 "shell".to_owned(),
                 r#"{"command":"for /L %i in (1,1,2147483647) do @echo waiting","timeout_seconds":1}"#.to_owned(),
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 None,
                 tasks.clone(),
                 Arc::new(crate::runtime::ShellPolicy::default()),
@@ -2366,7 +2365,7 @@ mod tests {
         let result = run_shell_tool(
             workspace.clone(),
             r#"{"command":"echo out; echo err 1>&2"}"#,
-            Arc::new(AtomicBool::new(false)),
+            RunCancellation::new(),
             Some(sender),
         )
         .await;
@@ -2394,7 +2393,7 @@ mod tests {
         let result = run_shell_tool(
             workspace.clone(),
             r#"{"command":"echo before failure; exit 7"}"#,
-            Arc::new(AtomicBool::new(false)),
+            RunCancellation::new(),
             None,
         )
         .await;
@@ -2422,7 +2421,7 @@ mod tests {
         let inside = run_shell_tool(
             workspace.clone(),
             r#"{"command":"pwd","cwd":"sub"}"#,
-            Arc::new(AtomicBool::new(false)),
+            RunCancellation::new(),
             None,
         )
         .await;
@@ -2440,13 +2439,8 @@ mod tests {
             r#"{"command":"pwd","cwd":"/"}"#,
             r#"{"command":"pwd","cwd":"missing"}"#,
         ] {
-            let escaped = run_shell_tool(
-                workspace.clone(),
-                arguments,
-                Arc::new(AtomicBool::new(false)),
-                None,
-            )
-            .await;
+            let escaped =
+                run_shell_tool(workspace.clone(), arguments, RunCancellation::new(), None).await;
             assert!(escaped.is_error, "cwd escape accepted: {arguments}");
         }
     }
@@ -2462,13 +2456,8 @@ mod tests {
             r#"{"command":"true","timeout_seconds":0}"#,
             r#"{"command":"true","timeout_seconds":601}"#,
         ] {
-            let result = run_shell_tool(
-                workspace.clone(),
-                arguments,
-                Arc::new(AtomicBool::new(false)),
-                None,
-            )
-            .await;
+            let result =
+                run_shell_tool(workspace.clone(), arguments, RunCancellation::new(), None).await;
             assert!(result.is_error, "invalid arguments accepted: {arguments}");
         }
     }
@@ -2490,7 +2479,7 @@ mod tests {
                     Arc::new(FileState::default()),
                     "shell".to_owned(),
                     arguments.to_owned(),
-                    Arc::new(AtomicBool::new(false)),
+                    RunCancellation::new(),
                     None,
                     ToolTasks::default(),
                     Arc::new(policy),
@@ -2582,7 +2571,7 @@ mod tests {
                     Arc::new(FileState::default()),
                     "exec".to_owned(),
                     arguments,
-                    Arc::new(AtomicBool::new(false)),
+                    RunCancellation::new(),
                     None,
                     ToolTasks::default(),
                     Arc::new(crate::runtime::ShellPolicy::default()),
@@ -2663,7 +2652,7 @@ mod tests {
                     Arc::new(FileState::default()),
                     "shell".to_owned(),
                     r#"{"command":"cat a.txt"}"#.to_owned(),
-                    Arc::new(AtomicBool::new(false)),
+                    RunCancellation::new(),
                     None,
                     ToolTasks::default(),
                     Arc::new(crate::runtime::ShellPolicy {
@@ -2701,7 +2690,7 @@ mod tests {
         let result = run_shell_tool(
             workspace.clone(),
             r#"{"command":"sleep 300 & echo pid:$!; wait","timeout_seconds":1}"#,
-            Arc::new(AtomicBool::new(false)),
+            RunCancellation::new(),
             None,
         )
         .await;
@@ -2727,7 +2716,7 @@ mod tests {
             run_shell_tool(
                 workspace,
                 r#"{"command":"while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done","timeout_seconds":1}"#,
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Some(sender),
             ),
         )
@@ -2747,12 +2736,12 @@ mod tests {
     async fn saturated_live_output_never_masks_shell_cancellation() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = RunCancellation::new();
         let (sender, receiver) = mpsc::channel::<String>(1);
         let execution = tokio::spawn(run_shell_tool(
             workspace,
             r#"{"command":"while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done"}"#,
-            Arc::clone(&cancelled),
+            cancelled.clone(),
             Some(sender),
         ));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -2762,7 +2751,7 @@ mod tests {
         })
         .await
         .expect("the live-output queue must become saturated");
-        cancelled.store(true, Ordering::Release);
+        cancelled.cancel();
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), execution)
             .await
@@ -2777,13 +2766,13 @@ mod tests {
     async fn shell_cancellation_kills_the_process_group() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = RunCancellation::new();
         let (sender, mut receiver) = mpsc::channel::<String>(16);
 
         let execution = tokio::spawn(run_shell_tool(
             workspace.clone(),
             r#"{"command":"sleep 300 & echo pid:$!; wait"}"#,
-            Arc::clone(&cancelled),
+            cancelled.clone(),
             Some(sender),
         ));
         // The first live chunk proves the command is running and carries the
@@ -2792,7 +2781,7 @@ mod tests {
             .await
             .expect("the running command must stream its first chunk")
             .expect("the delta channel must be open while the command runs");
-        cancelled.store(true, Ordering::Release);
+        cancelled.cancel();
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), execution)
             .await
@@ -2818,7 +2807,7 @@ mod tests {
         let result = run_shell_tool(
             workspace.clone(),
             r#"{"command":"i=0; while [ $i -lt 40000 ]; do echo line-$i; i=$((i+1)); done"}"#,
-            Arc::new(AtomicBool::new(false)),
+            RunCancellation::new(),
             None,
         )
         .await;

@@ -16,6 +16,8 @@
 
 use std::{
     collections::BTreeMap,
+    future::Future,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -52,7 +54,11 @@ const LIST_TOOLS_TIMEOUT: Duration = Duration::from_secs(20);
 /// arriving earlier waits out the remainder, then retries.
 const RECONNECT_BACKOFF: Duration = Duration::from_millis(250);
 /// How often an in-flight call re-checks its cancellation flag.
-const CANCEL_POLL: Duration = Duration::from_millis(50);
+/// A future that resolves when the caller's run is cancelled. The manager
+/// awaits it alongside the call so cancellation is observed as soon as it
+/// happens; the caller (`qq-core`'s host adapter) builds it from its own
+/// token, which keeps this crate free of that type.
+pub type CancellationSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// Provider APIs bound tool names; namespaced names above this are skipped.
 const MAX_NAMESPACED_NAME_BYTES: usize = 128;
 /// Environment variables always passed through to stdio server processes so
@@ -461,7 +467,7 @@ impl ServerHandle {
         &self,
         tool: &str,
         arguments: &str,
-        cancelled: Arc<AtomicBool>,
+        cancelled: CancellationSignal,
     ) -> McpCallOutcome {
         if self.shut_down.load(Ordering::Acquire) {
             return McpCallOutcome::error(
@@ -474,36 +480,24 @@ impl ServerHandle {
             Err(error) => return McpCallOutcome::error(error, McpCallFailure::InvalidArguments),
         };
         let deadline = tokio::time::Instant::now() + self.settings.call_timeout;
-        let mut cancel_poll = tokio::time::interval(CANCEL_POLL);
-        cancel_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let execution = self.execute(tool, arguments);
-        let mut execution = std::pin::pin!(execution);
-        let mut timeout = std::pin::pin!(tokio::time::sleep_until(deadline));
-        loop {
-            tokio::select! {
-                biased;
-                outcome = &mut execution => return outcome,
-                // Dropping the in-flight request future is safe for the
-                // shared client: rmcp requests are independent, so a timed
-                // out or cancelled call never wedges other users.
-                () = &mut timeout => {
-                    return McpCallOutcome::error(
-                        format!(
-                            "MCP call timed out after {} s",
-                            self.settings.call_timeout.as_secs()
-                        ),
-                        McpCallFailure::Timeout,
-                    );
-                }
-                _ = cancel_poll.tick() => {
-                    if cancelled.load(Ordering::Acquire) {
-                        return McpCallOutcome::error(
-                            "tool execution was cancelled",
-                            McpCallFailure::Cancelled,
-                        );
-                    }
-                }
-            }
+        tokio::select! {
+            biased;
+            outcome = execution => outcome,
+            // Dropping the in-flight request future is safe for the shared
+            // client: rmcp requests are independent, so a timed out or
+            // cancelled call never wedges other users.
+            () = cancelled => McpCallOutcome::error(
+                "tool execution was cancelled",
+                McpCallFailure::Cancelled,
+            ),
+            () = tokio::time::sleep_until(deadline) => McpCallOutcome::error(
+                format!(
+                    "MCP call timed out after {} s",
+                    self.settings.call_timeout.as_secs()
+                ),
+                McpCallFailure::Timeout,
+            ),
         }
     }
 
@@ -755,12 +749,14 @@ impl McpManager {
         self.grants.clone()
     }
 
-    /// Dispatches one namespaced `mcp__<server>__<tool>` call.
+    /// Dispatches one namespaced `mcp__<server>__<tool>` call. `cancelled`
+    /// resolves when the caller's run is cancelled; the call then returns
+    /// [`McpCallFailure::Cancelled`] at once rather than on a poll tick.
     pub async fn call(
         &self,
         name: &str,
         arguments: &str,
-        cancelled: Arc<AtomicBool>,
+        cancelled: CancellationSignal,
     ) -> McpCallOutcome {
         let Some((server, tool)) = name
             .strip_prefix(MCP_TOOL_PREFIX)

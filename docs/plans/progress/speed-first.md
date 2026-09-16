@@ -16,7 +16,7 @@ dated entries appended below, newest last.
 | H18 | `Arc<Vec<Message>>`, prompt prefix, `RawValue` schemas | Shipped (`a13fbfd`, #38) | `perf/h18-shared-transcript-prompt-prefix` | ADR-0024. `provider_encode` added: heap 4.4–4.7x → 1.55–1.80x (shared) / 2.7x (owned); encode 339–559 → 191–406 µs. No protocol or schema bump |
 | H19 | SSE framing, conditional | Shipped (`53bca7d`, #39) | [#39](https://github.com/retsu-AI/qq/pull/39) | Baseline: framing 55–72 % of decode → implemented (ADR-0025). Framing 0.21–0.23x, decode 0.40–0.42x, allocs ÷3.7–5.5. No protocol or schema bump |
 | H21.2 | Mechanical `sessions.rs` split | Shipped (`f905d68`, #44) | [#44](https://github.com/retsu-AI/qq/pull/44) | Ten concern modules + `tests/` tree; text-identical move, 1,401 tests unchanged, no ADR (D9/ADR-0012 already cover the design) |
-| H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, config/auth load, TUI; `Notify` cancellation stacked | In review | [#46](https://github.com/retsu-AI/qq/pull/46) `refactor/h22-2-structural-bundle` → `perf/h22-2-notify-cancellation` | 29 items across 8 crates, one commit per crate; `StaticHttpAuth`, headless writer, config parse-once, reviewer-via-PlanCache deferred with reasons in the plan |
+| H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, config/auth load, TUI; `Notify` cancellation stacked | In review | [#46](https://github.com/retsu-AI/qq/pull/46) `refactor/h22-2-structural-bundle` → [#47](https://github.com/retsu-AI/qq/pull/47) `perf/h22-2-notify-cancellation` | 29 items across 8 crates, one commit per crate; `StaticHttpAuth`, headless writer, config parse-once, reviewer-via-PlanCache deferred with reasons in the plan |
 | HC1 | `--correlation`, `--session`, `u32` turns, model-less `config check` | Shipped (`abad2de`, #30) | `feat/hc1-headless-run-contract` | `PROTOCOL_VERSION` 17 → 18; `v17/` fixtures retained decode-only. Per-store owner lock on every open (ADR-0022). `SessionRuntime::abandon_for_test` added for crash-simulation tests |
 | HC3 | `--output-schema`, repair turns, `final_output` | Shipped (`24b6e5c`, #33) | `feat/hc3-typed-final-output` | `PROTOCOL_VERSION` 18 → 19 (`v19/` goldens; `v18/` decode-only); store schema 26 → 27. ADR-0014 accepted. Evidence `target/qq-perf/hc3-2026-09-12/` |
 | HC4 | Headless golden fixtures | Shipped (`43caaea`, #34) | `feat/hc4-headless-goldens` | Record shapes in `qq_protocol::headless`; ten `v19/` golden streams + `v18/` decode-only; ADR-0023 accepted. No protocol or schema bump |
@@ -754,3 +754,43 @@ Open: the stacked `Notify` PR. Next: Phase 6 closes on its merge.
 
 Shipped: none this entry (stack in review). In progress: H22.2 review.
 Blocked: none. Next: H22.2 `Notify` PR.
+
+### 2026-09-15 — H22.2 `Notify` cancellation on `perf/h22-2-notify-cancellation`
+
+Stacked on `refactor/h22-2-structural-bundle` (#46). Owned paths:
+`crates/qq-core/src/cancellation.rs` (new), `hosts.rs`, `hosts/embedded.rs`,
+`hosts/conformance.rs`, `tools/dispatch.rs`, `tools/shell.rs`,
+`context_source.rs`, `workspace/{prepare,instructions,guidance}.rs`,
+`sessions/execution.rs`, `lib.rs`; `crates/qq-mcp/src/lib.rs`; `src/mcp.rs`;
+bench `host_cancel_latency`; ADR-0026, architecture § Runtime, plan D8
+note, this ledger, `root.md`.
+
+The D8 remainder. `RunCancellation` (flag + `Notify`, `Clone`) replaces the
+`Arc<AtomicBool>` in both public traits (`ExternalToolHost::call`,
+`ContextSource::fetch`) and the run loop; the three pollers select on
+`cancelled()`; `qq-mcp` takes a boxed `CancellationSignal` future so it
+stays free of core's type. Fourteen `.store(true)` sites in
+`execution.rs` became `.cancel()`, which cannot forget the wake.
+
+#### H22.2 (Notify) receipt — 2026-09-15
+Commits: `ce7c463` (token, traits, call sites, conformance bound),
+`cdcbaa5` (bench), + docs.
+Tests: +3 `cancellation::tests` (wake without polling, cancel-before-wait
+resolves and repeats, no lost wake between check and await); conformance
+suite tightened (settle ≤40 ms after `cancel()`, pre-cancelled token
+settles at once ×2); `qq-mcp` cancellation test asserts <45 ms. Workspace
+1,428 passed / 4 ignored; fmt; strict all-target Clippy.
+Gates: `host_cancel_latency`, 200 iterations, cancel → `Cancelled`:
+48.0 ms median / 49.0 ms p95 / 49.0 ms max (polled) → 251 ns / 941 ns /
+1.8 µs (token). Evidence
+`target/qq-perf/h22-2026-09-15/host_cancel_latency-{before,after}.txt`.
+Deviations: none from the D8 note. ADR-0026 records the boxed-future seam
+for `qq-mcp` and the rejection of `tokio_util::CancellationToken`.
+Docs: ADR-0026, `docs/adr/README.md`, `root.md` (0025 → merged #39, 0026
+row, next free 0027), `architecture.md` § Runtime + host seam, plan D8
+remaining-acceptance and § Bundled Fixes, this ledger.
+Open: none. Phase 6 closes when #46 and this PR merge.
+
+Shipped: none this entry (stack in review). In progress: H22.2 stack.
+Blocked: none. Next: Phase 7 is gated on R6; the seven H22 deferrals are
+the only open Phase 6 items.

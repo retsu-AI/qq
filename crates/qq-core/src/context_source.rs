@@ -21,6 +21,7 @@ use std::{
     time::Duration,
 };
 
+use crate::RunCancellation;
 use qq_protocol::{ContentHash, ContextSourceOutcome, ContextSourceRecord};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -124,11 +125,11 @@ pub trait ContextSource: Send + Sync {
     /// requests within the cache's lifetime do not refetch.
     fn cache_key(&self, request: &ContextRequest) -> Option<[u8; 32]>;
 
-    fn fetch(
-        &self,
-        request: ContextRequest,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
-    ) -> ContextFetchFuture;
+    /// Fetches the bundle for `request`. `cancelled` is the run's token; a
+    /// source that does network or blocking work should await
+    /// [`RunCancellation::cancelled`] alongside it, or check
+    /// [`RunCancellation::is_cancelled`] between steps.
+    fn fetch(&self, request: ContextRequest, cancelled: RunCancellation) -> ContextFetchFuture;
 
     fn fail_policy(&self) -> FailPolicy;
 
@@ -247,14 +248,14 @@ pub(crate) async fn fetch_all(
     sources: &[RegisteredSource],
     cache: &ContextCache,
     request: ContextRequest,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    cancelled: RunCancellation,
 ) -> Result<Vec<RenderedContext>, (String, ContextSourceRecord)> {
     let fetches = sources.iter().map(|registered| {
         let request = ContextRequest {
             budget: registered.budget,
             ..request.clone()
         };
-        let cancelled = Arc::clone(&cancelled);
+        let cancelled = cancelled.clone();
         async move { fetch_one(registered, cache, request, cancelled).await }
     });
     let outcomes = futures_util::future::join_all(fetches).await;
@@ -286,7 +287,7 @@ async fn fetch_one(
     registered: &RegisteredSource,
     cache: &ContextCache,
     request: ContextRequest,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    cancelled: RunCancellation,
 ) -> Result<RenderedContext, ContextSourceRecord> {
     let name = registered.source.name().to_owned();
     let version = registered.source.version().to_owned();
@@ -309,7 +310,7 @@ async fn fetch_one(
         None => {
             let fetched = tokio::time::timeout(
                 budget.timeout,
-                registered.source.fetch(request, Arc::clone(&cancelled)),
+                registered.source.fetch(request, cancelled.clone()),
             )
             .await;
             let bundle = match fetched {
@@ -400,7 +401,7 @@ async fn fetch_one(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use futures_util::stream;
     use qq_provider::{ModelRequest, Provider, ProviderEvent, ProviderStream};
@@ -439,7 +440,7 @@ mod tests {
         fn fetch(
             &self,
             _request: ContextRequest,
-            _cancelled: Arc<AtomicBool>,
+            _cancelled: RunCancellation,
         ) -> ContextFetchFuture {
             self.fetches.fetch_add(1, Ordering::SeqCst);
             let behavior = self.behavior.clone();
@@ -510,8 +511,8 @@ mod tests {
         .into_iter()
         .map(RegisteredSource::new)
         .collect();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let rendered = fetch_all(&sources, &cache, request("hello"), Arc::clone(&cancelled))
+        let cancelled = RunCancellation::new();
+        let rendered = fetch_all(&sources, &cache, request("hello"), cancelled.clone())
             .await
             .unwrap();
         assert_eq!(rendered.len(), 3);
@@ -534,7 +535,7 @@ mod tests {
         assert_eq!(rendered[2].record.outcome, ContextSourceOutcome::Invalid);
 
         // Same request: cached, one fetch.
-        let again = fetch_all(&sources, &cache, request("hello"), Arc::clone(&cancelled))
+        let again = fetch_all(&sources, &cache, request("hello"), cancelled.clone())
             .await
             .unwrap();
         assert_eq!(
@@ -559,14 +560,9 @@ mod tests {
             Behavior::Fail(ContextSourceError::Unavailable("down".to_owned())),
         );
         let sources = vec![RegisteredSource::new(closed as Arc<dyn ContextSource>)];
-        let error = fetch_all(
-            &sources,
-            &cache,
-            request("x"),
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await
-        .unwrap_err();
+        let error = fetch_all(&sources, &cache, request("x"), RunCancellation::new())
+            .await
+            .unwrap_err();
         assert!(error.0.contains("fail-closed"));
         assert_eq!(error.1.outcome, ContextSourceOutcome::Unavailable);
 

@@ -21,7 +21,6 @@ pub(super) const SHELL_BOUNDS: Bounds = Bounds::new(16 * 1024, 4_000);
 const SHELL_READ_CHUNK_BYTES: usize = 8 * 1024;
 const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
 pub(super) const MAX_SHELL_TIMEOUT_SECS: u64 = 600;
-const SHELL_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 #[cfg(test)]
 struct SpawnHook {
@@ -329,22 +328,17 @@ pub(super) async fn run_shell(
     let mut streamed = 0_usize;
     let mut stdout_buffer = vec![0_u8; SHELL_READ_CHUNK_BYTES];
     let mut stderr_buffer = vec![0_u8; SHELL_READ_CHUNK_BYTES];
-    let mut cancel_poll = tokio::time::interval(SHELL_CANCEL_POLL);
-    cancel_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // One timer for the whole call: this loop wakes once per output chunk, and
-    // a fresh `sleep_until` per iteration would re-register on each of them.
+    // One timer and one cancellation wait for the whole call: this loop wakes
+    // once per output chunk, and re-creating either per iteration would
+    // re-register on each of them.
     let mut timeout = std::pin::pin!(tokio::time::sleep_until(deadline));
+    let mut cancelled = std::pin::pin!(cancelled.cancelled());
 
     let outcome = loop {
         tokio::select! {
             biased;
-            () = cancelled.caller_dropped() => break ShellOutcome::Cancelled,
+            () = &mut cancelled => break ShellOutcome::Cancelled,
             () = &mut timeout => break ShellOutcome::TimedOut,
-            _ = cancel_poll.tick() => {
-                if cancelled.is_cancelled() {
-                    break ShellOutcome::Cancelled;
-                }
-            }
             read = read_from(&mut stdout, &mut stdout_buffer), if stdout.is_some() => {
                 match read {
                     Ok(0) | Err(_) => stdout = None,

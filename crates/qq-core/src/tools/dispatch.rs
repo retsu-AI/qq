@@ -11,7 +11,10 @@ use tokio::sync::{Notify, mpsc};
 
 use qq_protocol::ToolCallDisplay;
 
-use crate::workspace::{FileState, FileStateUpdate, Workspace, blocking_permits};
+use crate::{
+    RunCancellation,
+    workspace::{FileState, FileStateUpdate, Workspace, blocking_permits},
+};
 
 use super::{
     edit::edit_file,
@@ -96,8 +99,12 @@ impl Drop for ToolTaskLease {
     }
 }
 
+/// Why a tool call should stop: the run was cancelled, or this call's own
+/// future was dropped (the caller gave up on it). Both halves wake waiters;
+/// blocking tools check [`Self::is_cancelled`] between steps and the shell
+/// awaits [`Self::cancelled`] alongside its child process.
 pub(super) struct ToolCancellation {
-    run: Arc<AtomicBool>,
+    run: RunCancellation,
     call: Arc<CallCancellation>,
 }
 
@@ -108,7 +115,7 @@ struct CallCancellation {
 }
 
 impl ToolCancellation {
-    pub(super) fn new(run: Arc<AtomicBool>) -> Self {
+    pub(super) fn new(run: RunCancellation) -> Self {
         Self {
             run,
             call: Arc::new(CallCancellation::default()),
@@ -116,18 +123,25 @@ impl ToolCancellation {
     }
 
     pub(super) fn is_cancelled(&self) -> bool {
-        self.run.load(Ordering::Acquire) || self.call.cancelled.load(Ordering::Acquire)
+        self.run.is_cancelled() || self.call.cancelled.load(Ordering::Acquire)
     }
 
-    pub(super) async fn caller_dropped(&self) {
-        loop {
-            let wake = self.call.wake.notified();
-            tokio::pin!(wake);
-            wake.as_mut().enable();
-            if self.call.cancelled.load(Ordering::Acquire) {
-                return;
+    /// Resolves when either the run is cancelled or the call was dropped.
+    pub(super) async fn cancelled(&self) {
+        let caller_dropped = async {
+            loop {
+                let wake = self.call.wake.notified();
+                tokio::pin!(wake);
+                wake.as_mut().enable();
+                if self.call.cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                wake.await;
             }
-            wake.await;
+        };
+        tokio::select! {
+            () = self.run.cancelled() => {}
+            () = caller_dropped => {}
         }
     }
 }
@@ -147,7 +161,7 @@ pub(crate) async fn execute(
     file_state: Arc<FileState>,
     name: String,
     arguments: String,
-    cancelled: Arc<AtomicBool>,
+    cancelled: RunCancellation,
     output: Option<mpsc::Sender<String>>,
     tasks: ToolTasks,
     shell_policy: Arc<crate::runtime::ShellPolicy>,

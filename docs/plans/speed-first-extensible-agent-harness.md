@@ -336,9 +336,11 @@ the p95 tail is bimodal and not reproduced by a same-binary A/A control.
 
 Remaining acceptance: qualify p95 ≤20 ms on a quiet host, then tighten the
 executable budget from 50 ms to 20 ms. The 50 ms cancellation polls in
-`qq-mcp`, `hosts/embedded.rs`, and `tools/shell.rs` poll an `Arc<AtomicBool>`
-and do not touch the store; converting them to a `Notify` changes the public
-`ExternalToolHost::call` signature and moves to H22.
+`qq-mcp`, `hosts/embedded.rs`, and `tools/shell.rs` polled an
+`Arc<AtomicBool>`; H22.2 replaced them with the `RunCancellation` token
+(ADR-0026, `perf/h22-2-notify-cancellation`): cancel → `Cancelled` for an
+in-flight host call went from 48 ms median to 251 ns, and the conformance
+suite now bounds it at 40 ms so a host cannot revert to polling.
 
 ### D9 — Store Identity, Settlement, And Error Consolidation (H21)
 
@@ -456,8 +458,9 @@ The original list, for the record:
   counter; borrow when persisting model turns.
 - `qq-mcp`, `hosts/embedded.rs`, `tools/shell.rs`: replace the three 50 ms
   cancellation polls of the run's `Arc<AtomicBool>` with a shared `Notify`
-  (changes `ExternalToolHost::call`; moved here from H20). `qq-mcp`: release
-  the call permit before awaiting the connect mutex. (`ToolSpec` sharing by
+  (changes `ExternalToolHost::call`; moved here from H20; shipped as
+  `RunCancellation`, ADR-0026). `qq-mcp`: release the call permit before
+  awaiting the connect mutex. (`ToolSpec` sharing by
   `Arc` shipped in Phase 4.)
 - `qq-protocol`: box `SessionSummary` in the summary-carrying event variants
   (wire-neutral); one hash newtype macro for the two identical 32-byte hash

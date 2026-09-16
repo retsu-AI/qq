@@ -33,6 +33,7 @@ written.
 | 0023 | [Headless JSONL records are protocol types, pinned by golden streams per `PROTOCOL_VERSION`](0023-headless-records-as-protocol.md) | Accepted |
 | 0024 | [Shared transcript, raw tool JSON, and a precompiled prompt prefix on the request path](0024-shared-transcript-raw-json-prompt-prefix.md) | Accepted |
 | 0025 | [SSE bodies are framed per chunk with one allocation per event; adapters parse once](0025-sse-chunk-framing.md) | Accepted |
+| 0026 | [Run cancellation is a token that wakes waiters, not a flag that is polled](0026-run-cancellation-token.md) | Accepted |
 
 ## When to write one
 

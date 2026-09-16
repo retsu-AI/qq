@@ -2,15 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::{collections::HashMap, path::PathBuf, pin::Pin, sync::Arc};
 
 use async_stream::stream;
 use futures_core::Stream;
@@ -26,6 +18,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 mod approval;
+mod cancellation;
 pub mod catalog;
 pub mod context_source;
 pub mod hosts;
@@ -53,6 +46,7 @@ use runtime::{
 };
 
 pub use approval::shell_prefix_matches;
+pub use cancellation::RunCancellation;
 pub use context_source::{
     ContextBudget, ContextBundle, ContextCache, ContextFetchFuture, ContextItem, ContextRequest,
     ContextSource, ContextSourceError, FailPolicy, MAX_CONTEXT_SOURCES,
@@ -391,11 +385,11 @@ fn recover_pins(messages: &[Message], catalog: &catalog::ToolCatalog, pins: &mut
     }
 }
 
-struct CancelOnDrop(Arc<AtomicBool>);
+struct CancelOnDrop(RunCancellation);
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
+        self.0.cancel();
     }
 }
 
@@ -783,7 +777,7 @@ impl Runtime {
         self.run_messages_in_workspace_with_cancellation(
             messages,
             workspace,
-            Arc::new(AtomicBool::new(false)),
+            RunCancellation::new(),
         )
     }
 
@@ -791,7 +785,7 @@ impl Runtime {
         &self,
         messages: Vec<Message>,
         workspace: PathBuf,
-        cancelled: Arc<AtomicBool>,
+        cancelled: RunCancellation,
     ) -> RuntimeStream {
         // Configuration allowlists are the only grants a gate-less run has;
         // read-only mode still denies them inside `evaluate`.
@@ -815,7 +809,7 @@ impl Runtime {
         &self,
         messages: Vec<Message>,
         workspace: PathBuf,
-        cancelled: Arc<AtomicBool>,
+        cancelled: RunCancellation,
         gate: Arc<dyn ToolGate>,
         file_state: Arc<workspace::FileState>,
     ) -> RuntimeStream {
@@ -837,18 +831,18 @@ impl Runtime {
         &self,
         messages: Vec<Message>,
         workspace: PathBuf,
-        cancelled: Arc<AtomicBool>,
+        cancelled: RunCancellation,
         gate: Arc<dyn ToolGate>,
         file_state: Arc<workspace::FileState>,
         capabilities: RunCapabilities,
     ) -> RuntimeStream {
         let runtime = self.clone();
         Box::pin(stream! {
-            let _cancel_on_drop = CancelOnDrop(Arc::clone(&cancelled));
+            let _cancel_on_drop = CancelOnDrop(cancelled.clone());
             yield RuntimeEvent::Started;
             let (opened, _instructions) = match workspace::prepare_workspace(
                 workspace,
-                Arc::clone(&cancelled),
+                cancelled.clone(),
             )
             .await
             {
@@ -922,7 +916,7 @@ impl plan::CompiledAgentPlan {
         public_run_stream(
             self.execute(
                 vec![Message::user(input::render_text(command.input()))],
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Ask,
                     grants,
@@ -941,7 +935,7 @@ impl plan::CompiledAgentPlan {
     pub(crate) fn execute(
         self: &Arc<Self>,
         messages: Vec<Message>,
-        cancelled: Arc<AtomicBool>,
+        cancelled: RunCancellation,
         gate: Arc<dyn ToolGate>,
         file_state: Arc<workspace::FileState>,
         capabilities: RunCapabilities,
@@ -991,7 +985,7 @@ impl plan::CompiledAgentPlan {
             // The wall clock starts at admission, before workspace preparation
             // and provider selection, so caller time bounds mean what they say.
             let mut budget = BudgetMeter::new(limits, pricing, tokio::time::Instant::now());
-            let _cancel_on_drop = CancelOnDrop(Arc::clone(&cancelled));
+            let _cancel_on_drop = CancelOnDrop(cancelled.clone());
             yield RuntimeEvent::Started;
 
             // Completed turns can persist an assistant message with no model-visible
@@ -1032,7 +1026,7 @@ impl plan::CompiledAgentPlan {
                     workspace.clone(),
                     Arc::clone(&pack_roots),
                     Arc::clone(&skills),
-                    Arc::clone(&cancelled),
+                    cancelled.clone(),
                     request,
                 )
                 .await
@@ -1086,7 +1080,7 @@ impl plan::CompiledAgentPlan {
                     &context_sources,
                     &context_cache,
                     request,
-                    Arc::clone(&cancelled),
+                    cancelled.clone(),
                 )
                 .await
                 {
@@ -2151,7 +2145,7 @@ impl plan::CompiledAgentPlan {
                 >, child_limits: Result<runtime::ChildBudget, BudgetLimitKind>| {
                     let workspace = workspace.clone();
                     let file_state = Arc::clone(&file_state);
-                    let cancelled = Arc::clone(&cancelled);
+                    let cancelled = cancelled.clone();
                     let catalog = Arc::clone(&catalog);
                     let skills = Arc::clone(&skills);
                     let pack_roots = Arc::clone(&pack_roots);
@@ -2841,7 +2835,7 @@ mod tests {
     use std::{
         sync::{
             Arc, Mutex,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -3059,7 +3053,7 @@ mod tests {
             let events = plan
                 .execute(
                     vec![Message::user(prompt)],
-                    Arc::new(AtomicBool::new(false)),
+                    RunCancellation::new(),
                     Arc::new(StaticPolicyGate {
                         mode: ApprovalMode::ReadOnly,
                         grants: approval::SessionGrants::default(),
@@ -3732,7 +3726,7 @@ mod tests {
                     "Update src/feature/note.txt and verify the result.",
                 )],
                 directory.path().to_owned(),
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(AllowAllGate),
                 Arc::new(workspace::FileState::default()),
             )
@@ -3864,8 +3858,8 @@ mod tests {
             256,
         )
         .unwrap();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let run_cancelled = Arc::clone(&cancelled);
+        let cancelled = RunCancellation::new();
+        let run_cancelled = cancelled.clone();
         let pause = workspace::test_pause_after_workspace_open(&cancelled);
         let task = tokio::spawn(async move {
             runtime
@@ -3889,7 +3883,7 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        cancelled.store(true, Ordering::Release);
+        cancelled.cancel();
         pause.resume().unwrap();
         let events = tokio::time::timeout(Duration::from_secs(10), task)
             .await
@@ -4301,14 +4295,14 @@ mod tests {
         ));
 
         let workspace = workspace::Workspace::open(directory.path()).unwrap();
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = RunCancellation::new();
         let started = tools::test_executions_started();
         let execution = tokio::spawn(tools::execute(
             workspace,
             Arc::new(workspace::FileState::default()),
             "__test_delay".to_owned(),
             r#"{"delay_ms":500,"result":"late"}"#.to_owned(),
-            Arc::clone(&cancelled),
+            cancelled.clone(),
             None,
             tools::ToolTasks::default(),
             Arc::new(runtime::ShellPolicy::default()),
@@ -4316,7 +4310,7 @@ mod tests {
         while tools::test_executions_started() == started {
             tokio::task::yield_now().await;
         }
-        cancelled.store(true, Ordering::Release);
+        cancelled.cancel();
         let result = execution.await.unwrap();
         assert!(result.is_error);
         assert!(result.model_text.contains("cancelled"));
@@ -4496,7 +4490,7 @@ mod tests {
             .run_loop(
                 vec![Message::user("mutate twice")],
                 directory.path().to_owned(),
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Auto,
                     grants: approval::SessionGrants::default(),
@@ -4590,7 +4584,7 @@ mod tests {
             .run_loop(
                 vec![Message::user("run the command")],
                 directory.path().to_owned(),
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(AllowAllGate),
                 Arc::new(workspace::FileState::default()),
             )
@@ -4871,7 +4865,7 @@ mod tests {
             .run_loop(
                 vec![Message::user("mutate")],
                 directory.path().to_owned(),
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(RecordingGate {
                     consulted: Arc::clone(&consulted),
                 }),
@@ -5156,7 +5150,7 @@ mod tests {
             .run_loop_with_spawner(
                 vec![Message::user("write a long answer")],
                 directory.path().to_owned(),
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Ask,
                     grants: approval::SessionGrants::default(),
@@ -5422,7 +5416,7 @@ mod tests {
             .run_loop_with_spawner(
                 vec![Message::user("summarize")],
                 directory.path().to_owned(),
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(DenyAllGate),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(None).without_tools(),
@@ -5932,7 +5926,7 @@ mod tests {
             &self,
             name: String,
             arguments: String,
-            _cancelled: Arc<AtomicBool>,
+            _cancelled: RunCancellation,
         ) -> HostCallFuture {
             self.calls.lock().unwrap().push((name, arguments.clone()));
             let result = self.result.clone();
@@ -6083,7 +6077,7 @@ mod tests {
             .run_loop(
                 vec![Message::user("ping")],
                 directory.path().to_owned(),
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(AllowAllGate),
                 Arc::new(workspace::FileState::default()),
             )
@@ -6117,7 +6111,7 @@ mod tests {
             .run_loop(
                 vec![Message::user("ping")],
                 directory.path().to_owned(),
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(AllowAllGate),
                 Arc::new(workspace::FileState::default()),
             )
@@ -6188,7 +6182,7 @@ mod tests {
             .run_loop(
                 vec![Message::user("ping")],
                 directory.path().to_owned(),
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(AllowAllGate),
                 Arc::new(workspace::FileState::default()),
             )
@@ -6378,7 +6372,7 @@ mod tests {
             .run_loop_with_spawner(
                 vec![Message::user("go")],
                 directory.path().to_owned(),
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(AllowAllGate),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(Some(spawner)),
@@ -6457,7 +6451,7 @@ mod tests {
                 .run_loop_with_spawner(
                     vec![Message::user("go")],
                     directory.path().to_owned(),
-                    Arc::new(AtomicBool::new(false)),
+                    RunCancellation::new(),
                     Arc::new(AllowAllGate),
                     Arc::new(workspace::FileState::default()),
                     RunCapabilities::user(Some(spawner)),
@@ -6564,7 +6558,7 @@ mod tests {
             .run_loop_with_spawner(
                 vec![Message::user("go")],
                 directory.path().to_owned(),
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(AllowAllGate),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(Some(Arc::clone(&spawner) as Arc<dyn SubagentSpawner>))
@@ -6681,7 +6675,7 @@ mod tests {
             .run_loop_with_spawner(
                 vec![Message::user("go")],
                 directory.path().to_owned(),
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(AllowAllGate),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(Some(Arc::clone(&spawner) as Arc<dyn SubagentSpawner>))
@@ -6964,7 +6958,7 @@ mod tests {
             &self,
             name: String,
             _arguments: String,
-            _cancelled: Arc<AtomicBool>,
+            _cancelled: RunCancellation,
         ) -> HostCallFuture {
             self.calls.lock().unwrap().push(name.clone());
             let failure = self.failure.clone();
@@ -7072,7 +7066,7 @@ mod tests {
                     .run_loop(
                         vec![Message::user("deploy")],
                         directory.path().to_owned(),
-                        Arc::new(AtomicBool::new(false)),
+                        RunCancellation::new(),
                         Arc::new(StaticPolicyGate {
                             mode,
                             grants: approval::SessionGrants::default(),
@@ -7147,7 +7141,7 @@ mod tests {
         let events = plan
             .execute(
                 vec![Message::user("edit the note")],
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Full,
                     grants: approval::SessionGrants {
@@ -7630,7 +7624,7 @@ mod tests {
         let events = restricted_plan
             .execute(
                 vec![Message::user("summarize")],
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Ask,
                     grants: approval::SessionGrants::default(),

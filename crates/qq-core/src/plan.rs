@@ -526,7 +526,7 @@ impl CompiledAgentPlan {
                 path: workspace.clone(),
                 source,
             })?;
-        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let cancelled = crate::RunCancellation::new();
         let (instructions, mut sources) =
             crate::workspace::load_instructions_with_sources(&opened, &cancelled)?;
         // A selected pack contributes one opened root (capability-scoped like
@@ -1458,7 +1458,7 @@ mod tests {
         fn fetch(
             &self,
             _request: crate::ContextRequest,
-            _cancelled: Arc<std::sync::atomic::AtomicBool>,
+            _cancelled: crate::RunCancellation,
         ) -> crate::ContextFetchFuture {
             Box::pin(async { panic!("compile-time tests never fetch") })
         }
@@ -1778,7 +1778,7 @@ mod pack_tests {
             &plan.workspace,
             &plan.pack_roots,
             audit,
-            &std::sync::atomic::AtomicBool::new(false),
+            &crate::RunCancellation::new(),
         )
         .unwrap();
         assert!(loaded.render_for_tool().contains("Audit steps."));

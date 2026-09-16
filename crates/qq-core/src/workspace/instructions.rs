@@ -1,7 +1,4 @@
-use std::{
-    io::ErrorKind,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::io::ErrorKind;
 
 use qq_protocol::InstructionHash;
 
@@ -10,6 +7,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{BoundedReadError, Workspace, WorkspacePathError, read_bounded};
+use crate::RunCancellation;
 
 const AGENTS_FILE: &str = "AGENTS.md";
 const CLAUDE_FILE: &str = "CLAUDE.md";
@@ -97,7 +95,7 @@ impl WorkspaceInstructions {
 
 pub(super) fn load(
     workspace: &Workspace,
-    cancelled: &AtomicBool,
+    cancelled: &RunCancellation,
 ) -> Result<WorkspaceInstructions, WorkspaceInstructionError> {
     for path in [AGENTS_FILE, CLAUDE_FILE] {
         let Some(bytes) = read_candidate(workspace, path, cancelled)? else {
@@ -117,7 +115,7 @@ pub(super) fn load(
 fn read_candidate(
     workspace: &Workspace,
     path: &'static str,
-    cancelled: &AtomicBool,
+    cancelled: &RunCancellation,
 ) -> Result<Option<Vec<u8>>, WorkspaceInstructionError> {
     match workspace.root().symlink_metadata(path) {
         Ok(_) => {}
@@ -140,7 +138,7 @@ fn read_candidate(
             limit: MAX_INSTRUCTION_FILE_BYTES,
         });
     }
-    if cancelled.load(Ordering::Acquire) {
+    if cancelled.is_cancelled() {
         return Err(WorkspaceInstructionError::Cancelled);
     }
     let file = workspace
@@ -156,7 +154,7 @@ fn read_candidate(
             return Err(WorkspaceInstructionError::Read { path, source });
         }
     };
-    if cancelled.load(Ordering::Acquire) {
+    if cancelled.is_cancelled() {
         return Err(WorkspaceInstructionError::Cancelled);
     }
     Ok(Some(bytes))
@@ -186,7 +184,7 @@ fn hash_instruction(selected: Option<&SelectedInstruction>) -> InstructionHash {
 /// reported stale on the next check rather than silently trusted.
 pub(crate) fn load_with_sources(
     workspace: &Workspace,
-    cancelled: &AtomicBool,
+    cancelled: &RunCancellation,
 ) -> Result<(WorkspaceInstructions, Vec<SourceFingerprint>), WorkspaceInstructionError> {
     let sources = [AGENTS_FILE, CLAUDE_FILE]
         .into_iter()
