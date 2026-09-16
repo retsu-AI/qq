@@ -237,6 +237,14 @@ channels. Every long-running operation must support cancellation. Model calls,
 tool output, persistence, and client delivery must apply backpressure rather
 than create unbounded queues.
 
+Cancellation of a run is a `RunCancellation` token (ADR-0026): a flag and a
+`Notify`, one per run, cloned into every tool call, host call, context fetch,
+and blocking helper the run starts. `cancel()` is idempotent and wakes every
+waiter; `cancelled()` registers before reading the flag so a cancel between
+the check and the await is never lost. Async work selects on the token; work
+that cannot await (a blocking read, a directory walk) checks `is_cancelled()`
+between steps. No component polls a cancellation flag on a timer.
+
 ## Provider Compilation
 
 Provider names are configuration presets, not runtime dispatch keys. The root
@@ -476,8 +484,9 @@ remains callable.
 
 `ExternalToolHost` is the single seam for anything that is not a built-in:
 `catalog_blocking` returns a generation-stamped `HostCatalog` with readiness;
-`catalog_is_current` is the cheap plan-cache check; `call` runs under the
-runtime's deadline and cancellation and settles with a `HostCallError`
+`catalog_is_current` is the cheap plan-cache check; `call` takes the run's
+`RunCancellation` and runs under the runtime's deadline, settling with a
+`HostCallError`
 (`Timeout`, `Cancelled`, `Unavailable`, `Overloaded`, `InvalidResult`,
 `Refused`, `UnknownTool`, `ShutDown`) that the loop turns into a bounded tool
 error; `shutdown` is explicit and terminal. Two hosts implement it: the root's
