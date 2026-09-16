@@ -5,7 +5,7 @@ separate worktree and PR, revalidates current main, and preserves the lean core.
 
 | Slice | Goal | Status | Branch / PR | Acceptance |
 | --- | --- | --- | --- | --- |
-| F01 / ENG-781 | Preserve turn-scoped tool results and pruning metadata | In progress | `fix/eng-781-f01-tool-result-replay` | Public session follow-up/reopen regressions; mixed-effect repeated IDs; workspace gates; independent review |
+| F01 / ENG-781 | Preserve turn-scoped tool results and pruning metadata | In review | [PR #55](https://github.com/retsu-AI/qq/pull/55) · `fix/eng-781-f01-tool-result-replay` | Public session follow-up/reopen regressions; mixed-effect repeated IDs; workspace gates; independent review |
 
 ## F01 scope
 
@@ -55,3 +55,6 @@ after; no new tail budget. Other findings remain unstarted in this repair series
 - Upstream fetch PR #50 landed during measurement; merge-tree with `b75ebac`
   is clean. Measurements compare this repair on the pinned pre-fetch base.
 - Protocol, descriptor, schema, dependency graph unchanged by this repair.
+- Published [PR #55](https://github.com/retsu-AI/qq/pull/55); not merged.
+  Hosted checks pending. GitHub app lacks PR-write permission; authenticated
+  GitHub CLI from the pinned Nix input created the PR.
