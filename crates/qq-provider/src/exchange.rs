@@ -133,23 +133,38 @@ impl SseExchangeStream {
     }
 }
 
+/// Encodes a request body into a buffer sized from the payload. The hint is a
+/// lower bound on the body, so the writer grows at most once instead of
+/// doubling from empty through a megabyte of transcript.
+pub(crate) fn encode_body(
+    body: &impl Serialize,
+    size_hint: usize,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let mut encoded = Vec::with_capacity(size_hint.saturating_add(size_hint / 8));
+    serde_json::to_writer(&mut encoded, body)?;
+    Ok(encoded)
+}
+
 /// Executes one SSE request and prepares its decoded event stream. Pre-body
 /// retries draw from `ledger`; the caller keeps it so a restart after the
 /// body has begun draws from the same count.
 pub(crate) async fn sse_exchange(
     exchange: &HttpExchange,
     (endpoint, headers): (reqwest::Url, HeaderMap),
-    body: &impl Serialize,
+    (body, body_size_hint): (&impl Serialize, usize),
     decoder: SseDecoder,
     wire_limit: usize,
     spec: SseExchangeSpec,
     ledger: &SharedLedger,
 ) -> Result<SseExchangeStream, SseExchangeError> {
+    let encoded = encode_body(body, body_size_hint)
+        .map_err(|error| ProviderError::Protocol(format!("request encoding failed: {error}")))?;
     let request = exchange
         .request(reqwest::Method::POST, endpoint)
         .headers(headers)
         .header(ACCEPT, "text/event-stream")
-        .json(body)
+        .header(CONTENT_TYPE, "application/json")
+        .body(encoded)
         .build()
         .map_err(|error| transport_error(error, exchange.static_redactions()))?;
     let response = match exchange
@@ -298,7 +313,7 @@ mod tests {
         sse_exchange(
             &exchange,
             (endpoint, HeaderMap::new()),
-            &json!({"model": "test-model"}),
+            (&json!({"model": "test-model"}), 64),
             decoder(),
             1_024 * 1_024,
             spec(content_type_gate),

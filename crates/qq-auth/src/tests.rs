@@ -400,11 +400,21 @@ fn credential_epoch_advances_on_every_durable_mutation_and_survives_reload() {
     let after_set = store.epoch().unwrap();
     assert!(after_set > CredentialEpoch::NONE);
 
-    // Reading secrets does not move the epoch.
+    // Reading secrets does not move the epoch, and a resolve reports the
+    // epoch of the index it read from, for either reference kind.
     store
         .resolve(&SecretRef::Stored("openai".to_owned()))
         .unwrap();
     assert_eq!(store.epoch().unwrap(), after_set);
+    let (secret, epoch) = store
+        .resolve_with_epoch(&SecretRef::Stored("openai".to_owned()), None)
+        .unwrap();
+    assert_eq!(secret.expose_secret_str().unwrap(), "first");
+    assert_eq!(epoch, after_set);
+    let (_, epoch) = store
+        .resolve_with_epoch(&SecretRef::Value("inline".to_owned().into()), None)
+        .unwrap();
+    assert_eq!(epoch, after_set);
 
     store.set("openai", "rotated", false).unwrap();
     let after_rotation = store.epoch().unwrap();

@@ -1,6 +1,6 @@
 //! Built-in provider access routes.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::LazyLock};
 
 use crate::{
     AwsAuth, BedrockAuth, EndpointMode, HttpAccess, HttpCredential, ProviderAccess, ProviderApi,
@@ -17,7 +17,35 @@ pub(crate) const GOOGLE_CREDENTIAL_ENDPOINT: &str = "https://generativelanguage.
 pub(crate) const XAI_ENDPOINT: &str = "https://api.x.ai/v1";
 const CODEX_RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 
+/// The built-in preset for `kind`, cloned from a table built once per process.
+/// Every configuration load merges all seven presets, so building them (and
+/// filtering the model table into each) per load was the largest fixed cost
+/// of a load; a clone of the finished map is a fraction of that.
 pub(crate) fn builtin(kind: ProviderKind) -> ProviderConfig {
+    static BUILTINS: LazyLock<[ProviderConfig; 7]> = LazyLock::new(|| {
+        [
+            build(ProviderKind::OpenAi),
+            build(ProviderKind::OpenAiCodex),
+            build(ProviderKind::Anthropic),
+            build(ProviderKind::Google),
+            build(ProviderKind::XAi),
+            build(ProviderKind::AmazonBedrock),
+            build(ProviderKind::AmazonBedrockMantle),
+        ]
+    });
+    match kind {
+        ProviderKind::OpenAi => BUILTINS[0].clone(),
+        ProviderKind::OpenAiCodex => BUILTINS[1].clone(),
+        ProviderKind::Anthropic => BUILTINS[2].clone(),
+        ProviderKind::Google => BUILTINS[3].clone(),
+        ProviderKind::XAi => BUILTINS[4].clone(),
+        ProviderKind::AmazonBedrock => BUILTINS[5].clone(),
+        ProviderKind::AmazonBedrockMantle => BUILTINS[6].clone(),
+        ProviderKind::LiteLlm | ProviderKind::Custom => build(kind),
+    }
+}
+
+fn build(kind: ProviderKind) -> ProviderConfig {
     let (access, usage, catalog) = match kind {
         ProviderKind::OpenAi => (
             Some(http(

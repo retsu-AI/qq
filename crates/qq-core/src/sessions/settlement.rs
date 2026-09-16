@@ -74,7 +74,9 @@ pub(super) fn append_parent_session_update(
             Some(caused_by),
             occurred_at_ms,
         ),
-        SessionEvent::SessionUpdated { session },
+        SessionEvent::SessionUpdated {
+            session: Box::new(session),
+        },
     )?);
     Ok(())
 }
@@ -322,7 +324,7 @@ pub(super) fn settle_run(
         transaction,
         context,
         SessionEvent::RunFinished {
-            session: summary,
+            session: Box::new(summary),
             run_id: claimed.identity.run_id,
             outcome,
             usage,
@@ -401,7 +403,7 @@ pub(super) fn finish_queued_run_with_outcome(
         transaction,
         EventContext::for_run_ids(store_id, workspace_id, session_id, run_id, None, now),
         SessionEvent::RunFinished {
-            session: summary,
+            session: Box::new(summary),
             run_id,
             outcome,
             usage: None,
@@ -807,7 +809,7 @@ pub(super) fn cancel_owned_child_runs(
                 now,
             ),
             SessionEvent::CancellationRequested {
-                session: summary,
+                session: Box::new(summary),
                 run_id,
             },
         )?;
@@ -879,7 +881,7 @@ pub(super) fn cascade_auto_compaction_cancel(
             now,
         ),
         SessionEvent::CancellationRequested {
-            session: summary,
+            session: Box::new(summary),
             run_id: compaction_run,
         },
     )?;

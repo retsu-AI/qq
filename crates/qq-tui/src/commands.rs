@@ -455,15 +455,28 @@ pub(crate) fn command_for_key(settings: &Settings, key: KeyEvent) -> Option<Comm
     if let Some(action) = settings.action_for(key) {
         return Some(command_for_action(action));
     }
-    COMMANDS
+    default_chords()
         .iter()
-        .filter(|spec| spec.action.is_none())
-        .find(|spec| {
-            spec.chords
-                .iter()
-                .any(|chord| default_chord(chord).matches(key))
-        })
-        .map(|spec| spec.command)
+        .find(|(_, chord)| chord.matches(key))
+        .map(|(command, _)| *command)
+}
+
+/// The default chords of every command without a configurable action, parsed
+/// once. The table keeps them as strings for readability and the test below
+/// checks them; this is what a keypress consults.
+fn default_chords() -> &'static [(Command, KeyChord)] {
+    static PARSED: std::sync::LazyLock<Vec<(Command, KeyChord)>> = std::sync::LazyLock::new(|| {
+        COMMANDS
+            .iter()
+            .filter(|spec| spec.action.is_none())
+            .flat_map(|spec| {
+                spec.chords
+                    .iter()
+                    .map(|chord| (spec.command, default_chord(chord)))
+            })
+            .collect()
+    });
+    &PARSED
 }
 
 /// The chord shown for `command` in hints and the palette: the configured

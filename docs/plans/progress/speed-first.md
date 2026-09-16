@@ -15,8 +15,8 @@ dated entries appended below, newest last.
 | H22.1 | Correctness bundle: delete ~37 `notify(` sites, stored-kind pruning, MCP permit ordering | Done | merged in #22 | Store schema 25 → 26 (`tool_calls.effect`). MCP permit ordering was already correct |
 | H18 | `Arc<Vec<Message>>`, prompt prefix, `RawValue` schemas | Shipped (`a13fbfd`, #38) | `perf/h18-shared-transcript-prompt-prefix` | ADR-0024. `provider_encode` added: heap 4.4–4.7x → 1.55–1.80x (shared) / 2.7x (owned); encode 339–559 → 191–406 µs. No protocol or schema bump |
 | H19 | SSE framing, conditional | Shipped (`53bca7d`, #39) | [#39](https://github.com/retsu-AI/qq/pull/39) | Baseline: framing 55–72 % of decode → implemented (ADR-0025). Framing 0.21–0.23x, decode 0.40–0.42x, allocs ÷3.7–5.5. No protocol or schema bump |
-| H21.2 | Mechanical `sessions.rs` split | In review | [#44](https://github.com/retsu-AI/qq/pull/44) `refactor/h21-2-sessions-split` | Ten concern modules + `tests/` tree; text-identical move, 1,401 tests unchanged, no ADR (D9/ADR-0012 already cover the design) |
-| H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, `StaticHttpAuth`, config/auth load, TUI | Planned | | |
+| H21.2 | Mechanical `sessions.rs` split | Shipped (`f905d68`, #44) | [#44](https://github.com/retsu-AI/qq/pull/44) | Ten concern modules + `tests/` tree; text-identical move, 1,401 tests unchanged, no ADR (D9/ADR-0012 already cover the design) |
+| H22.2 | Structural bundle: `COMMAND_ROUTES`, `Box<SessionSummary>`, config/auth load, TUI; `Notify` cancellation stacked | In review | [#46](https://github.com/retsu-AI/qq/pull/46) `refactor/h22-2-structural-bundle` → `perf/h22-2-notify-cancellation` | 29 items across 8 crates, one commit per crate; `StaticHttpAuth`, headless writer, config parse-once, reviewer-via-PlanCache deferred with reasons in the plan |
 | HC1 | `--correlation`, `--session`, `u32` turns, model-less `config check` | Shipped (`abad2de`, #30) | `feat/hc1-headless-run-contract` | `PROTOCOL_VERSION` 17 → 18; `v17/` fixtures retained decode-only. Per-store owner lock on every open (ADR-0022). `SessionRuntime::abandon_for_test` added for crash-simulation tests |
 | HC3 | `--output-schema`, repair turns, `final_output` | Shipped (`24b6e5c`, #33) | `feat/hc3-typed-final-output` | `PROTOCOL_VERSION` 18 → 19 (`v19/` goldens; `v18/` decode-only); store schema 26 → 27. ADR-0014 accepted. Evidence `target/qq-perf/hc3-2026-09-12/` |
 | HC4 | Headless golden fixtures | Shipped (`43caaea`, #34) | `feat/hc4-headless-goldens` | Record shapes in `qq_protocol::headless`; ten `v19/` golden streams + `v18/` decode-only; ADR-0023 accepted. No protocol or schema bump |
@@ -697,3 +697,60 @@ to a public event for one `O(blocks)` pass. Not worth it. Closed as won't-do.
 
 Shipped: none this entry (branch in review). In progress: H21.2 review.
 Blocked: none. Next: H22.2.
+
+### 2026-09-15 — H22.2 structural bundle on `refactor/h22-2-structural-bundle`
+
+Worktree `../qq-hc4` from `896ea93` (T12 merged #45). Two audits first:
+of the 34 items under § Bundled Fixes, 1 was already done (MCP permit
+ordering, H22.1), 4 partial, 29 open. Landed as one PR with a commit per
+crate, plus a stacked PR for the one public-signature change (`Notify`
+cancellation, `ExternalToolHost::call`).
+
+The acceptance gate is the route table: `SessionCommandKind::route()` and
+`COMMAND_ROUTES` in `qq-protocol`; the server registers from the table and
+checks the decoded kind against the route's; the client posts to
+`kind.route()`. `command_routes_match_the_protocol_table` drives all
+thirteen kinds through their own route (200) and their neighbour's (400)
+and asserts the handled sequence equals `ALL`.
+
+Measured items: `SessionEvent` 536 → 328 bytes (`SessionSummary` is 408;
+boxed in eight variants; goldens unchanged, size test pins it);
+`provider_encode` request heap 1.57→1.40x / 1.80→1.60x / 1.55→1.39x /
+1.58→1.39x of payload from a sized body buffer, encode time flat within
+noise (five interleaved pairs; evidence
+`target/qq-perf/h22-2026-09-15/provider_encode-{before,after,ab}.txt`).
+
+Unmeasured structural items shipped on inspection: borrowed `PlanKey` on
+cache hits, `is_current` without a `PathBuf` clone, `decode_bounded`,
+`RequestAuthorizer` enum + static-redaction reuse, `Arc<HeaderMap>`,
+Bedrock event size from payload bytes, catalog capture inside
+`spawn_blocking` (a blocking call was on the executor), pinned deadline
+timers in the three call loops, `RetainedResult`, `read_bounded`,
+`AgentPlanDescriptor::encode` (3→1 serializations), gated `session_files`
+eviction, LazyLock presets, memoized ancestor checks, shared read locks +
+chmod-if-differs + `resolve_with_epoch`, `body_mut`, `has_status_line`,
+cached live tail, parsed chords, bounded `expanded_tool_calls`.
+
+#### H22.2 (bundle) receipt — 2026-09-15
+Commits: `9d8eb62` server routes; `07e4ff7` protocol; `4523bf2` cli plan
+cache; `272634a` provider; `19befce` runtime; `68318c5` config/auth;
+`26625d0` client/tui; + docs.
+Tests: +1 protocol route test, +1 size test, +1 server route gate (the H22
+acceptance item), +1 `read_bounded` module (3), +1 `session_files` bound,
++1 config memo test, +1 auth `resolve_with_epoch` assertions, +1 client
+tree-index test. Workspace 1,425 passed / 4 ignored; fmt; strict all-target
+Clippy; minimal provider profile 169 + Clippy. One flake observed once under
+full-workspace load (`schedules_ready_sessions_fairly`, 2 s timeout),
+3/3 isolated and 1/1 on rerun; pre-existing timing test, not touched.
+Gates: route-table equality test passes (acceptance). `provider_encode`
+heap as above. No other H22 gate is defined.
+Deviations: seven deferrals recorded in § Bundled Fixes with reasons
+(StaticHttpAuth, headless writer, config parse-once, reviewer-via-PlanCache,
+run-loop enums, args-parse-once, `Arc` calls).
+Docs: plan status block/task index/§ Bundled Fixes as-built + deferrals;
+this ledger. No ADR: no decision beyond the plan's list; no wire, schema,
+or descriptor change.
+Open: the stacked `Notify` PR. Next: Phase 6 closes on its merge.
+
+Shipped: none this entry (stack in review). In progress: H22.2 review.
+Blocked: none. Next: H22.2 `Notify` PR.

@@ -3,7 +3,7 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
     error::Error,
-    fmt::{self, Write as _},
+    fmt,
     pin::Pin,
     sync::Arc,
     sync::atomic::{AtomicBool, Ordering},
@@ -795,8 +795,7 @@ fn check_stream_event_size(
     event: &ConverseStreamOutput,
     limit: usize,
 ) -> Result<(), ProviderError> {
-    let debug_bytes = bounded_debug_size(event, limit)?;
-    let event_bytes = debug_bytes
+    let event_bytes = stream_event_payload_bytes(event)
         .checked_add(EVENT_FRAME_OVERHEAD_BYTES)
         .ok_or_else(|| {
             ProviderError::Protocol("Amazon Bedrock event size overflowed".to_owned())
@@ -809,28 +808,28 @@ fn check_stream_event_size(
     Ok(())
 }
 
-fn bounded_debug_size(value: &impl fmt::Debug, limit: usize) -> Result<usize, ProviderError> {
-    let mut counter = BoundedLength { length: 0, limit };
-    write!(&mut counter, "{value:?}").map_err(|_| {
-        ProviderError::Protocol(
-            "Amazon Bedrock event exceeded the configured size limit".to_owned(),
-        )
-    })?;
-    Ok(counter.length)
-}
-
-struct BoundedLength {
-    length: usize,
-    limit: usize,
-}
-
-impl fmt::Write for BoundedLength {
-    fn write_str(&mut self, value: &str) -> fmt::Result {
-        self.length = self.length.checked_add(value.len()).ok_or(fmt::Error)?;
-        if self.length > self.limit {
-            return Err(fmt::Error);
-        }
-        Ok(())
+/// The variable-length bytes one stream event carries: the text or tool-input
+/// delta, or a tool block's id and name. Every other field is fixed-size and
+/// covered by `EVENT_FRAME_OVERHEAD_BYTES`. Counting the payload directly
+/// replaces `Debug`-formatting the whole SDK event to measure it.
+fn stream_event_payload_bytes(event: &ConverseStreamOutput) -> usize {
+    match event {
+        ConverseStreamOutput::ContentBlockDelta(event) => match &event.delta {
+            Some(ContentBlockDelta::Text(text)) => text.len(),
+            Some(ContentBlockDelta::ToolUse(delta)) => delta.input.len(),
+            Some(_) | None => 0,
+        },
+        ConverseStreamOutput::ContentBlockStart(event) => match &event.start {
+            Some(ContentBlockStart::ToolUse(start)) => {
+                start.tool_use_id.len().saturating_add(start.name.len())
+            }
+            Some(_) | None => 0,
+        },
+        ConverseStreamOutput::ContentBlockStop(_)
+        | ConverseStreamOutput::MessageStart(_)
+        | ConverseStreamOutput::MessageStop(_)
+        | ConverseStreamOutput::Metadata(_) => 0,
+        _ => 0,
     }
 }
 

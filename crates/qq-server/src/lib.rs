@@ -33,23 +33,24 @@ mod cors;
 
 pub use cors::{AllowedOriginError, AllowedOrigins, MAX_ALLOWED_ORIGINS, MAX_ORIGIN_BYTES};
 use qq_protocol::{
-    AgentProfileSummary, ApprovalMode, BudgetLimitKind, CAPABILITIES_VERSION, CapabilitiesRequest,
-    CommandReceipt, CommandRequest, DelegationCapabilities, DelegationRoster, EventCapabilities,
-    InputPartKind, LimitCapabilities, LocalConnectionError, LocalServerConnection,
-    MAX_CORRELATION_ENTRIES, MAX_EVENT_BYTES, MAX_INPUT_FILE_BYTES, MAX_INPUT_FILE_PARTS,
-    MAX_INPUT_PARTS, MAX_INPUT_TEXT_BYTES, MAX_MODEL_BYTES, MAX_ORGANIZATION_BYTES,
-    MAX_OUTPUT_REPAIR_TURNS, MAX_OUTPUT_SCHEMA_BYTES, MAX_OUTPUT_SCHEMA_DEPTH,
-    MAX_OUTPUT_SCHEMA_VALUES, MAX_REQUEST_BYTES, MAX_WORKSPACE_BYTES, ModelCatalogRequest,
-    ModelDescriptor, PROTOCOL_VERSION, ServerCapabilities, ServerInfo, SessionCommand,
-    SessionCommandKind, SnapshotRequest, SteeringCapabilities, StoreId, SubscribeRequest,
-    ToolCapabilities, WorkspaceId, WorkspaceSnapshot, WorkspaceToolCapabilities,
-    sanitize_display_name, valid_process_version, validate_input,
+    AgentProfileSummary, ApprovalMode, BudgetLimitKind, CAPABILITIES_VERSION, COMMAND_ROUTES,
+    CapabilitiesRequest, CommandReceipt, CommandRequest, DelegationCapabilities, DelegationRoster,
+    EventCapabilities, InputPartKind, LimitCapabilities, LocalConnectionError,
+    LocalServerConnection, MAX_CORRELATION_ENTRIES, MAX_EVENT_BYTES, MAX_INPUT_FILE_BYTES,
+    MAX_INPUT_FILE_PARTS, MAX_INPUT_PARTS, MAX_INPUT_TEXT_BYTES, MAX_MODEL_BYTES,
+    MAX_MODEL_CATALOG_BYTES, MAX_ORGANIZATION_BYTES, MAX_OUTPUT_REPAIR_TURNS,
+    MAX_OUTPUT_SCHEMA_BYTES, MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MAX_REQUEST_BYTES,
+    MAX_WORKSPACE_BYTES, ModelCatalogRequest, ModelDescriptor, PROTOCOL_VERSION,
+    ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind, SnapshotRequest,
+    SteeringCapabilities, StoreId, SubscribeRequest, ToolCapabilities, WorkspaceId,
+    WorkspaceSnapshot, WorkspaceToolCapabilities, sanitize_display_name, valid_process_version,
+    validate_input,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
-    sync::{Semaphore, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     task::JoinHandle,
 };
 
@@ -60,7 +61,6 @@ const LOCK_FILE_NAME: &str = "server.lock";
 const DEFAULT_BIND_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 const MAX_METADATA_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_HEALTH_BYTES: usize = 16 * 1024;
-const MAX_MODEL_CATALOG_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const STARTUP_RETRIES: usize = 8;
 const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(25);
@@ -699,24 +699,20 @@ fn router(
         session_requests: Arc::new(Semaphore::new(MAX_CONCURRENT_SESSION_REQUESTS)),
         subscriptions: Arc::new(Semaphore::new(MAX_CONCURRENT_SUBSCRIPTIONS)),
     };
-    Router::new()
+    // Command routes come from the protocol table so the client and server
+    // agree by construction; `command_routes_match_the_protocol_table` pins it.
+    let mut router = Router::new();
+    for (kind, path) in COMMAND_ROUTES {
+        router = router.route(
+            path,
+            post(move |State(state): State<AppState>, body| session_command(state, body, kind)),
+        );
+    }
+    router
         .route("/v1/health", get(health))
         .route("/v1/capabilities", post(capabilities))
-        .route("/v1/workspaces/resolve", post(resolve_workspace))
         .route("/v1/workspaces/snapshot", post(workspace_snapshot))
         .route("/v1/models", post(models))
-        .route("/v1/sessions", post(create_session))
-        .route("/v1/sessions/prompts", post(submit_prompt))
-        .route("/v1/sessions/approval-mode", post(set_approval_mode))
-        .route("/v1/sessions/model", post(set_session_model))
-        .route("/v1/sessions/profile", post(set_session_profile))
-        .route("/v1/sessions/delete", post(delete_session))
-        .route("/v1/sessions/prune", post(prune_sessions))
-        .route("/v1/sessions/compact", post(compact_session))
-        .route("/v1/sessions/compact/rollback", post(rollback_compaction))
-        .route("/v1/runs/cancel", post(cancel_run))
-        .route("/v1/runs/steer", post(steer_run))
-        .route("/v1/tools/approvals", post(respond_tool_approval))
         .route(
             "/v1/workspaces/{workspace_id}/events",
             get(workspace_events),
@@ -757,152 +753,41 @@ async fn health(State(state): State<AppState>) -> Json<ServerInfo> {
     Json(state.connection.server_info().clone())
 }
 
-async fn resolve_workspace(
-    State(state): State<AppState>,
+/// The admission preamble shared by every bounded JSON route: one request
+/// permit, the transport body limit, then a strict decode. The permit is
+/// returned so the handler holds it for the rest of the request.
+fn decode_bounded<T: serde::de::DeserializeOwned>(
+    state: &AppState,
     body: Result<Bytes, BytesRejection>,
-) -> Response {
-    session_command(state, body, |command| {
-        matches!(command, SessionCommand::ResolveWorkspace { .. })
-    })
-    .await
-}
-
-async fn create_session(
-    State(state): State<AppState>,
-    body: Result<Bytes, BytesRejection>,
-) -> Response {
-    session_command(state, body, |command| {
-        matches!(command, SessionCommand::CreateSession { .. })
-    })
-    .await
-}
-
-async fn submit_prompt(
-    State(state): State<AppState>,
-    body: Result<Bytes, BytesRejection>,
-) -> Response {
-    session_command(state, body, |command| {
-        matches!(command, SessionCommand::SubmitPrompt { .. })
-    })
-    .await
-}
-
-async fn cancel_run(
-    State(state): State<AppState>,
-    body: Result<Bytes, BytesRejection>,
-) -> Response {
-    session_command(state, body, |command| {
-        matches!(command, SessionCommand::CancelRun { .. })
-    })
-    .await
-}
-
-async fn steer_run(State(state): State<AppState>, body: Result<Bytes, BytesRejection>) -> Response {
-    session_command(state, body, |command| {
-        matches!(command, SessionCommand::SteerRun { .. })
-    })
-    .await
-}
-
-async fn set_session_profile(
-    State(state): State<AppState>,
-    body: Result<Bytes, BytesRejection>,
-) -> Response {
-    session_command(state, body, |command| {
-        matches!(command, SessionCommand::SetSessionProfile { .. })
-    })
-    .await
-}
-
-async fn respond_tool_approval(
-    State(state): State<AppState>,
-    body: Result<Bytes, BytesRejection>,
-) -> Response {
-    session_command(state, body, |command| {
-        matches!(command, SessionCommand::RespondToolApproval { .. })
-    })
-    .await
-}
-
-async fn set_approval_mode(
-    State(state): State<AppState>,
-    body: Result<Bytes, BytesRejection>,
-) -> Response {
-    session_command(state, body, |command| {
-        matches!(command, SessionCommand::SetApprovalMode { .. })
-    })
-    .await
-}
-
-async fn set_session_model(
-    State(state): State<AppState>,
-    body: Result<Bytes, BytesRejection>,
-) -> Response {
-    session_command(state, body, |command| {
-        matches!(command, SessionCommand::SetSessionModel { .. })
-    })
-    .await
-}
-
-async fn delete_session(
-    State(state): State<AppState>,
-    body: Result<Bytes, BytesRejection>,
-) -> Response {
-    session_command(state, body, |command| {
-        matches!(command, SessionCommand::DeleteSession { .. })
-    })
-    .await
-}
-
-async fn prune_sessions(
-    State(state): State<AppState>,
-    body: Result<Bytes, BytesRejection>,
-) -> Response {
-    session_command(state, body, |command| {
-        matches!(command, SessionCommand::PruneSessions { .. })
-    })
-    .await
-}
-
-async fn compact_session(
-    State(state): State<AppState>,
-    body: Result<Bytes, BytesRejection>,
-) -> Response {
-    session_command(state, body, |command| {
-        matches!(command, SessionCommand::CompactSession { .. })
-    })
-    .await
-}
-
-async fn rollback_compaction(
-    State(state): State<AppState>,
-    body: Result<Bytes, BytesRejection>,
-) -> Response {
-    session_command(state, body, |command| {
-        matches!(command, SessionCommand::RollbackCompaction { .. })
-    })
-    .await
+) -> Result<(OwnedSemaphorePermit, T), (StatusCode, &'static str)> {
+    let Ok(permit) = Arc::clone(&state.session_requests).try_acquire_owned() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many requests are active",
+        ));
+    };
+    let body = match body {
+        Ok(body) => body,
+        Err(_) => return Err((StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")),
+    };
+    match serde_json::from_slice::<T>(&body) {
+        Ok(request) => Ok((permit, request)),
+        Err(_) => Err((StatusCode::BAD_REQUEST, "invalid request")),
+    }
 }
 
 async fn session_command(
     state: AppState,
     body: Result<Bytes, BytesRejection>,
-    expected: impl FnOnce(&SessionCommand) -> bool,
+    kind: SessionCommandKind,
 ) -> Response {
-    let Ok(_permit) = Arc::clone(&state.session_requests).try_acquire_owned() else {
-        return api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "too many requests are active",
-        );
+    let (_permit, request) = match decode_bounded::<CommandRequest>(&state, body) {
+        Ok(decoded) => decoded,
+        Err((status, message)) => return api_error(status, message),
     };
-    let body = match body {
-        Ok(body) => body,
-        Err(_) => return api_error(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"),
-    };
-    let request = match serde_json::from_slice::<CommandRequest>(&body) {
-        Ok(request) if expected(&request.command) => request,
-        Ok(_) | Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid request"),
-    };
+    if request.command.kind() != kind {
+        return api_error(StatusCode::BAD_REQUEST, "invalid request");
+    }
     // Structured input is bounded at the transport, before the handler can
     // admit anything durably: an oversized or malformed part is a client
     // error, never a queued run.
@@ -937,23 +822,17 @@ async fn capabilities(
     State(state): State<AppState>,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let Ok(_permit) = Arc::clone(&state.session_requests).try_acquire_owned() else {
-        return api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "too many requests are active",
-        );
-    };
-    let body = match body {
-        Ok(body) => body,
-        Err(_) => return api_error(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"),
-    };
-    let request = if body.is_empty() {
-        CapabilitiesRequest::default()
-    } else {
-        match serde_json::from_slice::<CapabilitiesRequest>(&body) {
-            Ok(request) => request,
-            Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid request"),
+    // An empty body is the protocol-1 capabilities probe; it decodes as default.
+    let body = body.map(|body| {
+        if body.is_empty() {
+            Bytes::from_static(b"{}")
+        } else {
+            body
         }
+    });
+    let (_permit, request) = match decode_bounded::<CapabilitiesRequest>(&state, body) {
+        Ok(decoded) => decoded,
+        Err((status, message)) => return api_error(status, message),
     };
     let (profiles, workspace_tools, delegation) = match request.workspace_id {
         None => (None, None, None),
@@ -1071,19 +950,9 @@ async fn workspace_snapshot(
     State(state): State<AppState>,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let Ok(_permit) = Arc::clone(&state.session_requests).try_acquire_owned() else {
-        return api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "too many requests are active",
-        );
-    };
-    let body = match body {
-        Ok(body) => body,
-        Err(_) => return api_error(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"),
-    };
-    let request = match serde_json::from_slice::<SnapshotRequest>(&body) {
-        Ok(request) => request,
-        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid request"),
+    let (_permit, request) = match decode_bounded::<SnapshotRequest>(&state, body) {
+        Ok(decoded) => decoded,
+        Err((status, message)) => return api_error(status, message),
     };
     match state.handler.snapshot(request).await {
         Ok(snapshot) => Json(snapshot).into_response(),
@@ -1092,35 +961,25 @@ async fn workspace_snapshot(
 }
 
 async fn models(State(state): State<AppState>, body: Result<Bytes, BytesRejection>) -> Response {
-    let Ok(_permit) = Arc::clone(&state.session_requests).try_acquire_owned() else {
-        return api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "too many requests are active",
-        );
+    let (_permit, request) = match decode_bounded::<ModelCatalogRequest>(&state, body) {
+        Ok(decoded) => decoded,
+        Err((status, message)) => return api_error(status, message),
     };
-    let body = match body {
-        Ok(body) => body,
-        Err(_) => return api_error(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"),
-    };
-    let request = match serde_json::from_slice::<ModelCatalogRequest>(&body) {
-        Ok(request)
-            if !request.workspace.is_empty()
-                && request.workspace.len() <= MAX_WORKSPACE_BYTES
-                && request
-                    .selection
-                    .model
-                    .as_ref()
-                    .is_none_or(|model| model.len() <= MAX_MODEL_BYTES)
-                && request
-                    .selection
-                    .organization
-                    .as_ref()
-                    .is_none_or(|organization| organization.len() <= MAX_ORGANIZATION_BYTES) =>
-        {
-            request
-        }
-        Ok(_) | Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid request"),
-    };
+    let bounded = !request.workspace.is_empty()
+        && request.workspace.len() <= MAX_WORKSPACE_BYTES
+        && request
+            .selection
+            .model
+            .as_ref()
+            .is_none_or(|model| model.len() <= MAX_MODEL_BYTES)
+        && request
+            .selection
+            .organization
+            .as_ref()
+            .is_none_or(|organization| organization.len() <= MAX_ORGANIZATION_BYTES);
+    if !bounded {
+        return api_error(StatusCode::BAD_REQUEST, "invalid request");
+    }
     match state.handler.models(request).await {
         Ok(models)
             if serde_json::to_vec(&models)
@@ -2324,6 +2183,124 @@ mod tests {
         let status = response.status();
         let body = response.json::<serde_json::Value>().await.unwrap();
         (status, body)
+    }
+
+    /// One command of every kind, so a route test can drive the whole table.
+    fn command_of_kind(kind: SessionCommandKind) -> SessionCommand {
+        let session_id = SessionId::from_bytes([3; 16]);
+        let run_id = qq_protocol::RunId::from_bytes([4; 16]);
+        let workspace_id = WorkspaceId::from_bytes([5; 16]);
+        match kind {
+            SessionCommandKind::ResolveWorkspace => SessionCommand::ResolveWorkspace {
+                path: "/tmp".to_owned(),
+            },
+            SessionCommandKind::CreateSession => SessionCommand::CreateSession {
+                workspace_id,
+                parent_id: None,
+                model: qq_protocol::ModelSelection::default(),
+                approval_mode: ApprovalMode::Ask,
+                profile: qq_protocol::AgentProfileId::default(),
+                correlation: qq_protocol::Correlation::default(),
+            },
+            SessionCommandKind::SubmitPrompt => SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![qq_protocol::InputPart::text("go")],
+                limits: qq_protocol::RunLimits::default(),
+                correlation: qq_protocol::Correlation::default(),
+                output: None,
+            },
+            SessionCommandKind::SteerRun => SessionCommand::SteerRun {
+                run_id,
+                input: vec![qq_protocol::InputPart::text("turn")],
+                interrupt: false,
+            },
+            SessionCommandKind::CancelRun => SessionCommand::CancelRun { run_id },
+            SessionCommandKind::RespondToolApproval => SessionCommand::RespondToolApproval {
+                run_id,
+                tool_call_id: qq_protocol::ToolCallId::from_bytes([6; 16]),
+                decision: qq_protocol::ApprovalDecision::ApproveOnce,
+            },
+            SessionCommandKind::SetApprovalMode => SessionCommand::SetApprovalMode {
+                session_id,
+                mode: ApprovalMode::Full,
+            },
+            SessionCommandKind::SetSessionModel => SessionCommand::SetSessionModel {
+                session_id,
+                model: qq_protocol::ModelSelection::default(),
+            },
+            SessionCommandKind::SetSessionProfile => SessionCommand::SetSessionProfile {
+                session_id,
+                profile: qq_protocol::AgentProfileId::default(),
+            },
+            SessionCommandKind::DeleteSession => SessionCommand::DeleteSession { session_id },
+            SessionCommandKind::PruneSessions => SessionCommand::PruneSessions { workspace_id },
+            SessionCommandKind::CompactSession => SessionCommand::CompactSession { session_id },
+            SessionCommandKind::RollbackCompaction => {
+                SessionCommand::RollbackCompaction { session_id }
+            }
+        }
+    }
+
+    /// Accepts every command kind with a fixed cancellation receipt and records
+    /// the kinds it saw, so a route test is about routing, not outcomes.
+    struct KindRecordingHandler {
+        kinds: Mutex<Vec<SessionCommandKind>>,
+    }
+
+    impl ServerHandler for KindRecordingHandler {
+        fn command(&self, request: CommandRequest) -> CommandFuture {
+            self.kinds.lock().unwrap().push(request.command.kind());
+            let receipt = CommandReceipt {
+                command_id: request.command_id,
+                committed_through: EventCursor {
+                    store_id: StoreId::from_bytes([1; 16]),
+                    workspace_id: WorkspaceId::from_bytes([2; 16]),
+                    sequence: 1,
+                },
+                outcome: CommandOutcome::CancellationRequested {
+                    run_id: qq_protocol::RunId::from_bytes([4; 16]),
+                },
+            };
+            Box::pin(async move { Ok(receipt) })
+        }
+    }
+
+    /// The H22 acceptance gate: the server routes exactly the protocol table
+    /// the client posts to. Every kind is accepted at its own path and refused
+    /// at its neighbour's, so a route added to one side without the other
+    /// fails here rather than in the field.
+    #[tokio::test]
+    async fn command_routes_match_the_protocol_table() {
+        let directory = TestDirectory::new();
+        let handler = Arc::new(KindRecordingHandler {
+            kinds: Mutex::new(Vec::new()),
+        });
+        let server = start_test_server(
+            directory.paths(),
+            Arc::clone(&handler) as Arc<dyn ServerHandler>,
+        )
+        .await;
+        let mut command_ids = 0_u8;
+        let mut next_request = |kind| {
+            command_ids += 1;
+            CommandRequest {
+                command_id: qq_protocol::CommandId::from_bytes([command_ids; 16]),
+                command: command_of_kind(kind),
+            }
+        };
+        for (index, (kind, path)) in COMMAND_ROUTES.iter().enumerate() {
+            let (status, body) = post(&server, path, &next_request(*kind)).await;
+            assert_eq!(status, StatusCode::OK, "{kind:?} at {path}: {body}");
+            let (wrong_kind, _) = COMMAND_ROUTES[(index + 1) % COMMAND_ROUTES.len()];
+            let (status, body) = post(&server, path, &next_request(wrong_kind)).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{wrong_kind:?} accepted at {path}: {body}"
+            );
+        }
+        assert_eq!(*handler.kinds.lock().unwrap(), SessionCommandKind::ALL);
+        server.shutdown().await.unwrap();
     }
 
     #[tokio::test]

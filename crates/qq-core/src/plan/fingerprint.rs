@@ -45,16 +45,7 @@ impl SourceFingerprint {
     #[must_use]
     pub fn capture(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let state = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => SourceState::Present {
-                len: metadata.len(),
-                modified: metadata.modified().ok(),
-                identity: file_identity(&metadata),
-                is_dir: metadata.is_dir(),
-            },
-            Err(error) if error.kind() == ErrorKind::NotFound => SourceState::Absent,
-            Err(error) => SourceState::Unreadable { kind: error.kind() },
-        };
+        let state = observe(&path);
         Self { path, state }
     }
 
@@ -68,10 +59,25 @@ impl SourceFingerprint {
         matches!(self.state, SourceState::Present { .. })
     }
 
-    /// Re-captures this path and reports whether anything observable changed.
+    /// Re-observes this path and reports whether anything observable changed.
+    /// One `symlink_metadata` call and no allocation; the cache asks this of
+    /// every source on every plan lookup.
     #[must_use]
     pub fn is_current(&self) -> bool {
-        Self::capture(self.path.clone()).state == self.state
+        observe(&self.path) == self.state
+    }
+}
+
+fn observe(path: &Path) -> SourceState {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => SourceState::Present {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            identity: file_identity(&metadata),
+            is_dir: metadata.is_dir(),
+        },
+        Err(error) if error.kind() == ErrorKind::NotFound => SourceState::Absent,
+        Err(error) => SourceState::Unreadable { kind: error.kind() },
     }
 }
 

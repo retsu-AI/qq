@@ -212,7 +212,7 @@ fn replaying_the_wire_fixtures_matches_the_golden_projection() {
     let SessionEvent::PromptQueued { session, .. } = &envelopes[0].event else {
         panic!("the first fixture in cursor order is the queued prompt");
     };
-    store.upsert_summary(session.clone(), &models, 0);
+    store.upsert_summary((**session).clone(), &models, 0);
     store.warm_empty(session.id);
 
     let mut effects = Vec::new();
@@ -299,7 +299,7 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
             5,
             session_id,
             SessionEvent::RunFinished {
-                session: idle.clone(),
+                session: Box::new(idle.clone()),
                 run_id,
                 outcome: RunOutcome::Completed,
                 usage: None,
@@ -330,7 +330,7 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
             6,
             session_id,
             SessionEvent::RunFinished {
-                session: idle,
+                session: Box::new(idle),
                 run_id,
                 outcome: RunOutcome::Completed,
                 usage: None,
@@ -503,4 +503,79 @@ fn the_output_truncation_notice_names_the_cap_when_capabilities_are_known() {
         with.as_slice(),
         [StateEffect::Notice { text, .. }] if text == "output limit reached; continuing (2/4)"
     ));
+}
+
+/// Streaming deltas are body-only mutations: the derived tree index (sidebar
+/// order) must survive them, or every frame during a run rebuilds it.
+#[test]
+fn streaming_deltas_keep_the_tree_index() {
+    let models: Vec<ModelOption> = Vec::new();
+    let mut store = SessionStore::default();
+    let parent = SessionId::from_bytes([1; 16]);
+    let child = SessionId::from_bytes([2; 16]);
+    let run_id = RunId::from_bytes([3; 16]);
+    store.upsert_summary(summary(parent), &models, 0);
+    let mut child_summary = summary(child);
+    child_summary.parent_id = Some(parent);
+    store.upsert_summary(child_summary, &models, 0);
+    store.warm_empty(child);
+    let order_before: *const SessionId = store.thread_order().as_ptr();
+    assert_eq!(store.thread_order(), &[parent, child]);
+
+    let started = message(9, child, run_id, "");
+    store.reduce_event(
+        &envelope(
+            1,
+            child,
+            SessionEvent::AssistantMessageStarted {
+                message: started.clone(),
+            },
+        ),
+        context(&models),
+    );
+    store.reduce_event(
+        &envelope(
+            2,
+            child,
+            SessionEvent::TextAppended {
+                message_id: started.id,
+                channel: qq_protocol::TextChannel::Output,
+                text: "hello".to_owned(),
+            },
+        ),
+        context(&models),
+    );
+    store.reduce_event(
+        &envelope(
+            3,
+            child,
+            SessionEvent::RunActivityChanged {
+                run_id,
+                activity: qq_protocol::RunActivity::WaitingForProvider,
+            },
+        ),
+        context(&models),
+    );
+    // Same allocation: the index was never dropped.
+    assert_eq!(store.thread_order().as_ptr(), order_before);
+    assert_eq!(store.thread_order(), &[parent, child]);
+    assert_eq!(
+        store.get(&child).unwrap().messages.as_ref().unwrap()[0].output,
+        "hello"
+    );
+
+    // A summary change still rebuilds it.
+    let mut moved = summary(child);
+    moved.updated_at_ms = 5;
+    store.reduce_event(
+        &envelope(
+            4,
+            child,
+            SessionEvent::SessionUpdated {
+                session: Box::new(moved),
+            },
+        ),
+        context(&models),
+    );
+    assert_eq!(store.thread_order(), &[child, parent]);
 }

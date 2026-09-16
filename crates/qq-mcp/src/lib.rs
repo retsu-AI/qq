@@ -478,6 +478,7 @@ impl ServerHandle {
         cancel_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let execution = self.execute(tool, arguments);
         let mut execution = std::pin::pin!(execution);
+        let mut timeout = std::pin::pin!(tokio::time::sleep_until(deadline));
         loop {
             tokio::select! {
                 biased;
@@ -485,7 +486,7 @@ impl ServerHandle {
                 // Dropping the in-flight request future is safe for the
                 // shared client: rmcp requests are independent, so a timed
                 // out or cancelled call never wedges other users.
-                () = tokio::time::sleep_until(deadline) => {
+                () = &mut timeout => {
                     return McpCallOutcome::error(
                         format!(
                             "MCP call timed out after {} s",

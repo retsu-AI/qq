@@ -60,7 +60,7 @@ pub(crate) enum ResponsesConstructionAuth {
 pub(crate) struct OpenAi {
     pub(crate) exchange: HttpExchange,
     endpoint: reqwest::Url,
-    headers: HeaderMap,
+    headers: Arc<HeaderMap>,
     request_kind: ResponsesRequestKind,
 }
 
@@ -145,7 +145,7 @@ impl OpenAi {
         Ok(Self {
             exchange: HttpExchange::new(client, authorizer, Arc::from(redactions)),
             endpoint,
-            headers,
+            headers: Arc::new(headers),
             request_kind,
         })
     }
@@ -167,8 +167,8 @@ impl Provider for OpenAi {
                 let body = ResponsesRequest::new(&request, request_kind);
                 let mut sse = sse_exchange(
                     &exchange,
-                    (endpoint, headers),
-                    &body,
+                    (endpoint, HeaderMap::clone(&headers)),
+                    (&body, request.wire_size_hint()),
                     sse_decoder(limits.event),
                     limits.wire,
                     sse_spec(request_kind),

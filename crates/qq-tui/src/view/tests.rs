@@ -1767,7 +1767,9 @@ fn session_picker_pins_search_and_keeps_the_selection_visible() {
             ..fixtures::envelope(
                 u64::from(byte),
                 session_id,
-                SessionEvent::SessionCreated { session: summary },
+                SessionEvent::SessionCreated {
+                    session: Box::new(summary),
+                },
             )
         }));
     }
@@ -1937,7 +1939,7 @@ fn sidebar_appears_at_wide_widths_and_shows_live_status_for_cold_sessions() {
             2,
             child_id,
             SessionEvent::SessionCreated {
-                session: SessionSummary {
+                session: Box::new(SessionSummary {
                     parent_id: Some(parent),
                     title: "Survey callers".to_owned(),
                     status: SessionStatus::Running,
@@ -1947,7 +1949,7 @@ fn sidebar_appears_at_wide_widths_and_shows_live_status_for_cold_sessions() {
                     estimated_cost_usd_nanos: None,
                     updated_at_ms: 2,
                     ..fixtures::session_summary(child_id)
-                },
+                }),
             },
         )
     }));
@@ -2066,7 +2068,7 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
             2,
             child_id,
             SessionEvent::SessionCreated {
-                session: SessionSummary {
+                session: Box::new(SessionSummary {
                     parent_id: Some(parent),
                     spawned_by: Some(qq_protocol::SpawnOrigin {
                         run_id,
@@ -2081,7 +2083,7 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
                     estimated_cost_usd_nanos: None,
                     updated_at_ms: 2,
                     ..fixtures::session_summary(child_id)
-                },
+                }),
             },
         )
     }));
@@ -2132,7 +2134,7 @@ fn background_approvals_surface_a_banner_that_ctrl_g_jumps_to() {
     app.apply_client_update(event(
         child_id,
         SessionEvent::SessionCreated {
-            session: SessionSummary {
+            session: Box::new(SessionSummary {
                 parent_id: Some(parent),
                 title: "Deploy helper".to_owned(),
                 status: SessionStatus::Running,
@@ -2141,7 +2143,7 @@ fn background_approvals_surface_a_banner_that_ctrl_g_jumps_to() {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 2,
                 ..fixtures::session_summary(child_id)
-            },
+            }),
         },
     ));
     let call = ToolCallSnapshot {
@@ -2197,14 +2199,14 @@ fn alt_arrows_walk_the_session_tree_in_spawn_order() {
                 sequence,
                 id,
                 SessionEvent::SessionCreated {
-                    session: SessionSummary {
+                    session: Box::new(SessionSummary {
                         parent_id: parent,
                         title: format!("s{byte}"),
                         model: None,
                         estimated_cost_usd_nanos: None,
                         updated_at_ms: at,
                         ..fixtures::session_summary(id)
-                    },
+                    }),
                 },
             )
         }));
@@ -2401,7 +2403,7 @@ fn running_view_app() -> (App, SessionId, RunId, u64) {
             2,
             session_id,
             SessionEvent::RunStarted {
-                session: summary,
+                session: Box::new(summary),
                 run_id,
                 plan: None,
             },
@@ -2459,7 +2461,7 @@ fn a_finished_run_ends_with_a_completion_line_and_a_running_one_does_not() {
     // The run started at the fixture's occurred_at_ms (1) and finishes here;
     // duration comes from the envelopes, tokens from usage.
     app.apply_client_update(event(SessionEvent::RunFinished {
-        session: summary,
+        session: Box::new(summary),
         run_id,
         outcome: qq_protocol::RunOutcome::Completed,
         usage: Some(qq_protocol::TokenUsage {
@@ -2857,7 +2859,7 @@ fn the_sidebar_groups_sessions_by_what_the_user_should_do() {
         done_id,
         done_run,
         SessionEvent::SessionCreated {
-            session: done.clone(),
+            session: Box::new(done.clone()),
         },
     ));
     done.status = SessionStatus::Idle;
@@ -2867,7 +2869,7 @@ fn the_sidebar_groups_sessions_by_what_the_user_should_do() {
         done_id,
         done_run,
         SessionEvent::RunFinished {
-            session: done,
+            session: Box::new(done),
             run_id: done_run,
             outcome: qq_protocol::RunOutcome::Completed,
             usage: None,
@@ -3269,7 +3271,7 @@ fn the_completion_line_names_the_plan_and_an_overridden_route() {
         })
     };
     app.apply_client_update(event(SessionEvent::RunStarted {
-        session: summary.clone(),
+        session: Box::new(summary.clone()),
         run_id,
         plan: Some(Box::new(qq_protocol::RunPlanIdentity {
             profile: qq_protocol::AgentProfileId::new("reviewer").unwrap(),
@@ -3301,7 +3303,7 @@ fn the_completion_line_names_the_plan_and_an_overridden_route() {
     summary.status = SessionStatus::Idle;
     summary.active_run_id = None;
     app.apply_client_update(event(SessionEvent::RunFinished {
-        session: summary,
+        session: Box::new(summary),
         run_id,
         outcome: qq_protocol::RunOutcome::Completed,
         usage: None,

@@ -1,4 +1,5 @@
 mod access;
+mod bounded_read;
 mod file_state;
 mod guidance;
 mod instructions;
@@ -7,6 +8,7 @@ pub mod skills;
 
 pub use access::WorkspacePathError;
 pub(crate) use access::{Workspace, blocking_permits};
+pub(crate) use bounded_read::{BoundedReadError, read_bounded};
 pub(crate) use file_state::{FileState, FileStateUpdate, content_hash};
 #[cfg(test)]
 pub(crate) use guidance::load_entry;

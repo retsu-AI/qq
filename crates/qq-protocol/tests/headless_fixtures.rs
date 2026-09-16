@@ -147,7 +147,7 @@ fn run_events(outcome: RunOutcome, final_output: Option<Box<FinalOutput>>) -> Ve
         event(
             1,
             SessionEvent::RunStarted {
-                session: summary(SessionStatus::Running, true),
+                session: Box::new(summary(SessionStatus::Running, true)),
                 run_id: RUN,
                 plan: None,
             },
@@ -183,7 +183,7 @@ fn run_events(outcome: RunOutcome, final_output: Option<Box<FinalOutput>>) -> Ve
         event(
             5,
             SessionEvent::RunFinished {
-                session: summary(SessionStatus::Idle, false),
+                session: Box::new(summary(SessionStatus::Idle, false)),
                 run_id: RUN,
                 outcome,
                 usage: Some(usage()),
@@ -486,7 +486,7 @@ fn current_version_streams_match_their_goldens() {
                     envelope: Box::new(envelope(
                         2,
                         SessionEvent::RunFinished {
-                            session: summary(SessionStatus::Idle, false),
+                            session: Box::new(summary(SessionStatus::Idle, false)),
                             run_id: RUN,
                             outcome: RunOutcome::Cancelled,
                             usage: None,

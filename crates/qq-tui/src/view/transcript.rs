@@ -28,6 +28,12 @@ pub(super) struct LiveMarkdown {
     settled_bytes: usize,
     /// Rendered, indented rows for the settled prefix.
     rows: Vec<Line>,
+    /// The unsettled text past `settled_bytes`, as collected by the refresh
+    /// that produced `rows`, with the source length it was taken at. The
+    /// same frame's `live_lines` lays this out instead of collecting the
+    /// tail a second time.
+    tail: String,
+    tail_source_len: usize,
 }
 
 pub(super) struct CachedMarkdown {
@@ -641,6 +647,8 @@ impl TranscriptCache {
             width,
             settled_bytes: 0,
             rows: Vec::new(),
+            tail: String::new(),
+            tail_source_len: 0,
         });
         if entry.width != width || entry.settled_bytes > source.len() {
             entry.width = width;
@@ -656,16 +664,21 @@ impl TranscriptCache {
             entry.rows.clear();
         }
         let scan_from = entry.settled_bytes;
-        let text = source.collect_range(scan_from..source.len(), false);
+        let mut text = source.collect_range(scan_from..source.len(), false);
         let settled = settled_prefix_end(&text);
+        if settled > 0 {
+            let rows = markdown_lines(&text[..settled], content_width, false);
+            entry
+                .rows
+                .extend(indent_lines(rows, prefix, prefix_style, width));
+            entry.settled_bytes = scan_from + settled;
+            text.drain(..settled);
+        }
+        entry.tail = text;
+        entry.tail_source_len = source.len();
         if settled == 0 {
             return;
         }
-        let rows = markdown_lines(&text[..settled], content_width, false);
-        entry
-            .rows
-            .extend(indent_lines(rows, prefix, prefix_style, width));
-        entry.settled_bytes = scan_from + settled;
         // Rows past the display bound are never shown again while streaming.
         let excess = entry.rows.len().saturating_sub(MAX_LIVE_MARKDOWN_ROWS);
         if excess > 0 {
@@ -1107,18 +1120,25 @@ impl TranscriptCache {
         let source = MessageText::new(message);
         let content_width = width.saturating_sub(3).max(1);
         let (prefix, prefix_style, _, _) = message_presentation(message.role);
-        let (settled_bytes, settled_rows) = match self.live.get(&message.id) {
-            Some(live) if live.width == width && live.settled_bytes <= source.len() => {
-                (live.settled_bytes, live.rows.as_slice())
-            }
-            Some(_) | None => (0, &[][..]),
+        let (settled_bytes, settled_rows, cached_tail) = match self.live.get(&message.id) {
+            Some(live) if live.width == width && live.settled_bytes <= source.len() => (
+                live.settled_bytes,
+                live.rows.as_slice(),
+                (live.tail_source_len == source.len()).then_some(live.tail.as_str()),
+            ),
+            Some(_) | None => (0, &[][..], None),
         };
         let visible_start = source.len().saturating_sub(MAX_LIVE_MARKDOWN_BYTES);
         let tail_start = settled_bytes.max(visible_start);
         let tail = if tail_start == settled_bytes {
-            source.collect_range(tail_start..source.len(), false)
+            match cached_tail {
+                Some(tail) => std::borrow::Cow::Borrowed(tail),
+                None => {
+                    std::borrow::Cow::Owned(source.collect_range(tail_start..source.len(), false))
+                }
+            }
         } else {
-            source.bounded_tail(MAX_LIVE_MARKDOWN_BYTES).into_owned()
+            source.bounded_tail(MAX_LIVE_MARKDOWN_BYTES)
         };
         let tail_rows = indent_lines(
             markdown_lines(&tail, content_width, false),

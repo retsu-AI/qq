@@ -86,6 +86,44 @@ impl ModelRequest {
     pub const fn max_output_tokens(&self) -> u32 {
         self.max_output_tokens
     }
+
+    /// A lower bound on the encoded request body, from the payload bytes the
+    /// wire codecs embed verbatim plus fixed per-item framing. Used to size
+    /// the body buffer once instead of doubling through a megabyte.
+    #[must_use]
+    pub fn wire_size_hint(&self) -> usize {
+        const MESSAGE_FRAMING: usize = 32;
+        const BLOCK_FRAMING: usize = 64;
+        const TOOL_FRAMING: usize = 64;
+        let messages = self.messages.iter().fold(0, |total, message| {
+            message
+                .content()
+                .iter()
+                .fold(total + MESSAGE_FRAMING, |total, block| {
+                    total
+                        + BLOCK_FRAMING
+                        + match block {
+                            ContentBlock::Text { text } => text.len(),
+                            ContentBlock::ToolCall {
+                                id,
+                                name,
+                                arguments,
+                            } => id.len() + name.len() + arguments.get().len(),
+                            ContentBlock::ToolResult {
+                                call_id, content, ..
+                            } => call_id.len() + content.len(),
+                        }
+                })
+        });
+        let tools = self.tools.iter().fold(0, |total, tool| {
+            total
+                + TOOL_FRAMING
+                + tool.name().len()
+                + tool.description().len()
+                + tool.input_schema().get().len()
+        });
+        messages + tools + self.system.as_ref().map_or(0, |system| system.len()) + 256
+    }
 }
 
 /// A tool the model may call, described provider-neutrally.

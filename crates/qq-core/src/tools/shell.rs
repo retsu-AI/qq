@@ -331,12 +331,15 @@ pub(super) async fn run_shell(
     let mut stderr_buffer = vec![0_u8; SHELL_READ_CHUNK_BYTES];
     let mut cancel_poll = tokio::time::interval(SHELL_CANCEL_POLL);
     cancel_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // One timer for the whole call: this loop wakes once per output chunk, and
+    // a fresh `sleep_until` per iteration would re-register on each of them.
+    let mut timeout = std::pin::pin!(tokio::time::sleep_until(deadline));
 
     let outcome = loop {
         tokio::select! {
             biased;
             () = cancelled.caller_dropped() => break ShellOutcome::Cancelled,
-            () = tokio::time::sleep_until(deadline) => break ShellOutcome::TimedOut,
+            () = &mut timeout => break ShellOutcome::TimedOut,
             _ = cancel_poll.tick() => {
                 if cancelled.is_cancelled() {
                     break ShellOutcome::Cancelled;

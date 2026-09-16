@@ -260,10 +260,23 @@ impl AgentPlanDescriptor {
     }
 
     pub fn digest(&self) -> Result<AgentPlanDigest, PlanCompileError> {
+        Ok(self.encode()?.0)
+    }
+
+    /// One serialization for both products of a compile: the digest over the
+    /// canonical bytes, and the persisted JSON, which is those bytes after the
+    /// domain separator (the same compact serializer, so byte-identical to a
+    /// direct `to_string`).
+    pub fn encode(&self) -> Result<(AgentPlanDigest, String), PlanCompileError> {
         let bytes = self.canonical_bytes()?;
-        Ok(AgentPlanDigest::from_hash(ContentHash::from_bytes(
-            Sha256::digest(&bytes).into(),
-        )))
+        let digest =
+            AgentPlanDigest::from_hash(ContentHash::from_bytes(Sha256::digest(&bytes).into()));
+        let json = String::from_utf8(bytes[DIGEST_DOMAIN.len()..].to_vec()).map_err(|_| {
+            PlanCompileError::Encode {
+                message: "descriptor JSON was not UTF-8".to_owned(),
+            }
+        })?;
+        Ok((digest, json))
     }
 }
 

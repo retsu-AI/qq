@@ -50,7 +50,7 @@ pub(crate) struct GoogleGenerateContent {
     pub(crate) exchange: HttpExchange,
     endpoint: reqwest::Url,
     endpoint_kind: EndpointKind,
-    headers: HeaderMap,
+    headers: Arc<HeaderMap>,
 }
 
 #[cfg(test)]
@@ -81,7 +81,7 @@ impl GoogleGenerateContent {
             ),
             endpoint,
             endpoint_kind,
-            headers,
+            headers: Arc::new(headers),
         })
     }
 
@@ -145,8 +145,8 @@ impl Provider for GoogleGenerateContent {
                 let body = GenerateContentRequest::new(&request, max_output_tokens)?;
                 let mut sse = sse_exchange(
                     &exchange,
-                    (endpoint, headers),
-                    &body,
+                    (endpoint, HeaderMap::clone(&headers)),
+                    (&body, request.wire_size_hint()),
                     sse_decoder(limits.event),
                     limits.wire,
                     SSE_SPEC,

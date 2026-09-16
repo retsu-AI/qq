@@ -16,9 +16,11 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use qq_protocol::{
     AgentProfileId, ApprovalDecision, CapabilitiesRequest, CommandId, CommandReceipt,
-    CommandRequest, Correlation, EventCursor, InputPart, MAX_EVENT_BYTES, MAX_REQUEST_BYTES,
-    ModelCatalogRequest, ModelDescriptor, RunId, RunLimits, ServerCapabilities, SessionCommand,
-    SessionEventEnvelope, SessionId, SnapshotRequest, ToolCallId, WorkspaceId, WorkspaceSnapshot,
+    CommandRequest, Correlation, EventCursor, InputPart, MAX_CAPABILITIES_BYTES,
+    MAX_ERROR_BODY_BYTES, MAX_EVENT_BYTES, MAX_MODEL_CATALOG_BYTES, MAX_REQUEST_BYTES,
+    MAX_SNAPSHOT_BYTES, MAX_SSE_WIRE_EVENT_BYTES, ModelCatalogRequest, ModelDescriptor, RunId,
+    RunLimits, ServerCapabilities, SessionCommand, SessionEventEnvelope, SessionId,
+    SnapshotRequest, ToolCallId, WorkspaceId, WorkspaceSnapshot,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -58,12 +60,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const SSE_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
-const MAX_ERROR_BODY_BYTES: usize = 16 * 1024;
-const MAX_SSE_WIRE_EVENT_BYTES: usize = MAX_EVENT_BYTES + 16 * 1024;
 const MAX_SSE_LINE_BYTES: usize = MAX_SSE_WIRE_EVENT_BYTES;
-const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_MODEL_CATALOG_BYTES: usize = 2 * 1024 * 1024;
-const MAX_CAPABILITIES_BYTES: usize = 256 * 1024;
 
 /// Authenticated coordinates for the server a client attaches to. A local
 /// `LocalServerConnection` converts losslessly with `into()`.
@@ -103,23 +100,8 @@ impl SessionClient {
         command_id: CommandId,
         command: SessionCommand,
     ) -> Result<CommandReceipt, ClientError> {
-        let path = match command {
-            SessionCommand::ResolveWorkspace { .. } => "/v1/workspaces/resolve",
-            SessionCommand::CreateSession { .. } => "/v1/sessions",
-            SessionCommand::SubmitPrompt { .. } => "/v1/sessions/prompts",
-            SessionCommand::SteerRun { .. } => "/v1/runs/steer",
-            SessionCommand::CancelRun { .. } => "/v1/runs/cancel",
-            SessionCommand::RespondToolApproval { .. } => "/v1/tools/approvals",
-            SessionCommand::SetApprovalMode { .. } => "/v1/sessions/approval-mode",
-            SessionCommand::SetSessionModel { .. } => "/v1/sessions/model",
-            SessionCommand::SetSessionProfile { .. } => "/v1/sessions/profile",
-            SessionCommand::DeleteSession { .. } => "/v1/sessions/delete",
-            SessionCommand::PruneSessions { .. } => "/v1/sessions/prune",
-            SessionCommand::CompactSession { .. } => "/v1/sessions/compact",
-            SessionCommand::RollbackCompaction { .. } => "/v1/sessions/compact/rollback",
-        };
         self.post_json(
-            path,
+            command.kind().route(),
             &CommandRequest {
                 command_id,
                 command,

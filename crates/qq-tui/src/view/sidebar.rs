@@ -65,7 +65,7 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize) -> Vec<Line> {
         Gap,
         Header(Group, usize),
         Session(SessionId),
-        Status(SessionId, String, Style),
+        Status(SessionId),
     }
     let mut plan: Vec<Entry> = Vec::new();
     for (group, members) in [Group::NeedsYou, Group::Working, Group::Idle, Group::Done]
@@ -84,8 +84,10 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize) -> Vec<Line> {
                 focused_row = plan.len();
             }
             plan.push(Entry::Session(session_id));
-            if let Some((text, style)) = live_status_line(app, session_id) {
-                plan.push(Entry::Status(session_id, text, style));
+            // Planning asks only whether a status row exists; the text is
+            // built for the rows inside the window, not for every session.
+            if has_status_line(app, session_id) {
+                plan.push(Entry::Status(session_id));
             }
         }
     }
@@ -128,7 +130,9 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize) -> Vec<Line> {
                 }
                 truncate_line(line, width)
             }
-            Entry::Status(session_id, text, style) => {
+            Entry::Status(session_id) => {
+                let (text, style) =
+                    live_status_line(app, session_id).unwrap_or_else(|| (String::new(), muted()));
                 let depth = app.sessions.depth(session_id);
                 let indent = "  ".repeat(depth.min(4));
                 let mut line = Line::styled(format!("│ {indent}   "), muted());
@@ -236,6 +240,19 @@ pub(super) fn child_rows(app: &App, tool_call_id: ToolCallId, width: usize) -> V
 }
 
 /// One-line live status for a session row, most urgent first.
+/// Whether [`live_status_line`] would return a row, without building it.
+/// The two must agree; the planning pass relies on it.
+fn has_status_line(app: &App, session_id: SessionId) -> bool {
+    let Some(session) = app.sessions.get(&session_id) else {
+        return false;
+    };
+    let live = &session.live;
+    !live.awaiting_approval.is_empty()
+        || session.summary.status == SessionStatus::Running
+        || session.summary.queued_prompts > 0
+        || (app.focused() != Some(session_id) && !live.tail.is_empty())
+}
+
 pub(super) fn live_status_line(app: &App, session_id: SessionId) -> Option<(String, Style)> {
     let session = app.sessions.get(&session_id)?;
     let live = &session.live;

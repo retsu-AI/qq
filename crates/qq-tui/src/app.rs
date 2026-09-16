@@ -32,6 +32,11 @@ use crate::{
 };
 mod pickers;
 
+/// Expanded tool-call details the transcript remembers across sessions.
+/// Toggling is per keypress, so this only bounds a very long interactive
+/// session; past it, expansions for calls no longer retained are dropped.
+const MAX_EXPANDED_TOOL_CALLS: usize = 256;
+
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 /// Milliseconds the loop's animation tick advances `now_ms` by; matches
 /// `terminal::ANIMATION_INTERVAL`.
@@ -1122,6 +1127,21 @@ impl App {
                     return self.focus_session(child);
                 }
                 if !self.expanded_tool_calls.remove(&call) {
+                    // Bounded: an expansion for a call no session still
+                    // retains has nothing to render and is dropped first.
+                    if self.expanded_tool_calls.len() >= MAX_EXPANDED_TOOL_CALLS {
+                        let live: std::collections::HashSet<_> = self
+                            .sessions
+                            .values()
+                            .filter_map(|session| session.tool_calls.as_deref())
+                            .flatten()
+                            .map(|tool_call| tool_call.id)
+                            .collect();
+                        self.expanded_tool_calls.retain(|id| live.contains(id));
+                        if self.expanded_tool_calls.len() >= MAX_EXPANDED_TOOL_CALLS {
+                            self.expanded_tool_calls.clear();
+                        }
+                    }
                     self.expanded_tool_calls.insert(call);
                 }
                 Effects::redraw(Redraw::Immediate)

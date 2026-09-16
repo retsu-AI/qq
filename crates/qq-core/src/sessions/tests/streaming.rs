@@ -728,3 +728,63 @@ fn prompt_titles_are_compact_and_bounded() {
     );
     assert_eq!(prompt_title("\0\u{1b}\u{202e}\u{2066}"), "New session");
 }
+
+#[tokio::test]
+async fn session_files_keep_the_newest_paths_and_updates_never_evict() {
+    let (_directory, store, claimed) = claimed_store_fixture().await;
+    let session_id = claimed.identity.session_id;
+    let (retained, oldest_present, newest_present, after_update) = store
+        .call(Priority::Control, move |connection| {
+            let transaction = connection.transaction()?;
+            // One past the bound, in ascending time order.
+            for index in 0..=MAX_SESSION_FILES {
+                let update = FileStateUpdate {
+                    path: format!("src/file_{index}.rs"),
+                    hash: format!("{index:064x}"),
+                };
+                record_session_file(&transaction, session_id, &update, u64::from(index))?;
+            }
+            let count = |transaction: &Connection| -> Result<u64, SessionRuntimeError> {
+                Ok(transaction.query_row(
+                    "SELECT COUNT(*) FROM session_files WHERE session_id = ?1",
+                    [session_id.to_string()],
+                    |row| row.get(0),
+                )?)
+            };
+            let present =
+                |transaction: &Connection, path: &str| -> Result<bool, SessionRuntimeError> {
+                    Ok(transaction.query_row(
+                        "SELECT COUNT(*) FROM session_files WHERE session_id = ?1 AND path = ?2",
+                        rusqlite::params![session_id.to_string(), path],
+                        |row| row.get::<_, u64>(0),
+                    )? == 1)
+                };
+            let retained = count(&transaction)?;
+            let oldest_present = present(&transaction, "src/file_0.rs")?;
+            let newest_present =
+                present(&transaction, &format!("src/file_{MAX_SESSION_FILES}.rs"))?;
+            // Re-recording a known path is an update: the set cannot grow and
+            // nothing is evicted, whatever timestamp it carries.
+            record_session_file(
+                &transaction,
+                session_id,
+                &FileStateUpdate {
+                    path: "src/file_1.rs".to_owned(),
+                    hash: "f".repeat(64),
+                },
+                0,
+            )?;
+            let after_update = count(&transaction)?;
+            transaction.commit()?;
+            Ok((retained, oldest_present, newest_present, after_update))
+        })
+        .await
+        .unwrap();
+    assert_eq!(retained, u64::from(MAX_SESSION_FILES));
+    assert!(
+        !oldest_present,
+        "the oldest path is evicted when the bound is crossed"
+    );
+    assert!(newest_present);
+    assert_eq!(after_update, u64::from(MAX_SESSION_FILES));
+}

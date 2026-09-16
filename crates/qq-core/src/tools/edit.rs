@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    io::{Read, Write as _},
+    io::Write as _,
     path::{Path, PathBuf},
     sync::{
         PoisonError,
@@ -712,16 +712,19 @@ pub(super) fn read_editable(workspace: &Workspace, path: &Path) -> Result<Editab
             MAX_EDIT_FILE_BYTES / (1024 * 1024)
         ));
     }
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or_default());
-    file.take(MAX_EDIT_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("could not read file: {error}"))?;
-    if bytes.len() as u64 > MAX_EDIT_FILE_BYTES {
-        return Err(format!(
-            "too_large: file exceeds the {} MiB editable size limit",
-            MAX_EDIT_FILE_BYTES / (1024 * 1024)
-        ));
-    }
+    let limit = usize::try_from(MAX_EDIT_FILE_BYTES).unwrap_or(usize::MAX);
+    let bytes = match crate::workspace::read_bounded(file, limit, metadata.len()) {
+        Ok(bytes) => bytes,
+        Err(crate::workspace::BoundedReadError::TooLarge { .. }) => {
+            return Err(format!(
+                "too_large: file exceeds the {} MiB editable size limit",
+                MAX_EDIT_FILE_BYTES / (1024 * 1024)
+            ));
+        }
+        Err(crate::workspace::BoundedReadError::Io(error)) => {
+            return Err(format!("could not read file: {error}"));
+        }
+    };
     Ok(EditableFile {
         bytes,
         permissions: metadata.permissions(),

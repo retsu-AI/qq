@@ -545,7 +545,7 @@ impl RuntimeFactory {
             explicit_config_path: request.explicit_path().map(Path::to_owned),
             explicit_config_content: request.explicit_content().map(str::to_owned),
         };
-        let lookup = self.inner.plans.load(key, || {
+        let lookup = self.inner.plans.load(&key, || {
             self.compile_generation(request, profile, &workspace)
         });
         match lookup {
@@ -4986,7 +4986,7 @@ mod tests {
         let (first, _) = factory
             .inner
             .plans
-            .load::<RuntimeBuildError, _>(key, || {
+            .load::<RuntimeBuildError, _>(&key, || {
                 let generation = factory.compile_generation(&request, &profile, &workspace)?;
                 fs::write(&config, document(1024)).unwrap();
                 Ok(generation)

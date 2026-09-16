@@ -407,15 +407,19 @@ pub(crate) struct HttpRejection {
 }
 
 impl HttpExchange {
+    /// The static redactions are normalized here, once, so an attempt whose
+    /// authorizer adds nothing can share the list as-is.
     pub(crate) fn new(
         client: reqwest::Client,
         authorizer: RequestAuthorizer,
         redactions: Arc<[String]>,
     ) -> Self {
+        let mut normalized = redactions.to_vec();
+        normalize_redactions(&mut normalized);
         Self {
             client,
             authorizer,
-            redactions,
+            redactions: Arc::from(normalized),
             attempts: AttemptPolicy::default(),
         }
     }
@@ -478,10 +482,17 @@ impl HttpExchange {
                 None
             };
 
-            let mut redactions = self.redactions.as_ref().to_vec();
-            redactions.extend(self.authorizer.authorize(&mut request).await?);
-            normalize_redactions(&mut redactions);
-            let redactions: Arc<[String]> = Arc::from(redactions);
+            // Static redactions are already normalized; only a request-time
+            // credential adds to them, and most authorizers add nothing.
+            let dynamic = self.authorizer.authorize(&mut request).await?;
+            let redactions: Arc<[String]> = if dynamic.is_empty() {
+                Arc::clone(&self.redactions)
+            } else {
+                let mut merged = self.redactions.as_ref().to_vec();
+                merged.extend(dynamic);
+                normalize_redactions(&mut merged);
+                Arc::from(merged)
+            };
 
             let response = match self.client.execute(request).await {
                 Ok(response) => response,

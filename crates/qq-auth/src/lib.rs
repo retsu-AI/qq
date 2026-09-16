@@ -346,13 +346,40 @@ impl CredentialStore {
             SecretRef::Env(variable) => resolve_environment(variable),
             SecretRef::Stored(name) => {
                 validate_credential_name(name)?;
-                let _lock = self.lock_state()?;
+                let _lock = self.lock_state_shared()?;
                 let index = self.load_index()?;
                 self.resolve_stored_from_index(&index, name, expected_endpoint)
             }
             SecretRef::Value(value) => Ok(Secret::from_secret_bytes(
                 value.expose_secret().as_bytes().to_vec(),
             )),
+        }
+    }
+
+    /// [`Self::resolve_with_endpoint`] plus the [`CredentialEpoch`] of the
+    /// index the secret was read from, in one lock cycle. A caller that
+    /// records the epoch alongside work derived from the secret (the plan
+    /// cache) otherwise takes the state lock once for the epoch and again
+    /// per secret. For a non-stored reference the epoch is read on its own,
+    /// so the caller sees one value whatever the reference kind.
+    pub fn resolve_with_epoch(
+        &self,
+        reference: &SecretRef,
+        expected_endpoint: Option<&str>,
+    ) -> Result<(Secret, CredentialEpoch), AuthError> {
+        match reference {
+            SecretRef::Stored(name) => {
+                validate_credential_name(name)?;
+                let _lock = self.lock_state_shared()?;
+                let index = self.load_index()?;
+                let epoch = CredentialEpoch::new(index.revision);
+                let secret = self.resolve_stored_from_index(&index, name, expected_endpoint)?;
+                Ok((secret, epoch))
+            }
+            SecretRef::Env(_) | SecretRef::Value(_) => {
+                let secret = self.resolve_with_endpoint(reference, expected_endpoint)?;
+                Ok((secret, self.epoch()?))
+            }
         }
     }
 
@@ -530,7 +557,7 @@ impl CredentialStore {
     }
 
     pub fn list(&self) -> Result<Vec<CredentialMetadata>, AuthError> {
-        let _lock = self.lock_state()?;
+        let _lock = self.lock_state_shared()?;
         let index = self.load_index()?;
         Ok(index.records.into_iter().map(Into::into).collect())
     }
@@ -542,14 +569,14 @@ impl CredentialStore {
     /// [`CredentialEpoch::NONE`]. Environment and inline secrets are outside
     /// the store and never move the epoch.
     pub fn epoch(&self) -> Result<CredentialEpoch, AuthError> {
-        let _lock = self.lock_state()?;
+        let _lock = self.lock_state_shared()?;
         let index = self.load_index()?;
         Ok(CredentialEpoch::new(index.revision))
     }
 
     pub fn status(&self, name: &str) -> Result<Option<CredentialMetadata>, AuthError> {
         validate_credential_name(name)?;
-        let _lock = self.lock_state()?;
+        let _lock = self.lock_state_shared()?;
         let index = self.load_index()?;
         Ok(index.find(name).cloned().map(Into::into))
     }
@@ -744,7 +771,7 @@ impl CredentialStore {
         expected_endpoint: Option<&str>,
     ) -> Result<Option<Secret>, AuthError> {
         validate_credential_name(name)?;
-        let _lock = self.lock_state()?;
+        let _lock = self.lock_state_shared()?;
         let index = self.load_index()?;
         if index.find(name).is_none() {
             return Ok(None);
@@ -981,10 +1008,28 @@ impl CredentialStore {
         Ok(CredentialBackend::WindowsProtectedFile)
     }
 
+    /// The exclusive state lock, for every operation that writes the index
+    /// or a fallback file.
     fn lock_state(&self) -> Result<StateLock, AuthError> {
+        self.lock_state_as(LockMode::Exclusive)
+    }
+
+    /// The shared state lock, for reads. Concurrent readers (every compile
+    /// resolving its secrets, every reviewer checking the epoch) no longer
+    /// serialize on each other; a writer still excludes them all. The
+    /// verification after the lock is the same as for a writer.
+    fn lock_state_shared(&self) -> Result<StateLock, AuthError> {
+        self.lock_state_as(LockMode::Shared)
+    }
+
+    fn lock_state_as(&self, mode: LockMode) -> Result<StateLock, AuthError> {
         ensure_data_directory(self.paths.data_dir())?;
         let file = open_lock_file(self.paths.lock_file())?;
-        file.lock().map_err(|source| AuthError::Io {
+        match mode {
+            LockMode::Exclusive => file.lock(),
+            LockMode::Shared => file.lock_shared(),
+        }
+        .map_err(|source| AuthError::Io {
             operation: "lock",
             path: self.paths.lock_file().to_owned(),
             source,
@@ -1510,14 +1555,18 @@ fn ensure_data_directory(path: &Path) -> Result<(), AuthError> {
             path: path.to_owned(),
             source,
         })?;
-        verify_open_directory(path, &directory)?;
-        directory
-            .set_permissions(fs::Permissions::from_mode(0o700))
-            .map_err(|source| AuthError::Io {
-                operation: "set permissions on",
-                path: path.to_owned(),
-                source,
-            })?;
+        let open_metadata = verify_open_directory(path, &directory)?;
+        // This runs on every lock cycle, so the chmod is issued only when the
+        // mode actually differs; the verified metadata already carries it.
+        if open_metadata.permissions().mode() & 0o777 != 0o700 {
+            directory
+                .set_permissions(fs::Permissions::from_mode(0o700))
+                .map_err(|source| AuthError::Io {
+                    operation: "set permissions on",
+                    path: path.to_owned(),
+                    source,
+                })?;
+        }
     }
     Ok(())
 }
@@ -1672,7 +1721,9 @@ fn validate_regular_metadata(path: &Path, metadata: &fs::Metadata) -> Result<(),
     Ok(())
 }
 
-fn verify_open_directory(path: &Path, file: &File) -> Result<(), AuthError> {
+/// Returns the open handle's metadata so the caller can act on the verified
+/// mode without a further stat.
+fn verify_open_directory(path: &Path, file: &File) -> Result<fs::Metadata, AuthError> {
     let open_metadata = file.metadata().map_err(|source| AuthError::Io {
         operation: "inspect",
         path: path.to_owned(),
@@ -1689,7 +1740,7 @@ fn verify_open_directory(path: &Path, file: &File) -> Result<(), AuthError> {
             path: path.to_owned(),
         });
     }
-    Ok(())
+    Ok(open_metadata)
 }
 
 fn verify_open_regular_file(
@@ -1944,6 +1995,12 @@ fn temporary_path(parent: &Path, destination: &Path) -> PathBuf {
 
 struct StateLock {
     _file: File,
+}
+
+#[derive(Clone, Copy)]
+enum LockMode {
+    Exclusive,
+    Shared,
 }
 
 struct CodexStateLock<'a> {

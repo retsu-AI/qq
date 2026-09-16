@@ -377,7 +377,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             10,
             SessionEvent::PromptQueued {
-                session: summary(),
+                session: Box::new(summary()),
                 message: message(0x20, false, MessageState::Queued),
                 run: Box::new(RunSnapshot {
                     id: run_id,
@@ -407,7 +407,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             14,
             SessionEvent::RunStarted {
-                session: summary(),
+                session: Box::new(summary()),
                 run_id,
                 plan: Some(Box::new(plan_identity())),
             },
@@ -489,7 +489,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             19,
             SessionEvent::RunFinished {
-                session: summary(),
+                session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Failed {
                     failure: RunFailure {
@@ -525,7 +525,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             21,
             SessionEvent::RunFinished {
-                session: summary(),
+                session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Failed {
                     failure: RunFailure {
@@ -544,7 +544,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             25,
             SessionEvent::RunFinished {
-                session: summary(),
+                session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Completed,
                 usage: None,
@@ -561,7 +561,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             26,
             SessionEvent::RunFinished {
-                session: summary(),
+                session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Completed,
                 usage: None,

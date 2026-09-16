@@ -466,9 +466,53 @@ pub(super) fn grant_pending_trust(
 pub(super) struct Probes {
     paths: Vec<PathBuf>,
     states: Vec<SourceState>,
+    /// Directories whose every ancestor was checked for symlinks during this
+    /// load. Candidates under one tree share their prefix; without this the
+    /// common prefix is re-stat'd once per candidate.
+    verified_directories: BTreeSet<PathBuf>,
 }
 
 impl Probes {
+    /// [`reject_symlink_components`] with the verified prefix memoized for the
+    /// rest of this load. A symlink swapped in mid-load under an already
+    /// verified prefix is a TOCTOU the un-memoized walk did not close either:
+    /// the read that follows still observes the file it opens.
+    fn reject_symlink_components(&mut self, path: &Path) -> Result<(), ConfigError> {
+        let mut unverified = Vec::new();
+        for ancestor in path.ancestors() {
+            if ancestor.as_os_str().is_empty() {
+                continue;
+            }
+            if self.verified_directories.contains(ancestor) {
+                break;
+            }
+            unverified.push(ancestor);
+        }
+        // Root first, as the un-memoized walk does, so the first symlink on
+        // the way down is the one reported.
+        for component in unverified.into_iter().rev() {
+            match fs::symlink_metadata(component) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(ConfigError::SymlinkSource {
+                        path: component.to_owned(),
+                    });
+                }
+                Ok(metadata) if metadata.is_dir() => {
+                    self.verified_directories.insert(component.to_owned());
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(ConfigError::Io {
+                        path: component.to_owned(),
+                        error,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn record(&mut self, path: &Path) {
         if !self.paths.iter().any(|recorded| recorded == path) {
             // Retain the first observation, before discovery or a read. A
@@ -843,7 +887,7 @@ fn is_fragment_name(name: &str) -> bool {
 
 fn check_optional_directory(path: &Path, probes: &mut Probes) -> Result<bool, ConfigError> {
     probes.record(path);
-    reject_symlink_components(path)?;
+    probes.reject_symlink_components(path)?;
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -874,7 +918,7 @@ pub(super) fn discover_file(
     probes: &mut Probes,
 ) -> Result<Option<FileCandidate>, ConfigError> {
     probes.record(&path);
-    reject_symlink_components(&path)?;
+    probes.reject_symlink_components(&path)?;
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1355,4 +1399,41 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ConfigError>
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_memoized_prefix_still_rejects_a_symlink_below_it() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        fs::create_dir_all(real.join("nested")).unwrap();
+        let linked = root.path().join("linked");
+        symlink(&real, &linked).unwrap();
+
+        let mut probes = Probes::default();
+        probes
+            .reject_symlink_components(&real.join("nested").join("config.ron"))
+            .unwrap();
+        assert!(probes.verified_directories.contains(&real.join("nested")));
+        assert!(probes.verified_directories.contains(root.path()));
+
+        // The prefix up to `root` is memoized; `linked` is not and is caught.
+        let error = probes
+            .reject_symlink_components(&linked.join("config.ron"))
+            .unwrap_err();
+        assert!(matches!(error, ConfigError::SymlinkSource { path } if path == linked));
+
+        // A second candidate under the verified tree stats nothing new.
+        let before = probes.verified_directories.len();
+        probes
+            .reject_symlink_components(&real.join("nested").join("other.ron"))
+            .unwrap();
+        assert_eq!(probes.verified_directories.len(), before);
+    }
 }

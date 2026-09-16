@@ -267,22 +267,33 @@ pub(super) fn record_session_file(
     update: &FileStateUpdate,
     now: u64,
 ) -> Result<(), SessionRuntimeError> {
+    let session = session_id.to_string();
     transaction.execute(
         "INSERT INTO session_files(session_id, path, content_hash, updated_at_ms)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(session_id, path) DO UPDATE
              SET content_hash = excluded.content_hash,
                  updated_at_ms = excluded.updated_at_ms",
-        params![session_id.to_string(), update.path, update.hash, now],
+        params![session, update.path, update.hash, now],
     )?;
-    transaction.execute(
-        "DELETE FROM session_files
-             WHERE session_id = ?1 AND rowid NOT IN (
-                 SELECT rowid FROM session_files WHERE session_id = ?1
-                 ORDER BY updated_at_ms DESC, rowid DESC LIMIT ?2
-             )",
-        params![session_id.to_string(), MAX_SESSION_FILES],
+    // Eviction is gated on the count: an update to a known path cannot grow
+    // the set, and a session under the bound has nothing to evict, so the
+    // ordered sub-select runs only when a new path pushed the session over.
+    let count: u64 = transaction.query_row(
+        "SELECT COUNT(*) FROM session_files WHERE session_id = ?1",
+        params![session],
+        |row| row.get(0),
     )?;
+    if count > u64::from(MAX_SESSION_FILES) {
+        transaction.execute(
+            "DELETE FROM session_files
+                 WHERE session_id = ?1 AND rowid NOT IN (
+                     SELECT rowid FROM session_files WHERE session_id = ?1
+                     ORDER BY updated_at_ms DESC, rowid DESC LIMIT ?2
+                 )",
+            params![session, MAX_SESSION_FILES],
+        )?;
+    }
     Ok(())
 }
 
