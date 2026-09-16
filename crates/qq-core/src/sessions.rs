@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     future::Future,
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},

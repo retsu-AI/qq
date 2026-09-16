@@ -31,7 +31,7 @@ fn assembly_pruning_stubs_old_read_only_results_and_preserves_errors() {
     ];
     let before = context_bytes(&context);
 
-    assert!(prune_stale_tool_results(&mut context, &HashSet::new()));
+    assert!(prune_stale_tool_results(&mut context, &HashMap::new()));
 
     let results = context
         .iter()
@@ -97,7 +97,7 @@ fn pruning_stubs_keep_a_result_header_line() {
         Message::assistant("c"),
         Message::assistant("d"),
     ];
-    assert!(prune_stale_tool_results(&mut context, &HashSet::new()));
+    assert!(prune_stale_tool_results(&mut context, &HashMap::new()));
     let stubs = context
         .iter()
         .flat_map(Message::content)
@@ -145,12 +145,18 @@ fn assembly_pruning_decides_from_the_stored_effect_class_not_the_tool_name() {
         // An external tool without a read-only effect is never pruned.
         Message::new(Role::Assistant, vec![call("c3", "mcp__docs__write")]),
         Message::tool_results(vec![result("c3")]),
+        // An explicit stored effect takes precedence over legacy names.
+        Message::new(Role::Assistant, vec![call("c4", "read_file")]),
+        Message::tool_results(vec![result("c4")]),
         Message::assistant("a"),
         Message::assistant("b"),
         Message::assistant("c"),
         Message::assistant("d"),
     ];
-    let prunable = HashSet::from(["c1".to_owned()]);
+    let prunable = HashMap::from([
+        ((2, 0), EffectClass::ReadOnly),
+        ((8, 0), EffectClass::External),
+    ]);
     assert!(prune_stale_tool_results(&mut context, &prunable));
     let results = context
         .iter()
@@ -170,6 +176,10 @@ fn assembly_pruning_decides_from_the_stored_effect_class_not_the_tool_name() {
     assert!(
         results[2].1.starts_with("yyy"),
         "an external non-read-only result stays"
+    );
+    assert!(
+        results[3].1.starts_with("yyy"),
+        "stored effect overrides the legacy name"
     );
 }
 

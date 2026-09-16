@@ -16,6 +16,7 @@ mod contract;
 mod delegation;
 mod feeds;
 mod migrations;
+mod replay_identity;
 mod runs;
 mod settlement;
 mod streaming;
@@ -2244,7 +2245,7 @@ mod reference_assembly {
         }
         // The reference predates the stored effect column and prunes by
         // name alone; the differential fixtures use built-in tools only.
-        let context_rewritten = prune_stale_tool_results(&mut context, &HashSet::new());
+        let context_rewritten = prune_stale_tool_results(&mut context, &HashMap::new());
         Ok((context, context_rewritten))
     }
     fn reference_append_legacy_run_messages(

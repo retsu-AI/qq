@@ -178,12 +178,12 @@ pub(super) fn load_model_context_with_rewrite_status(
     }
     drop(statement);
 
-    // Every recorded tool result, keyed by run and provider call id, with the
+    // Every recorded tool result, keyed by run, turn, and provider call id, with the
     // effect class the call was admitted under (absent for rows written
     // before schema 26).
-    let mut results: HashMap<String, HashMap<String, RecordedResult>> = HashMap::new();
+    let mut results: HashMap<String, RecordedTurnResults> = HashMap::new();
     let mut statement = transaction.prepare_cached(
-        "SELECT c.run_id, c.provider_call_id, c.result, c.is_error, c.effect
+        "SELECT c.run_id, c.provider_call_id, c.result, c.is_error, c.effect, c.turn_ordinal
              FROM tool_calls c JOIN runs r ON r.id = c.run_id
              WHERE r.session_id = ?1 AND c.result IS NOT NULL",
     )?;
@@ -194,19 +194,25 @@ pub(super) fn load_model_context_with_rewrite_status(
             row.get::<_, String>(2)?,
             row.get::<_, bool>(3)?,
             row.get::<_, Option<String>>(4)?,
+            row.get::<_, u32>(5)?,
         ))
     })?;
-    let mut prunable = HashSet::new();
     for row in rows {
-        let (run_id, call_id, content, is_error, effect) = row?;
+        let (run_id, call_id, content, is_error, effect, turn_ordinal) = row?;
         let effect = effect.as_deref().and_then(EffectClass::from_stored);
-        if effect == Some(EffectClass::ReadOnly) {
-            prunable.insert(call_id.clone());
-        }
         results
             .entry(run_id)
             .or_default()
-            .insert(call_id, RecordedResult { content, is_error });
+            .entry(turn_ordinal)
+            .or_default()
+            .insert(
+                call_id,
+                RecordedResult {
+                    content,
+                    is_error,
+                    effect,
+                },
+            );
     }
     drop(statement);
 
@@ -235,6 +241,7 @@ pub(super) fn load_model_context_with_rewrite_status(
     drop(statement);
 
     let mut context = Vec::new();
+    let mut effects = HashMap::new();
     if let Some(compaction) = compaction {
         context.push(Message::user(format!(
             "{COMPACTION_SUMMARY_PREAMBLE}\n\n{}",
@@ -257,6 +264,7 @@ pub(super) fn load_model_context_with_rewrite_status(
                     results.remove(&prompt.run_id).unwrap_or_default(),
                     steering.remove(&prompt.run_id).unwrap_or_default(),
                     &mut context,
+                    &mut effects,
                 )?,
                 None => append_legacy_run_messages(
                     transaction,
@@ -276,14 +284,17 @@ pub(super) fn load_model_context_with_rewrite_status(
             }
         }
     }
-    let context_rewritten = prune_stale_tool_results(&mut context, &prunable);
+    let context_rewritten = prune_stale_tool_results(&mut context, &effects);
     Ok((context, context_rewritten))
 }
+
+type RecordedTurnResults = HashMap<u32, HashMap<String, RecordedResult>>;
 
 /// One stored tool result as context assembly reads it.
 pub(super) struct RecordedResult {
     pub(super) content: String,
     pub(super) is_error: bool,
+    pub(super) effect: Option<EffectClass>,
 }
 
 /// Assistant rows from stores that predate `model_turns`: one query per such
@@ -348,15 +359,15 @@ pub(super) fn runtime_notice(outcome: &RunOutcome) -> Option<String> {
 
 /// Replaces read-only tool results older than the recency window with
 /// one-line stubs. A result is prunable when the call was admitted with the
-/// `read_only` effect class (`prunable` holds those provider call ids from the
-/// store) — its output is re-derivable on demand; mutating, shell, and
+/// `read_only` effect class (`effects` maps assembled message/block positions
+/// to their stored effects) — its output is re-derivable on demand; mutating, shell, and
 /// external outputs are not. Rows recorded before the effect was stored fall
 /// back to the built-in read-only names. The window keeps the last
 /// [`CONTEXT_PRUNE_KEEP_TURNS`] model turns (assistant messages) verbatim.
 /// `is_error` is preserved so an error result stays an error stub.
 pub(super) fn prune_stale_tool_results(
     context: &mut [Message],
-    prunable: &HashSet<String>,
+    effects: &HashMap<(usize, usize), EffectClass>,
 ) -> bool {
     let assistant_positions = context
         .iter()
@@ -371,51 +382,72 @@ pub(super) fn prune_stale_tool_results(
     else {
         return false;
     };
-    // Map provider call ids to the tool that produced them; the ToolResult
-    // block alone does not name its tool.
+    // A provider ID is local to one assistant turn, not the session. Retain
+    // only that turn's call metadata while visiting its results.
     let mut calls = HashMap::new();
-    for message in context.iter() {
-        for block in message.content() {
-            if let ContentBlock::ToolCall {
-                id,
-                name,
-                arguments,
-            } = block
-            {
-                calls.insert(id.clone(), (name.clone(), arguments.to_string()));
-            }
-        }
-    }
     let mut rewritten = false;
-    for message in &mut context[..window_start] {
-        let needs_pruning = message.content().iter().any(|block| {
-            matches!(block, ContentBlock::ToolResult { call_id, content, .. }
-                if prunable_stub(&calls, prunable, call_id, content).is_some())
-        });
-        if !needs_pruning {
+    for (message_index, message) in context[..window_start].iter_mut().enumerate() {
+        if message.role() == Role::Assistant {
+            calls.clear();
+            for block in message.content() {
+                if let ContentBlock::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } = block
+                {
+                    calls.insert(id.clone(), (name.clone(), arguments.to_string()));
+                }
+            }
             continue;
         }
-        let content = message
+        if !message
             .content()
             .iter()
-            .map(|block| match block {
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        {
+            continue;
+        }
+        let mut replacement: Option<Vec<ContentBlock>> = None;
+        for (block_index, block) in message.content().iter().enumerate() {
+            let stub = match block {
                 ContentBlock::ToolResult {
                     call_id,
                     content,
                     is_error,
-                } => match prunable_stub(&calls, prunable, call_id, content) {
-                    Some(stub) => ContentBlock::ToolResult {
-                        call_id: call_id.clone(),
-                        content: stub,
-                        is_error: *is_error,
-                    },
-                    None => block.clone(),
-                },
-                block => block.clone(),
-            })
-            .collect();
-        *message = Message::new(message.role(), content);
-        rewritten = true;
+                } => prunable_stub(
+                    &calls,
+                    effects.get(&(message_index, block_index)).copied(),
+                    call_id,
+                    content,
+                )
+                .map(|stub| ContentBlock::ToolResult {
+                    call_id: call_id.clone(),
+                    content: stub,
+                    is_error: *is_error,
+                }),
+                _ => None,
+            };
+            match stub {
+                Some(stub) => {
+                    let replacement = replacement.get_or_insert_with(|| {
+                        let mut blocks = Vec::with_capacity(message.content().len());
+                        blocks.extend_from_slice(&message.content()[..block_index]);
+                        blocks
+                    });
+                    replacement.push(stub);
+                }
+                None => {
+                    if let Some(replacement) = &mut replacement {
+                        replacement.push(block.clone());
+                    }
+                }
+            }
+        }
+        if let Some(content) = replacement {
+            *message = Message::new(message.role(), content);
+            rewritten = true;
+        }
     }
     rewritten
 }
@@ -425,12 +457,15 @@ pub(super) fn prune_stale_tool_results(
 /// than the stub would be).
 pub(super) fn prunable_stub(
     calls: &HashMap<String, (String, String)>,
-    prunable: &HashSet<String>,
+    effect: Option<EffectClass>,
     call_id: &str,
     content: &str,
 ) -> Option<String> {
     let (name, arguments) = calls.get(call_id)?;
-    if !prunable.contains(call_id) && !PRUNABLE_READ_ONLY_TOOLS.contains(&name.as_str()) {
+    if !match effect {
+        Some(effect) => effect == EffectClass::ReadOnly,
+        None => PRUNABLE_READ_ONLY_TOOLS.contains(&name.as_str()),
+    } {
         return None;
     }
     let mut arguments = arguments.clone();
@@ -627,11 +662,13 @@ pub(super) fn assembled_context_bytes(
 /// and the continuation notice after a truncated turn.
 pub(super) fn append_run_turns(
     turns: Vec<(u32, String, bool)>,
-    mut recorded: HashMap<String, RecordedResult>,
+    mut recorded: RecordedTurnResults,
     mut steering: std::collections::VecDeque<(u32, String)>,
     context: &mut Vec<Message>,
+    effects: &mut HashMap<(usize, usize), EffectClass>,
 ) -> Result<(), SessionRuntimeError> {
     for (turn_ordinal, content_json, truncated) in turns {
+        let mut recorded_turn = recorded.remove(&turn_ordinal).unwrap_or_default();
         while steering
             .front()
             .is_some_and(|(applied_before, _)| *applied_before <= turn_ordinal)
@@ -648,21 +685,36 @@ pub(super) fn append_run_turns(
         // and its tool_calls rows in an older store) gets an explicit
         // interrupted result so replayed context stays provider-valid
         // instead of poisoning the session.
+        let result_message_index = context.len() + 1;
+        let mut result_index = 0;
         let results = content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::ToolCall { id, .. } => Some(match recorded.remove(id) {
-                    Some(RecordedResult { content, is_error }) => ContentBlock::ToolResult {
-                        call_id: id.clone(),
-                        content,
-                        is_error,
-                    },
-                    None => ContentBlock::ToolResult {
-                        call_id: id.clone(),
-                        content: INTERRUPTED_TOOL_RESULT.to_owned(),
-                        is_error: true,
-                    },
-                }),
+                ContentBlock::ToolCall { id, .. } => {
+                    let block_index = result_index;
+                    result_index += 1;
+                    Some(match recorded_turn.remove(id) {
+                        Some(RecordedResult {
+                            content,
+                            is_error,
+                            effect,
+                        }) => {
+                            if let Some(effect) = effect {
+                                effects.insert((result_message_index, block_index), effect);
+                            }
+                            ContentBlock::ToolResult {
+                                call_id: id.clone(),
+                                content,
+                                is_error,
+                            }
+                        }
+                        None => ContentBlock::ToolResult {
+                            call_id: id.clone(),
+                            content: INTERRUPTED_TOOL_RESULT.to_owned(),
+                            is_error: true,
+                        },
+                    })
+                }
                 ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,
             })
             .collect::<Vec<_>>();

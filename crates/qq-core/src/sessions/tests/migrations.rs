@@ -1907,6 +1907,7 @@ fn version_twenty_two_migration_adds_truncation_state_as_never_truncated() {
         HashMap::new(),
         std::collections::VecDeque::new(),
         &mut context,
+        &mut HashMap::new(),
     )
     .unwrap();
     assert_eq!(context.len(), 1);
