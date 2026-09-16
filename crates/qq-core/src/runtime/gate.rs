@@ -13,6 +13,11 @@ pub(crate) enum GateDecision {
     Deny {
         message: String,
     },
+    /// The user answered an `ask_user` call: `result` is the call's complete,
+    /// already-persisted result, so nothing dispatches.
+    Answered {
+        result: String,
+    },
     Fail {
         kind: RunFailureKind,
         message: String,

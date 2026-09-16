@@ -569,6 +569,9 @@ impl ToolGate for StaticPolicyGate {
             approval::PolicyDecision::RequireApproval => GateDecision::Deny {
                 message: approval::UNATTENDED_DENIED_RESULT.to_owned(),
             },
+            approval::PolicyDecision::AskUser { .. } => GateDecision::Deny {
+                message: approval::UNATTENDED_QUESTION_RESULT.to_owned(),
+            },
         };
         Box::pin(std::future::ready(decision))
     }
@@ -2086,6 +2089,12 @@ impl plan::CompiledAgentPlan {
                             results[index] = Some(RetainedResult::error(message.clone()));
                             yield RuntimeEvent::ToolCallDenied { id: call.id, message };
                         }
+                        // The gate persisted and published the answered call;
+                        // the answer is the result and nothing executes.
+                        GateDecision::Answered { result } => {
+                            results[index] = Some(RetainedResult::answered(result.clone()));
+                            yield RuntimeEvent::ToolCallAnswered { id: call.id, result };
+                        }
                         GateDecision::Fail { kind, message } => {
                             yield RuntimeEvent::Failed { kind, message };
                             return;
@@ -2673,6 +2682,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 RuntimeEvent::AssistantTurnCompleted { usage: None, .. }
                 | RuntimeEvent::ToolCallStarted { .. }
                 | RuntimeEvent::ToolCallDenied { .. }
+                | RuntimeEvent::ToolCallAnswered { .. }
                 | RuntimeEvent::ToolCallOutputDelta { .. }
                 | RuntimeEvent::ToolCallFinished { .. }
                 // Direct runs have no steering channel, so these never fire.
@@ -2758,6 +2768,16 @@ impl RetainedResult {
         Self {
             model_text: message,
             is_error: true,
+            spill_handle: None,
+        }
+    }
+
+    /// An `ask_user` result the session layer already persisted: kept as-is
+    /// so the model reads exactly what the store holds.
+    const fn answered(result: String) -> Self {
+        Self {
+            model_text: result,
+            is_error: false,
             spill_handle: None,
         }
     }
@@ -4176,7 +4196,7 @@ mod tests {
         );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].tools().len(), 7);
+        assert_eq!(requests[0].tools().len(), 8);
         let system = requests[0]
             .system()
             .expect("agent runs set a system prompt");
@@ -6031,7 +6051,7 @@ mod tests {
             !names.contains(&"rogue_tool"),
             "specs outside the mcp__ namespace must be discarded"
         );
-        assert_eq!(requests[0].tools().len(), 8);
+        assert_eq!(requests[0].tools().len(), 9);
         let system = requests[0].system().unwrap();
         assert!(system.contains("mcp__srv__ping"));
         assert!(system.contains("external tool hosts"));

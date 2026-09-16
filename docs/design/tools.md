@@ -354,13 +354,50 @@ and keeps the schema for each tool in one place:
 - `exec` — one program with an argument list and no shell between the model
   and the process; same environment, timeout, output, and approval path as
   `shell`, but the classifier sees exact argv.
+- `ask_user` — one to four structured questions for the human, each with two
+  to six options or free text; the run waits for the answers (§ Asking The
+  User).
 
 Each returns complete domain output within its own scan and count limits;
 the model-facing text is then bounded once at dispatch (§ Output Bounding).
 
 Read-only tools (`read_file`, `tree`, `search`) never require approval
-inside the workspace and may execute concurrently. Everything else is a
-mutating or externally visible tool and goes through policy.
+inside the workspace and may execute concurrently. `ask_user` is
+`Interactive`: it executes nothing, so every mode allows it, and it is held
+like an approval until answered. Everything else is a mutating or externally
+visible tool and goes through policy.
+
+### Asking The User
+
+`ask_user` exists so the model has a cheaper move than guessing when a
+request is genuinely ambiguous, and a structured one instead of ending its
+turn with a question in prose. Arguments are `questions: [{prompt, options?,
+free_text?}]` with `1..=4` questions (`MAX_QUESTIONS`), `2..=6` options each
+(`MIN_OPTIONS`/`MAX_OPTIONS`) or none for a free-text prompt, prompts
+≤ 512 bytes and options ≤ 128 bytes (`MAX_QUESTION_BYTES`,
+`MAX_OPTION_BYTES`); each answer is clipped to 4 KiB (`MAX_ANSWER_BYTES`).
+
+Nothing dispatches. Policy classifies the call `Interactive` and the gate
+holds it exactly like an approval: the call row goes to `awaiting_approval`
+and `tool_approval_requested` carries the parsed `question` (never `shell`
+or `edit`). A client answers with `ApprovalDecision::Answer { answers }`,
+one string per question in order; the store settles the call `completed`
+with the rendered questions and answers as its result and resolves the hold
+`answered`. An empty answer set declines: the result tells the model to
+proceed on its own judgement. The approval timeout applies unchanged, so an
+unanswered question settles `denied_timeout` and the run continues. Under
+`supervised` the reviewer is not consulted — there is nothing to adjudicate —
+but it sees the question and the answer in the transcript like any other
+call. Malformed arguments never hold: they fall through to dispatch and the
+contract error names the failing question and bound.
+
+Headless runs have no human. `qq run` cancels the run at the first question
+and exits `needs_input` (5) with the question in the outcome message; the
+stream already carries the `tool_approval_requested` event so a supervisor
+can resume with an answer. A child session's question is declined on the
+spot so the child proceeds. Direct runs without a session gate answer with a
+fixed "no user is available" result. The system prompt tells the model to ask
+once, offer concrete options, and never ask what a tool could find out.
 
 ### Read-Side Walk
 
@@ -903,6 +940,16 @@ Each session has an approval mode:
 - `full` — everything executes without prompting, except shell commands the
   classifier marks `Forbidden` (§ Shell Classification): `full` is
   unrestricted authority over the workspace, not over the machine.
+
+Decision by effect class before grants (ADR-0021):
+
+| class | read-only | ask | auto | supervised | full |
+| --- | --- | --- | --- | --- | --- |
+| `ReadOnly` | Execute | Execute | Execute | Execute | Execute |
+| `Mutating` | Deny | Ask | Execute | Ask | Execute |
+| `Shell` | Deny | Ask | Execute unless `Prompt`/`Forbidden` | Ask | Execute (`Forbidden` still denied) |
+| `External` | Deny | Ask | Execute | Ask | Execute |
+| `Interactive` (`ask_user`) | Hold for answer | Hold | Hold | Hold | Hold |
 
 The allowlist is deliberately simple: exact commands or command prefixes
 (`cargo test`, `git status`), plus per-tool grants for MCP. No pattern DSL

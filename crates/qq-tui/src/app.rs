@@ -13,9 +13,9 @@ use qq_client::state::{
 };
 use qq_protocol::{
     AgentProfileId, ApprovalDecision, ApprovalGrant, ApprovalMode, ApprovalResolution, CommandId,
-    CommandOutcome, CommandRequest, ModelSelection, ServerCapabilities, SessionCommand,
-    SessionEvent, SessionEventEnvelope, SessionId, SessionStatus, SteeringCapabilities,
-    ToolCallSnapshot, ToolCallState, WorkspaceId, WorkspaceSnapshot,
+    CommandOutcome, CommandRequest, ModelSelection, QuestionPreview, ServerCapabilities,
+    SessionCommand, SessionEvent, SessionEventEnvelope, SessionId, SessionStatus,
+    SteeringCapabilities, ToolCallSnapshot, ToolCallState, WorkspaceId, WorkspaceSnapshot,
 };
 use thiserror::Error;
 
@@ -313,6 +313,9 @@ pub(crate) struct App {
     /// armed it, the composer collects the text, Enter sends the decision
     /// and then steers the run with the text.
     pub(crate) approval_amendment: Option<ApprovalChoice>,
+    /// Answers collected so far for a pending `ask_user` hold, one per
+    /// question in order; the composer holds a free-text answer in progress.
+    pub(crate) question_answers: Vec<String>,
     history_position: Option<usize>,
     history_draft: Option<String>,
     /// Cursor into the slash autocomplete list. The query is the composer
@@ -396,6 +399,7 @@ impl App {
             overlay: None,
             composer: Composer::default(),
             approval_amendment: None,
+            question_answers: Vec::new(),
             history_position: None,
             history_draft: None,
             slash: Picker::new(),
@@ -539,6 +543,7 @@ impl App {
                                     ApprovalResolution::DeniedByReviewer => {
                                         "tool call already denied by the reviewer"
                                     }
+                                    ApprovalResolution::Answered => "answer sent",
                                 }
                                 .to_owned(),
                             );
@@ -1980,13 +1985,21 @@ impl App {
             .get(&tool_call.id)
     }
 
+    /// The pending hold's question, when it is an `ask_user` call.
+    pub(crate) fn pending_question(&self) -> Option<&QuestionPreview> {
+        self.pending_approval_preview()?.question.as_ref()
+    }
+
     fn handle_approval_key(&mut self, key: KeyEvent) -> Effects {
         if matches!(self.settings.action_for(key), Some(Action::CancelRun)) {
             return self.cancel_run();
         }
+        if let Some(question) = self.pending_question() {
+            return self.handle_question_key(key, question.clone());
+        }
         // With an amendment armed, the composer collects the steering text;
         // Enter sends the decision then the steer, Esc drops the amendment.
-        if let Some(choice) = self.approval_amendment {
+        if let Some(choice) = self.approval_amendment.clone() {
             return match key.code {
                 KeyCode::Enter => {
                     self.approval_amendment = None;
@@ -2085,6 +2098,78 @@ impl App {
         )
     }
 
+    /// Keys while an `ask_user` hold is pending: a digit picks that option
+    /// for the current question, typed text is a free answer Enter submits,
+    /// Esc declines the whole question set. Answers accumulate until every
+    /// question has one, then the decision is sent.
+    fn handle_question_key(&mut self, key: KeyEvent, question: QuestionPreview) -> Effects {
+        let index = self.question_answers.len();
+        let Some(current) = question.questions.get(index) else {
+            return self.send_answers();
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.question_answers.clear();
+                self.composer.clear();
+                self.respond_to_approval(ApprovalChoice::Answer(Vec::new()))
+            }
+            KeyCode::Char(digit @ '1'..='9')
+                if self.composer.text.is_empty()
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                let Some(option) = current
+                    .options
+                    .get(usize::from(digit as u8 - b'1'))
+                    .cloned()
+                else {
+                    // A digit past the option list starts a free answer if
+                    // one is allowed; otherwise nothing.
+                    return if current.free_text {
+                        Effects::changed_now(self.push_input(digit))
+                    } else {
+                        Effects::none()
+                    };
+                };
+                self.question_answers.push(option);
+                self.send_answers()
+            }
+            KeyCode::Enter => {
+                let text = self.composer.expanded().trim().to_owned();
+                if text.is_empty() {
+                    return Effects::none();
+                }
+                self.composer.clear();
+                self.question_answers.push(text);
+                self.send_answers()
+            }
+            KeyCode::Backspace => Effects::changed_now(self.composer.backspace()),
+            KeyCode::Char(character)
+                if current.free_text
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                Effects::changed_now(self.push_input(character))
+            }
+            _ => Effects::none(),
+        }
+    }
+
+    /// Sends the collected answers once every question has one; otherwise
+    /// redraws so the block shows the next question.
+    fn send_answers(&mut self) -> Effects {
+        let total = self
+            .pending_question()
+            .map_or(0, |question| question.questions.len());
+        if self.question_answers.len() < total {
+            return Effects::redraw(Redraw::Immediate);
+        }
+        let answers = std::mem::take(&mut self.question_answers);
+        self.respond_to_approval(ApprovalChoice::Answer(answers))
+    }
+
     fn respond_to_approval(&mut self, choice: ApprovalChoice) -> Effects {
         let Some(tool_call) = self.pending_approval() else {
             return Effects::none();
@@ -2100,6 +2185,7 @@ impl App {
                 grant: approval_grant(tool_call),
             },
             ApprovalChoice::Deny => ApprovalDecision::Deny,
+            ApprovalChoice::Answer(answers) => ApprovalDecision::Answer { answers },
         };
         self.answered_approvals.insert(tool_call_id);
         self.send(
@@ -2423,12 +2509,14 @@ impl App {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ApprovalChoice {
     Once,
     Session,
     Workspace,
     Deny,
+    /// Answers to an `ask_user` hold; empty declines.
+    Answer(Vec<String>),
 }
 
 /// Derives the approve-for-session grant from the pending call: shell calls

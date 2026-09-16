@@ -46,7 +46,7 @@ Related documents:
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 20
+PROTOCOL_VERSION = 21
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -139,9 +139,15 @@ snapshot decoders are strict. Version 20 added `verdict` and `reasons` to
 classifier's tier (`allow | prompt | forbidden`) and the rule ids that
 produced it, so a client can show why the gate is asking. Both are optional
 and omitted when absent; the struct is `deny_unknown_fields`, so a
-version-19 client would reject a preview that carries them. Golden fixtures
-live under `crates/qq-protocol/tests/fixtures/v20/`; the `v17`–`v19`
-directories are retained decode-only.
+version-19 client would reject a preview that carries them. Version 21 added
+`range` to `InputPart::WorkspaceFile` (client-side `@path:a-b` mentions) and
+the `ask_user` question round trip (ADR-0021): optional `question` on
+`tool_approval_requested`, the `answer` decision, and the `answered`
+resolution. Every field is optional and omitted when absent; the version
+moves because `InputPart` and the previews are `deny_unknown_fields` and
+older peers would reject the new decision and resolution tags. Golden
+fixtures live under `crates/qq-protocol/tests/fixtures/v21/`; the
+`v17`–`v20` directories are retained decode-only.
 
 Clients and servers must agree on this value.
 
@@ -404,7 +410,7 @@ Response `ServerCapabilities` (abridged; see
     "max_output_continuations": 3,
     "max_descendants": 24
   },
-  "approvals": ["approve_once", "approve_for_session", "approve_for_workspace", "deny"],
+  "approvals": ["approve_once", "approve_for_session", "approve_for_workspace", "deny", "answer"],
   "approval_modes": ["read_only", "ask", "auto", "full"],
   "profiles": [
     { "id": "default", "model": "openai/gpt-5.6", "approval_mode": "auto" },
@@ -806,6 +812,7 @@ Decision variants:
 | `approve_for_session` | Run this call and record a session grant |
 | `approve_for_workspace` | Like `approve_for_session`, plus promote the grant into workspace configuration |
 | `deny` | Reject the call |
+| `answer` | Answer an `ask_user` question: `answers` is one string per question in order (an option's text or free text); empty declines |
 
 `approve_for_session` and `approve_for_workspace` include a grant:
 
@@ -832,7 +839,9 @@ Outcome:
 
 Resolution values: `approved_once`, `approved_for_session`,
 `approved_for_workspace`, `approved_by_reviewer`, `denied`, `denied_timeout`,
-`denied_by_reviewer`. The reviewer resolutions are written by the configured
+`denied_by_reviewer`, `answered`. `answered` settles an `ask_user` hold: the
+call is `completed` and its `result` is the rendered questions and answers
+(or the decline text). The reviewer resolutions are written by the configured
 `reviewer_model` without a human: `approved_by_reviewer` for `auto` sessions'
 dangerous shell and for every held call of a `supervised` child;
 `denied_by_reviewer` only for `supervised` children, where the denial is final
@@ -1282,7 +1291,7 @@ Every streamed payload is a `SessionEventEnvelope`:
 | `text_appended` | `message_id`, `channel`, `text` | Output or refusal delta |
 | `model_turn_completed` | `run_id`, `turn_ordinal`, `model`, optional `usage`, optional `estimated_cost_usd_nanos` | A provider inference and its accounting committed |
 | `tool_call_requested` | `tool_call` | Model finished requesting a tool call |
-| `tool_approval_requested` | `tool_call`, optional `shell`, optional `edit` | Policy needs a human decision |
+| `tool_approval_requested` | `tool_call`, optional `shell`, optional `edit`, optional `question` | Policy needs a human decision, or (`question`) the model asked one |
 | `tool_approval_resolved` | `tool_call`, `resolution` | Approval decision recorded |
 | `workspace_grant_promoted` | `grant`, `outcome` | An approve-for-workspace promotion finished (`written`, `already_present`, or non-fatal `failed`) |
 | `tool_call_started` | `tool_call` | Execution began |
@@ -1553,7 +1562,21 @@ context, and the `result` string remains authoritative.
 }
 ```
 
+```json
+{
+  "question": {
+    "questions": [
+      { "prompt": "Which crate?", "options": ["qq-core", "qq-tui"] },
+      { "prompt": "Why?", "options": [], "free_text": true }
+    ]
+  }
+}
+```
+
 Previews are advisory UI aids. The authoritative call remains `tool_call`.
+`question` is the exception in kind: it is not a permission but the model's
+question (`ask_user`), answered with the `answer` decision; `free_text` is
+omitted when false.
 
 ### Run outcomes and failures
 

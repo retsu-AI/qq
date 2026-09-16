@@ -372,7 +372,7 @@ pub(super) fn composer(
     let max_rows = max_rows.max(1);
     let mode = app.composer_mode();
     // An armed amendment turns the composer into the steering note field.
-    if let Some(choice) = app.approval_amendment {
+    if let Some(choice) = &app.approval_amendment {
         let mut line = Line::styled(" ✎ ", warning().bold());
         line.push(
             match choice {
@@ -407,10 +407,23 @@ pub(super) fn composer(
         ComposerMode::Approval => muted(),
     };
     let gutter = format!(" {} ", mode.glyph());
+    // A free-text question uses the composer for the answer, so its caret
+    // shows; a permission hold has nothing to type.
+    let answering = app
+        .pending_question()
+        .and_then(|question| question.questions.get(app.question_answers.len()))
+        .is_some_and(|question| question.free_text);
     if app.composer.text.is_empty() {
         let mut line = Line::styled(gutter, glyph_style);
-        line.push(mode.placeholder(), muted().italic());
-        let caret = (mode != ComposerMode::Approval).then_some((3, 0));
+        line.push(
+            if answering {
+                "Type your answer..."
+            } else {
+                mode.placeholder()
+            },
+            muted().italic(),
+        );
+        let caret = (mode != ComposerMode::Approval || answering).then_some((3, 0));
         return (vec![truncate_line(line, width)], caret);
     }
 

@@ -239,6 +239,7 @@ impl SessionStore {
                 tool_call,
                 shell,
                 edit,
+                question,
             } => {
                 if let Some(session) = self.get_mut(&session_id) {
                     if tool_call.state == ToolCallState::AwaitingApproval && !context.attentive {
@@ -246,12 +247,13 @@ impl SessionStore {
                             session_title: session.summary.title.clone(),
                         }));
                     }
-                    if shell.is_some() || edit.is_some() {
+                    if shell.is_some() || edit.is_some() || question.is_some() {
                         session.approval_previews.insert(
                             tool_call.id,
                             ApprovalPreview {
                                 shell: shell.clone(),
                                 edit: edit.clone(),
+                                question: question.as_deref().cloned(),
                             },
                         );
                     }

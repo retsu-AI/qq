@@ -1,0 +1,8 @@
+{
+  "command_id": "17171717171717171717171717171717",
+  "command": {
+    "type": "set_session_profile",
+    "session_id": "03030303030303030303030303030303",
+    "profile": "fast"
+  }
+}

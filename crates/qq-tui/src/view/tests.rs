@@ -619,6 +619,100 @@ fn diff_detection_requires_hunks_or_paired_change_lines() {
 }
 
 #[test]
+fn question_holds_render_numbered_options_and_the_answered_questions() {
+    let mut app = app_with_messages(1);
+    let session_id = app.focused().unwrap();
+    let tool_call = tool_call_snapshot(
+        9,
+        "ask_user",
+        "{}",
+        ToolCallState::AwaitingApproval,
+        None,
+        false,
+    );
+    app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(tool_call.run_id),
+        occurred_at_ms: 2,
+        ..fixtures::envelope(
+            2,
+            session_id,
+            SessionEvent::ToolApprovalRequested {
+                tool_call,
+                shell: None,
+                edit: None,
+                question: Some(Box::new(qq_protocol::QuestionPreview {
+                    questions: vec![
+                        qq_protocol::Question {
+                            prompt: "Which crate?".to_owned(),
+                            options: vec!["qq-core".to_owned(), "qq-tui".to_owned()],
+                            free_text: false,
+                        },
+                        qq_protocol::Question {
+                            prompt: "Why?".to_owned(),
+                            options: Vec::new(),
+                            free_text: true,
+                        },
+                    ],
+                })),
+            },
+        )
+    }));
+
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 24);
+    let rows = frame_rows(&frame);
+    assert!(
+        rows.iter().any(|row| row.contains("question  1/2")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("Which crate?")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| squash(row).contains("1 qq-core")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| squash(row).contains("2 qq-tui")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("press a number to pick")),
+        "{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("approval needed")),
+        "{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("Why?")),
+        "second question waits: {rows:?}"
+    );
+
+    // After the first answer the block moves on and shows the answer given;
+    // the free-text question puts the caret in the composer.
+    app.question_answers.push("qq-core".to_owned());
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 24);
+    let rows = frame_rows(&frame);
+    assert!(
+        rows.iter()
+            .any(|row| squash(row).contains("Which crate? → qq-core")),
+        "{rows:?}"
+    );
+    assert!(rows.iter().any(|row| row.contains("Why?")), "{rows:?}");
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("type an answer and press Enter")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("Type your answer...")),
+        "{rows:?}"
+    );
+}
+
+#[test]
 fn approval_prompts_render_edit_previews_as_colored_diffs() {
     let mut app = app_with_messages(1);
     let session_id = app.focused().unwrap();
@@ -643,6 +737,7 @@ fn approval_prompts_render_edit_previews_as_colored_diffs() {
                     path: "src/lib.rs".to_owned(),
                     diff: "@@ -1 +1 @@\n-old\n+new".to_owned(),
                 }),
+                question: None,
             },
         )
     }));
@@ -2160,6 +2255,7 @@ fn background_approvals_surface_a_banner_that_ctrl_g_jumps_to() {
             tool_call: call,
             shell: None,
             edit: None,
+            question: None,
         },
     ));
 
@@ -2731,6 +2827,7 @@ fn app_with_child_awaiting_approval() -> (App, SessionId, SessionId, RunId, Tool
                 tool_call: call,
                 shell: None,
                 edit: None,
+                question: None,
             },
         )
     }));
@@ -3232,6 +3329,7 @@ fn shell_approvals_show_the_server_preview_not_the_arguments() {
                     reasons: vec!["remove_file".to_owned()],
                 }),
                 edit: None,
+                question: None,
             },
         )
     }));

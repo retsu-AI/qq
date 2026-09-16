@@ -208,6 +208,7 @@ pub fn capabilities(steering: SteeringCapabilities) -> ServerCapabilities {
             "approve_for_session",
             "approve_for_workspace",
             "deny",
+            "answer",
         ]
         .map(str::to_owned)
         .to_vec(),

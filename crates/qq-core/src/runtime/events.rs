@@ -102,6 +102,13 @@ pub(crate) enum RuntimeEvent {
         id: ToolCallId,
         message: String,
     },
+    /// An `ask_user` call the user answered. Like a denial, the session
+    /// layer persisted and published the settled call before this fires;
+    /// `result` is what the model reads.
+    ToolCallAnswered {
+        id: ToolCallId,
+        result: String,
+    },
     /// A chunk of live output from a running tool (shell commands stream their
     /// combined stdout+stderr). Display-only: the bounded result on
     /// `ToolCallFinished` remains authoritative.

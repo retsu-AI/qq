@@ -436,6 +436,61 @@ pub(super) fn command_picker(app: &App, width: usize, height: usize) -> Vec<Line
 /// transcript so the decision is made with the run's context on screen.
 pub(super) fn approval_block(app: &App, width: usize) -> Vec<Line> {
     let mut lines = Vec::new();
+    if let Some(question) = app.pending_question() {
+        // A question, not a permission: the current question with numbered
+        // options; earlier answers stay visible so a multi-question hold
+        // reads as a form being filled in.
+        let answered = app.question_answers.len();
+        let mut title = Line::styled("     ◇ ", warning());
+        title.push("question", warning().bold());
+        if question.questions.len() > 1 {
+            title.push(
+                format!(
+                    "  {}/{}",
+                    (answered + 1).min(question.questions.len()),
+                    question.questions.len()
+                ),
+                muted(),
+            );
+        }
+        lines.push(truncate_line(title, width));
+        for (index, item) in question.questions.iter().enumerate() {
+            if index < answered {
+                let mut line = Line::styled("       ", muted());
+                line.push(item.prompt.as_str(), muted());
+                line.push(" → ", muted());
+                line.push(app.question_answers[index].as_str(), normal());
+                lines.push(truncate_line(line, width));
+                continue;
+            }
+            if index > answered {
+                break;
+            }
+            let mut line = Line::styled("       ", muted());
+            line.push(item.prompt.as_str(), normal().bold());
+            lines.push(truncate_line(line, width));
+            for (option_index, option) in item.options.iter().enumerate() {
+                let mut line = Line::styled("         ", muted());
+                line.push(format!("{}", option_index + 1), accent().bold());
+                line.push(format!(" {option}"), normal());
+                lines.push(truncate_line(line, width));
+            }
+            let mut hint = Line::styled("       ", muted());
+            if item.free_text {
+                hint.push("type an answer and press Enter", muted());
+                if !item.options.is_empty() {
+                    hint.push(", or a number to pick", muted());
+                }
+            } else {
+                hint.push("press a number to pick", muted());
+            }
+            hint.push("   ", muted());
+            hint.push("Esc", accent().bold());
+            hint.push(" decline", muted());
+            lines.push(truncate_line(hint, width));
+        }
+        return lines;
+    }
     let mut title = Line::styled("     ◇ ", warning());
     title.push("approval needed", warning().bold());
     lines.push(truncate_line(title, width));

@@ -1297,11 +1297,20 @@ impl Store {
         tool_call_id: ToolCallId,
         shell: Option<ShellCommandPreview>,
         edit: Option<EditPreview>,
+        question: Option<QuestionPreview>,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            request_tool_approval(connection, store_id, identity, tool_call_id, shell, edit)
+            request_tool_approval(
+                connection,
+                store_id,
+                identity,
+                tool_call_id,
+                shell,
+                edit,
+                question,
+            )
         })
         .await
     }

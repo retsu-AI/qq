@@ -13,11 +13,11 @@ newest last.
 | T5 | `edit_file` v2 batch/cascade/anchors/dry-run; `write_file` flags | Shipped (#37, `95fef1b`) | `feat/tool-layer-t5-edit-v2` | Evidence `target/qq-perf/t5-2026-09-14/` |
 | T6 | Shell classifier + `Forbidden` decision; shell v2 env/cleared environment; builtin preference | Shipped (#40, `91809b2`) | `feat/tool-layer-t6-classifier` | Evidence `target/qq-perf/t6-2026-09-14/`; ADR-0020 |
 | T7 | `exec`, env allowlist, prefer-built-in nudge, `builtin_preference` | Shipped (#41, `c3b5088`) | `feat/tool-layer-t7-exec` | env/nudge landed in T6 |
-| T8 | `ask_user` + `Interactive` class | Planned | | ADR shared with T9 |
+| T8 | `ask_user` + `Interactive` class + protocol 21 + headless `needs_input` | In review | `feat/tool-layer-t8-ask-user` | 2026-09-15; ADR-0021 (shared with T9); evidence `target/qq-perf/t8-2026-09-15/` |
 | T9 | `fetch` + `Network` class | Planned | | |
 | T10 | `terminal` | Planned (gated) | | Ships only on R6-terminal evidence |
 | T11 | `view_image` + provider image block | Planned | | `vision` feature |
-| T12 | `@` mentions: grammar, `range` field, dirs/globs, `@diff`/`@sha`, completion | In review | `feat/tool-layer-t12-mentions` | 2026-09-14; evidence `target/qq-perf/t12-2026-09-14/` |
+| T12 | `@` mentions: grammar, `range` field, dirs/globs, `@diff`/`@sha`, completion | Shipped (#45, `896ea93`) | `feat/tool-layer-t12-mentions` | Evidence `target/qq-perf/t12-2026-09-14/`; protocol bump folded into T8 |
 | T13 | Ablation harness A0–A5 | Planned | | Runs after T7 and after T12 |
 | T14 | `select_tools` lexical index | Planned | | |
 
@@ -149,3 +149,19 @@ Deviations: the mention grammar lives in `qq-protocol` (pure, wasm-safe) and res
 Docs: `docs/design/tools.md` § File References In Prompts (rewritten); `docs/design/protocol.md` `workspace_file` row.
 Open: server-side resolution of `WorkspaceFile` parts on `SteerRun` and direct `ask`; a `Mode::Compose` hint row for pending resolution if it ever takes long enough to notice; T13's completion-usage counts.
 Evidence: `target/qq-perf/t12-2026-09-14/` (untracked).
+
+### 2026-09-15 — T12 shipped; T8 in progress
+
+T12 merged (#45, `896ea93`) after a rebase over the H21.2 `sessions.rs`
+split. T8 on `feat/tool-layer-t8-ask-user` (worktree `/tmp/opencode/qq-t8`)
+from `896ea93`, rebased over H22.2 (#46, #47) mid-slice. Baseline:
+`tool_dispatch` `read_tool_loop` 41.5 µs median pinned core.
+
+#### T8 receipt — 2026-09-15
+Commit(s): `ask_user` tool (`tools/ask.rs`: bounds, parse, answer rendering), `EffectClass::Interactive`, `PolicyDecision::AskUser`, `GateDecision::Answered`, `RuntimeEvent::ToolCallAnswered`; protocol 21 (`QuestionPreview`/`Question`, `question` on `tool_approval_requested`, `ApprovalDecision::Answer`, `ApprovalResolution::Answered`, `HeadlessStatus::NeedsInput` = 5; T12's `range` bump folded in); store settles an answer as `completed` in the `RespondToolApproval` transaction; TUI question block with digit/free-text/Esc keys; headless `needs_input`; prompt v12; ADR-0021.
+Tests: 3 `ask` unit (bounds/defaults, indexed contract errors, rendering + clipping); 1 policy (every mode holds; malformed executes to the contract error; grants irrelevant); 4 session (read-only hold → `answered` result text in the next request, no start/finish; decline text + idempotent replay; timeout as `denied_timeout`; malformed → tool error without a hold); 1 TUI keys (digit then free text, `y` ignored, Esc declines); 1 TUI render (numbered options, hint, second question hidden until answered, composer caret for free text); 1 headless (`needs_input` exit 5, question on stream, held call interrupted); protocol round trips + v21 goldens (`event_tool_approval_requested_question`, `command_respond_tool_approval_answer`, headless `needs_input.jsonl`); exit table pinned. Workspace green: 1439 passed; wasm `qq-client` builds; minimal `qq-provider` profile passes.
+Gates: `tool_dispatch` A/B 5 pairs after the rebase: base 42.3 → cand 42.5 µs median (noise; pre-rebase pairs showed a consistent +4 µs that was entirely H22.2 landing on `main` between the two builds, not this slice — `plan_compile` 22.4 → 23.4 µs, the 8th declaration's share of catalog/prefix compile). `SessionEvent` stays ≤ 336 bytes: `question` is boxed.
+Deviations: the plan's `question` on `ToolApprovalRequested` is a `QuestionPreview { questions }` struct (boxed on the event); answers are `Vec<String>` (option text or free text) rather than option indices so a transcript reads without the schema; a question with no options is a free-text prompt (the plan implied options were mandatory); reviewer is skipped for `Interactive` (nothing to adjudicate); headless cancels at the first question rather than adding an approval relay (the plan's "typed `needs_input` outcome instead of hanging"); child-session questions are declined so a supervised child proceeds. `Network` half of ADR-0021 is written as designed for T9 to amend.
+Docs: `docs/design/tools.md` § Built-In Tools, new § Asking The User, § Approval Policy decision table; `docs/design/protocol.md` version note, `answer`/`answered`, `question` preview; `docs/design/headless-contract.md` exit table + approval semantics; `docs/adr/0021-interactive-and-network-effect-classes.md`; `root.md` ADR-0021 → Written.
+Open: a headless `--answer` relay or resume-with-answer flow (T13 can measure how often models ask); TUI multi-question back-navigation (Backspace on an empty composer could pop the previous answer); `ToolCallDisplay` for answered calls if the transcript wants the Q/A as a form rather than text.
+Evidence: `target/qq-perf/t8-2026-09-15/` (untracked).

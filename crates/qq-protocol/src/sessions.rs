@@ -324,6 +324,12 @@ pub enum ApprovalDecision {
         grant: ApprovalGrant,
     },
     Deny,
+    /// The user's answers to an `ask_user` question (protocol 21), one per
+    /// question in order: an option's text or free text. Settles the call
+    /// as completed with the answers as its result.
+    Answer {
+        answers: Vec<String>,
+    },
 }
 
 /// A session-scoped allowlist entry recorded by approve-for-session.
@@ -352,6 +358,9 @@ pub enum ApprovalResolution {
     /// sessions (write children), where a reviewer denial is final; for root
     /// `auto` sessions the reviewer still escalates to a human instead.
     DeniedByReviewer,
+    /// The user answered an `ask_user` question (protocol 21); the call
+    /// completed with the answers as its result.
+    Answered,
 }
 
 /// The durable fate of one workspace-lifetime grant promotion, carried by
@@ -402,6 +411,27 @@ pub enum ShellVerdict {
 pub struct EditPreview {
     pub path: String,
     pub diff: String,
+}
+
+/// The questions an `ask_user` call puts to the human (protocol 21), carried
+/// by the approval request so clients render them without parsing the call's
+/// arguments. Answered with `ApprovalDecision::Answer`, one answer per
+/// question in order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionPreview {
+    pub questions: Vec<Question>,
+}
+
+/// One question: a prompt, the options offered, and whether a typed answer
+/// outside the options is accepted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Question {
+    pub prompt: String,
+    pub options: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub free_text: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1633,6 +1663,11 @@ pub enum SessionEvent {
         shell: Option<ShellCommandPreview>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         edit: Option<EditPreview>,
+        /// Present when the held call is `ask_user`: the run is waiting for
+        /// an answer, not a permission. Boxed so the rare variant does not
+        /// grow every event (`session_events_are_bounded_by_the_boxed_summary`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        question: Option<Box<QuestionPreview>>,
     },
     ToolApprovalResolved {
         tool_call: ToolCallSnapshot,
@@ -2016,12 +2051,14 @@ mod tests {
                 reasons: vec!["unlisted".to_owned()],
             }),
             edit: None,
+            question: None,
         };
         let encoded = serde_json::to_value(&requested).unwrap();
         assert_eq!(encoded["type"], "tool_approval_requested");
         assert_eq!(encoded["tool_call"]["state"], "awaiting_approval");
         assert_eq!(encoded["shell"]["command"], "cargo test");
         assert!(encoded.get("edit").is_none());
+        assert!(encoded.get("question").is_none());
         assert_eq!(
             serde_json::from_value::<SessionEvent>(encoded).unwrap(),
             requested
@@ -2034,6 +2071,7 @@ mod tests {
                 path: "src/lib.rs".to_owned(),
                 diff: "- old\n+ new".to_owned(),
             }),
+            question: None,
         };
         let encoded = serde_json::to_value(&edit_requested).unwrap();
         assert_eq!(encoded["edit"]["path"], "src/lib.rs");
@@ -2042,6 +2080,45 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<SessionEvent>(encoded).unwrap(),
             edit_requested
+        );
+
+        // Protocol 21: an `ask_user` hold carries its questions; the answer
+        // decision carries one string per question and settles as answered.
+        let question_requested = SessionEvent::ToolApprovalRequested {
+            tool_call: tool_call.clone(),
+            shell: None,
+            edit: None,
+            question: Some(Box::new(QuestionPreview {
+                questions: vec![Question {
+                    prompt: "Which crate?".to_owned(),
+                    options: vec!["qq-core".to_owned(), "qq-tui".to_owned()],
+                    free_text: true,
+                }],
+            })),
+        };
+        let encoded = serde_json::to_value(&question_requested).unwrap();
+        assert_eq!(
+            encoded["question"]["questions"][0]["prompt"],
+            "Which crate?"
+        );
+        assert_eq!(encoded["question"]["questions"][0]["free_text"], true);
+        assert_eq!(
+            serde_json::from_value::<SessionEvent>(encoded).unwrap(),
+            question_requested
+        );
+        let answer = ApprovalDecision::Answer {
+            answers: vec!["qq-core".to_owned()],
+        };
+        let encoded = serde_json::to_value(&answer).unwrap();
+        assert_eq!(encoded["type"], "answer");
+        assert_eq!(encoded["answers"][0], "qq-core");
+        assert_eq!(
+            serde_json::from_value::<ApprovalDecision>(encoded).unwrap(),
+            answer
+        );
+        assert_eq!(
+            serde_json::to_value(ApprovalResolution::Answered).unwrap(),
+            "answered"
         );
 
         let resolved = SessionEvent::ToolApprovalResolved {
@@ -2897,7 +2974,11 @@ mod tests {
         // Version 20 added `verdict` and `reasons` to `ShellCommandPreview`
         // (why the gate is asking) for the shell classifier; the struct is
         // `deny_unknown_fields`, so older clients reject the new fields.
-        assert_eq!(crate::PROTOCOL_VERSION, 20);
+        // Version 21 added `range` to `InputPart::WorkspaceFile` (`@path:a-b`
+        // mentions) and the `ask_user` question round trip: `question` on
+        // `tool_approval_requested`, `ApprovalDecision::Answer`, and
+        // `ApprovalResolution::Answered`.
+        assert_eq!(crate::PROTOCOL_VERSION, 21);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

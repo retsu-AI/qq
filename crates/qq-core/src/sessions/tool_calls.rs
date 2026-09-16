@@ -430,6 +430,7 @@ pub(super) fn request_tool_approval(
     tool_call_id: ToolCallId,
     shell: Option<ShellCommandPreview>,
     edit: Option<EditPreview>,
+    question: Option<QuestionPreview>,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
@@ -449,6 +450,7 @@ pub(super) fn request_tool_approval(
             tool_call,
             shell,
             edit,
+            question: question.map(Box::new),
         },
     )?;
     transaction.commit()?;
@@ -664,6 +666,9 @@ pub(super) fn conclude_tool_approval(
             | ApprovalResolution::DeniedTimeout
             | ApprovalResolution::DeniedByReviewer => Ok(ConcludedApproval::Denied {
                 message: result.unwrap_or_else(|| approval::USER_DENIED_RESULT.to_owned()),
+            }),
+            ApprovalResolution::Answered => Ok(ConcludedApproval::Answered {
+                result: result.unwrap_or_else(|| approval::DECLINED_QUESTION_RESULT.to_owned()),
             }),
         };
     }

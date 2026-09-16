@@ -74,6 +74,9 @@ pub enum EffectClass {
     Mutating,
     Shell,
     External,
+    /// A round trip with the human (`ask_user`): nothing executes, so it
+    /// proceeds under every approval mode and settles from the answer.
+    Interactive,
 }
 
 impl EffectClass {
@@ -84,6 +87,7 @@ impl EffectClass {
             Self::Mutating => "mutating",
             Self::Shell => "shell",
             Self::External => "external",
+            Self::Interactive => "interactive",
         }
     }
 
@@ -93,6 +97,7 @@ impl EffectClass {
             "mutating" => Some(Self::Mutating),
             "shell" => Some(Self::Shell),
             "external" => Some(Self::External),
+            "interactive" => Some(Self::Interactive),
             _ => None,
         }
     }
@@ -570,7 +575,7 @@ impl ToolCatalog {
                     && match entry.effect {
                         EffectClass::Mutating | EffectClass::Shell => true,
                         EffectClass::External => !entry.hints.read_only,
-                        EffectClass::ReadOnly => false,
+                        EffectClass::ReadOnly | EffectClass::Interactive => false,
                     }
                 {
                     return false;
