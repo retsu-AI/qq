@@ -1,7 +1,4 @@
-use std::{
-    io::Read,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use qq_protocol::{
     ContentHash, GuidanceIdentity, GuidanceKind as ProtocolGuidanceKind,
@@ -11,7 +8,7 @@ use qq_provider::{ContentBlock, Message, Role};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::{Workspace, WorkspacePathError};
+use super::{BoundedReadError, Workspace, WorkspacePathError, read_bounded};
 
 const MAX_NAME_BYTES: usize = 64;
 const MAX_GUIDANCE_BYTES: usize = 64 * 1024;
@@ -242,26 +239,28 @@ pub(crate) fn load_entry(
             limit: MAX_GUIDANCE_BYTES,
         });
     }
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or_default());
-    workspace
+    let file = workspace
         .root()
         .open(&resolved)
         .map_err(|source| GuidanceError::Read {
             path: candidate.path.clone(),
             source,
-        })?
-        .take(MAX_GUIDANCE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|source| GuidanceError::Read {
-            path: candidate.path.clone(),
-            source,
         })?;
-    if bytes.len() > MAX_GUIDANCE_BYTES {
-        return Err(GuidanceError::FileTooLarge {
-            path: candidate.path.clone(),
-            limit: MAX_GUIDANCE_BYTES,
-        });
-    }
+    let bytes = match read_bounded(file, MAX_GUIDANCE_BYTES, metadata.len()) {
+        Ok(bytes) => bytes,
+        Err(BoundedReadError::TooLarge { limit }) => {
+            return Err(GuidanceError::FileTooLarge {
+                path: candidate.path.clone(),
+                limit,
+            });
+        }
+        Err(BoundedReadError::Io(source)) => {
+            return Err(GuidanceError::Read {
+                path: candidate.path.clone(),
+                source,
+            });
+        }
+    };
     if cancelled.load(Ordering::Acquire) {
         return Err(GuidanceError::Cancelled);
     }

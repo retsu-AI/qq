@@ -8,7 +8,7 @@
 //! the text. Each attached file is recorded in the session's file state so a
 //! later edit satisfies the read-before-write rule without a redundant read.
 
-use std::{io::Read as _, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 use qq_protocol::{
     InputPart, MAX_INPUT_FILE_BYTES, MAX_RESOLVED_INPUT_BYTES, RunFailureKind, validate_input,
@@ -116,17 +116,20 @@ pub(crate) fn resolve_blocking(
                         });
                     }
                 };
-                let mut bytes = Vec::new();
-                let cap = u64::try_from(MAX_INPUT_FILE_BYTES).unwrap_or(u64::MAX);
-                if let Err(error) = file.take(cap + 1).read_to_end(&mut bytes) {
-                    return Err(InputResolutionError::Read {
-                        path: path.clone(),
-                        message: error.to_string(),
-                    });
-                }
-                if bytes.len() > MAX_INPUT_FILE_BYTES {
-                    return Err(InputResolutionError::FileTooLarge { path: path.clone() });
-                }
+                // No metadata was read here before; a zero hint keeps that
+                // path to one open and one bounded read.
+                let bytes = match crate::workspace::read_bounded(file, MAX_INPUT_FILE_BYTES, 0) {
+                    Ok(bytes) => bytes,
+                    Err(crate::workspace::BoundedReadError::TooLarge { .. }) => {
+                        return Err(InputResolutionError::FileTooLarge { path: path.clone() });
+                    }
+                    Err(crate::workspace::BoundedReadError::Io(error)) => {
+                        return Err(InputResolutionError::Read {
+                            path: path.clone(),
+                            message: error.to_string(),
+                        });
+                    }
+                };
                 let actual = content_hash(&bytes);
                 if let Some(expected) = expected_hash {
                     let expected = expected.to_string();

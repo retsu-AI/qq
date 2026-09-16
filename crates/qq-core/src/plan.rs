@@ -724,15 +724,7 @@ impl CompiledAgentPlan {
                 .map(ContextSourceDescriptor::from)
                 .collect(),
         };
-        let digest = descriptor.digest()?;
-        let descriptor_json = match serde_json::to_string(&descriptor) {
-            Ok(json) => json,
-            Err(error) => {
-                return Err(PlanCompileError::Encode {
-                    message: error.to_string(),
-                });
-            }
-        };
+        let (digest, descriptor_json) = descriptor.encode()?;
         let roster_text: Option<Arc<str>> = crate::runtime::delegation_roster_text(
             &resolved_model.route,
             resolved_model.context_window,
@@ -765,8 +757,8 @@ impl CompiledAgentPlan {
             &instructions,
             persona.as_deref(),
         ));
-        let estimated_bytes = descriptor_json.len()
-            + descriptor.canonical_bytes()?.len()
+        // The canonical bytes are the JSON plus the fixed domain separator.
+        let estimated_bytes = descriptor_json.len() * 2
             + instructions.content_len()
             + persona.as_ref().map_or(0, |persona| persona.text.len())
             + catalog.estimated_bytes()
@@ -920,7 +912,6 @@ fn read_persona(
     selection: &PackSelection,
     relative: &str,
 ) -> Result<(String, SourceFingerprint), PlanCompileError> {
-    use std::io::Read as _;
     let fingerprint = SourceFingerprint::capture(pack.path().join(relative));
     let failure = |message: String| PlanCompileError::Persona {
         id: selection.id.clone(),
@@ -942,18 +933,19 @@ fn read_persona(
             "exceeds the {MAX_PERSONA_BYTES}-byte limit"
         )));
     }
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or_default());
-    pack.root()
+    let file = pack
+        .root()
         .open(&resolved)
-        .map_err(|error| failure(error.to_string()))?
-        .take(MAX_PERSONA_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
         .map_err(|error| failure(error.to_string()))?;
-    if bytes.len() > MAX_PERSONA_BYTES {
-        return Err(failure(format!(
-            "exceeds the {MAX_PERSONA_BYTES}-byte limit"
-        )));
-    }
+    let bytes = match crate::workspace::read_bounded(file, MAX_PERSONA_BYTES, metadata.len()) {
+        Ok(bytes) => bytes,
+        Err(crate::workspace::BoundedReadError::TooLarge { limit }) => {
+            return Err(failure(format!("exceeds the {limit}-byte limit")));
+        }
+        Err(crate::workspace::BoundedReadError::Io(error)) => {
+            return Err(failure(error.to_string()));
+        }
+    };
     let text = String::from_utf8(bytes).map_err(|_| failure("not valid UTF-8".to_owned()))?;
     Ok((text, fingerprint))
 }
@@ -1569,6 +1561,13 @@ mod tests {
         assert!(bare.descriptor().context_sources.is_empty());
         assert!(!bare.descriptor_json().contains("context_sources"));
         assert_ne!(bare.digest(), plan.digest());
+        // The persisted JSON is the canonical bytes minus the domain
+        // separator: one serialization serves the digest and the store.
+        assert_eq!(
+            bare.descriptor_json().as_ref(),
+            serde_json::to_string(bare.descriptor().as_ref()).unwrap()
+        );
+        assert_eq!(bare.digest(), bare.descriptor().digest().unwrap());
     }
 
     #[test]

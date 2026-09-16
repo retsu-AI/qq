@@ -264,6 +264,9 @@ impl ExternalToolHost for EmbeddedToolHost {
             cancel_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let execution = handler(arguments);
             let mut execution = std::pin::pin!(execution);
+            // One timer for the whole call; a fresh `sleep_until` per select
+            // iteration re-registers with the timer wheel on every poll tick.
+            let mut timeout = std::pin::pin!(tokio::time::sleep_until(deadline));
             loop {
                 tokio::select! {
                     biased;
@@ -278,7 +281,7 @@ impl ExternalToolHost for EmbeddedToolHost {
                             Err(content) => Ok(HostToolResult { content, is_error: true }),
                         };
                     }
-                    () = tokio::time::sleep_until(deadline) => return Err(HostCallError::Timeout),
+                    () = &mut timeout => return Err(HostCallError::Timeout),
                     _ = cancel_poll.tick() => {
                         if cancelled.load(Ordering::Acquire) {
                             return Err(HostCallError::Cancelled);

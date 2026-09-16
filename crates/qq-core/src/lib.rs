@@ -869,11 +869,14 @@ impl Runtime {
                     return;
                 }
             };
-            // Compilation re-opens the workspace and re-reads instructions on
-            // a blocking thread; the direct path pays this once per run, the
-            // same filesystem work it always did.
-            let profile = plan::AgentProfile::embedded(&runtime, opened.path().to_owned());
+            // Capturing the profile calls every host's blocking catalog and
+            // compilation re-opens the workspace and re-reads instructions, so
+            // both run on the blocking thread; the direct path pays this once
+            // per run, the same filesystem work it always did.
+            let profile_runtime = runtime.clone();
+            let workspace_path = opened.path().to_owned();
             let compiled = match tokio::task::spawn_blocking(move || {
+                let profile = plan::AgentProfile::embedded(&profile_runtime, workspace_path);
                 plan::CompiledAgentPlan::compile_blocking(profile)
             })
             .await
@@ -2042,7 +2045,7 @@ impl plan::CompiledAgentPlan {
                 // approval prompts arrive one at a time. Calls with malformed
                 // arguments never reach the gate: there is nothing executable
                 // to approve, so they short-circuit to their tool error below.
-                let mut results = vec![None; calls.len()];
+                let mut results: Vec<Option<RetainedResult>> = vec![None; calls.len()];
                 let mut turn_interrupted_in_tools = false;
                 for (index, call) in calls.iter().enumerate() {
                     if call.rejection.is_some() {
@@ -2051,7 +2054,7 @@ impl plan::CompiledAgentPlan {
                     if turn_interrupted_in_tools {
                         // Calls behind an interrupted approval wait never
                         // execute; they settle like calls behind a cancel.
-                        results[index] = Some(tools::ToolOutput::verbatim_error(INTERRUPTED_TOOL_RESULT.to_owned()));
+                        results[index] = Some(RetainedResult::error(INTERRUPTED_TOOL_RESULT.to_owned()));
                         continue;
                     }
                     // An approval wait is a boundary too: an interrupting
@@ -2067,7 +2070,7 @@ impl plan::CompiledAgentPlan {
                     };
                     let Some(decision) = decision else {
                         turn_interrupted_in_tools = true;
-                        results[index] = Some(tools::ToolOutput::verbatim_error(INTERRUPTED_TOOL_RESULT.to_owned()));
+                        results[index] = Some(RetainedResult::error(INTERRUPTED_TOOL_RESULT.to_owned()));
                         continue;
                     };
                     // Reviewer spend is charged whatever the verdict; the
@@ -2086,7 +2089,7 @@ impl plan::CompiledAgentPlan {
                     match decision {
                         GateDecision::Execute => {}
                         GateDecision::Deny { message } => {
-                            results[index] = Some(tools::ToolOutput::verbatim_error(message.clone()));
+                            results[index] = Some(RetainedResult::error(message.clone()));
                             yield RuntimeEvent::ToolCallDenied { id: call.id, message };
                         }
                         GateDecision::Fail { kind, message } => {
@@ -2124,7 +2127,7 @@ impl plan::CompiledAgentPlan {
                     }
                     let (result, changed) = select_tools(&catalog, &mut pins, &call.arguments);
                     pins_changed |= changed;
-                    results[index] = Some(result.clone());
+                    results[index] = Some(RetainedResult::retain(&result, &call.name, call.id));
                     yield RuntimeEvent::ToolCallFinished {
                         id: call.id,
                         result: result.model_text,
@@ -2477,7 +2480,8 @@ impl plan::CompiledAgentPlan {
                             &result,
                         );
                         let result = cite_spill(result, &call.name, call.id, spills.is_some());
-                        results[usize::from(call.call_ordinal - 1)] = Some(result.clone());
+                        results[usize::from(call.call_ordinal - 1)] =
+                            Some(RetainedResult::retain(&result, &call.name, call.id));
                         yield RuntimeEvent::ToolCallFinished {
                             id: call.id,
                             result: result.model_text,
@@ -2526,7 +2530,8 @@ impl plan::CompiledAgentPlan {
                             &result,
                         );
                         let result = cite_spill(result, &call.name, call.id, spills.is_some());
-                        results[usize::from(call.call_ordinal - 1)] = Some(result.clone());
+                        results[usize::from(call.call_ordinal - 1)] =
+                            Some(RetainedResult::retain(&result, &call.name, call.id));
                         yield RuntimeEvent::ToolCallFinished {
                             id: call.id,
                             result: result.model_text,
@@ -2558,7 +2563,7 @@ impl plan::CompiledAgentPlan {
                     // transcript stays provider-valid: one result per call.
                     for (index, call) in calls.iter().enumerate() {
                         if results[index].is_none() {
-                            results[index] = Some(tools::ToolOutput::verbatim_error(INTERRUPTED_TOOL_RESULT.to_owned()));
+                            results[index] = Some(RetainedResult::error(INTERRUPTED_TOOL_RESULT.to_owned()));
                             yield RuntimeEvent::ToolCallFinished {
                                 id: call.id,
                                 result: INTERRUPTED_TOOL_RESULT.to_owned(),
@@ -2582,11 +2587,7 @@ impl plan::CompiledAgentPlan {
                     .map(|(call, result)| {
                         let result = result.expect("every bounded tool execution completed");
                         let mut content = result.model_text;
-                        let handle = result
-                            .spill
-                            .as_ref()
-                            .map(|spill| spill.handle(&call.name, call.id));
-                        turn_output.admit(&mut content, handle.as_deref());
+                        turn_output.admit(&mut content, result.spill_handle.as_deref());
                         budget.charge_tool_output(content.len());
                         ContentBlock::ToolResult {
                             call_id: call.provider_call_id.clone(),
@@ -2737,6 +2738,35 @@ fn measure_messages(messages: &[Message]) -> u64 {
     messages.iter().fold(0_u64, |total, message| {
         total.saturating_add(measure_message(message))
     })
+}
+
+/// What the run loop keeps of a tool result between its finished event and
+/// the turn's result message: the bounded text, the error flag, and the spill
+/// handle. The full output (file states, display payload, and the spilled
+/// text, which can be as large as the store keeps) moves into the event.
+#[derive(Debug, Clone)]
+struct RetainedResult {
+    model_text: String,
+    is_error: bool,
+    spill_handle: Option<String>,
+}
+
+impl RetainedResult {
+    fn retain(output: &tools::ToolOutput, tool: &str, call: ToolCallId) -> Self {
+        Self {
+            model_text: output.model_text.clone(),
+            is_error: output.is_error,
+            spill_handle: output.spill.as_ref().map(|spill| spill.handle(tool, call)),
+        }
+    }
+
+    const fn error(message: String) -> Self {
+        Self {
+            model_text: message,
+            is_error: true,
+            spill_handle: None,
+        }
+    }
 }
 
 fn measure_message(message: &Message) -> u64 {

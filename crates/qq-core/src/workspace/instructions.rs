@@ -1,5 +1,5 @@
 use std::{
-    io::{ErrorKind, Read},
+    io::ErrorKind,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -9,7 +9,7 @@ use crate::plan::SourceFingerprint;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::{Workspace, WorkspacePathError};
+use super::{BoundedReadError, Workspace, WorkspacePathError, read_bounded};
 
 const AGENTS_FILE: &str = "AGENTS.md";
 const CLAUDE_FILE: &str = "CLAUDE.md";
@@ -143,20 +143,19 @@ fn read_candidate(
     if cancelled.load(Ordering::Acquire) {
         return Err(WorkspaceInstructionError::Cancelled);
     }
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or_default());
-    workspace
+    let file = workspace
         .root()
         .open(&resolved)
-        .map_err(|source| WorkspaceInstructionError::Read { path, source })?
-        .take(MAX_INSTRUCTION_FILE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
         .map_err(|source| WorkspaceInstructionError::Read { path, source })?;
-    if bytes.len() > MAX_INSTRUCTION_FILE_BYTES {
-        return Err(WorkspaceInstructionError::FileTooLarge {
-            path,
-            limit: MAX_INSTRUCTION_FILE_BYTES,
-        });
-    }
+    let bytes = match read_bounded(file, MAX_INSTRUCTION_FILE_BYTES, metadata.len()) {
+        Ok(bytes) => bytes,
+        Err(BoundedReadError::TooLarge { limit }) => {
+            return Err(WorkspaceInstructionError::FileTooLarge { path, limit });
+        }
+        Err(BoundedReadError::Io(source)) => {
+            return Err(WorkspaceInstructionError::Read { path, source });
+        }
+    };
     if cancelled.load(Ordering::Acquire) {
         return Err(WorkspaceInstructionError::Cancelled);
     }
