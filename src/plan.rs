@@ -277,9 +277,11 @@ impl PlanCache {
     /// cached or a recorded source changed. `compile` runs on the calling
     /// thread while this key's single-flight lock is held, so callers invoke
     /// this from a blocking context. Returns the plan and how it was obtained.
+    /// The key is borrowed: a hit, the common case, allocates nothing. It is
+    /// cloned only into the in-flight guard list and into a new slot.
     pub fn load<E, F>(
         &self,
-        key: PlanKey,
+        key: &PlanKey,
         compile: F,
     ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), PlanCacheError<E>>
     where
@@ -291,7 +293,7 @@ impl PlanCache {
                 .in_flight
                 .lock()
                 .map_err(|_| PlanCacheError::Poisoned)?;
-            match in_flight.iter().find(|(flight_key, _)| *flight_key == key) {
+            match in_flight.iter().find(|(flight_key, _)| flight_key == key) {
                 Some((_, guard)) => Arc::clone(guard),
                 None => {
                     let guard = Arc::new(Mutex::new(()));
@@ -302,7 +304,7 @@ impl PlanCache {
         };
         let outcome = {
             let _flight = flight.lock().map_err(|_| PlanCacheError::Poisoned)?;
-            self.load_under_flight(&key, compile)
+            self.load_under_flight(key, compile)
         };
         // Reclaim the guard once nobody else waits on it: the list holds one
         // reference and this call holds the other. A waiter that cloned the
@@ -312,7 +314,7 @@ impl PlanCache {
             && Arc::strong_count(&flight) == 2
             && let Some(index) = in_flight
                 .iter()
-                .position(|(flight_key, _)| *flight_key == key)
+                .position(|(flight_key, _)| flight_key == key)
         {
             in_flight.swap_remove(index);
         }
@@ -627,7 +629,7 @@ mod tests {
         let cache = PlanCache::new(PlanCacheLimits::default());
         let compiles = AtomicUsize::new(0);
         let load = || {
-            cache.load::<std::convert::Infallible, _>(key(directory.path(), "m"), || {
+            cache.load::<std::convert::Infallible, _>(&key(directory.path(), "m"), || {
                 compiles.fetch_add(1, Ordering::SeqCst);
                 Ok(compile(directory.path(), "m"))
             })
@@ -675,7 +677,7 @@ mod tests {
             max_bytes: usize::MAX,
         });
         let load = |model: &str| {
-            cache.load::<std::convert::Infallible, _>(key(directory.path(), model), || {
+            cache.load::<std::convert::Infallible, _>(&key(directory.path(), model), || {
                 Ok(compile(directory.path(), model))
             })
         };
@@ -711,7 +713,7 @@ mod tests {
             max_bytes: usize::MAX,
         });
         let load = || {
-            cache.load::<std::convert::Infallible, _>(key(directory.path(), "m"), || {
+            cache.load::<std::convert::Infallible, _>(&key(directory.path(), "m"), || {
                 Ok(compile(directory.path(), "m"))
             })
         };
@@ -724,7 +726,7 @@ mod tests {
         // and the untouched generation is served as before.
         std::fs::remove_file(directory.path().join("AGENTS.md")).unwrap();
         let (again, lookup) = cache
-            .load::<std::convert::Infallible, _>(key(directory.path(), "m"), || {
+            .load::<std::convert::Infallible, _>(&key(directory.path(), "m"), || {
                 panic!("must not compile")
             })
             .unwrap();
@@ -761,7 +763,7 @@ mod tests {
             generation
         };
         let (first, _) = cache
-            .load::<std::convert::Infallible, _>(key(directory.path(), "m"), || Ok(padded(0)))
+            .load::<std::convert::Infallible, _>(&key(directory.path(), "m"), || Ok(padded(0)))
             .unwrap();
         let touch = || {
             thread::sleep(std::time::Duration::from_millis(20));
@@ -772,14 +774,14 @@ mod tests {
         // Same digest, much more watched evidence: the growth does not fit.
         touch();
         let grown = cache
-            .load::<std::convert::Infallible, _>(key(directory.path(), "m"), || Ok(padded(64)));
+            .load::<std::convert::Infallible, _>(&key(directory.path(), "m"), || Ok(padded(64)));
         assert!(matches!(grown, Err(PlanCacheError::Capacity { .. })));
         assert_eq!(cache.len(), 1);
         assert!(cache.estimated_bytes() <= one_plan + 2048);
         // A rejected refresh left the old fingerprints in place: they are
         // still stale, so the next load compiles again rather than hitting.
         let (again, lookup) = cache
-            .load::<std::convert::Infallible, _>(key(directory.path(), "m"), || Ok(padded(0)))
+            .load::<std::convert::Infallible, _>(&key(directory.path(), "m"), || Ok(padded(0)))
             .unwrap();
         assert_eq!(lookup, PlanLookup::Revalidated);
         assert!(Arc::ptr_eq(&first, &again));
@@ -787,7 +789,7 @@ mod tests {
         touch();
         let before = cache.estimated_bytes();
         let (_, lookup) = cache
-            .load::<std::convert::Infallible, _>(key(directory.path(), "m"), || Ok(padded(1)))
+            .load::<std::convert::Infallible, _>(&key(directory.path(), "m"), || Ok(padded(1)))
             .unwrap();
         assert_eq!(lookup, PlanLookup::Revalidated);
         assert!(cache.estimated_bytes() > before);
@@ -804,7 +806,7 @@ mod tests {
             let model = format!("m{index}");
             drop(
                 cache
-                    .load::<std::convert::Infallible, _>(key(directory.path(), &model), || {
+                    .load::<std::convert::Infallible, _>(&key(directory.path(), &model), || {
                         Ok(compile(directory.path(), &model))
                     })
                     .unwrap(),
@@ -821,7 +823,7 @@ mod tests {
         std::fs::write(&instructions, "be terse\n").unwrap();
         let cache = PlanCache::new(PlanCacheLimits::default());
         let load = || {
-            cache.load::<std::convert::Infallible, _>(key(directory.path(), "m"), || {
+            cache.load::<std::convert::Infallible, _>(&key(directory.path(), "m"), || {
                 Ok(compile(directory.path(), "m"))
             })
         };
@@ -845,12 +847,12 @@ mod tests {
         let directory = canonical_temp();
         let cache = PlanCache::new(PlanCacheLimits::default());
         let (first, _) = cache
-            .load::<String, _>(key(directory.path(), "m"), || {
+            .load::<String, _>(&key(directory.path(), "m"), || {
                 Ok(compile(directory.path(), "m"))
             })
             .unwrap();
         std::fs::write(directory.path().join("AGENTS.md"), "x").unwrap();
-        let failed = cache.load::<String, _>(key(directory.path(), "m"), || {
+        let failed = cache.load::<String, _>(&key(directory.path(), "m"), || {
             Err("configuration is broken".to_owned())
         });
         assert!(
@@ -859,7 +861,7 @@ mod tests {
         // Reverting the edit makes the recorded fingerprints current again.
         std::fs::remove_file(directory.path().join("AGENTS.md")).unwrap();
         let (again, lookup) = cache
-            .load::<String, _>(key(directory.path(), "m"), || panic!("must not compile"))
+            .load::<String, _>(&key(directory.path(), "m"), || panic!("must not compile"))
             .unwrap();
         assert_eq!(lookup, PlanLookup::Hit);
         assert!(Arc::ptr_eq(&first, &again));
@@ -874,7 +876,7 @@ mod tests {
         });
         let load = |model: &str| {
             cache
-                .load::<std::convert::Infallible, _>(key(directory.path(), model), || {
+                .load::<std::convert::Infallible, _>(&key(directory.path(), model), || {
                     Ok(compile(directory.path(), model))
                 })
                 .unwrap()
@@ -885,18 +887,18 @@ mod tests {
         drop(load("b"));
         // Touch "a" so "b" is the least recently used.
         let (_, lookup) = cache
-            .load::<std::convert::Infallible, _>(key(directory.path(), "a"), || unreachable!())
+            .load::<std::convert::Infallible, _>(&key(directory.path(), "a"), || unreachable!())
             .unwrap();
         assert_eq!(lookup, PlanLookup::Hit);
         drop(load("c"));
         assert_eq!(cache.len(), 2);
         // "b" was evicted; "a" is still cached (and pinned by `pinned`).
         let (_, lookup) = cache
-            .load::<std::convert::Infallible, _>(key(directory.path(), "a"), || unreachable!())
+            .load::<std::convert::Infallible, _>(&key(directory.path(), "a"), || unreachable!())
             .unwrap();
         assert_eq!(lookup, PlanLookup::Hit);
         let (_, lookup) = cache
-            .load::<std::convert::Infallible, _>(key(directory.path(), "b"), || {
+            .load::<std::convert::Infallible, _>(&key(directory.path(), "b"), || {
                 Ok(compile(directory.path(), "b"))
             })
             .unwrap();
@@ -912,12 +914,12 @@ mod tests {
             max_bytes: usize::MAX,
         });
         let pinned = cache
-            .load::<std::convert::Infallible, _>(key(directory.path(), "a"), || {
+            .load::<std::convert::Infallible, _>(&key(directory.path(), "a"), || {
                 Ok(compile(directory.path(), "a"))
             })
             .unwrap()
             .0;
-        let full = cache.load::<std::convert::Infallible, _>(key(directory.path(), "b"), || {
+        let full = cache.load::<std::convert::Infallible, _>(&key(directory.path(), "b"), || {
             Ok(compile(directory.path(), "b"))
         });
         assert!(matches!(
@@ -931,7 +933,7 @@ mod tests {
         drop(pinned);
         // Released, the entry is evictable and admission succeeds.
         let (_, lookup) = cache
-            .load::<std::convert::Infallible, _>(key(directory.path(), "b"), || {
+            .load::<std::convert::Infallible, _>(&key(directory.path(), "b"), || {
                 Ok(compile(directory.path(), "b"))
             })
             .unwrap();
@@ -949,19 +951,19 @@ mod tests {
             max_bytes: one_plan + one_plan / 2,
         });
         let first = cache
-            .load::<std::convert::Infallible, _>(key(directory.path(), "a"), || {
+            .load::<std::convert::Infallible, _>(&key(directory.path(), "a"), || {
                 Ok(compile(directory.path(), "a"))
             })
             .unwrap()
             .0;
-        let second = cache.load::<std::convert::Infallible, _>(key(directory.path(), "b"), || {
+        let second = cache.load::<std::convert::Infallible, _>(&key(directory.path(), "b"), || {
             Ok(compile(directory.path(), "b"))
         });
         assert!(matches!(second, Err(PlanCacheError::Capacity { .. })));
         drop(first);
         assert!(
             cache
-                .load::<std::convert::Infallible, _>(key(directory.path(), "b"), || {
+                .load::<std::convert::Infallible, _>(&key(directory.path(), "b"), || {
                     Ok(compile(directory.path(), "b"))
                 })
                 .is_ok()
@@ -981,7 +983,7 @@ mod tests {
                 let workspace = directory.path().to_owned();
                 thread::spawn(move || {
                     cache
-                        .load::<std::convert::Infallible, _>(key(&workspace, "m"), || {
+                        .load::<std::convert::Infallible, _>(&key(&workspace, "m"), || {
                             compiles.fetch_add(1, Ordering::SeqCst);
                             thread::sleep(std::time::Duration::from_millis(10));
                             Ok(compile(&workspace, "m"))
@@ -1003,7 +1005,7 @@ mod tests {
         let directory = canonical_temp();
         let cache = PlanCache::new(PlanCacheLimits::default());
         let held = cache
-            .load::<std::convert::Infallible, _>(key(directory.path(), "m"), || {
+            .load::<std::convert::Infallible, _>(&key(directory.path(), "m"), || {
                 Ok(compile(directory.path(), "m"))
             })
             .unwrap()
@@ -1011,8 +1013,10 @@ mod tests {
         cache.shutdown();
         assert!(cache.is_empty());
         assert!(matches!(
-            cache
-                .load::<std::convert::Infallible, _>(key(directory.path(), "m"), || unreachable!()),
+            cache.load::<std::convert::Infallible, _>(
+                &key(directory.path(), "m"),
+                || unreachable!()
+            ),
             Err(PlanCacheError::ShutDown)
         ));
         // The plan a run holds is unaffected.
