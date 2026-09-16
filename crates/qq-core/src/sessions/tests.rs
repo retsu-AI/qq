@@ -16,6 +16,7 @@ mod contract;
 mod delegation;
 mod feeds;
 mod migrations;
+mod replay_identity;
 mod runs;
 mod settlement;
 mod streaming;
