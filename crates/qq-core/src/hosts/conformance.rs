@@ -6,12 +6,10 @@
 //! availability subset. Each check returns a description of what failed so a
 //! single test can report the first violation.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::{sync::Arc, time::Duration};
 
 use super::{ExternalToolHost, HostCallError, HostReadiness};
+use crate::RunCancellation;
 
 /// Names of the tools (namespaced) the fixture host serves, or `None` when
 /// the adapter cannot be made to exhibit that behavior.
@@ -34,9 +32,14 @@ pub struct ConformanceFixture {
     pub backend_unavailable: bool,
 }
 
-fn not_cancelled() -> Arc<AtomicBool> {
-    Arc::new(AtomicBool::new(false))
+fn not_cancelled() -> RunCancellation {
+    RunCancellation::new()
 }
+
+/// Cancellation must be observed by wake, not by a poll: the old hosts
+/// checked a flag every 50 ms, so anything comfortably under that period
+/// proves the host awaits the token.
+const CANCEL_LATENCY_BOUND: Duration = Duration::from_millis(40);
 
 /// Runs the suite. `Ok(())` when every applicable check passed.
 pub async fn check(
@@ -109,19 +112,53 @@ pub async fn check(
             Err(HostCallError::Timeout) => {}
             other => return Err(format!("{name} must time out, got {other:?}")),
         }
-        // Cancellation: a flag set while the call is in flight settles it
-        // promptly as Cancelled.
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let call = host.call(name.clone(), "{}".to_owned(), Arc::clone(&cancelled));
-        let flag = Arc::clone(&cancelled);
-        let trip = async move {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            flag.store(true, Ordering::Release);
+        // Cancellation while in flight settles the call as Cancelled, and it
+        // does so on the wake, not on a later poll tick.
+        let cancelled = RunCancellation::new();
+        let call = host.call(name.clone(), "{}".to_owned(), cancelled.clone());
+        let trip = {
+            let cancelled = cancelled.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                cancelled.cancel();
+                tokio::time::Instant::now()
+            }
         };
-        let (outcome, ()) = tokio::join!(call, trip);
+        let (outcome, cancelled_at) = tokio::join!(call, trip);
+        let settled_at = tokio::time::Instant::now();
         match outcome {
             Err(HostCallError::Cancelled) => {}
             other => return Err(format!("cancelled {name} must be Cancelled, got {other:?}")),
+        }
+        let latency = settled_at.saturating_duration_since(cancelled_at);
+        if latency > CANCEL_LATENCY_BOUND {
+            return Err(format!(
+                "cancellation of {name} took {latency:?}; the host must await the token, not poll it"
+            ));
+        }
+        // A token cancelled before the call starts settles the call at once,
+        // and the same token cancels a second call too (it is a flag, not a
+        // one-shot permit).
+        let already = RunCancellation::already_cancelled();
+        for attempt in 0..2 {
+            let started = tokio::time::Instant::now();
+            match host
+                .call(name.clone(), "{}".to_owned(), already.clone())
+                .await
+            {
+                Err(HostCallError::Cancelled) => {}
+                other => {
+                    return Err(format!(
+                        "pre-cancelled {name} (attempt {attempt}) must be Cancelled, got {other:?}"
+                    ));
+                }
+            }
+            if started.elapsed() > CANCEL_LATENCY_BOUND {
+                return Err(format!(
+                    "pre-cancelled {name} took {:?} to settle",
+                    started.elapsed()
+                ));
+            }
         }
         // Dropping an in-flight call must be safe and must not wedge the host.
         {

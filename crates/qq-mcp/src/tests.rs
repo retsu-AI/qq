@@ -1,9 +1,9 @@
 use std::{
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use rmcp::{
@@ -226,8 +226,8 @@ fn manager_with(servers: Vec<(McpServerSettings, TestConnector)>) -> McpManager 
     }
 }
 
-fn not_cancelled() -> Arc<AtomicBool> {
-    Arc::new(AtomicBool::new(false))
+fn not_cancelled() -> CancellationSignal {
+    Box::pin(std::future::pending())
 }
 
 async fn poll_until(mut condition: impl AsyncFnMut() -> bool) {
@@ -468,13 +468,27 @@ async fn cancellation_stops_a_call_without_wedging_the_shared_client() {
     slow.call_timeout = Duration::from_secs(30);
     let manager = manager_with(vec![(slow, fixture.connector())]);
 
-    let cancelled = not_cancelled();
-    let flag = Arc::clone(&cancelled);
+    let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(20)).await;
-        flag.store(true, Ordering::Release);
+        let _ = cancel.send(());
     });
-    let outcome = manager.call("mcp__srv__slow", "{}", cancelled).await;
+    let started = Instant::now();
+    let outcome = manager
+        .call(
+            "mcp__srv__slow",
+            "{}",
+            Box::pin(async move {
+                let _ = cancelled.await;
+            }),
+        )
+        .await;
+    // Observed by wake, not by a poll tick: well inside the old 50 ms period.
+    assert!(
+        started.elapsed() < Duration::from_millis(45),
+        "{:?}",
+        started.elapsed()
+    );
     assert!(outcome.is_error);
     assert!(outcome.content.contains("cancelled"));
 

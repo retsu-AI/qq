@@ -11,14 +11,14 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex, atomic::AtomicBool},
+    sync::{Arc, Mutex},
 };
 
 use qq_auth::CredentialStore;
 use qq_config::{ConfigSnapshot, McpServerConfig, McpTransport};
 use qq_core::{
     ExternalToolHost, HostCallError, HostCallFuture, HostCatalog, HostReadiness,
-    HostShutdownFuture, HostTool, HostToolResult, ToolHints,
+    HostShutdownFuture, HostTool, HostToolResult, RunCancellation, ToolHints,
     plan::{CredentialReference, McpServerDescriptor, McpTransportKind},
 };
 use qq_mcp::{McpCallFailure, McpManager, McpServerSettings, McpTransportSettings};
@@ -109,10 +109,13 @@ impl ExternalToolHost for WiredMcpRegistry {
         self.manager.config_grants()
     }
 
-    fn call(&self, name: String, arguments: String, cancelled: Arc<AtomicBool>) -> HostCallFuture {
+    fn call(&self, name: String, arguments: String, cancelled: RunCancellation) -> HostCallFuture {
         let manager = Arc::clone(&self.manager);
         Box::pin(async move {
-            let outcome = manager.call(&name, &arguments, cancelled).await;
+            // qq-mcp takes a plain future so it stays free of core's token
+            // type; the token's wait is that future.
+            let signal = Box::pin(async move { cancelled.cancelled().await });
+            let outcome = manager.call(&name, &arguments, signal).await;
             match outcome.failure {
                 None => Ok(HostToolResult {
                     content: outcome.content,
@@ -350,15 +353,15 @@ mod tests {
         fs,
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     };
 
     use qq_auth::{CredentialPaths, CredentialStore};
     use qq_config::{ConfigLoader, ConfigPaths, ConfigSnapshot, LoadRequest};
-    use qq_core::ExternalToolHost;
     use qq_core::hosts::conformance::{ConformanceFixture, check};
+    use qq_core::{ExternalToolHost, RunCancellation};
     use qq_mcp::{McpManager, McpServerSettings, McpTransportSettings};
     use qq_protocol::CredentialEpoch;
     use serde_json::json;
@@ -518,7 +521,7 @@ mod tests {
             registry.call(
                 "mcp__srv__echo".to_owned(),
                 "{}".to_owned(),
-                Arc::new(AtomicBool::new(false)),
+                RunCancellation::new(),
             ),
         )
         .await

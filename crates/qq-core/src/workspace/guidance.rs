@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use qq_protocol::{
     ContentHash, GuidanceIdentity, GuidanceKind as ProtocolGuidanceKind,
     RESERVED_CLIENT_SLASH_COMMANDS,
@@ -9,6 +7,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{BoundedReadError, Workspace, WorkspacePathError, read_bounded};
+use crate::RunCancellation;
 
 const MAX_NAME_BYTES: usize = 64;
 const MAX_GUIDANCE_BYTES: usize = 64 * 1024;
@@ -173,7 +172,7 @@ pub(crate) fn load(
     packs: &[Workspace],
     index: &super::skills::SkillIndex,
     request: GuidanceRequest,
-    cancelled: &AtomicBool,
+    cancelled: &RunCancellation,
 ) -> Result<SelectedGuidance, GuidanceError> {
     let entry = match index.resolve(&request.name) {
         super::skills::SkillResolution::One(entry) => entry,
@@ -200,11 +199,11 @@ pub(crate) fn load_entry(
     workspace: &Workspace,
     packs: &[Workspace],
     entry: &super::skills::SkillEntry,
-    cancelled: &AtomicBool,
+    cancelled: &RunCancellation,
 ) -> Result<SelectedGuidance, GuidanceError> {
     let candidate = Candidate::new(entry.kind.into(), entry.source.clone());
     let candidate = &candidate;
-    if cancelled.load(Ordering::Acquire) {
+    if cancelled.is_cancelled() {
         return Err(GuidanceError::Cancelled);
     }
     let workspace = match entry.root {
@@ -261,7 +260,7 @@ pub(crate) fn load_entry(
             });
         }
     };
-    if cancelled.load(Ordering::Acquire) {
+    if cancelled.is_cancelled() {
         return Err(GuidanceError::Cancelled);
     }
     let content = String::from_utf8(bytes).map_err(|_| GuidanceError::InvalidUtf8 {

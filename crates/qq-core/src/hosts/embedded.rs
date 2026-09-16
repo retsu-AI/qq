@@ -28,6 +28,7 @@ use super::{
     EMBEDDED_TOOL_PREFIX, ExternalToolHost, HostCallError, HostCallFuture, HostCatalog,
     HostReadiness, HostShutdownFuture, HostTool, HostToolResult, ToolHints,
 };
+use crate::RunCancellation;
 
 /// Default per-call deadline.
 pub const DEFAULT_EMBEDDED_CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -40,8 +41,6 @@ pub const MAX_EMBEDDED_ARGUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_EMBEDDED_RESULT_BYTES: usize = 1024 * 1024;
 const MAX_HOST_NAME_BYTES: usize = 64;
 const MAX_TOOL_NAME_BYTES: usize = 64;
-/// How often an in-flight call re-checks the run's cancellation flag.
-const CANCEL_POLL: Duration = Duration::from_millis(50);
 
 /// What a handler produces. `Err` is the tool reporting failure to the
 /// model (an ordinary `is_error` result); the host itself decides
@@ -237,7 +236,7 @@ impl ExternalToolHost for EmbeddedToolHost {
         self.grants.clone()
     }
 
-    fn call(&self, name: String, arguments: String, cancelled: Arc<AtomicBool>) -> HostCallFuture {
+    fn call(&self, name: String, arguments: String, cancelled: RunCancellation) -> HostCallFuture {
         if self.shut_down.load(Ordering::Acquire) {
             return Box::pin(std::future::ready(Err(HostCallError::ShutDown)));
         }
@@ -260,34 +259,19 @@ impl ExternalToolHost for EmbeddedToolHost {
         let deadline = tokio::time::Instant::now() + self.call_timeout;
         Box::pin(async move {
             let _permit = permit;
-            let mut cancel_poll = tokio::time::interval(CANCEL_POLL);
-            cancel_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let execution = handler(arguments);
-            let mut execution = std::pin::pin!(execution);
-            // One timer for the whole call; a fresh `sleep_until` per select
-            // iteration re-registers with the timer wheel on every poll tick.
-            let mut timeout = std::pin::pin!(tokio::time::sleep_until(deadline));
-            loop {
-                tokio::select! {
-                    biased;
-                    outcome = &mut execution => {
-                        return match outcome {
-                            Ok(content) if content.len() > MAX_EMBEDDED_RESULT_BYTES => {
-                                Err(HostCallError::InvalidResult(format!(
-                                    "result exceeds the {MAX_EMBEDDED_RESULT_BYTES}-byte limit"
-                                )))
-                            }
-                            Ok(content) => Ok(HostToolResult { content, is_error: false }),
-                            Err(content) => Ok(HostToolResult { content, is_error: true }),
-                        };
+            tokio::select! {
+                biased;
+                outcome = handler(arguments) => match outcome {
+                    Ok(content) if content.len() > MAX_EMBEDDED_RESULT_BYTES => {
+                        Err(HostCallError::InvalidResult(format!(
+                            "result exceeds the {MAX_EMBEDDED_RESULT_BYTES}-byte limit"
+                        )))
                     }
-                    () = &mut timeout => return Err(HostCallError::Timeout),
-                    _ = cancel_poll.tick() => {
-                        if cancelled.load(Ordering::Acquire) {
-                            return Err(HostCallError::Cancelled);
-                        }
-                    }
-                }
+                    Ok(content) => Ok(HostToolResult { content, is_error: false }),
+                    Err(content) => Ok(HostToolResult { content, is_error: true }),
+                },
+                () = cancelled.cancelled() => Err(HostCallError::Cancelled),
+                () = tokio::time::sleep_until(deadline) => Err(HostCallError::Timeout),
             }
         })
     }
@@ -413,12 +397,8 @@ mod tests {
         let host = fixture_host(1);
         let big = "x".repeat(MAX_EMBEDDED_ARGUMENT_BYTES + 1);
         assert!(matches!(
-            host.call(
-                "ext__app__echo".to_owned(),
-                big,
-                Arc::new(AtomicBool::new(false))
-            )
-            .await,
+            host.call("ext__app__echo".to_owned(), big, RunCancellation::new())
+                .await,
             Err(HostCallError::Refused(_))
         ));
 

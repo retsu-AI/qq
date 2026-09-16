@@ -2,6 +2,8 @@
 //! runtime and store fixtures, and the event collectors. Tests live in the
 //! theme modules below.
 
+use std::sync::atomic::AtomicBool;
+
 use super::*;
 
 mod accounting;
@@ -1574,7 +1576,7 @@ struct R4RssSampler {
 #[cfg(target_os = "linux")]
 impl R4RssSampler {
     fn start() -> Self {
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
         let worker_stop = std::sync::Arc::clone(&stop);
         let worker = std::thread::spawn(move || {
             let mut peak = r4_current_rss_bytes();

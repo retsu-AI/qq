@@ -73,7 +73,7 @@ const COMPACTION_OUTPUT_RESERVE_TOKENS: u32 = 2_048;
 struct PreparedExecution {
     events: crate::RuntimeStream,
     audit: PreparedRunAudit,
-    tool_cancellation: Arc<AtomicBool>,
+    tool_cancellation: RunCancellation,
 }
 
 #[derive(Clone, Default)]
@@ -160,7 +160,7 @@ async fn prepare_execution(
     cancellation: &mut watch::Receiver<bool>,
     resources: &RunResources,
 ) -> Result<PreparedExecution, RunOutcome> {
-    let tool_cancellation = Arc::new(AtomicBool::new(false));
+    let tool_cancellation = RunCancellation::new();
     let internal = claimed.identity.kind == RunKind::Compaction;
     // Take the only full transcript before cloning run metadata into gates or
     // spawners. ClaimedRun clones after this point stay scalar/empty instead
@@ -179,7 +179,7 @@ async fn prepare_execution(
     // The claim carried the session's file hashes, so nothing here waits on
     // the store; a cancel already recorded settles before any preparation.
     if *cancellation.borrow() {
-        tool_cancellation.store(true, Ordering::Release);
+        tool_cancellation.cancel();
         return Err(RunOutcome::Cancelled);
     }
     let file_state = Arc::new(FileState::with_entries(std::mem::take(
@@ -204,7 +204,7 @@ async fn prepare_execution(
                 crate::input::resolve_blocking(&parts, &workspace, &state)
             }) => result,
             changed = cancellation.changed() => {
-                tool_cancellation.store(true, Ordering::Release);
+                tool_cancellation.cancel();
                 return if changed.is_ok() && *cancellation.borrow() {
                     Err(RunOutcome::Cancelled)
                 } else {
@@ -215,7 +215,7 @@ async fn prepare_execution(
         let text = match resolved {
             Ok(Ok(text)) => text,
             Ok(Err(error)) => {
-                tool_cancellation.store(true, Ordering::Release);
+                tool_cancellation.cancel();
                 return Err(RunOutcome::Failed {
                     failure: RunFailure {
                         kind: error.failure_kind(),
@@ -224,7 +224,7 @@ async fn prepare_execution(
                 });
             }
             Err(_) => {
-                tool_cancellation.store(true, Ordering::Release);
+                tool_cancellation.cancel();
                 return Err(internal_failure("input resolution stopped unexpectedly"));
             }
         };
@@ -252,7 +252,7 @@ async fn prepare_execution(
         // headless adapter did before core owned the contract.
         if claimed.limits.max_cost_usd_nanos.is_some() && loaded.resolved_model().pricing.is_none()
         {
-            tool_cancellation.store(true, Ordering::Release);
+            tool_cancellation.cancel();
             return Err(RunOutcome::Failed {
                 failure: RunFailure {
                     kind: RunFailureKind::Configuration,
@@ -317,7 +317,7 @@ async fn prepare_execution(
                 steering.insert(claimed.identity.run_id, sender);
             }
             Err(_) => {
-                tool_cancellation.store(true, Ordering::Release);
+                tool_cancellation.cancel();
                 return Err(internal_failure("steering registry is poisoned"));
             }
         }
@@ -355,7 +355,7 @@ async fn prepare_execution(
     // canonicalization or directory open happens here.
     let mut events = loaded.plan.execute(
         messages,
-        Arc::clone(&tool_cancellation),
+        tool_cancellation.clone(),
         gate,
         file_state,
         capabilities,
@@ -364,7 +364,7 @@ async fn prepare_execution(
         let event = tokio::select! {
             biased;
             changed = cancellation.changed() => {
-                tool_cancellation.store(true, Ordering::Release);
+                tool_cancellation.cancel();
                 return if changed.is_ok() && *cancellation.borrow() {
                     Err(RunOutcome::Cancelled)
                 } else {
@@ -628,7 +628,7 @@ pub(super) async fn execute_run(
                     }
                 };
                 if *inner.failed.borrow() {
-                    prepared.tool_cancellation.store(true, Ordering::Release);
+                    prepared.tool_cancellation.cancel();
                     let Ok(teardown) = resources.stop(&mut prepared.events).await else {
                         inner.failed.send_replace(true);
                         return;
@@ -643,7 +643,7 @@ pub(super) async fn execute_run(
                     return;
                 }
                 if cancelled {
-                    prepared.tool_cancellation.store(true, Ordering::Release);
+                    prepared.tool_cancellation.cancel();
                     let Ok(teardown) = resources.stop(&mut prepared.events).await else {
                         inner.failed.send_replace(true);
                         return;
@@ -859,7 +859,7 @@ async fn run_auto_compaction(
         }
     };
     if *inner.failed.borrow() {
-        prepared.tool_cancellation.store(true, Ordering::Release);
+        prepared.tool_cancellation.cancel();
         let outcome = internal_failure("session runtime failed before compaction provider work");
         let Ok(teardown) = resources.stop(&mut prepared.events).await else {
             return false;
@@ -870,7 +870,7 @@ async fn run_auto_compaction(
     }
     let compaction_run_id = compaction.identity.run_id;
     if cancelled {
-        prepared.tool_cancellation.store(true, Ordering::Release);
+        prepared.tool_cancellation.cancel();
         let Ok(teardown) = resources.stop(&mut prepared.events).await else {
             inner.failed.send_replace(true);
             return false;
@@ -1019,7 +1019,7 @@ async fn execute_started_run(
     claimed: ClaimedRun,
     mut cancellation: watch::Receiver<bool>,
     mut events: crate::RuntimeStream,
-    tool_cancellation: Arc<AtomicBool>,
+    tool_cancellation: RunCancellation,
     audit: &PreparedRunAudit,
     resources: &RunResources,
 ) {
@@ -1032,7 +1032,7 @@ async fn execute_started_run(
     );
     let mut runtime_failed = inner.failed.subscribe();
     if *runtime_failed.borrow() {
-        tool_cancellation.store(true, Ordering::Release);
+        tool_cancellation.cancel();
         let Ok(teardown) = resources.stop(&mut events).await else {
             inner.failed.send_replace(true);
             return;
@@ -1277,7 +1277,7 @@ async fn execute_started_run(
                 flush_at = None;
             }
             stopped @ (RunInput::Cancelled | RunInput::Interrupted) => {
-                tool_cancellation.store(true, Ordering::Release);
+                tool_cancellation.cancel();
                 if let Err(error) = flush_pending_reasoning(
                     &inner,
                     &claimed,
@@ -1344,7 +1344,7 @@ async fn execute_started_run(
                 return;
             }
             RunInput::RuntimeFailed => {
-                tool_cancellation.store(true, Ordering::Release);
+                tool_cancellation.cancel();
                 if let Err(error) = flush_pending_reasoning(
                     &inner,
                     &claimed,

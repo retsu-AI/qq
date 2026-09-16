@@ -9,15 +9,13 @@
 //! executes one selected call at a time under its own bounds. Hosts perform
 //! no implicit retry: an ambiguous outcome is returned as such.
 
-use std::{
-    future::Future,
-    pin::Pin,
-    sync::{Arc, atomic::AtomicBool},
-};
+use std::{future::Future, pin::Pin};
 
 use qq_provider::ToolSpec;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::RunCancellation;
 
 /// Namespace prefix for MCP tool names: `mcp__<server>__<tool>`.
 pub const MCP_TOOL_PREFIX: &str = "mcp__";
@@ -146,9 +144,10 @@ pub trait ExternalToolHost: Send + Sync {
     fn config_grants(&self) -> Vec<String>;
 
     /// Executes one namespaced call. `cancelled` is the run's cancellation
-    /// flag; a cancelled call must return promptly without wedging shared
-    /// state. Dropping the future must be safe.
-    fn call(&self, name: String, arguments: String, cancelled: Arc<AtomicBool>) -> HostCallFuture;
+    /// token; a host awaits [`RunCancellation::cancelled`] alongside its work
+    /// and returns [`HostCallError::Cancelled`] as soon as it resolves,
+    /// without wedging shared state. Dropping the future must be safe.
+    fn call(&self, name: String, arguments: String, cancelled: RunCancellation) -> HostCallFuture;
 
     fn readiness(&self) -> HostReadiness;
 

@@ -13,7 +13,7 @@ use std::{hint::black_box, sync::Arc, time::Instant};
 use futures_util::stream;
 use qq_core::{
     ExternalToolHost, HostCallFuture, HostCatalog, HostReadiness, HostShutdownFuture, HostTool,
-    HostToolResult, Runtime, ToolHints,
+    HostToolResult, RunCancellation, Runtime, ToolHints,
     catalog::bench_support,
     plan::{AgentProfile, CompiledAgentPlan, HostSnapshot},
 };
@@ -93,7 +93,7 @@ impl ExternalToolHost for FixedHost {
         &self,
         _name: String,
         _arguments: String,
-        _cancelled: Arc<std::sync::atomic::AtomicBool>,
+        _cancelled: RunCancellation,
     ) -> HostCallFuture {
         Box::pin(std::future::ready(Ok(HostToolResult {
             content: String::new(),

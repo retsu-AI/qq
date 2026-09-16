@@ -4,14 +4,14 @@
 
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex, atomic::AtomicBool},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use futures_util::StreamExt;
 use qq_core::{
     ExternalToolHost, HostCallFuture, HostCatalog, HostReadiness, HostShutdownFuture, HostTool,
-    HostToolResult, LoadedRuntime, Runtime, RuntimeLoadError, RuntimeLoadFuture,
+    HostToolResult, LoadedRuntime, RunCancellation, Runtime, RuntimeLoadError, RuntimeLoadFuture,
     RuntimeLoadRequest, RuntimeLoader, SessionEventStream, SessionRuntime, SessionRuntimeOptions,
     ToolHints,
 };
@@ -57,7 +57,7 @@ impl ExternalToolHost for PingRegistry {
         Vec::new()
     }
 
-    fn call(&self, name: String, arguments: String, _cancelled: Arc<AtomicBool>) -> HostCallFuture {
+    fn call(&self, name: String, arguments: String, _cancelled: RunCancellation) -> HostCallFuture {
         self.calls.lock().unwrap().push((name, arguments));
         Box::pin(async {
             Ok(HostToolResult {

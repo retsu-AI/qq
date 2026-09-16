@@ -1,12 +1,8 @@
-use std::{
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::{path::PathBuf, sync::Arc};
 
 use thiserror::Error;
+
+use crate::RunCancellation;
 
 use super::{
     GuidanceError, GuidanceRequest, SelectedGuidance, Workspace, WorkspaceInstructionError,
@@ -20,7 +16,7 @@ static TEST_WORKSPACE_OPEN_HOOK: std::sync::OnceLock<
 
 #[cfg(test)]
 struct TestWorkspaceOpenHook {
-    target: std::sync::Weak<AtomicBool>,
+    target: crate::cancellation::WeakRunCancellation,
     opened: std::sync::mpsc::SyncSender<()>,
     resume: std::sync::mpsc::Receiver<()>,
 }
@@ -33,7 +29,7 @@ pub(crate) struct TestWorkspaceOpenPause {
 
 #[cfg(test)]
 pub(crate) fn test_pause_after_workspace_open(
-    cancelled: &Arc<AtomicBool>,
+    cancelled: &RunCancellation,
 ) -> TestWorkspaceOpenPause {
     let (opened_sender, opened) = std::sync::mpsc::sync_channel(1);
     let (resume, resume_receiver) = std::sync::mpsc::sync_channel(1);
@@ -46,7 +42,7 @@ pub(crate) fn test_pause_after_workspace_open(
         "a workspace-open test hook is already active"
     );
     *hook = Some(TestWorkspaceOpenHook {
-        target: Arc::downgrade(cancelled),
+        target: cancelled.downgrade(),
         opened: opened_sender,
         resume: resume_receiver,
     });
@@ -65,15 +61,17 @@ impl TestWorkspaceOpenPause {
 }
 
 #[cfg(test)]
-fn pause_after_workspace_open(cancelled: &Arc<AtomicBool>) {
+fn pause_after_workspace_open(cancelled: &RunCancellation) {
     let hook = {
         let mut slot = TEST_WORKSPACE_OPEN_HOOK
             .get_or_init(|| std::sync::Mutex::new(None))
             .lock()
             .unwrap();
-        let matches = slot
-            .as_ref()
-            .is_some_and(|hook| hook.target.as_ptr() == Arc::as_ptr(cancelled));
+        let matches = slot.as_ref().is_some_and(|hook| {
+            hook.target
+                .upgrade()
+                .is_some_and(|target| target.same_token(cancelled))
+        });
         matches.then(|| slot.take().unwrap())
     };
     if let Some(hook) = hook
@@ -117,7 +115,7 @@ pub(crate) enum WorkspacePreparationError {
 
 pub(crate) async fn prepare_workspace(
     path: PathBuf,
-    cancelled: Arc<AtomicBool>,
+    cancelled: RunCancellation,
 ) -> Result<(Workspace, WorkspaceInstructions), WorkspacePreparationError> {
     let permit = blocking_permits()
         .acquire_owned()
@@ -125,7 +123,7 @@ pub(crate) async fn prepare_workspace(
         .map_err(|source| WorkspacePreparationError::Unavailable { source })?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        if cancelled.load(Ordering::Acquire) {
+        if cancelled.is_cancelled() {
             return Err(WorkspacePreparationError::Cancelled);
         }
         let canonical = std::fs::canonicalize(&path).map_err(|source| {
@@ -141,7 +139,7 @@ pub(crate) async fn prepare_workspace(
             })?;
         #[cfg(test)]
         pause_after_workspace_open(&cancelled);
-        if cancelled.load(Ordering::Acquire) {
+        if cancelled.is_cancelled() {
             return Err(WorkspacePreparationError::Cancelled);
         }
         let instructions = super::instructions::load(&workspace, &cancelled)?;
@@ -158,7 +156,7 @@ pub(crate) async fn prepare_guidance(
     workspace: Workspace,
     packs: Arc<[Workspace]>,
     index: Arc<super::skills::SkillIndex>,
-    cancelled: Arc<AtomicBool>,
+    cancelled: RunCancellation,
     request: GuidanceRequest,
 ) -> Result<SelectedGuidance, WorkspacePreparationError> {
     let permit = blocking_permits()
@@ -167,7 +165,7 @@ pub(crate) async fn prepare_guidance(
         .map_err(|source| WorkspacePreparationError::Unavailable { source })?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        if cancelled.load(Ordering::Acquire) {
+        if cancelled.is_cancelled() {
             return Err(WorkspacePreparationError::Cancelled);
         }
         Ok(super::guidance::load(
@@ -185,7 +183,7 @@ pub(crate) async fn load_disclosed_skill(
     workspace: Workspace,
     packs: Arc<[Workspace]>,
     index: Arc<super::skills::SkillIndex>,
-    cancelled: Arc<AtomicBool>,
+    cancelled: RunCancellation,
     name: String,
 ) -> Result<SelectedGuidance, WorkspacePreparationError> {
     let permit = blocking_permits()
@@ -194,7 +192,7 @@ pub(crate) async fn load_disclosed_skill(
         .map_err(|source| WorkspacePreparationError::Unavailable { source })?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        if cancelled.load(Ordering::Acquire) {
+        if cancelled.is_cancelled() {
             return Err(WorkspacePreparationError::Cancelled);
         }
         let Some(entry) = index.resolve_disclosed(&name) else {
