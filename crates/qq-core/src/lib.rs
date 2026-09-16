@@ -1694,10 +1694,7 @@ impl plan::CompiledAgentPlan {
                     // the name. A name the catalog does not hold is not
                     // executable, so it settles as a tool error before any
                     // gate sees it.
-                    let known = catalog
-                        .lookup(&pending.name)
-                        .map(|entry| entry.effect)
-                        .or_else(|| tools::alias_effect(&pending.name, &catalog));
+                    let known = catalog.lookup(&pending.name).map(|entry| entry.effect);
                     #[cfg(test)]
                     let known = known.or_else(|| tools::test_tool_effect(&pending.name));
                     let (effect, rejection) = match known {
@@ -2930,11 +2927,11 @@ mod tests {
                     Box::pin(stream::iter([
                         Ok(ProviderEvent::ToolCallStarted {
                             id: "c1".to_owned(),
-                            name: "list_dir".to_owned(),
+                            name: "tree".to_owned(),
                         }),
                         Ok(ProviderEvent::ToolCallArgumentsDelta {
                             id: "c1".to_owned(),
-                            json: r#"{"path":"."}"#.to_owned(),
+                            json: r#"{"path":".","depth":1}"#.to_owned(),
                         }),
                         Ok(ProviderEvent::ToolCallCompleted {
                             id: "c1".to_owned(),
@@ -3607,7 +3604,7 @@ mod tests {
                 };
 
                 match turn {
-                    0 => tool_turn("list-src", "list_dir", r#"{"path":"src"}"#),
+                    0 => tool_turn("list-src", "tree", r#"{"path":"src","depth":1}"#),
                     1 => {
                         assert!(matches!(
                             request.messages().last().map(Message::content),
@@ -3635,7 +3632,11 @@ mod tests {
                             }]) if call_id == "read-src-policy"
                                 && content.ends_with("\n1\tFollow src fallback.\n")
                         ));
-                        tool_turn("list-feature", "list_dir", r#"{"path":"src/feature"}"#)
+                        tool_turn(
+                            "list-feature",
+                            "tree",
+                            r#"{"path":"src/feature","depth":1}"#,
+                        )
                     }
                     3 => {
                         assert!(matches!(
@@ -4141,11 +4142,11 @@ mod tests {
                         }),
                         Ok(ProviderEvent::ToolCallStarted {
                             id: "list".to_owned(),
-                            name: "list_dir".to_owned(),
+                            name: "tree".to_owned(),
                         }),
                         Ok(ProviderEvent::ToolCallArgumentsDelta {
                             id: "list".to_owned(),
-                            json: r#"{"path":"."}"#.to_owned(),
+                            json: r#"{"path":".","depth":1}"#.to_owned(),
                         }),
                         Ok(ProviderEvent::ToolCallCompleted {
                             id: "list".to_owned(),

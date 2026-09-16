@@ -1,6 +1,4 @@
 //! `tree`: a depth-bounded, ignore-aware directory tree with sizes and counts.
-//! `list_dir` is a hidden alias for `tree depth=1` so persisted transcripts
-//! and grants keep resolving.
 //!
 //! The tree fills breadth-first so the top level is complete before any
 //! deeper level appears: a model asking about a repository sees every
@@ -56,27 +54,6 @@ pub(super) struct TreeArgs {
     include_ignored: bool,
 }
 
-/// `list_dir` arguments: the pre-T2 shape, mapped onto `tree depth=1`.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ListDirArgs {
-    path: String,
-    #[serde(default = "default_list_limit")]
-    limit: usize,
-}
-
-impl From<ListDirArgs> for TreeArgs {
-    fn from(arguments: ListDirArgs) -> Self {
-        Self {
-            path: arguments.path,
-            depth: 1,
-            limit: arguments.limit.clamp(1, MAX_ENTRIES),
-            glob: None,
-            include_ignored: true,
-        }
-    }
-}
-
 fn default_path() -> String {
     ".".to_owned()
 }
@@ -87,10 +64,6 @@ const fn default_depth() -> usize {
 
 const fn default_entries() -> usize {
     DEFAULT_ENTRIES
-}
-
-const fn default_list_limit() -> usize {
-    MAX_ENTRIES
 }
 
 struct Node {

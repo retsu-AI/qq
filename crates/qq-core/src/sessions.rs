@@ -178,6 +178,8 @@ const RUNTIME_NOTICE_GUIDANCE: &str = "Continue from the committed history above
 const PRUNABLE_READ_ONLY_TOOLS: [&str; 6] = [
     "read_file",
     "tree",
+    // Pre-v0.1.0 name of `tree`; not a tool, but rows recorded before schema
+    // 26 stored no effect class and are pruned by this list.
     "list_dir",
     "search",
     "search_history",

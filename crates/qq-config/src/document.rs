@@ -1000,7 +1000,6 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
                 name.as_str(),
                 "read_file"
                     | "tree"
-                    | "list_dir"
                     | "search"
                     | "edit_file"
                     | "write_file"
