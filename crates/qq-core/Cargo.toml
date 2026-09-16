@@ -69,3 +69,7 @@ harness = false
 [[bench]]
 name = "classify_command"
 harness = false
+
+[[bench]]
+name = "host_cancel_latency"
+harness = false
