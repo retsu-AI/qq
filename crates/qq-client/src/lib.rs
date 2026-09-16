@@ -103,23 +103,8 @@ impl SessionClient {
         command_id: CommandId,
         command: SessionCommand,
     ) -> Result<CommandReceipt, ClientError> {
-        let path = match command {
-            SessionCommand::ResolveWorkspace { .. } => "/v1/workspaces/resolve",
-            SessionCommand::CreateSession { .. } => "/v1/sessions",
-            SessionCommand::SubmitPrompt { .. } => "/v1/sessions/prompts",
-            SessionCommand::SteerRun { .. } => "/v1/runs/steer",
-            SessionCommand::CancelRun { .. } => "/v1/runs/cancel",
-            SessionCommand::RespondToolApproval { .. } => "/v1/tools/approvals",
-            SessionCommand::SetApprovalMode { .. } => "/v1/sessions/approval-mode",
-            SessionCommand::SetSessionModel { .. } => "/v1/sessions/model",
-            SessionCommand::SetSessionProfile { .. } => "/v1/sessions/profile",
-            SessionCommand::DeleteSession { .. } => "/v1/sessions/delete",
-            SessionCommand::PruneSessions { .. } => "/v1/sessions/prune",
-            SessionCommand::CompactSession { .. } => "/v1/sessions/compact",
-            SessionCommand::RollbackCompaction { .. } => "/v1/sessions/compact/rollback",
-        };
         self.post_json(
-            path,
+            command.kind().route(),
             &CommandRequest {
                 command_id,
                 command,

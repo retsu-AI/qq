@@ -565,7 +565,42 @@ impl SessionCommandKind {
         Self::CompactSession,
         Self::RollbackCompaction,
     ];
+
+    /// The HTTP route that carries this command. One table for the client that
+    /// posts and the server that routes; the server test asserts its router
+    /// equals this table so the two cannot drift.
+    #[must_use]
+    pub const fn route(self) -> &'static str {
+        match self {
+            Self::ResolveWorkspace => "/v1/workspaces/resolve",
+            Self::CreateSession => "/v1/sessions",
+            Self::SubmitPrompt => "/v1/sessions/prompts",
+            Self::SteerRun => "/v1/runs/steer",
+            Self::CancelRun => "/v1/runs/cancel",
+            Self::RespondToolApproval => "/v1/tools/approvals",
+            Self::SetApprovalMode => "/v1/sessions/approval-mode",
+            Self::SetSessionModel => "/v1/sessions/model",
+            Self::SetSessionProfile => "/v1/sessions/profile",
+            Self::DeleteSession => "/v1/sessions/delete",
+            Self::PruneSessions => "/v1/sessions/prune",
+            Self::CompactSession => "/v1/sessions/compact",
+            Self::RollbackCompaction => "/v1/sessions/compact/rollback",
+        }
+    }
 }
+
+/// Every command route this protocol revision serves, in [`SessionCommandKind::ALL`]
+/// order. Routes are wire data: changing one is a protocol change.
+pub const COMMAND_ROUTES: [(SessionCommandKind, &str); 13] = {
+    let mut routes = [(SessionCommandKind::ResolveWorkspace, ""); 13];
+    let mut index = 0;
+    while index < SessionCommandKind::ALL.len() {
+        let kind = SessionCommandKind::ALL[index];
+        routes[index] = (kind, kind.route());
+        index += 1;
+    }
+    routes
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1730,6 +1765,25 @@ pub enum SessionEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_routes_are_distinct_versioned_paths_in_declaration_order() {
+        let kinds: Vec<_> = COMMAND_ROUTES.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(kinds, SessionCommandKind::ALL);
+        let mut paths: Vec<&str> = COMMAND_ROUTES.iter().map(|(_, path)| *path).collect();
+        for path in &paths {
+            assert!(path.starts_with("/v1/"), "{path}");
+            assert!(!path.ends_with('/'), "{path}");
+        }
+        paths.sort_unstable();
+        paths.dedup();
+        assert_eq!(paths.len(), COMMAND_ROUTES.len(), "routes must be distinct");
+        // Pinned: these strings are wire data.
+        assert_eq!(
+            SessionCommandKind::RollbackCompaction.route(),
+            "/v1/sessions/compact/rollback"
+        );
+    }
 
     fn id<T>(byte: u8) -> T
     where
