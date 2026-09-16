@@ -1,5 +1,17 @@
 const STORAGE_CONTEXT_BYTES: u64 = 4 * 1024 * 1024;
 const CONSERVATIVE_OUTPUT_BYTES_PER_TOKEN: u64 = 32;
+/// Bytes of provider-neutral request text per estimated input token when no
+/// provider measurement covers the request. English prose and source code
+/// tokenize at roughly 3.5–4.5 bytes per token on every current tokenizer;
+/// four is the figure Codex, pi, fx, and OpenCode all use. Rounding up and
+/// the output reserve keep the estimate conservative; a provider-reported
+/// overflow remains the authoritative backstop.
+pub(crate) const ESTIMATED_BYTES_PER_TOKEN: u64 = 4;
+
+/// Estimated input tokens for `bytes` of request text, rounded up.
+pub(crate) const fn estimate_tokens(bytes: u64) -> u64 {
+    bytes.div_ceil(ESTIMATED_BYTES_PER_TOKEN)
+}
 pub(crate) const COMPACTION_INSTRUCTION_BYTES: usize = 64 * 1024;
 const COMPACTION_STORAGE_ENVELOPE_BYTES: u64 = COMPACTION_INSTRUCTION_BYTES as u64 + 32;
 
@@ -32,6 +44,11 @@ pub(crate) enum CompactionDisposition {
     AlreadyAttempted,
     BetweenRunsOnly,
     Unsupported,
+    /// The request *is* the summarizer's: its transcript is the one being
+    /// shrunk, so an estimated model-window overflow is expected rather than
+    /// disqualifying. Only the storage backstop applies; a provider-reported
+    /// overflow of the summarizer request is the authoritative failure.
+    Summarizing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,8 +99,10 @@ pub(crate) fn plan(input: ContextInput) -> ContextPlan {
     // Compatibility is established by the caller from effective model,
     // prompt/tool identity, and an append-only transcript watermark. When it
     // holds, the provider's measured occupancy is more useful than applying
-    // the deliberately conservative byte upper bound to the unchanged prefix.
-    let estimated_input_tokens = input.compatible_input_tokens.unwrap_or(input_bytes);
+    // the byte-ratio estimate to the unchanged prefix.
+    let estimated_input_tokens = input
+        .compatible_input_tokens
+        .unwrap_or_else(|| estimate_tokens(input_bytes));
     let output_tokens = u64::from(input.max_output_tokens);
     let storage_reserve_bytes = output_tokens
         .saturating_mul(CONSERVATIVE_OUTPUT_BYTES_PER_TOKEN)
@@ -92,7 +111,7 @@ pub(crate) fn plan(input: ContextInput) -> ContextPlan {
         } else {
             0
         });
-    let fixed_tokens = fixed_input.saturating_add(output_tokens);
+    let fixed_tokens = estimate_tokens(fixed_input).saturating_add(output_tokens);
     let required_tokens = estimated_input_tokens.saturating_add(output_tokens);
     let estimate = ContextEstimate {
         input_bytes,
@@ -103,9 +122,14 @@ pub(crate) fn plan(input: ContextInput) -> ContextPlan {
     };
 
     let exceeds_storage = input_bytes.saturating_add(storage_reserve_bytes) > STORAGE_CONTEXT_BYTES;
-    let exceeds_window = input
-        .context_window
-        .is_some_and(|window| required_tokens > u64::from(window));
+    // The summarizer reads the very transcript that overflowed; judging it
+    // against the model window would refuse every compaction a window
+    // overflow asked for. The provider adjudicates that request; only the
+    // storage backstop is planned here.
+    let exceeds_window = input.compaction != CompactionDisposition::Summarizing
+        && input
+            .context_window
+            .is_some_and(|window| required_tokens > u64::from(window));
     // A compatible provider measurement covers the complete prior request.
     // Let a measured fit win before classifying raw byte weights as an
     // irreducible model-window overflow; the byte storage backstop remains
@@ -115,6 +139,7 @@ pub(crate) fn plan(input: ContextInput) -> ContextPlan {
     }
 
     let irreducible_window_overflow = input.compatible_input_tokens.is_none()
+        && input.compaction != CompactionDisposition::Summarizing
         && input
             .context_window
             .is_some_and(|window| fixed_tokens > u64::from(window));
@@ -143,7 +168,7 @@ pub(crate) fn plan(input: ContextInput) -> ContextPlan {
             (None, Some(window)) => Some(
                 u64::from(window)
                     .saturating_sub(output_tokens)
-                    .saturating_sub(fixed_input),
+                    .saturating_sub(estimate_tokens(fixed_input)),
             ),
             (None, None) | (Some(_), _) => None,
         },
@@ -163,10 +188,12 @@ pub(crate) fn plan(input: ContextInput) -> ContextPlan {
             reason: constraint,
             target,
         },
-        CompactionDisposition::AlreadyAttempted => ContextPlan::Reject {
-            estimate,
-            reason: ContextRejectReason::AlreadyAttempted(constraint),
-        },
+        CompactionDisposition::AlreadyAttempted | CompactionDisposition::Summarizing => {
+            ContextPlan::Reject {
+                estimate,
+                reason: ContextRejectReason::AlreadyAttempted(constraint),
+            }
+        }
         CompactionDisposition::BetweenRunsOnly => ContextPlan::Reject {
             estimate,
             reason: ContextRejectReason::BetweenRunsOnly(constraint),
@@ -199,26 +226,27 @@ pub(crate) fn rejection_message(plan: ContextPlan) -> Option<String> {
             let (constraint, detail) = match reason {
                 ContextRejectReason::Irreducible(constraint) => (
                     constraint,
-                    "the irreducible request cannot fit even after compaction".to_owned(),
+                    "the system prompt, tool schemas, and this run's own messages alone exceed the limit, so compaction cannot help; shorten the prompt or instructions, or start a new session".to_owned(),
                 ),
-                ContextRejectReason::NoReducibleHistory(constraint) => {
-                    (constraint, "no reducible history remains".to_owned())
-                }
+                ContextRejectReason::NoReducibleHistory(constraint) => (
+                    constraint,
+                    "no earlier history remains to compact; start a new session".to_owned(),
+                ),
                 ContextRejectReason::AlreadyAttempted(constraint) => (
                     constraint,
-                    "automatic compaction was already attempted for this prompt".to_owned(),
+                    "one automatic compaction already ran for this prompt and the context is still too large; run /compact again or start a new session".to_owned(),
                 ),
                 ContextRejectReason::BetweenRunsOnly(constraint) => (
                     constraint,
-                    "automatic compaction is only available between model runs".to_owned(),
+                    "the context grew past the limit during this run and compaction runs only between prompts; run /compact or start a new session, then retry".to_owned(),
                 ),
                 ContextRejectReason::Unsupported(constraint) => (
                     constraint,
-                    "this direct runtime path does not support automatic compaction".to_owned(),
+                    "the direct `qq ask` path has no session to compact; use a durable session (TUI or `qq run --session`) for long conversations".to_owned(),
                 ),
                 ContextRejectReason::ProviderReportedOverflow => {
                     return Some(format!(
-                        "the provider previously rejected an equivalent request for exceeding its context window, and the single automatic compaction attempt did not produce a usable smaller context; the current provider-neutral estimate is {} input tokens with a {}-token output reserve",
+                        "the provider previously rejected an equivalent request for exceeding its context window, and the single automatic compaction attempt did not produce a usable smaller context; the current provider-neutral estimate is {} input tokens with a {}-token output reserve; run /compact or start a new session",
                         estimate.estimated_input_tokens, estimate.output_reserve_tokens,
                     ));
                 }
@@ -228,19 +256,20 @@ pub(crate) fn rejection_message(plan: ContextPlan) -> Option<String> {
     };
     Some(match constraint {
         ContextConstraint::ModelWindow => format!(
-            "estimated provider-neutral context requires {} input tokens plus a {}-token output reserve, exceeding the selected model's {}-token window; {detail}",
+            "context is estimated at {} input tokens ({} bytes) plus a {}-token output reserve, over the selected model's {}-token window; {detail}",
             estimate.estimated_input_tokens,
+            estimate.input_bytes,
             estimate.output_reserve_tokens,
             estimate.context_window.unwrap_or(0),
         ),
         ContextConstraint::StorageBackstop => format!(
-            "provider-neutral context measures {} bytes and reserves {} bytes for bounded output and compaction headroom, exceeding the independent {} MiB storage backstop; {detail}",
+            "context measures {} bytes and reserves {} bytes for bounded output and compaction headroom, over the {} MiB per-session storage limit; {detail}",
             estimate.input_bytes,
             estimate.storage_reserve_bytes,
             STORAGE_CONTEXT_BYTES / (1024 * 1024),
         ),
         ContextConstraint::Both => format!(
-            "estimated provider-neutral context requires {} input tokens plus a {}-token output reserve against the selected model's {}-token window and measures {} bytes with {} bytes of bounded output and compaction headroom against the independent {} MiB storage backstop; {detail}",
+            "context is estimated at {} input tokens plus a {}-token output reserve against the selected model's {}-token window and measures {} bytes with {} bytes of bounded output and compaction headroom against the {} MiB per-session storage limit; {detail}",
             estimate.estimated_input_tokens,
             estimate.output_reserve_tokens,
             estimate.context_window.unwrap_or(0),
@@ -255,14 +284,20 @@ pub(crate) fn rejection_message(plan: ContextPlan) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Byte fixtures are multiples of the ratio so token arithmetic reads
+    /// directly: `bytes(n)` bytes estimate to exactly `n` tokens.
+    const fn bytes(tokens: u64) -> u64 {
+        tokens * ESTIMATED_BYTES_PER_TOKEN
+    }
+
     fn input(context_window: Option<u32>) -> ContextInput {
         ContextInput {
             context_window,
             max_output_tokens: 40,
-            system_bytes: 10,
-            tool_schema_bytes: 10,
-            reducible_message_bytes: 20,
-            irreducible_message_bytes: 20,
+            system_bytes: bytes(10),
+            tool_schema_bytes: bytes(10),
+            reducible_message_bytes: bytes(20),
+            irreducible_message_bytes: bytes(20),
             compatible_input_tokens: None,
             compaction: CompactionDisposition::Eligible,
         }
@@ -281,6 +316,31 @@ mod tests {
     }
 
     #[test]
+    fn tokens_are_estimated_at_four_bytes_each_rounded_up() {
+        assert_eq!(estimate_tokens(0), 0);
+        assert_eq!(estimate_tokens(1), 1);
+        assert_eq!(estimate_tokens(4), 1);
+        assert_eq!(estimate_tokens(5), 2);
+        assert_eq!(estimate_tokens(729_498 * 4), 729_498);
+        assert_eq!(estimate_tokens(u64::MAX), u64::MAX / 4 + 1);
+        // The user-visible failure this ratio fixes: ~730 KB of transcript
+        // on a 200k-token model is ~182k tokens and must send.
+        let ContextPlan::Send { estimate } = plan(ContextInput {
+            context_window: Some(200_000),
+            max_output_tokens: 16_384,
+            system_bytes: 20_000,
+            tool_schema_bytes: 12_000,
+            reducible_message_bytes: 680_000,
+            irreducible_message_bytes: 17_498,
+            compatible_input_tokens: None,
+            compaction: CompactionDisposition::Eligible,
+        }) else {
+            panic!("a 730 KB transcript fits a 200k window at four bytes per token")
+        };
+        assert_eq!(estimate.estimated_input_tokens, 182_375);
+    }
+
+    #[test]
     fn known_window_exact_fit_sends_and_one_token_over_compacts() {
         let ContextPlan::Send { estimate } = plan(input(Some(100))) else {
             panic!("exact fit must send")
@@ -288,7 +348,7 @@ mod tests {
         assert_eq!(estimate.estimated_input_tokens, 60);
         assert_eq!(estimate.output_reserve_tokens, 40);
         assert_eq!(estimate.context_window, Some(100));
-        assert_eq!(estimate.input_bytes, 60);
+        assert_eq!(estimate.input_bytes, bytes(60));
         let ContextPlan::Compact { reason, target, .. } = plan(input(Some(99))) else {
             panic!("one token over must compact")
         };
@@ -296,20 +356,20 @@ mod tests {
         assert_eq!(target.max_reducible_input_tokens, Some(19));
         assert_eq!(
             target.max_reducible_input_bytes,
-            STORAGE_CONTEXT_BYTES - 40 - estimate.storage_reserve_bytes
+            STORAGE_CONTEXT_BYTES - bytes(40) - estimate.storage_reserve_bytes
         );
     }
 
     #[test]
     fn tool_schema_and_output_reserve_are_both_part_of_the_window() {
         let mut request = input(Some(100));
-        request.system_bytes = 10;
-        request.tool_schema_bytes = 30;
+        request.system_bytes = bytes(10);
+        request.tool_schema_bytes = bytes(30);
         request.reducible_message_bytes = 0;
-        request.irreducible_message_bytes = 20;
+        request.irreducible_message_bytes = bytes(20);
         assert_send(plan(request));
 
-        request.tool_schema_bytes = 31;
+        request.tool_schema_bytes = bytes(30) + 1;
         assert_reject(plan(request));
     }
 
@@ -318,10 +378,10 @@ mod tests {
         let request = ContextInput {
             context_window: Some(99),
             max_output_tokens: 40,
-            system_bytes: 30,
-            tool_schema_bytes: 10,
-            reducible_message_bytes: 100,
-            irreducible_message_bytes: 20,
+            system_bytes: bytes(30),
+            tool_schema_bytes: bytes(10),
+            reducible_message_bytes: bytes(100),
+            irreducible_message_bytes: bytes(20),
             compatible_input_tokens: None,
             compaction: CompactionDisposition::Eligible,
         };
@@ -333,6 +393,40 @@ mod tests {
         assert_send(plan(ContextInput {
             context_window: Some(200),
             ..request
+        }));
+    }
+
+    #[test]
+    fn the_summarizer_request_is_planned_against_storage_only() {
+        // The transcript that overflowed a 150-token window is exactly what
+        // the summarizer must read: planning it against the window would
+        // refuse every window-triggered compaction.
+        let overflowing = ContextInput {
+            context_window: Some(150),
+            max_output_tokens: 40,
+            system_bytes: bytes(30),
+            tool_schema_bytes: 0,
+            reducible_message_bytes: bytes(400),
+            irreducible_message_bytes: bytes(20),
+            compatible_input_tokens: None,
+            compaction: CompactionDisposition::AlreadyAttempted,
+        };
+        assert_reject(plan(overflowing));
+        assert_send(plan(ContextInput {
+            compaction: CompactionDisposition::Summarizing,
+            ..overflowing
+        }));
+        // Even a fixed prefix past the window is the provider's call.
+        assert_send(plan(ContextInput {
+            system_bytes: bytes(400),
+            compaction: CompactionDisposition::Summarizing,
+            ..overflowing
+        }));
+        // The storage backstop still binds the summarizer.
+        assert_reject(plan(ContextInput {
+            reducible_message_bytes: STORAGE_CONTEXT_BYTES,
+            compaction: CompactionDisposition::Summarizing,
+            ..overflowing
         }));
     }
 
@@ -379,10 +473,10 @@ mod tests {
         let byte_heavy = ContextInput {
             context_window: Some(150),
             max_output_tokens: 40,
-            system_bytes: 10,
-            tool_schema_bytes: 10,
-            reducible_message_bytes: 120,
-            irreducible_message_bytes: 20,
+            system_bytes: bytes(10),
+            tool_schema_bytes: bytes(10),
+            reducible_message_bytes: bytes(120),
+            irreducible_message_bytes: bytes(20),
             compatible_input_tokens: None,
             compaction: CompactionDisposition::Eligible,
         };
@@ -395,9 +489,9 @@ mod tests {
         let raw_fixed_prefix_exceeds_the_window = ContextInput {
             context_window: Some(100),
             max_output_tokens: 40,
-            system_bytes: 80,
+            system_bytes: bytes(80),
             tool_schema_bytes: 0,
-            reducible_message_bytes: 100,
+            reducible_message_bytes: bytes(100),
             irreducible_message_bytes: 0,
             compatible_input_tokens: Some(10),
             compaction: CompactionDisposition::AlreadyAttempted,
@@ -411,6 +505,34 @@ mod tests {
             panic!("compatible occupancy cannot prove the reducible prefix is irreducible")
         };
         assert_eq!(target.max_reducible_input_tokens, None);
+    }
+
+    #[test]
+    fn rejection_messages_name_a_recovery_step() {
+        let mut request = input(Some(99));
+        request.compaction = CompactionDisposition::AlreadyAttempted;
+        let message = rejection_message(plan(request)).unwrap();
+        assert!(message.contains("/compact"), "{message}");
+        assert!(
+            message.contains("estimated at 60 input tokens"),
+            "{message}"
+        );
+        request.compaction = CompactionDisposition::BetweenRunsOnly;
+        assert!(
+            rejection_message(plan(request))
+                .unwrap()
+                .contains("/compact")
+        );
+        request.compaction = CompactionDisposition::Unsupported;
+        assert!(rejection_message(plan(request)).unwrap().contains("qq ask"));
+        request.compaction = CompactionDisposition::Eligible;
+        request.reducible_message_bytes = 0;
+        request.irreducible_message_bytes = bytes(40);
+        assert!(
+            rejection_message(plan(request))
+                .unwrap()
+                .contains("new session")
+        );
     }
 
     #[test]

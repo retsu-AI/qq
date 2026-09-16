@@ -1286,7 +1286,11 @@ impl plan::CompiledAgentPlan {
                         (previous_system.as_ref() == request_system.as_ref()
                             && *previous_had_tools == request_has_tools
                             && input_bytes >= *previous_bytes)
-                            .then(|| previous_tokens.saturating_add(input_bytes - previous_bytes))
+                            .then(|| {
+                                previous_tokens.saturating_add(sessions::context::estimate_tokens(
+                                    input_bytes - previous_bytes,
+                                ))
+                            })
                     },
                 );
                 yield RuntimeEvent::Prepared {

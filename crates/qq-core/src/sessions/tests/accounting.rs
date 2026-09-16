@@ -12,7 +12,8 @@ fn occupancy_reuse_requires_exact_shape_prefix_and_monotonic_request_bytes() {
     };
     assert_eq!(
         compatible_context_tokens(occupancy, shape, prefix, 1_024),
-        Some(124)
+        // 24 appended bytes are charged at the byte-ratio estimate.
+        Some(100 + context::estimate_tokens(24))
     );
     assert_eq!(
         compatible_context_tokens(occupancy, shape, prefix, 999),

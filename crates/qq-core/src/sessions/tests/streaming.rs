@@ -91,7 +91,8 @@ async fn measured_occupancy_basis_persists_atomically_and_reloads_with_the_reser
     assert_eq!(occupancy.basis, basis);
     assert_eq!(
         compatible_context_tokens(occupancy, shape, static_prefix, 1_024),
-        Some(124)
+        // 24 appended bytes are charged at the byte-ratio estimate.
+        Some(100 + context::estimate_tokens(24))
     );
     reopened
         .finish_reserved_run(&reserved, RunOutcome::Cancelled)
