@@ -342,6 +342,7 @@ async fn prepare_headless(
         reviewer_configured: snapshot.reviewer_model().is_some(),
         allow_tools: args.allow_tools,
         allow_shell_prefixes: args.allow_shell_prefixes,
+        allow_hosts: args.allow_hosts,
         timeout: args.timeout_seconds.map(std::time::Duration::from_secs),
         max_turns: args.max_turns,
         max_cost_usd_nanos,

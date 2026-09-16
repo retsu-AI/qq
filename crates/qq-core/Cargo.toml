@@ -14,10 +14,13 @@ cap-primitives.workspace = true
 crossbeam-channel.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
+htmd.workspace = true
 ignore.workspace = true
+ipnet.workspace = true
 qq-provider.workspace = true
 qq-protocol.workspace = true
 regex.workspace = true
+reqwest.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -26,11 +29,13 @@ thiserror.workspace = true
 tokio.workspace = true
 tree-sitter.workspace = true
 tree-sitter-bash.workspace = true
+url.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

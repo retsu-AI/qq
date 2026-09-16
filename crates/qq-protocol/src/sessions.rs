@@ -336,8 +336,17 @@ pub enum ApprovalDecision {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApprovalGrant {
-    Tool { name: String },
-    ShellPrefix { prefix: String },
+    Tool {
+        name: String,
+    },
+    ShellPrefix {
+        prefix: String,
+    },
+    /// A host `fetch` may reach without prompting (protocol 22): an exact
+    /// lowercase name or one `*.suffix` wildcard label.
+    Host {
+        host: String,
+    },
 }
 
 /// The durable outcome of one tool approval request.
@@ -411,6 +420,18 @@ pub enum ShellVerdict {
 pub struct EditPreview {
     pub path: String,
     pub diff: String,
+}
+
+/// The request an awaiting `fetch` call would make (protocol 22), so a client
+/// can offer to grant the host without parsing the call's arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FetchPreview {
+    pub url: String,
+    /// The lowercase host the policy judged; the natural grant value.
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
 }
 
 /// The questions an `ask_user` call puts to the human (protocol 21), carried
@@ -1659,8 +1680,10 @@ pub enum SessionEvent {
     },
     ToolApprovalRequested {
         tool_call: ToolCallSnapshot,
+        /// Boxed (protocol 22, wire-identical) so the largest event variant
+        /// stays within the size bound as previews accrete.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        shell: Option<ShellCommandPreview>,
+        shell: Option<Box<ShellCommandPreview>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         edit: Option<EditPreview>,
         /// Present when the held call is `ask_user`: the run is waiting for
@@ -1668,6 +1691,9 @@ pub enum SessionEvent {
         /// grow every event (`session_events_are_bounded_by_the_boxed_summary`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         question: Option<Box<QuestionPreview>>,
+        /// Present when the held call is `fetch` (protocol 22).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fetch: Option<Box<FetchPreview>>,
     },
     ToolApprovalResolved {
         tool_call: ToolCallSnapshot,
@@ -2044,14 +2070,15 @@ mod tests {
         };
         let requested = SessionEvent::ToolApprovalRequested {
             tool_call: tool_call.clone(),
-            shell: Some(ShellCommandPreview {
+            shell: Some(Box::new(ShellCommandPreview {
                 command: "cargo test".to_owned(),
                 cwd: Some("crates/qq-core".to_owned()),
                 verdict: Some(ShellVerdict::Prompt),
                 reasons: vec!["unlisted".to_owned()],
-            }),
+            })),
             edit: None,
             question: None,
+            fetch: None,
         };
         let encoded = serde_json::to_value(&requested).unwrap();
         assert_eq!(encoded["type"], "tool_approval_requested");
@@ -2072,6 +2099,7 @@ mod tests {
                 diff: "- old\n+ new".to_owned(),
             }),
             question: None,
+            fetch: None,
         };
         let encoded = serde_json::to_value(&edit_requested).unwrap();
         assert_eq!(encoded["edit"]["path"], "src/lib.rs");
@@ -2095,6 +2123,7 @@ mod tests {
                     free_text: true,
                 }],
             })),
+            fetch: None,
         };
         let encoded = serde_json::to_value(&question_requested).unwrap();
         assert_eq!(
@@ -2978,7 +3007,9 @@ mod tests {
         // mentions) and the `ask_user` question round trip: `question` on
         // `tool_approval_requested`, `ApprovalDecision::Answer`, and
         // `ApprovalResolution::Answered`.
-        assert_eq!(crate::PROTOCOL_VERSION, 21);
+        // Version 22 added `ApprovalGrant::Host` and the `fetch` preview on
+        // `tool_approval_requested` for the network tool.
+        assert_eq!(crate::PROTOCOL_VERSION, 22);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

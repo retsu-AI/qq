@@ -518,6 +518,19 @@ pub(super) fn approval_block(app: &App, width: usize) -> Vec<Line> {
             lines.push(truncate_line(line, width));
         }
     }
+    if let Some(fetch) = preview.and_then(|preview| preview.fetch.as_ref()) {
+        let mut line = Line::styled("       ", muted());
+        line.push(fetch.method.as_deref().unwrap_or("GET"), muted());
+        line.push(" ", muted());
+        line.push(fetch.url.as_str(), normal().bold());
+        lines.push(truncate_line(line, width));
+        let mut line = Line::styled("         ", muted());
+        line.push(
+            format!("session/workspace grants cover host {}", fetch.host),
+            muted(),
+        );
+        lines.push(truncate_line(line, width));
+    }
     if let Some(edit) = preview.and_then(|preview| preview.edit.as_ref()) {
         let mut line = Line::styled("       ", muted());
         line.push(

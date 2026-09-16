@@ -168,12 +168,31 @@ pub(crate) async fn execute(
     output: Option<mpsc::Sender<String>>,
     tasks: ToolTasks,
     shell_policy: Arc<crate::runtime::ShellPolicy>,
+    network_policy: Arc<super::network::NetworkPolicy>,
 ) -> ToolOutput {
     if arguments.len() > MAX_ARGUMENT_BYTES {
         return ToolOutput::error("tool arguments exceed the 64 KiB limit");
     }
     let cancelled = ToolCancellation::new(cancelled);
     let _cancel_on_drop = CancelCallOnDrop(Arc::clone(&cancelled.call));
+    // Fetch awaits sockets, not files: it runs on the async runtime like
+    // shell, under the same task lease, never on a blocking permit.
+    if BuiltInTool::from_name(&name) == Some(BuiltInTool::Fetch) {
+        let args: super::fetch::FetchArgs = match serde_json::from_str(&arguments) {
+            Ok(args) => args,
+            Err(error) => return ToolOutput::error(format!("invalid arguments: {error}")),
+        };
+        let lease = tasks.enter();
+        return match tokio::spawn(async move {
+            let _lease = lease;
+            super::fetch::fetch(args, network_policy, &cancelled).await
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => ToolOutput::error("tool execution stopped unexpectedly"),
+        };
+    }
     // Shell executes on the async runtime directly: it awaits a child process
     // rather than doing blocking filesystem work, so it must neither occupy a
     // blocking permit for its full (possibly 120 s) lifetime nor block a
@@ -399,8 +418,8 @@ pub(super) fn execute_blocking(
             .map_or_else(ToolOutput::error, |args| {
                 write_file(workspace, file_state, &args, cancelled)
             }),
-        Some(BuiltInTool::Shell | BuiltInTool::Exec) => {
-            ToolOutput::error("shell commands must execute asynchronously")
+        Some(BuiltInTool::Shell | BuiltInTool::Exec | BuiltInTool::Fetch) => {
+            ToolOutput::error("network and shell tools must execute asynchronously")
         }
         // A well-formed `ask_user` never reaches dispatch: the gate holds it
         // and the answer is its result. Only malformed calls fall through,

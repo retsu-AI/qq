@@ -219,6 +219,12 @@ Approval classification uses the catalog effect class (`crates/qq-core/src/appro
   those are held and answered by `--allow-tool`/`--allow-shell` grants.
 - `full`: everything executes; grants are redundant.
 
+`fetch` follows the ladder with a host grant: `--allow-host docs.rs` (or
+`*.suffix`) answers a held `fetch` to that host with a session `host`
+grant; `read-only` denies it and `full` runs it. Private, link-local,
+metadata, and managed-denied hosts are refused under every mode, including
+`full`.
+
 `ask_user` is outside this ladder: it executes nothing and is held under
 every mode for an answer. Headless has no answerer, so the run ends
 `needs_input` (exit 5) at the first question rather than stalling until the

@@ -150,6 +150,11 @@ pub struct RunArgs {
     #[arg(long = "allow-shell", value_name = "PREFIX")]
     pub allow_shell_prefixes: Vec<String>,
 
+    /// Approve held `fetch` calls to this host for the session (repeatable):
+    /// an exact name or `*.suffix`, e.g. `--allow-host docs.rs`.
+    #[arg(long = "allow-host", value_name = "HOST")]
+    pub allow_hosts: Vec<String>,
+
     /// Read steering messages from stdin, one per line, and inject each at
     /// the run's next model/tool boundary. Without it stdin is not read.
     #[arg(long)]

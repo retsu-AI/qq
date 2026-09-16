@@ -77,6 +77,9 @@ pub enum EffectClass {
     /// A round trip with the human (`ask_user`): nothing executes, so it
     /// proceeds under every approval mode and settles from the answer.
     Interactive,
+    /// Reaches a host outside the workspace (`fetch`): authority over the
+    /// outside, not the machine; gated by host grants and SSRF rules.
+    Network,
 }
 
 impl EffectClass {
@@ -88,6 +91,7 @@ impl EffectClass {
             Self::Shell => "shell",
             Self::External => "external",
             Self::Interactive => "interactive",
+            Self::Network => "network",
         }
     }
 
@@ -98,6 +102,7 @@ impl EffectClass {
             "shell" => Some(Self::Shell),
             "external" => Some(Self::External),
             "interactive" => Some(Self::Interactive),
+            "network" => Some(Self::Network),
             _ => None,
         }
     }
@@ -573,7 +578,7 @@ impl ToolCatalog {
                 // them by name at dispatch.
                 if include.read_only
                     && match entry.effect {
-                        EffectClass::Mutating | EffectClass::Shell => true,
+                        EffectClass::Mutating | EffectClass::Shell | EffectClass::Network => true,
                         EffectClass::External => !entry.hints.read_only,
                         EffectClass::ReadOnly | EffectClass::Interactive => false,
                     }

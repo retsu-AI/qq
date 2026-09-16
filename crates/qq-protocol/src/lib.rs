@@ -51,22 +51,22 @@ pub use sessions::{
     AuditOutcome, AuditRecord, BudgetExhaustion, BudgetLimitKind, COMMAND_ROUTES,
     CapabilitySupport, ChildAuthority, CommandOutcome, CommandReceipt, CommandRequest, ContentHash,
     ContentHashError, ContextSourceOutcome, ContextSourceRecord, CursorError,
-    DEFAULT_OUTPUT_REPAIR_TURNS, EditPreview, EventCursor, FinalOutput, GenerationCapabilities,
-    GuidanceIdentity, GuidanceKind, InstructionHash, InstructionHashError, MAX_INCLUDED_SESSIONS,
-    MAX_OUTPUT_ERROR_BYTES, MAX_OUTPUT_REPAIR_TURNS, MAX_OUTPUT_SCHEMA_BYTES,
-    MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MessageRole, MessageSnapshot, MessageState,
-    ModelCatalogRequest, ModelDescriptor, ModelPricing, ModelPricingTier, ModelSelection,
-    OutputContract, PromptCacheCapabilities, PromptVersion, ProviderRequestShapeIdentity,
-    ProviderRequestShapeVersion, Question, QuestionPreview, ResolvedModel, ResolvedModelVersion,
-    RunActivity, RunFailure, RunLimits, RunOutcome, RunPromptIdentity, RunSnapshot, RunStatus,
-    SessionAccounting, SessionCommand, SessionCommandKind, SessionEvent, SessionEventEnvelope,
-    SessionPurpose, SessionSnapshot, SessionStatus, SessionSummary, ShellCommandPreview,
-    ShellVerdict, SnapshotRequest, SpawnOrigin, SubscribeRequest, TextChannel, TokenUsage,
-    ToolCallDisplay, ToolCallSnapshot, ToolCallState, ToolExposure, WorkspaceGrantOutcome,
-    WorkspaceSnapshot, WorkspaceSummary,
+    DEFAULT_OUTPUT_REPAIR_TURNS, EditPreview, EventCursor, FetchPreview, FinalOutput,
+    GenerationCapabilities, GuidanceIdentity, GuidanceKind, InstructionHash, InstructionHashError,
+    MAX_INCLUDED_SESSIONS, MAX_OUTPUT_ERROR_BYTES, MAX_OUTPUT_REPAIR_TURNS,
+    MAX_OUTPUT_SCHEMA_BYTES, MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MessageRole,
+    MessageSnapshot, MessageState, ModelCatalogRequest, ModelDescriptor, ModelPricing,
+    ModelPricingTier, ModelSelection, OutputContract, PromptCacheCapabilities, PromptVersion,
+    ProviderRequestShapeIdentity, ProviderRequestShapeVersion, Question, QuestionPreview,
+    ResolvedModel, ResolvedModelVersion, RunActivity, RunFailure, RunLimits, RunOutcome,
+    RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting, SessionCommand,
+    SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionPurpose, SessionSnapshot,
+    SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict, SnapshotRequest, SpawnOrigin,
+    SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallSnapshot, ToolCallState,
+    ToolExposure, WorkspaceGrantOutcome, WorkspaceSnapshot, WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 21;
+pub const PROTOCOL_VERSION: u16 = 22;
 
 /// Slash commands owned by interactive clients rather than the shared
 /// runtime. Keeping this vocabulary in the transport-neutral protocol avoids

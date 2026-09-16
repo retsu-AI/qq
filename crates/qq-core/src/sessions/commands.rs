@@ -1013,6 +1013,7 @@ pub(super) fn execute_command(
                     let (kind, value) = match grant {
                         ApprovalGrant::Tool { name } => ("tool", name.trim()),
                         ApprovalGrant::ShellPrefix { prefix } => ("shell_prefix", prefix.trim()),
+                        ApprovalGrant::Host { host } => ("host", host.trim()),
                     };
                     if value.is_empty() || value.len() > MAX_GRANT_BYTES {
                         return Err(SessionRuntimeError::InvalidApprovalGrant);

@@ -1,8 +1,10 @@
 pub(crate) mod ask;
 mod dispatch;
 mod edit;
+pub(crate) mod fetch;
 mod lang;
 mod matching;
+pub(crate) mod network;
 pub mod output;
 mod read;
 mod search;
@@ -1207,6 +1209,7 @@ mod tests {
                 "shell",
                 "exec",
                 "ask_user",
+                "fetch",
             ]
         );
         assert!(!specs.iter().any(|spec| spec.name() == SPAWN_AGENT_TOOL));
@@ -1215,7 +1218,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "7d90f4a0c0201e2ca045c22bdc2faebc962a9b2bb6d71a25090f4b8eb15bf4c4"
+            "0cbb5795a3387f58ef002a09270201e49eef05af56e06f47087fa6f453439189"
         );
     }
 
@@ -2145,6 +2148,7 @@ mod tests {
             output,
             ToolTasks::default(),
             Arc::new(crate::runtime::ShellPolicy::default()),
+            Arc::default(),
         )
         .await
     }
@@ -2165,6 +2169,7 @@ mod tests {
             None,
             tasks.clone(),
             Arc::new(crate::runtime::ShellPolicy::default()),
+            Arc::default(),
         ));
         assert!(futures_util::poll!(execution.as_mut()).is_pending());
         tokio::time::timeout(std::time::Duration::from_secs(5), entered)
@@ -2208,6 +2213,7 @@ mod tests {
             Some(output),
             tasks.clone(),
             Arc::new(crate::runtime::ShellPolicy::default()),
+            Arc::default(),
         ));
         assert!(futures_util::poll!(execution.as_mut()).is_pending());
         let first = tokio::time::timeout(std::time::Duration::from_secs(5), chunks.recv())
@@ -2248,6 +2254,7 @@ mod tests {
             None,
             tasks.clone(),
             Arc::new(crate::runtime::ShellPolicy::default()),
+            Arc::default(),
         )
         .await;
         assert!(result.is_error);
@@ -2277,6 +2284,7 @@ mod tests {
             Some(output),
             tasks.clone(),
             Arc::new(crate::runtime::ShellPolicy::default()),
+            Arc::default(),
         ));
         assert!(futures_util::poll!(execution.as_mut()).is_pending());
         tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
@@ -2319,6 +2327,7 @@ mod tests {
                 None,
                 tasks.clone(),
                 Arc::new(crate::runtime::ShellPolicy::default()),
+                Arc::default(),
             ),
         )
         .await
@@ -2487,6 +2496,7 @@ mod tests {
                     None,
                     ToolTasks::default(),
                     Arc::new(policy),
+                    Arc::default(),
                 )
                 .await
             }
@@ -2579,6 +2589,7 @@ mod tests {
                     None,
                     ToolTasks::default(),
                     Arc::new(crate::runtime::ShellPolicy::default()),
+                    Arc::default(),
                 )
                 .await
             }
@@ -2663,6 +2674,7 @@ mod tests {
                         env_allowlist: std::sync::Arc::from([]),
                         builtin_preference: policy,
                     }),
+                    Arc::default(),
                 )
                 .await
             }

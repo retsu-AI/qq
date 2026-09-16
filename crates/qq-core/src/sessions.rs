@@ -18,8 +18,8 @@ use futures_util::{FutureExt, StreamExt};
 use qq_protocol::{
     AccountingTotal, AgentProfileId, ApprovalDecision, ApprovalGrant, ApprovalMode,
     ApprovalResolution, AuditOutcome, AuditRecord, CapabilitySupport, CommandId, CommandOutcome,
-    CommandReceipt, ContentHash, Correlation, EditPreview, EventCursor, FinalOutput, InputPart,
-    MessageId, MessageRole, MessageSnapshot, MessageState, ModelPricing, ModelSelection,
+    CommandReceipt, ContentHash, Correlation, EditPreview, EventCursor, FetchPreview, FinalOutput,
+    InputPart, MessageId, MessageRole, MessageSnapshot, MessageState, ModelPricing, ModelSelection,
     QuestionPreview, ReasoningEvent, ResolvedModel, RunActivity, RunFailure, RunFailureKind, RunId,
     RunLimits, RunOutcome, RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus,
     SessionAccounting, SessionCommand, SessionEvent, SessionEventEnvelope, SessionId,

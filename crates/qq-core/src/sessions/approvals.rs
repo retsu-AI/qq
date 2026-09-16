@@ -8,6 +8,7 @@ pub(super) struct SessionToolGate {
     inner: Arc<SessionRuntimeInner>,
     claimed: ClaimedRun,
     cancellation: watch::Receiver<bool>,
+    network: Arc<crate::tools::network::NetworkPolicy>,
 }
 
 impl SessionToolGate {
@@ -15,11 +16,13 @@ impl SessionToolGate {
         inner: Arc<SessionRuntimeInner>,
         claimed: ClaimedRun,
         cancellation: watch::Receiver<bool>,
+        network: Arc<crate::tools::network::NetworkPolicy>,
     ) -> Self {
         Self {
             inner,
             claimed,
             cancellation,
+            network,
         }
     }
 }
@@ -30,6 +33,7 @@ impl ToolGate for SessionToolGate {
         let claimed = self.claimed.clone();
         let call = call.clone();
         let mut cancellation = self.cancellation.clone();
+        let network = Arc::clone(&self.network);
         Box::pin(async move {
             let (mode, grants) = match inner
                 .store
@@ -39,11 +43,11 @@ impl ToolGate for SessionToolGate {
                 Ok(policy) => policy,
                 Err(error) => return approval_persistence_failure(error),
             };
-            let class = approval::classify(call.effect, &call.name, &call.arguments);
+            let class = approval::classify(call.effect, &call.name, &call.arguments, &network);
             match approval::evaluate(mode, &call.name, &class, &grants) {
                 approval::PolicyDecision::Execute => GateDecision::Execute,
-                approval::PolicyDecision::Deny => {
-                    let message = approval::POLICY_DENIED_RESULT.to_owned();
+                approval::PolicyDecision::Deny { reason } => {
+                    let message = approval::deny_result(&reason);
                     match inner
                         .store
                         .deny_tool_call(&claimed, call.id, message.clone())
@@ -71,7 +75,14 @@ impl ToolGate for SessionToolGate {
                     let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
                     match inner
                         .store
-                        .request_tool_approval(&claimed, call.id, None, None, Some(question))
+                        .request_tool_approval(
+                            &claimed,
+                            call.id,
+                            ApprovalPreviews {
+                                question: Some(question),
+                                ..ApprovalPreviews::default()
+                            },
+                        )
                         .await
                     {
                         Ok(_) => {}
@@ -98,6 +109,12 @@ impl ToolGate for SessionToolGate {
                     conclude(&inner, &claimed, call.id, timed_out, None).await
                 }
                 approval::PolicyDecision::RequireApproval => {
+                    let fetch = match &class {
+                        approval::ToolClass::Network {
+                            host: Some(host), ..
+                        } => crate::tools::fetch::preview(&call.arguments, host),
+                        _ => None,
+                    };
                     let shell = match class {
                         approval::ToolClass::Shell { command, cwd } => {
                             // Why the gate is asking, so the client can say so.
@@ -125,7 +142,16 @@ impl ToolGate for SessionToolGate {
                     let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
                     match inner
                         .store
-                        .request_tool_approval(&claimed, call.id, shell.clone(), edit.clone(), None)
+                        .request_tool_approval(
+                            &claimed,
+                            call.id,
+                            ApprovalPreviews {
+                                shell: shell.clone(),
+                                edit: edit.clone(),
+                                question: None,
+                                fetch,
+                            },
+                        )
                         .await
                     {
                         Ok(_) => {}

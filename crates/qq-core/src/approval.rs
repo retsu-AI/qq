@@ -27,6 +27,17 @@ pub mod bench_support {
 
 pub(crate) const POLICY_DENIED_RESULT: &str =
     "This session's approval mode is read-only; the tool call was denied without prompting.";
+
+/// The model-facing text for a `Deny`: the mode, or the host rule that
+/// refused the fetch and what would be needed to reach it.
+pub(crate) fn deny_result(reason: &DenyReason) -> String {
+    match reason {
+        DenyReason::Mode => POLICY_DENIED_RESULT.to_owned(),
+        DenyReason::HostBlocked { refusal } => format!(
+            "fetch refused: {refusal}. Private, link-local, and managed-denied hosts are unreachable under every approval mode."
+        ),
+    }
+}
 pub(crate) const USER_DENIED_RESULT: &str = "The user denied this tool call.";
 pub(crate) const TIMEOUT_DENIED_RESULT: &str = "No client resolved this tool approval within the configured wait; the call was denied by timeout.";
 pub(crate) const UNATTENDED_DENIED_RESULT: &str =
@@ -73,6 +84,26 @@ pub(crate) enum ToolClass {
     Interactive {
         question: Option<qq_protocol::QuestionPreview>,
     },
+    /// `fetch`: the lowercase host the URL names, once the network policy
+    /// admitted the name. `None` when the URL is malformed or the name is
+    /// refused; the refusal reaches the model from dispatch or as a deny.
+    Network {
+        host: Option<String>,
+        refusal: Option<crate::tools::network::HostRefusal>,
+    },
+}
+
+/// Why a call is refused outright, so the model's tool error names the rule
+/// rather than the mode alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DenyReason {
+    /// The approval mode refuses this class of call.
+    Mode,
+    /// A managed `deny_hosts` entry, private/link-local name, or metadata
+    /// host: refused under every mode.
+    HostBlocked {
+        refusal: crate::tools::network::HostRefusal,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,8 +115,10 @@ pub(crate) enum PolicyDecision {
     AskUser {
         question: qq_protocol::QuestionPreview,
     },
-    /// The mode refuses this class of call outright.
-    Deny,
+    /// The call is refused outright; `reason` says by what.
+    Deny {
+        reason: DenyReason,
+    },
     /// The command matched a `Forbidden` rule: refused under every mode,
     /// including `full`, unless a grant quotes the exact command string.
     Forbidden {
@@ -98,6 +131,8 @@ pub(crate) enum PolicyDecision {
 pub(crate) struct SessionGrants {
     pub(crate) tools: HashSet<String>,
     pub(crate) shell_prefixes: Vec<String>,
+    /// Hosts `fetch` may reach without prompting: exact names or `*.suffix`.
+    pub(crate) hosts: Vec<String>,
 }
 
 impl SessionGrants {
@@ -119,10 +154,17 @@ impl SessionGrants {
                 .shell_prefixes
                 .iter()
                 .any(|prefix| shell_prefix_matches(prefix, command)),
+            ToolClass::Network {
+                host: Some(host), ..
+            } => self
+                .hosts
+                .iter()
+                .any(|grant| crate::tools::network::host_grant_matches(grant, host)),
             ToolClass::ReadOnly
             | ToolClass::Mutating
             | ToolClass::External
-            | ToolClass::Interactive { .. } => false,
+            | ToolClass::Interactive { .. }
+            | ToolClass::Network { host: None, .. } => false,
         }
     }
 }
@@ -164,7 +206,12 @@ fn shell_control_character(c: char) -> bool {
 /// Arguments are consulted only where the effect alone is not the whole
 /// story: the shell command (for grants and the dangerous-shape check) and
 /// the `spawn_agent` authority (a write child is a mutating act).
-pub(crate) fn classify(effect: EffectClass, name: &str, arguments: &str) -> ToolClass {
+pub(crate) fn classify(
+    effect: EffectClass,
+    name: &str,
+    arguments: &str,
+    network: &crate::tools::network::NetworkPolicy,
+) -> ToolClass {
     match effect {
         EffectClass::ReadOnly if name == crate::tools::SPAWN_AGENT_TOOL => spawn_class(arguments),
         EffectClass::ReadOnly => ToolClass::ReadOnly,
@@ -173,6 +220,16 @@ pub(crate) fn classify(effect: EffectClass, name: &str, arguments: &str) -> Tool
         EffectClass::External => ToolClass::External,
         EffectClass::Interactive => ToolClass::Interactive {
             question: crate::tools::ask::parse(arguments).ok(),
+        },
+        EffectClass::Network => match crate::tools::fetch::target_host(arguments, network) {
+            Ok(host) => ToolClass::Network {
+                host: Some(host),
+                refusal: None,
+            },
+            Err(refusal) => ToolClass::Network {
+                host: None,
+                refusal,
+            },
         },
     }
 }
@@ -451,8 +508,24 @@ pub(crate) fn evaluate(
             };
         }
     }
+    // A blocked host is refused before the mode is consulted, like a
+    // Forbidden command: `full` is authority over the workspace, not over
+    // the local network or a managed deny.
+    if let ToolClass::Network {
+        refusal: Some(refusal),
+        ..
+    } = class
+    {
+        return PolicyDecision::Deny {
+            reason: DenyReason::HostBlocked {
+                refusal: refusal.clone(),
+            },
+        };
+    }
     match class {
         ToolClass::ReadOnly => PolicyDecision::Execute,
+        // A malformed fetch URL has nothing to gate; dispatch reports it.
+        ToolClass::Network { host: None, .. } => PolicyDecision::Execute,
         // Asking is never dangerous: the reviewer under `supervised` sees the
         // question too, and a read-only session may still consult its user.
         ToolClass::Interactive {
@@ -461,8 +534,13 @@ pub(crate) fn evaluate(
             question: question.clone(),
         },
         ToolClass::Interactive { question: None } => PolicyDecision::Execute,
-        ToolClass::Mutating | ToolClass::Shell { .. } | ToolClass::External => match mode {
-            ApprovalMode::ReadOnly => PolicyDecision::Deny,
+        ToolClass::Mutating
+        | ToolClass::Shell { .. }
+        | ToolClass::External
+        | ToolClass::Network { .. } => match mode {
+            ApprovalMode::ReadOnly => PolicyDecision::Deny {
+                reason: DenyReason::Mode,
+            },
             // Supervised holds everything, grants included: the whole point is
             // that a reviewer sees every action a write child takes.
             ApprovalMode::Supervised => PolicyDecision::RequireApproval,
@@ -487,6 +565,15 @@ pub(crate) fn evaluate(
                         PolicyDecision::RequireApproval
                     }
                 }
+                // Auto reaches a public host the user or the workspace named;
+                // anything else asks once, and the grant covers the site.
+                ToolClass::Network { .. } => {
+                    if grants.covers(name, class) {
+                        PolicyDecision::Execute
+                    } else {
+                        PolicyDecision::RequireApproval
+                    }
+                }
                 _ => PolicyDecision::Execute,
             },
             // Full is an explicit grant of unrestricted authority.
@@ -497,12 +584,16 @@ pub(crate) fn evaluate(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::tools::network::NetworkPolicy;
 
     fn grants(tools: &[&str], prefixes: &[&str]) -> SessionGrants {
         SessionGrants {
             tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
             shell_prefixes: prefixes.iter().map(|prefix| (*prefix).to_owned()).collect(),
+            hosts: Vec::new(),
         }
     }
 
@@ -566,6 +657,7 @@ mod tests {
             EffectClass::Interactive,
             "ask_user",
             r#"{"questions":[{"prompt":"Which?","options":["a","b"]}]}"#,
+            &NetworkPolicy::default(),
         );
         assert_eq!(
             class,
@@ -590,7 +682,12 @@ mod tests {
         }
         // Malformed arguments carry no question and pass to dispatch, which
         // reports the contract error; grants never make a question skippable.
-        let malformed = classify(EffectClass::Interactive, "ask_user", "{}");
+        let malformed = classify(
+            EffectClass::Interactive,
+            "ask_user",
+            "{}",
+            &NetworkPolicy::default(),
+        );
         assert_eq!(malformed, ToolClass::Interactive { question: None });
         assert_eq!(
             evaluate(
@@ -599,6 +696,131 @@ mod tests {
                 &malformed,
                 &grants(&["ask_user"], &[])
             ),
+            PolicyDecision::Execute
+        );
+    }
+
+    #[test]
+    fn network_calls_follow_the_decision_table_and_blocked_hosts_are_denied_under_every_mode() {
+        let open = NetworkPolicy::default();
+        let public = classify(
+            EffectClass::Network,
+            "fetch",
+            r#"{"url":"https://docs.rs/axum"}"#,
+            &open,
+        );
+        assert_eq!(
+            public,
+            ToolClass::Network {
+                host: Some("docs.rs".to_owned()),
+                refusal: None,
+            }
+        );
+        let none = grants(&[], &[]);
+        let mut covering = grants(&[], &[]);
+        covering.hosts.push("*.rs".to_owned());
+        assert_eq!(
+            evaluate(ApprovalMode::ReadOnly, "fetch", &public, &covering),
+            PolicyDecision::Deny {
+                reason: DenyReason::Mode
+            }
+        );
+        assert_eq!(
+            evaluate(ApprovalMode::Ask, "fetch", &public, &none),
+            PolicyDecision::RequireApproval
+        );
+        assert_eq!(
+            evaluate(ApprovalMode::Ask, "fetch", &public, &covering),
+            PolicyDecision::Execute
+        );
+        assert_eq!(
+            evaluate(ApprovalMode::Auto, "fetch", &public, &none),
+            PolicyDecision::RequireApproval,
+            "auto asks for a host nobody named"
+        );
+        assert_eq!(
+            evaluate(ApprovalMode::Auto, "fetch", &public, &covering),
+            PolicyDecision::Execute
+        );
+        assert_eq!(
+            evaluate(ApprovalMode::Supervised, "fetch", &public, &covering),
+            PolicyDecision::RequireApproval
+        );
+        assert_eq!(
+            evaluate(ApprovalMode::Full, "fetch", &public, &none),
+            PolicyDecision::Execute
+        );
+        // A tool grant covers fetch as a whole, like any other tool.
+        assert_eq!(
+            evaluate(
+                ApprovalMode::Auto,
+                "fetch",
+                &public,
+                &grants(&["fetch"], &[])
+            ),
+            PolicyDecision::Execute
+        );
+
+        // Blocked hosts: private names, metadata, managed denies — refused
+        // before the mode, even under full with a covering grant.
+        let denied_policy = NetworkPolicy {
+            deny_hosts: Arc::from(vec!["*.example.com".to_owned()]),
+            allow_private_for_tests: false,
+        };
+        for (url, policy) in [
+            ("http://localhost:8080/", &open),
+            ("http://169.254.169.254/", &open),
+            ("http://metadata.google.internal/", &open),
+            ("https://api.example.com/", &denied_policy),
+        ] {
+            let blocked = classify(
+                EffectClass::Network,
+                "fetch",
+                &format!(r#"{{"url":"{url}"}}"#),
+                policy,
+            );
+            assert!(
+                matches!(
+                    &blocked,
+                    ToolClass::Network {
+                        host: None,
+                        refusal: Some(_)
+                    }
+                ),
+                "{url}: {blocked:?}"
+            );
+            let mut all = grants(&["fetch"], &[]);
+            all.hosts.push("*".to_owned());
+            for mode in [
+                ApprovalMode::ReadOnly,
+                ApprovalMode::Ask,
+                ApprovalMode::Auto,
+                ApprovalMode::Supervised,
+                ApprovalMode::Full,
+            ] {
+                assert!(
+                    matches!(
+                        evaluate(mode, "fetch", &blocked, &all),
+                        PolicyDecision::Deny {
+                            reason: DenyReason::HostBlocked { .. }
+                        }
+                    ),
+                    "{url} under {mode:?}"
+                );
+            }
+        }
+        // Malformed arguments have no host and nothing to gate: dispatch
+        // reports the shape.
+        let malformed = classify(EffectClass::Network, "fetch", "{}", &open);
+        assert_eq!(
+            malformed,
+            ToolClass::Network {
+                host: None,
+                refusal: None,
+            }
+        );
+        assert_eq!(
+            evaluate(ApprovalMode::ReadOnly, "fetch", &malformed, &none),
             PolicyDecision::Execute
         );
     }
@@ -617,7 +839,9 @@ mod tests {
                     &class,
                     &grants(&[name], &["cargo"]),
                 ),
-                PolicyDecision::Deny,
+                PolicyDecision::Deny {
+                    reason: DenyReason::Mode
+                },
                 "read-only must deny {name} even when granted"
             );
         }
@@ -730,6 +954,7 @@ mod tests {
             EffectClass::Shell,
             "exec",
             r#"{"program":"cargo","args":["test","-p","qq-core","--","--nocapture"],"cwd":"crates"}"#,
+            &NetworkPolicy::default(),
         );
         assert_eq!(
             class,
@@ -758,6 +983,7 @@ mod tests {
             EffectClass::Shell,
             "exec",
             r#"{"program":"echo","args":["rm -rf /","$HOME","a b","it's"]}"#,
+            &NetworkPolicy::default(),
         );
         assert_eq!(
             quoted,
@@ -775,6 +1001,7 @@ mod tests {
             EffectClass::Shell,
             "exec",
             r#"{"program":"sudo","args":["ls"]}"#,
+            &NetworkPolicy::default(),
         );
         assert!(matches!(
             evaluate(ApprovalMode::Full, "exec", &sudo, &grants(&[], &[])),
@@ -931,30 +1158,52 @@ mod tests {
     #[test]
     fn classification_follows_the_catalog_effect_and_reads_refining_arguments() {
         let read = EffectClass::ReadOnly;
-        assert_eq!(classify(read, "search", "{}"), ToolClass::ReadOnly);
-        assert_eq!(classify(read, "spawn_agent", "{}"), ToolClass::ReadOnly);
         assert_eq!(
-            classify(read, "spawn_agent", r#"{"task":"t","authority":"read"}"#),
+            classify(read, "search", "{}", &NetworkPolicy::default()),
             ToolClass::ReadOnly
         );
         assert_eq!(
-            classify(read, "spawn_agent", r#"{"task":"t","authority":"write"}"#),
+            classify(read, "spawn_agent", "{}", &NetworkPolicy::default()),
+            ToolClass::ReadOnly
+        );
+        assert_eq!(
+            classify(
+                read,
+                "spawn_agent",
+                r#"{"task":"t","authority":"read"}"#,
+                &NetworkPolicy::default()
+            ),
+            ToolClass::ReadOnly
+        );
+        assert_eq!(
+            classify(
+                read,
+                "spawn_agent",
+                r#"{"task":"t","authority":"write"}"#,
+                &NetworkPolicy::default()
+            ),
             ToolClass::Mutating,
             "asking for a write child is a mutating act under the parent's policy"
         );
         assert_eq!(
-            classify(read, "spawn_agent", "not json"),
+            classify(read, "spawn_agent", "not json", &NetworkPolicy::default()),
             ToolClass::ReadOnly
         );
         assert_eq!(
-            classify(EffectClass::Mutating, "edit_file", "{}"),
+            classify(
+                EffectClass::Mutating,
+                "edit_file",
+                "{}",
+                &NetworkPolicy::default()
+            ),
             ToolClass::Mutating
         );
         assert_eq!(
             classify(
                 EffectClass::Shell,
                 "shell",
-                r#"{"command":"cargo test","cwd":"crates"}"#
+                r#"{"command":"cargo test","cwd":"crates"}"#,
+                &NetworkPolicy::default(),
             ),
             ToolClass::Shell {
                 command: "cargo test".to_owned(),
@@ -963,17 +1212,32 @@ mod tests {
         );
         // Every external tool is gated by its effect, whatever its prefix.
         assert_eq!(
-            classify(EffectClass::External, "mcp__github__create_issue", "{}"),
+            classify(
+                EffectClass::External,
+                "mcp__github__create_issue",
+                "{}",
+                &NetworkPolicy::default()
+            ),
             ToolClass::External
         );
         assert_eq!(
-            classify(EffectClass::External, "ext__embedded__deploy", "{}"),
+            classify(
+                EffectClass::External,
+                "ext__embedded__deploy",
+                "{}",
+                &NetworkPolicy::default()
+            ),
             ToolClass::External
         );
         // The effect, not the name, decides: a read-only-named tool that the
         // catalog recorded as mutating is mutating.
         assert_eq!(
-            classify(EffectClass::Mutating, "read_file", "{}"),
+            classify(
+                EffectClass::Mutating,
+                "read_file",
+                "{}",
+                &NetworkPolicy::default()
+            ),
             ToolClass::Mutating
         );
     }
@@ -984,7 +1248,9 @@ mod tests {
         let name = "ext__embedded__deploy";
         assert_eq!(
             evaluate(ApprovalMode::ReadOnly, name, &class, &grants(&[name], &[])),
-            PolicyDecision::Deny
+            PolicyDecision::Deny {
+                reason: DenyReason::Mode
+            }
         );
         assert_eq!(
             evaluate(ApprovalMode::Ask, name, &class, &grants(&[], &[])),

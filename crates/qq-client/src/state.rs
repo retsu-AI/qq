@@ -15,10 +15,11 @@ use std::{
 };
 
 use qq_protocol::{
-    AgentProfileId, EditPreview, MessageId, MessageRole, MessageSnapshot, MessageState,
-    ModelDescriptor, QuestionPreview, RunActivity, RunId, RunOutcome, RunPlanIdentity, SessionId,
-    SessionSnapshot, SessionStatus, SessionSummary, ShellCommandPreview, SnapshotRequest,
-    TokenUsage, ToolCallId, ToolCallSnapshot, ToolCallState, WorkspaceId,
+    AgentProfileId, EditPreview, FetchPreview, MessageId, MessageRole, MessageSnapshot,
+    MessageState, ModelDescriptor, QuestionPreview, RunActivity, RunId, RunOutcome,
+    RunPlanIdentity, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
+    ShellCommandPreview, SnapshotRequest, TokenUsage, ToolCallId, ToolCallSnapshot, ToolCallState,
+    WorkspaceId,
 };
 
 mod reduce;
@@ -698,6 +699,9 @@ pub struct ApprovalPreview {
     /// Present when the hold is an `ask_user` question rather than a
     /// permission: the client collects answers instead of a yes/no.
     pub question: Option<QuestionPreview>,
+    /// Present when the held call is `fetch`: the URL and the host a grant
+    /// would name.
+    pub fetch: Option<FetchPreview>,
 }
 
 /// One session as the client sees it: the summary every surface lists, and

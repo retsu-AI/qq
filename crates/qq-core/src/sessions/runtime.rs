@@ -144,12 +144,14 @@ pub struct RuntimeLoadError {
 pub struct WorkspaceGrantSeed {
     pub tools: Vec<String>,
     pub shell_prefixes: Vec<String>,
+    /// Hosts `fetch` may reach without prompting: exact or `*.suffix`.
+    pub hosts: Vec<String>,
 }
 
 impl WorkspaceGrantSeed {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty() && self.shell_prefixes.is_empty()
+        self.tools.is_empty() && self.shell_prefixes.is_empty() && self.hosts.is_empty()
     }
 }
 

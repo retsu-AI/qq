@@ -71,6 +71,9 @@ rustix = { version = "1", default-features = false, features = ["process", "std"
 # platform trust roots via rustls-platform-verifier instead.
 regex = "1"
 reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "form", "json", "rustls", "stream"] }
+htmd = "0.2"
+url = "2.5"
+ipnet = "2.12"
 rmcp = { version = "3.0.0", default-features = false, features = ["client", "reqwest", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 ron = "0.12"
 rpassword = "7"

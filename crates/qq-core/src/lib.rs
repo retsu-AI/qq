@@ -35,6 +35,7 @@ pub use approval::bench_support as classify_bench;
 /// Entry points for the `tool_output` bench. Not a public API.
 #[doc(hidden)]
 pub use tools::bench_support as tool_bench;
+pub use tools::network::{NetworkPolicy, host_grant_matches};
 #[doc(hidden)]
 pub use tools::output::bench_support as tool_output_bench;
 mod workspace;
@@ -211,7 +212,14 @@ fn note_audited_action(
     result: &tools::ToolOutput,
 ) {
     triggers.tool_calls = triggers.tool_calls.saturating_add(1);
-    match approval::classify(call.effect, &call.name, &call.arguments) {
+    // Classification here only asks "was it a mutation or a non-read shell";
+    // the network policy is irrelevant to that, so the default is enough.
+    match approval::classify(
+        call.effect,
+        &call.name,
+        &call.arguments,
+        &tools::network::NetworkPolicy::default(),
+    ) {
         approval::ToolClass::Mutating if !result.is_error => triggers.mutated_files = true,
         // Read-only shell (allowlisted VCS reads and the like) does not by
         // itself make a run worth auditing; anything else does.
@@ -555,15 +563,16 @@ struct StaticPolicyGate {
     /// Workspace-configured grants (today: MCP allowlist entries by exact
     /// namespaced name). Mode still wins: read-only denies granted tools.
     grants: approval::SessionGrants,
+    network: Arc<tools::network::NetworkPolicy>,
 }
 
 impl ToolGate for StaticPolicyGate {
     fn resolve(&self, call: &RuntimeToolCall) -> ToolGateFuture {
-        let class = approval::classify(call.effect, &call.name, &call.arguments);
+        let class = approval::classify(call.effect, &call.name, &call.arguments, &self.network);
         let decision = match approval::evaluate(self.mode, &call.name, &class, &self.grants) {
             approval::PolicyDecision::Execute => GateDecision::Execute,
-            approval::PolicyDecision::Deny => GateDecision::Deny {
-                message: approval::POLICY_DENIED_RESULT.to_owned(),
+            approval::PolicyDecision::Deny { reason } => GateDecision::Deny {
+                message: approval::deny_result(&reason),
             },
             approval::PolicyDecision::Forbidden { rules } => GateDecision::Deny {
                 message: approval::forbidden_result(&rules),
@@ -599,6 +608,7 @@ pub struct Runtime {
     pub(crate) audit: runtime::AuditPolicy,
     /// Environment allowlist and built-in preference for `shell` calls.
     pub(crate) shell: Arc<runtime::ShellPolicy>,
+    pub(crate) network: Arc<tools::network::NetworkPolicy>,
 }
 
 impl Runtime {
@@ -636,6 +646,7 @@ impl Runtime {
             delegation: Arc::new(DelegationRoster::default()),
             audit: runtime::AuditPolicy::default(),
             shell: Arc::new(runtime::ShellPolicy::default()),
+            network: Arc::new(tools::network::NetworkPolicy::default()),
         })
     }
 
@@ -746,6 +757,13 @@ impl Runtime {
         self
     }
 
+    /// Sets the managed host denies `fetch` refuses under every mode.
+    #[must_use]
+    pub fn with_network_policy(mut self, network: NetworkPolicy) -> Self {
+        self.network = Arc::new(network);
+        self
+    }
+
     /// Runs one command and returns events as they become available.
     pub fn run(&self, command: RunCommand) -> RunStream {
         self.run_in_workspace(
@@ -797,6 +815,7 @@ impl Runtime {
         let grants = approval::SessionGrants {
             tools: self.config_grants(),
             shell_prefixes: Vec::new(),
+            hosts: Vec::new(),
         };
         self.run_loop(
             messages,
@@ -805,6 +824,7 @@ impl Runtime {
             Arc::new(StaticPolicyGate {
                 mode: ApprovalMode::Ask,
                 grants,
+                network: Arc::clone(&self.network),
             }),
             Arc::new(workspace::FileState::default()),
         )
@@ -917,6 +937,7 @@ impl plan::CompiledAgentPlan {
         let grants = approval::SessionGrants {
             tools: self.runtime.config_grants(),
             shell_prefixes: Vec::new(),
+            hosts: Vec::new(),
         };
         public_run_stream(
             self.execute(
@@ -925,6 +946,7 @@ impl plan::CompiledAgentPlan {
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Ask,
                     grants,
+                    network: Arc::clone(&self.runtime.network),
                 }),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(None),
@@ -962,6 +984,7 @@ impl plan::CompiledAgentPlan {
         let profile_name = plan.descriptor().profile.as_str().to_owned();
         let delegation = Arc::clone(&plan.runtime.delegation);
         let shell_policy = Arc::clone(&plan.runtime.shell);
+        let network_policy = Arc::clone(&plan.runtime.network);
         Box::pin(stream! {
             let RunCapabilities {
                 spawner,
@@ -2164,6 +2187,7 @@ impl plan::CompiledAgentPlan {
                     let spills = spills.clone();
                     let delegation = Arc::clone(&delegation);
                     let shell_policy = Arc::clone(&shell_policy);
+                    let network_policy = Arc::clone(&network_policy);
                     // Under progressive exposure only pinned externals were
                     // offered; a call to one that was not is refused with the
                     // way to make it available.
@@ -2182,7 +2206,7 @@ impl plan::CompiledAgentPlan {
                             .then(|| {
                                 // The command text for either tool: exec's
                                 // argv rendered as the equivalent line.
-                                let command = match approval::classify(call.effect, &call.name, &call.arguments) {
+                                let command = match approval::classify(call.effect, &call.name, &call.arguments, &network_policy) {
                                     approval::ToolClass::Shell { command, .. } => command,
                                     _ => String::new(),
                                 };
@@ -2391,6 +2415,7 @@ impl plan::CompiledAgentPlan {
                                     output,
                                     tool_tasks,
                                     shell_policy,
+                                    network_policy,
                                 )
                                 .await
                             }
@@ -2412,7 +2437,7 @@ impl plan::CompiledAgentPlan {
                 let sequential = approved.iter().any(|call| {
                     (bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
                     || !matches!(
-                        approval::classify(call.effect, &call.name, &call.arguments),
+                        approval::classify(call.effect, &call.name, &call.arguments, &network_policy),
                         approval::ToolClass::ReadOnly
                     )
                 });
@@ -3076,6 +3101,7 @@ mod tests {
                     Arc::new(StaticPolicyGate {
                         mode: ApprovalMode::ReadOnly,
                         grants: approval::SessionGrants::default(),
+                        network: Arc::default(),
                     }),
                     Arc::new(workspace::FileState::default()),
                     capabilities,
@@ -4199,7 +4225,7 @@ mod tests {
         );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].tools().len(), 8);
+        assert_eq!(requests[0].tools().len(), 9);
         let system = requests[0]
             .system()
             .expect("agent runs set a system prompt");
@@ -4329,6 +4355,7 @@ mod tests {
             None,
             tools::ToolTasks::default(),
             Arc::new(runtime::ShellPolicy::default()),
+            Arc::default(),
         ));
         while tools::test_executions_started() == started {
             tokio::task::yield_now().await;
@@ -4517,6 +4544,7 @@ mod tests {
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Auto,
                     grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
             )
@@ -5177,6 +5205,7 @@ mod tests {
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Ask,
                     grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(None).with_limits(limits, None),
@@ -6054,7 +6083,7 @@ mod tests {
             !names.contains(&"rogue_tool"),
             "specs outside the mcp__ namespace must be discarded"
         );
-        assert_eq!(requests[0].tools().len(), 9);
+        assert_eq!(requests[0].tools().len(), 10);
         let system = requests[0].system().unwrap();
         assert!(system.contains("mcp__srv__ping"));
         assert!(system.contains("external tool hosts"));
@@ -7093,6 +7122,7 @@ mod tests {
                         Arc::new(StaticPolicyGate {
                             mode,
                             grants: approval::SessionGrants::default(),
+                            network: Arc::default(),
                         }),
                         Arc::new(workspace::FileState::default()),
                     )
@@ -7170,7 +7200,9 @@ mod tests {
                     grants: approval::SessionGrants {
                         tools: ["edit_file".to_owned()].into_iter().collect(),
                         shell_prefixes: Vec::new(),
+                        hosts: Vec::new(),
                     },
+                    network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::user(None),
@@ -7651,6 +7683,7 @@ mod tests {
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Ask,
                     grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
                 RunCapabilities::restricted(),

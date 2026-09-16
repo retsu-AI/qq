@@ -173,6 +173,7 @@ fn validate_grant(grant: &WorkspaceGrant) -> Result<(), ConfigError> {
     match grant {
         WorkspaceGrant::Tool(name) => document::validate_tool_grant_name(name),
         WorkspaceGrant::ShellPrefix(prefix) => document::validate_shell_prefix_grant(prefix),
+        WorkspaceGrant::Host(host) => document::validate_host_grant(host),
     }
     .map_err(|message| ConfigError::InvalidGrant { message })
 }
@@ -186,6 +187,7 @@ fn refuse_if_managed_denies(
 ) -> Result<(), ConfigError> {
     let mut deny_tools = Vec::new();
     let mut deny_shell_prefixes = Vec::new();
+    let mut deny_hosts = Vec::new();
     let paths = config_loader.paths();
     if paths.enforce_managed_ownership {
         loader::validate_managed_directory_if_present(paths.managed_dir())?;
@@ -202,11 +204,14 @@ fn refuse_if_managed_denies(
         }
         let (source, content) = loader::read_candidate(&candidate)?;
         let document = Document::parse(&content, &source)?;
-        document.collect_policy_denies(&mut deny_tools, &mut deny_shell_prefixes);
+        document.collect_policy_denies(&mut deny_tools, &mut deny_shell_prefixes, &mut deny_hosts);
     }
     if let Some(mdm) = loader::read_mdm_document(config_loader)? {
-        mdm.document
-            .collect_policy_denies(&mut deny_tools, &mut deny_shell_prefixes);
+        mdm.document.collect_policy_denies(
+            &mut deny_tools,
+            &mut deny_shell_prefixes,
+            &mut deny_hosts,
+        );
     }
     match grant {
         WorkspaceGrant::Tool(name) => {
@@ -228,6 +233,17 @@ fn refuse_if_managed_denies(
                 });
             }
         }
+        WorkspaceGrant::Host(host) => {
+            if deny_hosts
+                .iter()
+                .any(|denied| document::hosts_overlap(denied, host))
+            {
+                return Err(ConfigError::GrantDeniedByManaged {
+                    grant: host.clone(),
+                    rule: "deny_hosts",
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -236,6 +252,7 @@ const fn grant_field(grant: &WorkspaceGrant) -> &'static str {
     match grant {
         WorkspaceGrant::Tool(_) => "allow_tools",
         WorkspaceGrant::ShellPrefix(_) => "allow_shell_prefixes",
+        WorkspaceGrant::Host(_) => "allow_hosts",
     }
 }
 
