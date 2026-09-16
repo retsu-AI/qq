@@ -23,7 +23,7 @@ use super::{
     search::search,
     shell::{ExecArgs, Launch, ShellArgs, run_shell},
     specs::BuiltInTool,
-    tree::{TreeArgs, tree},
+    tree::tree,
     write::write_file,
 };
 
@@ -155,7 +155,10 @@ impl Drop for CancelCallOnDrop {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one dispatch per call; every argument is a distinct capability the tool receives"
+)]
 pub(crate) async fn execute(
     workspace: Workspace,
     file_state: Arc<FileState>,
@@ -384,12 +387,6 @@ pub(super) fn execute_blocking(
             }),
         Some(BuiltInTool::Tree) => deserialize(arguments)
             .map_or_else(ToolOutput::error, |args| tree(workspace, args, cancelled)),
-        // Hidden alias: `list_dir` is `tree depth=1` so persisted transcripts
-        // and grants keep resolving for one release.
-        Some(BuiltInTool::ListDir) => deserialize::<super::tree::ListDirArgs>(arguments)
-            .map_or_else(ToolOutput::error, |args| {
-                tree(workspace, TreeArgs::from(args), cancelled)
-            }),
         Some(BuiltInTool::Search) => deserialize(arguments)
             .map_or_else(ToolOutput::error, |args| search(workspace, args, cancelled)),
         // The applied change travels as a UI payload (the unified diff of what

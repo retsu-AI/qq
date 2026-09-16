@@ -2392,7 +2392,10 @@ mod tests {
         assert_eq!(manifest.qq_build_target, None);
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one report row; the fields are the row's columns"
+    )]
     fn write_trial(
         root: &Path,
         trial: &str,

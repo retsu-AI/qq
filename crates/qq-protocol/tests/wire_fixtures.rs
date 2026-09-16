@@ -144,6 +144,42 @@ fn fixture_dir(version: u16) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/v{version}"))
 }
 
+/// Every `v<N>/` directory under `root` with `N < PROTOCOL_VERSION`, ascending.
+///
+/// Retention rule: a fixture directory is never deleted while a released
+/// binary may still emit that version; the oldest retained one is the floor
+/// of what this crate promises to decode. Deriving the list from the
+/// filesystem means a directory cannot silently fall out of the test when a
+/// version is added — the current version's directory must exist and every
+/// older one present must still decode.
+fn retained_versions(root: &std::path::Path) -> Vec<u16> {
+    let mut versions: Vec<u16> = fs::read_dir(root)
+        .unwrap_or_else(|error| panic!("{}: {error}", root.display()))
+        .filter_map(|entry| {
+            let entry = entry.unwrap();
+            entry
+                .file_type()
+                .unwrap()
+                .is_dir()
+                .then_some(entry.file_name())
+        })
+        .filter_map(|name| name.to_str()?.strip_prefix('v')?.parse::<u16>().ok())
+        .filter(|version| *version < PROTOCOL_VERSION)
+        .collect();
+    versions.sort_unstable();
+    assert!(
+        !versions.is_empty(),
+        "{}: no retained historical fixture directories",
+        root.display()
+    );
+    assert_eq!(
+        *versions.last().unwrap(),
+        PROTOCOL_VERSION - 1,
+        "the version before the current one must keep its fixtures"
+    );
+    versions
+}
+
 fn check<T>(name: &str, value: &T)
 where
     T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
@@ -927,9 +963,8 @@ fn inbound_types_reject_unknown_fields_and_response_types_tolerate_them() {
 /// current encoding without invalidating what an older peer produced).
 #[test]
 fn historical_fixtures_still_decode() {
-    const RETAINED: &[u16] = &[17, 18, 19, 20];
-    for &version in RETAINED {
-        assert!(version < PROTOCOL_VERSION);
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    for version in retained_versions(&root) {
         let directory = fixture_dir(version);
         let mut entries: Vec<PathBuf> = fs::read_dir(&directory)
             .unwrap_or_else(|error| panic!("{}: {error}", directory.display()))

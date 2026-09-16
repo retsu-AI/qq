@@ -39,8 +39,6 @@ pub(super) enum BuiltInTool {
     Shell,
     Exec,
     AskUser,
-    /// Hidden alias for `tree depth=1`: dispatchable, never advertised.
-    ListDir,
     #[cfg(test)]
     TestDelay,
     #[cfg(test)]
@@ -65,7 +63,6 @@ impl BuiltInTool {
         match name {
             "read_file" => Some(Self::ReadFile),
             "tree" => Some(Self::Tree),
-            "list_dir" => Some(Self::ListDir),
             "search" => Some(Self::Search),
             "edit_file" => Some(Self::EditFile),
             "write_file" => Some(Self::WriteFile),
@@ -84,7 +81,7 @@ impl BuiltInTool {
 
     fn effect(self) -> EffectClass {
         match self {
-            Self::ReadFile | Self::Tree | Self::ListDir | Self::Search => EffectClass::ReadOnly,
+            Self::ReadFile | Self::Tree | Self::Search => EffectClass::ReadOnly,
             Self::EditFile | Self::WriteFile => EffectClass::Mutating,
             Self::Shell | Self::Exec => EffectClass::Shell,
             Self::AskUser => EffectClass::Interactive,
@@ -285,7 +282,6 @@ impl BuiltInTool {
                     "additionalProperties": false
                 }),
             ),
-            Self::ListDir => unreachable!("list_dir is a hidden alias and is not advertised"),
             #[cfg(test)]
             Self::TestDelay | Self::TestMutate | Self::TestShell => {
                 unreachable!("test tools are not advertised")
@@ -442,20 +438,6 @@ pub(crate) fn static_tools() -> Vec<StaticTool> {
                 .collect()
         })
         .clone()
-}
-
-/// The effect of a hidden alias for an advertised built-in: `list_dir` is
-/// `tree depth=1` for one release so persisted transcripts and grants keep
-/// resolving. Resolves only when the tool it aliases is exposed, so a
-/// profile that hides `tree` hides its alias too.
-pub(crate) fn alias_effect(
-    name: &str,
-    catalog: &crate::catalog::ToolCatalog,
-) -> Option<EffectClass> {
-    match BuiltInTool::from_name(name)? {
-        tool @ BuiltInTool::ListDir => catalog.lookup("tree").map(|_| tool.effect()),
-        _ => None,
-    }
 }
 
 /// The effect of a test-only tool, which dispatch executes but the catalog

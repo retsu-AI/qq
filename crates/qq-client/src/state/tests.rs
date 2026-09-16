@@ -17,6 +17,12 @@ use super::*;
 /// Every `event_*` wire fixture, in cursor order. They describe one session
 /// (`[3; 16]`) and one run (`[4; 16]`); the list is the replay input for the
 /// golden below, so adding a fixture means regenerating the golden.
+///
+/// Pinned to the `v17/` directory on purpose: the golden checks the reducer's
+/// projection of a *fixed* event stream, so it must not move when a newer
+/// protocol version adds events or fields. `v17` is the oldest retained
+/// wire-fixture version; if that directory is ever dropped, repoint this list
+/// at the new oldest and regenerate `state_replay_v17.json` under a new name.
 const EVENT_FIXTURES: [&str; 12] = [
     include_str!("../../../qq-protocol/tests/fixtures/v17/event_prompt_queued.json"),
     include_str!("../../../qq-protocol/tests/fixtures/v17/event_run_started.json"),

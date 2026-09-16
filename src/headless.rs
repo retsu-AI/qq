@@ -650,7 +650,10 @@ async fn submit(
 /// interrupt through the ordinary idempotent cancellation command, and
 /// rendering output per the selected format. Time and budget bounds are
 /// enforced by the core runtime and arrive as typed run outcomes.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the CLI's resolved options, passed once from main"
+)]
 async fn stream_run(
     sessions: &SessionRuntime,
     options: &HeadlessOptions,

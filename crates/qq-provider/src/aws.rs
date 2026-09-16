@@ -7,8 +7,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-#[allow(deprecated)]
-use aws_config::profile::profile_file::ProfileFiles;
 use aws_config::{
     BehaviorVersion, Region, SdkConfig,
     default_provider::credentials::DefaultCredentialsChain,
@@ -23,6 +21,7 @@ use aws_credential_types::{
     Credentials,
     provider::{self, ProvideCredentials, SharedCredentialsProvider, future as credential_future},
 };
+use aws_runtime::env_config::file::EnvConfigFiles;
 use aws_sigv4::{
     http_request::{SignableBody, SignableRequest, SigningParams, SigningSettings, sign},
     sign::v4,
@@ -108,11 +107,10 @@ pub(crate) async fn load_aws_config(
         .await
 }
 
-#[allow(deprecated)]
 async fn load_aws_config_with_profile_files(
     auth: &BedrockAuth,
     region: Option<&str>,
-    profile_files: Option<ProfileFiles>,
+    profile_files: Option<EnvConfigFiles>,
     permits: Arc<Semaphore>,
 ) -> Result<LoadedAwsConfig, AwsConfigLoadError> {
     let auth = auth.clone();
@@ -150,11 +148,10 @@ where
     }
 }
 
-#[allow(deprecated)]
 async fn build_aws_config(
     auth: &BedrockAuth,
     region: Option<&str>,
-    profile_files: Option<ProfileFiles>,
+    profile_files: Option<EnvConfigFiles>,
 ) -> Result<LoadedAwsConfig, AwsConfigLoadError> {
     let provider_config = ProviderConfig::without_region()
         .with_http_client((*DIRECT_AWS_HTTP_CLIENT).clone())
@@ -743,9 +740,8 @@ mod tests {
         time::Instant,
     };
 
-    #[allow(deprecated)]
-    use aws_config::profile::profile_file::{ProfileFileKind, ProfileFiles};
     use aws_credential_types::provider::{ProvideCredentials, future};
+    use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
     use reqwest::header::CONTENT_TYPE;
     use tokio::sync::Notify;
 
@@ -836,14 +832,13 @@ mod tests {
     #[tokio::test]
     async fn named_profiles_control_region_and_credentials_unless_region_is_explicit() {
         let permits = Arc::new(Semaphore::new(AWS_CONFIG_BUILD_CONCURRENCY));
-        #[allow(deprecated)]
-        let profile_files = ProfileFiles::builder()
+        let profile_files = EnvConfigFiles::builder()
             .with_contents(
-                ProfileFileKind::Config,
+                EnvConfigFileKind::Config,
                 "[default]\nregion = us-east-1\n[profile selected]\nregion = us-west-2\n",
             )
             .with_contents(
-                ProfileFileKind::Credentials,
+                EnvConfigFileKind::Credentials,
                 "[default]\naws_access_key_id = DEFAULTKEY\naws_secret_access_key = default-secret\n\
                  [selected]\naws_access_key_id = SELECTEDKEY\naws_secret_access_key = selected-secret\n",
             )
@@ -895,14 +890,13 @@ mod tests {
 
     #[tokio::test]
     async fn profile_endpoint_overrides_do_not_change_bedrock_routing() {
-        #[allow(deprecated)]
-        let profile_files = ProfileFiles::builder()
+        let profile_files = EnvConfigFiles::builder()
             .with_contents(
-                ProfileFileKind::Config,
+                EnvConfigFileKind::Config,
                 "[profile selected]\nregion = us-east-1\nendpoint_url = http://127.0.0.1:9\n",
             )
             .with_contents(
-                ProfileFileKind::Credentials,
+                EnvConfigFileKind::Credentials,
                 "[selected]\naws_access_key_id = SELECTEDKEY\naws_secret_access_key = selected-secret\n",
             )
             .build();
@@ -921,10 +915,9 @@ mod tests {
 
     #[tokio::test]
     async fn credential_process_profiles_are_rejected_without_running_a_process() {
-        #[allow(deprecated)]
-        let profile_files = ProfileFiles::builder()
+        let profile_files = EnvConfigFiles::builder()
             .with_contents(
-                ProfileFileKind::Config,
+                EnvConfigFileKind::Config,
                 "[profile selected]\nregion = us-east-1\ncredential_process = this-command-must-not-run\n",
             )
             .build();

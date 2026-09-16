@@ -1392,11 +1392,11 @@ async fn known_later_turn_context_overflow_starts_no_second_provider_request() {
                 Box::pin(stream::iter(vec![
                     Ok(qq_provider::ProviderEvent::ToolCallStarted {
                         id: "list".to_owned(),
-                        name: "list_dir".to_owned(),
+                        name: "tree".to_owned(),
                     }),
                     Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
                         id: "list".to_owned(),
-                        json: r#"{"path":"."}"#.to_owned(),
+                        json: r#"{"path":".","depth":1}"#.to_owned(),
                     }),
                     Ok(qq_provider::ProviderEvent::ToolCallCompleted {
                         id: "list".to_owned(),

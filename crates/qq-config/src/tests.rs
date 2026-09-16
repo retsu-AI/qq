@@ -1721,7 +1721,7 @@ fn tool_exposure_is_accepted_without_changing_approval_grants() {
     tree.write(
         "global/config.ron",
         r#"(version: 1, policy: (
-        exposed_tools: ["read_file", "search", "list_dir", "shell", "spawn_agent"], allow_tools: ["edit_file"]
+        exposed_tools: ["read_file", "search", "tree", "shell", "spawn_agent"], allow_tools: ["edit_file"]
     ))"#,
     );
     tree.write(

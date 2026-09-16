@@ -76,8 +76,7 @@ pub(crate) use edit::hold_tool_apply;
 pub(crate) use output::MAX_MODEL_TEXT_BYTES;
 pub(crate) use output::{TurnOutputBudget, finalize_spill_marker, header_line};
 pub(crate) use specs::{
-    MAX_SPAWN_AGENT_SCHEMA_BYTES, SPAWN_AGENT_TOOL, SpawnAgentArgs, alias_effect, spawn_agent_spec,
-    static_tools,
+    MAX_SPAWN_AGENT_SCHEMA_BYTES, SPAWN_AGENT_TOOL, SpawnAgentArgs, spawn_agent_spec, static_tools,
 };
 #[cfg(test)]
 pub(crate) use specs::{specs, test_tool_effect};
@@ -194,11 +193,14 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let state = FileState::default();
 
-        let listed = run_tool(&workspace, &state, "list_dir", r#"{"path":"."}"#);
+        let listed = run_tool(&workspace, &state, "tree", r#"{"path":".","depth":1}"#);
         assert_eq!(
             listed.model_text,
             "tree . depth=1 entries=2/2 files=2 dirs=0\na.txt 1  b.txt 14\n"
         );
+        // The pre-v0.1.0 name is not a tool.
+        let legacy = run_tool(&workspace, &state, "list_dir", r#"{"path":"."}"#);
+        assert!(legacy.is_error, "{}", legacy.model_text);
         let tree = run_tool(&workspace, &state, "tree", r#"{}"#);
         assert_eq!(
             tree.model_text,
@@ -1097,8 +1099,8 @@ mod tests {
         let result = run_tool(
             &workspace,
             &FileState::default(),
-            "list_dir",
-            r#"{"path":"."}"#,
+            "tree",
+            &format!(r#"{{"path":".","depth":1,"limit":{}}}"#, tree::MAX_ENTRIES),
         );
         assert!(!result.is_error);
         assert!(
