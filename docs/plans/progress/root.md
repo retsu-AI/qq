@@ -32,7 +32,7 @@ may append a **request** row; only root changes a request's status.
 | 0024 | Shared transcript, raw tool JSON, precompiled prompt prefix (D5) | speed-first H18 | Accepted (merged in #38) |
 | 0025 | SSE framing per chunk, parse once (D10) | speed-first H19 | Accepted (merged in #39) |
 | 0026 | Run cancellation token replaces polled flag (D8 remainder) | speed-first H22.2 | Accepted (merged in #47) |
-| 0027 | `qq-core` is a public embedding API | docs cleanup 2026-09-16 | Accepted (`docs/close-phase-6-reconcile`) |
+| 0027 | `qq-core` is a public embedding API | docs cleanup 2026-09-16 | Accepted (#52, in review) |
 
 Next free number: 0028. Reserve here before opening a PR that adds an ADR.
 

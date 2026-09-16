@@ -806,12 +806,11 @@ are quiet-host recordings and stay open in the plan's § Open Recordings: the
 eight-stream p95 and the Phase 5a H0 tail comparison. Gate file
 `g-phase-6.md`; `g-phase-5b.md` written retroactively for HC1–HC4.
 
-Docs reconciled in the same PR (`docs/close-phase-6-reconcile`): plan status
+Docs reconciled in #52 (`docs/close-phase-6-reconcile`): plan status
 block, Phases 5b and 6 collapsed to Completed Phases rows, as-built blocks
 reduced to ADR pointers, ADR-0012/0019/0020/0022/0026 statuses, ADR-0027
 (`qq-core` is a public embedding API), `plans/README.md` priorities, decision
-#3 carried to Phase 7. One regression found and fixed in the stacked PR
-below it: #46 had reverted `Cargo.toml` to 0.0.0 (branch cut before v0.1.0,
+#3 carried to Phase 7. One regression found and fixed in #51 beneath it: #46 had reverted `Cargo.toml` to 0.0.0 (branch cut before v0.1.0,
 merged after); restored with a test that the manifest is never behind the
 newest tag.
 
