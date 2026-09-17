@@ -744,12 +744,22 @@ reaches the store worker.
 Caller budgets are core-owned. `submit_prompt.limits` carries a versioned
 `RunLimits` (wall clock, model turns, tool calls, total tokens, cost) that is
 validated at admission, persisted with the run row, and metered by the runtime
-loop: every provider turn is decided at the turn boundary and the wall clock
-also bounds a provider stream that never yields. A cost cap without configured
+loop: every provider turn is decided at the turn boundary. The wall clock starts
+when execution is admitted, before loading and input preparation; time queued
+for a root session is excluded. The same absolute deadline spans context and
+guidance retrieval, automatic compaction and re-preparation, provider streaming,
+approval and user-input waits, tools, children, audits, and output repair.
+Finite-duration execution owns one cancellation alarm so a slow persistence
+consumer cannot let a spawned shell run past expiry. Unlimited execution has no
+deadline task or stream wrapper. Expiry requests cancellation and drops dispatch;
+started blocking work and owned tools/children drain before typed settlement.
+Already-dispatched store operations remain awaited, so cleanup and terminal
+publication can finish after the execution deadline. Unconfirmed cleanup fails
+the runtime closed instead of releasing its session. A cost cap without configured
 pricing is rejected before provider work. When the countable budget is nearly
 spent the last permitted turn becomes a tool-free final status response; an
-elapsed wall clock or a provider turn that omits usage under a cost cap settles
-immediately. Every bound produces the typed `budget_exhausted` outcome, never a
+elapsed wall clock or a provider turn that omits usage under a cost cap grants
+no further provider turn. Every bound produces the typed `budget_exhausted` outcome, never a
 provider failure, so the TUI, server, and headless adapter observe one
 contract. Each sequential child admission, including an auditor, derives fresh
 remaining cost and token bounds after charging earlier children. A turn containing

@@ -7,6 +7,7 @@ use super::{
         SessionSubagentSpawner,
     },
 };
+use crate::runtime::RunDeadline;
 
 /// Denies every tool call. Compaction runs summarize existing context; a
 /// call the instruction forbade costs one denied round trip and persists
@@ -21,7 +22,7 @@ struct BufferedToolOutputHook {
 }
 
 #[cfg(test)]
-static BUFFERED_TOOL_OUTPUT_HOOK: Mutex<Option<BufferedToolOutputHook>> = Mutex::new(None);
+static BUFFERED_TOOL_OUTPUT_HOOKS: Mutex<Vec<BufferedToolOutputHook>> = Mutex::new(Vec::new());
 
 /// Holds the execution loop immediately after one call's live output enters
 /// the bounded batch. Tests use this exact handoff to make cancellation-versus-
@@ -32,26 +33,25 @@ pub(super) fn hold_buffered_tool_output(
 ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
     let (entered, entered_rx) = oneshot::channel();
     let (release, release_rx) = oneshot::channel();
-    *BUFFERED_TOOL_OUTPUT_HOOK.lock().unwrap() = Some(BufferedToolOutputHook {
-        tool_call_id,
-        entered,
-        release: release_rx,
-    });
+    BUFFERED_TOOL_OUTPUT_HOOKS
+        .lock()
+        .unwrap()
+        .push(BufferedToolOutputHook {
+            tool_call_id,
+            entered,
+            release: release_rx,
+        });
     (entered_rx, release)
 }
 
 #[cfg(test)]
 async fn pause_after_buffering_tool_output(tool_call_id: ToolCallId) {
     let hook = {
-        let mut hook = BUFFERED_TOOL_OUTPUT_HOOK.lock().unwrap();
-        if hook
-            .as_ref()
-            .is_some_and(|hook| hook.tool_call_id == tool_call_id)
-        {
-            hook.take()
-        } else {
-            None
-        }
+        let mut hooks = BUFFERED_TOOL_OUTPUT_HOOKS.lock().unwrap();
+        hooks
+            .iter()
+            .position(|hook| hook.tool_call_id == tool_call_id)
+            .map(|index| hooks.remove(index))
     };
     if let Some(hook) = hook {
         let _ = hook.entered.send(());
@@ -159,7 +159,14 @@ async fn prepare_execution(
     loaded: &LoadedRuntime,
     cancellation: &mut watch::Receiver<bool>,
     resources: &RunResources,
+    execution_started: tokio::time::Instant,
 ) -> Result<PreparedExecution, RunOutcome> {
+    let deadline = RunDeadline::new(claimed.limits, execution_started);
+    if let Some(deadline) = deadline.filter(|deadline| deadline.expired()) {
+        return Err(RunOutcome::BudgetExhausted {
+            exhaustion: Box::new(deadline.exhaustion()),
+        });
+    }
     let tool_cancellation = RunCancellation::new();
     let internal = claimed.identity.kind == RunKind::Compaction;
     // Take the only full transcript before cloning run metadata into gates or
@@ -200,18 +207,31 @@ async fn prepare_execution(
         let workspace = loaded.plan.workspace_handle();
         let state = Arc::clone(&file_state);
         let parts = input;
+        let mut resolution = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            crate::workspace::pause_blocking_preparation(&workspace);
+            crate::input::resolve_blocking(&parts, &workspace, &state)
+        });
         let resolved = tokio::select! {
-            result = tokio::task::spawn_blocking(move || {
-                crate::input::resolve_blocking(&parts, &workspace, &state)
-            }) => result,
+            biased;
+            () = RunDeadline::wait(deadline) => {
+                tool_cancellation.cancel();
+                // Blocking work cannot be forcibly cancelled or detached.
+                let _ = resolution.await;
+                return Err(RunOutcome::BudgetExhausted {
+                    exhaustion: Box::new(deadline.expect("only a finite deadline wakes").exhaustion()),
+                });
+            }
             changed = cancellation.changed() => {
                 tool_cancellation.cancel();
+                let _ = resolution.await;
                 return if changed.is_ok() && *cancellation.borrow() {
                     Err(RunOutcome::Cancelled)
                 } else {
                     Err(RunOutcome::Interrupted)
                 };
             }
+            result = &mut resolution => result,
         };
         let text = match resolved {
             Ok(Ok(text)) => text,
@@ -240,6 +260,13 @@ async fn prepare_execution(
     }
     let capabilities = if internal {
         RunCapabilities::restricted()
+            .with_limits(
+                RunLimits {
+                    max_duration_ms: claimed.limits.max_duration_ms,
+                    ..RunLimits::default()
+                },
+                None,
+            )
             .without_tools()
             .with_max_output_tokens(
                 loaded
@@ -349,6 +376,7 @@ async fn prepare_execution(
         }
     }
     .with_literal_slash(claimed.literal_slash)
+    .with_execution_started(execution_started)
     .with_tool_tasks(resources.tools.clone())
     .with_output(claimed.output.clone());
     // The claimed workspace is the plan's workspace: the loader compiled the
@@ -366,6 +394,9 @@ async fn prepare_execution(
             biased;
             changed = cancellation.changed() => {
                 tool_cancellation.cancel();
+                if resources.stop(&mut events).await.is_err() {
+                    inner.failed.send_replace(true);
+                }
                 return if changed.is_ok() && *cancellation.borrow() {
                     Err(RunOutcome::Cancelled)
                 } else {
@@ -424,6 +455,11 @@ async fn prepare_execution(
                     },
                 });
             }
+            Some(RuntimeEvent::BudgetExhausted { exhaustion }) => {
+                return Err(RunOutcome::BudgetExhausted {
+                    exhaustion: Box::new(exhaustion),
+                });
+            }
             Some(_) | None => {
                 return Err(internal_failure(
                     "runtime preparation ended without an initial prepared request",
@@ -439,6 +475,8 @@ pub(super) async fn execute_run(
     mut cancellation: watch::Receiver<bool>,
     resources: RunResources,
 ) {
+    let execution_started = tokio::time::Instant::now();
+    let deadline = RunDeadline::new(claimed.limits, execution_started);
     if *cancellation.borrow() {
         finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await;
         return;
@@ -449,6 +487,15 @@ pub(super) async fn execute_run(
         profile: claimed.profile.clone(),
     });
     let loaded = tokio::select! {
+        biased;
+        () = RunDeadline::wait(deadline) => {
+            // The loader owns construction until it returns, even after expiry.
+            let _ = load.await;
+            finish_reserved_run(&inner, &claimed, RunOutcome::BudgetExhausted {
+                exhaustion: Box::new(deadline.expect("only a finite deadline wakes").exhaustion()),
+            }).await;
+            return;
+        }
         result = &mut load => match result {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -498,16 +545,29 @@ pub(super) async fn execute_run(
         return;
     }
     loop {
-        let mut prepared =
-            match prepare_execution(&inner, &mut claimed, &loaded, &mut cancellation, &resources)
-                .await
-            {
-                Ok(prepared) => prepared,
-                Err(outcome) => {
-                    finish_reserved_run(&inner, &claimed, outcome).await;
+        let mut prepared = match prepare_execution(
+            &inner,
+            &mut claimed,
+            &loaded,
+            &mut cancellation,
+            &resources,
+            execution_started,
+        )
+        .await
+        {
+            Ok(prepared) => prepared,
+            Err(outcome) => {
+                if resources.drain().await.is_err() {
+                    inner.failed.send_replace(true);
                     return;
                 }
-            };
+                if *inner.failed.borrow() {
+                    return;
+                }
+                finish_reserved_run(&inner, &claimed, outcome).await;
+                return;
+            }
+        };
         let plan = context::plan(context::ContextInput {
             context_window: loaded.resolved_model().context_window,
             max_output_tokens: prepared.audit.weight.max_output_tokens,
@@ -559,6 +619,7 @@ pub(super) async fn execute_run(
                 audit,
                 &mut cancellation,
                 &resources,
+                execution_started,
             )
             .await
             {
@@ -674,6 +735,7 @@ pub(super) async fn execute_run(
                     audit,
                     &mut cancellation,
                     &resources,
+                    execution_started,
                 )
                 .await
                 {
@@ -701,6 +763,7 @@ async fn run_auto_compaction(
     original_audit: PreparedRunAudit,
     cancellation: &mut watch::Receiver<bool>,
     resources: &RunResources,
+    execution_started: tokio::time::Instant,
 ) -> bool {
     if *inner.failed.borrow() {
         finish_prepared_run(
@@ -762,14 +825,29 @@ async fn run_auto_compaction(
     candidate.messages = messages;
     candidate.context_compaction_attempted = true;
     candidate.context_occupancy = None;
-    let mut prepared =
-        match prepare_execution(inner, &mut candidate, loaded, cancellation, resources).await {
-            Ok(prepared) => prepared,
-            Err(outcome) => {
-                finish_prepared_run(inner, original, &original_audit, outcome).await;
+    let mut prepared = match prepare_execution(
+        inner,
+        &mut candidate,
+        loaded,
+        cancellation,
+        resources,
+        execution_started,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(outcome) => {
+            if resources.drain().await.is_err() {
+                inner.failed.send_replace(true);
                 return false;
             }
-        };
+            if *inner.failed.borrow() {
+                return false;
+            }
+            finish_prepared_run(inner, original, &original_audit, outcome).await;
+            return false;
+        }
+    };
     let plan = context::plan(context::ContextInput {
         context_window: loaded.resolved_model().context_window,
         max_output_tokens: prepared.audit.weight.max_output_tokens,

@@ -72,7 +72,7 @@ impl ToolTasks {
         }
     }
 
-    fn enter(&self) -> ToolTaskLease {
+    pub(crate) fn enter(&self) -> ToolTaskLease {
         self.0.active.fetch_add(1, Ordering::AcqRel);
         ToolTaskLease {
             tasks: Arc::clone(&self.0),
@@ -81,7 +81,7 @@ impl ToolTasks {
     }
 }
 
-struct ToolTaskLease {
+pub(crate) struct ToolTaskLease {
     tasks: Arc<ToolTaskState>,
     process_pending: bool,
 }

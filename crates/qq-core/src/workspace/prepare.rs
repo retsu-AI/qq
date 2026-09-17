@@ -10,6 +10,52 @@ use super::{
 };
 
 #[cfg(test)]
+struct BlockingPreparationHook {
+    workspace: PathBuf,
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+static BLOCKING_PREPARATION_HOOKS: std::sync::Mutex<Vec<BlockingPreparationHook>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn hold_blocking_preparation(
+    workspace: PathBuf,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (entered, receiver) = tokio::sync::oneshot::channel();
+    let (sender, release) = tokio::sync::oneshot::channel();
+    BLOCKING_PREPARATION_HOOKS
+        .lock()
+        .unwrap()
+        .push(BlockingPreparationHook {
+            workspace,
+            entered,
+            release,
+        });
+    (receiver, sender)
+}
+
+#[cfg(test)]
+pub(crate) fn pause_blocking_preparation(workspace: &Workspace) {
+    let hook = {
+        let mut hooks = BLOCKING_PREPARATION_HOOKS.lock().unwrap();
+        hooks
+            .iter()
+            .position(|hook| hook.workspace == workspace.path())
+            .map(|index| hooks.remove(index))
+    };
+    if let Some(hook) = hook {
+        let _ = hook.entered.send(());
+        let _ = hook.release.blocking_recv();
+    }
+}
+
+#[cfg(test)]
 static TEST_WORKSPACE_OPEN_HOOK: std::sync::OnceLock<
     std::sync::Mutex<Option<TestWorkspaceOpenHook>>,
 > = std::sync::OnceLock::new();
@@ -158,13 +204,18 @@ pub(crate) async fn prepare_guidance(
     index: Arc<super::skills::SkillIndex>,
     cancelled: RunCancellation,
     request: GuidanceRequest,
+    tasks: &crate::tools::ToolTasks,
 ) -> Result<SelectedGuidance, WorkspacePreparationError> {
     let permit = blocking_permits()
         .acquire_owned()
         .await
         .map_err(|source| WorkspacePreparationError::Unavailable { source })?;
+    let lease = tasks.enter();
     tokio::task::spawn_blocking(move || {
+        let _lease = lease;
         let _permit = permit;
+        #[cfg(test)]
+        pause_blocking_preparation(&workspace);
         if cancelled.is_cancelled() {
             return Err(WorkspacePreparationError::Cancelled);
         }
@@ -185,13 +236,18 @@ pub(crate) async fn load_disclosed_skill(
     index: Arc<super::skills::SkillIndex>,
     cancelled: RunCancellation,
     name: String,
+    tasks: &crate::tools::ToolTasks,
 ) -> Result<SelectedGuidance, WorkspacePreparationError> {
     let permit = blocking_permits()
         .acquire_owned()
         .await
         .map_err(|source| WorkspacePreparationError::Unavailable { source })?;
+    let lease = tasks.enter();
     tokio::task::spawn_blocking(move || {
+        let _lease = lease;
         let _permit = permit;
+        #[cfg(test)]
+        pause_blocking_preparation(&workspace);
         if cancelled.is_cancelled() {
             return Err(WorkspacePreparationError::Cancelled);
         }

@@ -2314,8 +2314,9 @@ async fn steering_charges_a_completed_but_unconsumed_child_exactly_once() {
 
 #[tokio::test]
 async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() {
-    for interruption in [0, 1, 2, 3] {
+    for interruption in [0, 1, 2, 3, 4] {
         let shutting_down = interruption == 3;
+        let deadline = interruption == 4;
         let cancel_parent = interruption != 0;
         let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
         let child = Arc::new(ScriptedRunProvider {
@@ -2344,7 +2345,31 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
         .await;
         let workspace = std::fs::canonicalize(harness._directory.path()).unwrap();
         let (applying, release) = crate::tools::hold_tool_apply(&workspace);
-        let parent_run = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
+        let parent_run = if deadline {
+            let receipt = harness
+                .runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::SubmitPrompt {
+                        session_id: harness.session_id,
+                        input: vec![InputPart::text("delegate".to_owned())],
+                        limits: RunLimits {
+                            max_duration_ms: Some(1_000),
+                            ..RunLimits::default()
+                        },
+                        correlation: Correlation::default(),
+                        output: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
+                panic!("prompt")
+            };
+            run_id
+        } else {
+            submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await
+        };
         tokio::time::timeout(Duration::from_secs(2), applying)
             .await
             .unwrap()
@@ -2378,6 +2403,8 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
         };
         let last_run = if shutting_down {
             parent_run
+        } else if deadline {
+            submit_prompt_to(&harness.runtime, harness.session_id, "continue").await
         } else if cancel_parent {
             let queued = submit_prompt_to(&harness.runtime, harness.session_id, "continue").await;
             harness
@@ -2400,7 +2427,11 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
             .unwrap();
             parent_run
         };
-        if interruption != 2 {
+        if deadline {
+            // Both inherited child and parent deadlines must expire while the
+            // write is held; neither terminal may release the checkout early.
+            tokio::time::sleep(Duration::from_millis(1_200)).await;
+        } else if interruption != 2 {
             tokio::time::timeout(Duration::from_secs(2), stopping.take().unwrap())
                 .await
                 .unwrap()
@@ -2463,6 +2494,11 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
             })
             .unwrap();
         assert!(child_finished < parent_finished);
+        if deadline {
+            assert!(matches!(finished_outcome(&observed, parent_run),
+                Some(RunOutcome::BudgetExhausted { exhaustion }) if exhaustion.limit == BudgetLimitKind::Duration
+            ));
+        }
         assert_eq!(
             std::fs::read_to_string(harness._directory.path().join("child.txt")).unwrap(),
             "child"

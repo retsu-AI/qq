@@ -24,4 +24,6 @@ pub(crate) use prepare::test_pause_after_workspace_open;
 pub(crate) use prepare::{
     WorkspacePreparationError, load_disclosed_skill, prepare_guidance, prepare_workspace,
 };
+#[cfg(test)]
+pub(crate) use prepare::{hold_blocking_preparation, pause_blocking_preparation};
 pub use skills::{SkillEntry, SkillIndex, SkillKind};
