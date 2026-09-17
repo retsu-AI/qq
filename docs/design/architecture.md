@@ -858,9 +858,10 @@ the same subtree, and each depth claims runs from its own permit pool so
 parents awaiting children at any level cannot starve the level below.
 
 A root run's candidate final answer may be audited before it completes. The
-plan carries an `AuditPolicy` (`off`, `heuristic`, or `always`; `heuristic` is
-the configured default and fires on a mutation, a non-read shell command,
-twelve tool calls, or a spawned child). At the completion boundary the loop
+plan carries an `AuditPolicy` (`off`, `heuristic`, or `always`; `off` is the
+default because an audit is a second full agent run whose benefit on coding
+tasks is unmeasured; `heuristic` fires on a mutation, a non-read shell
+command, twelve tool calls, or a spawned child). At the completion boundary the loop
 consults an `AuditHook`; the session layer implements it by spawning a
 read-only child with `purpose: audit` at the roster's audit role, whose brief
 is the user prompt, the answer, and a bounded action list, never the
@@ -872,7 +873,10 @@ the answer plus the findings as a runtime notice and continues once (bounded by
 completion after charging audit spend. Otherwise the run settles as
 `budget_exhausted`, even when the auditor passed. The record is durable on the run
 (`runs.audit_json`, published as `run_audit_completed`) before the run settles,
-and the child's spend is charged to the audited run. Children, internal runs,
+and the child's spend is charged to the audited run. The auditor is bounded
+on its own beyond the parent's remainder: at most `MAX_AUDIT_CHILD_TURNS`
+(8) model turns and `MAX_AUDIT_CHILD_DURATION_MS` (120 s), past which the
+answer stands as `unavailable`. Children, internal runs,
 budget-final turns, and runs without a positive, known remainder for each imposed
 cost/token bound or with an expired deadline are never audited. Unbounded
 families do not require an affordability estimate. At dispatch

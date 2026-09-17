@@ -63,8 +63,9 @@ pub use hosts::{
 pub use runtime::{
     AUDIT_TOOL_CALL_THRESHOLD, AuditMode, AuditPolicy, AuditRequest, AuditVerdict, AuditedAction,
     BASE_ENV, BuiltinPreference, MAX_AUDIT_ACTION_BYTES, MAX_AUDIT_ANSWER_BYTES,
-    MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, MAX_SHELL_ENV_ALLOWLIST,
-    MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
+    MAX_AUDIT_CHILD_DURATION_MS, MAX_AUDIT_CHILD_TURNS, MAX_AUDIT_FINDING_BYTES,
+    MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, MAX_SHELL_ENV_ALLOWLIST, MAX_SHELL_ENV_NAMES,
+    ShellPolicy, valid_env_name,
 };
 pub use sessions::{
     ApprovalReviewer, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, MAX_CHILD_DEPTH,
@@ -1970,8 +1971,26 @@ impl plan::CompiledAgentPlan {
                         && (audit_revisions == 0
                             || audit_revisions < plan.runtime.audit.max_revisions)
                         && audit_triggers.fires(plan.runtime.audit.mode)
-                        && let Ok(child_limits) = budget.child_budget(tokio::time::Instant::now())
+                        && let Ok(mut child_limits) = budget.child_budget(tokio::time::Instant::now())
                     {
+                        // The auditor inherits the parent's remainder but is
+                        // also bounded on its own: a verdict is a few reads,
+                        // not a second open-ended run.
+                        child_limits.limits.max_model_turns = Some(
+                            child_limits
+                                .limits
+                                .max_model_turns
+                                .map_or(runtime::MAX_AUDIT_CHILD_TURNS, |turns| {
+                                    turns.min(runtime::MAX_AUDIT_CHILD_TURNS)
+                                }),
+                        );
+                        let audit_deadline = tokio::time::Instant::now()
+                            + std::time::Duration::from_millis(runtime::MAX_AUDIT_CHILD_DURATION_MS);
+                        child_limits.deadline = Some(
+                            child_limits
+                                .deadline
+                                .map_or(audit_deadline, |deadline| deadline.min(audit_deadline)),
+                        );
                         let answer = assistant
                             .content()
                             .iter()

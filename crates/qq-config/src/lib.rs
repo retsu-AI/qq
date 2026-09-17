@@ -1639,10 +1639,13 @@ impl Default for DelegationConfig {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditMode {
+    /// The default: every user-initiated run is one agent loop. Enable an
+    /// audit explicitly; its benefit on coding tasks is unmeasured (the
+    /// delegation plan's B1 arm) and it costs a second full agent run.
+    #[default]
     Off,
     /// Audit when the run mutated files, ran a non-read shell command, made
     /// at least twelve tool calls, or spawned a child.
-    #[default]
     Heuristic,
     Always,
 }
@@ -1691,7 +1694,7 @@ impl AuditConfig {
 impl Default for AuditConfig {
     fn default() -> Self {
         Self {
-            mode: AuditMode::Heuristic,
+            mode: AuditMode::Off,
             max_revisions: 1,
             role: DelegationRole::Strong,
         }
