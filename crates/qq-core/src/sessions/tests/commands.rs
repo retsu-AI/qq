@@ -1,6 +1,78 @@
 use super::*;
 
 #[tokio::test]
+async fn empty_attachment_range_fails_as_invalid_input_and_session_remains_usable() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("empty.txt"), "").unwrap();
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        Arc::new(MutableResolvedLoader {
+            resolved_model: Arc::new(StdMutex::new(test_resolved_model(
+                "test/model",
+                "wire-a",
+                64,
+                None,
+            ))),
+            requests: Arc::clone(&requests),
+        }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session(&runtime, workspace_id, None).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("unexpected receipt")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![InputPart::WorkspaceFile {
+                    path: "empty.txt".to_owned(),
+                    expected_hash: None,
+                    range: Some(qq_protocol::LineRange { start: 1, end: 1 }),
+                }],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let observed = collect_through_finished(&mut events).await;
+    let failed_requests = requests.lock().unwrap().len();
+    let follow_up = submit_prompt_to(&runtime, session_id, "still usable").await;
+    let follow_up_events = collect_through_finished(&mut events).await;
+    runtime.shutdown().await.unwrap();
+
+    let failure = observed.iter().find_map(|event| match &event.event {
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::Failed { failure },
+            ..
+        } => Some(failure),
+        _ => None,
+    });
+    let failure = failure.expect("nonexistent attachment line must fail the run");
+    assert_eq!(failure.kind, RunFailureKind::InvalidCommand);
+    assert!(failure.message.contains("file has 0 lines"), "{failure:?}");
+    assert_eq!(failed_requests, 0);
+    assert!(follow_up_events.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. }
+            if *run_id == follow_up
+    )));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
     // Two tool turns then a text turn. The approval wait on turn one is
     // the hold point: steering queued there must enter the request for
