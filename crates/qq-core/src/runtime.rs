@@ -13,7 +13,8 @@ mod subagent;
 pub(crate) use audit::{AUDIT_REVISION_NOTICE, AuditFuture, AuditHook, AuditTriggers};
 pub use audit::{
     AUDIT_TOOL_CALL_THRESHOLD, AuditMode, AuditPolicy, AuditRequest, AuditVerdict, AuditedAction,
-    MAX_AUDIT_ACTION_BYTES, MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS,
+    MAX_AUDIT_ACTION_BYTES, MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS,
+    MAX_AUDIT_CHILD_TURNS, MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS,
 };
 pub(crate) use budget::{BUDGET_FINAL_RESPONSE_NOTICE, BudgetDecision, BudgetMeter, ChildBudget};
 pub(crate) use deadline::RunDeadline;

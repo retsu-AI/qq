@@ -400,10 +400,10 @@ fn delegation_roster_layers_validates_and_falls_back_to_worker_model_sugar() {
 }
 
 #[test]
-fn audit_settings_default_to_heuristic_and_validate_revisions() {
+fn audit_settings_default_to_off_and_validate_revisions() {
     let tree = TempTree::new();
     let bare = tree.loader().load(&tree.request()).unwrap();
-    assert_eq!(bare.audit().mode(), AuditMode::Heuristic);
+    assert_eq!(bare.audit().mode(), AuditMode::Off);
     assert_eq!(bare.audit().max_revisions(), 1);
     assert_eq!(bare.audit().role(), DelegationRole::Strong);
     assert!(bare.provenance().audit().is_none());

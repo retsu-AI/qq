@@ -1858,9 +1858,9 @@ Those features require an explicit protocol revision.
 
 ## Final-answer audit
 
-When the configured `audit` section enables it (`mode: heuristic` by default:
-the run mutated a file, ran a non-read shell command, made twelve or more tool
-calls, or spawned a child; `always`; or `off`), a root run's candidate final
+When the configured `audit` section enables it (`mode: off` by default;
+`heuristic`: the run mutated a file, ran a non-read shell command, made twelve
+or more tool calls, or spawned a child; or `always`), a root run's candidate final
 answer is handed to a read-only child session (`purpose: "audit"`) at the
 roster's configured role before the run completes. The child receives the user
 prompt, the answer, and a bounded list of the run's tool calls, verifies the

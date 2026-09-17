@@ -20,9 +20,8 @@ pub enum AuditMode {
     Always,
 }
 
-/// The runtime default is `Off`: audits are enabled by the configured `audit`
-/// section (whose own default is `heuristic`), never by an embedded runtime
-/// that has no roster to audit with.
+/// The default is `Off` here and in the configured `audit` section: an audit
+/// is a second full agent run and is enabled explicitly.
 impl Default for AuditPolicy {
     fn default() -> Self {
         Self {
@@ -35,6 +34,13 @@ impl Default for AuditPolicy {
 
 /// Tool calls at or above which the heuristic considers a run substantial.
 pub const AUDIT_TOOL_CALL_THRESHOLD: u32 = 12;
+/// Model turns one audit child may take. The brief is one prompt, one
+/// answer, and a bounded action list; verifying it is a few reads and one
+/// JSON verdict, never an open-ended investigation.
+pub const MAX_AUDIT_CHILD_TURNS: u32 = 8;
+/// Wall clock one audit child may hold the parent at its completion
+/// boundary, beyond which the answer stands as `unavailable`.
+pub const MAX_AUDIT_CHILD_DURATION_MS: u64 = 120_000;
 /// Bytes of the action summary (tool names, paths, diff summaries) quoted to
 /// the auditor.
 pub const MAX_AUDIT_ACTION_BYTES: usize = 32 * 1024;
