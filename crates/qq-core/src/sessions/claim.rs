@@ -242,9 +242,10 @@ pub(super) fn context_occupancy_basis(
 }
 
 /// Seeds the next request's occupancy from a measured one. Requires a known
-/// provider identity, the exact shape and static prefix, and an append-only
-/// (byte-monotonic) transcript; the growth is charged at the byte-ratio
-/// estimate.
+/// provider identity and the exact shape and static prefix; the byte delta
+/// since the measured request (growth from the new prompt, shrinkage from
+/// assembly-time pruning) follows the byte-ratio estimate in either
+/// direction.
 pub(super) fn compatible_context_tokens(
     occupancy: ContextOccupancy,
     shape: ContextRequestShape,
@@ -252,16 +253,13 @@ pub(super) fn compatible_context_tokens(
     request_bytes: u64,
 ) -> Option<u64> {
     let basis = occupancy.basis;
-    (shape.provider_identity
-        && repeats_context_basis(basis, shape, static_prefix)
-        && request_bytes >= basis.request_bytes)
-        .then(|| {
-            occupancy
-                .context_tokens
-                .saturating_add(context::estimate_tokens(
-                    request_bytes - basis.request_bytes,
-                ))
-        })
+    (shape.provider_identity && repeats_context_basis(basis, shape, static_prefix)).then(|| {
+        context::adjust_measured_tokens(
+            occupancy.context_tokens,
+            basis.request_bytes,
+            request_bytes,
+        )
+    })
 }
 
 /// Whether a request with this shape and static prefix repeats the request
@@ -539,7 +537,7 @@ pub(super) fn reserve_next_run_recoverable(
     if reserved != 1 {
         return Ok(None);
     }
-    let (messages, context_rewritten) = match kind {
+    let messages = match kind {
         RunKind::Prompt => {
             let user_ordinal: u64 = transaction.query_row(
                 "SELECT ordinal FROM messages WHERE id = ?1",
@@ -551,13 +549,10 @@ pub(super) fn reserve_next_run_recoverable(
                 [user_message_id.to_string()],
                 |row| row.get(0),
             )?;
-            let (mut context, context_rewritten) = load_model_context_with_rewrite_status(
-                &transaction,
-                session_id,
-                user_ordinal.saturating_sub(1),
-            )?;
+            let mut context =
+                load_model_context(&transaction, session_id, user_ordinal.saturating_sub(1))?;
             context.push(Message::user(prompt));
-            (context, context_rewritten)
+            context
         }
         RunKind::Compaction => {
             // The summarization request is the session's assembled context —
@@ -569,7 +564,7 @@ pub(super) fn reserve_next_run_recoverable(
                 &transaction,
                 session_id,
             )?));
-            (context, false)
+            context
         }
     };
     // Malformed or foreign-version state is treated as absent and cleared
@@ -589,9 +584,10 @@ pub(super) fn reserve_next_run_recoverable(
     } else {
         None
     };
-    // Occupancy reuse does not: pruning breaks the append-only transcript
-    // the byte-delta seed depends on.
-    let context_occupancy = if kind == RunKind::Prompt && !context_rewritten {
+    // Occupancy reuse survives it too: the seed credits the pruned bytes at
+    // the estimate ratio instead of restarting from a raw byte estimate over
+    // the whole history, which after a few turns it always would.
+    let context_occupancy = if kind == RunKind::Prompt {
         context_tokens
             .zip(context_occupancy_json.as_deref())
             .and_then(|(context_tokens, encoded)| {
@@ -603,10 +599,8 @@ pub(super) fn reserve_next_run_recoverable(
     } else {
         None
     };
-    let clear_context_occupancy = kind == RunKind::Prompt
-        && !context_rewritten
-        && context_occupancy_json.is_some()
-        && context_occupancy.is_none();
+    let clear_context_occupancy =
+        kind == RunKind::Prompt && context_occupancy_json.is_some() && context_occupancy.is_none();
     let clear_context_overflow = kind == RunKind::Prompt
         && pending_context_overflow_basis_json.is_some()
         && context_overflow_basis.is_none();

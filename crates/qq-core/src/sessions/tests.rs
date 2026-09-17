@@ -2543,6 +2543,9 @@ enum AutoCompactScript {
         recall: serde_json::Value,
         text: String,
     },
+    /// Like `ReadNoteThenText`, reporting the given input-token usage on
+    /// every completion so the session persists a measured occupancy.
+    ReadNoteThenTextMeasured { text: String, input_tokens: u64 },
     /// Fails the model stream with a transport error.
     Fail,
     /// Fails the model stream with a context-window overflow.
@@ -2657,6 +2660,36 @@ impl Provider for AutoCompactProvider {
                             id: "call_read".to_owned(),
                         }),
                         Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
+            }
+            AutoCompactScript::ReadNoteThenTextMeasured { text, input_tokens } => {
+                let usage = Some(qq_provider::ProviderUsage {
+                    input_tokens: *input_tokens,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 1,
+                    reasoning_tokens: None,
+                });
+                if already_read {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage }),
+                    ]))
+                } else {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: "call_read".to_owned(),
+                            name: "read_file".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: "call_read".to_owned(),
+                            json: r#"{"path":"note.txt"}"#.to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
+                            id: "call_read".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage }),
                     ]))
                 }
             }

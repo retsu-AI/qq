@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn occupancy_reuse_requires_exact_shape_prefix_and_monotonic_request_bytes() {
+fn occupancy_reuse_requires_exact_shape_and_prefix_and_follows_byte_deltas() {
     let model = test_resolved_model("test/model", "wire-model", 256, None);
     let shape = context_request_shape(&model);
     let prefix = test_static_prefix(2, Some(3));
@@ -15,9 +15,11 @@ fn occupancy_reuse_requires_exact_shape_prefix_and_monotonic_request_bytes() {
         // 24 appended bytes are charged at the byte-ratio estimate.
         Some(100 + context::estimate_tokens(24))
     );
+    // A shrunken request (assembly-time pruning) keeps the measurement and
+    // credits the removed bytes at the estimate ratio.
     assert_eq!(
-        compatible_context_tokens(occupancy, shape, prefix, 999),
-        None
+        compatible_context_tokens(occupancy, shape, prefix, 996),
+        Some(99)
     );
     assert_eq!(
         compatible_context_tokens(occupancy, shape, test_static_prefix(4, Some(3)), 1_024),
