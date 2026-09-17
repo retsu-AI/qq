@@ -11,6 +11,7 @@ may append a **request** row; only root changes a request's status.
 | ROOT-1 | Docs system: ADR directory, workflow, templates, ledgers, runbooks; plan compression | In review | 2026-09-08. `docs/plans/speed-first-…` 2,582 → 774 lines; reference audit extracted; ADR-0001–0010 backfilled |
 | ROOT-2 | Windows CI: targeted `windows-teardown` job | Shipped (`893e582`) | Full native workspace run not claimed |
 | ROOT-3 | Toolchain pin `1.97.1` | Shipped (`893e582`) | `rust-toolchain.toml`, profile minimal, musl target |
+| ROOT-4 | Current QQ and four-reference harness audit; lean-core priorities | In review | 2026-09-16; local uncommitted document, no PR; `docs/harness-scale-audit-2026-09`; source baseline `7956e8e`; independent factual review complete |
 
 ## ADR number allocation
 
@@ -66,3 +67,52 @@ README), `docs/runbooks/{local-dev,perf-recording,windows-ci}.md`. Rewrote
 workflow. No code changes. Follow-up for the next agent: the first slice under
 this system is speed-first H20; its dispatch skeleton is in
 `workflow.md` § 7.
+
+### 2026-09-16 — ROOT-4 harness reliability and scale audit
+
+Source baseline: `7956e8e`; clean start; branch `docs/harness-scale-audit-2026-09`.
+Three read-only investigators covered core reliability and all four `.source`
+harnesses; root checked architecture, clients/server, profiles, CI and evidence.
+Produced `docs/design/harness-scale-audit-2026-09-16.md` and its index entry.
+Public-API probes reproduce tool-result ID collision, late duration exhaustion,
+and attachment-context loss; stale exact CI selector runs zero tests, corrected
+selector passes one Linux test. One later-turn overflow regression also passes.
+Local evidence: `target/qq-perf/harness-audit-2026-09-16/` (untracked).
+No runtime fixes, paid calls, commits, pushes, PR or tracker writes.
+Linear read query requires reauthentication; issue linkage is unverified.
+In progress: independent factual review and documentation validation.
+Open: implementation/qualification remains separate; no existing gate waived.
+
+### 2026-09-16 — ROOT-4 research handoff
+
+Independent factual review complete; reference maturity/transport and core CAS
+qualifications incorporated. Document has 28 findings and 63 capability rows.
+Additional probe: empty-file range triggers a caught worker panic and a typed
+Server run failure on the dev build; follow-up succeeds. No process crash claim.
+Documentation checks passed: local links/source paths, table columns, F01–F28
+sequence, whitespace; ignored evidence retained at the path above.
+Delivered locally, uncommitted and unstaged; no production source edits or PR.
+Open: implementing findings, full/runtime/performance/native-platform and paid
+quality qualification, tracker reauthentication/linkage. These remain unclaimed.
+
+### 2026-09-16 — ROOT-4 final comparative cross-check
+
+Two read-only agents rechecked the root snapshot's context/runtime claims and
+reference coverage. Expanded F02 to include preparation and clock reset risks;
+qualified F23's live-only output cap; added source-located Codex Python SDK and
+OpenCode Slack/GitHub applications. Findings remain 28; capability rows remain
+63. These are audit amendments only; implementation and comparative speed
+qualification are not established by this document.
+
+### 2026-09-16 — ROOT-4 repair status refresh
+
+Fetched main `1b40236` and checked hosted PR state: F01 #55 and F02 #57 are
+merged; F14 #63 remains open with final-head CI run 190 successful. Its prior
+workflow dispatch verified nine individual native Windows passes, not a full
+Windows workspace. Added a dated implementation-status note to the original
+audit without changing its pinned findings. Root audit documents remain local,
+uncommitted; runtime fixes are separate focused worktree PRs.
+Context work continues in the separate `qq-ctx` worktree; do not duplicate
+its unmerged work or treat local branch advancement as shipped behavior.
+F07 awaits retention-contract direction; F25 awaits its requested test-boundary
+confirmation. The full audit objective remains incomplete.

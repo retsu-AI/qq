@@ -30,6 +30,10 @@
   per-feature catalog of the same harnesses (tools, bounds, shell safety,
   input ergonomics) against QQ, with ranked gaps and differentiators
   (research; motivates `plans/tool-layer.md`).
+- [`harness-scale-audit-2026-09-16.md`](design/harness-scale-audit-2026-09-16.md)
+  — current-source reliability audit and comparative capability matrix;
+  reproduced context/budget failures, core versus adapter placement, proposed
+  priorities, and performance/quality acceptance.
 
 ## Decisions — `adr/`
 
