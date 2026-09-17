@@ -73,6 +73,143 @@ async fn empty_attachment_range_fails_as_invalid_input_and_session_remains_usabl
 }
 
 #[tokio::test]
+async fn attachment_ranges_preserve_lines_clip_eof_and_reject_nonexistent_starts() {
+    use qq_protocol::LineRange;
+
+    let directory = tempfile::tempdir().unwrap();
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        Arc::new(MutableResolvedLoader {
+            resolved_model: Arc::new(StdMutex::new(test_resolved_model(
+                "test/model",
+                "wire-a",
+                64,
+                None,
+            ))),
+            requests: Arc::clone(&requests),
+        }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let first_through_eof = Some(LineRange {
+        start: 1,
+        end: u32::MAX,
+    });
+    let second_through_eof = Some(LineRange {
+        start: 2,
+        end: u32::MAX,
+    });
+    for (content, range, expected) in [
+        ("", None, Some(("", "\n"))),
+        ("", first_through_eof, None),
+        ("a", first_through_eof, Some((" lines=\"1-1/1\"", "a\n"))),
+        ("a\n", first_through_eof, Some((" lines=\"1-1/1\"", "a\n"))),
+        ("\n", first_through_eof, Some((" lines=\"1-1/1\"", "\n"))),
+        (
+            "\r\n",
+            first_through_eof,
+            Some((" lines=\"1-1/1\"", "\r\n")),
+        ),
+        (
+            "a\n\n",
+            second_through_eof,
+            Some((" lines=\"2-2/2\"", "\n")),
+        ),
+        (
+            "a\r\nb\r\n",
+            second_through_eof,
+            Some((" lines=\"2-2/2\"", "b\r\n")),
+        ),
+        (
+            "a\rb",
+            first_through_eof,
+            Some((" lines=\"1-1/1\"", "a\rb\n")),
+        ),
+        ("a\n", second_through_eof, None),
+        (
+            "a",
+            Some(LineRange {
+                start: u32::MAX,
+                end: u32::MAX,
+            }),
+            None,
+        ),
+    ] {
+        std::fs::write(directory.path().join("case.txt"), content).unwrap();
+        let created = create_session(&runtime, workspace_id, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("unexpected receipt")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+        let before = requests.lock().unwrap().len();
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::WorkspaceFile {
+                        path: "case.txt".to_owned(),
+                        expected_hash: None,
+                        range,
+                    }],
+                    limits: RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let observed = collect_through_finished(&mut events).await;
+        let outcome = observed
+            .iter()
+            .find_map(|event| match &event.event {
+                SessionEvent::RunFinished { outcome, .. } => Some(outcome),
+                _ => None,
+            })
+            .expect("terminal outcome");
+        let captured = requests.lock().unwrap();
+        match expected {
+            Some((header, body)) => {
+                assert_eq!(outcome, &RunOutcome::Completed, "{content:?}, {range:?}");
+                assert_eq!(captured.len(), before + 1);
+                let message = captured.last().unwrap().messages().last().unwrap();
+                let actual = message
+                    .content()
+                    .iter()
+                    .find_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    actual,
+                    format!(
+                        "\n<attached-file path=\"case.txt\"{header}>\n````\n{body}````\n</attached-file>\n"
+                    )
+                );
+            }
+            None => {
+                assert!(
+                    matches!(outcome, RunOutcome::Failed { failure }
+                    if failure.kind == RunFailureKind::InvalidCommand
+                        && failure.message.contains("range starts at line")),
+                    "{outcome:?}"
+                );
+                assert_eq!(captured.len(), before);
+            }
+        }
+    }
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
     // Two tool turns then a text turn. The approval wait on turn one is
     // the hold point: steering queued there must enter the request for

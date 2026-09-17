@@ -154,7 +154,7 @@ pub(crate) fn resolve_blocking(
                     Some(range) => {
                         let total = content.lines().count();
                         let start = usize::try_from(range.start).unwrap_or(usize::MAX);
-                        if start > total.max(1) {
+                        if start > total {
                             return Err(InputResolutionError::RangeOutOfBounds {
                                 path: path.clone(),
                                 start: range.start,

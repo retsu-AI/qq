@@ -600,7 +600,13 @@ and fuzzy completion reuses the walker rather than growing a second index:
 - `@skill:name` at message start rewrites to `/name`.
 
 The text keeps the `@path` token so the model knows which attachment a
-sentence refers to; the transcript row shows the same placeholder; the
+sentence refers to. File ranges are 1-based and inclusive: the starting line
+must exist, and an end past EOF clips to the final line. An empty file has
+zero lines and can be attached whole, but any range fails the run as
+`InvalidCommand` before a provider request. A final newline does not add an
+extra empty line; selected content retains its original LF or CRLF bytes.
+
+The transcript row shows the same placeholder; the
 model sees the file fenced after the text. Attached files are recorded in
 the session's file-state map exactly as `read_file` does.
 
