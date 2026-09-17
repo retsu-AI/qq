@@ -1248,10 +1248,16 @@ impl plan::CompiledAgentPlan {
             // replaced by a between-run compaction. Everything appended by
             // this run is irreducible until the run settles.
             let reducible_messages = messages.len().saturating_sub(1);
-            let reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
+            let mut reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
             let mut irreducible_message_bytes =
                 measure_messages(&messages[reducible_messages..]);
             let mut compatible_request: Option<(Arc<str>, bool, u64, u64)> = None;
+            // Effects of this run's admitted calls by provider call id, so a
+            // turn that would overflow the window can stub the stale
+            // read-only results in memory before failing. Between runs
+            // assembly does the same from the stored effect column; within a
+            // run this is the only record.
+            let mut call_effects = HashMap::<String, catalog::EffectClass>::new();
 
             let mut slice_tool_calls = 0_usize;
             let mut output_continuations = 0_u16;
@@ -1326,10 +1332,57 @@ impl plan::CompiledAgentPlan {
                 } else {
                     0
                 };
-                let input_bytes = system_bytes
+                let mut input_bytes = system_bytes
                     .saturating_add(tool_schema_bytes)
                     .saturating_add(reducible_message_bytes)
                     .saturating_add(irreducible_message_bytes);
+                // Mid-run the transcript cannot be compacted, but read-only
+                // results older than the recency window are re-derivable and
+                // can be stubbed in place. Do that before a later turn is
+                // refused for the window: the same rewrite assembly applies
+                // between runs, applied to the live messages. A rewrite
+                // invalidates the measured-occupancy chain, so it runs only
+                // when the byte estimate says the request would not fit.
+                let would_overflow = turn_ordinal > 1
+                    && plan.runtime.context_window.is_some_and(|window| {
+                        sessions::context::estimate_tokens(input_bytes)
+                            .saturating_add(u64::from(max_output_tokens))
+                            > u64::from(window)
+                    });
+                if would_overflow && {
+                    // Results loaded from the store carry no effect here and
+                    // fall back to the built-in read-only names, exactly as
+                    // assembly treats rows that predate the effect column.
+                    let call_effects = &call_effects;
+                    let effects = messages
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(message_index, message)| {
+                            message.content().iter().enumerate().filter_map(
+                                move |(block_index, block)| match block {
+                                    ContentBlock::ToolResult { call_id, .. } => call_effects
+                                        .get(call_id)
+                                        .map(|effect| ((message_index, block_index), *effect)),
+                                    ContentBlock::Text { .. } | ContentBlock::ToolCall { .. } => {
+                                        None
+                                    }
+                                },
+                            )
+                        })
+                        .collect::<HashMap<_, _>>();
+                    sessions::prune_stale_tool_results(
+                        Arc::make_mut(&mut messages).as_mut_slice(),
+                        &effects,
+                    )
+                } {
+                    reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
+                    irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
+                    input_bytes = system_bytes
+                        .saturating_add(tool_schema_bytes)
+                        .saturating_add(reducible_message_bytes)
+                        .saturating_add(irreducible_message_bytes);
+                    compatible_request = None;
+                }
                 let compatible_input_tokens = compatible_request.as_ref().and_then(
                     |(previous_system, previous_had_tools, previous_bytes, previous_tokens)| {
                         (previous_system.as_ref() == request_system.as_ref()
@@ -1763,6 +1816,9 @@ impl plan::CompiledAgentPlan {
                             Some(format!("unknown tool {:?}", pending.name)),
                         ),
                     };
+                    if rejection.is_none() {
+                        call_effects.insert(pending.provider_call_id.clone(), effect);
+                    }
                     calls.push(RuntimeToolCall {
                         id,
                         turn_ordinal,

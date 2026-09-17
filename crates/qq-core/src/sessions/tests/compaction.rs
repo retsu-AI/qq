@@ -2232,3 +2232,105 @@ async fn manual_compaction_runs_when_the_estimate_already_exceeds_the_window() {
     );
     assert_eq!(harness.requests.lock().unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn a_run_that_outgrows_the_window_stubs_its_stale_reads_instead_of_failing() {
+    // Regression: mid-run overflow was a hard failure (`BetweenRunsOnly`).
+    // Eight verbatim 8 KiB reads (~16k tokens) plus the prompt do not fit a
+    // 16k window with a 2k output reserve, but once the reads older than the
+    // recency window are stubbed in memory the run completes.
+    let turns = 8;
+    let mut harness = auto_compact_harness_with_limits(
+        vec![AutoCompactScript::ReadNoteRepeatedly {
+            turns,
+            text: "done".to_owned(),
+        }],
+        Some(16 * 1024),
+        2_048,
+    )
+    .await;
+    std::fs::write(
+        harness.workspace_path.join("note.txt"),
+        format!("{}\n", "n".repeat(127)).repeat(64),
+    )
+    .unwrap();
+    let run = queue_prompt(&harness.runtime, harness.session_id, "read it".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    let outcome = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, outcome, ..
+            } if *run_id == run => Some(outcome.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests.len(), turns + 1);
+    // The last request carries stubs for the oldest reads and the most
+    // recent CONTEXT_PRUNE_KEEP_TURNS results verbatim.
+    let results: Vec<&str> = requests
+        .last()
+        .unwrap()
+        .messages()
+        .iter()
+        .flat_map(Message::content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), turns);
+    let stubbed = results.iter().filter(|r| r.contains("[pruned")).count();
+    assert!(
+        stubbed >= 1 && stubbed <= turns - CONTEXT_PRUNE_KEEP_TURNS,
+        "{stubbed}"
+    );
+    assert!(results.last().unwrap().contains(&"n".repeat(127)));
+    // The stored rows are untouched: the persisted result text is verbatim.
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let pruned_rows: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM tool_calls WHERE result LIKE '%[pruned%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pruned_rows, 0);
+}
+
+#[tokio::test]
+async fn a_prompt_inside_the_last_tenth_of_the_window_compacts_before_it_sends() {
+    // ~30k estimated tokens of history against a 32k window: the next prompt
+    // still fits, but inside the ten percent headroom. It compacts first
+    // rather than waiting for the estimate to cross the window.
+    let mut harness = auto_compact_harness_with_window(
+        vec![
+            AutoCompactScript::Text("x".repeat(29 * 1024 * 4)),
+            AutoCompactScript::Text(valid_summary("the summary")),
+            AutoCompactScript::Text("done".to_owned()),
+        ],
+        Some(32 * 1024),
+    )
+    .await;
+    let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(first)).await;
+
+    let second = queue_prompt(&harness.runtime, harness.session_id, "small".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(second)).await;
+    let compacted = position_of(&observed, |event| {
+        matches!(event, SessionEvent::SessionCompacted { .. })
+    });
+    let prompt_started = position_of(
+        &observed,
+        |event| matches!(event, SessionEvent::RunStarted { run_id, .. } if *run_id == second),
+    );
+    assert!(compacted < prompt_started);
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. }
+            if *run_id == second
+    )));
+    assert_eq!(harness.requests.lock().unwrap().len(), 3);
+}
