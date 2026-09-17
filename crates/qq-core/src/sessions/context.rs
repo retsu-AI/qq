@@ -12,6 +12,12 @@ pub(crate) const ESTIMATED_BYTES_PER_TOKEN: u64 = 4;
 pub(crate) const fn estimate_tokens(bytes: u64) -> u64 {
     bytes.div_ceil(ESTIMATED_BYTES_PER_TOKEN)
 }
+
+/// Fraction of the model window held back as headroom before a prompt run
+/// starts: an eligible run whose estimate exceeds `window - reserve` compacts
+/// proactively, while it still fits, instead of waiting for the estimate to
+/// cross the window itself. Codex compacts at 90 %; fx at 80 %.
+const PROACTIVE_COMPACTION_HEADROOM_DIVISOR: u64 = 10;
 pub(crate) const COMPACTION_INSTRUCTION_BYTES: usize = 64 * 1024;
 const COMPACTION_STORAGE_ENVELOPE_BYTES: u64 = COMPACTION_INSTRUCTION_BYTES as u64 + 32;
 
@@ -130,11 +136,20 @@ pub(crate) fn plan(input: ContextInput) -> ContextPlan {
         && input
             .context_window
             .is_some_and(|window| required_tokens > u64::from(window));
+    // An eligible prompt run compacts before it crosses the window, while the
+    // summarizer still has room; nothing else (mid-run turns, already
+    // attempted, the summarizer) is held to the headroom.
+    let near_window = input.compaction == CompactionDisposition::Eligible
+        && input.reducible_message_bytes > 0
+        && input.context_window.is_some_and(|window| {
+            let window = u64::from(window);
+            required_tokens > window.saturating_sub(window / PROACTIVE_COMPACTION_HEADROOM_DIVISOR)
+        });
     // A compatible provider measurement covers the complete prior request.
     // Let a measured fit win before classifying raw byte weights as an
     // irreducible model-window overflow; the byte storage backstop remains
     // independently authoritative.
-    if !exceeds_storage && !exceeds_window {
+    if !exceeds_storage && !exceeds_window && !near_window {
         return ContextPlan::Send { estimate };
     }
 
@@ -157,7 +172,7 @@ pub(crate) fn plan(input: ContextInput) -> ContextPlan {
             reason: ContextRejectReason::Irreducible(constraint),
         };
     }
-    let constraint = match (exceeds_window, exceeds_storage) {
+    let constraint = match (exceeds_window || near_window, exceeds_storage) {
         (true, true) => ContextConstraint::Both,
         (true, false) => ContextConstraint::ModelWindow,
         (false, true) => ContextConstraint::StorageBackstop,
@@ -333,7 +348,7 @@ mod tests {
             reducible_message_bytes: 680_000,
             irreducible_message_bytes: 17_498,
             compatible_input_tokens: None,
-            compaction: CompactionDisposition::Eligible,
+            compaction: CompactionDisposition::AlreadyAttempted,
         }) else {
             panic!("a 730 KB transcript fits a 200k window at four bytes per token")
         };
@@ -342,14 +357,23 @@ mod tests {
 
     #[test]
     fn known_window_exact_fit_sends_and_one_token_over_compacts() {
-        let ContextPlan::Send { estimate } = plan(input(Some(100))) else {
+        // Exact fit is judged without the proactive headroom: a run that
+        // already compacted once sends at the window.
+        let mut attempted = input(Some(100));
+        attempted.compaction = CompactionDisposition::AlreadyAttempted;
+        let ContextPlan::Send { estimate } = plan(attempted) else {
             panic!("exact fit must send")
         };
         assert_eq!(estimate.estimated_input_tokens, 60);
         assert_eq!(estimate.output_reserve_tokens, 40);
         assert_eq!(estimate.context_window, Some(100));
         assert_eq!(estimate.input_bytes, bytes(60));
-        let ContextPlan::Compact { reason, target, .. } = plan(input(Some(99))) else {
+        let ContextPlan::Compact {
+            estimate,
+            reason,
+            target,
+        } = plan(input(Some(99)))
+        else {
             panic!("one token over must compact")
         };
         assert_eq!(reason, ContextConstraint::ModelWindow);
@@ -390,9 +414,47 @@ mod tests {
             context_window: Some(150),
             ..request
         }));
-        assert_send(plan(ContextInput {
+        // 200 tokens required of a 200 window: inside the window but not the
+        // proactive headroom, so an eligible run compacts first...
+        assert_compact(plan(ContextInput {
             context_window: Some(200),
             ..request
+        }));
+        // ...and sends once the window leaves ten percent free.
+        assert_send(plan(ContextInput {
+            context_window: Some(223),
+            ..request
+        }));
+    }
+
+    #[test]
+    fn eligible_runs_compact_proactively_inside_the_last_tenth_of_the_window() {
+        // 60 input + 40 output = 100 required. Headroom on a 110 window is
+        // 11, so 100 > 99 compacts while 100 <= 108 on a 120 window sends.
+        let eligible = input(Some(110));
+        let ContextPlan::Compact { reason, target, .. } = plan(eligible) else {
+            panic!("an eligible run inside the headroom must compact")
+        };
+        assert_eq!(reason, ContextConstraint::ModelWindow);
+        assert_eq!(target.max_reducible_input_tokens, Some(30));
+        assert_send(plan(input(Some(120))));
+        // Only a first-chance prompt run is held to the headroom.
+        for disposition in [
+            CompactionDisposition::AlreadyAttempted,
+            CompactionDisposition::BetweenRunsOnly,
+            CompactionDisposition::Unsupported,
+            CompactionDisposition::Summarizing,
+        ] {
+            assert_send(plan(ContextInput {
+                compaction: disposition,
+                ..eligible
+            }));
+        }
+        // Nothing reducible: sending is the only option short of rejecting.
+        assert_send(plan(ContextInput {
+            reducible_message_bytes: 0,
+            irreducible_message_bytes: bytes(40),
+            ..eligible
         }));
     }
 
