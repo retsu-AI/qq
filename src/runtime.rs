@@ -779,11 +779,17 @@ impl RuntimeFactory {
             ProviderAccess::Http(access)
                 if matches!(access.auth(), HttpCredential::OpenAiCodex { .. })
         );
-        let (cache_read_usage, cache_write_usage) = match api {
+        // Explicit cache breakpoints exist only where the wire has them: the
+        // Anthropic Messages and Bedrock Converse codecs mark the system
+        // prompt, the last tool, and the last message block. OpenAI and
+        // Google cache the prefix implicitly and expose no control.
+        let (cache_read_usage, cache_write_usage, cache_control) = match api {
             ProviderApi::OpenAiResponses
             | ProviderApi::OpenAiChatCompletions
-            | ProviderApi::GoogleGenerateContent => (true, false),
-            ProviderApi::AnthropicMessages | ProviderApi::BedrockConverse => (true, true),
+            | ProviderApi::GoogleGenerateContent => (true, false, CapabilitySupport::Unsupported),
+            ProviderApi::AnthropicMessages | ProviderApi::BedrockConverse => {
+                (true, true, CapabilitySupport::Native)
+            }
         };
         let credential_profile = match access {
             ProviderAccess::Http(access) => match access.auth() {
@@ -821,7 +827,7 @@ impl RuntimeFactory {
                 reasoning_effort: CapabilitySupport::Unsupported,
             },
             prompt_cache: PromptCacheCapabilities {
-                control: CapabilitySupport::Unsupported,
+                control: cache_control,
                 cache_read_usage,
                 cache_write_usage,
             },
@@ -3579,6 +3585,7 @@ mod tests {
         assert_eq!(bedrock.credential_profile.as_deref(), Some("aws-work"));
         assert!(bedrock.prompt_cache.cache_read_usage);
         assert!(bedrock.prompt_cache.cache_write_usage);
+        assert_eq!(bedrock.prompt_cache.control, CapabilitySupport::Native);
     }
 
     #[test]

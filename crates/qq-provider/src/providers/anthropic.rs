@@ -368,11 +368,27 @@ pub(crate) fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
     )
 }
 
+/// Prompt-cache breakpoints. Anthropic caches the request prefix up to each
+/// marked block, so three markers cover the whole stable prefix: the system
+/// prompt, the last tool declaration (tools precede the system prompt in the
+/// cached order), and the last message block, which the next turn's request
+/// extends rather than rewrites. Every reference harness (Codex via the
+/// server, pi, fx, OpenCode) places the same three; without them a long
+/// transcript is re-processed uncached on every turn.
+#[derive(Serialize, Clone, Copy)]
+struct CacheControl {
+    r#type: &'static str,
+}
+
+const EPHEMERAL: CacheControl = CacheControl {
+    r#type: "ephemeral",
+};
+
 #[derive(Serialize)]
 pub(crate) struct MessagesRequest<'a> {
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<Text<'a>>,
+    system: Option<[AnthropicBlock<'a>; 1]>,
     messages: Vec<AnthropicMessage<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool<'a>>,
@@ -382,15 +398,30 @@ pub(crate) struct MessagesRequest<'a> {
 
 impl<'a> From<&'a ModelRequest> for MessagesRequest<'a> {
     fn from(request: &'a ModelRequest) -> Self {
+        let mut tools: Vec<AnthropicTool<'a>> =
+            request.tools().iter().map(AnthropicTool::from).collect();
+        if let Some(last) = tools.last_mut() {
+            last.cache_control = Some(EPHEMERAL);
+        }
+        let last_message = request.messages().len().checked_sub(1);
+        let messages = request
+            .messages()
+            .iter()
+            .enumerate()
+            .map(|(index, message)| {
+                AnthropicMessage::from_message(message, Some(index) == last_message)
+            })
+            .collect();
         Self {
             model: request.model(),
-            system: request.system().map(Text),
-            messages: request
-                .messages()
-                .iter()
-                .map(AnthropicMessage::from)
-                .collect(),
-            tools: request.tools().iter().map(AnthropicTool::from).collect(),
+            system: request.system().map(|system| {
+                [AnthropicBlock::Text {
+                    text: Text(system),
+                    cache_control: Some(EPHEMERAL),
+                }]
+            }),
+            messages,
+            tools,
             max_tokens: request.max_output_tokens(),
             stream: true,
         }
@@ -402,6 +433,8 @@ struct AnthropicTool<'a> {
     name: &'a str,
     description: &'a str,
     input_schema: &'a RawValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 impl<'a> From<&'a ToolSpec> for AnthropicTool<'a> {
@@ -410,6 +443,7 @@ impl<'a> From<&'a ToolSpec> for AnthropicTool<'a> {
             name: tool.name(),
             description: tool.description(),
             input_schema: tool.input_schema(),
+            cache_control: None,
         }
     }
 }
@@ -417,17 +451,18 @@ impl<'a> From<&'a ToolSpec> for AnthropicTool<'a> {
 #[derive(Serialize)]
 struct AnthropicMessage<'a> {
     role: AnthropicRole,
-    content: AnthropicContent<'a>,
+    content: Vec<AnthropicBlock<'a>>,
 }
 
-impl<'a> From<&'a Message> for AnthropicMessage<'a> {
-    fn from(message: &'a Message) -> Self {
-        // A single text block serializes as a plain string so tool-less
-        // requests keep their existing wire shape.
-        let content = match message.content() {
-            [ContentBlock::Text { text }] => AnthropicContent::Text(Text(text)),
-            blocks => AnthropicContent::Blocks(blocks.iter().map(AnthropicBlock::from).collect()),
-        };
+impl<'a> AnthropicMessage<'a> {
+    /// The message as wire blocks; the last block of the request's final
+    /// message carries the cache breakpoint.
+    fn from_message(message: &'a Message, breakpoint: bool) -> Self {
+        let mut content: Vec<AnthropicBlock<'a>> =
+            message.content().iter().map(AnthropicBlock::from).collect();
+        if breakpoint && let Some(last) = content.last_mut() {
+            last.mark_cache_control();
+        }
         Self {
             role: match message.role() {
                 Role::User => AnthropicRole::User,
@@ -439,34 +474,46 @@ impl<'a> From<&'a Message> for AnthropicMessage<'a> {
 }
 
 #[derive(Serialize)]
-#[serde(untagged)]
-enum AnthropicContent<'a> {
-    Text(Text<'a>),
-    Blocks(Vec<AnthropicBlock<'a>>),
-}
-
-#[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicBlock<'a> {
     Text {
         text: Text<'a>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolUse {
         id: &'a str,
         name: &'a str,
         input: &'a RawValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolResult {
         tool_use_id: &'a str,
         content: Text<'a>,
         is_error: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
+}
+
+impl AnthropicBlock<'_> {
+    fn mark_cache_control(&mut self) {
+        match self {
+            Self::Text { cache_control, .. }
+            | Self::ToolUse { cache_control, .. }
+            | Self::ToolResult { cache_control, .. } => *cache_control = Some(EPHEMERAL),
+        }
+    }
 }
 
 impl<'a> From<&'a ContentBlock> for AnthropicBlock<'a> {
     fn from(block: &'a ContentBlock) -> Self {
         match block {
-            ContentBlock::Text { text } => Self::Text { text: Text(text) },
+            ContentBlock::Text { text } => Self::Text {
+                text: Text(text),
+                cache_control: None,
+            },
             ContentBlock::ToolCall {
                 id,
                 name,
@@ -475,6 +522,7 @@ impl<'a> From<&'a ContentBlock> for AnthropicBlock<'a> {
                 id,
                 name,
                 input: arguments,
+                cache_control: None,
             },
             ContentBlock::ToolResult {
                 call_id,
@@ -484,6 +532,7 @@ impl<'a> From<&'a ContentBlock> for AnthropicBlock<'a> {
                 tool_use_id: call_id,
                 content: Text(content),
                 is_error: *is_error,
+                cache_control: None,
             },
         }
     }
@@ -1374,8 +1423,10 @@ mod tests {
             json!({
                 "model": "claude-test",
                 "messages": [
-                    {"role": "user", "content": "ping"},
-                    {"role": "assistant", "content": "pong"}
+                    {"role": "user", "content": [{"type": "text", "text": "ping"}]},
+                    {"role": "assistant", "content": [
+                        {"type": "text", "text": "pong", "cache_control": {"type": "ephemeral"}}
+                    ]}
                 ],
                 "max_tokens": 321,
                 "stream": true
@@ -1436,7 +1487,7 @@ mod tests {
             json!({
                 "model": "claude-test",
                 "messages": [
-                    {"role": "user", "content": "read the config"},
+                    {"role": "user", "content": [{"type": "text", "text": "read the config"}]},
                     {"role": "assistant", "content": [
                         {"type": "text", "text": "Reading it now."},
                         {"type": "tool_use", "id": "toolu_1", "name": "read_file",
@@ -1444,12 +1495,14 @@ mod tests {
                     ]},
                     {"role": "user", "content": [
                         {"type": "tool_result", "tool_use_id": "toolu_1",
-                         "content": "(config)", "is_error": false}
+                         "content": "(config)", "is_error": false,
+                         "cache_control": {"type": "ephemeral"}}
                     ]}
                 ],
                 "tools": [
                     {"name": "read_file", "description": "Reads one file",
-                     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}}
+                     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}},
+                     "cache_control": {"type": "ephemeral"}}
                 ],
                 "max_tokens": 128,
                 "stream": true
@@ -1458,16 +1511,64 @@ mod tests {
     }
 
     #[test]
-    fn maps_the_system_prompt_to_the_native_system_field() {
+    fn maps_the_system_prompt_to_a_cached_native_system_block() {
         let request = ModelRequest::new("claude-test", vec![Message::user("ping")], 64)
             .with_system("You are QQ.");
         let body = serde_json::to_value(MessagesRequest::from(&request)).unwrap();
-        assert_eq!(body["system"], "You are QQ.");
-        assert_eq!(body["messages"][0]["content"], "ping");
+        assert_eq!(
+            body["system"],
+            json!([{"type": "text", "text": "You are QQ.", "cache_control": {"type": "ephemeral"}}])
+        );
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([{"type": "text", "text": "ping", "cache_control": {"type": "ephemeral"}}])
+        );
 
         let without = ModelRequest::new("claude-test", vec![Message::user("ping")], 64);
         let body = serde_json::to_value(MessagesRequest::from(&without)).unwrap();
         assert!(body.get("system").is_none());
+    }
+
+    #[test]
+    fn cache_breakpoints_mark_exactly_the_system_last_tool_and_last_block() {
+        // Anthropic allows four breakpoints per request; QQ spends three on
+        // the stable prefix and leaves the rest of the transcript unmarked so
+        // consecutive turns extend one cached prefix.
+        let request = ModelRequest::new(
+            "claude-test",
+            vec![
+                Message::user("one"),
+                Message::assistant("two"),
+                Message::new(
+                    Role::User,
+                    vec![
+                        ContentBlock::Text {
+                            text: "three".to_owned(),
+                        },
+                        ContentBlock::Text {
+                            text: "four".to_owned(),
+                        },
+                    ],
+                ),
+            ],
+            64,
+        )
+        .with_system("sys")
+        .with_tools(vec![
+            ToolSpec::new("a", "A", json!({"type": "object"})),
+            ToolSpec::new("b", "B", json!({"type": "object"})),
+        ]);
+        let body = serde_json::to_value(MessagesRequest::from(&request)).unwrap();
+        let marked = |value: &serde_json::Value| value.get("cache_control").is_some();
+        assert!(marked(&body["system"][0]));
+        assert!(!marked(&body["tools"][0]));
+        assert!(marked(&body["tools"][1]));
+        assert!(!marked(&body["messages"][0]["content"][0]));
+        assert!(!marked(&body["messages"][1]["content"][0]));
+        assert!(!marked(&body["messages"][2]["content"][0]));
+        assert!(marked(&body["messages"][2]["content"][1]));
+        let total = body.to_string().matches("\"cache_control\"").count();
+        assert_eq!(total, 3);
     }
 
     #[tokio::test]
