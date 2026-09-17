@@ -57,6 +57,13 @@ sections, `docs/adr/README.md`, `docs/README.md`, `docs/plans/README.md`,
 
 ## Entries
 
+### F14 shared CI request — 2026-09-16
+
+Root approves `.github/workflows/ci.yml` and a CI-only exact-test helper for
+ENG-784: repair five stale Windows delegation selectors and fail closed when
+an intended case does not execute. No runtime or dependency changes. Evidence
+and native qualification belong to `harness-f14-ci.md`.
+
 ### 2026-09-08 — ROOT-1 docs system
 
 Created `docs/adr/` (template, index, ten backfilled ADRs with code anchors and
