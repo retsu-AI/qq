@@ -313,13 +313,11 @@ These are not gaps. They are deliberately outside QQ and should stay there.
 
 ## Gaps A Supervisor Currently Works Around
 
-Each of these is a generic QQ improvement that local, CI, and evaluation
-users also benefit from. They are tracked as the headless-contract tranche
-(HC1–HC4) in
-[`../plans/speed-first-extensible-agent-harness.md`](../plans/speed-first-extensible-agent-harness.md).
-CLI parsing and schema compilation stay off the run hot path. HC1 also
-changes shared limit types and startup ownership; HC3 adds opt-in core
-validation and repair turns, with bounded work and measured performance.
+Each of these was a generic QQ improvement that local, CI, and evaluation
+users also benefit from. All four shipped (HC1 #30, HC2 `893e582`, HC3 #33,
+HC4 #34); the table below records what each closed. CLI parsing and schema
+compilation stay off the run hot path; HC3's validation and repair turns are
+opt-in, bounded, and measured.
 
 | Gap | Today | Intended | Task |
 | --- | --- | --- | --- |

@@ -4,7 +4,7 @@
 **Date:** 2026-09-11
 **Deciders:** speed-first plan H21 (D9)
 **Implements:** [`architecture.md` § Persistence](../design/architecture.md#persistence),
-[`speed-first-extensible-agent-harness.md` § D9](../plans/speed-first-extensible-agent-harness.md)
+speed-first § D9 (store identity, settlement, and error consolidation; collapsed after Phase 6, see `git log -S"D9 —" -- docs/plans`)
 
 ## Context
 

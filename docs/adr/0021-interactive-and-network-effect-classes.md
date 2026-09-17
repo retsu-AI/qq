@@ -1,6 +1,6 @@
 # ADR-0021 — `Interactive` and `Network` effect classes: a question is a hold, not a permission; a fetch is authority over the outside, not the workspace
 
-**Status:** Proposed (`Interactive` shipped in T8, `Network` in T9)
+**Status:** Accepted (`Interactive` merged in #49, `Network` in #50)
 **Date:** 2026-09-15
 **Deciders:** tool-layer plan T8/T9
 **Implements:** [`tool-layer.md` § D7](../plans/tool-layer.md#d7--fetch-ask_user-view_image-select_tools-t8-t9-t11),

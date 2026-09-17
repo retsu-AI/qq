@@ -24,17 +24,11 @@
   `@` mentions, approvals, MCP and embedded hosts.
 - [`transcript.md`](design/transcript.md), [`theme.md`](design/theme.md) —
   TUI rendering.
-- [`harness-audit-2026-08.md`](design/harness-audit-2026-08.md) — reference
-  audit of Codex, OpenCode, Pi, fx, and the Hermes boundary (research; does
-  not change as work ships).
-- [`harness-catalog-2026-09.md`](design/harness-catalog-2026-09.md) — deep
-  per-feature catalog of the same harnesses (tools, bounds, shell safety,
-  input ergonomics) against QQ, with ranked gaps and differentiators
-  (research; motivates `plans/tool-layer.md`).
 - [`harness-scale-audit-2026-09-16.md`](design/harness-scale-audit-2026-09-16.md)
-  — current-source reliability audit and comparative capability matrix;
-  reproduced context/budget failures, core versus adapter placement, proposed
-  priorities, and performance/quality acceptance.
+  — reference audit of Codex, OpenCode, Pi, and fx against QQ: reliability
+  findings (F01–F28), comparative capability matrix, core versus adapter
+  placement, and acceptance criteria (research; supersedes the August audit
+  and September catalog).
 
 ## Decisions — `adr/`
 

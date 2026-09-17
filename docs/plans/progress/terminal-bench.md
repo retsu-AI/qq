@@ -6,7 +6,7 @@ dated entries appended below, newest last.
 
 Phases 1–5 (durable headless run, authoritative context, task-completion
 contract, linear/fair streaming R4, resolved model and spend R5) are complete
-and qualified; receipts are in the plan. Remaining work is evaluation-gated.
+and qualified; receipts are in Git history (the plan collapsed to its open items in #66). Remaining work is evaluation-gated.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |

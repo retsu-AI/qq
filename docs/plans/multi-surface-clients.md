@@ -6,9 +6,8 @@ Status: approved for Phases 1–2 on 2026-09-10. Shipped: W1 (transport-agnostic
 (ADR-0015), S4 remote exposure with TLS (ADR-0016), W3 multi-server model, S5,
 S6, then the U/D/M surfaces. Ledger:
 [`progress/multi-surface-clients.md`](./progress/multi-surface-clients.md).
-The "Current state" and "Gaps" sections below describe the repository as of
-2026-09-10, when the plan was written; items marked *(shipped)* have since
-closed.
+Shipped slices are one-line pointers; their design is in `design/` and the
+ledger receipts.
 
 This plan delivers a web app, a desktop app, and (later) a mobile app that
 drive the same agent harness the TUI drives today, and lets one client attach
@@ -36,44 +35,14 @@ Decisions to record before code (numbers reserved in `progress/root.md`):
 
 ## What Exists
 
-The backend already provides what remote clients need; the gaps are the
-server's remote readiness and the fact that client state lives in the TUI.
-
-Reusable as-is:
-
-- Versioned HTTP command API, workspace snapshot, capabilities, model catalog
-  (`crates/qq-server/src/lib.rs`, `docs/design/protocol.md`; `PROTOCOL_VERSION`
-  was 16 when this plan was written and is 20 as of v0.1.0, fixtures under
-  `crates/qq-protocol/tests/fixtures/v<N>/`).
-- Cursor-addressed SSE with gapless replay and unbounded retention
-  (ADR-0006). Moving between devices needs no client-state transfer.
-- Idempotent commands keyed by `command_id`.
-- Tool approvals as events with shell/edit previews.
-- `qq-protocol` depends only on `serde`, `getrandom`, `thiserror`, and
-  `qq-reasoning`: it compiles for `wasm32`.
-- The `ClientPort` seam (`crates/qq-client/src/port.rs`).
-- The reducer and client model (now `crates/qq-client/src/state.rs` and
-  `state/reduce.rs` after W2; originally TUI-private) depend on `std` and
-  `qq_protocol` only.
-- `SseDecoder` and cursor validation in `qq-client` are transport-agnostic;
-  the reconnect loop in `interactive.rs` is bound to `tokio::time` and native
-  `reqwest`.
-- `CONTEXT.md` already defines Client, Client Enrollment, Pairing Code,
-  Client Credential, Server Profile, Multi-Server Overview, Client Cache,
-  Workspace Root, and Workspace Catalog.
-
-Gaps:
-
-1. Non-loopback bind is rejected in `qq-server::reserve`,
-   `qq_protocol::LocalServerConnection::new`, and `MetadataFile::into_connection`.
-2. One shared bearer token per host; no per-client identity or revocation.
-3. *(shipped, S3)* No CORS; axum is built without `tower-http`.
-4. *(shipped, S1)* `ServerInfo` carries no stable identity, so a client cannot
-   key a server profile across endpoint changes.
-5. No workspace listing; clients must know a filesystem path.
-6. *(shipped, W1/W2)* Client state and reducer are TUI-private; `qq-client`
-   transport is native-only.
-7. `docs/design/architecture.md` and `product.md` defer web and mobile.
+The backend provides what remote clients need: a versioned HTTP command API
+with snapshot, capabilities, and model catalog; cursor-addressed SSE with
+gapless replay (ADR-0006); idempotent commands; approval events with
+previews; a `wasm32`-capable `qq-protocol` and `qq-client` with the shared
+reducer in `qq-client::state`; stable `ServerId`; CORS. The remaining gaps are
+the server's remote readiness: non-loopback bind is rejected, there is one
+shared bearer token per host with no per-client identity or revocation, and
+there is no workspace listing.
 
 One hard constraint follows from hosting the web app separately: a page served
 over HTTPS cannot `fetch` a plain-HTTP non-loopback origin. Every remote
@@ -81,6 +50,7 @@ server a browser talks to must present TLS. The default recipe is
 `tailscale serve` in front of a loopback `qq serve`; native TLS is the
 fallback for non-Tailscale networks. Tauri shells are not subject to this
 rule and may reach plain-HTTP LAN servers through the host HTTP client.
+
 
 ## Target Shape
 
@@ -136,49 +106,13 @@ mobile. Phases 1 and 2 are independent and may run in parallel worktrees.
 
 ### W1 — Transport-agnostic `qq-client`
 
-**Inputs:** none.
-**Owned paths:** `crates/qq-client/`, `crates/qq-protocol/src/local.rs`,
-`crates/qq-tui/` call sites only.
-**Gates:** none (no hot path).
-**Acceptance:**
+Shipped in #15: `qq-client` builds for `wasm32` behind a `wasm` feature; loopback checks moved to discovery. See `architecture.md` § Repository Layout (`qq-client`) and the ledger receipt.
 
-- `SessionClient`, `SseDecoder`, cursor validation, and the reconnect policy
-  compile without `tokio` or native `reqwest` behind a `native` cargo feature
-  (default on) and a `wasm` feature.
-- `ServerConnection { base_url, credential }` permits `https://` and
-  non-loopback; the loopback and port-zero checks move to the discovery path
-  (`qq-server::discover`) and to `LocalServerConnection`, which becomes a
-  constructor of `ServerConnection`.
-- `cargo build -p qq-client --target wasm32-unknown-unknown --no-default-features --features wasm`
-  is green in CI (root request for the workflow job and the `wasm32` target
-  in `rust-toolchain.toml`).
-- `SseDecoder` tests run under `wasm-bindgen-test`; existing `qq-client` and
-  `qq-tui` tests pass unchanged.
-
-**Docs:** `docs/design/architecture.md` crate paragraph for `qq-client`
-(root request); ADR-0017 spike result recorded in the ledger.
 
 ### W2 — Extract the reducer
 
-**Inputs:** W1.
-**Owned paths:** `crates/qq-client/src/state.rs` and `state/`,
-`crates/qq-tui/src/app.rs`, `app/reduce.rs`, `model.rs`.
-**Gates:** `cargo bench -p qq-tui --bench render` (no regression; record
-before and after per `docs/runbooks/perf-recording.md`).
-**Acceptance:**
+Shipped in #19: the reducer and client model live in `qq-client::state`; the TUI keeps only terminal-specific state. See the ledger receipt.
 
-- `SessionStore`, `SessionView`, `LiveStatus`, `RunStats`, `Reasoning`,
-  `Need`, `Group`, pending-intent tracking, and every reducer arm live in
-  `qq_client::state`; the TUI keeps rendering-only state.
-- The `terminal_safe_character` dependency becomes a caller-supplied text
-  sanitizer.
-- A fixture-replay test feeds every `tests/fixtures/v17/*.json` event through
-  the reducer and compares the projection to a checked-in golden; the test
-  runs natively and on `wasm32`.
-- TUI behavior tests pass unchanged.
-
-**Docs:** `docs/design/architecture.md` crate paragraphs for `qq-client` and
-`qq-tui` (root request).
 
 ### W3 — Multi-server client model
 
@@ -202,20 +136,8 @@ before and after per `docs/runbooks/perf-recording.md`).
 
 ### S1 — Stable server identity
 
-**Inputs:** none.
-**Owned paths:** `crates/qq-server/`, `crates/qq-protocol/`,
-`crates/qq-core/src/store*` (metadata row only), `src/runtime.rs`.
-**Gates:** none.
-**Acceptance:**
+Shipped in #14: `ServerInfo.server_id` is a stable per-store identity. See `protocol.md` and the ledger receipt.
 
-- A `ServerId` (16 random bytes, generated once) persists in store metadata
-  and survives restarts; `ServerInfo` gains `server_id` and `display_name`
-  (configured or hostname).
-- `PROTOCOL_VERSION` 16 → 17 with fixtures; `docs/design/protocol.md`
-  changelog entry. Discovery still matches.
-
-**Docs:** `docs/design/protocol.md`; `CONTEXT.md` gains *Server Identity*
-if reviewers want the term.
 
 ### S2 — Client enrollment
 
@@ -243,19 +165,8 @@ hash lookup per request; measure).
 
 ### S3 — CORS
 
-**Inputs:** none.
-**Owned paths:** `crates/qq-server/`.
-**Gates:** none.
-**Acceptance:**
+Shipped in #16: configurable CORS allowlist in `qq-server`. See `architecture.md` § Local And Remote Networking and the ledger receipt.
 
-- Hand-rolled middleware (no `tower-http`): with a non-empty
-  `allowed_origins`, preflights allow `Authorization`, `Content-Type`,
-  `Last-Event-ID`; responses carry `Vary: Origin` and answer
-  `Access-Control-Request-Private-Network`. Empty list → no CORS headers and
-  no behavior change.
-- Tests: allowed origin, denied origin, preflight on the SSE route.
-
-**Docs:** `docs/design/protocol.md` CORS contract.
 
 ### S4 — Remote exposure
 

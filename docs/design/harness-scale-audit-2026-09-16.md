@@ -2,24 +2,17 @@
 
 Research snapshot: 2026-09-16, QQ `7956e8e5570eeec0be636eb554893bd6088e26f1`.
 This document records an audit and proposes work; it does not authorize or
-claim implementation. It updates the current-state comparison in the
-[August audit](harness-audit-2026-08.md) and
-[September catalog](harness-catalog-2026-09.md), which remain historical records.
+claim implementation. It supersedes the August 2026 reference audit and the
+September 2026 per-feature catalog (both deleted; see Git history before
+`445d740`).
 
-Implementation status is separate from the findings at the pinned snapshot.
-Rechecked 2026-09-16 against fetched main `1b40236`: F01 merged as `c466605`
-([#55](https://github.com/retsu-AI/qq/pull/55)); F02 merged as `1b40236`
-([#57](https://github.com/retsu-AI/qq/pull/57)). Context estimator/summarizer
-corrections merged as `d4fd971` ([#56](https://github.com/retsu-AI/qq/pull/56));
-this does not establish completion of every context finding. F14 is in review
-in [#63](https://github.com/retsu-AI/qq/pull/63), with nine native Windows exact
-tests and final-head CI passing; it is not merged. Original findings below
-remain historical evidence, not a claim these repaired defects persist on main.
-The separate context-usability ledger describes C2 as proactive compaction and
-mid-run stale-read stubbing, explicitly deferring full mid-run summarization.
-That narrower work must not be counted as full closure of F03. C4 addresses
-provider cache breakpoints, not every generation/cache control in F17; its
-unmerged implementation likewise must not be presented as shipped support.
+Implementation status lives in the ledgers, not here. At the time of writing
+F01 (#55), F02 (#57), F14 (#63), and the context-usability stack C1–C6
+(#56, #58, #59, #61, #64) had merged. C2 ships proactive compaction and
+mid-run stale-read stubbing and explicitly defers full mid-run summarization,
+so it is not full closure of F03; C4 ships provider cache breakpoints, not
+every generation/cache control in F17. Findings below are evidence at the
+pinned snapshot, not a claim that repaired defects persist on `main`.
 
 ## Assessment
 

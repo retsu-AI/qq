@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-09-16
 **Deciders:** lead, docs cleanup after Phase 6
-**Implements:** [`speed-first-extensible-agent-harness.md` § Goals](../plans/speed-first-extensible-agent-harness.md#goals)
+**Implements:** [`architecture.md` § Extension Contract](../design/architecture.md#extension-contract)
 ("pleasant to embed and extend"), [`architecture.md` § Repository Layout](../design/architecture.md#repository-layout)
 
 ## Context
@@ -84,5 +84,5 @@ only in-tree consumer is the root looks unused from inside the workspace.
 ## Evidence / references
 
 - `crates/qq-core/src/lib.rs` crate-root `pub use` block.
-- `docs/design/architecture.md` § Crate Ownership; `docs/plans/speed-first-extensible-agent-harness.md` § Goals and § Ownership Within The Existing Crates.
+- `docs/design/architecture.md` § Crate Ownership and § Extension Contract (the crate responsibility table).
 - Audit that prompted this: docs cleanup, 2026-09-16 (ledger `progress/root.md`).
