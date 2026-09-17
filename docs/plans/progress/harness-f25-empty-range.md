@@ -2,7 +2,7 @@
 
 | Slice | Goal | Status | Branch / PR | Inputs |
 | --- | --- | --- | --- | --- |
-| ENG-783 / F25 | Reject nonexistent attachment lines without a worker panic | In progress | `fix/eng-783-empty-attachment-range` | main `83446d0` |
+| ENG-783 / F25 | Reject nonexistent attachment lines without a worker panic | In review | [PR #67](https://github.com/retsu-AI/qq/pull/67) | main `83446d0` |
 
 Own `qq-core/src/input.rs`, focused session tests, attachment documentation,
 and this ledger. Public seam: SessionRuntime commands/events and requests to
@@ -43,3 +43,6 @@ workspace gates precede PR. No new allocation, I/O, dependency, or timing gate.
 - No named performance gate or boundary/schema change; one predicate correction,
   no added allocation, I/O, dependency, or loop. No measured speedup claimed.
 - Evidence: `/tmp/qq-f25-{red,release,clippy,build,workspace}.log`; PR pending.
+
+- Implementation committed as `5a5e604`; opened PR #67. Local acceptance is
+  green; hosted CI and merge remain separate gates. No self-merge.
