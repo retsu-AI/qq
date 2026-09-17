@@ -74,6 +74,15 @@ sequence. `limits.rs` owns stream budgets and checked byte counters.
 - `UsageOnce` and checked cached-input subtraction;
 - test-only exact-endpoint client selection.
 
+Prompt-cache breakpoints are a codec concern. The Anthropic Messages codec
+marks three blocks `cache_control: ephemeral` (the system prompt, the last
+tool declaration, the last block of the last message) so consecutive turns
+extend one cached prefix; the Bedrock Converse codec places the equivalent
+`cachePoint` blocks, but only for the Anthropic model family, because Converse
+rejects the block for families without prompt caching. OpenAI and Google
+cache the prefix implicitly. `ResolvedModel.prompt_cache.control` is `Native`
+exactly for the two codecs that mark.
+
 Each adapter still owns its wire request/response schemas, protocol headers,
 error names, content-type exception, and streaming state machine. This is
 deliberate composition, not a Template Method. A `ProtocolCodec` super-trait was
