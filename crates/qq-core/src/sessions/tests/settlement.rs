@@ -2257,7 +2257,7 @@ async fn reservation_is_publicly_queued_exclusive_and_cancel_wins_before_start()
 
     assert!(
         store
-            .start_reserved_run(&claimed, test_prepared_audit(&claimed))
+            .start_reserved_run(&claimed, test_prepared_audit(&claimed), None)
             .await
             .unwrap()
             .is_none()

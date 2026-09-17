@@ -364,6 +364,82 @@ async fn prompts_below_the_context_threshold_never_auto_compact() {
     assert_eq!(harness.requests.lock().unwrap().len(), 2);
 }
 
+/// F05: the prompt that triggered automatic compaction is retried from the
+/// stored placeholder, but its attachment must be the bytes the first
+/// attempt read, not a re-read of a file that changed while the summary ran.
+#[tokio::test]
+async fn an_over_budget_prompt_keeps_its_first_attachment_bytes_across_auto_compaction() {
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text(over_threshold_output()),
+        AutoCompactScript::Text(valid_summary("the summary")),
+        AutoCompactScript::Text("done".to_owned()),
+        AutoCompactScript::Text("done again".to_owned()),
+    ])
+    .await;
+    std::fs::write(harness.workspace_path.join("a.txt"), "ALPHA_ORIGINAL\n").unwrap();
+    let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(first)).await;
+
+    // Over budget with an attachment: the claim resolves the file, plans
+    // Compact, summarizes, then reloads the placeholder and retries.
+    let queued = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id: harness.session_id,
+                input: vec![
+                    InputPart::text("y".repeat(MAX_PROMPT_BYTES - 64)),
+                    InputPart::WorkspaceFile {
+                        path: "a.txt".to_owned(),
+                        expected_hash: None,
+                        range: None,
+                    },
+                ],
+                limits: qq_protocol::RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::PromptQueued { run_id: prompt, .. } = queued.outcome else {
+        panic!("unexpected receipt")
+    };
+    // Change the file as soon as compaction starts, before the retry.
+    let observed = collect_until(
+        &mut harness.events,
+        |event| matches!(event, SessionEvent::RunStarted { run_id, .. } if *run_id != prompt),
+    )
+    .await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunStarted { run_id, .. } if *run_id != prompt
+    )));
+    std::fs::write(harness.workspace_path.join("a.txt"), "ALPHA_MODIFIED\n").unwrap();
+    collect_until(&mut harness.events, finished_for(prompt)).await;
+
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        let after = request_texts(&requests[2]);
+        let sent = after.last().unwrap();
+        assert!(sent.contains("ALPHA_ORIGINAL"), "{sent}");
+        assert!(!sent.contains("ALPHA_MODIFIED"), "{sent}");
+    }
+
+    // And the follow-up reconstructs the same bytes from the store.
+    let third = queue_prompt(&harness.runtime, harness.session_id, "after".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(third)).await;
+    let requests = harness.requests.lock().unwrap();
+    let texts = request_texts(&requests[3]);
+    let replayed = texts
+        .iter()
+        .find(|text| text.contains("<attached-file path=\"a.txt\""))
+        .expect("the attached prompt is replayed");
+    assert!(replayed.contains("ALPHA_ORIGINAL"), "{replayed}");
+}
+
 #[tokio::test]
 async fn storage_overflow_compacts_before_the_queued_prompt() {
     let mut harness = auto_compact_harness(vec![

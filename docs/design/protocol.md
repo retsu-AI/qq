@@ -645,7 +645,9 @@ must still hash to it. Any violation fails the run before its first provider
 request with an `invalid_command` failure naming the path; the command that
 queued it succeeded. The transcript row (`prompt_queued.message.output`)
 carries the text parts verbatim and each attachment as an `@path` placeholder;
-the model sees the file contents fenced after the text. Attached files are
+the model sees the file contents fenced after the text, and later runs in the
+session see the same bytes from the store (schema 29), not the current file.
+Attached files are
 recorded in the session file state, so a later edit satisfies the
 read-before-write rule without a redundant read. Image parts are not defined in
 this revision; the capability document's `input_parts` lists what a server

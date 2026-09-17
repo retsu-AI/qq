@@ -7,7 +7,7 @@ use crate::sessions::{PersistenceFault, SessionRuntimeError};
 
 /// Current session store schema, stored as `metadata.schema_version`. Bump it
 /// with every migration step appended to `open_database`.
-pub const STORE_SCHEMA_VERSION: u16 = 28;
+pub const STORE_SCHEMA_VERSION: u16 = 29;
 
 /// Suffix of the sibling file whose advisory lock marks the store's owner.
 pub const OWNER_LOCK_SUFFIX: &str = ".lock";
@@ -381,7 +381,7 @@ pub(in crate::sessions) fn open_database(
         }
         Some(
             "10" | "11" | "12" | "13" | "14" | "15" | "16" | "17" | "18" | "19" | "20" | "21"
-            | "22" | "23" | "24" | "25" | "26" | "27" | "28",
+            | "22" | "23" | "24" | "25" | "26" | "27" | "28" | "29",
         ) => {}
         Some(_) => return Err(SessionRuntimeError::CONSTRAINT),
     }
@@ -405,6 +405,7 @@ pub(in crate::sessions) fn open_database(
                 | "26"
                 | "27"
                 | "28"
+                | "29"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -434,6 +435,7 @@ pub(in crate::sessions) fn open_database(
                 | "26"
                 | "27"
                 | "28"
+                | "29"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -462,6 +464,7 @@ pub(in crate::sessions) fn open_database(
                 | "26"
                 | "27"
                 | "28"
+                | "29"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -489,6 +492,7 @@ pub(in crate::sessions) fn open_database(
                 | "26"
                 | "27"
                 | "28"
+                | "29"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -516,6 +520,7 @@ pub(in crate::sessions) fn open_database(
                 | "26"
                 | "27"
                 | "28"
+                | "29"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -552,6 +557,7 @@ pub(in crate::sessions) fn open_database(
                 | "26"
                 | "27"
                 | "28"
+                | "29"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -567,7 +573,20 @@ pub(in crate::sessions) fn open_database(
     }
     if !matches!(
         schema_version.as_deref(),
-        Some("17" | "18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27" | "28")
+        Some(
+            "17" | "18"
+                | "19"
+                | "20"
+                | "21"
+                | "22"
+                | "23"
+                | "24"
+                | "25"
+                | "26"
+                | "27"
+                | "28"
+                | "29"
+        )
     ) {
         let transaction = connection.transaction()?;
         add_preparing_run_storage(&transaction)?;
@@ -581,7 +600,7 @@ pub(in crate::sessions) fn open_database(
     validate_preparing_run_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27" | "28")
+        Some("18" | "19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27" | "28" | "29")
     ) {
         let transaction = connection.transaction()?;
         add_context_occupancy_storage(&transaction)?;
@@ -595,7 +614,7 @@ pub(in crate::sessions) fn open_database(
     validate_context_occupancy_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27" | "28")
+        Some("19" | "20" | "21" | "22" | "23" | "24" | "25" | "26" | "27" | "28" | "29")
     ) {
         let transaction = connection.transaction()?;
         add_run_limits_storage(&transaction)?;
@@ -609,7 +628,7 @@ pub(in crate::sessions) fn open_database(
     validate_run_limits_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("20" | "21" | "22" | "23" | "24" | "25" | "26" | "27" | "28")
+        Some("20" | "21" | "22" | "23" | "24" | "25" | "26" | "27" | "28" | "29")
     ) {
         let transaction = connection.transaction()?;
         add_sessions_spawned_by_tool_call_column(&transaction)?;
@@ -621,7 +640,7 @@ pub(in crate::sessions) fn open_database(
     }
     if !matches!(
         schema_version.as_deref(),
-        Some("21" | "22" | "23" | "24" | "25" | "26" | "27" | "28")
+        Some("21" | "22" | "23" | "24" | "25" | "26" | "27" | "28" | "29")
     ) {
         let transaction = connection.transaction()?;
         add_contract_columns(&transaction)?;
@@ -633,7 +652,7 @@ pub(in crate::sessions) fn open_database(
     }
     if !matches!(
         schema_version.as_deref(),
-        Some("22" | "23" | "24" | "25" | "26" | "27" | "28")
+        Some("22" | "23" | "24" | "25" | "26" | "27" | "28" | "29")
     ) {
         let transaction = connection.transaction()?;
         add_output_truncation_columns(&transaction)?;
@@ -646,7 +665,7 @@ pub(in crate::sessions) fn open_database(
     validate_output_truncation_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("23" | "24" | "25" | "26" | "27" | "28")
+        Some("23" | "24" | "25" | "26" | "27" | "28" | "29")
     ) {
         let transaction = connection.transaction()?;
         add_session_depth_columns(&transaction)?;
@@ -659,7 +678,7 @@ pub(in crate::sessions) fn open_database(
     validate_session_depth_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("24" | "25" | "26" | "27" | "28")
+        Some("24" | "25" | "26" | "27" | "28" | "29")
     ) {
         let transaction = connection.transaction()?;
         add_audit_columns(&transaction)?;
@@ -670,7 +689,10 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_audit_schema(&connection)?;
-    if !matches!(schema_version.as_deref(), Some("25" | "26" | "27" | "28")) {
+    if !matches!(
+        schema_version.as_deref(),
+        Some("25" | "26" | "27" | "28" | "29")
+    ) {
         let transaction = connection.transaction()?;
         add_fast_path_columns(&transaction)?;
         transaction.execute(
@@ -680,7 +702,7 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_fast_path_schema(&connection)?;
-    if !matches!(schema_version.as_deref(), Some("26" | "27" | "28")) {
+    if !matches!(schema_version.as_deref(), Some("26" | "27" | "28" | "29")) {
         let transaction = connection.transaction()?;
         add_tool_call_effect_column(&transaction)?;
         transaction.execute(
@@ -690,7 +712,7 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_tool_call_effect_schema(&connection)?;
-    if !matches!(schema_version.as_deref(), Some("27" | "28")) {
+    if !matches!(schema_version.as_deref(), Some("27" | "28" | "29")) {
         let transaction = connection.transaction()?;
         add_output_contract_columns(&transaction)?;
         transaction.execute(
@@ -700,7 +722,7 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_output_contract_schema(&connection)?;
-    if schema_version.as_deref() != Some("28") {
+    if !matches!(schema_version.as_deref(), Some("28" | "29")) {
         let transaction = connection.transaction()?;
         create_tool_spills_table(&transaction)?;
         transaction.execute(
@@ -710,6 +732,16 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_tool_spills_schema(&connection)?;
+    if schema_version.as_deref() != Some("29") {
+        let transaction = connection.transaction()?;
+        create_attachment_tables(&transaction)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '29' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
+    }
+    validate_attachment_schema(&connection)?;
     debug_assert_eq!(
         connection
             .query_row(
@@ -1595,6 +1627,75 @@ fn validate_tool_spills_schema(connection: &Connection) -> Result<(), SessionRun
         ("omitted_from_line", "INTEGER"),
     ] {
         if column_shape(connection, "tool_spills", column)? != (kind.to_owned(), true, None, 0) {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+    }
+    Ok(())
+}
+
+/// The file bytes a prompt attached, exactly as the model saw them, so a
+/// later run reconstructs the same request after the file changes or
+/// disappears. `message_attachments` has one row per `<attached-file>`
+/// block in prompt order; `attachment_blobs` holds the bytes once per
+/// `(session, digest, window)` so a file attached to several prompts is
+/// stored once. `evicted_at_ms` marks a blob the per-session cap reclaimed;
+/// the row stays so reconstruction renders an explicit evicted block rather
+/// than the bare `@path` placeholder.
+fn create_attachment_tables(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    if has_table(connection, "attachment_blobs")? && has_table(connection, "message_attachments")? {
+        return Ok(());
+    }
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS attachment_blobs (
+                 session_id TEXT NOT NULL,
+                 blob_key TEXT NOT NULL,
+                 content BLOB,
+                 content_bytes INTEGER NOT NULL,
+                 created_at_ms INTEGER NOT NULL,
+                 evicted_at_ms INTEGER,
+                 PRIMARY KEY (session_id, blob_key)
+             );
+             CREATE TABLE IF NOT EXISTS message_attachments (
+                 message_id TEXT NOT NULL,
+                 ordinal INTEGER NOT NULL,
+                 session_id TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 digest TEXT NOT NULL,
+                 blob_key TEXT NOT NULL,
+                 window_start INTEGER,
+                 window_end INTEGER,
+                 window_total INTEGER,
+                 PRIMARY KEY (message_id, ordinal)
+             );
+             CREATE INDEX IF NOT EXISTS message_attachments_session
+                 ON message_attachments(session_id);",
+        )
+        .map_err(|_| SessionRuntimeError::CONSTRAINT)
+}
+
+fn validate_attachment_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    for (column, kind) in [
+        ("session_id", "TEXT"),
+        ("blob_key", "TEXT"),
+        ("content_bytes", "INTEGER"),
+        ("created_at_ms", "INTEGER"),
+    ] {
+        let (shape, not_null, _, _) = column_shape(connection, "attachment_blobs", column)?;
+        if shape != kind || !not_null {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+    }
+    for (column, kind) in [
+        ("message_id", "TEXT"),
+        ("ordinal", "INTEGER"),
+        ("session_id", "TEXT"),
+        ("path", "TEXT"),
+        ("digest", "TEXT"),
+        ("blob_key", "TEXT"),
+    ] {
+        let (shape, not_null, _, _) = column_shape(connection, "message_attachments", column)?;
+        if shape != kind || !not_null {
             return Err(SessionRuntimeError::CONSTRAINT);
         }
     }

@@ -3,6 +3,162 @@
 
 use super::*;
 
+/// One stored `<attached-file>` block of a prompt, in prompt order. `content`
+/// is `None` when the per-session cap reclaimed the bytes.
+struct StoredAttachment {
+    path: String,
+    window: Option<(usize, usize, usize)>,
+    content: Option<String>,
+}
+
+/// Persists the attachments a prompt embedded so later assembly reproduces
+/// the request the model saw. Bytes are stored once per `(session, digest,
+/// window)`; past the per-session cap, the oldest blobs of runs that are no
+/// longer running lose their content, and their rows remain so reconstruction
+/// renders an explicit evicted block.
+pub(super) fn store_message_attachments(
+    transaction: &Connection,
+    session_id: SessionId,
+    message_id: &str,
+    attachments: &[crate::input::ResolvedAttachment],
+    now: u64,
+) -> Result<(), SessionRuntimeError> {
+    let session = session_id.to_string();
+    for (ordinal, attachment) in attachments.iter().enumerate() {
+        let blob_key = match attachment.window {
+            None => attachment.digest.clone(),
+            Some((start, end, _)) => format!("{}:{start}-{end}", attachment.digest),
+        };
+        // `INSERT OR IGNORE` keeps the first copy (and its eviction state):
+        // an evicted blob is not resurrected by a later prompt attaching the
+        // same bytes, which would make the earlier prompt's rendering depend
+        // on the later one.
+        transaction.execute(
+            "INSERT OR IGNORE INTO attachment_blobs(session_id, blob_key, content, content_bytes,
+                                                   created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                session,
+                blob_key,
+                attachment.content.as_bytes(),
+                attachment.content.len() as u64,
+                now,
+            ],
+        )?;
+        let (window_start, window_end, window_total) = match attachment.window {
+            None => (None, None, None),
+            Some((start, end, total)) => (Some(start as u64), Some(end as u64), Some(total as u64)),
+        };
+        transaction.execute(
+            "INSERT INTO message_attachments(message_id, ordinal, session_id, path, digest,
+                                             blob_key, window_start, window_end, window_total)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                message_id,
+                ordinal as u64,
+                session,
+                attachment.path,
+                attachment.digest,
+                blob_key,
+                window_start,
+                window_end,
+                window_total,
+            ],
+        )?;
+    }
+    let held: u64 = transaction.query_row(
+        "SELECT COALESCE(SUM(content_bytes), 0) FROM attachment_blobs
+         WHERE session_id = ?1 AND content IS NOT NULL",
+        [&session],
+        |row| row.get(0),
+    )?;
+    if held > MAX_SESSION_ATTACHMENT_BYTES {
+        let mut excess = held - MAX_SESSION_ATTACHMENT_BYTES;
+        // A blob is reclaimable once no running run's prompt references it.
+        let mut statement = transaction.prepare(
+            "SELECT b.blob_key, b.content_bytes FROM attachment_blobs b
+             WHERE b.session_id = ?1 AND b.content IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM message_attachments a
+                   JOIN messages m ON m.id = a.message_id
+                   JOIN runs r ON r.id = m.run_id
+                   WHERE a.session_id = b.session_id AND a.blob_key = b.blob_key
+                     AND r.status IN ('running', 'preparing', 'queued'))
+             ORDER BY b.created_at_ms ASC, b.blob_key ASC",
+        )?;
+        let candidates = statement
+            .query_map([&session], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        for (key, bytes) in candidates {
+            if excess == 0 {
+                break;
+            }
+            transaction.execute(
+                "UPDATE attachment_blobs SET content = NULL, evicted_at_ms = ?3
+                 WHERE session_id = ?1 AND blob_key = ?2",
+                params![session, key, now],
+            )?;
+            excess = excess.saturating_sub(bytes);
+        }
+    }
+    Ok(())
+}
+
+/// Every stored attachment of the session's prompts, keyed by message id and
+/// in prompt order, with the blob bytes joined in. Sessions without
+/// attachments pay one indexed lookup that returns nothing.
+fn load_session_attachments(
+    transaction: &Connection,
+    session: &str,
+) -> Result<HashMap<String, Vec<StoredAttachment>>, SessionRuntimeError> {
+    let mut statement = transaction.prepare_cached(
+        "SELECT a.message_id, a.path, a.window_start, a.window_end, a.window_total, b.content
+         FROM message_attachments a
+         JOIN attachment_blobs b ON b.session_id = a.session_id AND b.blob_key = a.blob_key
+         WHERE a.session_id = ?1
+         ORDER BY a.message_id, a.ordinal",
+    )?;
+    let rows = statement.query_map([session], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<u64>>(2)?,
+            row.get::<_, Option<u64>>(3)?,
+            row.get::<_, Option<u64>>(4)?,
+            row.get::<_, Option<Vec<u8>>>(5)?,
+        ))
+    })?;
+    let mut attachments: HashMap<String, Vec<StoredAttachment>> = HashMap::new();
+    for row in rows {
+        let (message_id, path, start, end, total, content) = row?;
+        let window = match (start, end, total) {
+            (Some(start), Some(end), Some(total)) => Some((
+                usize::try_from(start).map_err(|_| SessionRuntimeError::CODEC)?,
+                usize::try_from(end).map_err(|_| SessionRuntimeError::CODEC)?,
+                usize::try_from(total).map_err(|_| SessionRuntimeError::CODEC)?,
+            )),
+            (None, None, None) => None,
+            _ => return Err(SessionRuntimeError::CODEC),
+        };
+        let content = match content {
+            None => None,
+            Some(bytes) => Some(String::from_utf8(bytes).map_err(|_| SessionRuntimeError::CODEC)?),
+        };
+        attachments
+            .entry(message_id)
+            .or_default()
+            .push(StoredAttachment {
+                path,
+                window,
+                content,
+            });
+    }
+    Ok(attachments)
+}
+
 pub(super) fn load_message(
     connection: &Connection,
     message_id: MessageId,
@@ -119,8 +275,10 @@ pub(super) fn load_model_context_with_rewrite_status(
     // Prompts in ordinal order, each with its run's status and outcome and its
     // full text: the base `output` plus every streamed chunk in chunk order.
     struct Prompt {
+        message_id: String,
         run_id: String,
         text: String,
+        input_json: Option<String>,
         status: String,
         outcome_json: Option<String>,
     }
@@ -130,7 +288,8 @@ pub(super) fn load_model_context_with_rewrite_status(
                          SELECT text FROM message_chunks
                          WHERE message_id = m.id AND channel = 'output'
                          ORDER BY chunk_ordinal
-                     ) c)
+                     ) c),
+                    m.id, m.input_json
              FROM messages m JOIN runs r ON r.id = m.run_id
              WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
                AND m.role = 'user' AND m.steering = 0
@@ -144,14 +303,17 @@ pub(super) fn load_model_context_with_rewrite_status(
                 text.push_str(&chunks);
             }
             Ok(Prompt {
+                message_id: row.get(5)?,
                 run_id: row.get(0)?,
                 text,
+                input_json: row.get(6)?,
                 status: row.get(2)?,
                 outcome_json: row.get(3)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
+    let mut attachments = load_session_attachments(transaction, &session)?;
 
     // Every committed turn for the session's runs, grouped by run.
     let mut turns: HashMap<String, Vec<(u32, String, bool)>> = HashMap::new();
@@ -249,7 +411,26 @@ pub(super) fn load_model_context_with_rewrite_status(
         )));
     }
     for prompt in prompts {
-        context.push(Message::user(prompt.text));
+        // A prompt whose files were persisted at run start is reassembled
+        // from those bytes, exactly as its run first sent it. Prompts that
+        // never started (or predate schema 29) keep their placeholder text.
+        let text = match attachments.remove(&prompt.message_id) {
+            Some(stored) => {
+                let parts = parse_input_parts(prompt.input_json.as_deref())?;
+                crate::input::render_resolved_prompt(
+                    &crate::input::render_text_parts(&parts),
+                    stored.iter().map(|attachment| {
+                        (
+                            attachment.path.as_str(),
+                            attachment.window,
+                            attachment.content.as_deref(),
+                        )
+                    }),
+                )
+            }
+            None => prompt.text,
+        };
+        context.push(Message::user(text));
         // Reconstruct each run immediately after its prompt rather than
         // following message-row ordinals. Follow-up prompts can be queued
         // while the prior run is active, so its later committed output still

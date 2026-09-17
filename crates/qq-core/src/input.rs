@@ -7,8 +7,14 @@
 //! bounded, optionally hash-checked, and rendered as fenced attachments after
 //! the text. Each attached file is recorded in the session's file state so a
 //! later edit satisfies the read-before-write rule without a redundant read.
+//!
+//! The bytes the model saw are also returned as [`ResolvedAttachment`]s so
+//! the run can persist them when it starts. A later run reconstructs the
+//! prompt from those stored bytes with [`render_file_attachment`], never from
+//! the current file, so the assembled context stays byte-identical to the
+//! request the model actually saw even after the file changes or disappears.
 
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use qq_protocol::{
     InputPart, MAX_INPUT_FILE_BYTES, MAX_RESOLVED_INPUT_BYTES, RunFailureKind, validate_input,
@@ -77,16 +83,48 @@ pub(crate) fn render_text(parts: &[InputPart]) -> String {
     text
 }
 
+/// One file the model saw in a prompt: the contained path as rendered, the
+/// whole-file content hash, the attached window (the whole file when there is
+/// no range), and its bytes. `window` is `(start, end, total)` in lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedAttachment {
+    pub(crate) path: String,
+    pub(crate) digest: String,
+    pub(crate) window: Option<(usize, usize, usize)>,
+    pub(crate) content: String,
+}
+
+/// The provider-visible message text plus the attachments it embeds, in
+/// prompt order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedInput {
+    pub(crate) text: String,
+    pub(crate) attachments: Vec<ResolvedAttachment>,
+}
+
+/// The text parts of a prompt concatenated verbatim: the prefix of the
+/// provider-visible text before any attachment block.
+pub(crate) fn render_text_parts(parts: &[InputPart]) -> String {
+    let mut text = String::new();
+    for part in parts {
+        if let InputPart::Text { text: chunk } = part {
+            text.push_str(chunk);
+        }
+    }
+    text
+}
+
 /// Reads every file part and renders the provider-visible message text.
 /// Blocking: call from `spawn_blocking` or a dedicated thread.
 pub(crate) fn resolve_blocking(
     parts: &[InputPart],
     workspace: &Workspace,
     file_state: &Arc<FileState>,
-) -> Result<String, InputResolutionError> {
+) -> Result<ResolvedInput, InputResolutionError> {
     validate_input(parts)?;
     let mut text = String::new();
     let mut attachments = String::new();
+    let mut resolved = Vec::new();
     for part in parts {
         match part {
             InputPart::Text { text: chunk } => text.push_str(chunk),
@@ -146,11 +184,16 @@ pub(crate) fn resolve_blocking(
                     Err(_) => return Err(InputResolutionError::NotUtf8 { path: path.clone() }),
                 };
                 let recorded = contained.to_string_lossy().into_owned();
-                file_state.record(recorded, actual);
+                file_state.record(recorded.clone(), actual.clone());
                 // A range attaches only those lines; the whole file was
                 // hashed and recorded above, so an edit needs no re-read.
-                match range {
-                    None => render_attachment(&mut attachments, &contained, &content, None),
+                let attachment = match range {
+                    None => ResolvedAttachment {
+                        path: recorded,
+                        digest: actual,
+                        window: None,
+                        content,
+                    },
                     Some(range) => {
                         let total = content.lines().count();
                         let start = usize::try_from(range.start).unwrap_or(usize::MAX);
@@ -167,14 +210,21 @@ pub(crate) fn resolve_blocking(
                             .skip(start - 1)
                             .take(end - start + 1)
                             .collect();
-                        render_attachment(
-                            &mut attachments,
-                            &contained,
-                            &window,
-                            Some((start, end, total)),
-                        );
+                        ResolvedAttachment {
+                            path: recorded,
+                            digest: actual,
+                            window: Some((start, end, total)),
+                            content: window,
+                        }
                     }
-                }
+                };
+                render_file_attachment(
+                    &mut attachments,
+                    &attachment.path,
+                    attachment.window,
+                    Some(&attachment.content),
+                );
+                resolved.push(attachment);
             }
         }
     }
@@ -187,26 +237,63 @@ pub(crate) fn resolve_blocking(
     if text.len() > MAX_RESOLVED_INPUT_BYTES {
         return Err(InputResolutionError::TooLarge);
     }
-    Ok(text)
+    Ok(ResolvedInput {
+        text,
+        attachments: resolved,
+    })
 }
 
-fn render_attachment(
+/// Appends the placeholder-free prompt text for one message: `text` followed
+/// by each attachment rendered exactly as the model first saw it. Used by
+/// context reconstruction; the live run renders through `resolve_blocking`,
+/// which produces the same bytes for the same inputs.
+pub(crate) fn render_resolved_prompt<'a>(
+    text: &str,
+    attachments: impl IntoIterator<Item = (&'a str, Option<(usize, usize, usize)>, Option<&'a str>)>,
+) -> String {
+    let mut prompt = text.to_owned();
+    let mut rendered = String::new();
+    for (path, window, content) in attachments {
+        render_file_attachment(&mut rendered, path, window, content);
+    }
+    if !rendered.is_empty() {
+        if !prompt.is_empty() && !prompt.ends_with('\n') {
+            prompt.push('\n');
+        }
+        prompt.push_str(&rendered);
+    }
+    prompt
+}
+
+/// Renders one `<attached-file>` block. `None` content is a stored
+/// attachment whose bytes the per-session retention cap reclaimed; the block
+/// says so explicitly rather than reverting to the bare `@path` placeholder.
+fn render_file_attachment(
     into: &mut String,
-    path: &Path,
-    content: &str,
+    path: &str,
     window: Option<(usize, usize, usize)>,
+    content: Option<&str>,
 ) {
-    // A fence longer than any backtick run inside the file (and never shorter
-    // than four) keeps the content unambiguous for the model.
-    let longest_run = content.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(longest_run.max(3) + 1);
     into.push_str("\n<attached-file path=\"");
-    into.push_str(&path.to_string_lossy());
+    into.push_str(path);
     into.push('"');
     if let Some((start, end, total)) = window {
         into.push_str(&format!(" lines=\"{start}-{end}/{total}\""));
     }
+    let Some(content) = content else {
+        into.push_str(" evicted=\"true\">\n");
+        into.push_str(
+            "[the attached content was evicted from session storage; \
+             read the file again to see its current state]\n",
+        );
+        into.push_str("</attached-file>\n");
+        return;
+    };
     into.push_str(">\n");
+    // A fence longer than any backtick run inside the file (and never shorter
+    // than four) keeps the content unambiguous for the model.
+    let longest_run = content.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest_run.max(3) + 1);
     into.push_str(&fence);
     into.push('\n');
     into.push_str(content);
@@ -249,7 +336,8 @@ mod tests {
                 range: None,
             },
         ];
-        let text = resolve_blocking(&parts, &workspace, &state).unwrap();
+        let resolved = resolve_blocking(&parts, &workspace, &state).unwrap();
+        let text = resolved.text;
         assert!(text.starts_with("Summarize:\n\n<attached-file path=\"notes.md\">\n````\n# Notes"));
         assert!(text.contains("````\n</attached-file>\n\n<attached-file path=\"sub/data.txt\">\n````\ntail no newline\n````\n</attached-file>\n"));
         assert_eq!(
@@ -260,6 +348,36 @@ mod tests {
         assert_eq!(
             render_text(&parts),
             "Summarize:\n@notes.md\n@./sub/data.txt\n"
+        );
+        // The attachments the run persists reproduce the live text exactly.
+        assert_eq!(resolved.attachments.len(), 2);
+        assert_eq!(resolved.attachments[0].path, "notes.md");
+        assert_eq!(
+            resolved.attachments[0].digest,
+            content_hash(b"# Notes\n\nuse ``` fences\n")
+        );
+        assert_eq!(resolved.attachments[1].content, "tail no newline");
+        let reconstructed = render_resolved_prompt(
+            "Summarize:",
+            resolved.attachments.iter().map(|attachment| {
+                (
+                    attachment.path.as_str(),
+                    attachment.window,
+                    Some(attachment.content.as_str()),
+                )
+            }),
+        );
+        assert_eq!(reconstructed, text);
+    }
+
+    #[test]
+    fn an_evicted_attachment_renders_an_explicit_stub() {
+        let text = render_resolved_prompt("see\n", [("notes.md", Some((3, 3, 3)), None)]);
+        assert_eq!(
+            text,
+            "see\n\n<attached-file path=\"notes.md\" lines=\"3-3/3\" evicted=\"true\">\n\
+             [the attached content was evicted from session storage; \
+             read the file again to see its current state]\n</attached-file>\n"
         );
     }
 
@@ -275,7 +393,8 @@ mod tests {
                 range: Some(qq_protocol::LineRange { start: 3, end: 99 }),
             },
         ];
-        let text = resolve_blocking(&parts, &workspace, &state).unwrap();
+        let resolved = resolve_blocking(&parts, &workspace, &state).unwrap();
+        let text = resolved.text;
         assert!(
             text.contains(
                 "<attached-file path=\"notes.md\" lines=\"3-3/3\">\n````\nuse ``` fences\n````\n"
@@ -283,6 +402,8 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("# Notes"));
+        assert_eq!(resolved.attachments[0].window, Some((3, 3, 3)));
+        assert_eq!(resolved.attachments[0].content, "use ``` fences\n");
         // The hash is of the whole file: an edit after this needs no read.
         assert_eq!(
             state.recorded("notes.md").unwrap(),

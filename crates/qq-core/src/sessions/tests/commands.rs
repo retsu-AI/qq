@@ -700,6 +700,335 @@ async fn plan_identity_correlation_and_profile_persist_and_survive_refresh() {
     reopened.shutdown().await.unwrap();
 }
 
+/// F05 regression: the bytes a prompt attached are what every later request
+/// replays, whatever happened to the file since. Also covers dedup of a
+/// re-attached file, reopen, the reference-assembly oracle, and the delete
+/// cascade.
+#[tokio::test]
+async fn attached_files_are_reconstructed_as_the_model_first_saw_them() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("a.txt"), "ALPHA_ORIGINAL\n").unwrap();
+    std::fs::write(directory.path().join("b.txt"), "line1\nline2\nline3\n").unwrap();
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let loader = Arc::new(MutableResolvedLoader {
+        resolved_model: Arc::new(StdMutex::new(test_resolved_model(
+            "test/model",
+            "wire-a",
+            64,
+            None,
+        ))),
+        requests: Arc::clone(&requests),
+    });
+    let database = directory.path().join("sessions.sqlite3");
+    let runtime =
+        SessionRuntime::open(SessionRuntimeOptions::new(database.clone()), loader.clone())
+            .await
+            .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session(&runtime, workspace_id, None).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("unexpected receipt")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    let attach = |text: &str, files: Vec<InputPart>| {
+        let mut input = vec![InputPart::text(text)];
+        input.extend(files);
+        SessionCommand::SubmitPrompt {
+            session_id,
+            input,
+            limits: RunLimits::default(),
+            correlation: Correlation::default(),
+            output: None,
+        }
+    };
+    let file = |path: &str, range: Option<(u32, u32)>| InputPart::WorkspaceFile {
+        path: path.to_owned(),
+        expected_hash: None,
+        range: range.map(|(start, end)| qq_protocol::LineRange { start, end }),
+    };
+    let prompt_text = |request: &ModelRequest, index: usize| -> String {
+        let user_messages: Vec<&Message> = request
+            .messages()
+            .iter()
+            .filter(|message| message.role() == Role::User)
+            .collect();
+        user_messages[index]
+            .content()
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+
+    // Turn 1: whole file plus a range of another.
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            attach(
+                "inspect",
+                vec![file("a.txt", None), file("b.txt", Some((2, 2)))],
+            ),
+        )
+        .await
+        .unwrap();
+    collect_through_finished(&mut events).await;
+    let first_prompt = prompt_text(&requests.lock().unwrap()[0], 0);
+    assert!(first_prompt.contains("ALPHA_ORIGINAL"), "{first_prompt}");
+    assert!(
+        first_prompt.contains("<attached-file path=\"b.txt\" lines=\"2-2/3\">\n````\nline2\n````"),
+        "{first_prompt}"
+    );
+
+    // The files change underneath the session before the follow-up.
+    std::fs::write(directory.path().join("a.txt"), "ALPHA_MODIFIED\n").unwrap();
+    std::fs::remove_file(directory.path().join("b.txt")).unwrap();
+
+    // Turn 2: a plain follow-up sees turn 1 exactly as it was sent.
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            attach("continue", Vec::new()),
+        )
+        .await
+        .unwrap();
+    collect_through_finished(&mut events).await;
+    {
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(prompt_text(&captured[1], 0), first_prompt);
+        assert!(!prompt_text(&captured[1], 0).contains("ALPHA_MODIFIED"));
+        assert!(!prompt_text(&captured[1], 0).contains("@a.txt"));
+        assert_eq!(prompt_text(&captured[1], 1), "continue");
+    }
+
+    // Turn 3: attaching the modified file stores a second blob (different
+    // digest) while turn 1 still renders the original.
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            attach("again", vec![file("a.txt", None)]),
+        )
+        .await
+        .unwrap();
+    collect_through_finished(&mut events).await;
+    // Turn 4: re-attaching the same bytes dedups against turn 3's blob.
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            attach("once more", vec![file("a.txt", None)]),
+        )
+        .await
+        .unwrap();
+    collect_through_finished(&mut events).await;
+    {
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 4);
+        let last = &captured[3];
+        assert_eq!(prompt_text(last, 0), first_prompt);
+        assert!(prompt_text(last, 2).contains("ALPHA_MODIFIED"));
+        assert!(prompt_text(last, 3).contains("ALPHA_MODIFIED"));
+    }
+    let (blobs, references, evicted): (u32, u32, u32) = runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            Ok((
+                connection.query_row(
+                    "SELECT COUNT(*) FROM attachment_blobs WHERE session_id = ?1",
+                    [session_id.to_string()],
+                    |row| row.get(0),
+                )?,
+                connection.query_row(
+                    "SELECT COUNT(*) FROM message_attachments WHERE session_id = ?1",
+                    [session_id.to_string()],
+                    |row| row.get(0),
+                )?,
+                connection.query_row(
+                    "SELECT COUNT(*) FROM attachment_blobs WHERE evicted_at_ms IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        (blobs, references, evicted),
+        (3, 4, 0),
+        "a.txt original, b.txt range, a.txt modified; four prompt references"
+    );
+    runtime.shutdown().await.unwrap();
+    drop(events);
+    drop(runtime);
+
+    // Reopen: a fresh runtime assembles the same context from the store.
+    let reopened =
+        SessionRuntime::open(SessionRuntimeOptions::new(database.clone()), loader.clone())
+            .await
+            .unwrap();
+    let queued = reopened
+        .command(
+            CommandId::generate().unwrap(),
+            attach("after reopen", Vec::new()),
+        )
+        .await
+        .unwrap();
+    let mut events = reopened
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: queued.committed_through,
+        })
+        .unwrap();
+    collect_through_finished(&mut events).await;
+    {
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 5);
+        assert_eq!(prompt_text(&captured[4], 0), first_prompt);
+    }
+    reopened.shutdown().await.unwrap();
+    drop(events);
+    drop(reopened);
+    // The joined loader and the per-message reference agree on the
+    // reconstructed attachments.
+    assert_assembly_matches_reference(&database, session_id);
+
+    // Deleting the session removes its attachments with the rest of its rows.
+    let reopened = SessionRuntime::open(SessionRuntimeOptions::new(database.clone()), loader)
+        .await
+        .unwrap();
+    reopened
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::DeleteSession { session_id },
+        )
+        .await
+        .unwrap();
+    reopened.shutdown().await.unwrap();
+    drop(reopened);
+    let connection = Connection::open(&database).unwrap();
+    for table in ["attachment_blobs", "message_attachments"] {
+        let count: u32 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "{table} must be empty after the delete");
+    }
+}
+
+/// Past the per-session attachment cap the oldest blob loses its bytes; the
+/// prompt that carried it says so explicitly instead of reverting to `@path`.
+#[tokio::test]
+async fn evicted_attachments_render_an_explicit_stub_not_the_placeholder() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("a.txt"), "ALPHA\n").unwrap();
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        Arc::new(MutableResolvedLoader {
+            resolved_model: Arc::new(StdMutex::new(test_resolved_model(
+                "test/model",
+                "wire-a",
+                64,
+                None,
+            ))),
+            requests: Arc::clone(&requests),
+        }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session(&runtime, workspace_id, None).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("unexpected receipt")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![
+                    InputPart::text("inspect"),
+                    InputPart::WorkspaceFile {
+                        path: "a.txt".to_owned(),
+                        expected_hash: None,
+                        range: None,
+                    },
+                ],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    collect_through_finished(&mut events).await;
+    // Simulate the cap reclaiming the blob: the row stays, the bytes go.
+    runtime
+        .inner
+        .store
+        .call_write(Priority::Control, move |connection| {
+            connection.execute(
+                "UPDATE attachment_blobs SET content = NULL, evicted_at_ms = 1
+                 WHERE session_id = ?1",
+                [session_id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![InputPart::text("continue")],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    collect_through_finished(&mut events).await;
+    let first = {
+        let captured = requests.lock().unwrap();
+        captured[1]
+            .messages()
+            .iter()
+            .find(|message| message.role() == Role::User)
+            .unwrap()
+            .content()
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        first,
+        "inspect\n\n<attached-file path=\"a.txt\" evicted=\"true\">\n\
+         [the attached content was evicted from session storage; \
+         read the file again to see its current state]\n</attached-file>\n"
+    );
+    assert!(!first.contains("ALPHA"));
+    runtime.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn workspace_file_parts_attach_at_start_and_stale_hashes_fail_before_provider_work() {
     let directory = tempfile::tempdir().unwrap();

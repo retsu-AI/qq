@@ -99,6 +99,11 @@ pub(super) struct ClaimedRun {
     /// read) when the run starts; empty for compaction and historical runs,
     /// whose message text is already final.
     pub(super) input: Vec<InputPart>,
+    /// `input` after its files were read, kept for the run's lifetime so an
+    /// in-run compaction retry sends the same bytes (never a re-read) and
+    /// run start persists them for later reconstruction. Shared because the
+    /// tool gate clones the claim per call.
+    pub(super) resolved_input: Option<Arc<crate::input::ResolvedInput>>,
     /// Agent profile the session selected at claim time.
     pub(super) profile: AgentProfileId,
     /// State the executor needs before its first provider request, read in
@@ -132,6 +137,7 @@ impl ClaimedRun {
             context_occupancy: None,
             limits: RunLimits::default(),
             input: Vec::new(),
+            resolved_input: None,
             profile: self.profile.clone(),
             cancel_requested: false,
             file_state: Vec::new(),
@@ -648,6 +654,7 @@ pub(super) fn reserve_next_run_recoverable(
         context_occupancy,
         limits,
         input,
+        resolved_input: None,
         profile,
         approval_mode,
         depth,
@@ -678,6 +685,7 @@ pub(super) fn start_reserved_run(
     store_id: StoreId,
     identity: RunIdentity,
     audit: &PreparedRunAudit,
+    resolved_input: Option<&crate::input::ResolvedInput>,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let prompt_identity = serde_json::to_string(audit.prompt_identity.as_ref())?;
     let resolved_model = serde_json::to_string(audit.resolved_model.as_ref())?;
@@ -730,6 +738,23 @@ pub(super) fn start_reserved_run(
              WHERE run_id = ?1 AND role = 'user' AND state = 'queued'",
         [identity.run_id.to_string()],
     )?;
+    // The bytes the model is about to see become durable in the same unit
+    // that marks the run started, so a follow-up never reconstructs a prompt
+    // whose attachments were read but not kept.
+    if let Some(resolved) = resolved_input.filter(|resolved| !resolved.attachments.is_empty()) {
+        let user_message_id: String = transaction.query_row(
+            "SELECT user_message_id FROM runs WHERE id = ?1",
+            [identity.run_id.to_string()],
+            |row| row.get(0),
+        )?;
+        store_message_attachments(
+            &transaction,
+            identity.session_id,
+            &user_message_id,
+            &resolved.attachments,
+            now,
+        )?;
+    }
     let summary = load_session_summary(&transaction, identity.session_id)?;
     let started = append_event(
         &transaction,
