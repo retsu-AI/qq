@@ -9,7 +9,7 @@ appended below, newest last.
 | C1 | 4 bytes/token estimate; summarizer planned against storage only; actionable rejection text | In review | [#56](https://github.com/retsu-AI/qq/pull/56) | Regression: 730 KB / 200k window sends; window-triggered auto-compaction and `/compact` past the window both run |
 | C2 | Proactive compaction at 90 % of the window; in-run stale-read stubbing before a later turn fails | In review | `fix/context-usability-2-in-run-compaction`, stacked on #56 | Full mid-run summarization deferred: needs a mid-run cutoff marker in the store; stubbing recovers the common case (many reads) with no schema change |
 | C3 | Audit default `off`; audit child bounded to 8 turns / 120 s | In review | `fix/context-usability-3-audit-default`, stacked on #58 | TUI already surfaces `RunAuditCompleted`; no client change |
-| C4 | Anthropic/Bedrock cache breakpoints | Planned | stacked on C3 | |
+| C4 | Anthropic `cache_control` and Bedrock `cachePoint` on system, last tool, last message block | In review | `perf/context-usability-4-cache-breakpoints`, stacked on #59 | `provider_encode` anthropic 195 → 204 µs (+4.6 %, three markers on a 1.1 MiB body); Bedrock gated to the Anthropic family |
 | C5 | Concurrent read-only subset; soft 16-call cap; batching guidance | Planned | stacked on C4 | |
 | C6 | Occupancy survives pruning and checkpoints | Planned | stacked on C5 | |
 
@@ -75,3 +75,24 @@ Docs: `architecture.md` § audit, `protocol.md` § Final-answer audit,
 `supervised-delegation.md` B1 gate text.
 
 Shipped: C1 (#56 `d4fd971`). In progress: C2 (#58), C3. Blocked: none. Next: C4.
+
+### 2026-09-16 — C4
+
+Anthropic Messages: `system` becomes one text block with `cache_control`;
+the last tool and the last block of the last message carry it; every other
+block is unmarked so the transcript stays one growing cached prefix. Wire
+shape change: single-text messages now serialize as block arrays (Anthropic
+accepts both). Bedrock Converse: `SystemContentBlock::CachePoint`,
+`Tool::CachePoint`, `ContentBlock::CachePoint` at the same three positions,
+only when `supports_cache_points(model_id)` (any `anthropic` id segment,
+including regional/global prefixes and inference-profile ARNs). Root
+`ResolvedModel.prompt_cache.control` is `Native` for both APIs. Fixtures
+under `qq-protocol/tests/fixtures` unchanged (no wire type change).
+Tests: anthropic exact-body fixtures updated (+1 placement test); bedrock +1
+system/cache-point test, +1 family gate test; root `resolved_model` asserts
+`Native` for bedrock. Minimal provider profile green.
+Gate: `provider_encode --quick` anthropic 195 → 204 µs, heap 1.39x → 1.44x
+(three 30-byte markers on a 1.1 MiB body). Live `cache_read_input_tokens`
+qualification is a paid run and is recorded when the stack is exercised.
+
+Shipped: C1. In progress: C2 (#58), C3 (#59), C4. Blocked: none. Next: C5.

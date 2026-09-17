@@ -21,11 +21,11 @@ use aws_sdk_bedrockruntime::{
     error::{BoxError, DisplayErrorContext, SdkError},
     operation::converse_stream::ConverseStreamError,
     types::{
-        ContentBlock as BedrockContentBlock, ContentBlockDelta, ContentBlockStart,
-        ConversationRole, ConverseStreamOutput, InferenceConfiguration, Message as BedrockMessage,
-        StopReason, SystemContentBlock, TokenUsage, Tool, ToolConfiguration, ToolInputSchema,
-        ToolResultBlock, ToolResultContentBlock, ToolResultStatus, ToolSpecification, ToolUseBlock,
-        error::ConverseStreamOutputError,
+        CachePointBlock, CachePointType, ContentBlock as BedrockContentBlock, ContentBlockDelta,
+        ContentBlockStart, ConversationRole, ConverseStreamOutput, InferenceConfiguration,
+        Message as BedrockMessage, StopReason, SystemContentBlock, TokenUsage, Tool,
+        ToolConfiguration, ToolInputSchema, ToolResultBlock, ToolResultContentBlock,
+        ToolResultStatus, ToolSpecification, ToolUseBlock, error::ConverseStreamOutputError,
     },
 };
 use aws_smithy_types::{Document, Number, body::SdkBody};
@@ -283,6 +283,26 @@ struct ConverseRequest {
     inference_config: InferenceConfiguration,
 }
 
+/// Whether the Converse model id names a family that accepts `cachePoint`
+/// blocks. Converse rejects the block as a validation error for families
+/// without prompt caching (Llama, Mistral, most Nova variants), so the
+/// breakpoints are placed only where they are known to be honoured: the
+/// Anthropic family, in every regional and inference-profile spelling
+/// (`anthropic.`, `us.anthropic.`, `global.anthropic.`, ARNs ending in one).
+fn supports_cache_points(model_id: &str) -> bool {
+    model_id
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.split('.').any(|segment| segment == "anthropic"))
+}
+
+fn cache_point() -> CachePointBlock {
+    CachePointBlock::builder()
+        .r#type(CachePointType::Default)
+        .build()
+        .expect("a cache point needs only its type")
+}
+
 impl TryFrom<&ModelRequest> for ConverseRequest {
     type Error = ProviderError;
 
@@ -292,16 +312,24 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
                 "Amazon Bedrock max_output_tokens must not exceed 2147483647".to_owned(),
             )
         })?;
+        // Same three breakpoints as the Anthropic Messages codec: after the
+        // system prompt, after the last tool, after the last message block.
+        let cache_points = supports_cache_points(request.model());
+        let last_message = request.messages().len().checked_sub(1);
         let messages = request
             .messages()
             .iter()
-            .map(|message| {
+            .enumerate()
+            .map(|(index, message)| {
                 let mut builder = BedrockMessage::builder().role(match message.role() {
                     Role::User => ConversationRole::User,
                     Role::Assistant => ConversationRole::Assistant,
                 });
                 for block in message.content() {
                     builder = builder.content(bedrock_content_block(block)?);
+                }
+                if cache_points && Some(index) == last_message {
+                    builder = builder.content(BedrockContentBlock::CachePoint(cache_point()));
                 }
                 builder.build().map_err(|_| {
                     ProviderError::Configuration(
@@ -329,6 +357,9 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
                     })?;
                 builder = builder.tools(Tool::ToolSpec(specification));
             }
+            if cache_points {
+                builder = builder.tools(Tool::CachePoint(cache_point()));
+            }
             Some(builder.build().map_err(|_| {
                 ProviderError::Configuration(
                     "could not construct an Amazon Bedrock tool configuration".to_owned(),
@@ -338,9 +369,13 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
 
         Ok(Self {
             model_id: request.model().to_owned(),
-            system: request
-                .system()
-                .map(|system| vec![SystemContentBlock::Text(system.to_owned())]),
+            system: request.system().map(|system| {
+                let mut blocks = vec![SystemContentBlock::Text(system.to_owned())];
+                if cache_points {
+                    blocks.push(SystemContentBlock::CachePoint(cache_point()));
+                }
+                blocks
+            }),
             messages,
             tool_config,
             inference_config: InferenceConfiguration::builder()
@@ -910,16 +945,58 @@ mod tests {
     }
 
     #[test]
-    fn maps_the_system_prompt_to_converse_system_blocks() {
+    fn maps_the_system_prompt_to_converse_system_blocks_with_a_cache_point() {
         let request = ModelRequest::new("anthropic.claude-test", vec![Message::user("ping")], 64)
             .with_system("You are QQ.");
         let mapped = ConverseRequest::try_from(&request).unwrap();
         let system = mapped.system.unwrap();
-        assert_eq!(system.len(), 1);
+        assert_eq!(system.len(), 2);
         assert!(
             matches!(&system[0], SystemContentBlock::Text(text) if text == "You are QQ."),
             "unexpected system block: {system:?}"
         );
+        assert!(matches!(&system[1], SystemContentBlock::CachePoint(_)));
+        // The last message's final block is a cache point too.
+        assert!(
+            mapped.messages[0]
+                .content()
+                .last()
+                .unwrap()
+                .is_cache_point()
+        );
+    }
+
+    #[test]
+    fn cache_points_follow_the_anthropic_family_and_no_other() {
+        for id in [
+            "anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "us.anthropic.claude-opus-4-1-20250805-v1:0",
+            "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        ] {
+            assert!(supports_cache_points(id), "{id}");
+        }
+        for id in [
+            "amazon.nova-pro-v1:0",
+            "meta.llama3-70b-instruct-v1:0",
+            "mistral.mistral-large-2407-v1:0",
+            "openai.gpt-oss-120b-1:0",
+        ] {
+            assert!(!supports_cache_points(id), "{id}");
+        }
+        let request = ModelRequest::new("amazon.nova-pro-v1:0", vec![Message::user("ping")], 64)
+            .with_system("You are QQ.")
+            .with_tools(vec![ToolSpec::new("a", "A", json!({"type": "object"}))]);
+        let mapped = ConverseRequest::try_from(&request).unwrap();
+        assert_eq!(mapped.system.as_ref().unwrap().len(), 1);
+        assert_eq!(mapped.messages[0].content().len(), 1);
+        assert_eq!(mapped.tool_config.as_ref().unwrap().tools().len(), 1);
+        let request = ModelRequest::new("anthropic.claude-test", vec![Message::user("ping")], 64)
+            .with_tools(vec![ToolSpec::new("a", "A", json!({"type": "object"}))]);
+        let mapped = ConverseRequest::try_from(&request).unwrap();
+        let tools = mapped.tool_config.as_ref().unwrap().tools();
+        assert_eq!(tools.len(), 2);
+        assert!(matches!(tools[1], Tool::CachePoint(_)));
     }
 
     #[test]
