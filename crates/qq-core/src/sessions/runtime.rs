@@ -794,12 +794,7 @@ impl SessionRuntime {
             let applied = self
                 .inner
                 .store
-                .command_with_seed(
-                    command_id,
-                    SessionCommand::CancelRun { run_id },
-                    WorkspaceGrantSeed::default(),
-                    None,
-                )
+                .settlement_cancel(command_id, run_id)
                 .await?;
             self.inner.notify(applied.receipt.committed_through);
             self.inner.cancel(run_id);

@@ -739,7 +739,16 @@ its `RunActivityChanged` event, so the session summary a command publishes
 reads one row instead of scanning the event log; the command bound is a
 maintained `metadata.command_count` counter rather than a `COUNT(*)` per
 command; and a workspace snapshot aggregates every session's accounting in one
-grouped query. A claimed run carries the cancellation flag, session file
+grouped query. The command bound has two ceilings
+(`SessionCommandKind::creates_work`): commands that admit new work — a
+workspace, session, prompt, steering message, model or profile change,
+compaction — are refused with `CommandLimitReached` at 100 000 durable
+receipts, while commands that only stop, resolve, or remove existing work
+(`CancelRun`, `RespondToolApproval`, `DeleteSession`, `PruneSessions`,
+`RollbackCompaction`) are admitted up to a further 10 000, and a cancel the
+runtime issues for itself while settling is never refused. A full store can
+therefore always be cancelled, approved, and cleaned up; the receipt table is
+the idempotency record and is never trimmed to make room. A claimed run carries the cancellation flag, session file
 hashes, and pending steering out of the claim transaction, so claim to first
 provider request is two store hops (claim, then `RunStarted`), and context
 assembly runs a fixed number of session-scoped queries rather than one per

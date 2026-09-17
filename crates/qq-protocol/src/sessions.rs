@@ -617,6 +617,30 @@ impl SessionCommandKind {
         Self::RollbackCompaction,
     ];
 
+    /// Whether this command admits new work into the store (a workspace,
+    /// session, prompt, steering message, model or profile change, or
+    /// compaction run) as opposed to stopping, resolving, or removing work
+    /// that already exists. Stores bound the two classes separately so a full
+    /// store can still be cancelled, approved, and cleaned up.
+    #[must_use]
+    pub const fn creates_work(self) -> bool {
+        match self {
+            Self::ResolveWorkspace
+            | Self::CreateSession
+            | Self::SubmitPrompt
+            | Self::SteerRun
+            | Self::SetApprovalMode
+            | Self::SetSessionModel
+            | Self::SetSessionProfile
+            | Self::CompactSession => true,
+            Self::CancelRun
+            | Self::RespondToolApproval
+            | Self::DeleteSession
+            | Self::PruneSessions
+            | Self::RollbackCompaction => false,
+        }
+    }
+
     /// The HTTP route that carries this command. One table for the client that
     /// posts and the server that routes; the server test asserts its router
     /// equals this table so the two cannot drift.
@@ -1797,6 +1821,43 @@ mod tests {
             std::mem::size_of::<SessionEvent>() <= 336,
             "SessionEvent is {} bytes",
             std::mem::size_of::<SessionEvent>()
+        );
+    }
+
+    /// The work/control split is what lets a full store still be stopped and
+    /// cleaned up (F07). Pinned so a new command kind must choose a side.
+    #[test]
+    fn command_kinds_split_into_work_and_control() {
+        let creating: Vec<_> = SessionCommandKind::ALL
+            .into_iter()
+            .filter(|kind| kind.creates_work())
+            .collect();
+        let control: Vec<_> = SessionCommandKind::ALL
+            .into_iter()
+            .filter(|kind| !kind.creates_work())
+            .collect();
+        assert_eq!(
+            creating,
+            [
+                SessionCommandKind::ResolveWorkspace,
+                SessionCommandKind::CreateSession,
+                SessionCommandKind::SubmitPrompt,
+                SessionCommandKind::SteerRun,
+                SessionCommandKind::SetApprovalMode,
+                SessionCommandKind::SetSessionModel,
+                SessionCommandKind::SetSessionProfile,
+                SessionCommandKind::CompactSession,
+            ]
+        );
+        assert_eq!(
+            control,
+            [
+                SessionCommandKind::CancelRun,
+                SessionCommandKind::RespondToolApproval,
+                SessionCommandKind::DeleteSession,
+                SessionCommandKind::PruneSessions,
+                SessionCommandKind::RollbackCompaction,
+            ]
         );
     }
 

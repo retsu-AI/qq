@@ -369,6 +369,7 @@ fn capacity_accounting_measures_the_pruned_assembly_not_raw_rows() {
         },
         None,
         &WorkspaceGrantSeed::default(),
+        CommandOrigin::Client,
     )
     .unwrap();
     assert!(matches!(

@@ -137,7 +137,17 @@ const MAX_TEXT_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_FAILURE_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_WORKSPACES: u32 = 1024;
 const MAX_SESSIONS_PER_WORKSPACE: u32 = 512;
+/// Durable command receipts a store admits for commands that create work
+/// (`ResolveWorkspace`, `CreateSession`, `SubmitPrompt`, `SteerRun`,
+/// `SetSession*`, `CompactSession`). At the bound, new work is refused with
+/// `CommandLimitReached`; commands that only stop, resolve, or remove existing
+/// work keep being admitted up to `MAX_COMMANDS_WITH_CONTROL_HEADROOM`, so a
+/// full store can still be cancelled, approved, and cleaned up. The receipt
+/// table is the durable idempotency record and is never trimmed to make room.
 const MAX_COMMANDS: u32 = 100_000;
+/// Receipts reserved above `MAX_COMMANDS` for control and cleanup commands
+/// alone. New work cannot consume them; only the control lane reaches them.
+const MAX_COMMANDS_WITH_CONTROL_HEADROOM: u32 = MAX_COMMANDS + 10_000;
 const MAX_MODEL_SELECTION_BYTES: usize = 512;
 const OUTPUT_BATCH_BYTES: usize = 8 * 1024;
 const OUTPUT_BATCH_DELAY: Duration = Duration::from_millis(8);
