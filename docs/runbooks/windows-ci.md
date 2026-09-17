@@ -8,7 +8,12 @@ workspace run.
 ## The `windows-teardown` job
 
 `.github/workflows/ci.yml` runs nine exact tests on `windows-latest` with
-`cargo test --locked -p qq-core --lib <path> -- --exact`. They cover: dropped
+`bash .github/scripts/test-exact.sh <path>`. The helper invokes
+`cargo test --locked -p qq-core --lib <path> -- --exact --color never`, preserves
+command failures, and requires the named test plus exactly one passing,
+non-ignored result. A stale selector, ignored case, or missing result fails
+the step instead of silently qualifying zero tests. Git Bash supplies the
+shell on the Windows runner. They cover: dropped
 shell waiter kills the owned process; timeout confirms exit; a panicked
 process leaves cleanup unconfirmed; unconfirmed exit blocks session
 continuation; dropped write drains the atomic apply; child mutation drains
@@ -27,8 +32,10 @@ the run log.
    once (`893e582` history).
 2. Register session hooks with the canonical workspace path the runtime uses;
    Windows path canonicalization differs and has caused missing-hook failures.
-3. Add the exact test path as a new step in the `windows-teardown` job. Keep
-   steps one test each so a failure names the test.
+3. Add the exact test path using `bash .github/scripts/test-exact.sh <path>`
+   as a new step in the `windows-teardown` job. Include the defining module
+   (`sessions::tests::delegation::` for delegation tests). Keep steps one test
+   each so a failure names the test; do not bypass the coverage assertion.
 4. Run the job through `workflow_dispatch` on the branch before opening the PR
    and cite the run URL in the ledger.
 

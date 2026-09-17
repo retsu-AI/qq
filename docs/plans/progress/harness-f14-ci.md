@@ -6,7 +6,7 @@
 
 ## Acceptance and ownership
 
-Own `.github/workflows/ci.yml`, `.github/scripts/test-exact.sh`, the Windows
+Own `.github/workflows/ci.yml`, `.github/scripts/test-exact{,-test}.sh`, the Windows
 CI runbook, and this ledger. Root authorizes the CI change (request recorded
 in `progress/root.md`). No runtime, dependency, schema, or protocol changes;
 no product performance gate is affected.
@@ -30,3 +30,23 @@ push; independent source and receipt review.
 - Baseline complete: stale unconfirmed-shell selector returns exit 0 with
   zero tests (603 filtered). The new assertion returns exit 1 for that exact
   selector. No production sources changed; fresh debug build at `d4fd971`.
+
+- Wired the guard into all nine steps and corrected five delegation paths.
+  Corrected unconfirmed-shell selector executes one passing case on Linux.
+  Ten guard fixture cases pass, including CRLF and command-failure propagation.
+- Independent review approved source/portability and independently reran the
+  fixture checks. Workspace gates and native Windows dispatch remain pending.
+  Local workspace build disables debug symbols to limit disk consumption.
+
+#### F14 local receipt — 2026-09-16
+
+Base `d4fd971`; red guard commit `4ddb791`.
+Guard: 10 fixture cases passed; stale selector rejected; 7 Linux-eligible exact cases passed.
+Workspace: 1,466 passed / 5 ignored; fmt, all-target/all-feature Clippy `-D warnings`, build passed.
+Commands: `cargo test --workspace --quiet`, `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo build --workspace`.
+Environment: `NO_COLOR` unset, `TERM=xterm-256color`; dev/test debug symbols disabled for disk bounds.
+Independent review approved; syntax and diff checks passed. Runtime code unchanged.
+Docs: Windows CI runbook and root CI authorization. No product performance gate affected.
+Logs: `/tmp/qq-f14-{workspace,clippy,build}.log`.
+Open: native Windows dispatch before PR; no Windows or full audit completion claim yet.
