@@ -2132,3 +2132,174 @@ async fn delete_session_is_refused_while_running_then_cascades_completely() {
         SessionRuntimeError::SessionNotFound
     );
 }
+
+/// F07: a store at `MAX_COMMANDS` refuses new work but still admits the
+/// commands that stop, resolve, or remove what it holds; otherwise a full
+/// store could neither be cancelled nor cleaned up to make room.
+#[tokio::test]
+async fn control_and_cleanup_commands_are_admitted_past_the_command_limit() {
+    let mut harness = approval_harness(
+        ApprovalMode::Ask,
+        "__test_mutate",
+        "{}",
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+    )
+    .await;
+    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    // A receipt recorded before the cap, for the replay check below.
+    let pre_cap_id = CommandId::generate().unwrap();
+    let pre_cap = harness
+        .runtime
+        .command(
+            pre_cap_id,
+            SessionCommand::SetApprovalMode {
+                session_id: harness.session_id,
+                mode: ApprovalMode::Ask,
+            },
+        )
+        .await
+        .unwrap();
+    // Fill the counter, not the table: the bound reads `metadata.command_count`.
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            connection.execute(
+                "UPDATE metadata SET value = ?1 WHERE key = 'command_count'",
+                [MAX_COMMANDS.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    // New work is refused ...
+    let refused = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id: harness.session_id,
+                input: vec![InputPart::text("more")],
+                limits: qq_protocol::RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(SessionRuntimeError::CommandLimitReached)),
+        "{refused:?}"
+    );
+    let refused = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetApprovalMode {
+                session_id: harness.session_id,
+                mode: ApprovalMode::Auto,
+            },
+        )
+        .await;
+    assert!(matches!(
+        refused,
+        Err(SessionRuntimeError::CommandLimitReached)
+    ));
+    // ... a pre-cap receipt still replays exactly ...
+    let replayed = harness
+        .runtime
+        .command(
+            pre_cap_id,
+            SessionCommand::SetApprovalMode {
+                session_id: harness.session_id,
+                mode: ApprovalMode::Ask,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(replayed, pre_cap);
+    // ... and control still lands: the held approval resolves and the run
+    // completes.
+    respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        tool_call.id,
+        ApprovalDecision::Deny,
+    )
+    .await
+    .unwrap();
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(matches!(
+        &observed.last().unwrap().event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::Completed,
+            ..
+        }
+    ));
+    // Cleanup lands too: the idle session can be deleted and the workspace
+    // pruned, then the runtime shuts down.
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::DeleteSession {
+                session_id: harness.session_id,
+            },
+        )
+        .await
+        .unwrap();
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::PruneSessions {
+                workspace_id: harness.workspace_id,
+            },
+        )
+        .await
+        .unwrap();
+    harness.runtime.shutdown().await.unwrap();
+}
+
+/// The control lane has its own ceiling: past the headroom it is refused too,
+/// so the receipt table stays bounded.
+#[tokio::test]
+async fn control_commands_are_bounded_by_the_headroom() {
+    let harness = approval_harness(
+        ApprovalMode::Ask,
+        "__test_mutate",
+        "{}",
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+    )
+    .await;
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            connection.execute(
+                "UPDATE metadata SET value = ?1 WHERE key = 'command_count'",
+                [MAX_COMMANDS_WITH_CONTROL_HEADROOM.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let refused = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelRun {
+                run_id: harness.run_id,
+            },
+        )
+        .await;
+    assert!(matches!(
+        refused,
+        Err(SessionRuntimeError::CommandLimitReached)
+    ));
+    harness.runtime.shutdown().await.unwrap();
+}

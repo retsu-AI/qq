@@ -631,6 +631,41 @@ impl Store {
         seed: WorkspaceGrantSeed,
         promotion_wakeup: Option<mpsc::Sender<()>>,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
+        self.command_from(
+            command_id,
+            command,
+            seed,
+            promotion_wakeup,
+            CommandOrigin::Client,
+        )
+        .await
+    }
+
+    /// A `CancelRun` the runtime issues while settling: exempt from the
+    /// receipt bound (see `CommandOrigin`).
+    pub(super) async fn settlement_cancel(
+        &self,
+        command_id: CommandId,
+        run_id: RunId,
+    ) -> Result<AppliedCommand, SessionRuntimeError> {
+        self.command_from(
+            command_id,
+            SessionCommand::CancelRun { run_id },
+            WorkspaceGrantSeed::default(),
+            None,
+            CommandOrigin::RuntimeSettlement,
+        )
+        .await
+    }
+
+    async fn command_from(
+        &self,
+        command_id: CommandId,
+        command: SessionCommand,
+        seed: WorkspaceGrantSeed,
+        promotion_wakeup: Option<mpsc::Sender<()>>,
+        origin: CommandOrigin,
+    ) -> Result<AppliedCommand, SessionRuntimeError> {
         let store_id = self.store_id;
         // Workspace canonicalization is filesystem I/O; it runs on a blocking
         // thread before the command reaches the single store worker, which
@@ -671,6 +706,7 @@ impl Store {
                 command,
                 canonical_workspace,
                 &seed,
+                origin,
             )?;
             if applied.grant_promotion_pending
                 && let Some(wakeup) = promotion_wakeup
@@ -711,6 +747,7 @@ impl Store {
                 SessionCommand::CancelRun { run_id },
                 None,
                 &WorkspaceGrantSeed::default(),
+                CommandOrigin::RuntimeSettlement,
             )
         })
         .await

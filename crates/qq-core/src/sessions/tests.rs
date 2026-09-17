@@ -1918,6 +1918,7 @@ fn apply_denial_capacity_path(
             },
             None,
             &WorkspaceGrantSeed::default(),
+            CommandOrigin::Client,
         )
         .map(|_| ()),
         DenialCapacityPath::Timeout => {

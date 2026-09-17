@@ -677,6 +677,7 @@ fn interrupted_compaction_commits_no_marker_and_can_be_retried() {
         SessionCommand::CompactSession { session_id },
         None,
         &WorkspaceGrantSeed::default(),
+        CommandOrigin::Client,
     )
     .unwrap();
     assert!(matches!(

@@ -279,6 +279,18 @@ pub(super) fn create_child_run(
 /// `canonical_workspace` is the resolved path for `ResolveWorkspace`, computed
 /// by the caller on a blocking thread; the command itself is journaled as
 /// submitted so idempotency compares what the client sent.
+/// Who is asking, for the receipt bound. A store admits new work up to
+/// `MAX_COMMANDS`; a client's control and cleanup commands up to the headroom
+/// above it; and a cancel the runtime itself issues while settling (shutdown,
+/// a parent settling its child) always, because refusing it would leave a run
+/// unsettleable, which no capacity bound may do.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CommandOrigin {
+    Client,
+    /// A `CancelRun` the runtime issues on its own behalf during settlement.
+    RuntimeSettlement,
+}
+
 pub(super) fn execute_command(
     connection: &mut Connection,
     store_id: StoreId,
@@ -286,6 +298,7 @@ pub(super) fn execute_command(
     command: SessionCommand,
     canonical_workspace: Option<Result<String, SessionRuntimeError>>,
     seed: &WorkspaceGrantSeed,
+    origin: CommandOrigin,
 ) -> Result<AppliedCommand, SessionRuntimeError> {
     let request_json = serde_json::to_string(&command)?;
     if let Some((stored_request, stored_receipt)) = connection
@@ -327,7 +340,17 @@ pub(super) fn execute_command(
         .and_then(|mut statement| statement.query_row([], |row| row.get::<_, String>(0)))?
         .parse()
         .map_err(|_| SessionRuntimeError::CODEC)?;
-    if command_count >= MAX_COMMANDS {
+    // Control and cleanup commands are admitted past the new-work bound so a
+    // store at the cap can still stop, resolve, and remove what it holds;
+    // their own bound is the headroom above it. A settlement cancel the
+    // runtime issues for itself is never refused: the alternative is a run
+    // that can never settle.
+    let bound = match (origin, command.kind().creates_work()) {
+        (CommandOrigin::RuntimeSettlement, _) => None,
+        (CommandOrigin::Client, true) => Some(MAX_COMMANDS),
+        (CommandOrigin::Client, false) => Some(MAX_COMMANDS_WITH_CONTROL_HEADROOM),
+    };
+    if bound.is_some_and(|bound| command_count >= bound) {
         return Err(SessionRuntimeError::CommandLimitReached);
     }
 
