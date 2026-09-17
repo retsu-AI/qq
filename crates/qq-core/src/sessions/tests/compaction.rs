@@ -2334,3 +2334,73 @@ async fn a_prompt_inside_the_last_tenth_of_the_window_compacts_before_it_sends()
     )));
     assert_eq!(harness.requests.lock().unwrap().len(), 3);
 }
+
+#[tokio::test]
+async fn measured_occupancy_survives_assembly_pruning_and_admits_the_next_prompt() {
+    // Regression: once assembly stubbed any read-only result (always, after
+    // CONTEXT_PRUNE_KEEP_TURNS turns) the persisted measurement was
+    // discarded and the next prompt was judged by the raw byte estimate over
+    // the whole history. Here the provider reports a small measured
+    // occupancy for a transcript whose bytes alone would overflow the
+    // window; the prompt after pruning must still send without compacting.
+    let turns = CONTEXT_PRUNE_KEEP_TURNS + 2;
+    let mut scripts = Vec::new();
+    for _ in 0..=turns {
+        scripts.push(AutoCompactScript::ReadNoteThenTextMeasured {
+            text: "ok".to_owned(),
+            input_tokens: 500,
+        });
+    }
+    let mut harness = auto_compact_harness_with_window(scripts, Some(6 * 1024)).await;
+    // Each read is ~12 KiB once bounded (~3k estimated tokens). After
+    // pruning to the last four turns the transcript alone is ~6k estimated
+    // tokens, past a 6k window with its 256 output reserve, unless the
+    // 500-token measurement is trusted.
+    std::fs::write(
+        harness.workspace_path.join("note.txt"),
+        format!("{}\n", "n".repeat(127)).repeat(96),
+    )
+    .unwrap();
+    for index in 0..turns {
+        let run = queue_prompt(
+            &harness.runtime,
+            harness.session_id,
+            format!("read {index}"),
+        )
+        .await;
+        let observed = collect_until(&mut harness.events, finished_for(run)).await;
+        let outcome = observed
+            .iter()
+            .find_map(|event| match &event.event {
+                SessionEvent::RunFinished {
+                    run_id, outcome, ..
+                } if *run_id == run => Some(outcome.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            matches!(outcome, RunOutcome::Completed),
+            "run {index}: {outcome:?}"
+        );
+        assert!(
+            !observed
+                .iter()
+                .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. })),
+            "run {index} must not compact: the measured occupancy fits"
+        );
+    }
+    let requests = harness.requests.lock().unwrap();
+    assert!(
+        requests
+            .last()
+            .unwrap()
+            .messages()
+            .iter()
+            .flat_map(Message::content)
+            .any(|block| matches!(
+                block,
+                ContentBlock::ToolResult { content, .. } if content.starts_with("[pruned")
+            )),
+        "the final request carries pruned history"
+    );
+}

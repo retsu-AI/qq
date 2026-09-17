@@ -11,7 +11,7 @@ appended below, newest last.
 | C3 | Audit default `off`; audit child bounded to 8 turns / 120 s | In review | `fix/context-usability-3-audit-default`, stacked on #58 | TUI already surfaces `RunAuditCompleted`; no client change |
 | C4 | Anthropic `cache_control` and Bedrock `cachePoint` on system, last tool, last message block | In review | `perf/context-usability-4-cache-breakpoints`, stacked on #59 | `provider_encode` anthropic 195 → 204 µs (+4.6 %, three markers on a 1.1 MiB body); Bedrock gated to the Anthropic family |
 | C5 | Leading read-only calls overlap in mixed turns; calls past 16 settle as not-executed tool errors; prompt names the cap and asks for batching | In review | `perf/context-usability-5-parallel-reads`, stacked on #61 | Prompt version 13 → 14; plan golden digest re-pinned (same as #50) |
-| C6 | Occupancy survives pruning and checkpoints | Planned | stacked on C5 | |
+| C6 | Measured occupancy follows byte deltas across pruning, checkpoints, and continuation | In review | `perf/context-usability-6-occupancy-survival` | `adjust_measured_tokens`; `compatible_context_tokens` no longer requires byte-monotonic requests |
 
 ## Entries
 
@@ -118,3 +118,24 @@ Docs: `tools.md` § Loop Bounds and § Within a turn.
 
 Shipped: C1. In progress: C2 (#58), C3 (#59), C4 (#61), C5. Blocked: none.
 Next: C6.
+
+### 2026-09-16 — C6
+
+`context::adjust_measured_tokens(measured, previous_bytes, current_bytes)`
+charges growth and credits shrinkage at the ratio. Run loop: the compatible
+request is now `(system, tools, messages, measured)` and the next estimate
+adjusts per component, so the checkpoint (system text changes, schemas
+dropped), the continuation, and the turn after keep a measurement-derived
+estimate instead of three raw byte estimates at the transcript's largest
+point; the in-run prune also credits its removed bytes. Claim path:
+`compatible_context_tokens` drops the `request_bytes >= basis` requirement
+and `context_occupancy` is loaded regardless of `context_rewritten`, so
+assembly-time pruning no longer discards the persisted measurement.
+Tests: +`the_measured_token_chain_survives_the_slice_checkpoint_and_continuation`
+(every turn after the first carries a chain; checkpoint < measurement <
+continuation; none near the raw byte count);
++`measured_occupancy_survives_assembly_pruning_and_admits_the_next_prompt`
+(fails on the parent with a `Policy` overflow at run 3 despite a 500-token
+measurement); `adjust_measured_tokens` unit test; accounting test updated.
+
+Shipped: C1–C5. In progress: C6. Blocked: none. Next: stack complete.

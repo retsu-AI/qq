@@ -13,6 +13,23 @@ pub(crate) const fn estimate_tokens(bytes: u64) -> u64 {
     bytes.div_ceil(ESTIMATED_BYTES_PER_TOKEN)
 }
 
+/// Carries a provider-measured token count across a request whose bytes
+/// changed: appended bytes are charged at the ratio, removed bytes credited
+/// at it. Crediting `bytes / 4` for removed text is conservative wherever the
+/// text tokenized at four or fewer bytes per token, which holds for prose
+/// and code; a provider-reported overflow remains the backstop for the rest.
+pub(crate) const fn adjust_measured_tokens(
+    measured: u64,
+    previous_bytes: u64,
+    current_bytes: u64,
+) -> u64 {
+    if current_bytes >= previous_bytes {
+        measured.saturating_add(estimate_tokens(current_bytes - previous_bytes))
+    } else {
+        measured.saturating_sub(estimate_tokens(previous_bytes - current_bytes))
+    }
+}
+
 /// Fraction of the model window held back as headroom before a prompt run
 /// starts: an eligible run whose estimate exceeds `window - reserve` compacts
 /// proactively, while it still fits, instead of waiting for the estimate to
@@ -353,6 +370,15 @@ mod tests {
             panic!("a 730 KB transcript fits a 200k window at four bytes per token")
         };
         assert_eq!(estimate.estimated_input_tokens, 182_375);
+    }
+
+    #[test]
+    fn measured_tokens_follow_byte_deltas_in_both_directions() {
+        assert_eq!(adjust_measured_tokens(100, 1_000, 1_000), 100);
+        assert_eq!(adjust_measured_tokens(100, 1_000, 1_024), 106);
+        assert_eq!(adjust_measured_tokens(100, 1_024, 1_000), 94);
+        assert_eq!(adjust_measured_tokens(5, 1_024, 0), 0);
+        assert_eq!(adjust_measured_tokens(u64::MAX, 0, 8), u64::MAX);
     }
 
     #[test]

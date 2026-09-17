@@ -1258,7 +1258,13 @@ impl plan::CompiledAgentPlan {
             let mut reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
             let mut irreducible_message_bytes =
                 measure_messages(&messages[reducible_messages..]);
-            let mut compatible_request: Option<(Arc<str>, bool, u64, u64)> = None;
+            // The last provider-measured request as (system bytes, tool
+            // schema bytes, message bytes, measured input tokens). The next
+            // request's estimate starts from the measurement and follows each
+            // component's byte delta, so a checkpoint notice, a tool-free
+            // turn, or an in-run prune adjusts the chain instead of dropping
+            // it back to the raw byte estimate.
+            let mut compatible_request: Option<(u64, u64, u64, u64)> = None;
             // Effects of this run's admitted calls by provider call id, so a
             // turn that would overflow the window can stub the stale
             // read-only results in memory before failing. Between runs
@@ -1347,9 +1353,9 @@ impl plan::CompiledAgentPlan {
                 // results older than the recency window are re-derivable and
                 // can be stubbed in place. Do that before a later turn is
                 // refused for the window: the same rewrite assembly applies
-                // between runs, applied to the live messages. A rewrite
-                // invalidates the measured-occupancy chain, so it runs only
-                // when the byte estimate says the request would not fit.
+                // between runs, applied to the live messages. The measured
+                // chain credits the removed bytes; it runs only when the
+                // estimate says the request would not fit.
                 let would_overflow = turn_ordinal > 1
                     && plan.runtime.context_window.is_some_and(|window| {
                         sessions::context::estimate_tokens(input_bytes)
@@ -1388,18 +1394,25 @@ impl plan::CompiledAgentPlan {
                         .saturating_add(tool_schema_bytes)
                         .saturating_add(reducible_message_bytes)
                         .saturating_add(irreducible_message_bytes);
-                    compatible_request = None;
                 }
-                let compatible_input_tokens = compatible_request.as_ref().and_then(
-                    |(previous_system, previous_had_tools, previous_bytes, previous_tokens)| {
-                        (previous_system.as_ref() == request_system.as_ref()
-                            && *previous_had_tools == request_has_tools
-                            && input_bytes >= *previous_bytes)
-                            .then(|| {
-                                previous_tokens.saturating_add(sessions::context::estimate_tokens(
-                                    input_bytes - previous_bytes,
-                                ))
-                            })
+                let message_bytes = reducible_message_bytes.saturating_add(irreducible_message_bytes);
+                let compatible_input_tokens = compatible_request.map(
+                    |(previous_system, previous_tools, previous_messages, measured)| {
+                        let tokens = sessions::context::adjust_measured_tokens(
+                            measured,
+                            previous_system,
+                            system_bytes,
+                        );
+                        let tokens = sessions::context::adjust_measured_tokens(
+                            tokens,
+                            previous_tools,
+                            tool_schema_bytes,
+                        );
+                        sessions::context::adjust_measured_tokens(
+                            tokens,
+                            previous_messages,
+                            message_bytes,
+                        )
                     },
                 );
                 yield RuntimeEvent::Prepared {
@@ -1784,9 +1797,9 @@ impl plan::CompiledAgentPlan {
 
                 compatible_request = terminal_usage.map(|usage| {
                     (
-                        Arc::clone(&request_system),
-                        request_has_tools,
-                        input_bytes,
+                        system_bytes,
+                        tool_schema_bytes,
+                        message_bytes,
                         usage
                             .input_tokens
                             .saturating_add(usage.cache_read_input_tokens)
@@ -5715,6 +5728,146 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn the_measured_token_chain_survives_the_slice_checkpoint_and_continuation() {
+        // Every turn reports usage. The checkpoint turn changes the system
+        // prompt and drops the tool schemas, the continuation turn changes it
+        // again, and the turn after that restores it: three requests that
+        // used to fall back to the raw byte estimate. Each must still carry
+        // a measurement-derived estimate, adjusted by the byte deltas.
+        struct MeasuredCheckpoint {
+            emitted: Mutex<usize>,
+        }
+
+        impl Provider for MeasuredCheckpoint {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let usage = Some(qq_provider::ProviderUsage {
+                    input_tokens: 1_000,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 1,
+                    reasoning_tokens: None,
+                });
+                if request.tools().is_empty() {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "slice checkpoint".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage }),
+                    ]));
+                }
+                let mut emitted = self.emitted.lock().unwrap();
+                // Two turns past the checkpoint: continuation, then one more.
+                if *emitted >= MAX_TOOL_CALLS_PER_SLICE + 2 {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "task complete".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage }),
+                    ]));
+                }
+                let first = *emitted;
+                let count = if first < MAX_TOOL_CALLS_PER_SLICE {
+                    (MAX_TOOL_CALLS_PER_SLICE - first).min(MAX_TOOL_CALLS_PER_TURN - 1)
+                } else {
+                    1
+                };
+                *emitted += count;
+                drop(emitted);
+                let mut events = Vec::with_capacity(count * 3 + 1);
+                for index in first..first + count {
+                    let id = format!("call-{index}");
+                    events.push(Ok(ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "unknown".to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: "{}".to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
+                }
+                events.push(Ok(ProviderEvent::Completed { usage }));
+                Box::pin(stream::iter(events))
+            }
+        }
+
+        let runtime = Runtime::new(
+            MeasuredCheckpoint {
+                emitted: Mutex::new(0),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_loop(
+                vec![Message::user("finish a long task")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Auto,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let prepared: Vec<(u32, Option<u64>)> = events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::Prepared {
+                    turn_ordinal,
+                    weight,
+                    ..
+                } => Some((*turn_ordinal, weight.compatible_input_tokens)),
+                _ => None,
+            })
+            .collect();
+        // The first request has nothing to inherit; every later one does,
+        // including the checkpoint, the continuation, and the turn after.
+        assert_eq!(prepared[0].1, None);
+        let unmeasured: Vec<u32> = prepared[1..]
+            .iter()
+            .filter(|(_, tokens)| tokens.is_none())
+            .map(|(turn, _)| *turn)
+            .collect();
+        assert!(
+            unmeasured.is_empty(),
+            "turns without a measured chain: {unmeasured:?}"
+        );
+        // Every measured turn reports 1,000 tokens, so each ordinary request
+        // estimates 1,000 plus the byte delta of one turn's calls and results
+        // (~300 tokens here), never the raw byte count of the whole
+        // transcript. The checkpoint request is credited the schema bytes it
+        // dropped; the continuation charges them back plus its notice; the
+        // turn after converges on the measurement again.
+        let by_turn: HashMap<u32, u64> = prepared[1..]
+            .iter()
+            .filter_map(|(turn, tokens)| tokens.map(|tokens| (*turn, tokens)))
+            .collect();
+        let checkpoint_turn = *by_turn.iter().min_by_key(|(_, tokens)| **tokens).unwrap().0;
+        assert!(by_turn[&checkpoint_turn] < 1_000, "{prepared:?}");
+        assert!(by_turn[&(checkpoint_turn + 1)] > 1_000, "{prepared:?}");
+        let after = by_turn[&(checkpoint_turn + 2)];
+        assert!((900..=1_400).contains(&after), "{after} {prepared:?}");
+        for turn in 2..checkpoint_turn {
+            let tokens = by_turn[&turn];
+            assert!((1_000..=1_400).contains(&tokens), "turn {turn}: {tokens}");
+        }
+        let raw_bytes = sessions::context::estimate_tokens(MAX_TOOL_CALLS_PER_SLICE as u64 * 64);
+        assert!(
+            by_turn.values().all(|tokens| *tokens < raw_bytes),
+            "{prepared:?}"
+        );
     }
 
     #[tokio::test]
