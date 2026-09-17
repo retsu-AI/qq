@@ -104,6 +104,7 @@ use settlement::*;
 use snapshots::*;
 use streaming::*;
 use tool_calls::*;
+pub(crate) use transcript::prune_stale_tool_results;
 use transcript::*;
 
 /// Prompts one session may hold queued behind its active run.

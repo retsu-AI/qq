@@ -2527,6 +2527,9 @@ enum AutoCompactScript {
     /// Reads `note.txt` on the first turn, then streams the text: seeds a
     /// prunable read-only result into the transcript.
     ReadNoteThenText(String),
+    /// Reads `note.txt` once per turn for `turns` turns, then streams the
+    /// text: grows one run's own transcript with prunable results.
+    ReadNoteRepeatedly { turns: usize, text: String },
     /// Calls `search_history` with the query on the first turn, then
     /// streams the text.
     SearchHistoryThenText(String, String),
@@ -2652,6 +2655,28 @@ impl Provider for AutoCompactProvider {
                         Ok(qq_provider::ProviderEvent::ToolCallCompleted {
                             id: "call_read".to_owned(),
                         }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
+            }
+            AutoCompactScript::ReadNoteRepeatedly { turns, text } => {
+                if prior_results.len() >= *turns {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    let id = format!("call_read_{}", prior_results.len());
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: id.clone(),
+                            name: "read_file".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: id.clone(),
+                            json: r#"{"path":"note.txt"}"#.to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
                         Ok(qq_provider::ProviderEvent::Completed { usage: None }),
                     ]))
                 }

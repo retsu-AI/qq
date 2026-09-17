@@ -676,9 +676,15 @@ One durable run follows a guarded loop:
    up; `sessions::context::ESTIMATED_BYTES_PER_TOKEN`) unless a compatible
    provider measurement covers the request, and adds the output reserve. An
    estimated model-window overflow compacts or fails closed; the independent
-   4 MiB per-session storage backstop is measured in bytes. The summarizer's
-   own request is planned against storage only: it carries the transcript
-   that overflowed, so the provider adjudicates its fit.
+   4 MiB per-session storage backstop is measured in bytes. An eligible
+   prompt run compacts proactively once its estimate enters the last tenth
+   of the window, while the summarizer still has room. The summarizer's own
+   request is planned against storage only: it carries the transcript that
+   overflowed, so the provider adjudicates its fit. Within a run the
+   transcript cannot be compacted, but before a later turn is refused for
+   the window the run stubs its own read-only results older than the
+   recency window in memory (the same rewrite assembly applies between
+   runs) and re-plans; only when that does not fit does the turn fail.
 4. In one guarded transaction, persist the resolved model, prompt identity,
    exact request measurement, running/session/message state, and `RunStarted`.
 5. Re-read cancellation, then poll the provider only after that transaction

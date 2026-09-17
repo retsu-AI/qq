@@ -365,7 +365,7 @@ pub(super) fn runtime_notice(outcome: &RunOutcome) -> Option<String> {
 /// back to the built-in read-only names. The window keeps the last
 /// [`CONTEXT_PRUNE_KEEP_TURNS`] model turns (assistant messages) verbatim.
 /// `is_error` is preserved so an error result stays an error stub.
-pub(super) fn prune_stale_tool_results(
+pub(crate) fn prune_stale_tool_results(
     context: &mut [Message],
     effects: &HashMap<(usize, usize), EffectClass>,
 ) -> bool {
