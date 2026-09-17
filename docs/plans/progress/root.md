@@ -15,6 +15,7 @@ may append a **request** row; only root changes a request's status.
 | ROOT-5 | Context usability stack C1–C6: 4 bytes/token estimate, summarizer past the window, proactive and in-run compaction, audit default `off`, Anthropic/Bedrock cache breakpoints, overlapped leading reads and soft 16-call cap, measured occupancy across pruning/checkpoints | Shipped (#56 `d4fd971`, #58 `3446c54`, #59 `1c4467b`, #61 `49d4a03` incl. C5, #64 `4715226`) | 2026-09-16. Plan and ledger deleted with #66; design in `architecture.md` § run loop step 3, § resolved model, § audit; `providers.md` § breakpoints; `tools.md` § Loop Bounds. Deferred: true mid-run summarization (needs a store cutoff inside a run), estimator calibration from observed `usage`. Live qualification (cache reads on turn 2; a real long session) not yet run |
 | ROOT-6 | Docs cleanup: delete shipped plans/ledgers and superseded research; collapse speed-first to open items; move extension contract and perf targets into `architecture.md` | Shipped (#66) | 2026-09-16 |
 | F07 | Control and cleanup commands admitted past `MAX_COMMANDS` | In review ([ENG-786](https://linear.app/retsu-ai/issue/ENG-786), [#68](https://github.com/retsu-AI/qq/pull/68)) | 2026-09-16. `SessionCommandKind::creates_work` splits the thirteen kinds; new work bounded at 100 000 receipts, control/cleanup at +10 000 headroom, runtime settlement cancels unbounded (`CommandOrigin`). Receipts never trimmed; replay unchanged. Two regression tests fill the counter and drive cancel/approve/delete/prune/shutdown |
+| F05 | Attachments reconstructed as the model first saw them | In review ([ENG-788](https://linear.app/retsu-ai/issue/ENG-788), #69) | 2026-09-17. Schema 28 → 29: `attachment_blobs` (per-session, keyed by whole-file hash + range, 64 MiB cap with explicit evicted rendering) and `message_attachments`, written in the `RunStarted` transaction; `load_model_context` re-renders `<attached-file>` blocks from the store; `ClaimedRun.resolved_input` carries the first read across the auto-compaction retry. Three regression tests (modify/delete/reopen/dedup/cascade; eviction stub; auto-compaction retry) plus the reference-assembly oracle |
 
 ## ADR number allocation
 
@@ -127,3 +128,16 @@ Context work continues in the separate `qq-ctx` worktree; do not duplicate
 its unmerged work or treat local branch advancement as shipped behavior.
 F07 awaits retention-contract direction; F25 awaits its requested test-boundary
 confirmation. The full audit objective remains incomplete.
+
+### 2026-09-17 — F05 attachment provenance
+
+Order-1 repairs from the audit are now all merged or in review: F01 #55, F02
+#57, F14 #63, F25 #67, F07 #68, F05 #69 (this entry). F05 reproduced on
+`main` `c8b1120`: request 2 of an attach-then-continue session carried
+`inspect\n@a.txt`. Fix chosen over the "fat `messages.resolved_output`
+column" alternative because it dedups repeated attachments, gives eviction a
+row to render from, and keeps `MessageSnapshot` (and thus `PROTOCOL_VERSION`)
+unchanged. Steering messages still render placeholders for `@path` parts on
+the live run; that is the pre-existing gap noted in `progress/tool-layer.md`,
+not part of F05. Next in order 2: F03 (mid-run compaction at a tool
+boundary), F04, F06, F10, F11, F20, F23, F24, F28.

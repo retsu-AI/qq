@@ -159,6 +159,10 @@ const MAX_SESSION_FILES: u32 = 4_096;
 /// Complete tool outputs one session keeps; the oldest rows of finished runs
 /// lose their content (never their handle) past this.
 const MAX_SESSION_SPILL_BYTES: u64 = 64 * 1024 * 1024;
+/// Attached-file bytes one session keeps for context reconstruction; the
+/// oldest blobs of finished runs lose their content (never their row) past
+/// this, and the reconstructed prompt says so.
+const MAX_SESSION_ATTACHMENT_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 /// Child runs one parent run may hold in flight at once. Spawn calls beyond

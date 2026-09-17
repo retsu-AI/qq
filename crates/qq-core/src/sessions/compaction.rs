@@ -169,6 +169,7 @@ pub(super) fn start_auto_compaction(
             context_occupancy: None,
             limits: RunLimits::default(),
             input: Vec::new(),
+            resolved_input: None,
             profile: original.profile.clone(),
             approval_mode: original.approval_mode,
             depth: original.depth,

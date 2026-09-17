@@ -606,9 +606,14 @@ zero lines and can be attached whole, but any range fails the run as
 `InvalidCommand` before a provider request. A final newline does not add an
 extra empty line; selected content retains its original LF or CRLF bytes.
 
-The transcript row shows the same placeholder; the
-model sees the file fenced after the text. Attached files are recorded in
-the session's file-state map exactly as `read_file` does.
+The transcript row shows the same placeholder; the model sees the file
+fenced after the text, and every later request in the session sees those
+same bytes: the run start persists each attachment (path, whole-file hash,
+range, content) and context assembly re-renders it from the store rather
+than the current file. A blob the per-session attachment cap (64 MiB)
+reclaimed renders as `<attached-file … evicted="true">` with a note to read
+the file again, never as the placeholder. Attached files are recorded in the
+session's file-state map exactly as `read_file` does.
 
 **Completion.** Typing on an `@` token asks the loop for candidates
 (`Effect::CompleteMention` → `complete_paths`, ≤ 150 ms, ≤ 12 results)

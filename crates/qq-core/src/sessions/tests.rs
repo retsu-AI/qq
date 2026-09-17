@@ -1871,6 +1871,7 @@ fn denial_capacity_fixture(
         context_occupancy: None,
         limits: RunLimits::default(),
         input: Vec::new(),
+        resolved_input: None,
         profile: AgentProfileId::default(),
         approval_mode: ApprovalMode::default(),
         depth: 0,
@@ -2204,7 +2205,61 @@ mod reference_assembly {
             if snapshot.role != MessageRole::User {
                 return Err(SessionRuntimeError::CODEC);
             }
-            context.push(Message::user(snapshot.output));
+            // Per-message attachment lookup: a prompt with stored
+            // attachments is rebuilt from its text parts plus each stored
+            // block; one without keeps the transcript text.
+            let mut statement = transaction.prepare(
+                "SELECT a.path, a.window_start, a.window_end, a.window_total, b.content
+                     FROM message_attachments a
+                     JOIN attachment_blobs b
+                       ON b.session_id = a.session_id AND b.blob_key = a.blob_key
+                     WHERE a.message_id = ?1
+                     ORDER BY a.ordinal",
+            )?;
+            let stored = statement
+                .query_map([&id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<u64>>(1)?,
+                        row.get::<_, Option<u64>>(2)?,
+                        row.get::<_, Option<u64>>(3)?,
+                        row.get::<_, Option<Vec<u8>>>(4)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+            if stored.is_empty() {
+                context.push(Message::user(snapshot.output));
+            } else {
+                let input_json: Option<String> = transaction.query_row(
+                    "SELECT input_json FROM messages WHERE id = ?1",
+                    [&id],
+                    |row| row.get(0),
+                )?;
+                let parts = parse_input_parts(input_json.as_deref())?;
+                let stored: Vec<_> = stored
+                    .into_iter()
+                    .map(|(path, start, end, total, content)| {
+                        let window = match (start, end, total) {
+                            (Some(start), Some(end), Some(total)) => {
+                                Some((start as usize, end as usize, total as usize))
+                            }
+                            _ => None,
+                        };
+                        (
+                            path,
+                            window,
+                            content.map(|bytes| String::from_utf8(bytes).unwrap()),
+                        )
+                    })
+                    .collect();
+                context.push(Message::user(crate::input::render_resolved_prompt(
+                    &crate::input::render_text_parts(&parts),
+                    stored.iter().map(|(path, window, content)| {
+                        (path.as_str(), *window, content.as_deref())
+                    }),
+                )));
+            }
             // Reconstruct each run immediately after its prompt rather than
             // following message-row ordinals. Follow-up prompts can be queued
             // while the prior run is active, so its later committed output still

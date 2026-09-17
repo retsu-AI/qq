@@ -758,9 +758,17 @@ column (the catalog effect class the call was admitted under, schema 26) is
 `read_only`, with rows recorded before that column falling back to the
 built-in read-only names. Tool outputs the bounding boundary cut are stored in
 `tool_spills` (schema 28) in the same transaction as the result row, so a
-handle cited in a result always resolves after a crash or never appears.
-Workspace path canonicalization runs on a blocking thread before the command
-reaches the store worker.
+handle cited in a result always resolves after a crash or never appears. The
+files a prompt attached are stored the same way (`attachment_blobs` and
+`message_attachments`, schema 29) in the transaction that marks the run
+started: a follow-up, reopen, or compaction reassembles the prompt from those
+bytes — deduplicated by content hash within the session, bounded by a
+per-session cap whose eviction renders an explicit evicted block — so the
+model sees the same request after the file changes or disappears, and never
+the bare `@path` placeholder the transcript row keeps for display. A prompt
+that auto-compacts before its first send is retried with the bytes its first
+attempt read, not a second read. Workspace path canonicalization runs on a
+blocking thread before the command reaches the store worker.
 
 Caller budgets are core-owned. `submit_prompt.limits` carries a versioned
 `RunLimits` (wall clock, model turns, tool calls, total tokens, cost) that is

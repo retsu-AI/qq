@@ -1697,6 +1697,8 @@ pub(super) fn delete_idle_session(
     for statement in [
         "UPDATE sessions SET parent_id = NULL, owner_run_id = NULL WHERE parent_id = ?1",
         "DELETE FROM tool_spills WHERE session_id = ?1",
+        "DELETE FROM message_attachments WHERE session_id = ?1",
+        "DELETE FROM attachment_blobs WHERE session_id = ?1",
         "DELETE FROM tool_calls WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?1)",
         "DELETE FROM model_turns WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?1)",
         "DELETE FROM messages WHERE session_id = ?1",

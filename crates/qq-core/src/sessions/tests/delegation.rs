@@ -1791,6 +1791,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
         context_occupancy: None,
         limits: RunLimits::default(),
         input: Vec::new(),
+        resolved_input: None,
         profile: AgentProfileId::default(),
         approval_mode: ApprovalMode::default(),
         depth: 0,

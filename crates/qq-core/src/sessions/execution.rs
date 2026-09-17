@@ -198,57 +198,70 @@ async fn prepare_execution(
     // recorded in the session file state. The assembled context already ends
     // with the rendered prompt text (placeholders for attachments); the
     // resolved text replaces it. A missing, changed, or oversized attachment
-    // fails the run with a typed outcome and no provider work.
+    // fails the run with a typed outcome and no provider work. The result is
+    // kept on the claim: a retry after automatic compaction reloads the
+    // placeholder from the store and must send the bytes the first attempt
+    // read, not a second read of a file that may have changed since.
     if !internal
-        && input
-            .iter()
-            .any(|part| matches!(part, qq_protocol::InputPart::WorkspaceFile { .. }))
+        && (claimed.resolved_input.is_some()
+            || input
+                .iter()
+                .any(|part| matches!(part, qq_protocol::InputPart::WorkspaceFile { .. })))
     {
-        let workspace = loaded.plan.workspace_handle();
-        let state = Arc::clone(&file_state);
-        let parts = input;
-        let mut resolution = tokio::task::spawn_blocking(move || {
-            #[cfg(test)]
-            crate::workspace::pause_blocking_preparation(&workspace);
-            crate::input::resolve_blocking(&parts, &workspace, &state)
-        });
-        let resolved = tokio::select! {
-            biased;
-            () = RunDeadline::wait(deadline) => {
-                tool_cancellation.cancel();
-                // Blocking work cannot be forcibly cancelled or detached.
-                let _ = resolution.await;
-                return Err(RunOutcome::BudgetExhausted {
-                    exhaustion: Box::new(deadline.expect("only a finite deadline wakes").exhaustion()),
-                });
+        let resolved = if let Some(resolved) = &claimed.resolved_input {
+            Arc::clone(resolved)
+        } else {
+            let workspace = loaded.plan.workspace_handle();
+            let state = Arc::clone(&file_state);
+            let parts = input;
+            let mut resolution = tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                crate::workspace::pause_blocking_preparation(&workspace);
+                crate::input::resolve_blocking(&parts, &workspace, &state)
+            });
+            let resolved = tokio::select! {
+                biased;
+                () = RunDeadline::wait(deadline) => {
+                    tool_cancellation.cancel();
+                    // Blocking work cannot be forcibly cancelled or detached.
+                    let _ = resolution.await;
+                    return Err(RunOutcome::BudgetExhausted {
+                        exhaustion: Box::new(deadline.expect("only a finite deadline wakes").exhaustion()),
+                    });
+                }
+                changed = cancellation.changed() => {
+                    tool_cancellation.cancel();
+                    let _ = resolution.await;
+                    return if changed.is_ok() && *cancellation.borrow() {
+                        Err(RunOutcome::Cancelled)
+                    } else {
+                        Err(RunOutcome::Interrupted)
+                    };
+                }
+                result = &mut resolution => result,
+            };
+            match resolved {
+                Ok(Ok(resolved)) => {
+                    let resolved = Arc::new(resolved);
+                    claimed.resolved_input = Some(Arc::clone(&resolved));
+                    resolved
+                }
+                Ok(Err(error)) => {
+                    tool_cancellation.cancel();
+                    return Err(RunOutcome::Failed {
+                        failure: RunFailure {
+                            kind: error.failure_kind(),
+                            message: truncate_utf8(error.to_string(), MAX_FAILURE_MESSAGE_BYTES),
+                        },
+                    });
+                }
+                Err(_) => {
+                    tool_cancellation.cancel();
+                    return Err(internal_failure("input resolution stopped unexpectedly"));
+                }
             }
-            changed = cancellation.changed() => {
-                tool_cancellation.cancel();
-                let _ = resolution.await;
-                return if changed.is_ok() && *cancellation.borrow() {
-                    Err(RunOutcome::Cancelled)
-                } else {
-                    Err(RunOutcome::Interrupted)
-                };
-            }
-            result = &mut resolution => result,
         };
-        let text = match resolved {
-            Ok(Ok(text)) => text,
-            Ok(Err(error)) => {
-                tool_cancellation.cancel();
-                return Err(RunOutcome::Failed {
-                    failure: RunFailure {
-                        kind: error.failure_kind(),
-                        message: truncate_utf8(error.to_string(), MAX_FAILURE_MESSAGE_BYTES),
-                    },
-                });
-            }
-            Err(_) => {
-                tool_cancellation.cancel();
-                return Err(internal_failure("input resolution stopped unexpectedly"));
-            }
-        };
+        let text = resolved.text.clone();
         match messages.pop() {
             Some(prompt) if prompt.role() == Role::User => messages.push(Message::user(text)),
             Some(_) | None => {
@@ -641,7 +654,11 @@ pub(super) async fn execute_run(
                 }
                 let started = inner
                     .store
-                    .start_reserved_run(&claimed, prepared.audit.clone())
+                    .start_reserved_run(
+                        &claimed,
+                        prepared.audit.clone(),
+                        claimed.resolved_input.clone(),
+                    )
                     .await;
                 match started {
                     Ok(Some(_)) => {}

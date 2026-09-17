@@ -888,7 +888,11 @@ impl Store {
             return Ok(None);
         };
         let audit = test_prepared_audit(&claimed);
-        if self.start_reserved_run(&claimed, audit).await?.is_none() {
+        if self
+            .start_reserved_run(&claimed, audit, None)
+            .await?
+            .is_none()
+        {
             return Err(SessionRuntimeError::CONSTRAINT);
         }
         Ok(Some(claimed))
@@ -924,6 +928,7 @@ impl Store {
         &self,
         claimed: &ClaimedRun,
         audit: PreparedRunAudit,
+        resolved_input: Option<Arc<crate::input::ResolvedInput>>,
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         #[cfg(test)]
         if let Some(hook) = take_reserved_start_hold_hook(claimed.identity.run_id) {
@@ -934,7 +939,13 @@ impl Store {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call_write(Priority::AwaitControl, move |connection| {
-            start_reserved_run(connection, store_id, identity, &audit)
+            start_reserved_run(
+                connection,
+                store_id,
+                identity,
+                &audit,
+                resolved_input.as_deref(),
+            )
         })
         .await
     }
