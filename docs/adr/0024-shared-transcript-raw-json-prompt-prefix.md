@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-09-13
 **Deciders:** speed-first plan H18 (design D5)
-**Implements:** [`speed-first-extensible-agent-harness.md` § D5](../plans/speed-first-extensible-agent-harness.md#d5--shared-transcript-and-precompiled-prompt-prefix-h18),
+**Implements:** speed-first § D5 (shared transcript and precompiled prompt prefix; collapsed after Phase 6, see `git log -S"D5 —" -- docs/plans`),
 [`architecture.md` § Compiled Agent Plans](../design/architecture.md#compiled-agent-plans)
 
 ## Context

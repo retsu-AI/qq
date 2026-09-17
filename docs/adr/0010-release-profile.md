@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-09-07
 **Deciders:** speed-first plan Phase 5a
-**Implements:** [Performance Constitution](../plans/speed-first-extensible-agent-harness.md#performance-constitution)
+**Implements:** [`architecture.md` § Performance Discipline](../design/architecture.md#performance-discipline)
 
 ## Context
 

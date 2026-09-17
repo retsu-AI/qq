@@ -14,7 +14,7 @@ newest last.
 | T6 | Shell classifier + `Forbidden` decision; shell v2 env/cleared environment; builtin preference | Shipped (#40, `91809b2`) | `feat/tool-layer-t6-classifier` | Evidence `target/qq-perf/t6-2026-09-14/`; ADR-0020 |
 | T7 | `exec`, env allowlist, prefer-built-in nudge, `builtin_preference` | Shipped (#41, `c3b5088`) | `feat/tool-layer-t7-exec` | env/nudge landed in T6 |
 | T8 | `ask_user` + `Interactive` class + protocol 21 + headless `needs_input` | Shipped (#49, `7956e8e`) | [#49](https://github.com/retsu-AI/qq/pull/49) | 2026-09-15; ADR-0021 (shared with T9); evidence `target/qq-perf/t8-2026-09-15/` |
-| T9 | `fetch` + `Network` class + host grants + SSRF + protocol 22 | In review | [#50](https://github.com/retsu-AI/qq/pull/50) | 2026-09-15; ADR-0021 amended; evidence `target/qq-perf/t9-2026-09-15/` |
+| T9 | `fetch` + `Network` class + host grants + SSRF + protocol 22 | Shipped (`b75ebac`) | [#50](https://github.com/retsu-AI/qq/pull/50) | 2026-09-15; ADR-0021 amended; evidence `target/qq-perf/t9-2026-09-15/` |
 | T10 | `terminal` | Planned (gated) | | Ships only on R6-terminal evidence |
 | T11 | `view_image` + provider image block | Planned | | `vision` feature |
 | T12 | `@` mentions: grammar, `range` field, dirs/globs, `@diff`/`@sha`, completion | Shipped (#45, `896ea93`) | [#45](https://github.com/retsu-AI/qq/pull/45) | Evidence `target/qq-perf/t12-2026-09-14/`; protocol bump folded into T8 |
@@ -25,7 +25,7 @@ newest last.
 
 ### 2026-09-11 — plan opened
 
-Research landed in `docs/design/harness-catalog-2026-09.md`; plan written from
+Research landed in the September harness catalog (superseded, deleted with #66); plan written from
 it. No slice in progress. Root requests (workspace dependency promotion for
 T6; ADR numbers for T4, T6, T8/T9) were all granted; see `root.md`.
 

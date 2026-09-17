@@ -323,15 +323,25 @@ fixed per-session cap (4 MiB), and a persist that would exceed it fails
 the run. That is the backstop against unbounded growth, not window
 management.
 
-Result pruning is the first shedding mechanism (shipped compaction design;
-bounds recorded under "Compaction Hardening" in
-`docs/plans/terminal-bench-readiness.md`):
-during assembly, read-only built-in results older than the last few model
-turns are replaced by stubs naming the tool, arguments, and size (preceded
-by the result's header line when it has one), because the agent can
-re-derive them on demand. Mutating, shell, and MCP
-outputs are never pruned — they are not re-derivable. The stored rows are
-untouched; pruning is a property of assembly alone.
+Result pruning is the first shedding mechanism: during assembly, read-only
+built-in results older than the last four model turns
+(`CONTEXT_PRUNE_KEEP_TURNS`) are replaced by stubs naming the tool, arguments,
+and size (preceded by the result's header line when it has one), because the
+agent can re-derive them on demand. Mutating, shell, and MCP outputs are never
+pruned — they are not re-derivable. The stored rows are untouched; pruning is
+a property of assembly alone, and a run that would overflow the model window
+mid-run applies the same stubbing to its live transcript before failing.
+
+Compaction is the second. A summary must be non-empty, fit the 4 MiB context
+limit, carry the six required section headings (Intent, Decisions and
+constraints, Work state, Files touched, Errors, User messages), and shrink the
+measured assembly above a 16 KiB floor; any failure settles the internal run
+as a `policy` failure and the prior compaction stays in force. Three
+compactions are retained per session and `rollback_compaction` steps back
+through them. `search_history` makes aggressive compaction safe: it walks the
+full persisted transcript including replaced spans, excludes the calling run,
+and returns at most 20 excerpts of ~240 bytes with citations naming the user
+message ordinal, turn, and call.
 
 ## Built-In Tools
 

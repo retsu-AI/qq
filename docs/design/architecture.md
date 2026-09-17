@@ -324,10 +324,16 @@ generation/cache/output controls, and exact system/tool prefix. After a
 measured prompt turn, it persists that versioned basis, request byte count, and
 `context_tokens` atomically in the existing model-turn transaction. The next
 run's existing reservation query loads the basis without another store call.
-Only an exact shape/prefix match with monotonically growing request bytes may
-seed the conservative context estimate. Pricing-only refreshes are compatible;
-missing usage, model changes, successful compaction, malformed/unsupported or
-assembly-rewritten history, or any wire/prefix mismatch clear or disable reuse.
+Only an exact shape/prefix match may seed the next estimate; the seed then
+follows the byte delta since the measured request in both directions at the
+estimate ratio (`context::adjust_measured_tokens`), so growth from the new
+prompt is charged and shrinkage from assembly-time pruning is credited rather
+than discarding the measurement. Within a run the same rule is applied per
+request component (system text, tool schemas, messages), so the slice
+checkpoint and continuation turns, which change the system text and drop the
+schemas, keep a measurement-derived estimate. Pricing-only refreshes are
+compatible; missing usage, model changes, successful compaction, malformed or
+unsupported history, or any wire/prefix mismatch clear or disable reuse.
 Provider-overflow suppression is deliberately weaker than reuse: when the
 provider identity is unknown (Custom/LiteLLM, dynamic AWS region chains,
 historical descriptors), core falls back to a route-level shape in a separate
@@ -1114,6 +1120,64 @@ Three rules follow:
   `crates/qq-protocol/tests/fixtures/headless/` holds a golden stream per
   exit status for every retained `PROTOCOL_VERSION` (ADR-0023).
 
+## Extension Contract
+
+Customization uses a small set of deep extension lanes with different trust
+and performance contracts rather than one shallow plugin interface. There is
+no agent-framework, plugin, tool-host, context, or addon crate; each lane is
+owned by an existing crate.
+
+Do not add an agent-framework, plugin, tool-host, context, or addon crate.
+
+| Owner | Responsibility |
+| --- | --- |
+| `qq-config` | Parse and merge agent-profile and addon declarations, validate syntax, retain provenance |
+| `qq-auth` | Resolve provider and addon secret references without exposing secret values to config or protocol |
+| Root package | Discover trusted sources, translate external config, compile/cache plans, wire concrete adapters |
+| `qq-provider` | Compile provider recipes; one provider-neutral stream handle plus effective capabilities; sole retry owner |
+| `qq-core` | `CompiledAgentPlan`, descriptor, execution invariants, context-source contracts, tools, run limits, durable outcomes |
+| `qq-mcp` | Bounded MCP capability/catalog snapshots and selected MCP operations |
+| `qq-protocol` | Versioned profile IDs, plan digests, input parts, commands, outcomes, events, capabilities |
+| `qq-server` | Map authenticated HTTP/SSE onto protocol commands; no agent logic |
+| `qq-client` | Bounded command, reconnect, replay, approval, steering, capability APIs |
+| `qq-tui` | Project protocol state; never discover or execute addons |
+
+Application configuration types must not leak into `qq-core`.
+
+| Lane | Interface | Load time | Hot-path behavior | Trust/isolation |
+| --- | --- | --- | --- | --- |
+| Agent packs | Declarative versioned manifest | Discovery/startup | Immutable prompt/profile data | Hash and trust source; no code execution |
+| Providers | Rust provider compiler/stream seam | Startup or explicit refresh | Direct provider handle | Compile-time trusted adapter; secrets resolved outside core |
+| Native tools | Static Rust registration | Build/startup | Direct dispatch | Fully trusted; capability-scoped execution |
+| General tools | MCP and the embedded `ExternalToolHost` | Startup catalog; call on demand | One selected adapter call | MCP process/HTTP boundary or trusted embedder |
+| Context/memory | Typed bounded `ContextSource` | Plan compile plus pre-turn fetch | No per-delta hook | Time/byte/token budgets; explicit fail policy |
+| Observers | Durable SSE/outbox | Subscription | Post-commit only | Cannot affect authoritative execution |
+| Process execution | Local implementation plus one real sandbox adapter (deferred sandbox adapter) | Startup | Direct selected backend | Explicit filesystem/network/process capabilities |
+| Surface adapters | Versioned `qq-client` contract | Client startup | Outside agent loop | Product owns remote auth and UX |
+
+Rules that remain in force: the built-in Rust tools stay the zero-overhead
+path and are never wrapped in RPC or a plugin abstraction; the hot path
+selects one precompiled tool entry and never runs before/after hook lists;
+product memory is not a synchronous observer of every token and ordinary
+retrieval fails open with a visible diagnostic; synchronous decisions remain
+limited to approval, exact tool validation, and budget admission; provider
+adapter families are feature-gated inside `qq-provider` (`provider-bedrock`
+owns the AWS SDK closure) rather than split into crates.
+
+Invariants every lane keeps:
+
+- A disabled adapter family adds no shipping dependency to a minimal build.
+- Disabled addons add no run-loop allocation and no observer dispatch.
+- Plan lookup is digest/cache lookup, not filesystem discovery.
+- No observer can block durable commit or client delivery.
+- Every extension queue and concurrency permit is bounded.
+- A new extension mechanism may not regress the disabled/default hot path by
+  more than five percent without an explicitly accepted tradeoff.
+- Catalog changes compile a new immutable generation rather than mutating a
+  live registry under the run loop; active runs never wait for an unrelated
+  addon reload.
+- All runtime traces identify the exact plan and addon generations.
+
 ## Performance Discipline
 
 Optimize end-to-end time to a useful result, not isolated microbenchmarks.
@@ -1125,13 +1189,42 @@ Keep hot paths direct, queues bounded, and interfaces small. Avoid speculative
 abstractions and serialization layers. Any complexity introduced for speed
 must be supported by a benchmark and must not make routine development hostile.
 
+Method: fake providers and temporary stores for deterministic runtime latency;
+provider network latency separated from QQ latency; fixed-model live runs only
+for outcome and cache qualification. Every change records the pre-change
+baseline for its own new behavior before enforcing a regression gate. The
+reproducible protocol is [`benchmarks/perf/README.md`](../../benchmarks/perf/README.md);
+executable budgets are `benchmarks/perf/budgets-v1.json`. Tail gates on a
+loaded host are not repeatable (same-binary A/A pairs fail the same gates as
+A/B pairs); tail acceptance requires a quiet host, and failures are retained,
+never waived.
+
+Targets the executable budgets and benchmarks enforce or approach:
+
+| Gate | Target |
+| --- | ---: |
+| Command acknowledgement p95 | `<= 10 ms` |
+| Warm claimed run to provider send p95 | `<= 25 ms` |
+| Semantic delta to durable commit | `<= 15 ms` p95; `<= 40 ms` p99 |
+| Durable delta to TUI | `<= 25 ms` p95; `<= 60 ms` p99 |
+| Cancellation | `<= 100 ms` |
+| Output starvation with eight active streams | None longer than `50 ms` (executable); `20 ms` target pending a quiet-host recording |
+| One MiB request plus 32 schemas | `<= 10 ms` encode; heap `<= 2x` payload |
+| One MiB stream scaling | `<= 2.2x` the half-size work after fixed cost |
+| Context overflow sent to a provider | Zero |
+| Compaction reduction when required | At least `8x` |
+| Stable-prefix provider cache use | At least `80%` where supported |
+| Core retry amplification | `< 1.05` provider stream entries per logical turn; transport attempts obey `AttemptPolicy` |
+| Release binary / minimal binary | `<= 48,000,000` / `<= 41,000,000` bytes |
+| Harness-attributable evaluation failures | `< 0.5%` |
+
 ## Intentionally Deferred
 
 The initial repository is pure Rust. Do not create or scaffold any of the
 following yet:
 
 - Web and mobile client surfaces beyond `qq-client`'s transport and state
-  (W1/W2 shipped). Their plan is
+  (the WASM client crate and shared reducer exist). Their plan is
   [`docs/plans/multi-surface-clients.md`](../plans/multi-surface-clients.md);
   a browser client waits on remote enrollment and exposure (ADR-0015, S4).
 - JavaScript/TypeScript packages or package workspace.

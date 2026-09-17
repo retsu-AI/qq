@@ -195,7 +195,6 @@ than assumptions:
 - Authentication for a server exposed on a Tailscale address (loopback
   bearer-token auth is settled; the remote story is not).
 - Session control when several clients are attached to one session.
-- Concrete startup, latency, memory, and binary-size targets.
 
 Decisions previously listed here — crate choices, server discovery,
 provider and credential flow, and default approval policy — are made and

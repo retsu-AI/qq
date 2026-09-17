@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-09-14
 **Deciders:** speed-first plan H19 (design D10, conditional)
-**Implements:** [`speed-first-extensible-agent-harness.md` § D10](../plans/speed-first-extensible-agent-harness.md#d10--sse-framing-h19-conditional),
+**Implements:** speed-first § D10 (SSE framing; collapsed after Phase 6, see `git log -S"D10 —" -- docs/plans`),
 [`architecture.md` § Provider Compilation](../design/architecture.md#provider-compilation)
 
 ## Context
