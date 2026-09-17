@@ -33,11 +33,16 @@ implementation.
 
 "Repeat until no tool calls" needs a ceiling — a model that keeps calling
 tools must not burn tokens forever. The loop is bounded three ways: tool
-calls per turn (16), tool calls per run (64), and model turns per run
-(65). The turn ceiling is one greater than the call ceiling so a run that
-uses its last allowed tool call always gets a final model turn in which to
-return an answer. The defaults are high enough that legitimate multi-step
-work rarely notices them.
+calls executed per turn (16), tool calls per run (64), and model turns per
+run (65). The turn ceiling is one greater than the call ceiling so a run
+that uses its last allowed tool call always gets a final model turn in
+which to return an answer. The per-turn cap is soft: calls past the
+sixteenth are admitted into the transcript with a not-executed error
+result naming the cap, so the model re-issues them next turn and the run
+continues; only a turn naming more than 64 calls is a provider protocol
+failure. The prompt states the cap and asks the model to batch independent
+calls. The defaults are high enough that legitimate multi-step work rarely
+notices them.
 
 Hitting a ceiling ends the run with an explicit run outcome — not a silent
 stop, and not a generic failure — so clients can render "turn limit
@@ -1166,10 +1171,13 @@ shell, the server, tool, and arguments for MCP.
   permits. The tool layer adds no global locks; the only cross-session
   exclusion is the per-workspace microsecond apply section.
 - **Within a turn:** when a model emits several tool calls in one turn,
-  read-only calls execute concurrently under a small bound; mutating and
-  shell calls execute in request order. Results are appended to context in
-  request order regardless of completion order so context assembly stays
-  deterministic.
+  the leading run of read-only calls executes concurrently under a small
+  bound (`MAX_PARALLEL_READS`); from the first mutating, shell, external,
+  or spend-bounded child call on, the rest execute in request order, so a
+  read that follows a mutation is ordered against it and a read that
+  precedes every mutation sees the same workspace either way. Results are
+  appended to context in request order regardless of completion order so
+  context assembly stays deterministic.
 - **Persistence:** all tool events flow through the existing single-writer
   store worker with the existing batching, keeping SQLite off the streaming
   hot path.
