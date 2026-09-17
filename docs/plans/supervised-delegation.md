@@ -545,10 +545,10 @@ D6b runbook (not started; requires spend):
 
 Gates: delegation defaults per task class follow R7 — the candidate's
 `cost_per_pass_ratio_ci95_high` below 0.80 with no meaningful pass-rate loss
-(`delta.pass_rate` not below zero beyond `mcnemar_p_value` noise). Audit stays
-the configured default `heuristic` only if B1 raises pass rate meaningfully or
-lowers dollars per pass; otherwise `AuditConfig::default()` flips to `off` and
-the readiness guardrail amendment is retired. Depth above one stays opt-in
+(`delta.pass_rate` not below zero beyond `mcnemar_p_value` noise). Audit
+defaults to `off` since context-usability C3 (2026-09-16): every default run
+was paying a second unbounded agent loop. B1 may flip it back to `heuristic`
+only if it raises pass rate meaningfully or lowers dollars per pass. Depth above one stays opt-in
 unless A3 beats A2 on the same gate. Continuation is a correctness fix and
 needs no gate beyond T1 showing no pass-rate loss.
 

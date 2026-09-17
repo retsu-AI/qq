@@ -4594,6 +4594,19 @@ async fn audits_inherit_remaining_limits_and_charge_inclusive_spend_once() {
         .expect("auditor must inherit a budget");
     assert_eq!(limits.max_total_tokens, Some(90));
     assert_eq!(limits.max_cost_usd_nanos, Some(90_000));
+    // The auditor is bounded on its own as well: a turn cap and a deadline
+    // the parent did not impose, so an audit is never a second open-ended run.
+    assert_eq!(
+        limits.max_model_turns,
+        Some(crate::runtime::MAX_AUDIT_CHILD_TURNS)
+    );
+    assert!(
+        limits
+            .max_duration_ms
+            .is_some_and(|ms| ms <= crate::runtime::MAX_AUDIT_CHILD_DURATION_MS),
+        "{:?}",
+        limits.max_duration_ms
+    );
     let snapshot = harness
         .runtime
         .snapshot(SnapshotRequest {
