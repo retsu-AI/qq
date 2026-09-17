@@ -12,15 +12,16 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(13) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(14) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// Version 13 of the base agent prompt (10 → 11 covers the tool-layer
+/// Version 14 of the base agent prompt (10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
-/// 11 → 12 adds ask_user; 12 → 13 adds fetch).
+/// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
+/// batch independent calls and names the 16-call executable cap).
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -192,6 +193,7 @@ fn agent_prompt_prefix(
          - edit_file takes a batch: edits=[{{path, old, new}}] or {{path, insert_before|insert_after, new}}; later edits see earlier results, the whole batch applies or none does, and the result names via=<strategy> when whitespace or indentation had to be forgiven. Extend old until it is unique rather than guessing; use dry_run to preview.\n\
          - Inspect existing state before changing it and preserve unrelated work.\n\
          - Prefer search over guessing file paths, and search/tree over shell grep, rg, find, and ls; search groups matches by file as L<n>: text and its header carries next=<cursor> when more exist.\n\
+         - Batch independent tool calls in one turn: several read_file, search, or tree calls issued together run concurrently, and reads that precede the first edit or command in a turn overlap while the rest run in order. Up to 16 calls execute per turn; any beyond that return a not-executed error to re-issue next turn.\n\
          - Give every tool path relative to the workspace root; absolute paths are rejected.\n\
          - When a result ends in a …[qq: … omitted; full output t:…]… marker, the complete output is stored: call read_tool_result with that handle (offset/limit to page, query to search) instead of re-running the command.\n\
          - Before changing files below a subdirectory, inspect each directory from the workspace root to the target for AGENTS.md; when AGENTS.md is absent at one scope, check CLAUDE.md. Apply selected instructions root-to-leaf, with more-specific instructions taking precedence.\n\

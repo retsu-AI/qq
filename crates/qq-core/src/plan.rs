@@ -1225,7 +1225,7 @@ mod tests {
         // from a different encoding.
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "daf00e7bf6f95655f3e53eaf428e98e4cc015d0e1052c2857d699e7b432e7507"
+            "f744aac687d5962854097a53eca592936e0fc1b6623c0b445afec9743717b75c"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v6\0".len()..]).unwrap();

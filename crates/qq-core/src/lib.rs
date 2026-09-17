@@ -84,7 +84,13 @@ pub use workspace::{SkillEntry, SkillIndex, SkillKind};
 pub type RunStream = Pin<Box<dyn Stream<Item = RunEvent> + Send + 'static>>;
 type RuntimeStream = Pin<Box<dyn Stream<Item = RuntimeEvent> + Send + 'static>>;
 
+/// Tool calls one model turn may execute. Calls past this cap are admitted
+/// into the transcript with a not-executed error result so the model can
+/// re-issue them, and the run continues.
 const MAX_TOOL_CALLS_PER_TURN: usize = 16;
+/// Tool calls one model turn may name at all; beyond this the provider stream
+/// is treated as a protocol violation.
+const MAX_ADMITTED_TOOL_CALLS_PER_TURN: usize = 4 * MAX_TOOL_CALLS_PER_TURN;
 // A runaway-loop backstop for one internal execution slice, not a task
 // completion limit. Before a new model turn can exceed this ceiling, QQ
 // records a tool-free checkpoint, resets the counter, and continues the same
@@ -1564,13 +1570,20 @@ impl plan::CompiledAgentPlan {
                                 };
                                 return;
                             }
-                            if pending_calls.len() >= MAX_TOOL_CALLS_PER_TURN {
+                            if pending_calls.len() >= MAX_ADMITTED_TOOL_CALLS_PER_TURN {
                                 yield RuntimeEvent::Failed {
                                     kind: RunFailureKind::ProviderProtocol,
-                                    message: format!("model requested more than {MAX_TOOL_CALLS_PER_TURN} tools in one turn"),
+                                    message: format!("model requested more than {MAX_ADMITTED_TOOL_CALLS_PER_TURN} tools in one turn"),
                                 };
                                 return;
                             }
+                            // Past the executable cap a call is still admitted
+                            // so the transcript keeps one result per call, but
+                            // it settles as a tool error the model can act on
+                            // instead of failing the whole run. Over-cap calls
+                            // never execute, so they do not count against the
+                            // slice or the run's tool-call budget.
+                            let over_cap = pending_calls.len() >= MAX_TOOL_CALLS_PER_TURN;
                             if calls_by_provider_id.contains_key(&id) {
                                 yield RuntimeEvent::Failed {
                                     kind: RunFailureKind::ProviderProtocol,
@@ -1584,10 +1597,18 @@ impl plan::CompiledAgentPlan {
                                 provider_call_id: id,
                                 name,
                                 arguments: String::new(),
-                                rejection: None,
+                                rejection: over_cap.then(|| {
+                                    format!(
+                                        "not executed: this turn requested more than \
+                                         {MAX_TOOL_CALLS_PER_TURN} tool calls and only the first \
+                                         {MAX_TOOL_CALLS_PER_TURN} ran; call this again next turn"
+                                    )
+                                }),
                                 completed: false,
                             });
-                            slice_tool_calls += 1;
+                            if !over_cap {
+                                slice_tool_calls += 1;
+                            }
                             blocks.push(TurnBlock::ToolCall(index));
                         }
                         Ok(ProviderEvent::ToolCallArgumentsDelta { id, json }) => {
@@ -1642,9 +1663,11 @@ impl plan::CompiledAgentPlan {
                             {
                                 Ok(arguments) => arguments,
                                 Err(error) => {
-                                    call.rejection = Some(format!(
-                                        "tool call arguments were not valid JSON: {error}"
-                                    ));
+                                    if call.rejection.is_none() {
+                                        call.rejection = Some(format!(
+                                            "tool call arguments were not valid JSON: {error}"
+                                        ));
+                                    }
                                     serde_json::Value::Object(serde_json::Map::new())
                                 }
                             };
@@ -1819,7 +1842,7 @@ impl plan::CompiledAgentPlan {
                     truncated: truncated_turn,
                 };
                 budget.charge_turn(terminal_usage);
-                budget.charge_tool_calls(calls.len());
+                budget.charge_tool_calls(calls.iter().filter(|call| call.rejection.is_none()).count());
 
                 if truncated_turn {
                     // A reserved final response that ran out of room cannot be
@@ -2513,15 +2536,74 @@ impl plan::CompiledAgentPlan {
                     || limits.max_total_tokens.is_some()
                     || limits.max_input_tokens.is_some()
                     || limits.max_output_tokens.is_some();
-                let sequential = approved.iter().any(|call| {
-                    (bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
-                    || !matches!(
+                let overlaps = |call: &RuntimeToolCall| {
+                    !(bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
+                    && matches!(
                         approval::classify(call.effect, &call.name, &call.arguments, &network_policy),
                         approval::ToolClass::ReadOnly
                     )
-                });
-                if sequential {
-                    for call in approved {
+                };
+                // The leading run of read-only calls overlaps under a small
+                // bound; from the first mutating, shell, or external call on,
+                // the rest runs in request order so side effects never
+                // interleave and every read that follows a mutation is
+                // deterministically ordered against it. A read that precedes
+                // every mutation sees the same workspace either way. Only a
+                // read child may overlap: a write child is a mutation, and
+                // finite spend cannot be granted independently to overlapping
+                // children.
+                let leading_reads = approved.iter().take_while(|call| overlaps(call)).count();
+                let mut ordered = approved;
+                let overlapped: Vec<RuntimeToolCall> = ordered.drain(..leading_reads).collect();
+                if !overlapped.is_empty() {
+                    let child_limits = budget.child_budget(tokio::time::Instant::now());
+                    let mut executions = futures_stream::iter(
+                        overlapped.into_iter().map(|call| execute_one(call, None, child_limits)),
+                    )
+                        .buffer_unordered(MAX_PARALLEL_READS);
+                    loop {
+                        let interrupt = interrupt_requested(&mut steering, handled_interrupt);
+                        let next = tokio::select! {
+                            biased;
+                            () = interrupt => {
+                                turn_interrupted_in_tools = true;
+                                break;
+                            }
+                            next = executions.next() => next,
+                        };
+                        let Some((call, result, child_spend)) = next else {
+                            break;
+                        };
+                        if let Err(error) = tool_tasks.check() {
+                            yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
+                            return;
+                        }
+                        if let Some(spend) = child_spend {
+                            budget.charge_child(spend.usage, spend.cost_usd_nanos);
+                            if let Some(spawner) = &spawner { spawner.acknowledge(call.id); }
+                        }
+                        note_audited_action(
+                            &mut audit_triggers,
+                            &mut audit_actions,
+                            audit_hook.is_some(),
+                            &call,
+                            &result,
+                        );
+                        let result = cite_spill(result, &call.name, call.id, spills.is_some());
+                        results[usize::from(call.call_ordinal - 1)] =
+                            Some(RetainedResult::retain(&result, &call.name, call.id));
+                        yield RuntimeEvent::ToolCallFinished {
+                            id: call.id,
+                            result: result.model_text,
+                            is_error: result.is_error,
+                            file_states: result.file_states,
+                            display: result.ui_payload,
+                            spill: result.spill,
+                        };
+                    }
+                }
+                if !turn_interrupted_in_tools {
+                    for call in ordered {
                         // Live output chunks (shell) interleave with execution:
                         // drain the channel while the call runs so long
                         // commands render as they print.
@@ -2600,52 +2682,6 @@ impl plan::CompiledAgentPlan {
                             turn_interrupted_in_tools = true;
                             break;
                         }
-                    }
-                } else {
-                    let child_limits = budget.child_budget(tokio::time::Instant::now());
-                    let mut executions = futures_stream::iter(
-                        approved.into_iter().map(|call| execute_one(call, None, child_limits)),
-                    )
-                        .buffer_unordered(MAX_PARALLEL_READS);
-                    loop {
-                        let interrupt = interrupt_requested(&mut steering, handled_interrupt);
-                        let next = tokio::select! {
-                            biased;
-                            () = interrupt => {
-                                turn_interrupted_in_tools = true;
-                                break;
-                            }
-                            next = executions.next() => next,
-                        };
-                        let Some((call, result, child_spend)) = next else {
-                            break;
-                        };
-                        if let Err(error) = tool_tasks.check() {
-                            yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
-                            return;
-                        }
-                        if let Some(spend) = child_spend {
-                            budget.charge_child(spend.usage, spend.cost_usd_nanos);
-                            if let Some(spawner) = &spawner { spawner.acknowledge(call.id); }
-                        }
-                        note_audited_action(
-                            &mut audit_triggers,
-                            &mut audit_actions,
-                            audit_hook.is_some(),
-                            &call,
-                            &result,
-                        );
-                        let result = cite_spill(result, &call.name, call.id, spills.is_some());
-                        results[usize::from(call.call_ordinal - 1)] =
-                            Some(RetainedResult::retain(&result, &call.name, call.id));
-                        yield RuntimeEvent::ToolCallFinished {
-                            id: call.id,
-                            result: result.model_text,
-                            is_error: result.is_error,
-                            file_states: result.file_states,
-                            display: result.ui_payload,
-                            spill: result.spill,
-                        };
                     }
                 }
                 if turn_interrupted_in_tools {
@@ -5703,12 +5739,226 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enforces_the_per_turn_limit_and_checkpoint_request_contract() {
+    async fn calls_past_the_per_turn_cap_settle_as_tool_errors_and_the_run_continues() {
+        struct AllowAllGate;
+
+        impl ToolGate for AllowAllGate {
+            fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
+                Box::pin(std::future::ready(GateDecision::Execute))
+            }
+        }
+
+        struct TwentyReadsThenAnswer {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for TwentyReadsThenAnswer {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let mut requests = self.requests.lock().unwrap();
+                let turn = requests.len();
+                requests.push(request);
+                drop(requests);
+                if turn == 1 {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let mut events = Vec::new();
+                for index in 0..MAX_TOOL_CALLS_PER_TURN + 4 {
+                    let id = format!("call-{index}");
+                    events.push(Ok(ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "read_file".to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: r#"{"path":"note.txt"}"#.to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
+                }
+                events.push(Ok(ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TwentyReadsThenAnswer {
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_loop(
+                vec![Message::user("read it twenty times")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(AllowAllGate),
+                Arc::new(workspace::FileState::default()),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let results: Vec<(&str, bool)> = requests[1]
+            .messages()
+            .last()
+            .unwrap()
+            .content()
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => (content.as_str(), *is_error),
+                _ => panic!("tool-result message"),
+            })
+            .collect();
+        assert_eq!(results.len(), MAX_TOOL_CALLS_PER_TURN + 4);
+        for (content, is_error) in &results[..MAX_TOOL_CALLS_PER_TURN] {
+            assert!(!is_error, "{content}");
+            assert!(content.contains("hello"));
+        }
+        for (content, is_error) in &results[MAX_TOOL_CALLS_PER_TURN..] {
+            assert!(is_error);
+            assert!(content.contains("not executed"), "{content}");
+            assert!(content.contains("call this again next turn"), "{content}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mixed_turn_overlaps_its_leading_reads_then_runs_the_rest_in_order() {
+        struct AllowAllGate;
+
+        impl ToolGate for AllowAllGate {
+            fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
+                Box::pin(std::future::ready(GateDecision::Execute))
+            }
+        }
+
+        // Three reads, one edit, one read: the leading reads overlap and see
+        // the original file; the trailing read runs after the edit and sees
+        // the new text. Results still land in call order.
+        struct MixedTurn {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for MixedTurn {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let mut requests = self.requests.lock().unwrap();
+                let turn = requests.len();
+                requests.push(request);
+                drop(requests);
+                if turn == 1 {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let calls = [
+                    ("r1", "read_file", r#"{"path":"note.txt"}"#),
+                    ("r2", "read_file", r#"{"path":"note.txt"}"#),
+                    ("r3", "read_file", r#"{"path":"note.txt"}"#),
+                    (
+                        "e1",
+                        "edit_file",
+                        r#"{"edits":[{"path":"note.txt","old":"before\n","new":"after\n"}]}"#,
+                    ),
+                    ("r4", "read_file", r#"{"path":"note.txt"}"#),
+                ];
+                let mut events = Vec::new();
+                for (id, name, json) in calls {
+                    events.push(Ok(ProviderEvent::ToolCallStarted {
+                        id: id.to_owned(),
+                        name: name.to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.to_owned(),
+                        json: json.to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallCompleted { id: id.to_owned() }));
+                }
+                events.push(Ok(ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.txt"), "before\n").unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            MixedTurn {
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_loop(
+                vec![Message::user("read, edit, read")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(AllowAllGate),
+                Arc::new(workspace::FileState::default()),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let requests = requests.lock().unwrap();
+        let results: Vec<(&str, &str, bool)> = requests[1]
+            .messages()
+            .last()
+            .unwrap()
+            .content()
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult {
+                    call_id,
+                    content,
+                    is_error,
+                } => (call_id.as_str(), content.as_str(), *is_error),
+                _ => panic!("tool-result message"),
+            })
+            .collect();
+        assert_eq!(
+            results.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+            ["r1", "r2", "r3", "e1", "r4"]
+        );
+        for (id, content, is_error) in &results[..3] {
+            assert!(!is_error, "{id}: {content}");
+            assert!(content.contains("before"), "{id}: {content}");
+        }
+        assert!(!results[3].2, "{}", results[3].1);
+        assert!(results[4].1.contains("after"), "{}", results[4].1);
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("note.txt")).unwrap(),
+            "after\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforces_the_admitted_call_limit_and_checkpoint_request_contract() {
         struct TooManyInOneTurn;
 
         impl Provider for TooManyInOneTurn {
             fn stream(&self, _: ModelRequest) -> ProviderStream {
-                let events = (0..=MAX_TOOL_CALLS_PER_TURN)
+                let events = (0..=MAX_ADMITTED_TOOL_CALLS_PER_TURN)
                     .map(|index| {
                         Ok(ProviderEvent::ToolCallStarted {
                             id: format!("call-{index}"),
