@@ -2480,3 +2480,132 @@ async fn measured_occupancy_survives_assembly_pruning_and_admits_the_next_prompt
         "the final request carries pruned history"
     );
 }
+
+/// F06: assembling a fixed retained context must not read the archive behind
+/// the compaction cutoff. Wall time is a bench receipt, not a test; here the
+/// guarantee is structural: the same retained context assembles identically
+/// (and agrees with the per-message reference) whatever the archive size,
+/// and every assembly query is index-driven with no table scan.
+#[test]
+fn assembly_work_follows_the_retained_context_not_the_archive() {
+    let mut assembled = Vec::new();
+    for archived_runs in [10_usize, 2_000] {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("sessions.sqlite3");
+        let (connection, session_id) =
+            bench_support::seed_compacted_session(&database, archived_runs, 4, 3, 512);
+        let messages = load_model_context(&connection, session_id, u64::MAX).unwrap();
+        drop(connection);
+        assert_assembly_matches_reference(&database, session_id);
+        assembled.push(messages.len());
+    }
+    assert_eq!(assembled[0], assembled[1], "same retained context");
+
+    // Every assembly query reaches its rows through an index keyed by the
+    // retained window or the run id; none scans a whole table.
+    let directory = tempfile::tempdir().unwrap();
+    let (connection, _) = bench_support::seed_compacted_session(
+        &directory.path().join("sessions.sqlite3"),
+        50,
+        4,
+        3,
+        64,
+    );
+    for query in [
+        "SELECT t.run_id FROM messages m JOIN runs r ON r.id = m.run_id
+             JOIN model_turns t ON t.run_id = r.id
+         WHERE m.session_id = 's' AND m.ordinal <= 9 AND m.ordinal > 1
+           AND m.role = 'user' AND m.steering = 0 AND m.state = 'complete'",
+        "SELECT c.run_id FROM messages m JOIN runs r ON r.id = m.run_id
+             JOIN tool_calls c ON c.run_id = r.id
+         WHERE m.session_id = 's' AND m.ordinal <= 9 AND m.ordinal > 1
+           AND m.role = 'user' AND m.steering = 0 AND m.state = 'complete'",
+        "SELECT s.run_id FROM messages m JOIN messages s ON s.run_id = m.run_id
+         WHERE m.session_id = 's' AND m.ordinal <= 9 AND m.ordinal > 1
+           AND m.role = 'user' AND m.steering = 0 AND m.state = 'complete'
+           AND s.steering = 1 AND s.state = 'complete'",
+        "SELECT a.message_id FROM messages m JOIN message_attachments a ON a.message_id = m.id
+             JOIN attachment_blobs b ON b.session_id = a.session_id AND b.blob_key = a.blob_key
+         WHERE m.session_id = 's' AND m.ordinal <= 9 AND m.ordinal > 1
+           AND m.role = 'user' AND m.steering = 0",
+    ] {
+        let plan: Vec<String> = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().all(|step| !step.starts_with("SCAN")),
+            "{query}\n{plan:#?}"
+        );
+    }
+}
+
+/// F06: `search_history` bounds the transcript bytes it visits, walks newest
+/// history first so what it did cover is the most useful, and says when it
+/// stopped short. A present term near the top is still found in full.
+#[test]
+fn history_search_is_scan_bounded_and_newest_first() {
+    let directory = tempfile::tempdir().unwrap();
+    // 2_000 runs x 3 turns x 8 KiB results = ~48 MiB of transcript, well
+    // past the 8 MiB budget.
+    let (connection, session_id) = bench_support::seed_compacted_session(
+        &directory.path().join("sessions.sqlite3"),
+        2_000,
+        0,
+        3,
+        8 * 1024,
+    );
+    let calling_run = RunId::from_bytes([9; 16]);
+
+    let absent =
+        search_session_history(&connection, session_id, calling_run, "no-such-term", 8).unwrap();
+    assert!(absent.matches.is_empty());
+    assert!(absent.truncated, "an absent term must hit the scan budget");
+
+    // The newest prompt's needle is found; the oldest prompt's needle lies
+    // behind the budget and is reported as unexamined rather than absent.
+    let newest =
+        search_session_history(&connection, session_id, calling_run, "needle-1999", 8).unwrap();
+    assert_eq!(newest.matches.len(), 1, "{newest:?}");
+    assert!(newest.matches[0].citation.starts_with("user message #"));
+    let oldest =
+        search_session_history(&connection, session_id, calling_run, "needle-0 ", 8).unwrap();
+    assert!(oldest.matches.is_empty());
+    assert!(oldest.truncated);
+
+    // A common term returns the newest `limit` hits in transcript order.
+    let common = search_session_history(&connection, session_id, calling_run, "prompt", 5).unwrap();
+    assert_eq!(common.matches.len(), 5);
+    let ordinals: Vec<u64> = common
+        .matches
+        .iter()
+        .map(|hit| {
+            hit.citation
+                .trim_start_matches("user message #")
+                .parse()
+                .unwrap()
+        })
+        .collect();
+    assert!(
+        ordinals.windows(2).all(|pair| pair[0] < pair[1]),
+        "{ordinals:?}"
+    );
+    assert!(ordinals[4] > 3_990, "newest first: {ordinals:?}");
+
+    // A small session searches to the end and is not marked truncated.
+    let directory = tempfile::tempdir().unwrap();
+    let (connection, session_id) = bench_support::seed_compacted_session(
+        &directory.path().join("sessions.sqlite3"),
+        5,
+        2,
+        2,
+        128,
+    );
+    let complete =
+        search_session_history(&connection, session_id, calling_run, "no-such-term", 8).unwrap();
+    assert!(complete.matches.is_empty());
+    assert!(!complete.truncated);
+}

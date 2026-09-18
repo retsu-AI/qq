@@ -17,7 +17,8 @@ mod worker;
 pub use schema::STORE_SCHEMA_VERSION;
 
 #[cfg(test)]
-pub(super) use schema::{has_column, open_database};
+pub(super) use schema::has_column;
+pub(super) use schema::open_database;
 
 pub(super) const CONTROL_QUEUE_CAPACITY: usize = 256;
 const OUTPUT_QUEUE_CAPACITY: usize = 1024;
@@ -998,7 +999,7 @@ impl Store {
         calling_run: RunId,
         query: String,
         limit: usize,
-    ) -> Result<Vec<HistoryMatch>, SessionRuntimeError> {
+    ) -> Result<HistorySearch, SessionRuntimeError> {
         self.call(Priority::AwaitControl, move |connection| {
             let transaction = connection.transaction()?;
             search_session_history(&transaction, session_id, calling_run, &query, limit)

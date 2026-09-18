@@ -32,6 +32,8 @@ mod tools;
 
 #[doc(hidden)]
 pub use approval::bench_support as classify_bench;
+#[doc(hidden)]
+pub use sessions::bench_support as context_assembly_bench;
 /// Entry points for the `tool_output` bench. Not a public API.
 #[doc(hidden)]
 pub use tools::bench_support as tool_bench;
@@ -2448,8 +2450,8 @@ impl plan::CompiledAgentPlan {
                                     Ok(arguments) => {
                                         let limit = arguments.limit.clamp(1, crate::runtime::MAX_HISTORY_MATCHES);
                                         match history.search(arguments.query.clone(), limit).await {
-                                            Ok(matches) => tools::bounded_result(
-                                                render_history_matches(&arguments.query, &matches),
+                                            Ok(search) => tools::bounded_result(
+                                                render_history_matches(&arguments.query, &search),
                                                 false,
                                             ),
                                             Err(error) => tools::bounded_result(error, true),

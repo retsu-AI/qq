@@ -751,8 +751,12 @@ therefore always be cancelled, approved, and cleaned up; the receipt table is
 the idempotency record and is never trimmed to make room. A claimed run carries the cancellation flag, session file
 hashes, and pending steering out of the claim transaction, so claim to first
 provider request is two store hops (claim, then `RunStarted`), and context
-assembly runs a fixed number of session-scoped queries rather than one per
-message and per turn. Assembly stubs read-only tool results older than the
+assembly runs a fixed number of queries rather than one per message and per
+turn — each scoped to the retained ordinal window (after the compaction
+cutoff), so the archive behind a compaction is never read and assembly cost
+follows the retained context, not the session's age (`messages(run_id,
+steering, state)` index, schema 30; `cargo bench -p qq-core --bench
+context_assembly` holds ~50–100 µs from 10 to 10 000 archived runs). Assembly stubs read-only tool results older than the
 last four model turns; a result is prunable when its `tool_calls.effect`
 column (the catalog effect class the call was admitted under, schema 26) is
 `read_only`, with rows recorded before that column falling back to the

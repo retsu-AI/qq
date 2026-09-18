@@ -341,7 +341,11 @@ compactions are retained per session and `rollback_compaction` steps back
 through them. `search_history` makes aggressive compaction safe: it walks the
 full persisted transcript including replaced spans, excludes the calling run,
 and returns at most 20 excerpts of ~240 bytes with citations naming the user
-message ordinal, turn, and call.
+message ordinal, turn, and call. The walk runs newest prompt first and stops
+after 8 MiB of transcript so an absent or rare term costs bounded
+store-worker time however long the session is; a result that stopped short
+says so and tells the model to narrow the query rather than conclude the
+fact was never recorded.
 
 ## Built-In Tools
 
