@@ -955,21 +955,23 @@ impl Store {
         &self,
         original: &ClaimedRun,
         audit: PreparedRunAudit,
+        cutoff_ordinal: Option<u64>,
     ) -> Result<Option<(ClaimedRun, SessionEventEnvelope)>, SessionRuntimeError> {
         let store_id = self.store_id;
         let original = original.clone();
         self.call_write(Priority::AwaitControl, move |connection| {
-            start_auto_compaction(connection, store_id, &original, &audit)
+            start_auto_compaction(connection, store_id, &original, &audit, cutoff_ordinal)
         })
         .await
     }
 
-    pub(super) async fn load_auto_compaction_messages(
+    pub(super) async fn load_summarizer_input(
         &self,
         session_id: SessionId,
-    ) -> Result<Vec<Message>, SessionRuntimeError> {
+        message_byte_budget: Option<u64>,
+    ) -> Result<SummarizerInput, SessionRuntimeError> {
         self.call(Priority::AwaitControl, move |connection| {
-            load_auto_compaction_messages(connection, session_id)
+            load_summarizer_input(connection, session_id, message_byte_budget)
         })
         .await
     }
@@ -977,7 +979,7 @@ impl Store {
     pub(super) async fn reload_reserved_messages(
         &self,
         claimed: &ClaimedRun,
-    ) -> Result<Option<(Vec<Message>, bool)>, SessionRuntimeError> {
+    ) -> Result<Option<(Vec<Message>, CompactionProgress)>, SessionRuntimeError> {
         #[cfg(test)]
         if let Some(failure) =
             take_targeted_failure(&RESERVED_RELOAD_FAILURES, claimed.identity.run_id)
@@ -2263,7 +2265,7 @@ mod tests {
         let mut cancellation = Box::pin(store.cancellation_requested(run_id));
         let mut search =
             Box::pin(store.search_history(session_id, run_id, "anything".to_owned(), 4));
-        let mut reload = Box::pin(store.load_auto_compaction_messages(session_id));
+        let mut reload = Box::pin(store.load_summarizer_input(session_id, None));
         assert!(futures_util::poll!(cancellation.as_mut()).is_pending());
         assert!(futures_util::poll!(search.as_mut()).is_pending());
         assert!(futures_util::poll!(reload.as_mut()).is_pending());

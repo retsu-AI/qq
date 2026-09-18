@@ -2609,3 +2609,469 @@ fn history_search_is_scan_bounded_and_newest_first() {
     assert!(complete.matches.is_empty());
     assert!(!complete.truncated);
 }
+
+/// Every provider request the summarizer sent, in order, with the message
+/// bytes each carried (excluding the instruction).
+fn summarizer_requests(requests: &[ModelRequest]) -> Vec<(usize, u64)> {
+    requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| {
+            request_texts(request)
+                .last()
+                .is_some_and(|text| text.starts_with("Summarize this conversation"))
+        })
+        .map(|(index, request)| {
+            let messages = request.messages();
+            (
+                index,
+                crate::measure_messages(&messages[..messages.len() - 1]),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_transcript_several_windows_long_folds_through_bounded_summarizer_steps() {
+    // F04: the summarizer used to read the whole transcript. Past the
+    // window the provider rejected it, the one attempt was spent, and the
+    // prompt failed with "already attempted" — no route to a summary at all.
+    // Now each step reads at most a window of whole prompt/run units and
+    // commits a summary covering exactly that span; the next step folds the
+    // summary with the next chunk until the prompt fits.
+    let window: u32 = 32 * 1024;
+    // Each run leaves ~20k estimated tokens in the transcript; four of them
+    // are ~80k, two and a half windows.
+    let run_bytes = 20 * 1024 * 4;
+    let mut harness = auto_compact_harness_with_window(
+        vec![
+            AutoCompactScript::Text("a".repeat(run_bytes)),
+            AutoCompactScript::Text("b".repeat(run_bytes)),
+            AutoCompactScript::Text("c".repeat(run_bytes)),
+            AutoCompactScript::Text("d".repeat(run_bytes)),
+            // The final prompt's load serves every fold step and then the
+            // prompt itself.
+            AutoCompactScript::Sequence(vec![
+                AutoCompactScript::Text(valid_summary("step one")),
+                AutoCompactScript::Text(valid_summary("step two")),
+                AutoCompactScript::Text(valid_summary("step three")),
+                AutoCompactScript::Text(valid_summary("step four")),
+            ]),
+        ],
+        Some(window),
+    )
+    .await;
+    // Each seed prompt is planned before its run grows the transcript, so
+    // the first three fit; the fourth is planned at ~60k and would fold on
+    // its own. Seed it through the store instead so the fold under test is
+    // the final prompt's, over the whole 80k.
+    for prompt in ["one", "two", "three"] {
+        let run = queue_prompt(&harness.runtime, harness.session_id, prompt.to_owned()).await;
+        collect_until(&mut harness.events, finished_for(run)).await;
+    }
+    {
+        let run = queue_prompt(&harness.runtime, harness.session_id, "four".to_owned()).await;
+        let observed = collect_until(&mut harness.events, finished_for(run)).await;
+        let _ = observed;
+    }
+    let last = queue_prompt(&harness.runtime, harness.session_id, "final".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(last)).await;
+    assert!(
+        observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. }
+                if *run_id == last
+        )),
+        "the final prompt must proceed after the fold: {:?}",
+        observed
+            .iter()
+            .filter_map(|event| match &event.event {
+                SessionEvent::RunFinished { outcome, .. } => Some(outcome.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    );
+    let requests = harness.requests.lock().unwrap();
+    let steps = summarizer_requests(&requests);
+    assert!(
+        steps.len() >= 2,
+        "a multi-window transcript needs more than one step: {steps:?}"
+    );
+    let budget =
+        crate::sessions::context::summarizer_message_byte_budget(Some(window), 256, 0, 0).unwrap();
+    for (index, bytes) in &steps {
+        assert!(
+            *bytes <= budget,
+            "summarizer request {index} carried {bytes} message bytes, over the {budget}-byte window budget"
+        );
+    }
+    // Every request the model saw fit the window: nothing was sent that
+    // the estimate said would overflow.
+    for (index, request) in requests.iter().enumerate() {
+        let bytes = crate::measure_messages(request.messages());
+        assert!(
+            crate::sessions::context::estimate_tokens(bytes) + 256 <= u64::from(window),
+            "request {index} ({bytes} bytes) was sent over the window"
+        );
+    }
+    // The final prompt's context is the last summary plus what it did not
+    // cover; the raw "a" run is gone.
+    let final_request = requests.last().unwrap();
+    let texts = request_texts(final_request);
+    assert!(texts.iter().any(|text| text.contains("step")), "{texts:?}");
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text.contains(&"a".repeat(run_bytes)))
+    );
+}
+
+#[tokio::test]
+async fn one_run_larger_than_the_window_fails_as_irreducible_not_already_attempted() {
+    // A single prompt/run unit that alone exceeds the summarizer's budget
+    // cannot be cut anywhere. The step is still sent — the estimate is
+    // conservative — but when the provider rejects it the prompt fails
+    // naming the unit and its size, not a spent retry, and the same
+    // request is never sent twice.
+    let window: u32 = 32 * 1024;
+    let mut harness = auto_compact_harness_with_window(
+        vec![
+            AutoCompactScript::Text("x".repeat(40 * 1024 * 4)),
+            AutoCompactScript::ContextOverflow,
+        ],
+        Some(window),
+    )
+    .await;
+    let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(first)).await;
+    let second = queue_prompt(&harness.runtime, harness.session_id, "again".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(second)).await;
+    let outcome = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, outcome, ..
+            } if *run_id == second => Some(outcome.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let RunOutcome::Failed {
+        failure: RunFailure { kind, message },
+    } = outcome
+    else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(kind, RunFailureKind::Policy);
+    assert!(
+        message.contains("one earlier prompt and its run measure"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("summarizer step"),
+        "an oversized unit is not a spent retry: {message}"
+    );
+    // Seed, one summarizer attempt, nothing else.
+    assert_eq!(harness.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_bounded_step_that_fails_stops_the_fold_without_repeating_its_input() {
+    // The first bounded step commits; the next prompt's step is rejected by
+    // the provider. No further step may run for that prompt: it would read
+    // exactly the input the failed one did. The prompt fails naming the
+    // step it spent, and the fold's cutoff never moved backwards.
+    let window: u32 = 32 * 1024;
+    let run_bytes = 20 * 1024 * 4;
+    let mut harness = auto_compact_harness_with_window(
+        vec![
+            AutoCompactScript::Text("a".repeat(run_bytes)),
+            AutoCompactScript::Text("b".repeat(run_bytes)),
+            // Prompt three is planned at ~40k: over the window. Step one
+            // covers "a" and commits. The remaining ~20k plus the summary
+            // fit, so the prompt sends — and its own request is rejected by
+            // the provider, which is a known overflow for the retry.
+            AutoCompactScript::Sequence(vec![
+                AutoCompactScript::Text(valid_summary("step one")),
+                AutoCompactScript::ContextOverflow,
+            ]),
+            // The retry compacts first: step two ("b" folded with the
+            // summary) is rejected, and nothing further may be sent.
+            AutoCompactScript::ContextOverflow,
+        ],
+        Some(window),
+    )
+    .await;
+    for prompt in ["one", "two"] {
+        let run = queue_prompt(&harness.runtime, harness.session_id, prompt.to_owned()).await;
+        collect_until(&mut harness.events, finished_for(run)).await;
+    }
+    let third = queue_prompt(&harness.runtime, harness.session_id, "three".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(third)).await;
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+            .count(),
+        1
+    );
+    let last = queue_prompt(&harness.runtime, harness.session_id, "retry".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(last)).await;
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. })),
+        "the second step fails and commits nothing"
+    );
+    let outcome = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, outcome, ..
+            } if *run_id == last => Some(outcome.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            &outcome,
+            RunOutcome::Failed { failure: RunFailure { kind: RunFailureKind::Policy, message } }
+                if message.contains("1 automatic compaction step did not produce")
+        ),
+        "{outcome:?}"
+    );
+    // Two seeds; step one; prompt three's rejected send; step two. The
+    // retry itself never reached the provider.
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    let steps = summarizer_requests(&requests);
+    assert_eq!(steps.len(), 2, "{steps:?}");
+    // The failed step read new input, not the first step's.
+    let first_step = request_texts(&requests[steps[0].0]);
+    let second_step = request_texts(&requests[steps[1].0]);
+    assert!(
+        first_step
+            .iter()
+            .any(|text| text.contains(&"a".repeat(run_bytes)))
+    );
+    assert!(
+        !first_step
+            .iter()
+            .any(|text| text.contains(&"b".repeat(run_bytes)))
+    );
+    assert!(
+        second_step.iter().any(|text| text.contains("step one")),
+        "{second_step:?}"
+    );
+    assert!(
+        second_step
+            .iter()
+            .any(|text| text.contains(&"b".repeat(run_bytes)))
+    );
+}
+
+#[tokio::test]
+async fn manual_compaction_of_an_oversized_transcript_reads_one_window_at_a_time() {
+    // `/compact` on a transcript past the window used to send the whole
+    // thing and fail. It now summarizes the first window of whole units; a
+    // second `/compact` folds the rest.
+    let window: u32 = 32 * 1024;
+    let run_bytes = 20 * 1024 * 4;
+    let mut harness = auto_compact_harness_with_window(
+        vec![
+            AutoCompactScript::Text("a".repeat(run_bytes)),
+            AutoCompactScript::Text("b".repeat(run_bytes)),
+            AutoCompactScript::Text(valid_summary("first half")),
+            AutoCompactScript::Text(valid_summary("second half")),
+        ],
+        Some(window),
+    )
+    .await;
+    // Two prompts of ~20k tokens: the second is planned at ~20k + system,
+    // under the 90 % proactive line, so no automatic compaction runs here.
+    for prompt in ["one", "two"] {
+        let run = queue_prompt(&harness.runtime, harness.session_id, prompt.to_owned()).await;
+        collect_until(&mut harness.events, finished_for(run)).await;
+    }
+    let first = compact_session(&harness.runtime, harness.session_id).await;
+    let observed = collect_until(&mut harness.events, finished_for(first)).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if *run_id == first
+    )));
+    let second = compact_session(&harness.runtime, harness.session_id).await;
+    let observed = collect_until(&mut harness.events, finished_for(second)).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if *run_id == second
+    )));
+    let requests = harness.requests.lock().unwrap();
+    let steps = summarizer_requests(&requests);
+    assert_eq!(steps.len(), 2, "{steps:?}");
+    let budget =
+        crate::sessions::context::summarizer_message_byte_budget(Some(window), 256, 0, 0).unwrap();
+    assert!(steps[0].1 <= budget, "{steps:?}");
+    // The second /compact folds the first summary with the "b" run.
+    let texts = request_texts(&requests[steps[1].0]);
+    assert!(
+        texts.iter().any(|text| text.contains("first half")),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains(&"b".repeat(run_bytes)))
+    );
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text.contains(&"a".repeat(run_bytes)))
+    );
+}
+
+#[tokio::test]
+async fn a_committed_step_survives_shutdown_and_the_next_prompt_folds_from_its_marker() {
+    // Step one commits and the prompt, now fitting, is sent and stalls; the
+    // runtime shuts down and settles it cancelled. Step one's marker is
+    // durable and its step count stays on the cancelled prompt. After
+    // reopen a new prompt is planned over the summary plus the "b" run;
+    // when that grows past the window, its fold starts from the marker —
+    // reading the summary and "b", never "a" again.
+    let window: u32 = 32 * 1024;
+    let run_bytes = 20 * 1024 * 4;
+    let mut harness = auto_compact_harness_with_window(
+        vec![
+            AutoCompactScript::Text("a".repeat(run_bytes)),
+            AutoCompactScript::Text("b".repeat(run_bytes)),
+            // Prompt three is planned at ~40k: step one covers "a" and
+            // commits; the remainder fits, so the prompt sends — and stalls.
+            AutoCompactScript::Sequence(vec![
+                AutoCompactScript::Text(valid_summary("step one")),
+                AutoCompactScript::Stall,
+            ]),
+        ],
+        Some(window),
+    )
+    .await;
+    for prompt in ["one", "two"] {
+        let run = queue_prompt(&harness.runtime, harness.session_id, prompt.to_owned()).await;
+        collect_until(&mut harness.events, finished_for(run)).await;
+    }
+    let prompt = queue_prompt(&harness.runtime, harness.session_id, "three".to_owned()).await;
+    let observed = collect_until(
+        &mut harness.events,
+        |event| matches!(event, SessionEvent::RunStarted { run_id, .. } if *run_id == prompt),
+    )
+    .await;
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+            .count(),
+        1,
+        "exactly one bounded step ran before the prompt fit"
+    );
+    let after = observed.last().unwrap().cursor;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while harness.requests.lock().unwrap().len() < 4 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the prompt never reached the provider"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let workspace_id = harness.workspace_id;
+    let session_id = harness.session_id;
+    let database_path = harness.workspace_path.join("sessions.sqlite3");
+    harness.runtime.close().await.unwrap();
+    drop(harness.runtime);
+
+    let connection = Connection::open(&database_path).unwrap();
+    let (status, steps, cutoff, markers): (String, u32, u64, u32) = connection
+        .query_row(
+            "SELECT r.status, r.context_compaction_attempted,
+                    (SELECT cutoff_ordinal FROM session_compactions
+                     WHERE session_id = r.session_id ORDER BY rowid DESC LIMIT 1),
+                    (SELECT COUNT(*) FROM session_compactions WHERE session_id = r.session_id)
+             FROM runs r WHERE r.id = ?1",
+            [prompt.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        status, "cancelled",
+        "shutdown settles the interrupted prompt"
+    );
+    assert_eq!(steps, 1);
+    assert_eq!(markers, 1);
+    assert_eq!(cutoff, 1, "step one's marker covers exactly prompt one");
+    drop(connection);
+
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(database_path),
+        Arc::new(AutoCompactLoader {
+            requests: Arc::clone(&requests),
+            scripts: vec![
+                // Grows the transcript past the window again.
+                AutoCompactScript::Text("c".repeat(run_bytes)),
+                AutoCompactScript::Sequence(vec![
+                    AutoCompactScript::Text(valid_summary("step two")),
+                    AutoCompactScript::Text(valid_summary("step three")),
+                ]),
+            ],
+            loads: StdMutex::new(0),
+            context_window: Some(window),
+            max_output_tokens: 256,
+            provider_identity: true,
+        }),
+    )
+    .await
+    .unwrap();
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after,
+        })
+        .unwrap();
+    let grow = queue_prompt(&runtime, session_id, "four".to_owned()).await;
+    collect_until(&mut events, finished_for(grow)).await;
+    let retry = queue_prompt(&runtime, session_id, "five".to_owned()).await;
+    let observed = collect_until(&mut events, finished_for(retry)).await;
+    assert!(
+        observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. }
+                if *run_id == retry
+        )),
+        "{:?}",
+        observed
+            .iter()
+            .filter_map(|event| match &event.event {
+                SessionEvent::RunFinished { outcome, .. } => Some(outcome.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    );
+    let resumed = {
+        let requests = requests.lock().unwrap();
+        let steps = summarizer_requests(&requests);
+        assert!(!steps.is_empty(), "the new prompt folds the remainder");
+        request_texts(&requests[steps[0].0])
+    };
+    assert!(
+        resumed.iter().any(|text| text.contains("step one")),
+        "{resumed:?}"
+    );
+    assert!(
+        resumed
+            .iter()
+            .any(|text| text.contains(&"b".repeat(run_bytes)))
+    );
+    assert!(
+        !resumed
+            .iter()
+            .any(|text| text.contains(&"a".repeat(run_bytes))),
+        "the fold must not reread what step one already summarized"
+    );
+    runtime.close().await.unwrap();
+}

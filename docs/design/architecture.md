@@ -685,8 +685,21 @@ One durable run follows a guarded loop:
    4 MiB per-session storage backstop is measured in bytes. An eligible
    prompt run compacts proactively once its estimate enters the last tenth
    of the window, while the summarizer still has room. The summarizer's own
-   request is planned against storage only: it carries the transcript that
-   overflowed, so the provider adjudicates its fit. Within a run the
+   request is planned against storage only and is bounded by construction:
+   it reads the longest prefix of whole prompt/run units after the current
+   cutoff that fits the window less its output reserve
+   (`context::summarizer_message_byte_budget`), never fewer than one, and
+   its summary covers exactly that span. A prompt still over the window
+   after a step folds again — each step's input is the prior summary plus
+   the next units, so the cutoff strictly advances and no rejected input is
+   ever resent — until the prompt fits, the transcript is fully summarized,
+   a step fails, or `MAX_COMPACTION_STEPS` (32) is spent.
+   `runs.context_compaction_attempted` counts the steps; a restart resumes
+   from the durable marker. A single unit larger than the budget is still
+   sent (the estimate is conservative); if the provider rejects it the
+   prompt fails naming that unit and its size, distinct from a spent step
+   count. Manual `/compact` on an oversized transcript takes one bounded
+   step per command. Within a run the
    transcript cannot be compacted, but before a later turn is refused for
    the window the run stubs its own read-only results older than the
    recency window in memory (the same rewrite assembly applies between
@@ -946,7 +959,9 @@ contract pay nothing: no allocation, no event, no prompt change.
 
 Compaction is a property of that projection, not an edit to the transcript: a
 validated summary row and cutoff marker commit atomically with the internal
-summarization run, three compactions are retained per session for
+summarization run (a bounded step carries its own cutoff, the unit boundary it
+read to; an unbounded one covers everything settled), three compactions are
+retained per session for
 `RollbackCompaction`, and a summary that is empty, missing a required section,
 or fails to shrink the measured assembly settles as a policy failure while the
 prior compaction stays in force. `search_history` is the recall path that makes

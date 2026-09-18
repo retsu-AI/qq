@@ -54,6 +54,7 @@ pub(super) fn start_auto_compaction(
     store_id: StoreId,
     original: &ClaimedRun,
     audit: &PreparedRunAudit,
+    cutoff_ordinal: Option<u64>,
 ) -> Result<Option<(ClaimedRun, SessionEventEnvelope)>, SessionRuntimeError> {
     let run_id = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
     let command_id = CommandId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
@@ -66,14 +67,17 @@ pub(super) fn start_auto_compaction(
     let context_base_bytes = prepared_context_bytes(audit.weight)?;
     let now = now_ms();
     let transaction = store::begin_unit(connection)?;
+    // One step per call; the column counts summarizer requests spent on this
+    // prompt so a restart resumes the fold where it stopped.
     let attempted = transaction.execute(
-        "UPDATE runs SET context_compaction_attempted = 1
+        "UPDATE runs SET context_compaction_attempted = context_compaction_attempted + 1
              WHERE id = ?1 AND session_id = ?2 AND status = 'queued'
                AND outcome_json IS NULL AND cancel_requested = 0
-               AND context_compaction_attempted = 0",
+               AND context_compaction_attempted < ?3",
         params![
             original.identity.run_id.to_string(),
-            original.identity.session_id.to_string()
+            original.identity.session_id.to_string(),
+            context::MAX_COMPACTION_STEPS,
         ],
     )?;
     if attempted != 1 {
@@ -164,7 +168,11 @@ pub(super) fn start_auto_compaction(
             session_model: original.session_model.clone(),
             model: original.model.clone(),
             messages: Vec::new(),
-            context_compaction_attempted: true,
+            context_compaction_attempted: original.context_compaction_attempted.saturating_add(1),
+            context_compaction_failed: false,
+            context_compaction_remaining: false,
+            compaction_cutoff_ordinal: cutoff_ordinal,
+            context_compaction_oversized_unit_bytes: None,
             context_overflow_basis: None,
             context_occupancy: None,
             limits: RunLimits::default(),
@@ -186,18 +194,71 @@ pub(super) fn start_auto_compaction(
     )))
 }
 
-pub(super) fn load_auto_compaction_messages(
+/// What one summarizer request reads: the assembled context up to a unit
+/// boundary plus the instruction, and the ordinal its summary will cover.
+/// Whether that is everything the session holds is re-read from the store
+/// after the step commits, so a fold resumes correctly after a restart.
+pub(super) struct SummarizerInput {
+    pub(super) messages: Vec<Message>,
+    /// The prompt ordinal the summary will cover; `None` when nothing new
+    /// follows the current marker, so the commit keeps its span.
+    pub(super) cutoff_ordinal: Option<u64>,
+    /// Bytes of the first unit when even it alone exceeds the budget. The
+    /// request is still sent — the estimate is conservative and the provider
+    /// adjudicates — but a rejection then names an irreducible unit, not an
+    /// exhausted retry.
+    pub(super) oversized_unit_bytes: Option<u64>,
+}
+
+/// Assembles the summarizer's request from the session's context after its
+/// current cutoff. With a byte budget, the longest prefix of whole
+/// prompt/run units that fits is taken — never fewer than one — so the
+/// request fits the model window by construction and the summary it
+/// produces replaces exactly that span. Without a budget (no declared
+/// window) the whole context is read, as before.
+pub(super) fn load_summarizer_input(
     connection: &mut Connection,
     session_id: SessionId,
-) -> Result<Vec<Message>, SessionRuntimeError> {
+    message_byte_budget: Option<u64>,
+) -> Result<SummarizerInput, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    let mut messages = load_model_context(&transaction, session_id, u64::MAX)?;
-    messages.push(Message::user(compaction_instruction(
-        &transaction,
-        session_id,
-    )?));
+    let (mut messages, _, units) =
+        load_model_context_with_units(&transaction, session_id, u64::MAX)?;
+    let instruction = Message::user(compaction_instruction(&transaction, session_id)?);
     transaction.commit()?;
-    Ok(messages)
+    let everything_ordinal = units.last().map(|unit| unit.prompt_ordinal);
+    let (cutoff_ordinal, oversized_unit_bytes) = match (message_byte_budget, everything_ordinal) {
+        (None, everything) | (Some(_), everything @ None) => (everything, None),
+        (Some(budget), Some(everything)) => {
+            let budget = budget.saturating_sub(crate::measure_message(&instruction));
+            let mut spent = 0_u64;
+            let mut taken = 0_usize;
+            let mut cutoff = everything;
+            let mut oversized = None;
+            for (index, unit) in units.iter().enumerate() {
+                // The leading summary, if any, is charged to the first unit.
+                let unit_bytes = crate::measure_messages(&messages[taken..unit.end]);
+                let total = spent.saturating_add(unit_bytes);
+                if total > budget && index > 0 {
+                    break;
+                }
+                if total > budget {
+                    oversized = Some(unit_bytes);
+                }
+                spent = total;
+                taken = unit.end;
+                cutoff = unit.prompt_ordinal;
+            }
+            messages.truncate(taken);
+            (Some(cutoff), oversized)
+        }
+    };
+    messages.push(instruction);
+    Ok(SummarizerInput {
+        messages,
+        cutoff_ordinal,
+        oversized_unit_bytes,
+    })
 }
 
 /// Commits a compaction: the summary row and cutoff marker persist in the
@@ -237,15 +298,20 @@ pub(super) fn complete_compaction(
         let now = now_ms();
         let before_bytes = assembled_context_bytes(&transaction, claimed.identity.session_id)?;
         // The cutoff covers exactly the span the summary replaced: the
-        // messages assembly showed the summarizer. A prompt still queued
-        // behind an auto-compaction has an ordinal but was not summarized —
-        // it must stay after the marker so its run still sends it.
-        let cutoff_ordinal: u64 = transaction.query_row(
-            "SELECT COALESCE(MAX(ordinal), 0) FROM messages
-                 WHERE session_id = ?1 AND state IN ('complete', 'interrupted')",
-            [claimed.identity.session_id.to_string()],
-            |row| row.get(0),
-        )?;
+        // messages assembly showed the summarizer. A bounded step carries
+        // its unit boundary; an unbounded one read everything settled. A
+        // prompt still queued behind an auto-compaction has an ordinal but
+        // was not summarized — it must stay after the marker so its run
+        // still sends it.
+        let cutoff_ordinal: u64 = match claimed.compaction_cutoff_ordinal {
+            Some(cutoff) => cutoff,
+            None => transaction.query_row(
+                "SELECT COALESCE(MAX(ordinal), 0) FROM messages
+                     WHERE session_id = ?1 AND state IN ('complete', 'interrupted')",
+                [claimed.identity.session_id.to_string()],
+                |row| row.get(0),
+            )?,
+        };
         // Insert the candidate marker, then measure the assembly it
         // produces. A summary that does not shrink the assembly is rejected
         // and the row removed within this transaction, so the prior usable

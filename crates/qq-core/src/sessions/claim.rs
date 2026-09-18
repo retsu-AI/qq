@@ -86,7 +86,23 @@ pub(super) struct ClaimedRun {
     pub(super) session_model: ModelSelection,
     pub(super) model: ModelSelection,
     pub(super) messages: Vec<Message>,
-    pub(super) context_compaction_attempted: bool,
+    /// Summarizer steps already spent admitting this prompt. Zero until the
+    /// first automatic compaction starts.
+    pub(super) context_compaction_attempted: u32,
+    /// A step for this prompt settled failed: its input was rejected or did
+    /// not shrink the assembly, so an identical step must never be resent.
+    pub(super) context_compaction_failed: bool,
+    /// The latest compaction covers fewer settled prompts than the session
+    /// holds, so a further step reads new input rather than repeating one.
+    pub(super) context_compaction_remaining: bool,
+    /// For a bounded compaction step, the prompt ordinal its summary covers.
+    /// `None` reads everything settled (manual `/compact`, no declared
+    /// window).
+    pub(super) compaction_cutoff_ordinal: Option<u64>,
+    /// Set in memory when a step that read a single over-budget unit was
+    /// rejected: that unit cannot be reduced by any cut, and the prompt's
+    /// failure names it. Never persisted; a restart re-derives the fold.
+    pub(super) context_compaction_oversized_unit_bytes: Option<u64>,
     pub(super) context_overflow_basis: Option<ContextOccupancyBasis>,
     pub(super) context_occupancy: Option<ContextOccupancy>,
     /// Caller-imposed budgets persisted with the run row. Compaction runs and
@@ -133,6 +149,10 @@ impl ClaimedRun {
             model: self.model.clone(),
             messages: Vec::new(),
             context_compaction_attempted: self.context_compaction_attempted,
+            context_compaction_failed: self.context_compaction_failed,
+            context_compaction_remaining: self.context_compaction_remaining,
+            compaction_cutoff_ordinal: None,
+            context_compaction_oversized_unit_bytes: None,
             context_overflow_basis: None,
             context_occupancy: None,
             limits: RunLimits::default(),
@@ -414,7 +434,16 @@ pub(super) fn reserve_next_run_recoverable(
                     s.pending_context_overflow_basis_json,
                     s.context_tokens, s.context_occupancy_json, r.limits_json,
                     r.input_json, s.profile, s.approval_mode, s.depth, s.root_run_id,
-                    s.purpose, r.output_contract_json
+                    s.purpose, r.output_contract_json,
+                    EXISTS(SELECT 1 FROM runs step
+                           WHERE step.auto_compaction_for_run_id = r.id
+                             AND step.status = 'failed'),
+                    COALESCE((SELECT cutoff_ordinal FROM session_compactions
+                              WHERE session_id = s.id ORDER BY rowid DESC LIMIT 1), 0)
+                      < COALESCE((SELECT MAX(ordinal) FROM messages
+                                  WHERE session_id = s.id
+                                    AND role = 'user' AND steering = 0
+                                    AND state IN ('complete', 'cancelled', 'failed', 'interrupted')), 0)
              FROM runs r
              JOIN sessions s ON s.id = r.session_id
              JOIN workspaces w ON w.id = s.workspace_id
@@ -441,7 +470,7 @@ pub(super) fn reserve_next_run_recoverable(
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<u32>>(8)?,
                     row.get::<_, Option<String>>(9)?,
-                    row.get::<_, bool>(10)?,
+                    row.get::<_, u32>(10)?,
                     row.get::<_, Option<String>>(11)?,
                     row.get::<_, Option<String>>(12)?,
                     row.get::<_, Option<u64>>(13)?,
@@ -454,6 +483,8 @@ pub(super) fn reserve_next_run_recoverable(
                     row.get::<_, Option<String>>(20)?,
                     row.get::<_, String>(21)?,
                     row.get::<_, Option<String>>(22)?,
+                    row.get::<_, bool>(23)?,
+                    row.get::<_, bool>(24)?,
                 ))
             },
         )
@@ -482,6 +513,8 @@ pub(super) fn reserve_next_run_recoverable(
         root_run,
         purpose,
         output_contract_json,
+        context_compaction_failed,
+        context_compaction_remaining,
     )) = row
     else {
         return Ok(None);
@@ -650,6 +683,10 @@ pub(super) fn reserve_next_run_recoverable(
         model,
         messages,
         context_compaction_attempted,
+        context_compaction_failed,
+        context_compaction_remaining,
+        compaction_cutoff_ordinal: None,
+        context_compaction_oversized_unit_bytes: None,
         context_overflow_basis,
         context_occupancy,
         limits,
@@ -769,15 +806,33 @@ pub(super) fn start_reserved_run(
     Ok(Some(started))
 }
 
+/// Where a prompt's automatic compaction stands, re-read from the store
+/// after each step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CompactionProgress {
+    pub(super) steps: u32,
+    pub(super) failed: bool,
+    pub(super) remaining: bool,
+}
+
 pub(super) fn reload_reserved_messages(
     connection: &mut Connection,
     identity: RunIdentity,
-) -> Result<Option<(Vec<Message>, bool)>, SessionRuntimeError> {
+) -> Result<Option<(Vec<Message>, CompactionProgress)>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let row = transaction
         .query_row(
             "SELECT r.status, r.cancel_requested, r.context_compaction_attempted,
-                    r.user_message_id, s.preparing_run_id, s.active_run_id
+                    r.user_message_id, s.preparing_run_id, s.active_run_id,
+                    EXISTS(SELECT 1 FROM runs step
+                           WHERE step.auto_compaction_for_run_id = r.id
+                             AND step.status = 'failed'),
+                    COALESCE((SELECT cutoff_ordinal FROM session_compactions
+                              WHERE session_id = s.id ORDER BY rowid DESC LIMIT 1), 0)
+                      < COALESCE((SELECT MAX(ordinal) FROM messages
+                                  WHERE session_id = s.id
+                                    AND role = 'user' AND steering = 0
+                                    AND state IN ('complete', 'cancelled', 'failed', 'interrupted')), 0)
              FROM runs r JOIN sessions s ON s.id = r.session_id
              WHERE r.id = ?1 AND r.session_id = ?2",
             params![identity.run_id.to_string(), identity.session_id.to_string()],
@@ -785,16 +840,25 @@ pub(super) fn reload_reserved_messages(
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, bool>(1)?,
-                    row.get::<_, bool>(2)?,
+                    row.get::<_, u32>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, bool>(6)?,
+                    row.get::<_, bool>(7)?,
                 ))
             },
         )
         .optional()?;
-    let Some((status, cancelled, attempted, user_message_id, preparing, active)) = row else {
+    let Some((status, cancelled, steps, user_message_id, preparing, active, failed, remaining)) =
+        row
+    else {
         return Ok(None);
+    };
+    let progress = CompactionProgress {
+        steps,
+        failed,
+        remaining,
     };
     if status != "queued"
         || cancelled
@@ -820,7 +884,7 @@ pub(super) fn reload_reserved_messages(
     )?;
     messages.push(Message::user(prompt));
     transaction.commit()?;
-    Ok(Some((messages, attempted)))
+    Ok(Some((messages, progress)))
 }
 
 pub(super) fn reserve_context_capacity(
