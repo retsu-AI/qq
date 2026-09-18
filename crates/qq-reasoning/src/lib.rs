@@ -19,6 +19,22 @@ pub enum ReasoningKind {
     ExposedThinking,
 }
 
+/// Provider-neutral effort control for reasoning models.
+///
+/// These are the values accepted by the current OpenAI Responses and Chat
+/// Completions contracts. Model-specific support remains a runtime/provider
+/// capability question; adapters must reject values they cannot encode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+}
+
 /// One lifecycle event for a displayable reasoning block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReasoningEvent {

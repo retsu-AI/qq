@@ -346,6 +346,8 @@ pub(crate) struct ResponsesRequest<'a> {
     tools: Vec<ResponsesTool<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ReasoningConfig>,
     stream: bool,
     store: bool,
 }
@@ -395,9 +397,28 @@ impl<'a> ResponsesRequest<'a> {
             tools: request.tools().iter().map(ResponsesTool::from).collect(),
             max_output_tokens: matches!(kind, ResponsesRequestKind::Standard)
                 .then(|| request.max_output_tokens()),
+            reasoning: request.reasoning_effort().map(|effort| ReasoningConfig {
+                effort: effort_string(effort),
+            }),
             stream: true,
             store: false,
         }
+    }
+}
+
+#[derive(Serialize)]
+struct ReasoningConfig {
+    effort: &'static str,
+}
+
+fn effort_string(effort: crate::ReasoningEffort) -> &'static str {
+    match effort {
+        crate::ReasoningEffort::None => "none",
+        crate::ReasoningEffort::Minimal => "minimal",
+        crate::ReasoningEffort::Low => "low",
+        crate::ReasoningEffort::Medium => "medium",
+        crate::ReasoningEffort::High => "high",
+        crate::ReasoningEffort::Xhigh => "xhigh",
     }
 }
 
@@ -902,6 +923,28 @@ mod tests {
         ))
         .unwrap();
         assert!(body.get("instructions").is_none());
+    }
+
+    #[test]
+    fn serializes_reasoning_effort_only_when_selected() {
+        let request = ModelRequest::new("gpt-test", vec![Message::user("ping")], 64)
+            .with_reasoning_effort(crate::ReasoningEffort::High);
+        let body = serde_json::to_value(ResponsesRequest::new(
+            &request,
+            ResponsesRequestKind::Standard,
+        ))
+        .unwrap();
+        assert_eq!(body["reasoning"]["effort"], "high");
+
+        let clone = request.clone();
+        assert_eq!(clone.reasoning_effort(), request.reasoning_effort());
+        let without = ModelRequest::new("gpt-test", vec![Message::user("ping")], 64);
+        let body = serde_json::to_value(ResponsesRequest::new(
+            &without,
+            ResponsesRequestKind::Standard,
+        ))
+        .unwrap();
+        assert!(body.get("reasoning").is_none());
     }
 
     #[tokio::test]

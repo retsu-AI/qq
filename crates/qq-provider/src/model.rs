@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use qq_reasoning::ReasoningKind;
+use qq_reasoning::{ReasoningEffort, ReasoningKind};
 use serde_json::value::RawValue;
 use thiserror::Error;
 
@@ -19,6 +19,7 @@ pub struct ModelRequest {
     tools: Arc<[ToolSpec]>,
     system: Option<Arc<str>>,
     max_output_tokens: u32,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl ModelRequest {
@@ -34,6 +35,7 @@ impl ModelRequest {
             tools: Arc::from([]),
             system: None,
             max_output_tokens,
+            reasoning_effort: None,
         }
     }
 
@@ -85,6 +87,19 @@ impl ModelRequest {
     #[must_use]
     pub const fn max_output_tokens(&self) -> u32 {
         self.max_output_tokens
+    }
+
+    /// Requests a provider-native reasoning effort. The selected adapter
+    /// validates whether it can encode the value before transport.
+    #[must_use]
+    pub const fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(effort);
+        self
+    }
+
+    #[must_use]
+    pub const fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+        self.reasoning_effort
     }
 
     /// A lower bound on the encoded request body, from the payload bytes the

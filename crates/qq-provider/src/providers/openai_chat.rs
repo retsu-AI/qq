@@ -277,6 +277,8 @@ pub(crate) struct ChatCompletionsRequest<'a> {
     stream: bool,
     stream_options: ChatStreamOptions,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
 }
 
 impl<'a> From<&'a ModelRequest> for ChatCompletionsRequest<'a> {
@@ -304,7 +306,19 @@ impl<'a> From<&'a ModelRequest> for ChatCompletionsRequest<'a> {
                 include_usage: true,
             },
             max_tokens: request.max_output_tokens(),
+            reasoning_effort: request.reasoning_effort().map(effort_string),
         }
+    }
+}
+
+fn effort_string(effort: crate::ReasoningEffort) -> &'static str {
+    match effort {
+        crate::ReasoningEffort::None => "none",
+        crate::ReasoningEffort::Minimal => "minimal",
+        crate::ReasoningEffort::Low => "low",
+        crate::ReasoningEffort::Medium => "medium",
+        crate::ReasoningEffort::High => "high",
+        crate::ReasoningEffort::Xhigh => "xhigh",
     }
 }
 
@@ -1079,6 +1093,18 @@ mod tests {
             body["messages"],
             json!([{"role": "user", "content": "ping"}])
         );
+    }
+
+    #[test]
+    fn serializes_reasoning_effort_only_when_selected() {
+        let request = ModelRequest::new("chat-test", vec![Message::user("ping")], 64)
+            .with_reasoning_effort(crate::ReasoningEffort::Minimal);
+        let body = serde_json::to_value(ChatCompletionsRequest::from(&request)).unwrap();
+        assert_eq!(body["reasoning_effort"], "minimal");
+
+        let without = ModelRequest::new("chat-test", vec![Message::user("ping")], 64);
+        let body = serde_json::to_value(ChatCompletionsRequest::from(&without)).unwrap();
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[tokio::test]
