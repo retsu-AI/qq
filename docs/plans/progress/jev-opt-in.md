@@ -5,7 +5,7 @@ Owner: this stacked implementation session. Base `dc59d14` / draft #72.
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
 | J1–J5 + visible J7 | Optional review, correctness and receipts | In review | [#74](https://github.com/retsu-AI/qq/pull/74), stacked on #72 | Local and hosted checks green; quiet-host tails open |
-| J6a | Explicit model effort | In progress | `feat/eng-791-jev-routing`, ecc6a1f | Local checks/reviews green; performance qualification and stacked delivery in progress |
+| J6a | Explicit model effort | In review | [#76](https://github.com/retsu-AI/qq/pull/76), stacked on #74 | Local checks/reviews green; performance gate unresolved; hosted checks pending |
 | J6b + passive J7 | Optional routing and advisory observer | Planned | Follow-up slices | Independent acceptance; not shipping in #74 |
 | J8–J9 | Qualification and delivery | In progress | #74 | Live evaluation and remaining slices open |
 
@@ -179,3 +179,12 @@ Host I/O some avg10: 31.38–47.17%. No overlapping root build/test during sampl
 The tool-loop 5% gate is not met; noisy control does not waive it. Quiet-host
 measurement remains required before merge qualification. This draft delivers
 reviewable functionality, not a performance or Jev acceleration claim.
+
+### J6a stacked delivery — 2026-09-18
+
+Pushed c5feef4 and opened draft [#76](https://github.com/retsu-AI/qq/pull/76),
+base `feat/eng-791-jev-opt-in` (#74, 1405ff0). The GitHub connector still cannot
+write PR metadata (403); authenticated CLI performed the authorized draft/update.
+#74 body now accurately records successful hosted CI. #76 does not claim its
+performance gate, automatic routing or advisory observation are complete.
+No merge, paid evaluation or Linear update. Broader goal remains in progress.
