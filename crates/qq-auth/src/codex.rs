@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{AuthError, CredentialBackend, CredentialStore, Secret, validate_credential_name};
+use qq_protocol::CredentialEpoch;
 use qq_provider::SecretRef;
 use qq_provider::{
     RequestCredential, RequestCredentialError, RequestCredentialFuture, RequestCredentialProvider,
@@ -632,10 +633,17 @@ impl StoredCodexCredential {
     }
 
     fn runtime_credential(&self) -> CodexCredential {
+        let refresh_after = match jwt_expiration(&self.access_token)
+            .and_then(|expiration| u64::try_from(expiration).ok())
+        {
+            Some(expiration) => expiration.saturating_sub(REFRESH_WINDOW_SECONDS),
+            None => self.refreshed_at.saturating_add(REFRESH_FALLBACK_SECONDS),
+        };
         CodexCredential {
             access_token: Secret::from_secret_bytes(self.access_token.as_bytes().to_vec()),
             account_id: self.account_id.clone(),
             is_fedramp: self.is_fedramp,
+            refresh_after,
         }
     }
 }
@@ -701,10 +709,12 @@ fn decode_jwt_payload<T: DeserializeOwned>(token: &str) -> Option<T> {
 
 /// Runtime-only Codex bearer material.
 #[doc(hidden)]
+#[derive(Clone)]
 pub struct CodexCredential {
     access_token: Secret,
     account_id: String,
     is_fedramp: bool,
+    refresh_after: u64,
 }
 
 impl CodexCredential {
@@ -719,6 +729,10 @@ impl CodexCredential {
     pub const fn is_fedramp(&self) -> bool {
         self.is_fedramp
     }
+
+    const fn refresh_after(&self) -> u64 {
+        self.refresh_after
+    }
 }
 
 impl CredentialStore {
@@ -726,24 +740,33 @@ impl CredentialStore {
         SharedRequestCredentialProvider::new(CodexRequestCredentials {
             store: self.clone(),
             profile: profile.to_owned(),
+            cache: tokio::sync::Mutex::new(None),
         })
     }
 
     pub fn resolve_codex(&self, profile: &str) -> Result<CodexCredential, AuthError> {
+        self.resolve_codex_with_epoch(profile)
+            .map(|(credential, _epoch)| credential)
+    }
+
+    fn resolve_codex_with_epoch(
+        &self,
+        profile: &str,
+    ) -> Result<(CodexCredential, CredentialEpoch), AuthError> {
         let name = credential_name(profile)?;
         let now = unix_time()?;
-        let credential = self.load_codex(&name)?;
+        let (credential, epoch) = self.load_codex_with_epoch(&name)?;
         if !credential.needs_refresh(now) {
-            return Ok(credential.runtime_credential());
+            return Ok((credential.runtime_credential(), epoch));
         }
 
         let _refresh = self
             .lock_codex_operation(&name)?
             .expect("OpenAI Codex credential names always require the Codex lock");
-        let mut credential = self.load_codex(&name)?;
+        let (mut credential, epoch) = self.load_codex_with_epoch(&name)?;
         let now = unix_time()?;
         if !credential.needs_refresh(now) {
-            return Ok(credential.runtime_credential());
+            return Ok((credential.runtime_credential(), epoch));
         }
 
         let refreshed = self.codex_client.refresh(&credential.refresh_token)?;
@@ -776,42 +799,99 @@ impl CredentialStore {
             "openai-codex".to_owned(),
             CREDENTIAL_ENDPOINT.to_owned(),
         )?;
-        Ok(credential.runtime_credential())
+        // Bind the cache candidate to the exact durable value and epoch read
+        // under one state lock. A separate process may rotate or remove it
+        // immediately after our refresh write.
+        let (credential, epoch) = self.load_codex_with_epoch(&name)?;
+        let now = unix_time()?;
+        if credential.needs_refresh(now) {
+            return Err(CodexAuthError::TokenResponseInvalid {
+                operation: "refresh",
+            }
+            .into());
+        }
+        Ok((credential.runtime_credential(), epoch))
     }
 
-    fn load_codex(&self, name: &str) -> Result<StoredCodexCredential, AuthError> {
-        let secret = self.resolve_with_endpoint(
+    fn load_codex_with_epoch(
+        &self,
+        name: &str,
+    ) -> Result<(StoredCodexCredential, CredentialEpoch), AuthError> {
+        let (secret, epoch) = self.resolve_with_epoch(
             &SecretRef::Stored(name.to_owned()),
             Some(CREDENTIAL_ENDPOINT),
         )?;
-        StoredCodexCredential::parse(secret.expose_secret_bytes()).map_err(Into::into)
+        let credential =
+            StoredCodexCredential::parse(secret.expose_secret_bytes()).map_err(AuthError::from)?;
+        Ok((credential, epoch))
     }
 }
 
-struct CodexRequestCredentials {
-    store: CredentialStore,
-    profile: String,
+pub(super) struct CodexRequestCredentials {
+    pub(super) store: CredentialStore,
+    pub(super) profile: String,
+    pub(super) cache: tokio::sync::Mutex<Option<CachedCodexCredential>>,
+}
+
+#[derive(Clone)]
+pub(super) struct CachedCodexCredential {
+    pub(super) credential: CodexCredential,
+    pub(super) epoch: CredentialEpoch,
+    pub(super) refresh_after: u64,
 }
 
 impl RequestCredentialProvider for CodexRequestCredentials {
     fn credential(&self) -> RequestCredentialFuture<'_> {
-        let store = self.store.clone();
-        let profile = self.profile.clone();
         Box::pin(async move {
-            let credential = store
-                .load_request_credential(move |store| store.resolve_codex(&profile))
+            let mut cache = self.cache.lock().await;
+            let cached_state = cache
+                .as_ref()
+                .map(|cached| (cached.epoch, cached.refresh_after));
+            let profile = self.profile.clone();
+            let resolved = self
+                .store
+                .load_request_credential(move |store| {
+                    let now = unix_time()?;
+                    let epoch = store.epoch()?;
+                    if cached_state.is_some_and(|(cached_epoch, refresh_after)| {
+                        cached_epoch == epoch && now < refresh_after
+                    }) {
+                        return Ok(None);
+                    }
+                    store.resolve_codex_with_epoch(&profile).map(Some)
+                })
                 .await?
                 .map_err(map_request_credential_error)?;
-            RequestCredential::codex(
-                credential
-                    .access_token()
-                    .expose_secret_str()
-                    .map_err(|_| RequestCredentialError::Invalid)?,
-                credential.account_id(),
-                credential.is_fedramp(),
-            )
+            let Some((credential, epoch)) = resolved else {
+                let credential = &cache
+                    .as_ref()
+                    .expect("a cache hit requires a cached Codex credential")
+                    .credential;
+                return request_credential(credential);
+            };
+            let refresh_after = credential.refresh_after();
+            let request_credential = request_credential(&credential)?;
+            *cache = Some(CachedCodexCredential {
+                credential,
+                epoch,
+                refresh_after,
+            });
+            Ok(request_credential)
         })
     }
+}
+
+fn request_credential(
+    credential: &CodexCredential,
+) -> Result<RequestCredential, RequestCredentialError> {
+    RequestCredential::codex(
+        credential
+            .access_token()
+            .expose_secret_str()
+            .map_err(|_| RequestCredentialError::Invalid)?,
+        credential.account_id(),
+        credential.is_fedramp(),
+    )
 }
 
 fn map_request_credential_error(error: AuthError) -> RequestCredentialError {
