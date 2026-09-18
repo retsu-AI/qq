@@ -14,6 +14,9 @@ may append a **request** row; only root changes a request's status.
 | ROOT-4 | Current QQ and four-reference harness audit; lean-core priorities | Shipped (`445d740`, #65) | 2026-09-16; `docs/design/harness-scale-audit-2026-09-16.md`; source baseline `7956e8e`; F01/F02/F14 repaired (#55, #57, #63); F03–F28 unowned |
 | ROOT-5 | Context usability stack C1–C6: 4 bytes/token estimate, summarizer past the window, proactive and in-run compaction, audit default `off`, Anthropic/Bedrock cache breakpoints, overlapped leading reads and soft 16-call cap, measured occupancy across pruning/checkpoints | Shipped (#56 `d4fd971`, #58 `3446c54`, #59 `1c4467b`, #61 `49d4a03` incl. C5, #64 `4715226`) | 2026-09-16. Plan and ledger deleted with #66; design in `architecture.md` § run loop step 3, § resolved model, § audit; `providers.md` § breakpoints; `tools.md` § Loop Bounds. Deferred: true mid-run summarization (needs a store cutoff inside a run), estimator calibration from observed `usage`. Live qualification (cache reads on turn 2; a real long session) not yet run |
 | ROOT-6 | Docs cleanup: delete shipped plans/ledgers and superseded research; collapse speed-first to open items; move extension contract and perf targets into `architecture.md` | Shipped (#66) | 2026-09-16 |
+| ENG-791.R1 | Typed reasoning effort reaches the real provider request | In progress (`feat/jev-runtime-checkpoints`) | Source `c210d968`; sole writer `qq_jev_feature_map`, manager integration, distinct Daybreak review. Supported codecs transmit the selected value; unsupported combinations fail before transport; defaults remain unchanged. This dependency is not automatic routing |
+| ENG-791.R2 | JEV selects authorized model/effort pairs for root and child tasks | Planned; depends on R1 | Same ENG-791 requirement, not a separate backlog. Actual dispatch, overrides, current capability/authorization checks, cancellation and declared fallback must agree with the selection; mandatory completion checkpoints remain enforced |
+| ENG-791.R3 | Durable routing identity, TUI visibility and observed runtime qualification | Planned; depends on R2 | Retain candidate set, selection/distribution, actual model/effort, usage and outcomes across replay; real-model and fixed-baseline comparison before any savings claim. Recorded demonstration and canonical release remain separate gates |
 | F07 | Control and cleanup commands admitted past `MAX_COMMANDS` | In review ([ENG-786](https://linear.app/retsu-ai/issue/ENG-786), [#68](https://github.com/retsu-AI/qq/pull/68)) | 2026-09-16. `SessionCommandKind::creates_work` splits the thirteen kinds; new work bounded at 100 000 receipts, control/cleanup at +10 000 headroom, runtime settlement cancels unbounded (`CommandOrigin`). Receipts never trimmed; replay unchanged. Two regression tests fill the counter and drive cancel/approve/delete/prune/shutdown |
 | F05 | Attachments reconstructed as the model first saw them | In review ([ENG-788](https://linear.app/retsu-ai/issue/ENG-788), #69) | 2026-09-17. Schema 28 → 29: `attachment_blobs` (per-session, keyed by whole-file hash + range, 64 MiB cap with explicit evicted rendering) and `message_attachments`, written in the `RunStarted` transaction; `load_model_context` re-renders `<attached-file>` blocks from the store; `ClaimedRun.resolved_input` carries the first read across the auto-compaction retry. Three regression tests (modify/delete/reopen/dedup/cascade; eviction stub; auto-compaction retry) plus the reference-assembly oracle |
 | F06 | Context assembly and history search bounded by retained context, not archive size | In review ([ENG-790](https://linear.app/retsu-ai/issue/ENG-790), #70) | 2026-09-17. Turn/result/steering/attachment queries joined to the retained prompt window; schema 29 → 30 adds `messages(run_id, steering, state)`. `search_history` newest-first with an 8 MiB scan budget and a `truncated` note. New `context_assembly` bench: assembly 83 µs / 25 ms / 98 ms → 50 / 47 / 82 µs at 10 / 1 000 / 10 000 archived runs; absent-term search 433 ms → 54 ms (truncated) at 10 000 |
@@ -41,6 +44,7 @@ may append a **request** row; only root changes a request's status.
 | 0026 | Run cancellation token replaces polled flag (D8 remainder) | speed-first H22.2 | Accepted (merged in #47) |
 | 0027 | `qq-core` is a public embedding API | docs cleanup 2026-09-16 | Accepted (merged in #52) |
 | 0028 | Mandatory typed JEV checkpoints after tool results and final candidates | JEV runtime checkpoint slice | Accepted locally; unpushed candidate |
+| 0029 | Native JEV model-and-effort routing and durable selection identity | Startup Manager / ENG-791 | Reserved; no accepted decision document yet |
 
 2026-09-18 — JEV checkpoint hardening remains in progress on
 `feat/jev-runtime-checkpoints`: complete task/tool payloads now fail closed
@@ -104,7 +108,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0029. Reserve here before opening a PR that adds an ADR.
+Next free number: 0030. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -126,6 +130,22 @@ sections, `docs/adr/README.md`, `docs/README.md`, `docs/plans/README.md`,
 `AGENTS.md`. A lane may edit a design doc section it owns without a request.
 
 ## Entries
+
+### 2026-09-18 — ENG-791 native routing dependency start
+
+Source readback: clean `c210d968ebda475a5997a6cf7efe50ed96d8637c`.
+The source map confirms no effort field in `qq-provider::ModelRequest`; the
+current completion reviewer also cannot represent a routing distribution.
+R1 owns `crates/qq-provider/`, a neutral effort type in `qq-reasoning/` only if
+needed, and `docs/design/providers.md`. Root owns this ledger; the writer owns
+the sole heavy local test lane. The existing accepted, unmerged feature head
+is the intentional dependency: none of this is claimed integrated into main.
+Tests must capture emitted requests and prove rejection before transport,
+preserve the default wire shape and retry/request sharing, then obtain
+non-author review of the exact candidate. No credentials or Keychain probes.
+JEV task receipt `958fb4de-c85b-487b-a2e6-3ca385c27073` advised native routing;
+sequence receipt `3f770f0d-0d64-42b5-95c4-bcb38c92355b` advised effort first.
+The parent goal and all ENG-791 requirements remain open after this dependency.
 
 ### F14 shared CI request — 2026-09-16
 
