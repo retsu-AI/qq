@@ -50,7 +50,7 @@ migration; historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 24
+PROTOCOL_VERSION = 25
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -1956,3 +1956,9 @@ Protocol 24 adds `checkpoint_started` and optional typed `spend` on
 unknown. A settled receipt and updated run totals commit together. Cancellation
 settles a pending tool or final assessment as unavailable with unknown spend.
 Historical verdicts without `spend` decode as absent, never as a priced receipt.
+
+Protocol 25 adds `routing_started` and `routing_completed`. Routing occurs before
+`run_started`; a decision carries the selected or fallback model, effort, reason
+and typed usage/cost. Missing spend remains unknown. A cancelled pending request
+may have only `routing_started` followed by `run_finished`; this is not a free
+request or a successful decision. Older versioned event fixtures remain readable.

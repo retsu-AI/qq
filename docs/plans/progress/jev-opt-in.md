@@ -6,7 +6,8 @@ Owner: this stacked implementation session. Base `dc59d14` / draft #72.
 | --- | --- | --- | --- | --- |
 | J1–J5 + visible J7 | Optional review, correctness and receipts | In review | [#74](https://github.com/retsu-AI/qq/pull/74), stacked on #72 | Local and hosted checks green; quiet-host tails open |
 | J6a | Explicit model effort | In review | [#76](https://github.com/retsu-AI/qq/pull/76), stacked on #74 | Local checks/reviews green; performance gate unresolved; hosted checks pending |
-| J6b + passive J7 | Optional routing and advisory observer | Planned | Follow-up slices | Independent acceptance; not shipping in #74 |
+| J6b | Optional routing | In progress | `feat/eng-791-jev-routing-accounting` | Core preparation/accounting implemented; root adapter and pin provenance unfinished |
+| Passive J7 | Advisory observer | Planned | Follow-up slice | Independent acceptance; not shipping in #74 |
 | J8–J9 | Qualification and delivery | In progress | #74 | Live evaluation and remaining slices open |
 
 ## Entries
@@ -188,3 +189,38 @@ write PR metadata (403); authenticated CLI performed the authorized draft/update
 #74 body now accurately records successful hosted CI. #76 does not claim its
 performance gate, automatic routing or advisory observation are complete.
 No merge, paid evaluation or Linear update. Broader goal remains in progress.
+
+### J6b durable routing start — 2026-09-18
+
+Branch `feat/eng-791-jev-routing-accounting` starts from #76 head 2a56015.
+First regression covers known/unknown routing spend through cancellation and
+restart, duplicate dispatch and late responses. Routing occurs before ordinary
+plan preparation; its receipt must survive failure and seed budgets once.
+The #76 release binaries remain the pre-change baseline. No paid calls.
+
+J6b focused evidence: four routing tests pass (selection/fallback, budget charge,
+pending cancellation, restart/late-response guards and context observation).
+Independent accounting review found routing-only settlement cleared the main
+context meter; separate spend/turn flags repair it. New schema migration keeps
+old runs unrouted and ordinary queued recovery unchanged. Protocol 25 fixtures
+include routing events; production routing remains unavailable pending adapter,
+pin provenance, inherited opt-in and direct-CLI integration. Work is uncommitted.
+
+J6b core suite after integration: 667 passed, three ignored, with loopback
+fixtures authorized outside the sandbox. Standards review approves the current
+core seam; production activation remains outside that verdict. Follow-up repair
+persists known routing spend before selected-provider loading. Four focused
+routing tests include pending known-spend cancellation/recovery, and workspace
+verification is running on that final repair. No change pushed in this slice.
+
+#### J6b core preparation receipt — 2026-09-18
+Workspace: 1,584 passed, five ignored after accounting/protocol repairs.
+Final schema validation addition: migration suite 44 passed, one ignored.
+Strict workspace all-target/all-feature Clippy, formatting and workspace build pass.
+Independent accounting/Standards reviews approve the core seam and corrections.
+Schema 30→31; protocol 24→25 with retained old and new wire/headless fixtures.
+ADR-0032, architecture/protocol docs and ledger updated; no dependency added.
+Known routing spend persists before provider reload; main context meter preserved.
+Unfinished: production Jev adapter, model-pin provenance, inherited opt-in,
+direct ask routing, passive advisory, performance/live qualification.
+This is local implementation progress, not a shipping routing capability or PR.

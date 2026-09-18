@@ -17,9 +17,35 @@ pub type SpawnModelValidationFuture =
 #[derive(Clone)]
 pub struct LoadedRuntime {
     pub plan: Arc<CompiledAgentPlan>,
+    pub router: Option<Arc<dyn TaskRouter>>,
+    pub(crate) routing_spend: Option<qq_protocol::CheckpointSpend>,
+}
+
+pub type TaskRoutingFuture = Pin<Box<dyn Future<Output = qq_protocol::RoutingDecision> + Send>>;
+
+/// Optional task selection performed once before ordinary run preparation.
+/// Implementations return a declared fallback on inference failure.
+pub trait TaskRouter: Send + Sync + 'static {
+    fn route(&self, task: String) -> TaskRoutingFuture;
+    fn max_cost_usd_nanos(&self) -> Option<u64>;
 }
 
 impl LoadedRuntime {
+    #[must_use]
+    pub fn new(plan: Arc<CompiledAgentPlan>) -> Self {
+        Self {
+            plan,
+            router: None,
+            routing_spend: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_router(mut self, router: Arc<dyn TaskRouter>) -> Self {
+        self.router = Some(router);
+        self
+    }
+
     /// Compiles a plan from an already constructed runtime and its resolved
     /// model, for loaders that build runtimes directly (embedders, tests,
     /// benchmarks). The runtime's provider, MCP registry, spawn routes, and
@@ -82,9 +108,7 @@ impl LoadedRuntime {
             profile = profile.with_checkpoint_reviewer(Arc::clone(reviewer));
         }
         profile = profile.with_context_cache(Arc::clone(&runtime.context_cache));
-        Ok(Self {
-            plan: CompiledAgentPlan::compile_blocking(profile)?,
-        })
+        Ok(Self::new(CompiledAgentPlan::compile_blocking(profile)?))
     }
 
     #[must_use]
@@ -243,6 +267,7 @@ impl CheckpointSelection {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeLoadRequest {
+    pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
     pub checkpoint: Option<CheckpointSelection>,
     pub workspace: String,
     pub model: ModelSelection,

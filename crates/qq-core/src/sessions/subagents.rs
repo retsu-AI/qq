@@ -461,6 +461,7 @@ async fn run_owned_child(
         if let Err(error) = inner
             .loader
             .load(RuntimeLoadRequest {
+                reasoning_effort: None,
                 checkpoint: parent.checkpoint.clone(),
                 workspace: parent.workspace.clone(),
                 model: selection.clone(),

@@ -813,6 +813,15 @@ async fn stream_run(
                             let _ = writeln!(stderr, "[tool] {} {verdict}", tool_call.name);
                         }
                     }
+                    SessionEvent::RoutingStarted { .. } if ours => {
+                        if text { let _ = writeln!(stderr, "[jev] routing pending"); }
+                    }
+                    SessionEvent::RoutingCompleted { decision, .. } if ours => {
+                        if text {
+                            let _ = writeln!(stderr, "[jev] routing {:?}: {}; {}", decision.outcome,
+                                decision.model.model.as_deref().unwrap_or("configured model"), concise(&decision.reason));
+                        }
+                    }
                     SessionEvent::CheckpointReviewed {
                         correlation,
                         phase,

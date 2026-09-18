@@ -1648,6 +1648,9 @@ impl RuntimeLoader for RuntimeFactory {
                     };
                     overrides = overrides.with_jev_review(mode);
                 }
+                if let Some(effort) = request.reasoning_effort {
+                    overrides = overrides.with_reasoning_effort(effort);
+                }
                 if let Some(model) = request.model.model {
                     overrides = overrides.with_model(model);
                 }
@@ -1657,7 +1660,7 @@ impl RuntimeLoader for RuntimeFactory {
                 load = load.with_overrides(overrides);
                 let plan =
                     factory.plan_for_profile_with_progress(&load, &request.profile, &progress)?;
-                Ok::<_, RuntimeBuildError>(LoadedRuntime { plan })
+                Ok::<_, RuntimeBuildError>(LoadedRuntime::new(plan))
             })
             .await;
             completed.set(qq_core::RuntimeLoadStage::Complete);
@@ -5164,6 +5167,7 @@ mod tests {
         RuntimeLoader::load(
             &factory,
             RuntimeLoadRequest {
+                reasoning_effort: None,
                 checkpoint: None,
                 workspace: workspace.display().to_string(),
                 model: ModelSelection::default(),
@@ -6625,6 +6629,7 @@ mod tests {
             .display()
             .to_string();
         let request = RuntimeLoadRequest {
+            reasoning_effort: None,
             workspace,
             model: ModelSelection::default(),
             profile: AgentProfileId::default(),
@@ -6637,6 +6642,7 @@ mod tests {
         let error = match RuntimeLoader::load(
             &factory,
             RuntimeLoadRequest {
+                reasoning_effort: None,
                 checkpoint: Some(qq_core::CheckpointSelection::ReviewerIdentity(
                     "unknown/reviewer".into(),
                 )),

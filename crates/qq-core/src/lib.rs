@@ -79,8 +79,9 @@ pub use sessions::{
     RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend,
     ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest,
     RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime,
-    SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture,
-    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
+    SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture, TaskRouter,
+    TaskRoutingFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
+    run_cost,
 };
 pub use workspace::skills::{MAX_INDEXED_SKILLS, MAX_SKILL_DESCRIPTION_BYTES};
 pub use workspace::{SkillEntry, SkillIndex, SkillKind};
@@ -435,6 +436,7 @@ pub(crate) struct RunCapabilities {
     /// measurable. Admission rejects a cost cap without pricing before this
     /// struct is built.
     limits: RunLimits,
+    routing_spend: Option<qq_protocol::CheckpointSpend>,
     execution_started: Option<tokio::time::Instant>,
     pricing: Option<ModelPricing>,
     /// Full-transcript recall for `search_history`. Session runs install one;
@@ -466,6 +468,7 @@ impl RunCapabilities {
             read_only: false,
             max_output_tokens: None,
             limits: RunLimits::default(),
+            routing_spend: None,
             execution_started: None,
             pricing: None,
             history: None,
@@ -569,6 +572,7 @@ impl RunCapabilities {
                 max_children: None,
                 max_concurrent_children: None,
             },
+            routing_spend: None,
             execution_started: None,
             pricing: None,
             history: None,
@@ -1084,6 +1088,7 @@ impl plan::CompiledAgentPlan {
                 read_only,
                 max_output_tokens,
                 limits,
+                routing_spend,
                 execution_started: _,
                 pricing,
                 history,
@@ -1104,6 +1109,9 @@ impl plan::CompiledAgentPlan {
             // The session owner supplies the original execution admission,
             // including time spent loading or automatically compacting.
             let mut budget = BudgetMeter::new(limits, pricing, started);
+            if let Some(spend) = routing_spend {
+                budget.charge_child(spend.usage, spend.estimated_cost_usd_nanos);
+            }
             let _cancel_on_drop = CancelOnDrop(cancelled.clone());
             yield RuntimeEvent::Started;
 

@@ -285,7 +285,7 @@ pub(super) const ACCOUNTING_ROWS_SQL: &str = "WITH RECURSIVE subtree(root, id, d
      )
      SELECT subtree.root, r.session_id, r.status, r.usage_json, r.estimated_cost_usd_nanos,
             EXISTS(SELECT 1 FROM model_turns turn WHERE turn.run_id = r.id),
-            r.started_at_ms
+            r.started_at_ms, r.routing_json IS NOT NULL
      FROM runs r
      JOIN subtree ON subtree.id = r.session_id
      ORDER BY r.rowid";
@@ -333,13 +333,15 @@ pub(super) fn load_accounting_folds(
                 row.get::<_, Option<u64>>(4)?,
                 row.get::<_, bool>(5)?,
                 row.get::<_, Option<u64>>(6)?,
+                row.get::<_, bool>(7)?,
             ))
         },
     )?;
 
     let mut folds: HashMap<String, SessionAccountingFold> = HashMap::new();
     for row in rows {
-        let (session_id, owner_id, status, encoded_usage, cost, saw_turn, started_at_ms) = row?;
+        let (session_id, owner_id, status, encoded_usage, cost, saw_turn, started_at_ms, routed) =
+            row?;
         let fold = folds.entry(session_id.clone()).or_default();
         let SessionAccountingFold { direct, inclusive } = fold;
         let Some(encoded_usage) = encoded_usage else {
@@ -351,7 +353,8 @@ pub(super) fn load_accounting_folds(
             // request and preserves known prior accounting. Other terminal
             // rows without usage stay unknown for legacy/provider-failure
             // compatibility; a committed turn is always an explicit unknown.
-            if saw_turn || (terminal && status != "cancelled" && started_at_ms.is_some()) {
+            if routed || saw_turn || (terminal && status != "cancelled" && started_at_ms.is_some())
+            {
                 inclusive.mark_unknown();
                 if owner_id == session_id {
                     direct.mark_unknown();

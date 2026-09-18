@@ -603,3 +603,420 @@ fn deleting_child_persists_deleted_then_refreshed_parent_projection() {
         }
     );
 }
+
+#[tokio::test]
+async fn routing_spend_survives_preparation_cancellation_and_recovery() {
+    for (spent, complete) in [(false, false), (true, false), (true, true)] {
+        for recover in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(directory.path().join("sessions.sqlite3"))
+                .await
+                .unwrap();
+            let (_, session_id, first) = create_claimed_parent(&store, directory.path()).await;
+            store
+                .finish_run(
+                    &first,
+                    RunOutcome::Cancelled,
+                    None,
+                    TeardownComplete::nothing_ran(),
+                )
+                .await
+                .unwrap();
+            store
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::SubmitPrompt {
+                        session_id,
+                        input: vec![InputPart::text("route this task".to_owned())],
+                        limits: RunLimits::default(),
+                        correlation: Correlation::default(),
+                        output: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let run = store.reserve_next_run(false).await.unwrap().unwrap();
+            assert!(store.record_routing_started(&run).await.unwrap().is_some());
+            assert!(
+                store.record_routing_started(&run).await.unwrap().is_none(),
+                "a routing request cannot dispatch twice"
+            );
+            let decision = qq_protocol::RoutingDecision {
+                model: run.model.clone(),
+                reasoning_effort: None,
+                outcome: qq_protocol::RoutingOutcome::Fallback,
+                reason: "insufficient confidence".to_owned(),
+                usage: Some(usage(7, 0)),
+                estimated_cost_usd_nanos: Some(294),
+            };
+            if spent {
+                assert!(
+                    store
+                        .record_routing_spend(
+                            &run,
+                            qq_protocol::CheckpointSpend {
+                                usage: decision.usage,
+                                estimated_cost_usd_nanos: decision.estimated_cost_usd_nanos,
+                            }
+                        )
+                        .await
+                        .unwrap()
+                );
+            }
+            if complete {
+                assert!(
+                    store
+                        .record_routing_completed(&run, decision.clone())
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(
+                    store
+                        .record_routing_completed(&run, decision.clone())
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            if recover {
+                store.recover_interrupted_runs().await.unwrap();
+                assert!(
+                    store.reserve_next_run(false).await.unwrap().is_none(),
+                    "restart must not repeat billed routing"
+                );
+            } else {
+                store
+                    .finish_reserved_run(&run, RunOutcome::Cancelled)
+                    .await
+                    .unwrap();
+            }
+            assert!(store.record_routing_started(&run).await.unwrap().is_none());
+            assert!(
+                store
+                    .record_routing_completed(&run, decision)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a late response cannot mutate terminal accounting"
+            );
+            let events = store
+                .events_after(run.identity.workspace_id, 0, 100)
+                .await
+                .unwrap();
+            let (summary, finished_usage) = events
+                .iter()
+                .find_map(|event| match &event.event {
+                    SessionEvent::RunFinished {
+                        run_id,
+                        session,
+                        usage,
+                        outcome,
+                        ..
+                    } if *run_id == run.identity.run_id => {
+                        assert_eq!(
+                            *outcome,
+                            if recover {
+                                RunOutcome::Interrupted
+                            } else {
+                                RunOutcome::Cancelled
+                            }
+                        );
+                        Some((session, *usage))
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let expected_usage = spent.then_some(usage(7, 0));
+            assert_eq!(finished_usage, expected_usage);
+            assert_eq!(
+                summary.accounting.as_ref().unwrap().direct.usage,
+                expected_usage
+            );
+            assert_eq!(
+                summary
+                    .accounting
+                    .as_ref()
+                    .unwrap()
+                    .direct
+                    .estimated_cost_usd_nanos,
+                spent.then_some(294)
+            );
+            store.close().await.unwrap();
+        }
+    }
+}
+
+struct RoutingTestLoader {
+    reject_selected: bool,
+    hold: bool,
+    routing_calls: Arc<AtomicUsize>,
+}
+
+struct FixedTaskRouter(Arc<AtomicUsize>, bool);
+
+impl TaskRouter for FixedTaskRouter {
+    fn route(&self, task: String) -> TaskRoutingFuture {
+        assert!(task.contains("route this task"));
+        self.0.fetch_add(1, Ordering::SeqCst);
+        if self.1 {
+            return Box::pin(std::future::pending());
+        }
+        Box::pin(async {
+            qq_protocol::RoutingDecision {
+                model: ModelSelection {
+                    model: Some("test/selected".to_owned()),
+                    max_output_tokens: None,
+                    organization: None,
+                },
+                reasoning_effort: Some(qq_provider::ReasoningEffort::Low),
+                outcome: qq_protocol::RoutingOutcome::Selected,
+                reason: "bounded fixture choice".to_owned(),
+                usage: Some(usage(7, 0)),
+                estimated_cost_usd_nanos: Some(294),
+            }
+        })
+    }
+    fn max_cost_usd_nanos(&self) -> Option<u64> {
+        Some(294)
+    }
+}
+
+impl RuntimeLoader for RoutingTestLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        if self.reject_selected && request.model.model.as_deref() == Some("test/selected") {
+            return Box::pin(async {
+                Err(RuntimeLoadError {
+                    kind: RunFailureKind::Configuration,
+                    message: "selected route removed".to_owned(),
+                })
+            });
+        }
+        let mut runtime = Runtime::with_provider(
+            Arc::new(AccountingTextProvider {
+                usage: qq_provider::ProviderUsage {
+                    input_tokens: 3,
+                    output_tokens: 2,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_tokens: None,
+                },
+            }),
+            "fixture-model",
+            256,
+        )
+        .unwrap();
+        if let Some(effort) = request.reasoning_effort {
+            runtime = runtime.with_reasoning_effort(effort);
+        }
+        let loaded = loaded_runtime_for_route(
+            runtime,
+            &request.workspace,
+            request
+                .model
+                .model
+                .unwrap_or_else(|| "test/model".to_owned()),
+            Some(ModelPricing {
+                input_usd_nanos_per_token: 1,
+                output_usd_nanos_per_token: 1,
+                cache_read_usd_nanos_per_token: None,
+                cache_write_usd_nanos_per_token: None,
+                context_tier: None,
+                provenance: "fixture".to_owned(),
+            }),
+        )
+        .with_router(Arc::new(FixedTaskRouter(
+            Arc::clone(&self.routing_calls),
+            self.hold,
+        )));
+        Box::pin(async { Ok(loaded) })
+    }
+}
+
+#[tokio::test]
+async fn routing_precedes_provider_preparation_and_charges_the_run_once() {
+    for (reject_selected, capped) in [(false, false), (true, false), (false, true)] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut harness = spawn_harness_with_loader(
+            Arc::new(RoutingTestLoader {
+                reject_selected,
+                hold: false,
+                routing_calls: Arc::clone(&calls),
+            }),
+            1,
+        )
+        .await;
+        let mut limits = RunLimits::default();
+        if capped {
+            limits.max_total_tokens = Some(6);
+        }
+        harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id: harness.session_id,
+                    input: vec![InputPart::text("route this task".to_owned())],
+                    limits,
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let events = collect_through_finished(&mut harness.events).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let decision_index = events
+            .iter()
+            .position(|event| matches!(event.event, SessionEvent::RoutingCompleted { .. }))
+            .unwrap();
+        let SessionEvent::RoutingCompleted { decision, .. } = &events[decision_index].event else {
+            unreachable!()
+        };
+        assert_eq!(
+            decision.outcome,
+            if reject_selected {
+                qq_protocol::RoutingOutcome::Fallback
+            } else {
+                qq_protocol::RoutingOutcome::Selected
+            }
+        );
+        let expected_route = if reject_selected {
+            "test/model"
+        } else {
+            "test/selected"
+        };
+        assert_eq!(decision.model.model.as_deref(), Some(expected_route));
+        let SessionEvent::RunFinished {
+            session,
+            usage: finished_usage,
+            outcome,
+            ..
+        } = &events.last().unwrap().event
+        else {
+            panic!("missing settlement")
+        };
+        if capped {
+            assert!(matches!(outcome, RunOutcome::BudgetExhausted { .. }));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event.event, SessionEvent::ModelTurnCompleted { .. }))
+            );
+            assert_eq!(*finished_usage, Some(usage(7, 0)));
+            assert_eq!(
+                session
+                    .accounting
+                    .as_ref()
+                    .unwrap()
+                    .direct
+                    .estimated_cost_usd_nanos,
+                Some(294)
+            );
+        } else {
+            assert_eq!(*outcome, RunOutcome::Completed);
+            assert_eq!(*finished_usage, Some(usage(10, 2)));
+            assert_eq!(
+                session
+                    .accounting
+                    .as_ref()
+                    .unwrap()
+                    .direct
+                    .estimated_cost_usd_nanos,
+                Some(299)
+            );
+            let start_index = events
+                .iter()
+                .position(|event| matches!(event.event, SessionEvent::RunStarted { .. }))
+                .unwrap();
+            assert!(decision_index < start_index);
+            assert!(events.iter().any(|event| matches!(&event.event, SessionEvent::ModelTurnCompleted { model, .. } if model.model.as_deref() == Some(expected_route))));
+        }
+        harness.runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn routing_cancellation_stops_before_the_main_provider_and_keeps_spend_unknown() {
+    let mut harness = spawn_harness_with_loader(
+        Arc::new(RoutingTestLoader {
+            reject_selected: false,
+            hold: true,
+            routing_calls: Arc::new(AtomicUsize::new(0)),
+        }),
+        1,
+    )
+    .await;
+    let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "route this task").await;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(2), harness.events.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if matches!(event.event, SessionEvent::RoutingStarted { .. }) {
+            break;
+        }
+    }
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelRun { run_id },
+        )
+        .await
+        .unwrap();
+    let events = collect_through_finished(&mut harness.events).await;
+    assert!(!events.iter().any(|event| matches!(
+        event.event,
+        SessionEvent::RunStarted { .. } | SessionEvent::ModelTurnCompleted { .. }
+    )));
+    let SessionEvent::RunFinished {
+        session,
+        usage,
+        outcome,
+        ..
+    } = &events.last().unwrap().event
+    else {
+        panic!("missing settlement")
+    };
+    assert_eq!(*outcome, RunOutcome::Cancelled);
+    assert_eq!(*usage, None);
+    assert_eq!(
+        session
+            .accounting
+            .as_ref()
+            .unwrap()
+            .direct
+            .estimated_cost_usd_nanos,
+        None
+    );
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[test]
+fn routing_or_review_spend_is_not_a_main_model_context_observation() {
+    let mut accounting = RunAccountingAccumulator::new(
+        None,
+        context_occupancy_basis(
+            context_request_shape(&test_resolved_model("test/model", "model", 256, None)).digest,
+            test_static_prefix(1, None),
+            10,
+        ),
+    );
+    accounting = accounting.with_routing_spend(Some(qq_protocol::CheckpointSpend {
+        usage: Some(usage(7, 0)),
+        estimated_cost_usd_nanos: Some(294),
+    }));
+    let snapshot = accounting.snapshot();
+    assert_eq!(snapshot.usage, Some(usage(7, 0)));
+    assert!(
+        !snapshot.saw_turn,
+        "auxiliary inference must preserve the main model context meter"
+    );
+    accounting.record_turn(Some(usage(11, 3)));
+    let snapshot = accounting.snapshot();
+    assert!(snapshot.saw_turn);
+    assert_eq!(snapshot.context_tokens, Some(11));
+    assert_eq!(snapshot.usage, Some(usage(18, 3)));
+}

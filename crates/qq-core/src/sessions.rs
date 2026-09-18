@@ -76,8 +76,8 @@ pub use runtime::{
     PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest,
     ReviewSpend, ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
     RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, SessionEventStream, SessionRuntime,
-    SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture,
-    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
+    SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture, TaskRouter,
+    TaskRoutingFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
 };
 pub use snapshots::run_cost;
 pub use store::STORE_SCHEMA_VERSION;

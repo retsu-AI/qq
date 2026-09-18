@@ -398,6 +398,14 @@ pub(super) fn finish_queued_run_with_outcome(
              WHERE id = ?1",
         params![session_id.to_string(), now, run_id.to_string()],
     )?;
+    let usage_json: Option<String> = transaction.query_row(
+        "SELECT usage_json FROM runs WHERE id = ?1",
+        [run_id.to_string()],
+        |row| row.get(0),
+    )?;
+    let usage = usage_json
+        .map(|encoded| serde_json::from_str(&encoded))
+        .transpose()?;
     let summary = load_session_summary(transaction, session_id)?;
     append_event(
         transaction,
@@ -406,7 +414,7 @@ pub(super) fn finish_queued_run_with_outcome(
             session: Box::new(summary),
             run_id,
             outcome,
-            usage: None,
+            usage,
             // A queued run never reached the model; no context to report.
             context_tokens: None,
             final_output: None,
@@ -899,6 +907,37 @@ pub(super) fn recover_interrupted_runs(
     store_id: StoreId,
 ) -> Result<Vec<EventCursor>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    // Routing may already have billed while the main model was unstarted.
+    // Interrupt these reservations instead of silently dispatching twice.
+    let mut statement = transaction.prepare(
+        "SELECT r.id, r.session_id, s.workspace_id FROM runs r
+         JOIN sessions s ON s.id = r.session_id
+         WHERE r.status = 'queued' AND r.outcome_json IS NULL AND r.routing_json IS NOT NULL",
+    )?;
+    let routed = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    let mut cursors = Vec::with_capacity(routed.len());
+    for (run, session, workspace) in routed {
+        if let Some(event) = finish_queued_run_with_outcome(
+            &transaction,
+            store_id,
+            parse_id(&workspace)?,
+            parse_id(&session)?,
+            parse_id(&run)?,
+            RunOutcome::Interrupted,
+            now_ms(),
+        )? {
+            cursors.push(event.cursor);
+        }
+    }
     // Reservation is process-local work backed by a queued run. A crash may
     // leave the pointer behind before RunStarted; clearing it makes that same
     // queued row eligible again. The per-prompt compaction-attempt marker is
@@ -932,7 +971,7 @@ pub(super) fn recover_interrupted_runs(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    let mut cursors = Vec::with_capacity(abandoned_children.len());
+    cursors.reserve(abandoned_children.len());
     let recovery_started_at = now_ms();
     for (run, session, workspace) in abandoned_children {
         let event = finish_queued_run(

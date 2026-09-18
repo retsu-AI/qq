@@ -1400,6 +1400,43 @@ impl Store {
         .await
     }
 
+    pub(super) async fn record_routing_started(
+        &self,
+        claimed: &ClaimedRun,
+    ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            streaming::record_routing_started(connection, store_id, identity)
+        })
+        .await
+    }
+
+    pub(super) async fn record_routing_spend(
+        &self,
+        claimed: &ClaimedRun,
+        spend: qq_protocol::CheckpointSpend,
+    ) -> Result<bool, SessionRuntimeError> {
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            streaming::record_routing_spend(connection, identity, spend)
+        })
+        .await
+    }
+
+    pub(super) async fn record_routing_completed(
+        &self,
+        claimed: &ClaimedRun,
+        decision: qq_protocol::RoutingDecision,
+    ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            streaming::record_routing_completed(connection, store_id, identity, decision)
+        })
+        .await
+    }
+
     pub(super) async fn record_checkpoint_started(
         &self,
         claimed: &ClaimedRun,
@@ -1588,7 +1625,7 @@ impl Store {
                             r.outcome_json IS NOT NULL AND r.status IN
                                 ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted'),
                             r.usage_json, r.estimated_cost_usd_nanos,
-                            r.status = 'cancelled' AND r.started_at_ms IS NULL
+                            r.status = 'cancelled' AND r.started_at_ms IS NULL AND r.routing_json IS NULL
                                 AND NOT EXISTS(SELECT 1 FROM model_turns t WHERE t.run_id = r.id),
                             owned.depth = ?3 AND EXISTS(
                                 SELECT 1 FROM candidates child

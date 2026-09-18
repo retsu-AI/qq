@@ -1366,3 +1366,33 @@ following yet:
 The HTTP/SSE server and client crates are designed to permit future surfaces,
 but future client code must not add placeholder crates or speculative
 extension points before it exists.
+
+### Optional task routing during session preparation
+
+An embedding loader can attach a `TaskRouter` to `LoadedRuntime`. The session
+executor calls it once before ordinary preparation, outside the compaction loop.
+Absent routers allocate no task projection and dispatch no inference. Compaction
+and non-task internal runs skip routing. The production Jev routing switch still
+rejects activation until its concrete adapter and model-choice provenance exist.
+
+The routing projection contains at most 16 KiB of the latest task text, masked
+before dispatch; oversized or textless tasks retain the configured model. A
+five-second inference deadline falls back visibly. A selected route goes through
+the ordinary loader again, with fixed workspace, profile and reviewer identity;
+an unavailable or incompatible selection retains the original plan. Explicit
+effort on that original plan remains authoritative.
+
+Schema 31 adds nullable `runs.routing_json`. A committed pending marker precedes
+dispatch and clears usage/cost to unknown; a bounded completed receipt restores
+reported spend atomically with its event. Reported spend is also persisted before
+loading a selected provider, so cancellation during that load retains it. All
+writes require the live queued
+reservation and reject cancellation, duplicate dispatch and terminal mutations.
+Cancelled/failed preparation retains the receipt. Recovery interrupts billed
+reservations rather than requeueing another paid decision. Session and child
+accounting distinguish these requests from never-started zero-spend runs.
+
+Routing spend seeds the runtime budget and durable accumulator once, without
+pretending a main-model turn occurred or resetting context occupancy. The budget
+is checked again before main-model work. Internal compaction does not receive
+that seed again. Client notices expose pending, selected and fallback decisions.

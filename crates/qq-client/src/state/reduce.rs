@@ -361,6 +361,33 @@ impl SessionStore {
                     text,
                 });
             }
+            SessionEvent::RoutingStarted { .. } => {
+                effects.push(StateEffect::Notice {
+                    session: Some(session_id),
+                    level: NoticeLevel::Info,
+                    text: "Jev routing pending; selecting an authorized model".to_owned(),
+                });
+            }
+            SessionEvent::RoutingCompleted { decision, .. } => {
+                effects.push(StateEffect::Notice {
+                    session: Some(session_id),
+                    level: NoticeLevel::Info,
+                    text: format!(
+                        "Jev routing {:?}: {}; {}; routing spend {}",
+                        decision.outcome,
+                        decision
+                            .model
+                            .model
+                            .as_deref()
+                            .unwrap_or("configured model"),
+                        decision.reason,
+                        decision.estimated_cost_usd_nanos.map_or_else(
+                            || "unknown".to_owned(),
+                            |cost| format!("${:.6}", cost as f64 / 1_000_000_000.0)
+                        )
+                    ),
+                });
+            }
             SessionEvent::CheckpointStarted {
                 correlation, phase, ..
             } => {

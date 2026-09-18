@@ -1749,6 +1749,13 @@ pub enum SessionEvent {
     /// root final candidate. Persisted before publication and correlated to
     /// the reviewed boundary. `supported` permits progress; every other
     /// outcome is fail-closed.
+    RoutingStarted {
+        run_id: RunId,
+    },
+    RoutingCompleted {
+        run_id: RunId,
+        decision: Box<RoutingDecision>,
+    },
     CheckpointStarted {
         run_id: RunId,
         correlation: String,
@@ -1823,6 +1830,25 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         final_output: Option<Box<FinalOutput>>,
     },
+}
+
+/// One optional routing request, including the declared fallback on failure.
+/// Missing usage or cost means unknown spend, never a free request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutingDecision {
+    pub model: ModelSelection,
+    pub reasoning_effort: Option<qq_reasoning::ReasoningEffort>,
+    pub outcome: RoutingOutcome,
+    pub reason: String,
+    pub usage: Option<TokenUsage>,
+    pub estimated_cost_usd_nanos: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingOutcome {
+    Selected,
+    Fallback,
 }
 
 /// One reviewer request's accounting. Missing usage or price means unknown,
@@ -3119,7 +3145,7 @@ mod tests {
         // Version 22 added `ApprovalGrant::Host` and the `fetch` preview on
         // `tool_approval_requested` for the network tool.
         // Version 24 adds review start markers and typed spend receipts.
-        assert_eq!(crate::PROTOCOL_VERSION, 24);
+        assert_eq!(crate::PROTOCOL_VERSION, 25);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
