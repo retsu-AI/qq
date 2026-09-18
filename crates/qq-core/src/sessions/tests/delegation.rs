@@ -685,6 +685,7 @@ async fn parent_cancellation_linearizes_with_in_flight_child_creation() {
                     ChildAdmission {
                         profile: AgentProfileId::default(),
                         model: ModelSelection {
+                            model_is_fallback: false,
                             model: Some("test/child".to_owned()),
                             max_output_tokens: Some(256),
                             organization: None,
@@ -763,6 +764,7 @@ async fn parent_cancellation_linearizes_with_in_flight_child_creation() {
             ChildAdmission {
                 profile: AgentProfileId::default(),
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/child".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -801,6 +803,7 @@ async fn replayed_parent_cancellation_rediscovers_its_running_child() {
             ChildAdmission {
                 profile: AgentProfileId::default(),
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/child".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -861,6 +864,7 @@ async fn restart_cancels_a_queued_child_owned_by_an_interrupted_parent() {
             ChildAdmission {
                 profile: AgentProfileId::default(),
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/child".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -1071,6 +1075,7 @@ async fn configured_worker_model_wins_and_preserves_parent_selection_fields() {
     let resolutions = Arc::new(AtomicUsize::new(0));
     let loads = Arc::new(StdMutex::new(Vec::new()));
     let worker = ModelSelection {
+        model_is_fallback: false,
         model: Some("test/worker".to_owned()),
         max_output_tokens: Some(123),
         organization: Some("worker-org".to_owned()),
@@ -1141,6 +1146,7 @@ async fn explicit_spawn_model_bypasses_configured_worker_resolution() {
             parent,
             child: Arc::new(StaticTextProvider),
             worker: Some(ModelSelection {
+                model_is_fallback: false,
                 model: Some("test/worker".to_owned()),
                 max_output_tokens: Some(111),
                 organization: Some("worker-org".to_owned()),
@@ -1340,6 +1346,7 @@ async fn rejected_spawn_validation_creates_no_child_state_and_names_the_check() 
 async fn spawn_validation_covers_worker_and_parent_fallback_routes() {
     for worker in [
         Some(ModelSelection {
+            model_is_fallback: false,
             model: Some("test/worker".to_owned()),
             max_output_tokens: Some(64),
             organization: None,
@@ -2013,11 +2020,13 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
         user_initiated: true,
         literal_slash: false,
         session_model: ModelSelection {
+            model_is_fallback: false,
             model: Some("test/model".to_owned()),
             max_output_tokens: Some(256),
             organization: None,
         },
         model: ModelSelection {
+            model_is_fallback: false,
             model: Some("test/model".to_owned()),
             max_output_tokens: Some(256),
             organization: None,
@@ -3530,6 +3539,7 @@ async fn owned_spend_session_deletion_checks_followup_owners_after_the_original_
             SessionCommand::SetSessionModel {
                 session_id: child,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/followup".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -3907,6 +3917,7 @@ async fn depth_one_keeps_children_from_spawning_and_the_ceiling_is_enforced() {
                 workspace_id: harness.workspace_id,
                 parent_id: Some(parent_id),
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,

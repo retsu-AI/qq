@@ -765,6 +765,7 @@ impl TaskRouter for FixedTaskRouter {
         Box::pin(async {
             qq_protocol::RoutingDecision {
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/selected".to_owned()),
                     max_output_tokens: None,
                     organization: None,
@@ -835,7 +836,12 @@ impl RuntimeLoader for RoutingTestLoader {
 
 #[tokio::test]
 async fn routing_precedes_provider_preparation_and_charges_the_run_once() {
-    for (reject_selected, capped) in [(false, false), (true, false), (false, true)] {
+    for (reject_selected, capped, pinned) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut harness = spawn_harness_with_loader(
             Arc::new(RoutingTestLoader {
@@ -846,6 +852,22 @@ async fn routing_precedes_provider_preparation_and_charges_the_run_once() {
             1,
         )
         .await;
+        harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SetSessionModel {
+                    session_id: harness.session_id,
+                    model: ModelSelection {
+                        model_is_fallback: !pinned,
+                        model: Some("test/model".to_owned()),
+                        max_output_tokens: Some(256),
+                        organization: None,
+                    },
+                },
+            )
+            .await
+            .unwrap();
         let mut limits = RunLimits::default();
         if capped {
             limits.max_total_tokens = Some(6);
@@ -875,13 +897,13 @@ async fn routing_precedes_provider_preparation_and_charges_the_run_once() {
         };
         assert_eq!(
             decision.outcome,
-            if reject_selected {
+            if reject_selected || pinned {
                 qq_protocol::RoutingOutcome::Fallback
             } else {
                 qq_protocol::RoutingOutcome::Selected
             }
         );
-        let expected_route = if reject_selected {
+        let expected_route = if reject_selected || pinned {
             "test/model"
         } else {
             "test/selected"

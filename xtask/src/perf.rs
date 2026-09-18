@@ -2303,6 +2303,7 @@ impl RuntimeFixture {
 
 fn benchmark_model() -> ModelSelection {
     ModelSelection {
+        model_is_fallback: false,
         model: Some("benchmark/model".to_owned()),
         max_output_tokens: Some(16_384),
         organization: None,
@@ -4083,6 +4084,7 @@ async fn busy_workspace_ack_workloads(
                 SessionCommand::SetSessionModel {
                     session_id: idle_session,
                     model: ModelSelection {
+                        model_is_fallback: false,
                         model: Some(format!("benchmark/model-{index}")),
                         max_output_tokens: Some(256),
                         organization: None,

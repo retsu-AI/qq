@@ -1094,6 +1094,7 @@ async fn scripted_runs_harness_with_authority(
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -1222,6 +1223,7 @@ async fn approval_harness_with_reviewer(
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -1451,6 +1453,7 @@ async fn store_with_one_spill(
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -2016,6 +2019,7 @@ async fn claimed_store_fixture() -> (TempDir, Store, ClaimedRun) {
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -2183,6 +2187,7 @@ async fn create_session_with_mode(
                 workspace_id,
                 parent_id,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -3081,6 +3086,7 @@ async fn project_terminal_run_with_tool_boundaries(
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -4097,6 +4103,7 @@ async fn create_claimed_parent(
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -4344,6 +4351,7 @@ async fn output_contract_harness(answers: &[&'static str]) -> OutputContractHarn
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,

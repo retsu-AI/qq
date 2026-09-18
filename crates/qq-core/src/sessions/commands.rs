@@ -164,8 +164,8 @@ pub(super) fn create_child_run(
             "INSERT INTO sessions(
                 id, workspace_id, parent_id, owner_run_id, spawned_by_tool_call_id, title,
                 status, queued_prompts, model, max_output_tokens, organization, approval_mode,
-                created_at_ms, updated_at_ms, depth, root_run_id, purpose, profile
-             ) VALUES (?1, ?2, ?3, ?4, ?10, ?5, 'queued', 1, ?6, ?7, ?8, ?11, ?9, ?9, ?12, ?13, ?14, ?15)",
+                created_at_ms, updated_at_ms, depth, root_run_id, purpose, profile, model_is_fallback
+             ) VALUES (?1, ?2, ?3, ?4, ?10, ?5, 'queued', 1, ?6, ?7, ?8, ?11, ?9, ?9, ?12, ?13, ?14, ?15, ?16)",
             params![
                 session_id.to_string(),
                 workspace_id.to_string(),
@@ -182,6 +182,7 @@ pub(super) fn create_child_run(
                 root_run_id.to_string(),
                 purpose.as_str(),
                 profile.as_str(),
+                model.model_is_fallback,
             ],
         )
         ?;
@@ -458,8 +459,8 @@ pub(super) fn execute_command(
                         id, workspace_id, parent_id, title, status, model,
                         max_output_tokens, organization, approval_mode,
                         created_at_ms, updated_at_ms, profile, correlation_json, depth,
-                        root_run_id
-                     ) VALUES (?1, ?2, ?3, 'New session', 'idle', ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12)",
+                        root_run_id, model_is_fallback
+                     ) VALUES (?1, ?2, ?3, 'New session', 'idle', ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13)",
                     params![
                         session_id.to_string(),
                         workspace_id.to_string(),
@@ -473,6 +474,7 @@ pub(super) fn execute_command(
                         correlation_json,
                         depth,
                         root_run_id,
+                        model.model_is_fallback,
                     ],
                 )
                 ?;
@@ -1176,7 +1178,7 @@ pub(super) fn execute_command(
                              THEN context_occupancy_json ELSE NULL
                          END,
                          model = ?2, max_output_tokens = ?3, organization = ?4,
-                         updated_at_ms = ?5
+                         updated_at_ms = ?5, model_is_fallback = ?6
                      WHERE id = ?1",
                 params![
                     session_id.to_string(),
@@ -1184,6 +1186,7 @@ pub(super) fn execute_command(
                     model.max_output_tokens,
                     &model.organization,
                     now,
+                    model.model_is_fallback,
                 ],
             )?;
             // The new selection is read at claim time (`claim_next_run`), so

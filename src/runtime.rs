@@ -215,6 +215,7 @@ impl RuntimeFactory {
                 .map(str::to_owned),
             context_window: metadata.and_then(|metadata| metadata.context_window()),
             selection: ModelSelection {
+                model_is_fallback: false,
                 model: Some(snapshot.model().as_str().to_owned()),
                 max_output_tokens: Some(
                     metadata
@@ -253,6 +254,7 @@ impl RuntimeFactory {
                     name: metadata.name().map(str::to_owned),
                     context_window: metadata.context_window(),
                     selection: qq_protocol::ModelSelection {
+                        model_is_fallback: false,
                         model: Some(format!("{provider_id}/{model_id}")),
                         max_output_tokens: Some(
                             metadata
@@ -279,6 +281,7 @@ impl RuntimeFactory {
                         name: model.name.clone(),
                         context_window: None,
                         selection: qq_protocol::ModelSelection {
+                            model_is_fallback: false,
                             model: Some(format!("{provider_id}/{}", model.id)),
                             max_output_tokens: Some(snapshot.max_output_tokens()),
                             organization: snapshot.organization().map(str::to_owned),
@@ -301,6 +304,7 @@ impl RuntimeFactory {
                 name: None,
                 context_window: metadata.and_then(|metadata| metadata.context_window()),
                 selection: qq_protocol::ModelSelection {
+                    model_is_fallback: false,
                     model: Some(snapshot.model().as_str().to_owned()),
                     max_output_tokens: Some(snapshot.max_output_tokens()),
                     organization: snapshot.organization().map(str::to_owned),
@@ -873,6 +877,7 @@ impl RuntimeFactory {
         let key = PlanKey {
             workspace: workspace.clone(),
             model: ModelSelection {
+                model_is_fallback: false,
                 model: request.overrides().model().map(str::to_owned),
                 max_output_tokens: request.overrides().max_output_tokens(),
                 organization: request.overrides().organization().map(str::to_owned),
@@ -1554,6 +1559,7 @@ impl RuntimeLoader for RuntimeFactory {
                 let snapshot = factory.snapshot_for_selection(&workspace, &parent)?;
                 Ok::<_, RuntimeBuildError>(match snapshot.worker_model() {
                     Some(worker) => qq_protocol::ModelSelection {
+                        model_is_fallback: false,
                         model: Some(worker.as_str().to_owned()),
                         max_output_tokens: Some(snapshot.max_output_tokens()),
                         organization: snapshot.organization().map(str::to_owned),
@@ -1651,7 +1657,9 @@ impl RuntimeLoader for RuntimeFactory {
                 if let Some(effort) = request.reasoning_effort {
                     overrides = overrides.with_reasoning_effort(effort);
                 }
-                if let Some(model) = request.model.model {
+                if !request.model.model_is_fallback
+                    && let Some(model) = request.model.model
+                {
                     overrides = overrides.with_model(model);
                 }
                 if let Some(organization) = request.model.organization {
@@ -3335,6 +3343,7 @@ mod tests {
                         workspace_id,
                         parent_id: None,
                         model: ModelSelection {
+                            model_is_fallback: false,
                             model: Some("test/model".to_owned()),
                             max_output_tokens: Some(256),
                             organization: None,
@@ -3533,6 +3542,7 @@ mod tests {
                     workspace_id,
                     parent_id: None,
                     model: ModelSelection {
+                        model_is_fallback: false,
                         model: Some("test/model".to_owned()),
                         max_output_tokens: Some(256),
                         organization: None,
@@ -3774,6 +3784,7 @@ mod tests {
             server.connection().to_server_connection(),
             fixture.path("work"),
             ModelSelection {
+                model_is_fallback: false,
                 model: Some("custom/test-model".to_owned()),
                 max_output_tokens: Some(256),
                 organization: None,
@@ -3890,6 +3901,7 @@ mod tests {
             StartOutcome::Existing(_) => panic!("test unexpectedly found a running server"),
         };
         let selection = ModelSelection {
+            model_is_fallback: false,
             model: Some("custom/test-model".to_owned()),
             max_output_tokens: Some(256),
             organization: None,
@@ -4559,6 +4571,7 @@ mod tests {
         .unwrap();
         let factory = fixture.factory();
         let parent = qq_protocol::ModelSelection {
+            model_is_fallback: false,
             model: Some("custom/persisted".to_owned()),
             max_output_tokens: Some(123),
             organization: Some("parent-org".to_owned()),
@@ -4602,6 +4615,52 @@ mod tests {
         assert_eq!(fallback, parent);
     }
 
+    #[tokio::test]
+    async fn session_model_fallback_resolves_config_but_explicit_pin_wins() {
+        let fixture = RuntimeFixture::new();
+        let workspace = fs::canonicalize(fixture.path("work")).unwrap();
+        fs::write(
+            fixture.path("global/config.ron"),
+            r#"(
+            version: 1,
+            model: "custom/configured",
+            providers: {"custom": Custom(connection: (
+                base_url: "http://127.0.0.1:1/v1",
+                api: OpenAiResponses,
+                auth: NoAuth,
+            ))},
+        )"#,
+        )
+        .unwrap();
+        let factory = fixture.factory();
+        for model_is_fallback in [true, false] {
+            let loaded = RuntimeLoader::load(
+                &factory,
+                RuntimeLoadRequest {
+                    reasoning_effort: None,
+                    checkpoint: None,
+                    workspace: workspace.display().to_string(),
+                    model: ModelSelection {
+                        model_is_fallback,
+                        model: Some("custom/persisted".to_owned()),
+                        ..ModelSelection::default()
+                    },
+                    profile: AgentProfileId::default(),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                loaded.resolved_model().route,
+                if model_is_fallback {
+                    "custom/configured"
+                } else {
+                    "custom/persisted"
+                }
+            );
+        }
+    }
+
     async fn validate_route(
         factory: &RuntimeFactory,
         workspace: &Path,
@@ -4611,6 +4670,7 @@ mod tests {
             factory,
             workspace.display().to_string(),
             qq_protocol::ModelSelection {
+                model_is_fallback: false,
                 model: Some(route.to_owned()),
                 max_output_tokens: Some(128),
                 organization: None,
@@ -5131,6 +5191,7 @@ mod tests {
             &factory,
             workspace.display().to_string(),
             ModelSelection {
+                model_is_fallback: false,
                 model: Some("custom/test-model".to_owned()),
                 ..ModelSelection::default()
             },
@@ -5141,6 +5202,7 @@ mod tests {
             &factory,
             workspace.display().to_string(),
             ModelSelection {
+                model_is_fallback: false,
                 model: Some("custom/test-model".to_owned()),
                 ..ModelSelection::default()
             },

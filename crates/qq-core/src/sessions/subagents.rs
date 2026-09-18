@@ -420,6 +420,7 @@ async fn run_owned_child(
             (!model.is_empty()).then_some(model)
         }) {
             selection.model = Some(model);
+            selection.model_is_fallback = false;
         } else {
             selection = match inner
                 .loader

@@ -447,7 +447,7 @@ pub(super) fn reserve_next_run_recoverable(
                                     AND role = 'user' AND steering = 0
                                     AND state IN ('complete', 'cancelled', 'failed', 'interrupted')), 0),
                     (SELECT owner.plan_descriptor_json FROM runs owner WHERE owner.id = s.owner_run_id),
-                    s.owner_run_id IS NOT NULL
+                    s.owner_run_id IS NOT NULL, s.model_is_fallback
              FROM runs r
              JOIN sessions s ON s.id = r.session_id
              JOIN workspaces w ON w.id = s.workspace_id
@@ -491,6 +491,7 @@ pub(super) fn reserve_next_run_recoverable(
                     row.get::<_, bool>(24)?,
                     row.get::<_, Option<String>>(25)?,
                     row.get::<_, bool>(26)?,
+                    row.get::<_, bool>(27)?,
                 ))
             },
         )
@@ -523,6 +524,7 @@ pub(super) fn reserve_next_run_recoverable(
         context_compaction_remaining,
         parent_descriptor,
         has_owner,
+        model_is_fallback,
     )) = row
     else {
         return Ok(None);
@@ -591,6 +593,7 @@ pub(super) fn reserve_next_run_recoverable(
     let kind = parse_run_kind(&kind)?;
     let workspace_id: WorkspaceId = parse_id(&workspace)?;
     let model = ModelSelection {
+        model_is_fallback,
         model,
         max_output_tokens: max_tokens,
         organization,

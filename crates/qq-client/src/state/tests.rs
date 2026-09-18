@@ -57,6 +57,7 @@ fn context(models: &[ModelOption]) -> ReduceContext<'_> {
 
 fn summary(id: SessionId) -> SessionSummary {
     SessionSummary {
+        model_is_fallback: false,
         id,
         workspace_id: WorkspaceId::from_bytes([2; 16]),
         parent_id: None,
@@ -208,6 +209,7 @@ fn replaying_the_wire_fixtures_matches_the_golden_projection() {
         name: None,
         context_window: Some(400_000),
         selection: qq_protocol::ModelSelection {
+            model_is_fallback: false,
             model: Some("openai/gpt-5.6".to_owned()),
             ..qq_protocol::ModelSelection::default()
         },

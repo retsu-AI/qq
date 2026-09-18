@@ -1964,6 +1964,7 @@ mod tests {
             workspace: workspace.to_owned(),
             session: None,
             model: ModelSelection {
+                model_is_fallback: false,
                 model: Some("test/model".to_owned()),
                 max_output_tokens: Some(256),
                 organization: None,
@@ -2672,6 +2673,7 @@ mod tests {
             session: Some(session_id),
             approval: HeadlessApproval::Auto,
             model: ModelSelection {
+                model_is_fallback: false,
                 model: Some("test/model".to_owned()),
                 max_output_tokens: Some(128),
                 organization: None,

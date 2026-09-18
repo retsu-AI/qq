@@ -283,6 +283,7 @@ async fn prepare_headless(
     let load = overrides
         .load_request_in(&workspace)
         .map_err(|error| invalid(error.to_string()))?;
+    let model_is_fallback = load.overrides().model().is_none();
     let config_factory = factory.clone();
     let snapshot = tokio::task::spawn_blocking(move || config_factory.load(&load))
         .await
@@ -326,6 +327,7 @@ async fn prepare_headless(
     };
 
     let model = qq_protocol::ModelSelection {
+        model_is_fallback,
         model: Some(snapshot.model().as_str().to_owned()),
         max_output_tokens: Some(snapshot.max_output_tokens()),
         organization: snapshot.organization().map(str::to_owned),
@@ -478,6 +480,7 @@ async fn interactive(
     let loader = environment.config;
     let server_paths = environment.server_paths;
     let workspace = environment.workspace;
+    let model_is_fallback = request.overrides().model().is_none();
     let config_factory = factory.clone();
     let (snapshot, tui, themes, models) = tokio::task::spawn_blocking(move || {
         let snapshot = config_factory.load(&request)?;
@@ -493,6 +496,7 @@ async fn interactive(
         .collect::<Vec<qq_tui::ModelOption>>();
     let workspace_root = workspace.clone();
     let configured_model = qq_protocol::ModelSelection {
+        model_is_fallback,
         model: Some(snapshot.model().as_str().to_owned()),
         max_output_tokens: Some(snapshot.max_output_tokens()),
         organization: snapshot.organization().map(str::to_owned),

@@ -1456,7 +1456,8 @@ impl App {
         }))
     }
 
-    fn set_session_model(&mut self, session_id: SessionId, model: ModelSelection) -> Effects {
+    fn set_session_model(&mut self, session_id: SessionId, mut model: ModelSelection) -> Effects {
+        model.model_is_fallback = false;
         // Remember the pick as the client default so /new and later creates
         // keep using it until the user chooses another model.
         self.model = model.clone();
@@ -1511,14 +1512,22 @@ impl App {
             return self.model.clone();
         };
 
-        self.models
+        let model_is_fallback = self
+            .focused()
+            .and_then(|id| self.sessions.get(&id))
+            .is_some_and(|session| session.summary.model_is_fallback);
+        let mut selection = self
+            .models
             .iter()
             .find(|option| option.selection.model.as_deref() == Some(route))
             .map(|option| option.selection.clone())
             .unwrap_or_else(|| ModelSelection {
+                model_is_fallback: false,
                 model: Some(route.to_owned()),
                 ..ModelSelection::default()
-            })
+            });
+        selection.model_is_fallback = model_is_fallback;
+        selection
     }
 
     fn create_session_with_model(

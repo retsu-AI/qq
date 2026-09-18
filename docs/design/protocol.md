@@ -1962,3 +1962,9 @@ Protocol 25 adds `routing_started` and `routing_completed`. Routing occurs befor
 and typed usage/cost. Missing spend remains unknown. A cancelled pending request
 may have only `routing_started` followed by `run_finished`; this is not a free
 request or a successful decision. Older versioned event fixtures remain readable.
+
+Model selections and session summaries carry optional `model_is_fallback`
+(default false). True identifies a configured fallback eligible for independently
+opted-in routing. False preserves explicit and legacy choices as pins. Schema 32
+persists the flag; model changes and reconnect snapshots retain it. A TUI model
+pick clears it. This field does not enable Jev or grant access to any model.

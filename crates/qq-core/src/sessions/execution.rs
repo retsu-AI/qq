@@ -538,6 +538,7 @@ async fn route_run(
         }
     }
     let fallback = ModelSelection {
+        model_is_fallback: false,
         model: Some(loaded.resolved_model().route.clone()),
         max_output_tokens: Some(loaded.resolved_model().max_output_tokens),
         organization: loaded.resolved_model().organization.clone(),
@@ -608,6 +609,10 @@ async fn route_run(
     if pinned_effort.is_some() {
         decision.reasoning_effort = pinned_effort;
     }
+    if !claimed.session_model.model_is_fallback && decision.model.model != fallback.model {
+        decision.outcome = qq_protocol::RoutingOutcome::Fallback;
+        decision.reason = "explicit model choice retained".to_owned();
+    }
     if decision.outcome == qq_protocol::RoutingOutcome::Fallback {
         decision.model = fallback.clone();
         decision.reasoning_effort = pinned_effort;
@@ -666,6 +671,7 @@ async fn route_run(
                     && selected.plan.descriptor().profile == loaded.plan.descriptor().profile =>
             {
                 decision.model = ModelSelection {
+                    model_is_fallback: false,
                     model: Some(selected.resolved_model().route.clone()),
                     max_output_tokens: Some(selected.resolved_model().max_output_tokens),
                     organization: selected.resolved_model().organization.clone(),
@@ -980,6 +986,7 @@ pub(super) async fn execute_run(
                     }
                 };
                 claimed.model = ModelSelection {
+                    model_is_fallback: claimed.session_model.model_is_fallback,
                     model: Some(prepared.audit.resolved_model.route.clone()),
                     max_output_tokens: Some(prepared.audit.resolved_model.max_output_tokens),
                     organization: prepared.audit.resolved_model.organization.clone(),
@@ -1304,6 +1311,7 @@ async fn run_auto_compaction(
         return false;
     }
     compaction.model = ModelSelection {
+        model_is_fallback: false,
         model: Some(prepared.audit.resolved_model.route.clone()),
         max_output_tokens: Some(prepared.audit.resolved_model.max_output_tokens),
         organization: prepared.audit.resolved_model.organization.clone(),

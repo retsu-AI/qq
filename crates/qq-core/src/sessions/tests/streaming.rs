@@ -510,6 +510,7 @@ async fn overflowing_text_append_persists_no_counter_chunk_or_event() {
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,

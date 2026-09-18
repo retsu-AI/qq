@@ -1373,7 +1373,7 @@ An embedding loader can attach a `TaskRouter` to `LoadedRuntime`. The session
 executor calls it once before ordinary preparation, outside the compaction loop.
 Absent routers allocate no task projection and dispatch no inference. Compaction
 and non-task internal runs skip routing. The production Jev routing switch still
-rejects activation until its concrete adapter and model-choice provenance exist.
+rejects activation until its concrete adapter and inherited policy are connected.
 
 The routing projection contains at most 16 KiB of the latest task text, masked
 before dispatch; oversized or textless tasks retain the configured model. A
@@ -1396,3 +1396,10 @@ Routing spend seeds the runtime budget and durable accumulator once, without
 pretending a main-model turn occurred or resetting context occupancy. The budget
 is checked again before main-model work. Internal compaction does not receive
 that seed again. Client notices expose pending, selected and fallback decisions.
+
+Session model choices distinguish configured fallbacks from explicit pins
+(ADR-0033). Schema 32 stores `model_is_fallback`; older sessions remain pinned.
+The composition root reloads the configured route for fallback selections and
+applies explicit selections as overrides. Optional routing cannot replace a pin.
+CLI/environment overrides, TUI picks and explicit child choices establish pins;
+this provenance does not itself enable routing.

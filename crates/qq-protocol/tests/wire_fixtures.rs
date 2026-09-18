@@ -55,6 +55,7 @@ fn correlation(pairs: &[(&str, &str)]) -> Correlation {
 
 fn summary() -> SessionSummary {
     SessionSummary {
+        model_is_fallback: false,
         id: SessionId::from_bytes([3; 16]),
         workspace_id: WorkspaceId::from_bytes([2; 16]),
         parent_id: None,
@@ -221,6 +222,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 workspace_id: WorkspaceId::from_bytes([2; 16]),
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("openai/gpt-5.6".to_owned()),
                     max_output_tokens: Some(4096),
                     organization: None,
@@ -492,6 +494,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 run_id,
                 decision: Box::new(qq_protocol::RoutingDecision {
                     model: ModelSelection {
+                        model_is_fallback: false,
                         model: Some("openai/gpt-5".to_owned()),
                         max_output_tokens: Some(1024),
                         organization: None,

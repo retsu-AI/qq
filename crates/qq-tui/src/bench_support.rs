@@ -225,6 +225,7 @@ fn run_id(index: u8) -> RunId {
 
 fn summary(id: SessionId, status: SessionStatus) -> SessionSummary {
     SessionSummary {
+        model_is_fallback: false,
         title: format!("Session {}", id.as_bytes()[15]),
         status,
         ..fixtures::session_summary(id)

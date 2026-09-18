@@ -224,3 +224,21 @@ Known routing spend persists before provider reload; main context meter preserve
 Unfinished: production Jev adapter, model-pin provenance, inherited opt-in,
 direct ask routing, passive advisory, performance/live qualification.
 This is local implementation progress, not a shipping routing capability or PR.
+
+### J6b model-choice provenance — 2026-09-18
+
+Schema 32 and protocol-25 selections retain configured fallback versus explicit
+pin intent across commands, reservation, reconnect and child creation. Root
+loading resolves fallbacks from configuration; routing cannot replace a pin.
+Added legacy wire/migration, pin rejection and root-resolution regressions.
+Independent read-only spec/standards reviews approve the bounded change, with
+requested pin/loader coverage now added. Production adapter remains unfinished.
+No paid inference, new dependency, push or shipping claim in this session.
+
+J6b provenance receipt: workspace 1,590 passed, five ignored; formatting,
+strict all-target/all-feature Clippy and workspace build pass. Pin rejection
+retains the chosen provider and charges auxiliary spend once. Root loader tests
+cover a conflicting configured default; migration and legacy-wire tests preserve
+pins. ADR-0033 and architecture/protocol/plan docs updated. Protocol 25 is still
+unpublished and includes both the routing and provenance changes. Performance
+qualification remains open; no speed claim or additional hosted PR yet.

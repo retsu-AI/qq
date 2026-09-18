@@ -152,6 +152,7 @@ async fn run_batch() -> Duration {
                     workspace_id,
                     parent_id: None,
                     model: ModelSelection {
+                        model_is_fallback: false,
                         model: Some("bench/model".to_owned()),
                         max_output_tokens: Some(4096),
                         organization: None,

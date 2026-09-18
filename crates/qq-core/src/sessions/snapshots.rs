@@ -402,7 +402,7 @@ pub(super) fn load_session_summary_with_accounting(
                       ORDER BY finished_at_ms DESC, rowid DESC LIMIT 1),
                      s.owner_run_id, s.spawned_by_tool_call_id, s.profile, s.correlation_json,
                      s.approval_mode, s.depth, s.purpose,
-                     (SELECT activity FROM runs WHERE id = s.active_run_id)
+                     (SELECT activity FROM runs WHERE id = s.active_run_id), s.model_is_fallback
               FROM sessions s WHERE s.id = ?1",
             [session_id.to_string()],
             |row| {
@@ -425,6 +425,7 @@ pub(super) fn load_session_summary_with_accounting(
                     row.get::<_, u16>(15)?,
                     row.get::<_, String>(16)?,
                     row.get::<_, Option<String>>(17)?,
+                    row.get::<_, bool>(18)?,
                 ))
             },
         )
@@ -450,6 +451,7 @@ pub(super) fn load_session_summary_with_accounting(
                 depth,
                 purpose,
                 activity,
+                model_is_fallback,
             )| {
                 let direct_cost = accounting.direct.estimated_cost_usd_nanos;
                 let active_run_id: Option<RunId> = active.as_deref().map(parse_id).transpose()?;
@@ -466,6 +468,7 @@ pub(super) fn load_session_summary_with_accounting(
                     None => None,
                 };
                 Ok(SessionSummary {
+                    model_is_fallback,
                     id: session_id,
                     workspace_id: parse_id(&workspace)?,
                     parent_id: parent.as_deref().map(parse_id).transpose()?,

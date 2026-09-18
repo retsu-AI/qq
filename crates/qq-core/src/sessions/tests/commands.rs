@@ -578,6 +578,7 @@ async fn plan_identity_correlation_and_profile_persist_and_survive_refresh() {
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(64),
                     organization: None,
@@ -2089,6 +2090,7 @@ async fn set_session_model_applies_to_the_next_run_but_not_the_active_one() {
             SessionCommand::SetSessionModel {
                 session_id: harness.session_id,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model-b".to_owned()),
                     max_output_tokens: Some(512),
                     organization: None,
@@ -2223,6 +2225,7 @@ async fn active_run_cannot_restore_occupancy_after_same_route_shape_change() {
             SessionCommand::SetSessionModel {
                 session_id: harness.session_id,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: None,
                     organization: None,
@@ -2269,6 +2272,7 @@ async fn active_run_cannot_restore_occupancy_after_same_route_shape_change() {
             SessionCommand::SetSessionModel {
                 session_id: harness.session_id,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(512),
                     organization: Some("changed-organization".to_owned()),
@@ -2631,4 +2635,70 @@ async fn control_commands_are_bounded_by_the_headroom() {
         Err(SessionRuntimeError::CommandLimitReached)
     ));
     harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn model_fallback_provenance_survives_commands_and_run_reservation() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (_, session_id, first) = create_claimed_parent(&store, directory.path()).await;
+    store
+        .finish_run(
+            &first,
+            RunOutcome::Cancelled,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    for model_is_fallback in [true, false] {
+        let selection = ModelSelection {
+            model_is_fallback,
+            model: Some("test/model".to_owned()),
+            max_output_tokens: Some(256),
+            organization: None,
+        };
+        let changed = store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SetSessionModel {
+                    session_id,
+                    model: selection.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let events = store
+            .events_after(
+                first.identity.workspace_id,
+                changed.receipt.committed_through.sequence - 1,
+                10,
+            )
+            .await
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(&event.event, SessionEvent::SessionUpdated { session } if session.model_is_fallback == model_is_fallback)));
+        store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::text("retain choice".to_owned())],
+                    limits: RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let claimed = store.reserve_next_run(false).await.unwrap().unwrap();
+        assert_eq!(claimed.model, selection);
+        assert_eq!(claimed.session_model, selection);
+        store
+            .finish_reserved_run(&claimed, RunOutcome::Cancelled)
+            .await
+            .unwrap();
+    }
+    store.close().await.unwrap();
 }
