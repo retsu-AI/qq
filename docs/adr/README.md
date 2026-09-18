@@ -36,6 +36,7 @@ written.
 | 0025 | [SSE bodies are framed per chunk with one allocation per event; adapters parse once](0025-sse-chunk-framing.md) | Accepted |
 | 0026 | [Run cancellation is a token that wakes waiters, not a flag that is polled](0026-run-cancellation-token.md) | Accepted |
 | 0027 | [`qq-core` is a public embedding API; its exports are a contract, not leakage](0027-qq-core-public-embedding-api.md) | Accepted |
+| 0028 | [Mandatory typed JEV checkpoints after tool results and final candidates](0028-mandatory-typed-jev-checkpoints.md) | Accepted; narrowly supersedes ADR-0003's synchronous-decision list |
 
 ## When to write one
 

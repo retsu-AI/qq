@@ -40,8 +40,9 @@ may append a **request** row; only root changes a request's status.
 | 0025 | SSE framing per chunk, parse once (D10) | speed-first H19 | Accepted (merged in #39) |
 | 0026 | Run cancellation token replaces polled flag (D8 remainder) | speed-first H22.2 | Accepted (merged in #47) |
 | 0027 | `qq-core` is a public embedding API | docs cleanup 2026-09-16 | Accepted (merged in #52) |
+| 0028 | Mandatory typed JEV checkpoints after tool results and final candidates | JEV runtime checkpoint slice | Accepted locally; unpushed candidate |
 
-Next free number: 0028. Reserve here before opening a PR that adds an ADR.
+Next free number: 0029. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 

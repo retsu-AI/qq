@@ -64,10 +64,11 @@ pub use hosts::{
 };
 pub use runtime::{
     AUDIT_TOOL_CALL_THRESHOLD, AuditMode, AuditPolicy, AuditRequest, AuditVerdict, AuditedAction,
-    BASE_ENV, BuiltinPreference, MAX_AUDIT_ACTION_BYTES, MAX_AUDIT_ANSWER_BYTES,
-    MAX_AUDIT_CHILD_DURATION_MS, MAX_AUDIT_CHILD_TURNS, MAX_AUDIT_FINDING_BYTES,
-    MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, MAX_SHELL_ENV_ALLOWLIST, MAX_SHELL_ENV_NAMES,
-    ShellPolicy, valid_env_name,
+    BASE_ENV, BuiltinPreference, CheckpointFuture, CheckpointOutcome, CheckpointPhase,
+    CheckpointRequest, CheckpointReviewer, CheckpointVerdict, MAX_AUDIT_ACTION_BYTES,
+    MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS, MAX_AUDIT_CHILD_TURNS,
+    MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, MAX_SHELL_ENV_ALLOWLIST,
+    MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
 };
 pub use sessions::{
     ApprovalReviewer, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, MAX_CHILD_DEPTH,
@@ -623,6 +624,9 @@ pub struct Runtime {
     pub(crate) delegation: Arc<DelegationRoster>,
     /// When a root run's final answer is audited before completion.
     pub(crate) audit: runtime::AuditPolicy,
+    /// Mandatory, non-recursive post-result and final-candidate reviewer.
+    pub(crate) checkpoint: Option<Arc<dyn runtime::CheckpointReviewer>>,
+    pub(crate) checkpoint_identity: Option<Arc<str>>,
     /// Environment allowlist and built-in preference for `shell` calls.
     pub(crate) shell: Arc<runtime::ShellPolicy>,
     pub(crate) network: Arc<tools::network::NetworkPolicy>,
@@ -662,9 +666,23 @@ impl Runtime {
             spawn_model_routes: Arc::from([]),
             delegation: Arc::new(DelegationRoster::default()),
             audit: runtime::AuditPolicy::default(),
+            checkpoint: None,
+            checkpoint_identity: None,
             shell: Arc::new(runtime::ShellPolicy::default()),
             network: Arc::new(tools::network::NetworkPolicy::default()),
         })
+    }
+
+    /// Installs the typed reviewer that must support every tool result and final
+    /// candidate before the run may advance.
+    #[must_use]
+    pub fn with_checkpoint_reviewer(
+        mut self,
+        reviewer: Arc<dyn runtime::CheckpointReviewer>,
+    ) -> Self {
+        self.checkpoint_identity = Some(Arc::from(reviewer.identity()));
+        self.checkpoint = Some(reviewer);
+        self
     }
 
     /// Supplies the effective model context window for provider-neutral
@@ -1041,6 +1059,7 @@ impl plan::CompiledAgentPlan {
         let delegation = Arc::clone(&plan.runtime.delegation);
         let shell_policy = Arc::clone(&plan.runtime.shell);
         let network_policy = Arc::clone(&plan.runtime.network);
+        let checkpoint = plan.runtime.checkpoint.clone();
         let events: RuntimeStream = Box::pin(stream! {
             let RunCapabilities {
                 spawner,
@@ -1281,6 +1300,11 @@ impl plan::CompiledAgentPlan {
             let mut audit_triggers = runtime::AuditTriggers::default();
             let mut audit_actions: Vec<runtime::AuditedAction> = Vec::new();
             let mut audit_revisions = 0_u16;
+            let mut checkpoint_evidence = String::new();
+            let mut checkpoint_cache = HashMap::<String, runtime::CheckpointVerdict>::new();
+            let mut checkpoint_corrections = 0_u8;
+            let mut checkpoint_evidence_version = 0_u32;
+            let mut checkpoint_required_evidence_version = None;
             // Repair turns spent against the output contract, for the whole
             // run: neither an audit revision nor steering resets them.
             let mut output_repairs = 0_u8;
@@ -1877,6 +1901,18 @@ impl plan::CompiledAgentPlan {
                     };
                     return;
                 }
+                if checkpoint.is_some()
+                    && calls.iter().filter(|call| call.rejection.is_none()).count() > 1
+                {
+                    for call in &mut calls {
+                        if call.rejection.is_none() {
+                            call.rejection = Some(
+                                "JEV enforcement admits one tool call per model turn so each result is reviewed before any later tool executes; retry this call alone"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                }
                 // The completed turn and its requested calls travel on one event
                 // so the store can persist them atomically.
                 yield RuntimeEvent::AssistantTurnCompleted {
@@ -2199,6 +2235,98 @@ impl plan::CompiledAgentPlan {
                             Some(Box::new(output::final_output(validation, output_repairs)))
                         }
                     };
+                    if let Some(reviewer) = &checkpoint {
+                        let answer = assistant
+                            .content()
+                            .iter()
+                            .filter_map(|block| match block {
+                                ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if checkpoint_required_evidence_version
+                            .is_some_and(|required| checkpoint_evidence_version < required)
+                        {
+                            if checkpoint_corrections >= 2 {
+                                yield RuntimeEvent::Failed {
+                                    kind: RunFailureKind::Policy,
+                                    message: "JEV correction exhausted without fresh tool evidence".to_owned(),
+                                };
+                                return;
+                            }
+                            checkpoint_corrections += 1;
+                            irreducible_message_bytes = irreducible_message_bytes
+                                .saturating_add(measure_message(&assistant));
+                            Arc::make_mut(&mut messages).push(assistant);
+                            Arc::make_mut(&mut messages).push(Message::user(
+                                "JEV requires a fresh tool observation before another final checkpoint; rewording the same evidence is not a correction"
+                            ));
+                            irreducible_message_bytes = irreducible_message_bytes
+                                .saturating_add(measure_message(messages.last().expect("just pushed")));
+                            continue;
+                        }
+                        let correlation = format!("final:{turn_ordinal}");
+                        let request = runtime::CheckpointRequest {
+                            correlation: correlation.clone(),
+                            phase: runtime::CheckpointPhase::FinalCandidate,
+                            tool_call_id: None,
+                            tool: None,
+                            task: runtime::bounded_checkpoint_text(&audit_prompt),
+                            evidence: runtime::bounded_checkpoint_text(&format!(
+                                "final candidate:\n{answer}\n\nretained tool evidence:\n{checkpoint_evidence}"
+                            )),
+                            is_error: false,
+                        };
+                        let cache_key = format!("final\u{0}{}\u{0}{}", request.task, request.evidence);
+                        let verdict = match checkpoint_cache.get(&cache_key) {
+                            Some(verdict) => verdict.clone(),
+                            None => {
+                                let verdict = reviewer.review(request).await;
+                                checkpoint_cache.insert(cache_key, verdict.clone());
+                                verdict
+                            }
+                        };
+                        yield RuntimeEvent::CheckpointReviewed {
+                            correlation,
+                            phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                            tool_call_id: None,
+                            outcome: checkpoint_protocol_outcome(verdict.outcome),
+                            confidence: verdict.confidence,
+                            feedback: runtime::bounded_checkpoint_text(&verdict.feedback),
+                        };
+                        if verdict.outcome == runtime::CheckpointOutcome::Unavailable {
+                            yield RuntimeEvent::Failed {
+                                kind: RunFailureKind::Policy,
+                                message: format!("JEV final checkpoint {}: {}", verdict.outcome.label(), verdict.feedback),
+                            };
+                            return;
+                        }
+                        if !verdict.outcome.allows_progress() {
+                            if checkpoint_corrections >= 2 {
+                                yield RuntimeEvent::Failed {
+                                    kind: RunFailureKind::Policy,
+                                    message: format!("JEV final checkpoint remained {} after two corrective turns: {}", verdict.outcome.label(), verdict.feedback),
+                                };
+                                return;
+                            }
+                            checkpoint_corrections += 1;
+                            checkpoint_required_evidence_version = Some(
+                                checkpoint_evidence_version.saturating_add(1),
+                            );
+                            irreducible_message_bytes = irreducible_message_bytes
+                                .saturating_add(measure_message(&assistant));
+                            Arc::make_mut(&mut messages).push(assistant);
+                            let notice = format!(
+                                "JEV RED {}. Correct the candidate using fresh direct evidence before attempting completion. Feedback: {}",
+                                verdict.outcome.label(), verdict.feedback
+                            );
+                            Arc::make_mut(&mut messages).push(Message::user(notice));
+                            irreducible_message_bytes = irreducible_message_bytes
+                                .saturating_add(measure_message(messages.last().expect("just pushed")));
+                            continue;
+                        }
+                    }
                     yield RuntimeEvent::Completed { final_output };
                     return;
                 }
@@ -2764,6 +2892,97 @@ impl plan::CompiledAgentPlan {
                     }
                     yield RuntimeEvent::Interrupted { turn_ordinal };
                 }
+                // Mandatory post-result checkpoints run after every outcome,
+                // including denied, malformed, unknown, interrupted, MCP, and
+                // child-task results. Their feedback enters the same retained
+                // result the next provider turn sees. The reviewer is an
+                // internal capability and is never represented as a tool call,
+                // so this cannot recursively checkpoint itself.
+                let mut checkpoint_correction_notice = None;
+                if let Some(reviewer) = &checkpoint {
+                    let mut unavailable = None;
+                    let mut correction = Vec::new();
+                    for (call, retained) in calls.iter().zip(results.iter_mut()) {
+                        let retained = retained.as_mut().expect("every tool outcome is retained before checkpointing");
+                        let correlation = format!("tool:{}", call.id);
+                        let request = runtime::CheckpointRequest {
+                            correlation: correlation.clone(),
+                            phase: runtime::CheckpointPhase::ToolResult,
+                            tool_call_id: Some(call.id),
+                            tool: Some(call.name.clone()),
+                            task: runtime::bounded_checkpoint_text(&audit_prompt),
+                            evidence: runtime::bounded_checkpoint_text(&format!(
+                                "tool: {}\narguments: {}\nresult: {}",
+                                call.name,
+                                tools::output::mask_secrets(call.arguments.clone()),
+                                retained.model_text
+                            )),
+                            is_error: retained.is_error,
+                        };
+                        let cache_key = format!(
+                            "tool\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
+                            call.name, call.arguments, request.task, request.evidence
+                        );
+                        let verdict = match checkpoint_cache.get(&cache_key) {
+                            Some(verdict) => verdict.clone(),
+                            None => {
+                                let verdict = reviewer.review(request).await;
+                                checkpoint_cache.insert(cache_key, verdict.clone());
+                                verdict
+                            }
+                        };
+                        yield RuntimeEvent::CheckpointReviewed {
+                            correlation,
+                            phase: qq_protocol::CheckpointPhase::ToolResult,
+                            tool_call_id: Some(call.id),
+                            outcome: checkpoint_protocol_outcome(verdict.outcome),
+                            confidence: verdict.confidence,
+                            feedback: runtime::bounded_checkpoint_text(&verdict.feedback),
+                        };
+                        let marker = if verdict.outcome.allows_progress() { "GREEN" } else { "RED" };
+                        retained.model_text.push_str(&format!(
+                            "\n\n[JEV {marker} {}: {}]",
+                            verdict.outcome.label(),
+                            runtime::bounded_checkpoint_text(&verdict.feedback)
+                        ));
+                        checkpoint_evidence.push_str(&format!(
+                            "\n- {} ({}) args={} result={} verdict={}\n",
+                            call.name,
+                            call.id,
+                            tools::output::mask_secrets(call.arguments.clone()),
+                            retained.model_text,
+                            verdict.outcome.label(),
+                        ));
+                        checkpoint_evidence = runtime::bounded_checkpoint_text(&checkpoint_evidence);
+                        checkpoint_evidence_version = checkpoint_evidence_version.saturating_add(1);
+                        if verdict.outcome == runtime::CheckpointOutcome::Unavailable {
+                            unavailable.get_or_insert_with(|| format!(
+                                "JEV tool checkpoint {} for {}: {}",
+                                verdict.outcome.label(), call.name, verdict.feedback
+                            ));
+                        } else if !verdict.outcome.allows_progress() {
+                            correction.push(format!("{}: {}", call.name, verdict.feedback));
+                        }
+                    }
+                    if let Some(message) = unavailable {
+                        yield RuntimeEvent::Failed { kind: RunFailureKind::Policy, message };
+                        return;
+                    }
+                    if !correction.is_empty() {
+                        if checkpoint_corrections >= 2 {
+                            yield RuntimeEvent::Failed {
+                                kind: RunFailureKind::Policy,
+                                message: "JEV tool evidence remained unsupported after two corrective turns".to_owned(),
+                            };
+                            return;
+                        }
+                        checkpoint_corrections += 1;
+                        checkpoint_correction_notice = Some(format!(
+                            "JEV RED. Do not claim completion. Produce fresh direct evidence or correct the work, then retry one tool call. Feedback:\n- {}",
+                            correction.join("\n- ")
+                        ));
+                    }
+                }
                 // The per-turn output budget: results enter context in call
                 // order, and a late result that would overshoot is re-bounded
                 // to the remainder. The persisted row keeps the per-call
@@ -2788,6 +3007,12 @@ impl plan::CompiledAgentPlan {
                 irreducible_message_bytes = irreducible_message_bytes
                     .saturating_add(measure_message(&tool_results));
                 Arc::make_mut(&mut messages).push(tool_results);
+                if let Some(notice) = checkpoint_correction_notice.take() {
+                    let notice = Message::user(notice);
+                    irreducible_message_bytes = irreducible_message_bytes
+                        .saturating_add(measure_message(&notice));
+                    Arc::make_mut(&mut messages).push(notice);
+                }
                 // The boundary: every result of this turn is in context, and
                 // the next request has not been built. Steering joins here as
                 // a user message after the tool results.
@@ -2817,6 +3042,22 @@ impl plan::CompiledAgentPlan {
             }
             _ => events,
         }
+    }
+}
+
+fn checkpoint_protocol_outcome(
+    outcome: runtime::CheckpointOutcome,
+) -> qq_protocol::CheckpointOutcome {
+    match outcome {
+        runtime::CheckpointOutcome::Supported => qq_protocol::CheckpointOutcome::Supported,
+        runtime::CheckpointOutcome::PartiallySupported => {
+            qq_protocol::CheckpointOutcome::PartiallySupported
+        }
+        runtime::CheckpointOutcome::Contradicted => qq_protocol::CheckpointOutcome::Contradicted,
+        runtime::CheckpointOutcome::InsufficientEvidence => {
+            qq_protocol::CheckpointOutcome::InsufficientEvidence
+        }
+        runtime::CheckpointOutcome::Unavailable => qq_protocol::CheckpointOutcome::Unavailable,
     }
 }
 
@@ -2882,6 +3123,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 // Direct runs have no reviewer or auditor either.
                 | RuntimeEvent::ReviewCharged { .. }
                 | RuntimeEvent::Audited { .. }
+                | RuntimeEvent::CheckpointReviewed { .. }
                 // Continuation is transparent to the direct stream: the text
                 // keeps flowing and the typed failure names exhaustion.
                 | RuntimeEvent::OutputTruncated { .. }
@@ -4746,6 +4988,98 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn enforced_checkpoint_rejects_multi_call_turn_before_any_tool_executes() {
+        struct TwoCalls {
+            turn: Mutex<u8>,
+        }
+        impl Provider for TwoCalls {
+            fn stream(&self, _request: ModelRequest) -> ProviderStream {
+                let mut turn = self.turn.lock().unwrap();
+                let current = *turn;
+                *turn += 1;
+                drop(turn);
+                if current == 0 {
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::ToolCallStarted {
+                            id: "a".into(),
+                            name: "__test_read".into(),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: "a".into(),
+                            json: r#"{"delay_ms":0,"result":"a"}"#.into(),
+                        }),
+                        Ok(ProviderEvent::ToolCallCompleted { id: "a".into() }),
+                        Ok(ProviderEvent::ToolCallStarted {
+                            id: "b".into(),
+                            name: "__test_read".into(),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: "b".into(),
+                            json: r#"{"delay_ms":0,"result":"b"}"#.into(),
+                        }),
+                        Ok(ProviderEvent::ToolCallCompleted { id: "b".into() }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".into(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
+            }
+        }
+        struct Supports;
+        impl CheckpointReviewer for Supports {
+            fn review(&self, _request: CheckpointRequest) -> CheckpointFuture {
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome: CheckpointOutcome::Supported,
+                    confidence: Some(1.0),
+                    feedback: "supported".into(),
+                }))
+            }
+        }
+        let before = tools::test_executions_started();
+        let runtime = Runtime::new(
+            TwoCalls {
+                turn: Mutex::new(0),
+            },
+            "test",
+            256,
+        )
+        .unwrap()
+        .with_checkpoint_reviewer(Arc::new(Supports));
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("two reads")], directory.path().into())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(tools::test_executions_started(), before);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RuntimeEvent::CheckpointReviewed {
+                        phase: qq_protocol::CheckpointPhase::ToolResult,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::AssistantTurnCompleted { calls, .. } if calls.len() == 2
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn shell_calls_stream_output_deltas_before_their_result() {
@@ -4839,6 +5173,24 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_tool_argument_json_yields_a_tool_error_and_continues_the_run() {
+        struct RecordingReviewer {
+            requests: Arc<Mutex<Vec<CheckpointRequest>>>,
+            outcome: CheckpointOutcome,
+        }
+        impl CheckpointReviewer for RecordingReviewer {
+            fn identity(&self) -> &'static str {
+                "test/checkpoint/enforce"
+            }
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                self.requests.lock().unwrap().push(request);
+                let outcome = self.outcome;
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome,
+                    confidence: Some(1.0),
+                    feedback: outcome.label().to_owned(),
+                }))
+            }
+        }
         struct MalformedArgumentsProvider {
             requests: Arc<Mutex<Vec<ModelRequest>>>,
         }
@@ -4877,6 +5229,7 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let reviews = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             MalformedArgumentsProvider {
                 requests: Arc::clone(&requests),
@@ -4884,7 +5237,11 @@ mod tests {
             "gpt-test",
             256,
         )
-        .unwrap();
+        .unwrap()
+        .with_checkpoint_reviewer(Arc::new(RecordingReviewer {
+            requests: Arc::clone(&reviews),
+            outcome: CheckpointOutcome::Supported,
+        }));
 
         let events = runtime
             .run_messages_in_workspace(vec![Message::user("inspect")], directory.path().to_owned())
@@ -4908,8 +5265,19 @@ mod tests {
                 call_id,
                 content,
                 is_error: true,
-            }] if call_id == "bad" && content.contains("not valid JSON")
+            }] if call_id == "bad" && content.contains("not valid JSON") && content.contains("JEV GREEN supported")
         ));
+        drop(requests);
+        let recorded = reviews.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            2,
+            "malformed result and final candidate are reviewed"
+        );
+        assert_eq!(recorded[0].phase, CheckpointPhase::ToolResult);
+        assert!(recorded[0].evidence.contains("not valid JSON"));
+        assert_eq!(recorded[1].phase, CheckpointPhase::FinalCandidate);
+        assert!(recorded[1].evidence.contains("not valid JSON"));
     }
 
     #[tokio::test]

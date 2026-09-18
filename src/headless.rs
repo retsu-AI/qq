@@ -815,6 +815,29 @@ async fn stream_run(
                             let _ = writeln!(stderr, "[tool] {} {verdict}", tool_call.name);
                         }
                     }
+                    SessionEvent::CheckpointReviewed {
+                        correlation,
+                        phase,
+                        outcome,
+                        confidence_basis_points,
+                        feedback,
+                        ..
+                    } if ours => {
+                        if text {
+                            let color = if matches!(outcome, qq_protocol::CheckpointOutcome::Supported) {
+                                "GREEN"
+                            } else {
+                                "RED"
+                            };
+                            let confidence = confidence_basis_points
+                                .map(|value| format!(" confidence={:.2}%", f64::from(value) / 100.0))
+                                .unwrap_or_default();
+                            let _ = writeln!(
+                                stderr,
+                                "[jev] {color} {phase:?} {correlation} outcome={outcome:?}{confidence}: {feedback}"
+                            );
+                        }
+                    }
                     SessionEvent::ToolApprovalRequested { tool_call, question: Some(question), .. }
                         if ours && envelope.run_id == Some(handle.run_id) =>
                     {

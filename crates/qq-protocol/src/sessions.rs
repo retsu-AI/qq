@@ -1745,6 +1745,21 @@ pub enum SessionEvent {
     ToolCallFinished {
         tool_call: ToolCallSnapshot,
     },
+    /// A mandatory JEV checkpoint settled after a tool result or against the
+    /// root final candidate. Persisted before publication and correlated to
+    /// the reviewed boundary. `supported` permits progress; every other
+    /// outcome is fail-closed.
+    CheckpointReviewed {
+        run_id: RunId,
+        correlation: String,
+        phase: CheckpointPhase,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<ToolCallId>,
+        outcome: CheckpointOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confidence_basis_points: Option<u16>,
+        feedback: String,
+    },
     CancellationRequested {
         session: Box<SessionSummary>,
         run_id: RunId,
@@ -1800,6 +1815,23 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         final_output: Option<Box<FinalOutput>>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointPhase {
+    ToolResult,
+    FinalCandidate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointOutcome {
+    Supported,
+    PartiallySupported,
+    Contradicted,
+    InsufficientEvidence,
+    Unavailable,
 }
 
 #[cfg(test)]
@@ -3070,7 +3102,7 @@ mod tests {
         // `ApprovalResolution::Answered`.
         // Version 22 added `ApprovalGrant::Host` and the `fetch` preview on
         // `tool_approval_requested` for the network tool.
-        assert_eq!(crate::PROTOCOL_VERSION, 22);
+        assert_eq!(crate::PROTOCOL_VERSION, 23);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

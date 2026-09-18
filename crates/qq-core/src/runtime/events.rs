@@ -130,6 +130,14 @@ pub(crate) enum RuntimeEvent {
         /// will keep it under the handle the marker already names.
         spill: Option<crate::tools::SpillRecord>,
     },
+    CheckpointReviewed {
+        correlation: String,
+        phase: qq_protocol::CheckpointPhase,
+        tool_call_id: Option<ToolCallId>,
+        outcome: qq_protocol::CheckpointOutcome,
+        confidence: Option<f64>,
+        feedback: String,
+    },
     /// The final-answer auditor settled. Emitted before `Completed` (when the
     /// answer stands) or before the revision turn (when it does not); the
     /// store persists the record and charges the audit's spend to the run.

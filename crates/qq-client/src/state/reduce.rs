@@ -361,6 +361,26 @@ impl SessionStore {
                     text,
                 });
             }
+            SessionEvent::CheckpointReviewed {
+                correlation,
+                outcome,
+                feedback,
+                ..
+            } => {
+                let supported = matches!(outcome, qq_protocol::CheckpointOutcome::Supported);
+                effects.push(StateEffect::Notice {
+                    session: Some(session_id),
+                    level: if supported {
+                        NoticeLevel::Info
+                    } else {
+                        NoticeLevel::Error
+                    },
+                    text: format!(
+                        "JEV {} {correlation}: {feedback}",
+                        if supported { "GREEN" } else { "RED" }
+                    ),
+                });
+            }
             // The truncated turn's message was already completed with its
             // `truncated` flag by the turn commit; the next turn's message
             // continues the same answer. Surface the continuation so the

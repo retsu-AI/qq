@@ -1187,6 +1187,7 @@ Application configuration types must not leak into `qq-core`.
 | Native tools | Static Rust registration | Build/startup | Direct dispatch | Fully trusted; capability-scoped execution |
 | General tools | MCP and the embedded `ExternalToolHost` | Startup catalog; call on demand | One selected adapter call | MCP process/HTTP boundary or trusted embedder |
 | Context/memory | Typed bounded `ContextSource` | Plan compile plus pre-turn fetch | No per-delta hook | Time/byte/token budgets; explicit fail policy |
+| JEV checkpoints | Typed `CheckpointReviewer` | Explicit enforced profile at plan compile | One bounded decision after each retained tool result and the root final candidate | Fixed endpoint/model/policy; fail closed; durable correlated status |
 | Observers | Durable SSE/outbox | Subscription | Post-commit only | Cannot affect authoritative execution |
 | Process execution | Local implementation plus one real sandbox adapter (deferred sandbox adapter) | Startup | Direct selected backend | Explicit filesystem/network/process capabilities |
 | Surface adapters | Versioned `qq-client` contract | Client startup | Outside agent loop | Product owns remote auth and UX |
@@ -1196,7 +1197,8 @@ path and are never wrapped in RPC or a plugin abstraction; the hot path
 selects one precompiled tool entry and never runs before/after hook lists;
 product memory is not a synchronous observer of every token and ordinary
 retrieval fails open with a visible diagnostic; synchronous decisions remain
-limited to approval, exact tool validation, and budget admission; provider
+limited to typed approval, exact tool validation, budget admission, and the
+explicit enforced JEV checkpoint profile from ADR-0028; provider
 adapter families are feature-gated inside `qq-provider` (`provider-bedrock`
 owns the AWS SDK closure) rather than split into crates.
 

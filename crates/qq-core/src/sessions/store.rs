@@ -1400,6 +1400,34 @@ impl Store {
         .await
     }
 
+    pub(super) async fn record_checkpoint(
+        &self,
+        claimed: &ClaimedRun,
+        correlation: String,
+        phase: qq_protocol::CheckpointPhase,
+        tool_call_id: Option<qq_protocol::ToolCallId>,
+        outcome: qq_protocol::CheckpointOutcome,
+        confidence_basis_points: Option<u16>,
+        feedback: String,
+    ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            streaming::record_checkpoint(
+                connection,
+                store_id,
+                identity,
+                correlation,
+                phase,
+                tool_call_id,
+                outcome,
+                confidence_basis_points,
+                feedback,
+            )
+        })
+        .await
+    }
+
     /// Settles a held `Supervised` call as denied by the reviewer.
     pub(super) async fn deny_approval_by_reviewer(
         &self,

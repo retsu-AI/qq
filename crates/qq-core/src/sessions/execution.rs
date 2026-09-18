@@ -2006,6 +2006,43 @@ async fn execute_started_run(
             })) => {
                 accounting.record_review(usage, cost_usd_nanos);
             }
+            RunInput::Event(Some(RuntimeEvent::CheckpointReviewed {
+                correlation,
+                phase,
+                tool_call_id,
+                outcome,
+                confidence,
+                feedback,
+            })) => {
+                let confidence_basis_points =
+                    confidence.map(|value| (value.clamp(0.0, 1.0) * 10_000.0).round() as u16);
+                if let Err(error) = inner
+                    .store
+                    .record_checkpoint(
+                        &claimed,
+                        correlation,
+                        phase,
+                        tool_call_id,
+                        outcome,
+                        confidence_basis_points,
+                        feedback,
+                    )
+                    .await
+                {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure("failed to persist JEV checkpoint", &error),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
+            }
             RunInput::Event(Some(RuntimeEvent::ToolCallStarted { id })) => {
                 if internal {
                     continue;

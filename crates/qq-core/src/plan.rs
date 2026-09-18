@@ -114,6 +114,7 @@ pub struct AgentProfile {
     spawn_model_routes: Vec<String>,
     delegation: DelegationRoster,
     audit: AuditPolicy,
+    checkpoint: Option<Arc<dyn crate::runtime::CheckpointReviewer>>,
     shell: ShellPolicy,
     network: crate::tools::network::NetworkPolicy,
     adapter_build: String,
@@ -146,6 +147,7 @@ impl AgentProfile {
             spawn_model_routes: Vec::new(),
             delegation: DelegationRoster::default(),
             audit: AuditPolicy::default(),
+            checkpoint: None,
             shell: ShellPolicy::default(),
             network: crate::tools::network::NetworkPolicy::default(),
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
@@ -157,6 +159,15 @@ impl AgentProfile {
             context_sources: Vec::new(),
             context_cache: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_checkpoint_reviewer(
+        mut self,
+        reviewer: Arc<dyn crate::runtime::CheckpointReviewer>,
+    ) -> Self {
+        self.checkpoint = Some(reviewer);
+        self
     }
 
     /// A profile for an embedded runtime built without configuration: the
@@ -179,6 +190,7 @@ impl AgentProfile {
             spawn_model_routes: runtime.spawn_model_routes.to_vec(),
             delegation: runtime.delegation.as_ref().clone(),
             audit: runtime.audit,
+            checkpoint: runtime.checkpoint.clone(),
             shell: runtime.shell.as_ref().clone(),
             network: runtime.network.as_ref().clone(),
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
@@ -480,6 +492,7 @@ impl CompiledAgentPlan {
             spawn_model_routes,
             delegation,
             audit,
+            checkpoint,
             shell,
             network,
             adapter_build,
@@ -508,6 +521,9 @@ impl CompiledAgentPlan {
         .with_audit(audit)
         .with_shell_policy(shell)
         .with_network_policy(network);
+        if let Some(reviewer) = checkpoint {
+            runtime = runtime.with_checkpoint_reviewer(reviewer);
+        }
         for source in context_sources {
             runtime = runtime.with_context_source(source);
         }
@@ -709,6 +725,7 @@ impl CompiledAgentPlan {
             },
             delegation: runtime.delegation.as_ref().clone(),
             audit: AuditDescriptor::from(runtime.audit),
+            checkpoint: runtime.checkpoint_identity.as_deref().map(str::to_owned),
             skills: SkillIndexDescriptor {
                 digest: skills.digest(),
                 indexed: skills.len(),
@@ -1171,6 +1188,7 @@ mod tests {
                 max_revisions: 1,
                 role: qq_protocol::DelegationRole::Strong,
             },
+            checkpoint: None,
             skills: SkillIndexDescriptor {
                 digest: qq_protocol::ContentHash::from_bytes([3; 32]),
                 indexed: 2,
@@ -1217,7 +1235,7 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v6\0{\"version\":6,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v7\0{\"version\":7,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
@@ -1225,10 +1243,10 @@ mod tests {
         // from a different encoding.
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "f744aac687d5962854097a53eca592936e0fc1b6623c0b445afec9743717b75c"
+            "ea106a0d3481c4ce55fbefd575fa8af0c10630db07a722f0b49b3fed7151e9ce"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v6\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v7\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }
@@ -1348,6 +1366,10 @@ mod tests {
             (
                 "delegation.write_children",
                 Box::new(|d| d.delegation.write_children = true),
+            ),
+            (
+                "checkpoint",
+                Box::new(|d| d.checkpoint = Some("typesafe/jev/enforce".to_owned())),
             ),
             ("pack", Box::new(|d| d.pack = None)),
             (
