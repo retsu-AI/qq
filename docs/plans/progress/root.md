@@ -92,6 +92,18 @@ This does not claim to cancel an OS credential read: safely interrupting that
 operation requires a cancellable credential-backend boundary, not dropping a
 started blocking task.
 
+2026-09-18 — Isolated TUI QA profile follow-up: bare interactive
+`qq --tui-qa-root PATH` now composes configuration/trust/session data, an empty
+credential index, server discovery, and its workspace below one canonical
+fixture root. Admission is restricted to a selected loopback HTTP
+`Custom`/`NoAuth` model and rejects enforced JEV or other credential-bearing
+and multi-agent integrations rather than weakening them. Focused tests cover
+root composition, subcommand rejection, remote/header rejection, mandatory
+review rejection, explicit server discovery, and a panic-on-Keychain backend.
+This is a deterministic TUI fixture only; no real provider, JEV, credential,
+or customer acceptance is claimed. Exact final commit and artifact evidence
+will be appended after gates and independent review.
+
 Next free number: 0029. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests

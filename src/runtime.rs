@@ -96,6 +96,35 @@ impl RuntimeFactory {
         self.model_options_with_discovery(snapshot, &BTreeMap::new())
     }
 
+    /// Returns only the already-validated selected model without probing any
+    /// other provider's authentication. The isolated TUI QA profile uses this
+    /// after restricting the route to a loopback Custom/NoAuth fixture.
+    pub fn isolated_tui_qa_model_option(snapshot: &ConfigSnapshot) -> ModelDescriptor {
+        let metadata = snapshot
+            .providers()
+            .get(snapshot.model().provider())
+            .and_then(|provider| provider.models().get(snapshot.model().model()));
+        ModelDescriptor {
+            provider: snapshot.model().provider().to_owned(),
+            model: snapshot.model().model().to_owned(),
+            name: metadata
+                .and_then(|metadata| metadata.name())
+                .map(str::to_owned),
+            context_window: metadata.and_then(|metadata| metadata.context_window()),
+            selection: ModelSelection {
+                model: Some(snapshot.model().as_str().to_owned()),
+                max_output_tokens: Some(
+                    metadata
+                        .and_then(|metadata| metadata.max_output_tokens())
+                        .map_or(snapshot.max_output_tokens(), |limit| {
+                            limit.min(snapshot.max_output_tokens())
+                        }),
+                ),
+                organization: snapshot.organization().map(str::to_owned),
+            },
+        }
+    }
+
     fn model_options_with_discovery(
         &self,
         snapshot: &ConfigSnapshot,
@@ -2487,6 +2516,8 @@ pub enum RuntimeBuildError {
     JevKeyInvalid,
     #[error("the TypeSafe JEV checkpoint client could not be constructed")]
     JevClientUnavailable,
+    #[error("isolated TUI QA profile is invalid: {reason}")]
+    InvalidTuiQaProfile { reason: String },
 }
 
 impl RuntimeBuildError {
@@ -2521,7 +2552,8 @@ impl RuntimeBuildError {
             | Self::PackRequiresNewerProtocol { .. }
             | Self::JevKeyRequired
             | Self::JevKeyInvalid
-            | Self::JevClientUnavailable => RunFailureKind::Configuration,
+            | Self::JevClientUnavailable
+            | Self::InvalidTuiQaProfile { .. } => RunFailureKind::Configuration,
             Self::UnauthenticatedProvider(_) => RunFailureKind::Authentication,
             Self::Runtime(_)
             | Self::UnknownProvider(_)

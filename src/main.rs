@@ -3,7 +3,8 @@
 use std::{
     error::Error,
     io::{self, IsTerminal, Read},
-    path::Path,
+    net::IpAddr,
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
 };
@@ -35,6 +36,7 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<ExitCode, Box<dyn Error>> {
     let cli = cli::Cli::parse();
+    validate_tui_qa_invocation(&cli.tui_qa_root, cli.command.is_some())?;
     let overrides = CliOverrides {
         model: cli.model,
         max_output_tokens: cli.max_output_tokens,
@@ -58,10 +60,19 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         Some(cli::Command::Org { command }) => organization_command(command)?,
         Some(cli::Command::Trust) => trust_command(&overrides)?,
         Some(cli::Command::Version) => print!("{}", version_report()),
-        None => interactive(&overrides, cli.session).await?,
+        None => interactive(&overrides, cli.session, cli.tui_qa_root).await?,
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn validate_tui_qa_invocation(root: &Option<PathBuf>, has_command: bool) -> Result<(), io::Error> {
+    if root.is_some() && has_command {
+        return Err(io::Error::other(
+            "--tui-qa-root is only valid for bare interactive qq",
+        ));
+    }
+    Ok(())
 }
 
 /// The product version plus the compatibility contracts this build speaks.
@@ -456,19 +467,33 @@ enum EmbeddedShutdownError {
 async fn interactive(
     overrides: &CliOverrides,
     session: Option<qq_protocol::SessionId>,
+    tui_qa_root: Option<PathBuf>,
 ) -> Result<(), Box<dyn Error>> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::other("interactive mode requires a terminal").into());
     }
-    let factory = runtime::RuntimeFactory::system()?;
-    let request = overrides.load_request()?;
+    let environment = InteractiveEnvironment::open(overrides, tui_qa_root)?;
+    let factory = environment.factory;
+    let request = environment.request;
+    let loader = environment.config;
+    let server_paths = environment.server_paths;
+    let workspace = environment.workspace;
+    let tui_qa = environment.tui_qa;
     let config_factory = factory.clone();
     let (snapshot, tui, themes, models) = tokio::task::spawn_blocking(move || {
         let snapshot = config_factory.load(&request)?;
-        let loader = config::ConfigLoader::system()?;
+        if tui_qa {
+            validate_tui_qa_snapshot(&snapshot, jev_enforcement_requested())?;
+        }
         let (tui_snapshot, tui) = load_tui_config(&loader, request.cwd())?;
         let themes = load_tui_themes(&loader, request.cwd(), tui_snapshot.settings().theme())?;
-        let models = config_factory.configured_model_options(&snapshot);
+        let models = if tui_qa {
+            vec![runtime::RuntimeFactory::isolated_tui_qa_model_option(
+                &snapshot,
+            )]
+        } else {
+            config_factory.configured_model_options(&snapshot)
+        };
         Ok::<_, runtime::RuntimeBuildError>((snapshot, tui, themes, models))
     })
     .await??;
@@ -476,7 +501,6 @@ async fn interactive(
         .into_iter()
         .map(Into::into)
         .collect::<Vec<qq_tui::ModelOption>>();
-    let workspace = std::fs::canonicalize(std::env::current_dir()?)?;
     let workspace_root = workspace.clone();
     let configured_model = qq_protocol::ModelSelection {
         model: Some(snapshot.model().as_str().to_owned()),
@@ -494,10 +518,10 @@ async fn interactive(
     let (embedded_tx, mut embedded_rx) = tokio::sync::oneshot::channel::<EmbeddedRuntime>();
     let connect = {
         let model = model.clone();
+        let server_paths = server_paths.clone();
         async move {
-            let options = server::ServerOptions::for_user()
-                .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?
-                .with_version(cli::BUILD_VERSION);
+            let options =
+                server::ServerOptions::new(server_paths.clone()).with_version(cli::BUILD_VERSION);
             // Which session to show first. `--session` opens that one. Bare
             // `qq` starts a new conversation when this process owns the
             // server and the configured model is usable; a client attaching
@@ -537,12 +561,15 @@ async fn interactive(
                 workspace,
                 configured_model,
                 initial,
-                || async {
-                    server::discover()
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(client::Connection::from)
+                move || {
+                    let server_paths = server_paths.clone();
+                    async move {
+                        server::discover_at(&server_paths)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(client::Connection::from)
+                    }
                 },
             )
             .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))
@@ -567,6 +594,159 @@ async fn interactive(
     let focused = result?;
     if let Some(session_id) = focused {
         eprint!("{}", cli::resume_hint(session_id));
+    }
+    Ok(())
+}
+
+struct InteractiveEnvironment {
+    factory: runtime::RuntimeFactory,
+    config: config::ConfigLoader,
+    request: config::LoadRequest,
+    server_paths: server::ServerPaths,
+    workspace: PathBuf,
+    tui_qa: bool,
+}
+
+impl InteractiveEnvironment {
+    fn open(
+        overrides: &CliOverrides,
+        tui_qa_root: Option<PathBuf>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let Some(root) = tui_qa_root else {
+            let config = config::ConfigLoader::system()?;
+            let factory =
+                runtime::RuntimeFactory::new(config.clone(), auth::CredentialStore::system()?)?;
+            return Ok(Self {
+                factory,
+                config,
+                request: overrides.load_request()?,
+                server_paths: server::ServerPaths::for_user()?,
+                workspace: std::fs::canonicalize(std::env::current_dir()?)?,
+                tui_qa: false,
+            });
+        };
+
+        let root = std::fs::canonicalize(&root).map_err(|source| {
+            io::Error::new(
+                source.kind(),
+                format!(
+                    "could not open --tui-qa-root `{}`: {source}",
+                    root.display()
+                ),
+            )
+        })?;
+        if !root.is_dir() {
+            return Err(io::Error::other(format!(
+                "--tui-qa-root `{}` is not a directory",
+                root.display()
+            ))
+            .into());
+        }
+        for child in [
+            "config",
+            "data",
+            "credentials",
+            "managed",
+            "runtime",
+            "workspace",
+        ] {
+            std::fs::create_dir_all(root.join(child)).map_err(|source| {
+                io::Error::new(
+                    source.kind(),
+                    format!(
+                        "could not create isolated TUI QA directory `{}`: {source}",
+                        root.join(child).display()
+                    ),
+                )
+            })?;
+        }
+        let config = config::ConfigLoader::new(config::ConfigPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("managed"),
+        ));
+        let credentials =
+            auth::CredentialStore::with_paths(auth::CredentialPaths::new(root.join("credentials")));
+        let factory = runtime::RuntimeFactory::new(config.clone(), credentials)?;
+        let request = overrides.apply(config::LoadRequest::new(root.join("workspace")))?;
+        Ok(Self {
+            factory,
+            config,
+            request,
+            server_paths: server::ServerPaths::new(root.join("runtime")),
+            workspace: root.join("workspace"),
+            tui_qa: true,
+        })
+    }
+}
+
+fn jev_enforcement_requested() -> bool {
+    std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref() == Some("enforce")
+}
+
+fn validate_tui_qa_snapshot(
+    snapshot: &config::ConfigSnapshot,
+    jev_enforced: bool,
+) -> Result<(), runtime::RuntimeBuildError> {
+    let invalid = |reason: &str| runtime::RuntimeBuildError::InvalidTuiQaProfile {
+        reason: reason.to_owned(),
+    };
+    if jev_enforced {
+        return Err(invalid(
+            "QQ_JEV_CHECKPOINTS=enforce requires a real reviewer credential; use the ordinary profile",
+        ));
+    }
+    let provider = snapshot
+        .providers()
+        .get(snapshot.model().provider())
+        .ok_or_else(|| invalid("the selected provider is unavailable"))?;
+    if provider.kind() != config::ProviderKind::Custom {
+        return Err(invalid("the selected provider must be Custom"));
+    }
+    let Some(config::ProviderAccess::Http(access)) = provider.access() else {
+        return Err(invalid("the selected provider must use HTTP"));
+    };
+    if !matches!(
+        access.auth(),
+        config::HttpCredential::Configured(config::ProviderAuth::NoAuth)
+    ) || !access.headers().is_empty()
+    {
+        return Err(invalid(
+            "the selected provider must use NoAuth with no static headers",
+        ));
+    }
+    let endpoint = reqwest::Url::parse(access.endpoint())
+        .map_err(|_| invalid("the selected provider endpoint is invalid"))?;
+    let loopback = endpoint.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if endpoint.scheme() != "http"
+        || !loopback
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return Err(invalid(
+            "the selected provider endpoint must be credential-free loopback HTTP",
+        ));
+    }
+    if !snapshot.mcp_servers().is_empty()
+        || snapshot.worker_model().is_some()
+        || snapshot.reviewer_model().is_some()
+        || !snapshot.delegation().roster().is_empty()
+        || snapshot.audit().mode() != config::AuditMode::Off
+        || !snapshot.profiles().is_empty()
+        || !snapshot.packs().is_empty()
+    {
+        return Err(invalid(
+            "MCP, worker/reviewer routes, delegation, audit, profiles, and packs are not allowed",
+        ));
     }
     Ok(())
 }
@@ -1237,6 +1417,22 @@ mod tests {
         }
     }
 
+    struct PanicKeyring;
+
+    impl auth::KeyringBackend for PanicKeyring {
+        fn get(&self, name: &str) -> Result<Vec<u8>, auth::KeyringError> {
+            panic!("isolated TUI QA attempted to read Keychain entry {name:?}")
+        }
+
+        fn set(&self, name: &str, _secret: &[u8]) -> Result<(), auth::KeyringError> {
+            panic!("isolated TUI QA attempted to write Keychain entry {name:?}")
+        }
+
+        fn remove(&self, name: &str) -> Result<(), auth::KeyringError> {
+            panic!("isolated TUI QA attempted to remove Keychain entry {name:?}")
+        }
+    }
+
     #[test]
     fn version_report_names_every_compatibility_contract() {
         let report = version_report();
@@ -1252,6 +1448,127 @@ mod tests {
             assert!(contracts.contains(&expected), "{report:?}");
         }
         assert_eq!(lines.next(), None);
+    }
+
+    #[test]
+    fn isolated_tui_qa_root_is_bare_interactive_only() {
+        let root = Some(PathBuf::from("/tmp/qq-tui-qa"));
+        validate_tui_qa_invocation(&root, false).unwrap();
+        let error = validate_tui_qa_invocation(&root, true).unwrap_err();
+        assert!(error.to_string().contains("bare interactive"));
+        validate_tui_qa_invocation(&None, true).unwrap();
+    }
+
+    fn tui_qa_snapshot(document: &str) -> (tempfile::TempDir, config::ConfigSnapshot) {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        let global = canonical.join("config");
+        let data = canonical.join("data");
+        let managed = canonical.join("managed");
+        let workspace = canonical.join("workspace");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config_path = global.join("config.ron");
+        std::fs::write(&config_path, document).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let loader = config::ConfigLoader::new(config::ConfigPaths::new(global, data, managed));
+        let snapshot = loader.load(&config::LoadRequest::new(workspace)).unwrap();
+        (root, snapshot)
+    }
+
+    #[test]
+    fn isolated_tui_qa_profile_accepts_only_loopback_custom_no_auth() {
+        let (_root, snapshot) = tui_qa_snapshot(
+            r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test-model": (name: "Test model") }) })"#,
+        );
+        validate_tui_qa_snapshot(&snapshot, false).unwrap();
+
+        let error = validate_tui_qa_snapshot(&snapshot, true).unwrap_err();
+        assert!(error.to_string().contains("real reviewer credential"));
+    }
+
+    #[test]
+    fn isolated_tui_qa_profile_rejects_remote_or_credential_bearing_routes() {
+        let cases = [
+            (
+                r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "https://example.test/v1", api: OpenAiResponses, auth: NoAuth), models: { "test-model": (name: "Test model") }) })"#,
+                "loopback HTTP",
+            ),
+            (
+                r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "http://localhost:9080/v1", api: OpenAiResponses, auth: NoAuth, headers: {"authorization": "secret"}), models: { "test-model": (name: "Test model") }) })"#,
+                "no static headers",
+            ),
+        ];
+        for (document, expected) in cases {
+            let (_root, snapshot) = tui_qa_snapshot(document);
+            let error = validate_tui_qa_snapshot(&snapshot, false).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn isolated_tui_qa_environment_uses_only_explicit_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let environment =
+            InteractiveEnvironment::open(&CliOverrides::default(), Some(root.path().to_owned()))
+                .unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        assert_eq!(
+            environment.config.paths().global_dir(),
+            canonical.join("config")
+        );
+        assert_eq!(
+            environment.config.paths().data_dir(),
+            canonical.join("data")
+        );
+        assert_eq!(
+            environment.config.paths().managed_dir(),
+            canonical.join("managed")
+        );
+        assert_eq!(
+            environment.server_paths.directory(),
+            canonical.join("runtime")
+        );
+        assert_eq!(environment.request.cwd(), canonical.join("workspace"));
+        assert_eq!(environment.workspace, canonical.join("workspace"));
+        for child in [
+            "config",
+            "data",
+            "credentials",
+            "managed",
+            "runtime",
+            "workspace",
+        ] {
+            assert!(canonical.join(child).is_dir(), "{child}");
+        }
+    }
+
+    #[test]
+    fn isolated_tui_qa_plan_does_not_consult_the_os_keyring() {
+        let root = tempfile::tempdir().unwrap();
+        let environment =
+            InteractiveEnvironment::open(&CliOverrides::default(), Some(root.path().to_owned()))
+                .unwrap();
+        let config_path = environment.config.paths().global_dir().join("config.ron");
+        std::fs::write(
+            &config_path,
+            r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test-model": (name: "Test model") }) })"#,
+        )
+        .unwrap();
+        let credentials = auth::CredentialStore::with_backend(
+            auth::CredentialPaths::new(root.path().canonicalize().unwrap().join("credentials")),
+            Arc::new(PanicKeyring),
+        );
+        let factory = runtime::RuntimeFactory::new(environment.config, credentials).unwrap();
+        let snapshot = factory.load(&environment.request).unwrap();
+        validate_tui_qa_snapshot(&snapshot, false).unwrap();
+        let option = runtime::RuntimeFactory::isolated_tui_qa_model_option(&snapshot);
+        assert_eq!(option.selection.model.as_deref(), Some("custom/test-model"));
+        factory.plan_for(&environment.request).unwrap();
     }
 
     #[test]

@@ -36,6 +36,16 @@ The binary has multiple process modes:
 - `qq` opens the TUI scoped to the current working directory. By default it
   starts a local server runtime in the same process and communicates with it
   through the same HTTP/SSE interface used by remote clients.
+- `qq --tui-qa-root PATH` is an explicit diagnostic-fixture mode for local TUI
+  testing. It roots configuration, trust/session data, the empty credential
+  index, server discovery, and the workspace beneath the canonical `PATH`.
+  It admits only the selected loopback-HTTP `Custom` provider with `NoAuth`
+  and no static headers, and omits authentication probes for every unselected
+  provider. MCP, additional agent routes, delegation, audit, profiles, packs,
+  and enforced JEV are rejected rather than disabled. The ordinary no-flag
+  path continues to use the user-scoped system directories and mandatory JEV
+  activation rules. This fixture demonstrates TUI behavior only; it is not
+  evidence for a real provider or reviewer integration.
 - `qq serve [ARGS]` runs the server without a TUI. It is suitable for a
   persistent process on a desktop or home server.
 - `qq ask PROMPT` is the initial direct, automation-oriented path. It streams
