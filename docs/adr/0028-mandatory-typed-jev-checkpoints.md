@@ -30,8 +30,9 @@ before `Completed`.
 Tool-result questions judge only whether that invocation outcome is concrete
 and usable for the next step; they never demand proof of whole-task completion.
 Final-candidate questions retain the strict whole-task evidence contract. A
-semantic red triggers at most two corrective turns with the feedback in model
-context, and a final retry requires a fresh reviewed tool observation; an
+semantic red triggers a corrective turn with the feedback in model context;
+recovery is bounded by the run's explicit turn/time budgets and cancellation,
+not a checkpoint-local attempt cap. A final retry requires a fresh reviewed tool observation; an
 unavailable or malformed reviewer response fails immediately.
 
 This supersedes ADR-0003's narrower statement that synchronous decisions are

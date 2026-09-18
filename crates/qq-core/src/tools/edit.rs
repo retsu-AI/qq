@@ -96,8 +96,12 @@ impl Edit {
         let new = self.new.as_deref();
         match (
             self.old.as_deref(),
-            self.insert_before.as_deref(),
-            self.insert_after.as_deref(),
+            self.insert_before
+                .as_deref()
+                .filter(|anchor| !anchor.is_empty()),
+            self.insert_after
+                .as_deref()
+                .filter(|anchor| !anchor.is_empty()),
         ) {
             (Some(old), None, None) => {
                 if old.is_empty() {
@@ -137,6 +141,31 @@ impl Edit {
                     .to_owned(),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Edit, Form};
+
+    #[test]
+    fn empty_optional_insert_modes_do_not_conflict_with_replace() {
+        let edit: Edit = serde_json::from_value(serde_json::json!({
+            "path": "README.md",
+            "old": "before",
+            "new": "after",
+            "insert_before": "",
+            "insert_after": ""
+        }))
+        .expect("valid edit arguments");
+
+        assert!(matches!(
+            edit.form(),
+            Ok(Form::Replace {
+                old: "before",
+                new: "after"
+            })
+        ));
     }
 }
 

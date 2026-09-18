@@ -1301,8 +1301,8 @@ impl plan::CompiledAgentPlan {
             let mut audit_actions: Vec<runtime::AuditedAction> = Vec::new();
             let mut audit_revisions = 0_u16;
             let mut checkpoint_evidence = String::new();
+            let mut checkpoint_evidence_truncated = false;
             let mut checkpoint_cache = HashMap::<String, runtime::CheckpointVerdict>::new();
-            let mut checkpoint_corrections = 0_u8;
             let mut checkpoint_evidence_version = 0_u32;
             let mut checkpoint_required_evidence_version = None;
             // Repair turns spent against the output contract, for the whole
@@ -2248,14 +2248,6 @@ impl plan::CompiledAgentPlan {
                         if checkpoint_required_evidence_version
                             .is_some_and(|required| checkpoint_evidence_version < required)
                         {
-                            if checkpoint_corrections >= 2 {
-                                yield RuntimeEvent::Failed {
-                                    kind: RunFailureKind::Policy,
-                                    message: "JEV correction exhausted without fresh tool evidence".to_owned(),
-                                };
-                                return;
-                            }
-                            checkpoint_corrections += 1;
                             irreducible_message_bytes = irreducible_message_bytes
                                 .saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
@@ -2265,6 +2257,13 @@ impl plan::CompiledAgentPlan {
                             irreducible_message_bytes = irreducible_message_bytes
                                 .saturating_add(measure_message(messages.last().expect("just pushed")));
                             continue;
+                        }
+                        if checkpoint_evidence_truncated {
+                            yield RuntimeEvent::Failed {
+                                kind: RunFailureKind::Policy,
+                                message: "JEV final checkpoint cannot verify completion because retained tool evidence exceeded the review bound".to_owned(),
+                            };
+                            return;
                         }
                         let correlation = format!("final:{turn_ordinal}");
                         let request = runtime::CheckpointRequest {
@@ -2303,14 +2302,6 @@ impl plan::CompiledAgentPlan {
                             return;
                         }
                         if !verdict.outcome.allows_progress() {
-                            if checkpoint_corrections >= 2 {
-                                yield RuntimeEvent::Failed {
-                                    kind: RunFailureKind::Policy,
-                                    message: format!("JEV final checkpoint remained {} after two corrective turns: {}", verdict.outcome.label(), verdict.feedback),
-                                };
-                                return;
-                            }
-                            checkpoint_corrections += 1;
                             checkpoint_required_evidence_version = Some(
                                 checkpoint_evidence_version.saturating_add(1),
                             );
@@ -2953,7 +2944,9 @@ impl plan::CompiledAgentPlan {
                             retained.model_text,
                             verdict.outcome.label(),
                         ));
-                        checkpoint_evidence = runtime::bounded_checkpoint_text(&checkpoint_evidence);
+                        let bounded_evidence = runtime::bounded_checkpoint_text(&checkpoint_evidence);
+                        checkpoint_evidence_truncated |= bounded_evidence.len() < checkpoint_evidence.len();
+                        checkpoint_evidence = bounded_evidence;
                         checkpoint_evidence_version = checkpoint_evidence_version.saturating_add(1);
                         if verdict.outcome == runtime::CheckpointOutcome::Unavailable {
                             unavailable.get_or_insert_with(|| format!(
@@ -2969,14 +2962,6 @@ impl plan::CompiledAgentPlan {
                         return;
                     }
                     if !correction.is_empty() {
-                        if checkpoint_corrections >= 2 {
-                            yield RuntimeEvent::Failed {
-                                kind: RunFailureKind::Policy,
-                                message: "JEV tool evidence remained unsupported after two corrective turns".to_owned(),
-                            };
-                            return;
-                        }
-                        checkpoint_corrections += 1;
                         checkpoint_correction_notice = Some(format!(
                             "JEV RED. Do not claim completion. Produce fresh direct evidence or correct the work, then retry one tool call. Feedback:\n- {}",
                             correction.join("\n- ")
