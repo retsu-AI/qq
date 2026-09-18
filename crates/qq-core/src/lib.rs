@@ -2349,6 +2349,17 @@ impl plan::CompiledAgentPlan {
                             continue;
                         }
                     }
+                    // A review may await remote inference. Input accepted during
+                    // that wait belongs to this run, not its successor.
+                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1)) {
+                        irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
+                        let keep = messages.len() - applied.len();
+                        let queued = Arc::make_mut(&mut messages).split_off(keep);
+                        Arc::make_mut(&mut messages).push(assistant);
+                        Arc::make_mut(&mut messages).extend(queued);
+                        for message_id in applied { yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) }; }
+                        continue;
+                    }
                     yield RuntimeEvent::Completed { final_output };
                     return;
                 }
