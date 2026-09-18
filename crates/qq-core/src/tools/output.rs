@@ -733,7 +733,7 @@ fn next_hit(bytes: &[u8], from: usize, copied: usize) -> Option<Hit> {
 
 /// Replaces secret-shaped spans with `[masked:<kind>]`. Returns the input
 /// untouched (no allocation) when nothing matches, which is the common case.
-pub(crate) fn mask_secrets(text: String) -> String {
+pub fn mask_secrets(text: String) -> String {
     let bytes = text.as_bytes();
     let Some(mut hit) = next_hit(bytes, 0, 0) else {
         return text;

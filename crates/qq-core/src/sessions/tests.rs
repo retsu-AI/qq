@@ -1886,6 +1886,7 @@ fn denial_capacity_fixture(
         .unwrap();
     let claimed = ClaimedRun {
         checkpoint: None,
+        routing: None,
         identity: RunIdentity {
             workspace_id,
             session_id,

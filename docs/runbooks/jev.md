@@ -1,4 +1,4 @@
-# Optional Jev review
+# Optional Jev review and routing
 
 QQ runs without Jev by default, including when a TypeSafe credential is stored.
 `qq jev setup` stores an endpoint-bound credential; it does not enable reviews.
@@ -61,9 +61,27 @@ known reviewer usage and estimated cost are recorded with the verdict. Interrupt
 requests have unknown spend. A positive verdict is evidence support, not proof.
 For current pinned pricing and uncertainty policy, see the architecture document.
 
-Automatic model/effort routing is a separate planned slice. Setting
-`jev_routing: true` currently returns a configuration error; it is never silently
-treated as enabled. `QQ_JEV_ROUTING=off` overrides that reserved setting.
+Model/effort routing is independently opt-in: use `QQ_JEV_ROUTING=on`, trusted
+`jev_routing: true`, or `Profile(jev_routing: true)`. `QQ_JEV_ROUTING=off` overrides
+configured activation. Routing does not enable review. It chooses once before
+ordinary provider preparation from at most eight authorized configured models;
+explicit model choices stay fixed. Missing credentials fail configuration.
+
+Automatic effort requires a model declaration, for example:
+
+```ron
+models: { "my-model": (reasoning_efforts: [low, medium, high]) }
+```
+
+Declare only values the remote model supports. Adapter transport support alone
+is insufficient; unknown model support preserves omitted effort. Pinned effort
+remains fixed, including explicit `none`. One available choice skips inference.
+Requests contain masked task text and bounded model metadata. Low confidence,
+timeout, invalid responses or unavailable selected routes visibly retain the
+configured choice. Session decisions and spend are durable; direct `ask` reports
+them on stderr and remains ephemeral. Routing spends count against session run
+budgets. Owned children inherit the parent's routing activation; later user
+prompts resolve current configuration.
 
 Explicit effort can be pinned independently of Jev in trusted configuration:
 

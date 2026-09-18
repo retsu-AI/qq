@@ -756,6 +756,12 @@ struct RoutingTestLoader {
 struct FixedTaskRouter(Arc<AtomicUsize>, bool);
 
 impl TaskRouter for FixedTaskRouter {
+    fn configuration_identity(&self) -> &str {
+        "fixture/routing"
+    }
+    fn identity(&self) -> &'static str {
+        "fixture/routing"
+    }
     fn route(&self, task: String) -> TaskRoutingFuture {
         assert!(task.contains("route this task"));
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -810,6 +816,10 @@ impl RuntimeLoader for RoutingTestLoader {
         if let Some(effort) = request.reasoning_effort {
             runtime = runtime.with_reasoning_effort(effort);
         }
+        runtime = runtime.with_task_router(Arc::new(FixedTaskRouter(
+            Arc::clone(&self.routing_calls),
+            self.hold,
+        )));
         let loaded = loaded_runtime_for_route(
             runtime,
             &request.workspace,
@@ -825,11 +835,7 @@ impl RuntimeLoader for RoutingTestLoader {
                 context_tier: None,
                 provenance: "fixture".to_owned(),
             }),
-        )
-        .with_router(Arc::new(FixedTaskRouter(
-            Arc::clone(&self.routing_calls),
-            self.hold,
-        )));
+        );
         Box::pin(async { Ok(loaded) })
     }
 }

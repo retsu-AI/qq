@@ -417,7 +417,7 @@ values, secret hashes, live handles, and the credential epoch never enter the
 descriptor or its digest.
 
 Explicit `reasoning_effort` is resolved from trusted configuration and profiles,
-with runtime overrides first. Descriptor version 8 records the choice and its
+with runtime overrides first. Descriptor version 9 records the choice and its
 cache key distinguishes overrides. Every model turn uses the compiled choice;
 omission uses provider defaults, while explicit `none` requests disabled
 reasoning. This does not enable Jev. HTTP OpenAI Responses/Chat adapters carry
@@ -1369,11 +1369,10 @@ extension points before it exists.
 
 ### Optional task routing during session preparation
 
-An embedding loader can attach a `TaskRouter` to `LoadedRuntime`. The session
+A compiled runtime may contain a `TaskRouter`. The session
 executor calls it once before ordinary preparation, outside the compaction loop.
 Absent routers allocate no task projection and dispatch no inference. Compaction
-and non-task internal runs skip routing. The production Jev routing switch still
-rejects activation until its concrete adapter and inherited policy are connected.
+and non-task internal runs skip routing. The production Jev adapter is constructed only when trusted `jev_routing` is enabled.
 
 The routing projection contains at most 16 KiB of the latest task text, masked
 before dispatch; oversized or textless tasks retain the configured model. A
@@ -1403,3 +1402,17 @@ The composition root reloads the configured route for fallback selections and
 applies explicit selections as overrides. Optional routing cannot replace a pin.
 CLI/environment overrides, TUI picks and explicit child choices establish pins;
 this provenance does not itself enable routing.
+
+The concrete adapter considers at most eight authenticated, authorized configured
+models and 32 combined model/effort choices, without live model discovery.
+Automatic effort values come only from model `reasoning_efforts` declarations on
+supported adapters; unknown capabilities retain omission. Pinned effort limits
+alternative models to those declaring support for that value. Descriptor 9
+records both the routing policy and the candidate/constraint fingerprint, so
+cache refresh cannot discard changed candidate metadata or profile pin intent.
+One-choice plans skip inference. Invalid or uncertain answers retain the fallback;
+confidence and winning probability must each reach the initial 0.7 threshold.
+Owned children inherit enabled/disabled routing from the parent's persisted
+plan; user followups resolve current configuration. Direct `ask` uses the same
+router and loader before its existing core run and prints pending/outcome/spend
+to stderr; its execution remains ephemeral. No live speed benefit is asserted.

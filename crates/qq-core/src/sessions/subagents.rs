@@ -464,6 +464,7 @@ async fn run_owned_child(
             .load(RuntimeLoadRequest {
                 reasoning_effort: None,
                 checkpoint: parent.checkpoint.clone(),
+                routing: parent.routing.clone(),
                 workspace: parent.workspace.clone(),
                 model: selection.clone(),
                 profile: parent.profile.clone(),

@@ -1,5 +1,7 @@
 //! Application configuration to model-runtime composition.
 
+mod routing;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     net::IpAddr,
@@ -189,6 +191,77 @@ impl RuntimeFactory {
             self.validate_tui_qa_snapshot(&snapshot)?;
         }
         Ok(snapshot)
+    }
+
+    /// Direct ask keeps its ephemeral output contract while reusing the same
+    /// router and selected-provider loader as durable sessions.
+    pub async fn route_direct(
+        &self,
+        plan: Arc<CompiledAgentPlan>,
+        task: String,
+    ) -> (Arc<CompiledAgentPlan>, qq_protocol::RoutingDecision) {
+        let loaded = LoadedRuntime::new(Arc::clone(&plan));
+        let router = loaded
+            .router
+            .expect("called only for a routing-enabled plan");
+        let fallback = ModelSelection {
+            model: Some(plan.resolved_model().route.clone()),
+            max_output_tokens: Some(plan.resolved_model().max_output_tokens),
+            organization: plan.resolved_model().organization.clone(),
+            ..ModelSelection::default()
+        };
+        let mut decision =
+            match tokio::time::timeout(std::time::Duration::from_secs(5), router.route(task)).await
+            {
+                Ok(decision) => decision,
+                Err(_) => qq_protocol::RoutingDecision {
+                    model: fallback.clone(),
+                    reasoning_effort: plan.descriptor().reasoning_effort,
+                    outcome: qq_protocol::RoutingOutcome::Fallback,
+                    reason: "routing timed out; configured choice retained".to_owned(),
+                    usage: None,
+                    estimated_cost_usd_nanos: None,
+                },
+            };
+        if decision.outcome == qq_protocol::RoutingOutcome::Selected {
+            decision.model.model_is_fallback = false;
+            decision.model.max_output_tokens = fallback.max_output_tokens;
+            decision.model.organization = fallback.organization.clone();
+            let selected = RuntimeLoader::load(
+                self,
+                RuntimeLoadRequest {
+                    model: decision.model.clone(),
+                    reasoning_effort: decision.reasoning_effort,
+                    routing: Some(qq_core::RoutingSelection::RouterIdentity(
+                        router.identity().to_owned(),
+                    )),
+                    checkpoint: Some(match plan.descriptor().checkpoint.as_ref() {
+                        Some(identity) => {
+                            qq_core::CheckpointSelection::ReviewerIdentity(identity.clone())
+                        }
+                        None => qq_core::CheckpointSelection::Disabled,
+                    }),
+                    workspace: plan.workspace_path().display().to_string(),
+                    profile: plan.descriptor().profile.clone(),
+                },
+            )
+            .await;
+            if let Ok(selected) = selected
+                && selected.plan.workspace_path() == plan.workspace_path()
+                && selected.plan.descriptor().profile == plan.descriptor().profile
+                && selected.plan.descriptor().checkpoint == plan.descriptor().checkpoint
+                && selected.plan.descriptor().routing == plan.descriptor().routing
+                && selected.plan.descriptor().reasoning_effort == decision.reasoning_effort
+                && Some(selected.resolved_model().route.as_str()) == decision.model.model.as_deref()
+            {
+                return (selected.plan, decision);
+            }
+            decision.outcome = qq_protocol::RoutingOutcome::Fallback;
+            decision.reason = "selected route unavailable; configured choice retained".to_owned();
+        }
+        decision.model = fallback;
+        decision.reasoning_effort = plan.descriptor().reasoning_effort;
+        (plan, decision)
     }
 
     pub fn configured_model_options(&self, snapshot: &ConfigSnapshot) -> Vec<ModelDescriptor> {
@@ -936,6 +1009,10 @@ impl RuntimeFactory {
         // gap. Both loads retain their pre-read observations because the
         // first selected the profile and the second supplied runtime values.
         let selected_profile = snapshot.profile(profile_id.as_str());
+        let model_pinned = request.overrides().model().is_some()
+            || selected_profile
+                .as_ref()
+                .is_some_and(|profile| profile.model().is_some());
         // A pack-declared profile brings its pack's resources and, when it
         // names MCP servers, restricts which declared servers join this plan.
         let pack_selection = match selected_profile.as_ref().and_then(|p| p.pack()) {
@@ -1019,9 +1096,6 @@ impl RuntimeFactory {
                 snapshot
             }
         };
-        if snapshot.jev_routing() {
-            return Err(RuntimeBuildError::JevRoutingUnavailable);
-        }
         let resolved_model = self.resolved_model_for_snapshot(&snapshot)?;
         if snapshot.reasoning_effort().is_some()
             && resolved_model.generation.reasoning_effort
@@ -1070,6 +1144,12 @@ impl RuntimeFactory {
         if let Some(effort) = snapshot.reasoning_effort() {
             profile = profile.with_reasoning_effort(effort);
         }
+        if snapshot.jev_routing() {
+            profile = profile.with_task_router(Arc::new(
+                routing::TypeSafeTaskRouter::from_snapshot(self, &snapshot, model_pinned)?,
+            ));
+        }
+
         if snapshot.jev_review() != qq_config::JevReviewMode::Off {
             if let Some(progress) = progress {
                 progress.set(qq_core::RuntimeLoadStage::ResolvingCheckpointCredential);
@@ -1633,6 +1713,20 @@ impl RuntimeLoader for RuntimeFactory {
                 let mut load =
                     factory.request_for_workspace(&workspace, request.model.max_output_tokens)?;
                 let mut overrides = load.overrides().clone();
+                if let Some(selection) = &request.routing {
+                    let enabled = match selection {
+                        qq_core::RoutingSelection::Disabled => false,
+                        qq_core::RoutingSelection::RouterIdentity(identity)
+                            if identity == routing::ROUTER_IDENTITY =>
+                        {
+                            true
+                        }
+                        qq_core::RoutingSelection::RouterIdentity(identity) => {
+                            return Err(RuntimeBuildError::InheritedRouting(identity.clone()));
+                        }
+                    };
+                    overrides = overrides.with_jev_routing(enabled);
+                }
                 if let Some(selection) = &request.checkpoint {
                     let mode = match selection {
                         qq_core::CheckpointSelection::Disabled => qq_config::JevReviewMode::Off,
@@ -2627,6 +2721,34 @@ fn update_digest(digest: &mut Sha256, value: &[u8]) {
     digest.update(value);
 }
 
+fn typesafe_http_client(store: &CredentialStore) -> Result<reqwest::Client, RuntimeBuildError> {
+    let secret = resolve_provider_credential(
+        store,
+        None,
+        "typesafe-jev",
+        "TYPESAFE_API_KEY",
+        Some("https://api.typesafe.ai"),
+    )
+    .map_err(|_| RuntimeBuildError::JevKeyRequired)?;
+    let key = secret
+        .expose_secret_str()
+        .map_err(|_| RuntimeBuildError::JevKeyInvalid)?;
+    if key.trim().is_empty() {
+        return Err(RuntimeBuildError::JevKeyRequired);
+    }
+    let mut authorization = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
+        .map_err(|_| RuntimeBuildError::JevKeyInvalid)?;
+    authorization.set_sensitive(true);
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::AUTHORIZATION, authorization);
+    let client = reqwest::Client::builder()
+        .default_headers(headers)
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|_| RuntimeBuildError::JevClientUnavailable)?;
+    Ok(client)
+}
+
 #[derive(Clone)]
 struct TypeSafeCheckpointReviewer {
     client: reqwest::Client,
@@ -2639,30 +2761,7 @@ impl TypeSafeCheckpointReviewer {
         store: &CredentialStore,
         mode: qq_config::JevReviewMode,
     ) -> Result<Self, RuntimeBuildError> {
-        let secret = resolve_provider_credential(
-            store,
-            None,
-            "typesafe-jev",
-            "TYPESAFE_API_KEY",
-            Some("https://api.typesafe.ai"),
-        )
-        .map_err(|_| RuntimeBuildError::JevKeyRequired)?;
-        let key = secret
-            .expose_secret_str()
-            .map_err(|_| RuntimeBuildError::JevKeyInvalid)?;
-        if key.trim().is_empty() {
-            return Err(RuntimeBuildError::JevKeyRequired);
-        }
-        let mut authorization = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
-            .map_err(|_| RuntimeBuildError::JevKeyInvalid)?;
-        authorization.set_sensitive(true);
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::AUTHORIZATION, authorization);
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .map_err(|_| RuntimeBuildError::JevClientUnavailable)?;
+        let client = typesafe_http_client(store)?;
         Ok(Self {
             client,
             endpoint: "https://api.typesafe.ai/v1/systemone".into(),
@@ -2740,65 +2839,14 @@ impl CheckpointReviewer for TypeSafeCheckpointReviewer {
                 "questions": questions,
                 "model": "jev-1.13.0"
             });
-            let mut response = match client.post(endpoint.as_ref()).json(&body).send().await {
-                Ok(response) if response.status().is_success() => response,
-                Ok(response) => {
-                    return CheckpointVerdict {
-                        spend: qq_protocol::CheckpointSpend::default(),
-                        outcome: CheckpointOutcome::Unavailable,
-                        confidence: None,
-                        feedback: format!("TypeSafe returned HTTP {}", response.status()),
-                    };
-                }
+            let value = match routing::typesafe_evaluate(&client, &endpoint, &body).await {
+                Ok(value) => value,
                 Err(error) => {
                     return CheckpointVerdict {
                         spend: qq_protocol::CheckpointSpend::default(),
                         outcome: CheckpointOutcome::Unavailable,
                         confidence: None,
-                        feedback: if error.is_timeout() {
-                            "TypeSafe checkpoint timed out".to_owned()
-                        } else {
-                            "TypeSafe checkpoint transport failed".to_owned()
-                        },
-                    };
-                }
-            };
-            const MAX_REVIEW_RESPONSE_BYTES: usize = 64 * 1024;
-            let unavailable = |feedback: &str| CheckpointVerdict {
-                outcome: CheckpointOutcome::Unavailable,
-                confidence: None,
-                feedback: feedback.to_owned(),
-                spend: qq_protocol::CheckpointSpend::default(),
-            };
-            if response
-                .content_length()
-                .is_some_and(|length| length > MAX_REVIEW_RESPONSE_BYTES as u64)
-            {
-                return unavailable("TypeSafe checkpoint response exceeded 64 KiB");
-            }
-            let mut bytes = Vec::new();
-            loop {
-                match response.chunk().await {
-                    Ok(Some(chunk)) => {
-                        if chunk.len() > MAX_REVIEW_RESPONSE_BYTES - bytes.len() {
-                            return unavailable("TypeSafe checkpoint response exceeded 64 KiB");
-                        }
-                        bytes.extend_from_slice(&chunk);
-                    }
-                    Ok(None) => break,
-                    Err(_) => {
-                        return unavailable("TypeSafe checkpoint response body was interrupted");
-                    }
-                }
-            }
-            let value: serde_json::Value = match serde_json::from_slice(&bytes) {
-                Ok(value) => value,
-                Err(_) => {
-                    return CheckpointVerdict {
-                        spend: qq_protocol::CheckpointSpend::default(),
-                        outcome: CheckpointOutcome::Unavailable,
-                        confidence: None,
-                        feedback: "TypeSafe returned an invalid checkpoint response".to_owned(),
+                        feedback: error.to_string(),
                     };
                 }
             };
@@ -2990,19 +3038,17 @@ pub enum RuntimeBuildError {
     #[error(transparent)]
     CatalogClientUnavailable(#[from] crate::catalog::ModelDiscoveryError),
     #[error(
-        "JEV review requires the stored typesafe-jev credential or TYPESAFE_API_KEY before the agent starts"
+        "JEV review or routing requires the stored typesafe-jev credential or TYPESAFE_API_KEY before the agent starts"
     )]
     JevKeyRequired,
     #[error("unsupported inherited reviewer identity: {0}")]
     InheritedCheckpoint(String),
+    #[error("unsupported inherited routing identity: {0}")]
+    InheritedRouting(String),
     #[error("TYPESAFE_API_KEY cannot be encoded as an authorization header")]
     JevKeyInvalid,
-    #[error("the TypeSafe JEV checkpoint client could not be constructed")]
+    #[error("the TypeSafe JEV client could not be constructed")]
     JevClientUnavailable,
-    #[error(
-        "Jev routing is not implemented in this build; set jev_routing to false or QQ_JEV_ROUTING=off"
-    )]
-    JevRoutingUnavailable,
     #[error(
         "model route {0:?} uses a provider API that does not support reasoning_effort; remove that setting or choose a supported route"
     )]
@@ -3042,10 +3088,10 @@ impl RuntimeBuildError {
             | Self::UnknownProfile(_)
             | Self::PackRequiresNewerProtocol { .. }
             | Self::InheritedCheckpoint(_)
+            | Self::InheritedRouting(_)
             | Self::JevKeyRequired
             | Self::JevKeyInvalid
             | Self::UnsupportedReasoningEffort(_)
-            | Self::JevRoutingUnavailable
             | Self::JevClientUnavailable
             | Self::InvalidTuiQaProfile { .. } => RunFailureKind::Configuration,
             Self::UnauthenticatedProvider(_) => RunFailureKind::Authentication,
@@ -4502,7 +4548,7 @@ mod tests {
                 )"#,
             ))
             .unwrap();
-        assert_eq!(plan.descriptor().version, 8);
+        assert_eq!(plan.descriptor().version, 9);
         assert_eq!(plan.descriptor().delegation.roster.len(), 1);
         assert_eq!(plan.descriptor().delegation.roster[0].route, "custom/fast");
         assert_eq!(
@@ -4637,6 +4683,7 @@ mod tests {
             let loaded = RuntimeLoader::load(
                 &factory,
                 RuntimeLoadRequest {
+                    routing: None,
                     reasoning_effort: None,
                     checkpoint: None,
                     workspace: workspace.display().to_string(),
@@ -5229,6 +5276,7 @@ mod tests {
         RuntimeLoader::load(
             &factory,
             RuntimeLoadRequest {
+                routing: None,
                 reasoning_effort: None,
                 checkpoint: None,
                 workspace: workspace.display().to_string(),
@@ -6555,7 +6603,7 @@ mod tests {
                 "descriptor leaked {forbidden}"
             );
         }
-        assert!(canonical.starts_with("qq-agent-plan-descriptor-v8\0{"));
+        assert!(canonical.starts_with("qq-agent-plan-descriptor-v9\0{"));
     }
 
     #[test]
@@ -6691,6 +6739,7 @@ mod tests {
             .display()
             .to_string();
         let request = RuntimeLoadRequest {
+            routing: None,
             reasoning_effort: None,
             workspace,
             model: ModelSelection::default(),
@@ -6704,6 +6753,7 @@ mod tests {
         let error = match RuntimeLoader::load(
             &factory,
             RuntimeLoadRequest {
+                routing: None,
                 reasoning_effort: None,
                 checkpoint: Some(qq_core::CheckpointSelection::ReviewerIdentity(
                     "unknown/reviewer".into(),
@@ -6775,7 +6825,7 @@ mod tests {
     }
 
     #[test]
-    fn reserved_routing_opt_in_is_rejected_instead_of_silently_ignored() {
+    fn routing_opt_in_requires_credentials_and_explicit_off_needs_none() {
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
         let request = fixture.request(r#"(
@@ -6784,12 +6834,185 @@ mod tests {
         )"#);
         assert!(matches!(
             factory.plan_for(&request),
-            Err(RuntimeBuildError::JevRoutingUnavailable)
+            Err(RuntimeBuildError::JevKeyRequired)
         ));
         let disabled = request
             .clone()
             .with_overrides(request.overrides().clone().with_jev_routing(false));
         assert!(factory.plan_for(&disabled).is_ok());
+    }
+
+    #[tokio::test]
+    async fn routing_plans_are_opt_in_and_pinned_direct_ask_does_not_infer() {
+        let fixture = RuntimeFixture::new();
+        let store = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        );
+        store
+            .set_with_metadata(
+                "typesafe-jev",
+                b"test-key",
+                false,
+                Some("typesafe-jev"),
+                Some("https://api.typesafe.ai"),
+            )
+            .unwrap();
+        let factory = fixture.factory_with_credentials(store);
+        let request = fixture.request(r#"(
+            version: 1, model: "custom/test", jev_routing: true, reasoning_effort: low,
+            profiles: { "pinned": Profile(model: Some("custom/test")) },
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test": (name: "test"), "other": (name: "other") }) },
+        )"#);
+        let pinned = request
+            .clone()
+            .with_overrides(request.overrides().clone().with_model("custom/test"));
+        let plan = factory.plan_for(&pinned).unwrap();
+        assert_eq!(
+            plan.descriptor().routing.as_deref(),
+            Some(routing::ROUTER_IDENTITY)
+        );
+        let digest = plan.digest();
+        let (selected, decision) = factory.route_direct(plan, "answer this".to_owned()).await;
+        assert_eq!(selected.digest(), digest);
+        assert_eq!(decision.estimated_cost_usd_nanos, Some(0));
+        assert_eq!(decision.model.model.as_deref(), Some("custom/test"));
+        let profile = factory
+            .plan_for_profile(&request, &AgentProfileId::new("pinned").unwrap())
+            .unwrap();
+        let (_, decision) = factory
+            .route_direct(profile, "answer this".to_owned())
+            .await;
+        assert_eq!(
+            decision.estimated_cost_usd_nanos,
+            Some(0),
+            "profile model is also an explicit choice"
+        );
+        let off = pinned
+            .clone()
+            .with_overrides(pinned.overrides().clone().with_jev_routing(false));
+        let plain = factory.plan_for(&off).unwrap();
+        assert!(plain.descriptor().routing.is_none());
+        assert!(LoadedRuntime::new(plain.clone()).router.is_none());
+        assert_ne!(plain.digest(), digest);
+        assert_eq!(factory.plan_for(&pinned).unwrap().digest(), digest);
+    }
+
+    #[tokio::test]
+    async fn routing_cache_refreshes_candidate_metadata_and_same_route_profile_pin() {
+        let fixture = RuntimeFixture::new();
+        let store = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        );
+        store
+            .set_with_metadata(
+                "typesafe-jev",
+                b"test-key",
+                false,
+                Some("typesafe-jev"),
+                Some("https://api.typesafe.ai"),
+            )
+            .unwrap();
+        let factory = fixture.factory_with_credentials(store);
+        let request = LoadRequest::new(fs::canonicalize(fixture.path("work")).unwrap());
+        let profile_id = AgentProfileId::new("worker").unwrap();
+        let config = r#"(
+            version: 1, model: "custom/test", jev_routing: true,
+            profiles: { "worker": Profile(jev_routing: true) },
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: {
+                "test": (name: "test"), "other": (name: "other", context_window: 4096)
+            }) },
+        )"#;
+        fs::write(fixture.path("global/config.ron"), config).unwrap();
+        let first = factory.plan_for_profile(&request, &profile_id).unwrap();
+        let changed = config.replace("context_window: 4096", "context_window: 32768");
+        fs::write(fixture.path("global/config.ron"), &changed).unwrap();
+        let second = factory.plan_for_profile(&request, &profile_id).unwrap();
+        assert_ne!(
+            first.descriptor().routing_configuration,
+            second.descriptor().routing_configuration
+        );
+        assert_ne!(first.digest(), second.digest());
+        let pinned = changed.replace(
+            "Profile(jev_routing: true)",
+            "Profile(jev_routing: true, model: Some(\"custom/test\"))",
+        );
+        fs::write(fixture.path("global/config.ron"), &pinned).unwrap();
+        let third = factory.plan_for_profile(&request, &profile_id).unwrap();
+        assert_ne!(second.digest(), third.digest());
+        let (same, choice) = factory
+            .route_direct(third.clone(), "answer this".to_owned())
+            .await;
+        assert_eq!(same.digest(), third.digest());
+        assert_eq!(
+            choice.estimated_cost_usd_nanos,
+            Some(0),
+            "unknown model effort support must retain omission without inference"
+        );
+        let declared = pinned.replace(
+            "name: \"test\"",
+            "name: \"test\", reasoning_efforts: [low, high]",
+        );
+        fs::write(fixture.path("global/config.ron"), &declared).unwrap();
+        let fourth = factory.plan_for_profile(&request, &profile_id).unwrap();
+        assert_ne!(third.digest(), fourth.digest());
+        assert!(
+            LoadedRuntime::new(fourth)
+                .router
+                .unwrap()
+                .max_cost_usd_nanos()
+                .unwrap()
+                > 0
+        );
+        let snapshot = factory.load(&request).unwrap();
+        assert_eq!(
+            snapshot.providers()["custom"].models()["test"].reasoning_efforts(),
+            &[
+                qq_provider::ReasoningEffort::Low,
+                qq_provider::ReasoningEffort::High
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn inherited_routing_off_wins_before_credentials_and_unknown_identity_is_rejected() {
+        let fixture = RuntimeFixture::new();
+        fs::write(fixture.path("global/config.ron"), r#"(
+            version: 1, model: "custom/test", jev_routing: true,
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test": (name: "test") }) },
+        )"#).unwrap();
+        let factory = fixture.factory();
+        let request = RuntimeLoadRequest {
+            routing: Some(qq_core::RoutingSelection::Disabled),
+            checkpoint: None,
+            reasoning_effort: None,
+            workspace: fs::canonicalize(fixture.path("work"))
+                .unwrap()
+                .display()
+                .to_string(),
+            model: ModelSelection::default(),
+            profile: AgentProfileId::default(),
+        };
+        let plain = RuntimeLoader::load(&factory, request.clone())
+            .await
+            .unwrap();
+        assert!(plain.router.is_none());
+        let result = RuntimeLoader::load(
+            &factory,
+            RuntimeLoadRequest {
+                routing: Some(qq_core::RoutingSelection::RouterIdentity(
+                    "unknown/router".to_owned(),
+                )),
+                ..request
+            },
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("unknown routing policy accepted"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("inherited routing identity"));
     }
 
     #[test]
@@ -6818,6 +7041,7 @@ mod tests {
         )"#);
         let plan = factory.plan_for(&request).unwrap();
         assert!(plan.descriptor().checkpoint.is_none());
+        assert!(plan.descriptor().routing.is_none());
     }
 
     #[test]

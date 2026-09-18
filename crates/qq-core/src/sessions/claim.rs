@@ -123,6 +123,7 @@ pub(super) struct ClaimedRun {
     /// Agent profile the session selected at claim time.
     pub(super) profile: AgentProfileId,
     pub(super) checkpoint: Option<CheckpointSelection>,
+    pub(super) routing: Option<RoutingSelection>,
     /// State the executor needs before its first provider request, read in
     /// the claim transaction so it needs no further store round trips: the
     /// cancellation flag as of the claim, the session's known file hashes,
@@ -161,6 +162,7 @@ impl ClaimedRun {
             resolved_input: None,
             profile: self.profile.clone(),
             checkpoint: self.checkpoint.clone(),
+            routing: self.routing.clone(),
             cancel_requested: false,
             file_state: Vec::new(),
             pending_steering: Vec::new(),
@@ -571,23 +573,32 @@ pub(super) fn reserve_next_run_recoverable(
         }
         None => (false, false),
     };
-    let checkpoint = if user_initiated || !has_owner {
-        None
+    let (checkpoint, routing) = if user_initiated || !has_owner {
+        (None, None)
     } else {
         #[derive(serde::Deserialize)]
         struct ParentReview {
             #[serde(default)]
             checkpoint: Option<String>,
+            #[serde(default)]
+            routing: Option<String>,
         }
         let identity = parent_descriptor
             .as_deref()
             .map(serde_json::from_str::<ParentReview>)
             .transpose()?;
-        Some(CheckpointSelection::from_identity(
-            identity
-                .as_ref()
-                .and_then(|descriptor| descriptor.checkpoint.as_deref()),
-        ))
+        (
+            Some(CheckpointSelection::from_identity(
+                identity
+                    .as_ref()
+                    .and_then(|descriptor| descriptor.checkpoint.as_deref()),
+            )),
+            Some(RoutingSelection::from_identity(
+                identity
+                    .as_ref()
+                    .and_then(|descriptor| descriptor.routing.as_deref()),
+            )),
+        )
     };
 
     let kind = parse_run_kind(&kind)?;
@@ -724,6 +735,7 @@ pub(super) fn reserve_next_run_recoverable(
         resolved_input: None,
         profile,
         checkpoint,
+        routing,
         approval_mode,
         depth,
         root_run_id,

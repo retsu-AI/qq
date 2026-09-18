@@ -3,6 +3,9 @@
 //! boundary. No references, no remote fetches, no regular expressions: every
 //! accepted keyword validates in time linear in the instance.
 
+/// Applies the runtime secret masking policy to outgoing text evidence.
+pub use crate::tools::output::mask_secrets;
+
 use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
 
 use qq_protocol::{

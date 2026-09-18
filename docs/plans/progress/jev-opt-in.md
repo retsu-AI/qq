@@ -5,8 +5,8 @@ Owner: this stacked implementation session. Base `dc59d14` / draft #72.
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
 | J1–J5 + visible J7 | Optional review, correctness and receipts | In review | [#74](https://github.com/retsu-AI/qq/pull/74), stacked on #72 | Local and hosted checks green; quiet-host tails open |
-| J6a | Explicit model effort | In review | [#76](https://github.com/retsu-AI/qq/pull/76), stacked on #74 | Local checks/reviews green; performance gate unresolved; hosted checks pending |
-| J6b | Optional routing | In progress | `feat/eng-791-jev-routing-accounting` | Core preparation/accounting implemented; root adapter and pin provenance unfinished |
+| J6a | Explicit model effort | In review | [#76](https://github.com/retsu-AI/qq/pull/76), stacked on #74 | Local checks/reviews green; performance gate unresolved; hosted CI 35394821612 successful |
+| J6b | Optional routing | In progress | `feat/eng-791-jev-routing-accounting` | Adapter, inherited activation, direct ask and pin provenance implemented locally; verification in progress |
 | Passive J7 | Advisory observer | Planned | Follow-up slice | Independent acceptance; not shipping in #74 |
 | J8–J9 | Qualification and delivery | In progress | #74 | Live evaluation and remaining slices open |
 
@@ -242,3 +242,26 @@ cover a conflicting configured default; migration and legacy-wire tests preserve
 pins. ADR-0033 and architecture/protocol/plan docs updated. Protocol 25 is still
 unpublished and includes both the routing and provenance changes. Performance
 qualification remains open; no speed claim or additional hosted PR yet.
+
+### J6b concrete adapter and activation — 2026-09-18
+
+Connected TypeSafe task selection to compiled plans, sessions and direct ask.
+Owned children inherit routing identity/off before credentials; user followups
+reload current settings. Added declared model effort capabilities and bounded
+candidate fingerprinting after independent review found stale-cache and unknown
+model-effort risks. Embedded compilation now preserves the router too.
+HTTP contract tests cover masking, bounds, invalid/uncertain choices and spend;
+cache/pin/inheritance regressions are running. ADR-0034 and runbook updated.
+No paid calls or new dependency. Performance and live qualification remain open.
+
+J6b verification: 1,597 workspace tests passed, five ignored. Independent
+Spec/Standards rechecks approve candidate identity, declared effort support and
+embedded router preservation. Strict workspace Clippy passes after boxing the
+configuration-only model patch and moving the masking re-export before tests.
+Application/configuration tests are rerunning on that representation change.
+Refreshed #76: open/draft, head 2a56015, hosted CI 35394821612 successful.
+
+Final representation check: 249 application/config tests passed, one ignored;
+workspace build and formatting pass. No inference credentials or live APIs used.
+Descriptor 8→9 golden encoding and routing candidate fingerprints are covered.
+The retained #76 release binaries are the off-path comparison baseline.

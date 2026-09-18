@@ -43,6 +43,7 @@ written.
 - [ADR-0031: explicit reasoning effort in compiled plans](0031-explicit-reasoning-effort.md) — Accepted.
 - [ADR-0032: durable optional task routing](0032-durable-task-routing.md) — Accepted.
 - [ADR-0033: model-choice provenance](0033-model-choice-provenance.md) — Accepted.
+- [ADR-0034: concrete Jev routing](0034-concrete-jev-routing.md) — Accepted.
 
 ## When to write one
 

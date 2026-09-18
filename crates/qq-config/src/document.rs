@@ -232,7 +232,7 @@ enum RemoveMarker {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 enum ModelEntryPatch {
-    Set(ModelPatch),
+    Set(Box<ModelPatch>),
     Remove(RemoveMarker),
 }
 
@@ -245,6 +245,8 @@ struct ModelPatch {
     api: Field<ProviderApi>,
     #[serde(skip_serializing_if = "Field::is_missing")]
     reasoning: Field<bool>,
+    #[serde(skip_serializing_if = "Field::is_missing")]
+    reasoning_efforts: Field<Vec<qq_provider::ReasoningEffort>>,
     #[serde(skip_serializing_if = "Field::is_missing")]
     input: Field<Vec<InputModality>>,
     #[serde(skip_serializing_if = "Field::is_missing")]
@@ -2392,6 +2394,11 @@ fn apply_model_patch(model: &mut ModelMetadata, patch: &ModelPatch) {
     apply_optional_string(&patch.name, &mut model.name);
     apply_optional(&patch.api, &mut model.api);
     apply_default(&patch.reasoning, &mut model.reasoning, false);
+    apply_default(
+        &patch.reasoning_efforts,
+        &mut model.reasoning_efforts,
+        Vec::new(),
+    );
     apply_default(&patch.input, &mut model.input, Vec::new());
     apply_optional(&patch.context_window, &mut model.context_window);
     apply_optional(&patch.max_output_tokens, &mut model.max_output_tokens);

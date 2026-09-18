@@ -77,11 +77,11 @@ pub use sessions::{
     MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS,
     MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent, PublishedEventStream,
     RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend,
-    ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest,
-    RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime,
-    SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture, TaskRouter,
-    TaskRoutingFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
-    run_cost,
+    ReviewVerdict, RoutingSelection, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
+    RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream,
+    SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture,
+    TaskRouter, TaskRoutingFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority,
+    WorkspaceGrantSeed, run_cost,
 };
 pub use workspace::skills::{MAX_INDEXED_SKILLS, MAX_SKILL_DESCRIPTION_BYTES};
 pub use workspace::{SkillEntry, SkillIndex, SkillKind};
@@ -637,6 +637,7 @@ pub struct Runtime {
     /// Mandatory, non-recursive post-result and final-candidate reviewer.
     pub(crate) checkpoint: Option<Arc<dyn runtime::CheckpointReviewer>>,
     pub(crate) checkpoint_identity: Option<Arc<str>>,
+    pub(crate) task_router: Option<Arc<dyn sessions::TaskRouter>>,
     /// Environment allowlist and built-in preference for `shell` calls.
     pub(crate) shell: Arc<runtime::ShellPolicy>,
     pub(crate) network: Arc<tools::network::NetworkPolicy>,
@@ -685,14 +686,21 @@ impl Runtime {
             audit: runtime::AuditPolicy::default(),
             checkpoint: None,
             checkpoint_identity: None,
+            task_router: None,
             reasoning_effort: None,
             shell: Arc::new(runtime::ShellPolicy::default()),
             network: Arc::new(tools::network::NetworkPolicy::default()),
         })
     }
 
-    /// Installs the typed reviewer that must support every tool result and final
-    /// candidate before the run may advance.
+    /// Carries an optional pre-run router into compiled plans for orchestration.
+    #[must_use]
+    pub fn with_task_router(mut self, router: Arc<dyn sessions::TaskRouter>) -> Self {
+        self.task_router = Some(router);
+        self
+    }
+
+    /// Installs the typed reviewer for its selected tool/final boundaries.
     #[must_use]
     pub fn with_checkpoint_reviewer(
         mut self,

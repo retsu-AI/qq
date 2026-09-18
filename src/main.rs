@@ -127,7 +127,25 @@ impl CliOverrides {
 async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
     let factory = runtime::RuntimeFactory::system()?;
     let load = overrides.load_request()?;
-    let plan = tokio::task::spawn_blocking(move || factory.plan_for(&load)).await??;
+    let compiler = factory.clone();
+    let mut plan = tokio::task::spawn_blocking(move || compiler.plan_for(&load)).await??;
+    if plan.descriptor().routing.is_some() {
+        eprintln!("[jev] routing pending: selecting model and effort");
+        let (selected, decision) = factory.route_direct(plan, prompt.clone()).await;
+        plan = selected;
+        let cost = decision.estimated_cost_usd_nanos.map_or_else(
+            || "unknown".to_owned(),
+            |cost| format!("${:.6}", cost as f64 / 1_000_000_000.0),
+        );
+        eprintln!(
+            "[jev] routing {:?}: {} ({:?}); {}; estimated routing cost {}",
+            decision.outcome,
+            decision.model.model.as_deref().unwrap_or("configured"),
+            decision.reasoning_effort,
+            decision.reason,
+            cost
+        );
+    }
     render_events(plan.run(RunCommand::new(prompt))).await
 }
 

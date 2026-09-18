@@ -177,6 +177,9 @@ async fn prepare_execution(
         });
     }
     claimed.checkpoint = Some(CheckpointSelection::from_identity(identity));
+    claimed.routing = Some(RoutingSelection::from_identity(
+        loaded.plan.descriptor().routing.as_deref(),
+    ));
     let deadline = RunDeadline::new(claimed.limits, execution_started);
     if let Some(deadline) = deadline.filter(|deadline| deadline.expired()) {
         return Err(RunOutcome::BudgetExhausted {
@@ -508,6 +511,18 @@ async fn route_run(
     cancellation: &mut watch::Receiver<bool>,
     started: tokio::time::Instant,
 ) -> Result<(), RunOutcome> {
+    if claimed
+        .routing
+        .as_ref()
+        .is_some_and(|selection| !selection.matches(loaded.plan.descriptor().routing.as_deref()))
+    {
+        return Err(RunOutcome::Failed {
+            failure: RunFailure {
+                kind: RunFailureKind::Configuration,
+                message: "child loader did not preserve the parent's routing policy".to_owned(),
+            },
+        });
+    }
     if claimed.identity.kind != RunKind::Prompt || claimed.purpose != SessionPurpose::Task {
         return Ok(());
     }
@@ -641,6 +656,9 @@ async fn route_run(
         decision.model.organization = claimed.model.organization.clone();
         let mut load = inner.loader.load(RuntimeLoadRequest {
             reasoning_effort: decision.reasoning_effort,
+            routing: Some(RoutingSelection::from_identity(
+                loaded.plan.descriptor().routing.as_deref(),
+            )),
             checkpoint: Some(CheckpointSelection::from_identity(
                 loaded.plan.descriptor().checkpoint.as_deref(),
             )),
@@ -666,6 +684,7 @@ async fn route_run(
                     && Some(selected.resolved_model().route.as_str())
                         == decision.model.model.as_deref()
                     && selected.plan.descriptor().reasoning_effort == decision.reasoning_effort
+                    && selected.plan.descriptor().routing == loaded.plan.descriptor().routing
                     && selected.plan.descriptor().checkpoint
                         == loaded.plan.descriptor().checkpoint
                     && selected.plan.descriptor().profile == loaded.plan.descriptor().profile =>
@@ -733,6 +752,7 @@ pub(super) async fn execute_run(
         RuntimeLoadRequest {
             reasoning_effort: None,
             checkpoint: claimed.checkpoint.clone(),
+            routing: claimed.routing.clone(),
             workspace: claimed.workspace.clone(),
             model: claimed.model.clone(),
             profile: claimed.profile.clone(),
