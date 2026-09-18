@@ -27,3 +27,10 @@ Baseline release measurements: tool loop 61,241 ns; plan compile 25,670 ns;
 descriptor digest 2,581 ns. Single recordings are baselines, not tail acceptance.
 Interrupting review, effective task revision and durable review accounting remain
 in progress. No paid calls or source changes outside the stacked worktree.
+
+### J1 interrupt steering — 2026-09-18
+
+Held-review regression failed with timeout before the fix. Reviewer now selects
+interrupting steering and records Unavailable before applying the new input.
+Checkpoint-focused suite: 17 passed, 0 failed. Queued and interrupt cases pass.
+Design updated; J1 locally implemented, independent review remains required.

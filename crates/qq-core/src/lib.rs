@@ -2312,7 +2312,31 @@ impl plan::CompiledAgentPlan {
                         let verdict = match checkpoint_cache.get(&request) {
                             Some(verdict) => verdict.clone(),
                             None => {
-                                let verdict = reviewer.review(request.clone()).await;
+                                let verdict = tokio::select! {
+                                    biased;
+                                    () = interrupt_requested(&mut steering, handled_interrupt) => None,
+                                    verdict = reviewer.review(request.clone()) => Some(verdict),
+                                };
+                                let Some(verdict) = verdict else {
+                                    yield RuntimeEvent::CheckpointReviewed {
+                                        correlation,
+                                        phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                                        tool_call_id: None,
+                                        outcome: qq_protocol::CheckpointOutcome::Unavailable,
+                                        confidence: None,
+                                        feedback: "Final review interrupted by new user input; no assessment was recorded".to_owned(),
+                                    };
+                                    handled_interrupt = steering.as_ref().map_or(handled_interrupt, |steering| *steering.interrupts.borrow());
+                                    irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
+                                    Arc::make_mut(&mut messages).push(assistant);
+                                    yield RuntimeEvent::Interrupted { turn_ordinal };
+                                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1)) {
+                                        for message_id in applied {
+                                            yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) };
+                                        }
+                                    }
+                                    continue;
+                                };
                                 checkpoint_cache.insert(request, verdict.clone());
                                 verdict
                             }
@@ -4594,6 +4618,89 @@ mod tests {
             )
             .collect::<Vec<_>>()
             .await;
+        assert!(
+            events.iter().any(|event| matches!(event,
+                RuntimeEvent::SteeringApplied { message_id: applied, .. } if *applied == message_id
+            )),
+            "steering accepted during final review must be applied before completion: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupting_steering_stops_final_checkpoint_review() {
+        struct FinalProvider;
+        impl Provider for FinalProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "done".into(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        struct SteeringReviewer {
+            sender: runtime::SteeringSender,
+            sent: std::sync::atomic::AtomicBool,
+            message_id: qq_protocol::MessageId,
+        }
+        impl CheckpointReviewer for SteeringReviewer {
+            fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
+                let send = !self.sent.swap(true, std::sync::atomic::Ordering::SeqCst);
+                let sender = self.sender.clone();
+                let message_id = self.message_id;
+                Box::pin(async move {
+                    // Deliver steering after the final checkpoint has started,
+                    // before its successful result is returned to the run loop.
+                    if send {
+                        sender
+                            .messages
+                            .send(runtime::SteeringMessage {
+                                message_id,
+                                text: "Also explain the result".into(),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    if send {
+                        sender.interrupt();
+                        std::future::pending::<()>().await;
+                    }
+                    CheckpointVerdict {
+                        outcome: CheckpointOutcome::Supported,
+                        confidence: Some(1.0),
+                        feedback: "supported".into(),
+                    }
+                })
+            }
+        }
+        let (sender, receiver) = runtime::steering_channel();
+        let message_id = qq_protocol::MessageId::from_bytes([42; 16]);
+        let runtime = Runtime::new(FinalProvider, "test", 256)
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(SteeringReviewer {
+                sender,
+                sent: std::sync::atomic::AtomicBool::new(false),
+                message_id,
+            }));
+        let directory = tempfile::tempdir().unwrap();
+        let running = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("answer directly")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Ask,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).with_steering(receiver),
+            )
+            .collect::<Vec<_>>();
+        let events = tokio::time::timeout(std::time::Duration::from_millis(100), running)
+            .await
+            .expect("interrupting steering must stop the held final reviewer");
         assert!(
             events.iter().any(|event| matches!(event,
                 RuntimeEvent::SteeringApplied { message_id: applied, .. } if *applied == message_id

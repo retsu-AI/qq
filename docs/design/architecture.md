@@ -1236,8 +1236,9 @@ runtime into a session plan, so every execution surface shares the same gate.
 A parent receives a `spawn_agent` result only after the child final checkpoint
 and child terminal outcome are durable; the parent then checkpoints that tool
 result before its next model turn.
-Steering accepted during final assessment is applied before completion; the
-candidate is regenerated for the updated task instead of dropping that input.
+Steering accepted during final assessment is applied before completion; an
+interrupting steer drops the in-flight reviewer, records an unavailable marker,
+and regenerates the candidate for the updated task instead of dropping input.
 
 Invariants every lane keeps:
 

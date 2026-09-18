@@ -11,7 +11,7 @@ The user's explicit stack instruction overrides the workflow's merged-base rule.
 
 | Slice | Deliverable | Required evidence | State |
 | --- | --- | --- | --- |
-| J1 | Preserve queued and interrupting steering across final review | Runtime regression; no completion using obsolete task | In progress |
+| J1 | Preserve queued and interrupting steering across final review | Two red/green runtime regressions; 17 checkpoint tests pass | Locally implemented; independent review pending |
 | J2 | Default-off trusted configuration, setup/status/off, independent review/routing choices | Config/runtime/CLI tests, stored credential does not enable; child and reload identity | Planned |
 | J3 | Bounded evidence selection from effective task/history; remove ineffective cache; retain tool batching for selective review | Long-run, continuation, steering, no-tool, off batching tests | Planned |
 | J4 | Bounded cancellable reviewer requests, usage accounting, spend admission and finite repair budget | Budget, timeout, cancellation, persistence, body overflow regressions | Planned |
