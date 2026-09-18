@@ -4,8 +4,9 @@ Owner: this stacked implementation session. Base `dc59d14` / draft #72.
 
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
-| J1–J5 + visible J7 | Optional review, correctness and receipts | In review | [#74](https://github.com/retsu-AI/qq/pull/74), stacked on #72 | Local checks green; quiet-host tails and hosted qualification open |
-| J6 + passive J7 | Optional routing and advisory observer | Planned | Follow-up slices | Independent acceptance; not shipping in #74 |
+| J1–J5 + visible J7 | Optional review, correctness and receipts | In review | [#74](https://github.com/retsu-AI/qq/pull/74), stacked on #72 | Local and hosted checks green; quiet-host tails open |
+| J6a | Explicit model effort | In progress | `feat/eng-791-jev-routing`, ecc6a1f | Local checks/reviews green; performance qualification and stacked delivery in progress |
+| J6b + passive J7 | Optional routing and advisory observer | Planned | Follow-up slices | Independent acceptance; not shipping in #74 |
 | J8–J9 | Qualification and delivery | In progress | #74 | Live evaluation and remaining slices open |
 
 ## Entries
@@ -159,3 +160,22 @@ Independent Spec/Standards: approve. Descriptor 7→8; ADR-0031 and runbook upda
 No new dependency, migration or Jev inference. This commit is local to the
 routing follow-up branch; #74 remains at its independently green head.
 J6b selection/admission/accounting and J7 passive observer remain unfinished.
+
+### J6a delivery qualification — 2026-09-18
+
+Rechecked #74: open/draft, head 1405ff0, hosted CI 35392565866 succeeded.
+Explicit effort remains the bounded follow-up; automatic routing and passive
+observation are not represented as implemented. Release A/B and A/A use the
+retained #74 candidate binaries as baseline and ecc6a1f as candidate.
+Raw evidence: `target/qq-perf/jev-effort-2026-09-18/paired.json`.
+
+#### J6a performance receipt — 2026-09-18
+Thirty release A/B pairs against #74, followed by 30 same-binary A/A pairs.
+Tool loop median: 52,282.5 → 55,146 ns (+5.48%); sample p95 71,741 → 85,339 ns.
+A/A median: 54,681.5 → 51,717.5 ns (−5.42%); p95 82,130 → 80,980 ns.
+Plan compile median: 24,729.5 → 24,583.5 ns (−0.59%).
+Descriptor digest median: 2,433.5 → 2,343.5 ns (−3.70%).
+Host I/O some avg10: 31.38–47.17%. No overlapping root build/test during samples.
+The tool-loop 5% gate is not met; noisy control does not waive it. Quiet-host
+measurement remains required before merge qualification. This draft delivers
+reviewable functionality, not a performance or Jev acceleration claim.
