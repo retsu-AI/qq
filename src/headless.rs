@@ -353,9 +353,7 @@ pub async fn run(
     });
     let trial = HeadlessTrial {
         qq_version: env!("CARGO_PKG_VERSION").to_owned(),
-        qq_source_revision: option_env!("QQ_SOURCE_REVISION")
-            .unwrap_or("unknown")
-            .to_owned(),
+        qq_source_revision: env!("QQ_SOURCE_REVISION").to_owned(),
         protocol_version: qq_protocol::PROTOCOL_VERSION,
         workspace_identity: workspace_identity(&options.workspace),
         model: options.model.clone(),
@@ -3181,7 +3179,7 @@ mod tests {
         assert_eq!(records[0]["workspace_identity"].as_str().unwrap().len(), 64);
         assert_eq!(records[0]["context_window"], 128_000);
         assert_eq!(records[0]["pricing_provenance"], "test fixture");
-        assert!(records[0]["qq_source_revision"].is_string());
+        assert_eq!(records[0]["qq_source_revision"], env!("QQ_SOURCE_REVISION"));
 
         let mut previous = None;
         for record in event_records(&records) {
