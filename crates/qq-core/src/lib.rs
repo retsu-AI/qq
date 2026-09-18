@@ -2929,7 +2929,7 @@ fn usable_conversation(messages: Vec<Message>) -> Vec<Message> {
     conversation
 }
 
-fn measure_messages(messages: &[Message]) -> u64 {
+pub(crate) fn measure_messages(messages: &[Message]) -> u64 {
     messages.iter().fold(0_u64, |total, message| {
         total.saturating_add(measure_message(message))
     })
@@ -2974,7 +2974,7 @@ impl RetainedResult {
     }
 }
 
-fn measure_message(message: &Message) -> u64 {
+pub(crate) fn measure_message(message: &Message) -> u64 {
     message
         .content()
         .iter()

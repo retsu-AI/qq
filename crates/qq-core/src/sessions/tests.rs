@@ -1866,7 +1866,11 @@ fn denial_capacity_fixture(
         session_model: ModelSelection::default(),
         model: ModelSelection::default(),
         messages: Vec::new(),
-        context_compaction_attempted: false,
+        context_compaction_attempted: 0,
+        context_compaction_failed: false,
+        context_compaction_remaining: false,
+        compaction_cutoff_ordinal: None,
+        context_compaction_oversized_unit_bytes: None,
         context_overflow_basis: None,
         context_occupancy: None,
         limits: RunLimits::default(),
@@ -2610,6 +2614,10 @@ enum AutoCompactScript {
     Stall,
     /// Panics synchronously when the provider stream is created.
     Panic,
+    /// One script per provider request within the same load, in order; the
+    /// last repeats. A prompt whose admission folds several summarizer steps
+    /// shares one loaded runtime across all of them and its own request.
+    Sequence(Vec<AutoCompactScript>),
 }
 
 struct AutoCompactLoader {
@@ -2636,6 +2644,7 @@ impl RuntimeLoader for AutoCompactLoader {
         let provider = AutoCompactProvider {
             requests: Arc::clone(&self.requests),
             script,
+            served: StdMutex::new(0),
         };
         let context_window = self.context_window;
         let max_output_tokens = self.max_output_tokens;
@@ -2667,10 +2676,27 @@ impl RuntimeLoader for AutoCompactLoader {
 struct AutoCompactProvider {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
     script: AutoCompactScript,
+    served: StdMutex<usize>,
 }
 
 impl Provider for AutoCompactProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
+        if let AutoCompactScript::Sequence(scripts) = &self.script {
+            let mut served = self.served.lock().unwrap();
+            let script = scripts
+                .get(*served)
+                .or(scripts.last())
+                .cloned()
+                .expect("a sequence script has at least one entry");
+            *served += 1;
+            drop(served);
+            let step = AutoCompactProvider {
+                requests: Arc::clone(&self.requests),
+                script,
+                served: StdMutex::new(0),
+            };
+            return step.stream(request);
+        }
         // The turn following this run's own tool call ends with the
         // tool result; earlier runs' results sit before the new prompt.
         let already_read = request.messages().last().is_some_and(|message| {
@@ -2856,6 +2882,7 @@ impl Provider for AutoCompactProvider {
             )])),
             AutoCompactScript::Stall => Box::pin(stream::pending()),
             AutoCompactScript::Panic => panic!("injected auto-compaction provider panic"),
+            AutoCompactScript::Sequence(_) => unreachable!("sequences dispatch above"),
         }
     }
 }

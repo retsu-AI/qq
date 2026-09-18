@@ -181,7 +181,7 @@ async fn a_committed_compaction_is_not_resettled_by_the_prompts_teardown() {
         .unwrap();
     let original = store.reserve_next_run(false).await.unwrap().unwrap();
     let (compaction, _) = store
-        .start_auto_compaction(&original, test_prepared_audit(&original))
+        .start_auto_compaction(&original, test_prepared_audit(&original), None)
         .await
         .unwrap()
         .unwrap();
@@ -2397,7 +2397,7 @@ async fn delayed_old_panic_cannot_settle_a_newer_auto_compaction() {
     };
     let new = store.reserve_next_run(false).await.unwrap().unwrap();
     let (compaction, _) = store
-        .start_auto_compaction(&new, test_prepared_audit(&new))
+        .start_auto_compaction(&new, test_prepared_audit(&new), None)
         .await
         .unwrap()
         .unwrap();
@@ -2532,7 +2532,7 @@ async fn recovery_ignores_legacy_overflow_evidence_without_spending_a_second_att
         .await
         .unwrap();
     let (compaction, started) = store
-        .start_auto_compaction(&original, audit)
+        .start_auto_compaction(&original, audit, None)
         .await
         .unwrap()
         .unwrap();
@@ -2674,7 +2674,7 @@ async fn version_sixteen_active_auto_compaction_backfills_exact_attempt_ownershi
     };
     let original = store.reserve_next_run(false).await.unwrap().unwrap();
     let (compaction, started) = store
-        .start_auto_compaction(&original, test_prepared_audit(&original))
+        .start_auto_compaction(&original, test_prepared_audit(&original), None)
         .await
         .unwrap()
         .unwrap();

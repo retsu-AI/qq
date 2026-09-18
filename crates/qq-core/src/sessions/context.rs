@@ -13,6 +13,27 @@ pub(crate) const fn estimate_tokens(bytes: u64) -> u64 {
     bytes.div_ceil(ESTIMATED_BYTES_PER_TOKEN)
 }
 
+/// Request bytes the summarizer may spend on transcript messages so its
+/// estimate fits the window: the window less the output reserve, at the
+/// byte ratio, less the fixed system and tool-schema bytes. `None` when the
+/// model has no declared window; nothing bounds the transcript then but the
+/// storage backstop.
+pub(crate) fn summarizer_message_byte_budget(
+    context_window: Option<u32>,
+    max_output_tokens: u32,
+    system_bytes: u64,
+    tool_schema_bytes: u64,
+) -> Option<u64> {
+    let window = u64::from(context_window?);
+    Some(
+        window
+            .saturating_sub(u64::from(max_output_tokens))
+            .saturating_mul(ESTIMATED_BYTES_PER_TOKEN)
+            .saturating_sub(system_bytes)
+            .saturating_sub(tool_schema_bytes),
+    )
+}
+
 /// Carries a provider-measured token count across a request whose bytes
 /// changed: appended bytes are charged at the ratio, removed bytes credited
 /// at it. Crediting `bytes / 4` for removed text is conservative wherever the
@@ -55,16 +76,34 @@ pub(crate) struct ContextTarget {
 pub(crate) enum ContextRejectReason {
     Irreducible(ContextConstraint),
     NoReducibleHistory(ContextConstraint),
-    AlreadyAttempted(ContextConstraint),
+    Exhausted(ContextConstraint, CompactionExhaustion),
+    /// The summarizer's own request is over the storage backstop.
+    SummarizerOverflow(ContextConstraint),
     BetweenRunsOnly(ContextConstraint),
     Unsupported(ContextConstraint),
-    ProviderReportedOverflow,
+    ProviderReportedOverflow(CompactionExhaustion),
 }
+
+/// Why no further automatic compaction step will run for this prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompactionExhaustion {
+    /// `steps` summarizer requests ran and the transcript is either fully
+    /// summarized or a step failed; a further step would repeat its input.
+    Attempted { steps: u32 },
+    /// One prompt and its run alone exceed what the summarizer can read in
+    /// the model window; no cut at a unit boundary can make it fit.
+    OversizedUnit { bytes: u64 },
+}
+
+/// Most summarizer requests one prompt may spend before the fold stops.
+/// Each step reads at most one model window of transcript and must shrink
+/// the assembly, so this bounds the provider cost of admitting one prompt.
+pub(crate) const MAX_COMPACTION_STEPS: u32 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompactionDisposition {
     Eligible,
-    AlreadyAttempted,
+    Exhausted(CompactionExhaustion),
     BetweenRunsOnly,
     Unsupported,
     /// The request *is* the summarizer's: its transcript is the one being
@@ -220,12 +259,14 @@ pub(crate) fn plan(input: ContextInput) -> ContextPlan {
             reason: constraint,
             target,
         },
-        CompactionDisposition::AlreadyAttempted | CompactionDisposition::Summarizing => {
-            ContextPlan::Reject {
-                estimate,
-                reason: ContextRejectReason::AlreadyAttempted(constraint),
-            }
-        }
+        CompactionDisposition::Exhausted(exhaustion) => ContextPlan::Reject {
+            estimate,
+            reason: ContextRejectReason::Exhausted(constraint, exhaustion),
+        },
+        CompactionDisposition::Summarizing => ContextPlan::Reject {
+            estimate,
+            reason: ContextRejectReason::SummarizerOverflow(constraint),
+        },
         CompactionDisposition::BetweenRunsOnly => ContextPlan::Reject {
             estimate,
             reason: ContextRejectReason::BetweenRunsOnly(constraint),
@@ -264,9 +305,28 @@ pub(crate) fn rejection_message(plan: ContextPlan) -> Option<String> {
                     constraint,
                     "no earlier history remains to compact; start a new session".to_owned(),
                 ),
-                ContextRejectReason::AlreadyAttempted(constraint) => (
+                ContextRejectReason::Exhausted(
                     constraint,
-                    "one automatic compaction already ran for this prompt and the context is still too large; run /compact again or start a new session".to_owned(),
+                    CompactionExhaustion::Attempted { steps },
+                ) => (
+                    constraint,
+                    format!(
+                        "automatic compaction ran {steps} summarizer step{} for this prompt and the context is still too large; run /compact again or start a new session",
+                        if steps == 1 { "" } else { "s" },
+                    ),
+                ),
+                ContextRejectReason::Exhausted(
+                    constraint,
+                    CompactionExhaustion::OversizedUnit { bytes },
+                ) => (
+                    constraint,
+                    format!(
+                        "one earlier prompt and its run measure {bytes} bytes, more than the summarizer can read within the selected model's window, so compaction cannot reduce it; start a new session, or continue this one with a model that has a larger context window",
+                    ),
+                ),
+                ContextRejectReason::SummarizerOverflow(constraint) => (
+                    constraint,
+                    "the summarizer's own request is over the limit; start a new session".to_owned(),
                 ),
                 ContextRejectReason::BetweenRunsOnly(constraint) => (
                     constraint,
@@ -276,9 +336,18 @@ pub(crate) fn rejection_message(plan: ContextPlan) -> Option<String> {
                     constraint,
                     "the direct `qq ask` path has no session to compact; use a durable session (TUI or `qq run --session`) for long conversations".to_owned(),
                 ),
-                ContextRejectReason::ProviderReportedOverflow => {
+                ContextRejectReason::ProviderReportedOverflow(exhaustion) => {
+                    let why = match exhaustion {
+                        CompactionExhaustion::Attempted { steps } => format!(
+                            "{steps} automatic compaction step{} did not produce a usable smaller context",
+                            if steps == 1 { "" } else { "s" },
+                        ),
+                        CompactionExhaustion::OversizedUnit { bytes } => format!(
+                            "one earlier prompt and its run measure {bytes} bytes, more than the summarizer can read within the model's window, so compaction cannot reduce it",
+                        ),
+                    };
                     return Some(format!(
-                        "the provider previously rejected an equivalent request for exceeding its context window, and the single automatic compaction attempt did not produce a usable smaller context; the current provider-neutral estimate is {} input tokens with a {}-token output reserve; run /compact or start a new session",
+                        "the provider previously rejected an equivalent request for exceeding its context window, and {why}; the current provider-neutral estimate is {} input tokens with a {}-token output reserve; run /compact or start a new session",
                         estimate.estimated_input_tokens, estimate.output_reserve_tokens,
                     ));
                 }
@@ -365,11 +434,45 @@ mod tests {
             reducible_message_bytes: 680_000,
             irreducible_message_bytes: 17_498,
             compatible_input_tokens: None,
-            compaction: CompactionDisposition::AlreadyAttempted,
+            compaction: CompactionDisposition::Exhausted(CompactionExhaustion::Attempted {
+                steps: 1,
+            }),
         }) else {
             panic!("a 730 KB transcript fits a 200k window at four bytes per token")
         };
         assert_eq!(estimate.estimated_input_tokens, 182_375);
+    }
+
+    #[test]
+    fn summarizer_budget_is_the_window_less_reserve_and_fixed_prefix_in_bytes() {
+        // 100-token window, 40 reserved for output: 60 tokens of input at
+        // four bytes each, less the system and tool bytes the request carries.
+        assert_eq!(
+            summarizer_message_byte_budget(Some(100), 40, bytes(10), bytes(10)),
+            Some(bytes(40))
+        );
+        // A fixed prefix past the window leaves nothing for the transcript;
+        // the loader still takes one unit and the provider adjudicates.
+        assert_eq!(
+            summarizer_message_byte_budget(Some(100), 40, bytes(70), 0),
+            Some(0)
+        );
+        assert_eq!(summarizer_message_byte_budget(None, 40, 0, 0), None);
+    }
+
+    #[test]
+    fn exhaustion_reasons_are_distinct_in_diagnostics() {
+        let mut exhausted = input(Some(90));
+        exhausted.compaction =
+            CompactionDisposition::Exhausted(CompactionExhaustion::Attempted { steps: 3 });
+        let message = rejection_message(plan(exhausted)).unwrap();
+        assert!(message.contains("3 summarizer steps"), "{message}");
+        let mut oversized = input(Some(90));
+        oversized.compaction =
+            CompactionDisposition::Exhausted(CompactionExhaustion::OversizedUnit { bytes: 9_000 });
+        let message = rejection_message(plan(oversized)).unwrap();
+        assert!(message.contains("measure 9000 bytes"), "{message}");
+        assert!(!message.contains("summarizer step"), "{message}");
     }
 
     #[test]
@@ -386,7 +489,8 @@ mod tests {
         // Exact fit is judged without the proactive headroom: a run that
         // already compacted once sends at the window.
         let mut attempted = input(Some(100));
-        attempted.compaction = CompactionDisposition::AlreadyAttempted;
+        attempted.compaction =
+            CompactionDisposition::Exhausted(CompactionExhaustion::Attempted { steps: 1 });
         let ContextPlan::Send { estimate } = plan(attempted) else {
             panic!("exact fit must send")
         };
@@ -466,7 +570,7 @@ mod tests {
         assert_send(plan(input(Some(120))));
         // Only a first-chance prompt run is held to the headroom.
         for disposition in [
-            CompactionDisposition::AlreadyAttempted,
+            CompactionDisposition::Exhausted(CompactionExhaustion::Attempted { steps: 1 }),
             CompactionDisposition::BetweenRunsOnly,
             CompactionDisposition::Unsupported,
             CompactionDisposition::Summarizing,
@@ -497,7 +601,9 @@ mod tests {
             reducible_message_bytes: bytes(400),
             irreducible_message_bytes: bytes(20),
             compatible_input_tokens: None,
-            compaction: CompactionDisposition::AlreadyAttempted,
+            compaction: CompactionDisposition::Exhausted(CompactionExhaustion::Attempted {
+                steps: 1,
+            }),
         };
         assert_reject(plan(overflowing));
         assert_send(plan(ContextInput {
@@ -545,7 +651,9 @@ mod tests {
         }));
         assert_reject(plan(ContextInput {
             reducible_message_bytes: STORAGE_CONTEXT_BYTES,
-            compaction: CompactionDisposition::AlreadyAttempted,
+            compaction: CompactionDisposition::Exhausted(CompactionExhaustion::Attempted {
+                steps: 1,
+            }),
             ..exact
         }));
     }
@@ -582,7 +690,9 @@ mod tests {
             reducible_message_bytes: bytes(100),
             irreducible_message_bytes: 0,
             compatible_input_tokens: Some(10),
-            compaction: CompactionDisposition::AlreadyAttempted,
+            compaction: CompactionDisposition::Exhausted(CompactionExhaustion::Attempted {
+                steps: 1,
+            }),
         };
         assert_send(plan(raw_fixed_prefix_exceeds_the_window));
         let ContextPlan::Compact { target, .. } = plan(ContextInput {
@@ -598,7 +708,8 @@ mod tests {
     #[test]
     fn rejection_messages_name_a_recovery_step() {
         let mut request = input(Some(99));
-        request.compaction = CompactionDisposition::AlreadyAttempted;
+        request.compaction =
+            CompactionDisposition::Exhausted(CompactionExhaustion::Attempted { steps: 1 });
         let message = rejection_message(plan(request)).unwrap();
         assert!(message.contains("/compact"), "{message}");
         assert!(

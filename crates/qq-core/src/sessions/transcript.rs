@@ -269,6 +269,28 @@ pub(super) fn load_model_context_with_rewrite_status(
     session_id: SessionId,
     through_ordinal: u64,
 ) -> Result<(Vec<Message>, bool), SessionRuntimeError> {
+    load_model_context_with_units(transaction, session_id, through_ordinal)
+        .map(|(context, rewritten, _)| (context, rewritten))
+}
+
+/// One prompt and the run it produced, as assembly laid them out: the
+/// prompt's message ordinal and the index in the assembled context of the
+/// first message *after* the unit. A summarizer that cannot read the whole
+/// transcript cuts at a unit boundary so no run is split from its prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ContextUnit {
+    pub(super) prompt_ordinal: u64,
+    pub(super) end: usize,
+}
+
+/// [`load_model_context_with_rewrite_status`] that also reports where each
+/// prompt/run unit ends in the returned context. The leading summary
+/// message, when present, belongs to no unit.
+pub(super) fn load_model_context_with_units(
+    transaction: &Connection,
+    session_id: SessionId,
+    through_ordinal: u64,
+) -> Result<(Vec<Message>, bool, Vec<ContextUnit>), SessionRuntimeError> {
     let compaction = latest_compaction(transaction, session_id)?;
     let cutoff_ordinal = compaction
         .as_ref()
@@ -286,6 +308,7 @@ pub(super) fn load_model_context_with_rewrite_status(
         input_json: Option<String>,
         status: String,
         outcome_json: Option<String>,
+        ordinal: u64,
     }
     let mut statement = transaction.prepare_cached(
         "SELECT m.run_id, m.output, r.status, r.outcome_json,
@@ -294,7 +317,7 @@ pub(super) fn load_model_context_with_rewrite_status(
                          WHERE message_id = m.id AND channel = 'output'
                          ORDER BY chunk_ordinal
                      ) c),
-                    m.id, m.input_json
+                    m.id, m.input_json, m.ordinal
              FROM messages m JOIN runs r ON r.id = m.run_id
              WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
                AND m.role = 'user' AND m.steering = 0
@@ -314,6 +337,7 @@ pub(super) fn load_model_context_with_rewrite_status(
                 input_json: row.get(6)?,
                 status: row.get(2)?,
                 outcome_json: row.get(3)?,
+                ordinal: row.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -429,6 +453,7 @@ pub(super) fn load_model_context_with_rewrite_status(
 
     let mut context = Vec::new();
     let mut effects = HashMap::new();
+    let mut units = Vec::with_capacity(prompts.len());
     if let Some(compaction) = compaction {
         context.push(Message::user(format!(
             "{COMPACTION_SUMMARY_PREAMBLE}\n\n{}",
@@ -436,6 +461,7 @@ pub(super) fn load_model_context_with_rewrite_status(
         )));
     }
     for prompt in prompts {
+        let prompt_ordinal = prompt.ordinal;
         // A prompt whose files were persisted at run start is reassembled
         // from those bytes, exactly as its run first sent it. Prompts that
         // never started (or predate schema 29) keep their placeholder text.
@@ -489,9 +515,15 @@ pub(super) fn load_model_context_with_rewrite_status(
                 context.push(Message::user(notice));
             }
         }
+        units.push(ContextUnit {
+            prompt_ordinal,
+            end: context.len(),
+        });
     }
+    // Pruning rewrites results in place and never adds or removes messages,
+    // so the unit ends computed above still index this context.
     let context_rewritten = prune_stale_tool_results(&mut context, &effects);
-    Ok((context, context_rewritten))
+    Ok((context, context_rewritten, units))
 }
 
 type RecordedTurnResults = HashMap<u32, HashMap<String, RecordedResult>>;

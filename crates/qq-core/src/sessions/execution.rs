@@ -557,6 +557,7 @@ pub(super) async fn execute_run(
         .await;
         return;
     }
+    let mut bounded_manual_compaction = false;
     loop {
         let mut prepared = match prepare_execution(
             &inner,
@@ -591,10 +592,8 @@ pub(super) async fn execute_run(
             compatible_input_tokens: prepared.audit.weight.compatible_input_tokens,
             compaction: if claimed.identity.kind == RunKind::Compaction {
                 context::CompactionDisposition::Summarizing
-            } else if claimed.context_compaction_attempted {
-                context::CompactionDisposition::AlreadyAttempted
             } else {
-                context::CompactionDisposition::Eligible
+                compaction_disposition(&claimed)
             },
         });
         let repeats_known_overflow = matches!(plan, context::ContextPlan::Send { .. })
@@ -607,7 +606,8 @@ pub(super) async fn execute_run(
             })
             && claimed.identity.kind == RunKind::Prompt;
         if repeats_known_overflow {
-            if claimed.context_compaction_attempted {
+            let disposition = compaction_disposition(&claimed);
+            if let context::CompactionDisposition::Exhausted(exhaustion) = disposition {
                 let context::ContextPlan::Send { estimate } = plan else {
                     unreachable!("known overflow override only applies to a send plan")
                 };
@@ -617,7 +617,7 @@ pub(super) async fn execute_run(
                     &prepared.audit,
                     planned_context_failure(context::ContextPlan::Reject {
                         estimate,
-                        reason: context::ContextRejectReason::ProviderReportedOverflow,
+                        reason: context::ContextRejectReason::ProviderReportedOverflow(exhaustion),
                     }),
                 )
                 .await;
@@ -637,6 +637,53 @@ pub(super) async fn execute_run(
             .await
             {
                 return;
+            }
+            continue;
+        }
+        // A manual compaction whose transcript is estimated past the window
+        // reads one window of it at a unit boundary instead, exactly as an
+        // automatic step does; the summary covers that span and a further
+        // `/compact` folds the rest. Once per run: the bounded reload is
+        // itself judged by the provider.
+        if let context::ContextPlan::Send { estimate } = plan
+            && claimed.identity.kind == RunKind::Compaction
+            && !bounded_manual_compaction
+            && let Some(window) = estimate.context_window
+            && estimate
+                .estimated_input_tokens
+                .saturating_add(estimate.output_reserve_tokens)
+                > u64::from(window)
+        {
+            let audit = prepared.audit.clone();
+            drop(prepared);
+            let summarizer = inner
+                .store
+                .load_summarizer_input(
+                    claimed.identity.session_id,
+                    context::summarizer_message_byte_budget(
+                        Some(window),
+                        audit.weight.max_output_tokens,
+                        audit.weight.system_bytes,
+                        audit.weight.tool_schema_bytes,
+                    ),
+                )
+                .await;
+            match summarizer {
+                Ok(summarizer) => {
+                    bounded_manual_compaction = true;
+                    claimed.messages = summarizer.messages;
+                    claimed.compaction_cutoff_ordinal = summarizer.cutoff_ordinal;
+                }
+                Err(error) => {
+                    finish_prepared_run(
+                        &inner,
+                        &claimed,
+                        &audit,
+                        persistence_failure("failed to bound the compaction request", &error),
+                    )
+                    .await;
+                    return;
+                }
             }
             continue;
         }
@@ -773,6 +820,32 @@ pub(super) async fn execute_run(
     }
 }
 
+/// Whether the prompt may spend another summarizer step. Each step reads a
+/// window of transcript after the latest cutoff and commits a summary that
+/// advances it, so a further step is new input as long as the transcript is
+/// not fully summarized, no step for this prompt has failed, and the step
+/// cap is not reached. Any of those exhausts the fold; the reason names
+/// which so the failure is actionable.
+fn compaction_disposition(claimed: &ClaimedRun) -> context::CompactionDisposition {
+    if let Some(bytes) = claimed.context_compaction_oversized_unit_bytes {
+        return context::CompactionDisposition::Exhausted(
+            context::CompactionExhaustion::OversizedUnit { bytes },
+        );
+    }
+    let steps = claimed.context_compaction_attempted;
+    let may_continue = steps == 0
+        || (claimed.context_compaction_remaining
+            && !claimed.context_compaction_failed
+            && steps < context::MAX_COMPACTION_STEPS);
+    if may_continue {
+        context::CompactionDisposition::Eligible
+    } else {
+        context::CompactionDisposition::Exhausted(context::CompactionExhaustion::Attempted {
+            steps,
+        })
+    }
+}
+
 async fn run_auto_compaction(
     inner: &Arc<SessionRuntimeInner>,
     original: &mut ClaimedRun,
@@ -792,12 +865,27 @@ async fn run_auto_compaction(
         .await;
         return false;
     }
-    let messages = inner
+    // The summarizer reads at most one window of transcript: the budget is
+    // the window less the summarizer's output reserve and the fixed prefix
+    // the prompt's own preparation just measured. Without a declared window
+    // the whole transcript is read and the storage backstop alone applies.
+    let summarizer = inner
         .store
-        .load_auto_compaction_messages(original.identity.session_id)
+        .load_summarizer_input(
+            original.identity.session_id,
+            context::summarizer_message_byte_budget(
+                loaded.resolved_model().context_window,
+                loaded
+                    .resolved_model()
+                    .max_output_tokens
+                    .min(COMPACTION_OUTPUT_RESERVE_TOKENS),
+                original_audit.weight.system_bytes,
+                original_audit.weight.tool_schema_bytes,
+            ),
+        )
         .await;
-    let messages = match messages {
-        Ok(messages) => messages,
+    let summarizer = match summarizer {
+        Ok(summarizer) => summarizer,
         Err(error) => {
             finish_prepared_run(
                 inner,
@@ -839,8 +927,10 @@ async fn run_auto_compaction(
     candidate.identity.kind = RunKind::Compaction;
     candidate.user_initiated = false;
     candidate.literal_slash = false;
-    candidate.messages = messages;
-    candidate.context_compaction_attempted = true;
+    candidate.messages = summarizer.messages;
+    candidate.context_compaction_attempted =
+        original.context_compaction_attempted.saturating_add(1);
+    candidate.compaction_cutoff_ordinal = summarizer.cutoff_ordinal;
     candidate.context_occupancy = None;
     let mut prepared = match prepare_execution(
         inner,
@@ -897,7 +987,7 @@ async fn run_auto_compaction(
     }
     let started = inner
         .store
-        .start_auto_compaction(original, prepared.audit.clone())
+        .start_auto_compaction(original, prepared.audit.clone(), summarizer.cutoff_ordinal)
         .await;
     let mut compaction = match started {
         Ok(Some((compaction, _))) => compaction,
@@ -1005,9 +1095,18 @@ async fn run_auto_compaction(
         }
     };
     match inner.store.reload_reserved_messages(original).await {
-        Ok(Some((messages, attempted))) => {
+        Ok(Some((messages, progress))) => {
             original.messages = messages;
-            original.context_compaction_attempted = attempted;
+            original.context_compaction_attempted = progress.steps;
+            original.context_compaction_failed = progress.failed;
+            original.context_compaction_remaining = progress.remaining;
+            // A step that sent one unit larger than the budget and still
+            // got rejected has proven that unit irreducible; remember it so
+            // the prompt's failure names it instead of a step count.
+            original.compaction_cutoff_ordinal = None;
+            if !compacted && let Some(bytes) = summarizer.oversized_unit_bytes {
+                original.context_compaction_oversized_unit_bytes = Some(bytes);
+            }
             if compacted {
                 original.context_overflow_basis = None;
                 original.context_occupancy = None;
