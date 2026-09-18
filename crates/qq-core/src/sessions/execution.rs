@@ -2969,7 +2969,7 @@ async fn record_unreviewed_tool_checkpoints(
                 qq_protocol::CheckpointOutcome::Unavailable,
                 None,
                 format!(
-                    "JEV review was not performed because the run {terminal_reason} after the tool result became durable"
+                    "No JEV reviewer verdict was durably recorded before the run {terminal_reason} after the tool result became durable"
                 ),
             )
             .await?;

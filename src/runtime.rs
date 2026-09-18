@@ -2559,7 +2559,10 @@ mod tests {
                 "qq-runtime-test-{}-{nanos}-{sequence}",
                 std::process::id()
             ));
-            for directory in ["global", "data", "managed", "work"] {
+            // Tests may deliberately place TMPDIR below a real checkout. A
+            // local VCS boundary keeps config discovery inside this fixture
+            // instead of inheriting that checkout's untrusted `.qq` sources.
+            for directory in [".git", "global", "data", "managed", "work"] {
                 fs::create_dir_all(root.join(directory)).unwrap();
             }
             Self { root }
@@ -3904,7 +3907,7 @@ mod tests {
                 )"#,
             ))
             .unwrap();
-        assert_eq!(plan.descriptor().version, 6);
+        assert_eq!(plan.descriptor().version, 7);
         assert_eq!(plan.descriptor().delegation.roster.len(), 1);
         assert_eq!(plan.descriptor().delegation.roster[0].route, "custom/fast");
         assert_eq!(
@@ -5757,7 +5760,7 @@ mod tests {
                 "descriptor leaked {forbidden}"
             );
         }
-        assert!(canonical.starts_with("qq-agent-plan-descriptor-v6\0{"));
+        assert!(canonical.starts_with("qq-agent-plan-descriptor-v7\0{"));
     }
 
     #[test]

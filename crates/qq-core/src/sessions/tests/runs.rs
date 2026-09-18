@@ -1206,7 +1206,7 @@ async fn cancellation_after_durable_tool_result_records_unavailable_checkpoint()
                 outcome: qq_protocol::CheckpointOutcome::Unavailable,
                 feedback,
                 ..
-            } if feedback.contains("review was not performed") && feedback.contains("cancelled")
+            } if feedback.contains("verdict was durably recorded") && feedback.contains("cancelled")
         )
     });
     let checkpoint = checkpoint.unwrap_or_else(|| {
@@ -1286,7 +1286,7 @@ async fn runtime_failure_after_durable_tool_result_records_unavailable_checkpoin
                     outcome: qq_protocol::CheckpointOutcome::Unavailable,
                     feedback,
                     ..
-                } if feedback.contains("review was not performed")
+                } if feedback.contains("verdict was durably recorded")
                     && feedback.contains("failed")
             )
         })

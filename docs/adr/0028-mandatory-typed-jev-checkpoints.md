@@ -41,7 +41,7 @@ truncating either into an assessable request. Memoization keys the complete
 typed request, including phase, correlation, tool identity, and error status.
 If cancellation wins after a tool result is durable but before its checkpoint
 is durable, the session records a local `unavailable` checkpoint stating that
-review was not performed, then settles cancellation. Direct `qq ask` keeps
+no reviewer verdict was durably recorded, then settles cancellation. Direct `qq ask` keeps
 answer bytes on stdout and renders checkpoint notices on stderr. The
 `LoadedRuntime` embedding adapter propagates the installed reviewer into its
 compiled profile; loading a session cannot silently discard enforcement.
@@ -54,6 +54,8 @@ provider failure, or premature stream end cuts off a pending review. QQ records
 the local `unavailable` checkpoint before `run_finished`; it preserves the real
 terminal outcome and never represents the local marker as a completed remote
 assessment. A nominal completion with any such pending result fails closed.
+Persistence failures while recording an ordinary checkpoint event remain
+fail-closed but are not covered by this terminal-drain recovery path.
 
 This supersedes ADR-0003's narrower statement that synchronous decisions are
 limited to approval, validation, and budgets. Persist-before-publish remains in

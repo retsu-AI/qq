@@ -1209,8 +1209,9 @@ contains every typed request field. Cancellation does not wait for remote
 review: when a tool result is already durable but its checkpoint is not, the
 session durably records a local `unavailable`/not-performed checkpoint before
 any cancellation, deadline, runtime/provider failure, premature stream end, or
-other terminal settlement. A nominal completion with such a pending result
-fails closed. Direct automation preserves answer-only stdout and writes
+defensive nominal completion settlement. The marker means no reviewer verdict
+was durably recorded; it does not claim whether remote work started. A nominal
+completion with such a pending result fails closed. Direct automation preserves answer-only stdout and writes
 human-readable checkpoint notices to stderr.
 The `LoadedRuntime` adapter preserves the reviewer when compiling an embedded
 runtime into a session plan, so every execution surface shares the same gate.

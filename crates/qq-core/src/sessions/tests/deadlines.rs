@@ -90,7 +90,7 @@ async fn duration_after_durable_tool_result_records_unavailable_checkpoint_befor
                     outcome: qq_protocol::CheckpointOutcome::Unavailable,
                     feedback,
                     ..
-                } if feedback.contains("review was not performed")
+                } if feedback.contains("verdict was durably recorded")
                     && feedback.contains("budget")
             )
         })
