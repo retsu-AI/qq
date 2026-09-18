@@ -133,3 +133,29 @@ Pushed `1d2b3604ffd1393a285cc2070799c88df7d2b26d`; opened draft
 created the authorized PR. Local workspace is clean after the implementation
 commit. Linear connector remains unavailable; issue state was not changed.
 No merge or release. Broader routing/advisory work remains planned.
+
+### J6a explicit effort foundation — 2026-09-18
+
+Follow-up branch `feat/eng-791-jev-routing` starts from #74 head 1405ff0.
+Scope: explicit effort in trusted config/profiles, request dispatch and immutable
+plan identity. Routing will preserve this pinned choice. Default omission remains
+unchanged; no Jev activation is coupled to effort. Prior candidate benchmark
+binaries are the pre-change baseline for this slice. No new dependency or runtime.
+
+J6a tests went red for missing effort config/runtime methods, then green.
+Config/profile precedence, explicit none versus omission, workspace re-trust,
+cache isolation and provider dispatch are covered. Independent Spec/Standards
+reviewers approve this bounded slice. The root suite hit an existing one-second
+silent-turn timeout under load (156 passed, one failed, one ignored); the exact
+regression passed alone in 0.19 s. No timeout was widened. Final suite pending.
+PR #74 hosted CI run 35392565866 completed successfully at 1405ff0.
+
+#### J6a local receipt — 2026-09-18
+Workspace tests: 1,579 passed, five ignored, no failures, NO_COLOR unset.
+`cargo fmt --all -- --check`, strict workspace all-target/all-feature Clippy,
+and workspace build pass (locked/offline, shared target directory).
+Core regression observes the same effort on both sides of a real tool turn.
+Independent Spec/Standards: approve. Descriptor 7→8; ADR-0031 and runbook updated.
+No new dependency, migration or Jev inference. This commit is local to the
+routing follow-up branch; #74 remains at its independently green head.
+J6b selection/admission/accounting and J7 passive observer remain unfinished.

@@ -873,6 +873,7 @@ fn config_command(
                     "audit" => snapshot.provenance().audit(),
                     "jev_review" => snapshot.provenance().jev_review(),
                     "jev_routing" => snapshot.provenance().jev_routing(),
+                    "reasoning_effort" => snapshot.provenance().reasoning_effort(),
                     "max_output_tokens" => snapshot.provenance().max_output_tokens(),
                     _ => field
                         .strip_prefix("pack.")
@@ -968,6 +969,10 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
     );
     println!("jev_review: {}", snapshot.jev_review().as_str());
     println!("jev_routing: {}", snapshot.jev_routing());
+    println!(
+        "reasoning_effort: {}",
+        serde_json::to_string(&snapshot.reasoning_effort()).expect("effort is serializable")
+    );
     println!("max_output_tokens: {}", snapshot.max_output_tokens());
     println!("providers:");
     for (name, provider) in snapshot.providers() {

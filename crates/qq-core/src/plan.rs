@@ -115,6 +115,7 @@ pub struct AgentProfile {
     delegation: DelegationRoster,
     audit: AuditPolicy,
     checkpoint: Option<Arc<dyn crate::runtime::CheckpointReviewer>>,
+    reasoning_effort: Option<qq_provider::ReasoningEffort>,
     shell: ShellPolicy,
     network: crate::tools::network::NetworkPolicy,
     adapter_build: String,
@@ -128,6 +129,12 @@ pub struct AgentProfile {
 }
 
 impl AgentProfile {
+    #[must_use]
+    pub const fn with_reasoning_effort(mut self, effort: qq_provider::ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(effort);
+        self
+    }
+
     /// Starts a profile for a compiled provider. `workspace` must already be
     /// the canonical absolute path the run will execute in.
     #[must_use]
@@ -148,6 +155,7 @@ impl AgentProfile {
             delegation: DelegationRoster::default(),
             audit: AuditPolicy::default(),
             checkpoint: None,
+            reasoning_effort: None,
             shell: ShellPolicy::default(),
             network: crate::tools::network::NetworkPolicy::default(),
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
@@ -191,6 +199,7 @@ impl AgentProfile {
             delegation: runtime.delegation.as_ref().clone(),
             audit: runtime.audit,
             checkpoint: runtime.checkpoint.clone(),
+            reasoning_effort: runtime.reasoning_effort,
             shell: runtime.shell.as_ref().clone(),
             network: runtime.network.as_ref().clone(),
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
@@ -493,6 +502,7 @@ impl CompiledAgentPlan {
             delegation,
             audit,
             checkpoint,
+            reasoning_effort,
             shell,
             network,
             adapter_build,
@@ -521,6 +531,9 @@ impl CompiledAgentPlan {
         .with_audit(audit)
         .with_shell_policy(shell)
         .with_network_policy(network);
+        if let Some(effort) = reasoning_effort {
+            runtime = runtime.with_reasoning_effort(effort);
+        }
         if let Some(reviewer) = checkpoint {
             runtime = runtime.with_checkpoint_reviewer(reviewer);
         }
@@ -726,6 +739,7 @@ impl CompiledAgentPlan {
             delegation: runtime.delegation.as_ref().clone(),
             audit: AuditDescriptor::from(runtime.audit),
             checkpoint: runtime.checkpoint_identity.as_deref().map(str::to_owned),
+            reasoning_effort: runtime.reasoning_effort,
             skills: SkillIndexDescriptor {
                 digest: skills.digest(),
                 indexed: skills.len(),
@@ -1189,6 +1203,7 @@ mod tests {
                 role: qq_protocol::DelegationRole::Strong,
             },
             checkpoint: None,
+            reasoning_effort: None,
             skills: SkillIndexDescriptor {
                 digest: qq_protocol::ContentHash::from_bytes([3; 32]),
                 indexed: 2,
@@ -1235,7 +1250,7 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v7\0{\"version\":7,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v8\0{\"version\":8,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
@@ -1243,10 +1258,10 @@ mod tests {
         // from a different encoding.
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "ea106a0d3481c4ce55fbefd575fa8af0c10630db07a722f0b49b3fed7151e9ce"
+            "2264d2971b8abe079c82becef6798660534b72d39275daae2a47a77006eade7d"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v7\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v8\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }
@@ -1370,6 +1385,10 @@ mod tests {
             (
                 "checkpoint",
                 Box::new(|d| d.checkpoint = Some("typesafe/jev/enforce".to_owned())),
+            ),
+            (
+                "reasoning_effort",
+                Box::new(|d| d.reasoning_effort = Some(qq_provider::ReasoningEffort::High)),
             ),
             ("pack", Box::new(|d| d.pack = None)),
             (

@@ -177,9 +177,21 @@ pub struct RuntimeOverrides {
     max_output_tokens: Option<u32>,
     jev_review: Option<JevReviewMode>,
     jev_routing: Option<bool>,
+    reasoning_effort: Option<qq_provider::ReasoningEffort>,
 }
 
 impl RuntimeOverrides {
+    #[must_use]
+    pub const fn with_reasoning_effort(mut self, effort: qq_provider::ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(effort);
+        self
+    }
+
+    #[must_use]
+    pub const fn reasoning_effort(&self) -> Option<qq_provider::ReasoningEffort> {
+        self.reasoning_effort
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -246,6 +258,7 @@ impl RuntimeOverrides {
             && self.max_output_tokens.is_none()
             && self.jev_review.is_none()
             && self.jev_routing.is_none()
+            && self.reasoning_effort.is_none()
     }
 }
 
@@ -1355,6 +1368,7 @@ pub enum ConfigKey {
     Audit,
     JevReview,
     JevRouting,
+    ReasoningEffort,
     MaxOutputTokens,
     Providers,
     Provider(String),
@@ -1409,6 +1423,7 @@ pub struct ConfigProvenance {
     audit: Option<SourceIdentity>,
     jev_review: Option<SourceIdentity>,
     jev_routing: Option<SourceIdentity>,
+    reasoning_effort: Option<SourceIdentity>,
     max_output_tokens: Option<SourceIdentity>,
     providers: BTreeMap<String, SourceIdentity>,
     profiles: BTreeMap<String, SourceIdentity>,
@@ -1420,6 +1435,11 @@ pub struct ConfigProvenance {
 }
 
 impl ConfigProvenance {
+    #[must_use]
+    pub const fn reasoning_effort(&self) -> Option<&SourceIdentity> {
+        self.reasoning_effort.as_ref()
+    }
+
     /// The manifest that declared pack `id`.
     #[must_use]
     pub fn pack(&self, id: &str) -> Option<&SourceIdentity> {
@@ -1543,6 +1563,7 @@ pub struct ConfigSnapshot {
     audit: AuditConfig,
     jev_review: JevReviewMode,
     jev_routing: bool,
+    reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
     mcp: BTreeMap<String, McpServerConfig>,
@@ -1820,6 +1841,7 @@ pub struct AgentProfileConfig {
     approval_mode: Option<ProfileApprovalMode>,
     jev_review: Option<JevReviewMode>,
     jev_routing: Option<bool>,
+    reasoning_effort: Option<qq_provider::ReasoningEffort>,
     /// Set when this profile came from an agent pack rather than `profiles`.
     pack: Option<PackProfileRef>,
 }
@@ -1873,6 +1895,11 @@ impl PackProfileRef {
 
 impl AgentProfileConfig {
     #[must_use]
+    pub const fn reasoning_effort(&self) -> Option<qq_provider::ReasoningEffort> {
+        self.reasoning_effort
+    }
+
+    #[must_use]
     pub const fn jev_review(&self) -> Option<JevReviewMode> {
         self.jev_review
     }
@@ -1912,6 +1939,11 @@ impl AgentProfileConfig {
 }
 
 impl ConfigSnapshot {
+    #[must_use]
+    pub const fn reasoning_effort(&self) -> Option<qq_provider::ReasoningEffort> {
+        self.reasoning_effort
+    }
+
     #[must_use]
     pub const fn jev_review(&self) -> JevReviewMode {
         self.jev_review
