@@ -102,6 +102,16 @@ impl ModelRequest {
         self.reasoning_effort
     }
 
+    /// Returns a configuration error for an adapter that cannot encode effort.
+    /// This guard runs before transport or request-time credential authorization.
+    pub(crate) fn unsupported_reasoning_effort(&self, adapter: &str) -> Option<ProviderError> {
+        self.reasoning_effort.map(|effort| {
+            ProviderError::Configuration(format!(
+                "reasoning effort `{effort:?}` is unsupported by {adapter}"
+            ))
+        })
+    }
+
     /// A lower bound on the encoded request body, from the payload bytes the
     /// wire codecs embed verbatim plus fixed per-item framing. Used to size
     /// the body buffer once instead of doubling through a megabyte.
@@ -549,5 +559,16 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(spec, raw);
+    }
+
+    #[test]
+    fn unsupported_effort_is_a_configuration_error_before_transport() {
+        let request = ModelRequest::new("m", vec![Message::user("hello")], 16)
+            .with_reasoning_effort(ReasoningEffort::Xhigh);
+        assert!(matches!(
+            request.unsupported_reasoning_effort("Anthropic Messages"),
+            Some(ProviderError::Configuration(message))
+                if message.contains("unsupported by Anthropic Messages")
+        ));
     }
 }

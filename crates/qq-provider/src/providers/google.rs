@@ -125,6 +125,9 @@ impl GoogleGenerateContent {
 
 impl Provider for GoogleGenerateContent {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
+        if let Some(error) = request.unsupported_reasoning_effort("Google GenerateContent") {
+            return Box::pin(async_stream::stream! { yield Err(error); });
+        }
         let exchange = self.exchange.clone();
         let endpoint = self.request_endpoint(request.model()).map_err(Arc::new);
         let headers = self.headers.clone();

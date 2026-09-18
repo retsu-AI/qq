@@ -103,6 +103,9 @@ impl Mantle {
 
 impl Provider for Mantle {
     fn stream(&self, request: crate::ModelRequest) -> ProviderStream {
+        if let Some(error) = request.unsupported_reasoning_effort("Mantle") {
+            return Box::pin(async_stream::stream! { yield Err(error); });
+        }
         if let Some(provider) = self.inner.provider.get() {
             #[cfg(test)]
             self.inner

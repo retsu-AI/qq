@@ -88,6 +88,9 @@ impl Bedrock {
 
 impl Provider for Bedrock {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
+        if let Some(error) = request.unsupported_reasoning_effort("Bedrock Converse") {
+            return Box::pin(async_stream::stream! { yield Err(error); });
+        }
         let client = self.client.clone();
         let auth = self.auth.clone();
         let region = self.region.clone();
