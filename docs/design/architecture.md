@@ -801,7 +801,15 @@ deadline task or stream wrapper. Expiry requests cancellation and drops dispatch
 started blocking work and owned tools/children drain before typed settlement.
 Already-dispatched store operations remain awaited, so cleanup and terminal
 publication can finish after the execution deadline. Unconfirmed cleanup fails
-the runtime closed instead of releasing its session. A cost cap without configured
+the runtime closed instead of releasing its session. Runtime preparation reports
+a secret-free stage before each named construction phase. If its deadline
+expires, the terminal message retains the stage observed at expiry and states
+that provider work did not start. The loader still retains ownership until its
+blocking work returns: abandoning a started blocking credential read would only
+detach it and could leave an OS credential prompt active after false terminal
+settlement. The wall-clock bound therefore remains a cancellation request plus
+owned drain, not a promise that an uninterruptible platform operation ends at the
+deadline. A cost cap without configured
 pricing is rejected before provider work. When the countable budget is nearly
 spent the last permitted turn becomes a tool-free final status response; an
 elapsed wall clock or a provider turn that omits usage under a cost cap grants

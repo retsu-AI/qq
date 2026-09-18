@@ -667,10 +667,19 @@ async fn duration_cancels_automatic_compaction_and_settles_the_original_prompt()
 
 impl RuntimeLoader for HeldDeadlineLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        self.load_with_progress(request, RuntimeLoadProgress::default())
+    }
+
+    fn load_with_progress(
+        &self,
+        request: RuntimeLoadRequest,
+        progress: RuntimeLoadProgress,
+    ) -> RuntimeLoadFuture {
         let entered = Arc::clone(&self.entered);
         let release = Arc::clone(&self.release);
         let requests = Arc::clone(&self.requests);
         Box::pin(async move {
+            progress.set(RuntimeLoadStage::ResolvingCheckpointCredential);
             entered.notify_one();
             release.notified().await;
             CountingTextLoader {
@@ -746,12 +755,27 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
     );
     let observed = collect_until(&mut events, finished_for(run_id)).await;
     runtime.shutdown().await.unwrap();
+    let exhaustion = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::BudgetExhausted { exhaustion },
+                ..
+            } if exhaustion.limit == BudgetLimitKind::Duration => Some(exhaustion),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{observed:?}"));
     assert!(
-        observed.iter().any(|event| matches!(&event.event,
-            SessionEvent::RunFinished { outcome: RunOutcome::BudgetExhausted { exhaustion }, .. }
-                if exhaustion.limit == BudgetLimitKind::Duration
-        )),
-        "{observed:?}"
+        exhaustion
+            .message
+            .contains("resolving checkpoint reviewer credentials"),
+        "{}",
+        exhaustion.message
+    );
+    assert!(
+        exhaustion.message.contains("no model request was started"),
+        "{}",
+        exhaustion.message
     );
     assert_eq!(
         requests.load(Ordering::SeqCst),

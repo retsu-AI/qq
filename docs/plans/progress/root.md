@@ -80,6 +80,18 @@ workspace test suite passes with the host's `NO_COLOR` variable removed for
 the exact ANSI-color TUI assertions. The optional Python Harbor validation
 still requires the documented external `harbor==0.20.0` dependency.
 
+Runtime-load diagnostics follow-up: a real headless proof at source `47d3a95`
+persisted only `prompt_queued`, then exceeded its 180 second duration budget
+after 197342 ms with no `run_started`, model usage, tool, or checkpoint event.
+The deadline path intentionally retained loader ownership for the extra time.
+Runtime preparation now publishes a secret-free in-process stage to core; a
+duration outcome records the stage observed at expiry and that no model request
+started. A deterministic held-loader regression covers the checkpoint-reviewer
+credential stage while preserving the existing no-detached-loader invariant.
+This does not claim to cancel an OS credential read: safely interrupting that
+operation requires a cancellable credential-backend boundary, not dropping a
+started blocking task.
+
 Next free number: 0029. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests

@@ -518,12 +518,23 @@ impl RuntimeFactory {
     /// [`Self::plan_for`] under a configured agent profile. The request's
     /// overrides win over the profile, which wins over the top-level
     /// configuration.
-    pub fn plan_for_profile(
+    #[cfg(test)]
+    fn plan_for_profile(
         &self,
         request: &LoadRequest,
         profile: &AgentProfileId,
     ) -> Result<Arc<CompiledAgentPlan>, RuntimeBuildError> {
-        self.plan_with_lookup(request, profile)
+        self.plan_with_lookup_progress(request, profile, None)
+            .map(|(plan, _)| plan)
+    }
+
+    fn plan_for_profile_with_progress(
+        &self,
+        request: &LoadRequest,
+        profile: &AgentProfileId,
+        progress: &qq_core::RuntimeLoadProgress,
+    ) -> Result<Arc<CompiledAgentPlan>, RuntimeBuildError> {
+        self.plan_with_lookup_progress(request, profile, Some(progress))
             .map(|(plan, _)| plan)
     }
 
@@ -533,6 +544,15 @@ impl RuntimeFactory {
         &self,
         request: &LoadRequest,
         profile: &AgentProfileId,
+    ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), RuntimeBuildError> {
+        self.plan_with_lookup_progress(request, profile, None)
+    }
+
+    fn plan_with_lookup_progress(
+        &self,
+        request: &LoadRequest,
+        profile: &AgentProfileId,
+        progress: Option<&qq_core::RuntimeLoadProgress>,
     ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), RuntimeBuildError> {
         let workspace = qq_config::canonical_working_directory(request.cwd())?;
         let key = PlanKey {
@@ -547,7 +567,7 @@ impl RuntimeFactory {
             explicit_config_content: request.explicit_content().map(str::to_owned),
         };
         let lookup = self.inner.plans.load(&key, || {
-            self.compile_generation(request, profile, &workspace)
+            self.compile_generation(request, profile, &workspace, progress)
         });
         match lookup {
             Ok(result) => Ok(result),
@@ -572,12 +592,19 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile_id: &AgentProfileId,
         workspace: &Path,
+        progress: Option<&qq_core::RuntimeLoadProgress>,
     ) -> Result<CompiledGeneration, RuntimeBuildError> {
         // The credential index is fingerprinted before secrets are read so a
         // rotation racing this compile is observed on the next lookup.
+        if let Some(progress) = progress {
+            progress.set(qq_core::RuntimeLoadStage::ReadingCredentialMetadata);
+        }
         let credential_index =
             SourceFingerprint::capture(self.inner.credentials.paths().index_file());
         let epoch = self.inner.credentials.epoch()?;
+        if let Some(progress) = progress {
+            progress.set(qq_core::RuntimeLoadStage::LoadingConfiguration);
+        }
         let snapshot = self.load(request)?;
         let mut configuration_sources = vec![snapshot.sources().clone()];
         // A named profile supplies defaults beneath the request's explicit
@@ -660,6 +687,9 @@ impl RuntimeFactory {
             .providers()
             .get(provider_id)
             .ok_or_else(|| RuntimeBuildError::UnknownProvider(provider_id.to_owned()))?;
+        if let Some(progress) = progress {
+            progress.set(qq_core::RuntimeLoadStage::CompilingProvider);
+        }
         let (recipe, descriptor) =
             self.prepare_provider(provider_id, snapshot.model().model(), provider_config)?;
         let provider = self.inner.providers.compile(recipe)?;
@@ -687,6 +717,9 @@ impl RuntimeFactory {
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone());
+        if let Some(progress) = progress {
+            progress.set(qq_core::RuntimeLoadStage::ResolvingCheckpointCredential);
+        }
         let jev_enforced = std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref() == Some("enforce")
             || self.inner.credentials.is_registered("typesafe-jev")?;
         if jev_enforced {
@@ -726,6 +759,9 @@ impl RuntimeFactory {
             provider: provider_config.access().cloned(),
             mcp: None,
         };
+        if let Some(progress) = progress {
+            progress.set(qq_core::RuntimeLoadStage::LoadingTools);
+        }
         if let Some(wired) = self.inner.mcp.registry_for_snapshot(
             &self.inner.credentials,
             epoch,
@@ -739,6 +775,9 @@ impl RuntimeFactory {
             profile = profile
                 .with_host(HostSnapshot::capture_blocking(wired.registry))
                 .with_mcp_servers(wired.servers);
+        }
+        if let Some(progress) = progress {
+            progress.set(qq_core::RuntimeLoadStage::CompilingPlan);
         }
         let plan = CompiledAgentPlan::compile_blocking(profile)?;
         let mut sources = Vec::with_capacity(plan.instruction_sources().len() + 1);
@@ -1202,9 +1241,19 @@ impl RuntimeLoader for RuntimeFactory {
     }
 
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        self.load_with_progress(request, qq_core::RuntimeLoadProgress::default())
+    }
+
+    fn load_with_progress(
+        &self,
+        request: RuntimeLoadRequest,
+        progress: qq_core::RuntimeLoadProgress,
+    ) -> RuntimeLoadFuture {
         let factory = self.clone();
         Box::pin(async move {
+            let completed = progress.clone();
             let build = tokio::task::spawn_blocking(move || {
+                progress.set(qq_core::RuntimeLoadStage::CanonicalizingWorkspace);
                 let requested_workspace = PathBuf::from(&request.workspace);
                 let workspace = std::fs::canonicalize(&requested_workspace).map_err(|_| {
                     ConfigError::InvalidWorkingDirectory {
@@ -1217,6 +1266,7 @@ impl RuntimeLoader for RuntimeFactory {
                     }
                     .into());
                 }
+                progress.set(qq_core::RuntimeLoadStage::LoadingConfiguration);
                 let mut load =
                     LoadRequest::from_process_env(&workspace, request.model.max_output_tokens)?;
                 let mut overrides = load.overrides().clone();
@@ -1227,10 +1277,12 @@ impl RuntimeLoader for RuntimeFactory {
                     overrides = overrides.with_organization(organization);
                 }
                 load = load.with_overrides(overrides);
-                let plan = factory.plan_for_profile(&load, &request.profile)?;
+                let plan =
+                    factory.plan_for_profile_with_progress(&load, &request.profile, &progress)?;
                 Ok::<_, RuntimeBuildError>(LoadedRuntime { plan })
             })
             .await;
+            completed.set(qq_core::RuntimeLoadStage::Complete);
             match build {
                 Ok(Ok(runtime)) => Ok(runtime),
                 Ok(Err(error)) => Err(RuntimeLoadError {
@@ -5232,7 +5284,8 @@ mod tests {
             .inner
             .plans
             .load::<RuntimeBuildError, _>(&key, || {
-                let generation = factory.compile_generation(&request, &profile, &workspace)?;
+                let generation =
+                    factory.compile_generation(&request, &profile, &workspace, None)?;
                 fs::write(&config, document(1024)).unwrap();
                 Ok(generation)
             })

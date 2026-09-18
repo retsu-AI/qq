@@ -495,18 +495,27 @@ pub(super) async fn execute_run(
         finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await;
         return;
     }
-    let mut load = inner.loader.load(RuntimeLoadRequest {
-        workspace: claimed.workspace.clone(),
-        model: claimed.model.clone(),
-        profile: claimed.profile.clone(),
-    });
+    let load_progress = RuntimeLoadProgress::default();
+    let mut load = inner.loader.load_with_progress(
+        RuntimeLoadRequest {
+            workspace: claimed.workspace.clone(),
+            model: claimed.model.clone(),
+            profile: claimed.profile.clone(),
+        },
+        load_progress.clone(),
+    );
     let loaded = tokio::select! {
         biased;
         () = RunDeadline::wait(deadline) => {
+            let unfinished_stage = load_progress.stage();
             // The loader owns construction until it returns, even after expiry.
             let _ = load.await;
+            let mut exhaustion = deadline.expect("only a finite deadline wakes").exhaustion();
+            exhaustion.message.push_str("; runtime preparation was still ");
+            exhaustion.message.push_str(unfinished_stage.description());
+            exhaustion.message.push_str(" when the budget expired; no model request was started");
             finish_reserved_run(&inner, &claimed, RunOutcome::BudgetExhausted {
-                exhaustion: Box::new(deadline.expect("only a finite deadline wakes").exhaustion()),
+                exhaustion: Box::new(exhaustion),
             }).await;
             return;
         }
