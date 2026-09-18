@@ -6,7 +6,7 @@ Owner: this stacked implementation session. Base `dc59d14` / draft #72.
 | --- | --- | --- | --- | --- |
 | J1–J5 + visible J7 | Optional review, correctness and receipts | In review | [#74](https://github.com/retsu-AI/qq/pull/74), stacked on #72 | Local and hosted checks green; quiet-host tails open |
 | J6a | Explicit model effort | In review | [#76](https://github.com/retsu-AI/qq/pull/76), stacked on #74 | Local checks/reviews green; performance gate unresolved; hosted CI 35394821612 successful |
-| J6b | Optional routing | In progress | `feat/eng-791-jev-routing-accounting` | Adapter, inherited activation, direct ask and pin provenance implemented locally; verification in progress |
+| J6b | Optional routing | In review | [#77](https://github.com/retsu-AI/qq/pull/77), stacked on #76 | Local checks/reviews green; incremental median within budget; hosted and full-stack qualification pending |
 | Passive J7 | Advisory observer | Planned | Follow-up slice | Independent acceptance; not shipping in #74 |
 | J8–J9 | Qualification and delivery | In progress | #74 | Live evaluation and remaining slices open |
 
@@ -276,3 +276,11 @@ I/O some avg10 sampled 18.03–22.40%. Raw evidence:
 `target/qq-perf/jev-routing-2026-09-18/paired.json` (untracked).
 This increment is within the 5% median budget. The earlier #76 gate and
 quiet-host full-stack qualification remain unresolved; no Jev speed claim.
+
+### J6b stacked delivery — 2026-09-18
+
+Pushed b7a537a and opened draft [#77](https://github.com/retsu-AI/qq/pull/77),
+base `feat/eng-791-jev-routing` (#76). GitHub connector creation still returned
+403; authenticated CLI created the authorized draft. No merge or paid inference.
+Remaining full-goal work: passive advisory observation, hosted checks and
+full-stack performance/live qualification. Linear reauthentication remains open.
