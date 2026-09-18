@@ -57,6 +57,11 @@ The focused final run passed 13 QQ-core checkpoint tests, including child-final
 checkpoint before child settlement and parent spawn-result delivery, plus the
 direct stderr notice regression and all qq-protocol unit/headless/wire fixtures.
 Raw logs are retained under `target/qq-checkpoint-tests/`.
+ENG-791 extends that settlement invariant to deadlines, runtime/provider
+failures, premature stream end, and defensive nominal completion. Focused
+deadline and runtime-failure regressions prove durable `tool_call_finished`,
+then local `unavailable` checkpoint, then the true terminal outcome; cancellation
+remains covered by its existing ordering regression.
 Final candidate checks also passed repository formatting, `cargo check -p
 qq-core -p qq-protocol -p qq`, and `cargo build -p qq`. The resulting debug
 binary SHA-256 is

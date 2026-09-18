@@ -61,6 +61,62 @@ impl DeadlineSession {
 }
 
 #[tokio::test]
+async fn duration_after_durable_tool_result_records_unavailable_checkpoint_before_settlement() {
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let mut harness = DeadlineSession::open(
+        Arc::new(BlockingCheckpointLoader { requests }),
+        ApprovalMode::Auto,
+    )
+    .await;
+    std::fs::write(harness._directory.path().join("note.txt"), "tool result\n").unwrap();
+    let run_id = harness.submit("inspect the note", 500).await;
+
+    let mut observed = collect_until(&mut harness.events, |event| {
+        matches!(event, SessionEvent::ToolCallFinished { .. })
+    })
+    .await;
+    observed.extend(collect_until(&mut harness.events, finished_for(run_id)).await);
+
+    let tool_finished = observed
+        .iter()
+        .position(|event| matches!(event.event, SessionEvent::ToolCallFinished { .. }))
+        .expect("tool result is durable");
+    let checkpoint = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                SessionEvent::CheckpointReviewed {
+                    outcome: qq_protocol::CheckpointOutcome::Unavailable,
+                    feedback,
+                    ..
+                } if feedback.contains("review was not performed")
+                    && feedback.contains("budget")
+            )
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "budgeted unreviewed result has durable checkpoint status; observed={observed:#?}"
+            )
+        });
+    let terminal = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                event.event,
+                SessionEvent::RunFinished {
+                    run_id: finished,
+                    outcome: RunOutcome::BudgetExhausted { ref exhaustion },
+                    ..
+                } if finished == run_id && exhaustion.limit == BudgetLimitKind::Duration
+            )
+        })
+        .expect("duration budget settles the run");
+    assert!(tool_finished < checkpoint && checkpoint < terminal);
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn duration_withdraws_pending_approval_without_executing_the_tool() {
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let mut harness = DeadlineSession::open(

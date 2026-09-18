@@ -49,6 +49,12 @@ Child execution uses that same compiled profile: its supported final checkpoint
 is durable before the child settles, and the parent receives the
 `spawn_agent` result only after that settlement.
 
+The same durable settlement rule applies when a deadline, runtime failure,
+provider failure, or premature stream end cuts off a pending review. QQ records
+the local `unavailable` checkpoint before `run_finished`; it preserves the real
+terminal outcome and never represents the local marker as a completed remote
+assessment. A nominal completion with any such pending result fails closed.
+
 This supersedes ADR-0003's narrower statement that synchronous decisions are
 limited to approval, validation, and budgets. Persist-before-publish remains in
 force: checkpoint status is committed before clients observe it. JEV is an
