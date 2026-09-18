@@ -56,6 +56,10 @@ name = "store_output_batch"
 harness = false
 
 [[bench]]
+name = "context_assembly"
+harness = false
+
+[[bench]]
 name = "child_admission"
 harness = false
 

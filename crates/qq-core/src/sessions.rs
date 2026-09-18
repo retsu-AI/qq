@@ -41,8 +41,8 @@ use crate::{
     SpawnRequest, SubagentSpawner, ToolGate, ToolGateFuture, approval,
     catalog::EffectClass,
     runtime::{
-        HistoryMatch, HistorySearchFuture, HistorySearcher, SpillHandle, SpillReadFuture,
-        SpillReader, excerpt_around,
+        HISTORY_SCAN_BUDGET_BYTES, HistoryMatch, HistorySearch, HistorySearchFuture,
+        HistorySearcher, SpillHandle, SpillReadFuture, SpillReader, excerpt_around,
     },
     workspace::{FileState, FileStateUpdate},
 };
@@ -82,13 +82,190 @@ pub use runtime::{
 pub use snapshots::run_cost;
 pub use store::STORE_SCHEMA_VERSION;
 
+/// Entry points for the `context_assembly` bench. Not a public API.
+#[doc(hidden)]
+pub mod bench_support {
+    use super::*;
+
+    /// Opens a store at `path` holding one session whose transcript has
+    /// `archived_runs` completed prompt runs behind a compaction marker and
+    /// `retained_runs` after it. Every run has `turns` model turns, each with
+    /// one tool call whose result is `result_bytes` long. Returns the
+    /// connection and the session id.
+    #[must_use]
+    pub fn seed_compacted_session(
+        path: &Path,
+        archived_runs: usize,
+        retained_runs: usize,
+        turns: u32,
+        result_bytes: usize,
+    ) -> (Connection, SessionId) {
+        let (mut connection, _) = open_database(&path.to_path_buf()).expect("bench store opens");
+        let workspace_id = WorkspaceId::from_bytes([1; 16]);
+        let session_id = SessionId::from_bytes([2; 16]);
+        let transaction = connection.transaction().expect("bench transaction");
+        transaction
+            .execute(
+                "INSERT INTO workspaces(id, path, next_sequence) VALUES (?1, '/w', 0)",
+                [workspace_id.to_string()],
+            )
+            .expect("workspace row");
+        transaction
+            .execute(
+                "INSERT INTO sessions(id, workspace_id, title, status, model,
+                                      created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 'bench', 'idle', 'bench/model', 1, 2)",
+                params![session_id.to_string(), workspace_id.to_string()],
+            )
+            .expect("session row");
+        let result = "r".repeat(result_bytes);
+        let total = archived_runs + retained_runs;
+        let mut ordinal: u64 = 0;
+        let mut cutoff_ordinal = 0;
+        for index in 0..total {
+            let run_id = RunId::generate().expect("run id");
+            let user_id = MessageId::generate().expect("message id");
+            let assistant_id = MessageId::generate().expect("message id");
+            ordinal += 1;
+            transaction
+                .execute(
+                    "INSERT INTO runs(id, session_id, command_id, user_message_id,
+                                      assistant_message_id, status, outcome_json,
+                                      created_at_ms, started_at_ms, finished_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'completed', ?6, 1, 1, 2)",
+                    params![
+                        run_id.to_string(),
+                        session_id.to_string(),
+                        CommandId::generate().expect("command id").to_string(),
+                        user_id.to_string(),
+                        assistant_id.to_string(),
+                        serde_json::to_string(&RunOutcome::Completed).expect("outcome"),
+                    ],
+                )
+                .expect("run row");
+            transaction
+                .execute(
+                    "INSERT INTO messages(id, session_id, run_id, ordinal, role, state,
+                                          output, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, 'user', 'complete', ?5, 1)",
+                    params![
+                        user_id.to_string(),
+                        session_id.to_string(),
+                        run_id.to_string(),
+                        ordinal,
+                        format!("prompt {index} needle-{index}"),
+                    ],
+                )
+                .expect("user message row");
+            ordinal += 1;
+            transaction
+                .execute(
+                    "INSERT INTO messages(id, session_id, run_id, ordinal, role, state,
+                                          output, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, 'assistant', 'complete', '', 1)",
+                    params![
+                        assistant_id.to_string(),
+                        session_id.to_string(),
+                        run_id.to_string(),
+                        ordinal,
+                    ],
+                )
+                .expect("assistant message row");
+            for turn in 1..=turns {
+                let call_id = format!("call-{index}-{turn}");
+                let content = vec![
+                    PersistedContentBlock::Text {
+                        text: format!("turn {turn} of run {index}"),
+                    },
+                    PersistedContentBlock::ToolCall {
+                        id: call_id.clone(),
+                        name: "read_file".to_owned(),
+                        arguments: serde_json::json!({ "path": format!("f{turn}.rs") }),
+                    },
+                ];
+                transaction
+                    .execute(
+                        "INSERT INTO model_turns(run_id, turn_ordinal, assistant_content_json,
+                                                 completed_at_ms, truncated)
+                         VALUES (?1, ?2, ?3, 1, 0)",
+                        params![
+                            run_id.to_string(),
+                            turn,
+                            serde_json::to_string(&content).expect("turn json"),
+                        ],
+                    )
+                    .expect("model turn row");
+                transaction
+                    .execute(
+                        "INSERT INTO tool_calls(id, run_id, turn_ordinal, call_ordinal,
+                                                provider_call_id, name, arguments_json, state,
+                                                result, requested_at_ms, effect)
+                         VALUES (?1, ?2, ?3, 1, ?4, 'read_file', '{}', 'completed', ?5, 1,
+                                 'read_only')",
+                        params![
+                            ToolCallId::generate().expect("tool call id").to_string(),
+                            run_id.to_string(),
+                            turn,
+                            call_id,
+                            result,
+                        ],
+                    )
+                    .expect("tool call row");
+            }
+            if index + 1 == archived_runs {
+                cutoff_ordinal = ordinal;
+            }
+        }
+        if archived_runs > 0 {
+            transaction
+                .execute(
+                    "INSERT INTO session_compactions(session_id, run_id, summary, cutoff_ordinal,
+                                                     before_bytes, after_bytes, created_at_ms)
+                     VALUES (?1, ?2, 'summary of the archive', ?3, 1, 1, 1)",
+                    params![
+                        session_id.to_string(),
+                        RunId::generate().expect("run id").to_string(),
+                        cutoff_ordinal,
+                    ],
+                )
+                .expect("compaction row");
+        }
+        transaction.commit().expect("bench seed commits");
+        (connection, session_id)
+    }
+
+    /// Assembles the session's model context as the next run would.
+    #[must_use]
+    pub fn assemble(connection: &Connection, session_id: SessionId) -> usize {
+        load_model_context(connection, session_id, u64::MAX)
+            .expect("assembly")
+            .len()
+    }
+
+    /// Searches the session's full history for `query`; returns the match
+    /// count and whether the scan budget truncated the walk.
+    #[must_use]
+    pub fn search(connection: &Connection, session_id: SessionId, query: &str) -> (usize, bool) {
+        let search = search_session_history(
+            connection,
+            session_id,
+            RunId::from_bytes([9; 16]),
+            query,
+            crate::runtime::MAX_HISTORY_MATCHES,
+        )
+        .expect("search");
+        (search.matches.len(), search.truncated)
+    }
+}
+
 use approvals::ConcludedApproval;
 #[cfg(test)]
 use execution::RunAccountingAccumulator;
 use execution::{ModelTurnCommit, RunAccounting, TeardownComplete, add_usage};
 use store::Store;
+use store::open_database;
 #[cfg(test)]
-use store::{Priority, has_column, open_database};
+use store::{Priority, has_column};
 #[cfg(test)]
 use subagents::spawn_child_run;
 

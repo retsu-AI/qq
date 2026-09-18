@@ -10,6 +10,11 @@ pub(crate) const SEARCH_HISTORY_TOOL: &str = "search_history";
 /// Excerpts returned per query, and the bytes of transcript around each hit.
 pub(crate) const MAX_HISTORY_MATCHES: usize = 20;
 pub(crate) const HISTORY_EXCERPT_BYTES: usize = 240;
+/// Transcript bytes one search may visit. A result-count cap alone lets a
+/// rare or absent term walk the whole archive on the store's control lane;
+/// this bounds the work instead. Newest history is searched first, so a
+/// search that hits the budget has already covered the most recent spans.
+pub(crate) const HISTORY_SCAN_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,8 +37,18 @@ pub(crate) struct HistoryMatch {
     pub(crate) excerpt: String,
 }
 
+/// What one search found, and whether it read the whole transcript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HistorySearch {
+    /// In transcript order.
+    pub(crate) matches: Vec<HistoryMatch>,
+    /// The scan budget ended the walk before the oldest history; earlier
+    /// spans were not examined.
+    pub(crate) truncated: bool,
+}
+
 pub(crate) type HistorySearchFuture =
-    Pin<Box<dyn Future<Output = Result<Vec<HistoryMatch>, String>> + Send + 'static>>;
+    Pin<Box<dyn Future<Output = Result<HistorySearch, String>> + Send + 'static>>;
 
 /// Searches the session's complete persisted transcript — every user prompt,
 /// assistant turn, and tool result, including spans compaction has replaced
@@ -71,19 +86,32 @@ pub(crate) fn search_history_spec() -> ToolSpec {
     )
 }
 
-/// Renders matches as one tool result. Bounded by the caller's limit and the
-/// ordinary tool-result truncation.
-pub(crate) fn render_history_matches(query: &str, matches: &[HistoryMatch]) -> String {
-    if matches.is_empty() {
-        return format!("No history matches for {query:?}.");
+/// Renders a search as one tool result. Bounded by the caller's limit and the
+/// ordinary tool-result truncation. A truncated walk says so, so the model
+/// can narrow the query rather than conclude the fact was never recorded.
+pub(crate) fn render_history_matches(query: &str, search: &HistorySearch) -> String {
+    let truncation_note = "\n[search stopped at its scan budget before reaching the oldest \
+                           history; narrow the query to look further back]\n";
+    if search.matches.is_empty() {
+        let mut output = format!("No history matches for {query:?}.");
+        if search.truncated {
+            output.push_str(truncation_note);
+        }
+        return output;
     }
-    let mut output = format!("{} history match(es) for {query:?}:\n", matches.len());
-    for hit in matches {
+    let mut output = format!(
+        "{} history match(es) for {query:?}:\n",
+        search.matches.len()
+    );
+    for hit in &search.matches {
         output.push_str("\n[");
         output.push_str(&hit.citation);
         output.push_str("]\n");
         output.push_str(&hit.excerpt);
         output.push('\n');
+    }
+    if search.truncated {
+        output.push_str(truncation_note);
     }
     output
 }
@@ -133,19 +161,32 @@ mod tests {
     }
 
     #[test]
-    fn rendering_cites_every_match() {
+    fn rendering_cites_every_match_and_reports_truncation() {
+        let empty = HistorySearch {
+            matches: Vec::new(),
+            truncated: false,
+        };
         assert_eq!(
-            render_history_matches("x", &[]),
+            render_history_matches("x", &empty),
             "No history matches for \"x\"."
         );
-        let rendered = render_history_matches(
-            "x",
-            &[HistoryMatch {
+        let one = HistorySearch {
+            matches: vec![HistoryMatch {
                 citation: "user message #3".to_owned(),
                 excerpt: "an x".to_owned(),
             }],
-        );
+            truncated: false,
+        };
+        let rendered = render_history_matches("x", &one);
         assert!(rendered.starts_with("1 history match(es) for \"x\":"));
         assert!(rendered.contains("[user message #3]\nan x"));
+        assert!(!rendered.contains("scan budget"));
+        let truncated = HistorySearch {
+            matches: Vec::new(),
+            truncated: true,
+        };
+        let rendered = render_history_matches("x", &truncated);
+        assert!(rendered.starts_with("No history matches for \"x\"."));
+        assert!(rendered.contains("scan budget"), "{rendered}");
     }
 }

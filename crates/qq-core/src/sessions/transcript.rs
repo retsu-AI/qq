@@ -107,21 +107,26 @@ pub(super) fn store_message_attachments(
     Ok(())
 }
 
-/// Every stored attachment of the session's prompts, keyed by message id and
-/// in prompt order, with the blob bytes joined in. Sessions without
-/// attachments pay one indexed lookup that returns nothing.
-fn load_session_attachments(
+/// Every stored attachment of the retained prompts (those in the ordinal
+/// window), keyed by message id and in prompt order, with the blob bytes
+/// joined in. Sessions without attachments pay one indexed lookup that
+/// returns nothing; archived prompts behind the cutoff are never read.
+fn load_retained_attachments(
     transaction: &Connection,
     session: &str,
+    through_ordinal: u64,
+    cutoff_ordinal: u64,
 ) -> Result<HashMap<String, Vec<StoredAttachment>>, SessionRuntimeError> {
     let mut statement = transaction.prepare_cached(
         "SELECT a.message_id, a.path, a.window_start, a.window_end, a.window_total, b.content
-         FROM message_attachments a
+         FROM messages m
+         JOIN message_attachments a ON a.message_id = m.id
          JOIN attachment_blobs b ON b.session_id = a.session_id AND b.blob_key = a.blob_key
-         WHERE a.session_id = ?1
+         WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
+           AND m.role = 'user' AND m.steering = 0
          ORDER BY a.message_id, a.ordinal",
     )?;
-    let rows = statement.query_map([session], |row| {
+    let rows = statement.query_map(params![session, through_ordinal, cutoff_ordinal], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -313,17 +318,27 @@ pub(super) fn load_model_context_with_rewrite_status(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    let mut attachments = load_session_attachments(transaction, &session)?;
+    let mut attachments =
+        load_retained_attachments(transaction, &session, through_ordinal, cutoff_ordinal)?;
 
-    // Every committed turn for the session's runs, grouped by run.
+    // Every committed turn of a retained run, grouped by run. The retained
+    // runs are exactly those whose prompt the query above selected: the
+    // same session, ordinal window, role, and state filter, expressed as a
+    // join so the archive behind the compaction cutoff is never read. Old
+    // history therefore costs nothing at assembly; recall goes through
+    // `search_history`.
     let mut turns: HashMap<String, Vec<(u32, String, bool)>> = HashMap::new();
     let mut statement = transaction.prepare_cached(
         "SELECT t.run_id, t.turn_ordinal, t.assistant_content_json, t.truncated
-             FROM model_turns t JOIN runs r ON r.id = t.run_id
-             WHERE r.session_id = ?1
+             FROM messages m
+             JOIN runs r ON r.id = m.run_id
+             JOIN model_turns t ON t.run_id = r.id
+             WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
+               AND m.role = 'user' AND m.steering = 0
+               AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
              ORDER BY t.run_id, t.turn_ordinal",
     )?;
-    let rows = statement.query_map([&session], |row| {
+    let rows = statement.query_map(params![session, through_ordinal, cutoff_ordinal], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, u32>(1)?,
@@ -346,10 +361,15 @@ pub(super) fn load_model_context_with_rewrite_status(
     let mut results: HashMap<String, RecordedTurnResults> = HashMap::new();
     let mut statement = transaction.prepare_cached(
         "SELECT c.run_id, c.provider_call_id, c.result, c.is_error, c.effect, c.turn_ordinal
-             FROM tool_calls c JOIN runs r ON r.id = c.run_id
-             WHERE r.session_id = ?1 AND c.result IS NOT NULL",
+             FROM messages m
+             JOIN runs r ON r.id = m.run_id
+             JOIN tool_calls c ON c.run_id = r.id
+             WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
+               AND m.role = 'user' AND m.steering = 0
+               AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
+               AND c.result IS NOT NULL",
     )?;
-    let rows = statement.query_map([&session], |row| {
+    let rows = statement.query_map(params![session, through_ordinal, cutoff_ordinal], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -382,11 +402,16 @@ pub(super) fn load_model_context_with_rewrite_status(
     // the ordinal of the turn whose request first included it.
     let mut steering: HashMap<String, std::collections::VecDeque<(u32, String)>> = HashMap::new();
     let mut statement = transaction.prepare_cached(
-        "SELECT run_id, turn_ordinal, output FROM messages
-             WHERE session_id = ?1 AND steering = 1 AND state = 'complete'
-             ORDER BY run_id, turn_ordinal, ordinal",
+        "SELECT s.run_id, s.turn_ordinal, s.output
+             FROM messages m
+             JOIN messages s ON s.run_id = m.run_id
+             WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
+               AND m.role = 'user' AND m.steering = 0
+               AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
+               AND s.steering = 1 AND s.state = 'complete'
+             ORDER BY s.run_id, s.turn_ordinal, s.ordinal",
     )?;
-    let rows = statement.query_map([&session], |row| {
+    let rows = statement.query_map(params![session, through_ordinal, cutoff_ordinal], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, u32>(1)?,
@@ -691,27 +716,35 @@ pub(super) fn context_bytes(messages: &[Message]) -> usize {
 }
 
 /// Searches the session's complete durable transcript for a case-insensitive
-/// literal, in transcript order: each user prompt, then that run's assistant
-/// turns and tool results. Compaction markers and assembly-time pruning are
-/// deliberately ignored — this is the recall path that makes aggressive
-/// compaction safe. Each match yields one bounded excerpt with a citation
-/// naming its durable coordinates; at most `limit` matches are returned. The
-/// calling run is excluded: its own `search_history` arguments would
+/// literal: each user prompt, then that run's assistant turns and tool
+/// results. Compaction markers and assembly-time pruning are deliberately
+/// ignored — this is the recall path that makes aggressive compaction safe.
+/// Each match yields one bounded excerpt with a citation naming its durable
+/// coordinates; at most `limit` matches are returned, in transcript order.
+/// The calling run is excluded: its own `search_history` arguments would
 /// otherwise match every query.
+///
+/// The walk runs newest prompt first and stops once it has examined
+/// [`HISTORY_SCAN_BUDGET_BYTES`] of transcript, so a rare or absent term
+/// costs a bounded amount of store-worker time however long the session is;
+/// the result says when the oldest history went unexamined. Every statement
+/// is prepared once per search, not once per run.
 pub(super) fn search_session_history(
     transaction: &Connection,
     session_id: SessionId,
     calling_run: RunId,
     query: &str,
     limit: usize,
-) -> Result<Vec<HistoryMatch>, SessionRuntimeError> {
+) -> Result<HistorySearch, SessionRuntimeError> {
     let needle = query.to_lowercase();
-    let mut matches = Vec::new();
-    let mut statement = transaction.prepare(
+    // Newest first, so a budget-truncated search has covered the recent
+    // spans a follow-up most often needs. Matches are reversed at the end
+    // to keep transcript order for the reader.
+    let mut statement = transaction.prepare_cached(
         "SELECT id, ordinal, run_id FROM messages
-             WHERE session_id = ?1 AND role = 'user' AND run_id != ?2
+             WHERE session_id = ?1 AND role = 'user' AND run_id != ?2 AND steering = 0
                AND state IN ('complete', 'cancelled', 'failed', 'interrupted')
-             ORDER BY ordinal",
+             ORDER BY ordinal DESC",
     )?;
     let prompts = statement
         .query_map(
@@ -726,67 +759,49 @@ pub(super) fn search_session_history(
         )?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
+    let mut turns_statement = transaction.prepare_cached(
+        "SELECT turn_ordinal, assistant_content_json FROM model_turns
+             WHERE run_id = ?1 ORDER BY turn_ordinal DESC",
+    )?;
+    let mut results_statement = transaction.prepare_cached(
+        "SELECT name, call_ordinal, result FROM tool_calls
+             WHERE run_id = ?1 AND turn_ordinal = ?2 AND result IS NOT NULL
+             ORDER BY call_ordinal DESC",
+    )?;
 
-    let record = |matches: &mut Vec<HistoryMatch>, citation: String, text: &str| {
-        if matches.len() >= limit {
-            return;
-        }
-        let lowered = text.to_lowercase();
-        if let Some(excerpt) = excerpt_around(text, &lowered, &needle) {
-            matches.push(HistoryMatch { citation, excerpt });
-        }
-    };
-
-    for (message_id, ordinal, run_id) in prompts {
-        if matches.len() >= limit {
+    // Per run, hits are collected newest-turn-first and reversed before they
+    // join the overall list, so each run's span reads in transcript order
+    // once the whole list is reversed.
+    let mut newest_first: Vec<HistoryMatch> = Vec::new();
+    let mut scanned: usize = 0;
+    let mut truncated = false;
+    'prompts: for (message_id, ordinal, run_id) in prompts {
+        if newest_first.len() >= limit {
             break;
         }
-        let prompt = load_message(transaction, parse_id(&message_id)?)?;
-        record(
-            &mut matches,
-            format!("user message #{ordinal}"),
-            &prompt.output,
-        );
-        let run_id: RunId = parse_id(&run_id)?;
-        let mut statement = transaction.prepare(
-            "SELECT turn_ordinal, assistant_content_json FROM model_turns
-                 WHERE run_id = ?1 ORDER BY turn_ordinal",
-        )?;
-        let turns = statement
-            .query_map([run_id.to_string()], |row| {
+        if scanned >= HISTORY_SCAN_BUDGET_BYTES {
+            truncated = true;
+            break;
+        }
+        let mut run_hits: Vec<HistoryMatch> = Vec::new();
+        let record = |scanned: &mut usize,
+                      run_hits: &mut Vec<HistoryMatch>,
+                      citation: String,
+                      text: &str| {
+            *scanned = scanned.saturating_add(text.len());
+            let lowered = text.to_lowercase();
+            if let Some(excerpt) = excerpt_around(text, &lowered, &needle) {
+                run_hits.push(HistoryMatch { citation, excerpt });
+            }
+        };
+        let turns = turns_statement
+            .query_map([&run_id], |row| {
                 Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        drop(statement);
         for (turn_ordinal, content_json) in turns {
-            if matches.len() >= limit {
-                break;
-            }
-            let content = serde_json::from_str::<Vec<PersistedContentBlock>>(&content_json)?;
-            for block in content {
-                match ContentBlock::from(block) {
-                    ContentBlock::Text { text } => record(
-                        &mut matches,
-                        format!("assistant, user message #{ordinal} turn {turn_ordinal}"),
-                        &text,
-                    ),
-                    ContentBlock::ToolCall {
-                        name, arguments, ..
-                    } => record(
-                        &mut matches,
-                        format!("tool call {name}, user message #{ordinal} turn {turn_ordinal}"),
-                        &arguments.to_string(),
-                    ),
-                    ContentBlock::ToolResult { .. } => {}
-                }
-            }
-            let mut statement = transaction.prepare(
-                "SELECT name, call_ordinal, result FROM tool_calls
-                     WHERE run_id = ?1 AND turn_ordinal = ?2 AND result IS NOT NULL
-                     ORDER BY call_ordinal",
-            )?;
-            let results = statement
-                .query_map(params![run_id.to_string(), turn_ordinal], |row| {
+            let results = results_statement
+                .query_map(params![&run_id, turn_ordinal], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, u16>(1)?,
@@ -794,19 +809,72 @@ pub(super) fn search_session_history(
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
-            drop(statement);
             for (name, call_ordinal, result) in results {
                 record(
-                    &mut matches,
+                    &mut scanned,
+                    &mut run_hits,
                     format!(
                         "{name} result, user message #{ordinal} turn {turn_ordinal} call {call_ordinal}"
                     ),
                     &result,
                 );
             }
+            let content = serde_json::from_str::<Vec<PersistedContentBlock>>(&content_json)?;
+            for block in content.into_iter().rev() {
+                match ContentBlock::from(block) {
+                    ContentBlock::Text { text } => record(
+                        &mut scanned,
+                        &mut run_hits,
+                        format!("assistant, user message #{ordinal} turn {turn_ordinal}"),
+                        &text,
+                    ),
+                    ContentBlock::ToolCall {
+                        name, arguments, ..
+                    } => record(
+                        &mut scanned,
+                        &mut run_hits,
+                        format!("tool call {name}, user message #{ordinal} turn {turn_ordinal}"),
+                        &arguments.to_string(),
+                    ),
+                    ContentBlock::ToolResult { .. } => {}
+                }
+            }
+            if scanned >= HISTORY_SCAN_BUDGET_BYTES {
+                // Finish this prompt's own text so its citation set is
+                // whole, then stop.
+                let prompt = load_message(transaction, parse_id(&message_id)?)?;
+                record(
+                    &mut scanned,
+                    &mut run_hits,
+                    format!("user message #{ordinal}"),
+                    &prompt.output,
+                );
+                run_hits.reverse();
+                newest_first.extend(run_hits);
+                truncated = true;
+                break 'prompts;
+            }
         }
+        let prompt = load_message(transaction, parse_id(&message_id)?)?;
+        record(
+            &mut scanned,
+            &mut run_hits,
+            format!("user message #{ordinal}"),
+            &prompt.output,
+        );
+        run_hits.reverse();
+        newest_first.extend(run_hits);
     }
-    Ok(matches)
+    if newest_first.len() > limit {
+        // Keep the newest `limit` hits: the walk collected whole runs past
+        // the cap so a run's span is never split mid-way.
+        newest_first.truncate(limit);
+    }
+    newest_first.reverse();
+    Ok(HistorySearch {
+        matches: newest_first,
+        truncated,
+    })
 }
 
 /// Measures the session's context as the next run would assemble it —

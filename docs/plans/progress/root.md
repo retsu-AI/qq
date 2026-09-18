@@ -16,6 +16,7 @@ may append a **request** row; only root changes a request's status.
 | ROOT-6 | Docs cleanup: delete shipped plans/ledgers and superseded research; collapse speed-first to open items; move extension contract and perf targets into `architecture.md` | Shipped (#66) | 2026-09-16 |
 | F07 | Control and cleanup commands admitted past `MAX_COMMANDS` | In review ([ENG-786](https://linear.app/retsu-ai/issue/ENG-786), [#68](https://github.com/retsu-AI/qq/pull/68)) | 2026-09-16. `SessionCommandKind::creates_work` splits the thirteen kinds; new work bounded at 100 000 receipts, control/cleanup at +10 000 headroom, runtime settlement cancels unbounded (`CommandOrigin`). Receipts never trimmed; replay unchanged. Two regression tests fill the counter and drive cancel/approve/delete/prune/shutdown |
 | F05 | Attachments reconstructed as the model first saw them | In review ([ENG-788](https://linear.app/retsu-ai/issue/ENG-788), #69) | 2026-09-17. Schema 28 → 29: `attachment_blobs` (per-session, keyed by whole-file hash + range, 64 MiB cap with explicit evicted rendering) and `message_attachments`, written in the `RunStarted` transaction; `load_model_context` re-renders `<attached-file>` blocks from the store; `ClaimedRun.resolved_input` carries the first read across the auto-compaction retry. Three regression tests (modify/delete/reopen/dedup/cascade; eviction stub; auto-compaction retry) plus the reference-assembly oracle |
+| F06 | Context assembly and history search bounded by retained context, not archive size | In review ([ENG-790](https://linear.app/retsu-ai/issue/ENG-790), #70) | 2026-09-17. Turn/result/steering/attachment queries joined to the retained prompt window; schema 29 → 30 adds `messages(run_id, steering, state)`. `search_history` newest-first with an 8 MiB scan budget and a `truncated` note. New `context_assembly` bench: assembly 83 µs / 25 ms / 98 ms → 50 / 47 / 82 µs at 10 / 1 000 / 10 000 archived runs; absent-term search 433 ms → 54 ms (truncated) at 10 000 |
 
 ## ADR number allocation
 
@@ -141,3 +142,18 @@ unchanged. Steering messages still render placeholders for `@path` parts on
 the live run; that is the pre-existing gap noted in `progress/tool-layer.md`,
 not part of F05. Next in order 2: F03 (mid-run compaction at a tool
 boundary), F04, F06, F10, F11, F20, F23, F24, F28.
+
+### 2026-09-17 — F06 bounded assembly and recall
+
+Baseline measured first with the new `context_assembly` bench (4 retained
+runs × 4 turns × 2 KiB results): assembly 83 µs → 25 ms → 98 ms as the
+compacted archive grew 10 → 1 000 → 10 000 runs; absent-term
+`search_history` 0.5 ms → 42 ms → 433 ms, all on the store's control lane.
+Cause was three session-wide queries (turns, results, steering) plus the F05
+attachment lookup, and the steering self-join scanning `messages` for lack of
+a `run_id` index. After: assembly 50 / 47 / 82 µs (flat); absent search
+0.3 / 26 / 54 ms with `truncated=true` at 10 000. The remaining 26 ms at
+1 000 runs is the budget-bounded walk itself (~8 MiB lowercased); indexed
+recall (FTS) would be the next step if that shows up in practice — not
+built, no evidence yet. Order 2 remaining: F03, F04, F10, F11, F20, F23,
+F24, F28.
