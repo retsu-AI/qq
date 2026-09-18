@@ -3,6 +3,7 @@
 User direction (2026-09-18): implement the recommendations in
 [`jev-runtime-review-2026-09-18.md`](../design/jev-runtime-review-2026-09-18.md)
 as a stacked PR, keep the design small, move promptly and update docs with code.
+Stacked implementation: [draft #74](https://github.com/retsu-AI/qq/pull/74).
 Base PR: #72, `feat/jev-runtime-checkpoints` at `dc59d14`.
 Owning issue: ENG-791 (connector reauthentication currently prevents live read).
 The user's explicit stack instruction overrides the workflow's merged-base rule.
@@ -19,7 +20,7 @@ The user's explicit stack instruction overrides the workflow's merged-base rule.
 | J6 | Independent optional authorized root/child model/effort routing with pinned-choice precedence | Dispatch, capability, fallback, cancellation, spend and durable identity tests | Planned |
 | J7 | Advisory observation plus visible effective/pending/outcome/spend state | Observer and client/headless replay tests; does not gate authoritative completion | Pending/outcome/spend implemented; passive observer planned |
 | J8 | Evidence-led qualification and current docs | Baseline/candidate off-path comparison, mode workload evaluation, full workspace gates and independent reviews | Local checks pass; off-path medians within 5%; quiet-host tails and live evaluation open |
-| J9 | Stacked PR and accurate tracker/delivery state | PR targets #72 branch, owned commits, checks inspected; no self-merge | Planned |
+| J9 | Stacked PR and accurate tracker/delivery state | PR targets #72 branch, owned commits, checks inspected; no self-merge | Draft #74 open; Linear connector unavailable |
 
 The concrete scope is the Jev review's repairs, optional-mode contract, routing
 and qualification. The reference audit's broader product hypotheses remain

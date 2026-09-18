@@ -4,7 +4,9 @@ Owner: this stacked implementation session. Base `dc59d14` / draft #72.
 
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
-| J1–J9 | Implement Jev review recommendations and qualify opt-in paths | In progress | `feat/eng-791-jev-opt-in`; PR pending | See owning plan for requirement-by-requirement acceptance |
+| J1–J5 + visible J7 | Optional review, correctness and receipts | In review | [#74](https://github.com/retsu-AI/qq/pull/74), stacked on #72 | Local checks green; quiet-host tails and hosted qualification open |
+| J6 + passive J7 | Optional routing and advisory observer | Planned | Follow-up slices | Independent acceptance; not shipping in #74 |
+| J8–J9 | Qualification and delivery | In progress | #74 | Live evaluation and remaining slices open |
 
 ## Entries
 
@@ -122,3 +124,12 @@ Independent reviews: Spec and Standards approve; no outstanding code blockers.
 Protocol 23→24 with matching golden fixtures; no database migration/dependency.
 Open: hosted checks, quiet-host latency tails, paid evaluation, J6 routing and
 passive J7 observer. No paid calls, merge, release or tracker update claimed.
+
+### Stacked delivery — 2026-09-18
+
+Pushed `1d2b3604ffd1393a285cc2070799c88df7d2b26d`; opened draft
+[#74](https://github.com/retsu-AI/qq/pull/74), base `feat/jev-runtime-checkpoints`
+(#72, dc59d14). GitHub connector creation returned 403; authenticated GitHub CLI
+created the authorized PR. Local workspace is clean after the implementation
+commit. Linear connector remains unavailable; issue state was not changed.
+No merge or release. Broader routing/advisory work remains planned.
