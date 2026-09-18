@@ -2265,6 +2265,16 @@ impl plan::CompiledAgentPlan {
                             };
                             return;
                         }
+                        let final_evidence = format!(
+                            "final candidate:\n{answer}\n\nretained tool evidence:\n{checkpoint_evidence}"
+                        );
+                        if !runtime::checkpoint_text_fits(&final_evidence) {
+                            yield RuntimeEvent::Failed {
+                                kind: RunFailureKind::Policy,
+                                message: "JEV final checkpoint cannot verify completion because the combined candidate and tool evidence exceeded the review bound".to_owned(),
+                            };
+                            return;
+                        }
                         let correlation = format!("final:{turn_ordinal}");
                         let request = runtime::CheckpointRequest {
                             correlation: correlation.clone(),
@@ -2272,9 +2282,7 @@ impl plan::CompiledAgentPlan {
                             tool_call_id: None,
                             tool: None,
                             task: runtime::bounded_checkpoint_text(&audit_prompt),
-                            evidence: runtime::bounded_checkpoint_text(&format!(
-                                "final candidate:\n{answer}\n\nretained tool evidence:\n{checkpoint_evidence}"
-                            )),
+                            evidence: final_evidence,
                             is_error: false,
                         };
                         let cache_key = format!("final\u{0}{}\u{0}{}", request.task, request.evidence);
@@ -2944,8 +2952,9 @@ impl plan::CompiledAgentPlan {
                             retained.model_text,
                             verdict.outcome.label(),
                         ));
+                        checkpoint_evidence_truncated |=
+                            !runtime::checkpoint_text_fits(&checkpoint_evidence);
                         let bounded_evidence = runtime::bounded_checkpoint_text(&checkpoint_evidence);
-                        checkpoint_evidence_truncated |= bounded_evidence.len() < checkpoint_evidence.len();
                         checkpoint_evidence = bounded_evidence;
                         checkpoint_evidence_version = checkpoint_evidence_version.saturating_add(1);
                         if verdict.outcome == runtime::CheckpointOutcome::Unavailable {

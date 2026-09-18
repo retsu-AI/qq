@@ -18,11 +18,11 @@ pub use audit::{
     MAX_AUDIT_CHILD_TURNS, MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS,
 };
 pub(crate) use budget::{BUDGET_FINAL_RESPONSE_NOTICE, BudgetDecision, BudgetMeter, ChildBudget};
-pub(crate) use checkpoint::bounded_checkpoint_text;
 pub use checkpoint::{
     CheckpointFuture, CheckpointOutcome, CheckpointPhase, CheckpointRequest, CheckpointReviewer,
     CheckpointVerdict,
 };
+pub(crate) use checkpoint::{bounded_checkpoint_text, checkpoint_text_fits};
 pub(crate) use deadline::RunDeadline;
 pub(crate) use events::{
     PendingToolCall, PreparedRequestWeight, PreparedStaticPrefix, RuntimeEvent, RuntimeToolCall,

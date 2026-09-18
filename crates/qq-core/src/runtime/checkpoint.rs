@@ -72,3 +72,27 @@ pub(crate) fn bounded_checkpoint_text(text: &str) -> String {
     }
     format!("{}…[truncated]", &text[..end])
 }
+
+pub(crate) fn checkpoint_text_fits(text: &str) -> bool {
+    text.len() <= MAX_CHECKPOINT_TEXT_BYTES
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_CHECKPOINT_TEXT_BYTES, checkpoint_text_fits};
+
+    #[test]
+    fn checkpoint_bound_accepts_boundary_and_rejects_first_byte_over() {
+        assert!(checkpoint_text_fits(&"x".repeat(MAX_CHECKPOINT_TEXT_BYTES)));
+        assert!(!checkpoint_text_fits(
+            &"x".repeat(MAX_CHECKPOINT_TEXT_BYTES + 1)
+        ));
+    }
+
+    #[test]
+    fn final_wrapper_counts_against_the_checkpoint_bound() {
+        let evidence = "x".repeat(MAX_CHECKPOINT_TEXT_BYTES);
+        let payload = format!("final candidate:\nok\n\nretained tool evidence:\n{evidence}");
+        assert!(!checkpoint_text_fits(&payload));
+    }
+}
