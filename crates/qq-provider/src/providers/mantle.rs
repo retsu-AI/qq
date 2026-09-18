@@ -385,6 +385,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_reasoning_effort_before_aws_provider_initialization() {
+        for protocol in [
+            HttpProtocol::OpenAiResponses,
+            HttpProtocol::OpenAiChatCompletions,
+            HttpProtocol::AnthropicMessages,
+        ] {
+            let provider = Mantle::new(
+                reqwest::Client::new(),
+                Some("us-east-1".to_owned()),
+                protocol,
+                BedrockAuth::DefaultChain,
+                HttpRetryMode::Default,
+            )
+            .unwrap();
+            assert!(provider.inner.provider.get().is_none());
+
+            let events = provider
+                .stream(
+                    ModelRequest::new("test-model", vec![Message::user("hello")], 64)
+                        .with_reasoning_effort(crate::ReasoningEffort::Medium),
+                )
+                .collect::<Vec<_>>()
+                .await;
+
+            assert!(matches!(
+                events.as_slice(),
+                [Err(ProviderError::Configuration(message))] if message.contains("Mantle")
+            ));
+            assert!(provider.inner.provider.get().is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn api_keys_use_protocol_specific_headers() {
         for protocol in [
             HttpProtocol::OpenAiResponses,

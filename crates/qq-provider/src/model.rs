@@ -562,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_effort_is_a_configuration_error_before_transport() {
+    fn unsupported_effort_helper_constructs_an_adapter_specific_error() {
         let request = ModelRequest::new("m", vec![Message::user("hello")], 16)
             .with_reasoning_effort(ReasoningEffort::Xhigh);
         assert!(matches!(

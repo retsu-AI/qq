@@ -878,6 +878,7 @@ mod tests {
         ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
         ConverseStreamMetadataEvent, MessageStopEvent, ToolUseBlockDelta, ToolUseBlockStart,
     };
+    use futures_util::StreamExt;
     use serde_json::json;
 
     use super::*;
@@ -906,6 +907,31 @@ mod tests {
 
         assert_eq!(second, Ok(&42));
         assert_eq!(client.get(), Some(&42));
+    }
+
+    #[tokio::test]
+    async fn rejects_reasoning_effort_before_client_initialization() {
+        let provider = Bedrock::new(
+            BedrockAuth::ApiKey("bedrock-test-secret".into()),
+            Some("us-east-1".to_owned()),
+        )
+        .unwrap();
+        assert!(provider.client.get().is_none());
+
+        let events = provider
+            .stream(
+                ModelRequest::new("test-model", vec![Message::user("hello")], 64)
+                    .with_reasoning_effort(crate::ReasoningEffort::Medium),
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(matches!(
+            events.as_slice(),
+            [Err(ProviderError::Configuration(message))]
+                if message.contains("Bedrock Converse")
+        ));
+        assert!(provider.client.get().is_none());
     }
 
     #[test]

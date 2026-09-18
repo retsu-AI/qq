@@ -377,6 +377,13 @@ Reference: [OpenAI Responses API reference](https://platform.openai.com/docs/api
 selection, capability authorization, JEV routing, and durable receipts remain
 runtime work.
 
+Offline interface tests drive all six values through
+`ProviderCompiler::compile` and `Provider::stream` for standard Responses,
+Codex Responses, and Chat Completions. They capture both attempts of a
+retryable request, pin the byte-exact request body when effort is absent, and
+invoke every unsupported adapter to require a configuration error before HTTP,
+request-time authorization, or lazy AWS provider initialization.
+
 Current strengths:
 
 - OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, and Google
