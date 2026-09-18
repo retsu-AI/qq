@@ -3212,6 +3212,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn embedded_source_revision_is_exact_and_matches_display_revision() {
+        let source = env!("QQ_SOURCE_REVISION");
+        let display = env!("QQ_BUILD_REVISION");
+        let source = source.strip_suffix("-dirty").unwrap_or(source);
+        let display = display.strip_suffix("-dirty").unwrap_or(display);
+
+        if source == "unknown" {
+            assert_eq!(display, "unknown");
+            return;
+        }
+
+        assert_eq!(source.len(), 40);
+        assert!(source.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(source.starts_with(display));
+    }
+
     #[tokio::test]
     async fn internal_slice_rollover_is_not_a_headless_terminal_outcome() {
         let fixture = fixture(CompletesAfterInternalSlice::new).await;
