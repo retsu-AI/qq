@@ -14,6 +14,7 @@ use qq_config as config;
 use qq_protocol::{RunCommand, RunEvent};
 use qq_server as server;
 
+mod advisory;
 mod catalog;
 mod cli;
 mod headless;
@@ -53,9 +54,12 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         Some(cli::Command::Auth { command }) => {
             run_blocking_command(move || auth_command(command)).await?
         }
-        Some(cli::Command::Jev { command }) => {
-            run_blocking_command(move || jev_command(command)).await?
-        }
+        Some(cli::Command::Jev {
+            command: cli::JevCommand::Observe(args),
+        }) => advisory::run(args).await?,
+        Some(cli::Command::Jev {
+            command: cli::JevCommand::Setup { allow_file },
+        }) => run_blocking_command(move || jev_setup(allow_file)).await?,
         Some(cli::Command::Org { command }) => organization_command(command)?,
         Some(cli::Command::Trust) => trust_command(&overrides)?,
         Some(cli::Command::Version) => print!("{}", version_report()),
@@ -1318,25 +1322,21 @@ fn auth_command(command: cli::AuthCommand) -> Result<(), Box<dyn Error>> {
 const TYPESAFE_JEV_CREDENTIAL: &str = "typesafe-jev";
 const TYPESAFE_JEV_ENDPOINT: &str = "https://api.typesafe.ai";
 
-fn jev_command(command: cli::JevCommand) -> Result<(), Box<dyn Error>> {
-    match command {
-        cli::JevCommand::Setup { allow_file } => {
-            let secret = read_secret("TypeSafe API key: ")?;
-            let store = auth::CredentialStore::system()?;
-            let backend = store_typesafe_jev_credential(&store, &secret, allow_file)?;
-            println!("stored {TYPESAFE_JEV_CREDENTIAL} in {backend}");
-            println!("credentials stored; Jev remains off until explicitly enabled");
-            println!(
-                "Jev sends task and selected tool evidence to TypeSafe; enable only for work you allow it to process"
-            );
-            println!("enable final-answer review: QQ_JEV_CHECKPOINTS=final qq");
-            println!("enable review after every tool and final answer:");
-            println!("  QQ_JEV_CHECKPOINTS=enforce qq");
-            println!("disable reviews without removing credentials: QQ_JEV_CHECKPOINTS=off qq");
-            println!("inspect: qq config show; qq auth status {TYPESAFE_JEV_CREDENTIAL}");
-            println!("remove:  qq auth logout {TYPESAFE_JEV_CREDENTIAL}");
-        }
-    }
+fn jev_setup(allow_file: bool) -> Result<(), Box<dyn Error>> {
+    let secret = read_secret("TypeSafe API key: ")?;
+    let store = auth::CredentialStore::system()?;
+    let backend = store_typesafe_jev_credential(&store, &secret, allow_file)?;
+    println!("stored {TYPESAFE_JEV_CREDENTIAL} in {backend}");
+    println!("credentials stored; Jev remains off until explicitly enabled");
+    println!(
+        "Jev sends task and selected tool evidence to TypeSafe; enable only for work you allow it to process"
+    );
+    println!("enable final-answer review: QQ_JEV_CHECKPOINTS=final qq");
+    println!("enable review after every tool and final answer:");
+    println!("  QQ_JEV_CHECKPOINTS=enforce qq");
+    println!("disable reviews without removing credentials: QQ_JEV_CHECKPOINTS=off qq");
+    println!("inspect: qq config show; qq auth status {TYPESAFE_JEV_CREDENTIAL}");
+    println!("remove:  qq auth logout {TYPESAFE_JEV_CREDENTIAL}");
     Ok(())
 }
 

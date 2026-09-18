@@ -6,8 +6,8 @@ Owner: this stacked implementation session. Base `dc59d14` / draft #72.
 | --- | --- | --- | --- | --- |
 | J1–J5 + visible J7 | Optional review, correctness and receipts | In review | [#74](https://github.com/retsu-AI/qq/pull/74), stacked on #72 | Local and hosted checks green; quiet-host tails open |
 | J6a | Explicit model effort | In review | [#76](https://github.com/retsu-AI/qq/pull/76), stacked on #74 | Local checks/reviews green; performance gate unresolved; hosted CI 35394821612 successful |
-| J6b | Optional routing | In review | [#77](https://github.com/retsu-AI/qq/pull/77), stacked on #76 | Local checks/reviews green; incremental median within budget; hosted and full-stack qualification pending |
-| Passive J7 | Advisory observer | Planned | Follow-up slice | Independent acceptance; not shipping in #74 |
+| J6b | Optional routing | In review | [#77](https://github.com/retsu-AI/qq/pull/77), stacked on #76 | Hosted CI 35406214280 successful; incremental median within budget; full-stack qualification pending |
+| Passive J7 | Advisory observer | In progress | `feat/eng-791-jev-advisory`, stacked on #77 | Explicit client observer and durable external receipts implemented; verification in progress |
 | J8–J9 | Qualification and delivery | In progress | #74 | Live evaluation and remaining slices open |
 
 ## Entries
@@ -284,3 +284,23 @@ base `feat/eng-791-jev-routing` (#76). GitHub connector creation still returned
 403; authenticated CLI created the authorized draft. No merge or paid inference.
 Remaining full-goal work: passive advisory observation, hosted checks and
 full-stack performance/live qualification. Linear reauthentication remains open.
+
+### Passive J7 verification — 2026-09-18
+
+Branch `feat/eng-791-jev-advisory` adds explicit `qq jev observe` with finite
+external budgets, bounded run-specific evidence and a synced JSONL journal.
+Five focused advisory tests pass, including a real local server demonstration
+that a held assessment does not delay the next run and cancellation preserves
+the pending dispatch. No paid inference. Runbook updated with restart and
+unknown-spend behavior. Workspace gates, independent review and publication
+remain outstanding. PR #77 CI 35406214280 completed successfully.
+
+Full workspace tests now pass: 1,602 passed, five ignored, no failures.
+`cargo fmt --all -- --check`, workspace Clippy with all targets/features and
+`-D warnings`, and `git diff --check` pass. Independent review requested;
+workspace build and publication remain in progress.
+
+Workspace build passed. Independent Standards review approved the passive
+observer with no concrete blockers; documented evidence-window and pending-spend
+limitations remain. No protocol, schema, runtime hot-path or dependency change
+in this slice. Full-stack performance qualification is still outstanding.

@@ -2721,6 +2721,14 @@ fn update_digest(digest: &mut Sha256, value: &[u8]) {
     digest.update(value);
 }
 
+pub(crate) fn advisory_reviewer() -> Result<Arc<dyn CheckpointReviewer>, RuntimeBuildError> {
+    let store = CredentialStore::system()?;
+    Ok(Arc::new(TypeSafeCheckpointReviewer::from_credentials(
+        &store,
+        qq_config::JevReviewMode::Final,
+    )?))
+}
+
 fn typesafe_http_client(store: &CredentialStore) -> Result<reqwest::Client, RuntimeBuildError> {
     let secret = resolve_provider_credential(
         store,
@@ -3533,6 +3541,211 @@ mod tests {
         ) -> qq_client::observer::ObserverStep {
             self.disconnects += 1;
             qq_client::observer::ObserverStep::Continue
+        }
+    }
+
+    struct HoldingAdvisory {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl CheckpointReviewer for HoldingAdvisory {
+        fn max_cost_usd_nanos(&self) -> Option<u64> {
+            Some(42)
+        }
+        fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+            assert!(request.task.contains("first task"));
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                CheckpointVerdict {
+                    outcome: CheckpointOutcome::Supported,
+                    confidence: Some(0.9),
+                    feedback: "fixture".to_owned(),
+                    spend: qq_protocol::CheckpointSpend {
+                        usage: Some(qq_protocol::TokenUsage {
+                            input_tokens: 1,
+                            ..Default::default()
+                        }),
+                        estimated_cost_usd_nanos: Some(42),
+                    },
+                }
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn passive_advisory_does_not_gate_next_run_and_cancellation_retains_dispatch() {
+        use futures_util::StreamExt;
+        use qq_protocol::SessionEvent;
+
+        for cancel in [false, true] {
+            let fixture = RuntimeFixture::new();
+            let model_runtime = Arc::new(
+                Runtime::new(
+                    CapturingProvider {
+                        requests: Arc::new(Mutex::new(Vec::new())),
+                    },
+                    "test/model",
+                    256,
+                )
+                .unwrap(),
+            );
+            let durable = SessionRuntime::open(
+                SessionRuntimeOptions::new(fixture.path("sessions.sqlite3")),
+                Arc::new(FixedRuntimeLoader {
+                    runtime: model_runtime,
+                }),
+            )
+            .await
+            .unwrap();
+            let handler = Arc::new(RuntimeHandler {
+                durable,
+                factory: fixture.factory(),
+            });
+            let server = match qq_server::start(
+                handler.clone(),
+                handler.server_identity(None),
+                ServerOptions::new(ServerPaths::new(fixture.path("server"))),
+            )
+            .await
+            .unwrap()
+            {
+                StartOutcome::Started(server) => server,
+                StartOutcome::Existing(_) => panic!("fixture server already exists"),
+            };
+            let client = qq_client::SessionClient::new(server.connection().clone()).unwrap();
+            let (workspace_id, origin) = client
+                .resolve_workspace(&fixture.path("work"))
+                .await
+                .unwrap();
+            let created = client
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::CreateSession {
+                        workspace_id,
+                        parent_id: None,
+                        model: ModelSelection {
+                            model: Some("test/model".to_owned()),
+                            max_output_tokens: Some(256),
+                            ..ModelSelection::default()
+                        },
+                        approval_mode: qq_protocol::ApprovalMode::ReadOnly,
+                        profile: AgentProfileId::default(),
+                        correlation: qq_protocol::Correlation::default(),
+                    },
+                )
+                .await
+                .unwrap();
+            let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+                panic!("missing session")
+            };
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let path = fixture.path("advisory.jsonl");
+            let mut sink = crate::advisory::test_sink(
+                client.clone(),
+                Arc::new(HoldingAdvisory {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                }),
+                &path,
+                origin,
+            );
+            let observed_client = client.clone();
+            let observer = tokio::spawn(async move {
+                qq_client::observer::run(&observed_client, workspace_id, origin, &mut sink).await
+            });
+            client
+                .submit(
+                    session_id,
+                    vec![qq_protocol::InputPart::text("first task")],
+                    qq_protocol::RunLimits::default(),
+                    qq_protocol::Correlation::default(),
+                )
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+                .await
+                .unwrap();
+            let pending: Vec<serde_json::Value> = fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(
+                pending.last().unwrap()["receipt"]["state"],
+                "pending",
+                "pending dispatch is durable before inference starts"
+            );
+            let second = client
+                .submit(
+                    session_id,
+                    vec![qq_protocol::InputPart::text("second task")],
+                    qq_protocol::RunLimits::default(),
+                    qq_protocol::Correlation::default(),
+                )
+                .await
+                .unwrap();
+            let CommandOutcome::PromptQueued {
+                run_id: second_id, ..
+            } = second.outcome
+            else {
+                panic!("missing queued run")
+            };
+            let mut events = client
+                .events(workspace_id, second.committed_through)
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while let Some(event) = events.next().await {
+                    if let SessionEvent::RunFinished {
+                        run_id, outcome, ..
+                    } = event.unwrap().event
+                        && run_id == second_id
+                    {
+                        assert_eq!(outcome, qq_protocol::RunOutcome::Completed);
+                        return;
+                    }
+                }
+                panic!("event stream ended before the second run completed");
+            })
+            .await
+            .unwrap();
+            if cancel {
+                observer.abort();
+                assert!(observer.await.unwrap_err().is_cancelled());
+            } else {
+                release.notify_one();
+                let result = tokio::time::timeout(std::time::Duration::from_secs(5), observer)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(result.0, qq_client::observer::ObserverExit::Stopped);
+            }
+            let receipts: Vec<serde_json::Value> = fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let receipt = &receipts.last().unwrap()["receipt"];
+            assert_eq!(
+                receipt["state"],
+                if cancel { "pending" } else { "assessed" }
+            );
+            assert_eq!(
+                receipt["combined_estimated_cost_usd_nanos"],
+                serde_json::Value::Null,
+                "unknown main-model cost stays unknown"
+            );
+            if !cancel {
+                assert_eq!(receipt["external_advisory"]["estimated_cost_usd_nanos"], 42);
+            }
+            drop(events);
+            server.shutdown().await.unwrap();
+            handler.shutdown().await.unwrap();
         }
     }
 

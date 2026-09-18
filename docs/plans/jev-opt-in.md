@@ -20,7 +20,7 @@ The user's explicit stack instruction overrides the workflow's merged-base rule.
 | J4 | Bounded cancellable reviewer requests, usage accounting, spend admission and finite repair budget | Budget, timeout, cancellation, persistence, body overflow regressions | Locally implemented; qualification in progress |
 | J5 | Mask every outgoing evidence field; narrow actionable questions and explicit uncertainty | HTTP adapter contract tests, failure criterion IDs, masking tests | Locally implemented; qualification in progress |
 | J6 | Independent optional authorized root/child model/effort routing with pinned-choice precedence | Dispatch, capability, fallback, cancellation, spend and durable identity tests | J6a pinned effort in draft #76; J6b adapter, inherited activation, direct ask and model-pin provenance in draft #77; local verification green |
-| J7 | Advisory observation plus visible effective/pending/outcome/spend state | Observer and client/headless replay tests; does not gate authoritative completion | Pending/outcome/spend implemented; passive observer planned |
+| J7 | Advisory observation plus visible effective/pending/outcome/spend state | Observer and client/headless replay tests; does not gate authoritative completion | Pending/outcome/spend implemented; passive observer implemented locally with five focused tests passing; workspace verification in progress |
 | J8 | Evidence-led qualification and current docs | Baseline/candidate off-path comparison, mode workload evaluation, full workspace gates and independent reviews | Local checks pass; latest effort tool-loop median exceeds 5%; quiet-host qualification and live evaluation open |
 | J9 | Stacked PR and accurate tracker/delivery state | PR targets #72 branch, owned commits, checks inspected; no self-merge | Draft #74 open; Linear connector unavailable |
 
@@ -52,5 +52,5 @@ Ledger: [`progress/jev-opt-in.md`](progress/jev-opt-in.md).
 
 The first stacked PR contains J1–J5 and the pending/outcome/spend portion of J7.
 J6 effort and routing are separate drafts #76/#77. Passive advisory observation
-retains separate acceptance and remains planned; this split makes the correctness
+retains separate acceptance and is in local verification; this split makes the correctness
 repairs independently reviewable.

@@ -1,5 +1,42 @@
 # Optional Jev review and routing
 
+## Passive advisory observation
+
+Run an independent observer against an already running local QQ server:
+
+```sh
+qq jev observe --workspace-id WORKSPACE_ID --session-id SESSION_ID \
+  --receipts ./jev-advisory.jsonl --max-cost-usd 0.10
+```
+
+This explicit command enables observation only for its lifetime. It does not
+enable runtime review or routing, change run outcomes, request repairs, or delay
+the server's next run. Omit `--session-id` to observe task sessions throughout
+the selected workspace. The default duration is 300 seconds and the request
+limit is 32; use `--duration-seconds`, `--max-requests`, and
+`--max-total-tokens` to reduce the finite allowance.
+
+The observer assesses newly completed runs using masked, bounded evidence from
+the server's recent snapshot window. Missing original task or final-answer
+evidence produces an unavailable receipt without inference. It does not read
+workspace files or retrieve omitted history. Selected evidence cannot establish
+the correctness of an entire run.
+
+The JSONL receipt file is exclusively locked and synced before dispatch and
+settlement. Resume with the same file, scope and budget flags to retain its
+cursor and spending limits. A pending request after interruption has unknown
+spend and prevents further dispatch from that journal; it is never automatically
+retried. Admission reserves a worst-case request before spending, so observation
+can stop before the nominal allowance is fully consumed.
+
+Receipts distinguish `recorded_run` from `external_advisory` spend. Combined
+totals remain unknown when either component is unknown. Advisory spending uses
+its own explicit allowance and does not modify the completed run's accounting.
+Receipts are also printed to stdout after durable recording. Store them with the
+same care as session history; masking does not guarantee removal of all secrets.
+
+## Runtime review and routing
+
 QQ runs without Jev by default, including when a TypeSafe credential is stored.
 `qq jev setup` stores an endpoint-bound credential; it does not enable reviews.
 Jev receives task text and selected evidence, so enable it only for work whose
