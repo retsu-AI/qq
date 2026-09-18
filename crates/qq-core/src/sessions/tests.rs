@@ -1882,6 +1882,7 @@ fn denial_capacity_fixture(
         )
         .unwrap();
     let claimed = ClaimedRun {
+        checkpoint: None,
         identity: RunIdentity {
             workspace_id,
             session_id,
@@ -3653,6 +3654,7 @@ impl RuntimeLoader for CheckpointQueueLoader {
                 fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
                     self.0.lock().unwrap().push(request);
                     Box::pin(std::future::ready(CheckpointVerdict {
+                        spend: qq_protocol::CheckpointSpend::default(),
                         outcome: CheckpointOutcome::Supported,
                         confidence: Some(1.0),
                         feedback: "supported".to_owned(),

@@ -39,3 +39,10 @@ uses the existing observer boundary, not an untracked task in the run loop.
 Credential presence as activation was rejected: it defeats explicit off and
 applies across unrelated workspaces. A new settings service or universal hook
 framework was rejected: existing layering, plans and observer contracts suffice.
+
+## Implementation clarification
+
+Protocol 24 records pending assessments before dispatch and typed token/estimated
+cost receipts with the verdict. Pending dispatch clears durable known totals until
+a receipt restores them; cancellation/crash cannot leave a known total omitting
+in-flight work. Review uses the same run budget as model and child work.

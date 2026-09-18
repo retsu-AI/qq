@@ -1251,6 +1251,39 @@ Steering accepted during final assessment is applied before completion; an
 interrupting steer drops the in-flight reviewer, records an unavailable marker,
 and regenerates the candidate for the updated task instead of dropping input.
 
+### Jev assessment bounds and accounting
+
+Each opted-in run admits at most 32 assessments and two correction attempts;
+each request has a five-second deadline and a 64 KiB response cap (including
+chunked bodies). Final claims may be corrected using existing evidence within
+the same finite repair allowance; no extra tool call is forced merely to revise
+wording. Existing run cancellation and deadlines drop inference futures.
+
+`checkpoint_started` commits before dispatch and marks the in-flight charge
+unknown in durable totals. `checkpoint_reviewed.spend` carries typed usage and
+estimated cost; its transaction updates run accounting before publication.
+Interrupted requests remain unknown rather than free. Jev's pinned 1.13 input
+price is estimated at 42 nanodollars per input token (42 USD per billion
+tokens; output free); price source checked 2026-09-18:
+[TypeSafe models](https://docs.typesafe.ai/models). Hard cost admission reserves
+capacity for its documented 64k input limit; custom reviewers without a maximum
+charge cannot run against a hard cost allowance. Actual receipts charge the
+shared token/cost budget, including a final assessment.
+
+The criteria-2026-09-18.1 policy assesses task coverage, direct evidence and
+consistency independently. Feedback names unsupported criterion IDs and the next
+evidence/correction action. Each selected probability and reported confidence
+must be at least 0.7 to permit a criterion's supported verdict. This conservative
+initial policy is not calibrated accuracy; real quality/savings remain subject
+to paired evaluation. Missing/invalid responses are unavailable, distinct from
+contradiction. Clients receive pending and settled events through normal replay.
+
+Spawned work preserves the parent run's reviewer identity and selected profile
+through admission and durable claiming. User-submitted prompts resolve current
+configuration even in previously spawned or publicly parented sessions. Unknown
+inherited reviewer identities fail before credential lookup; legacy owned work
+without a recorded reviewer stays disabled.
+
 Invariants every lane keeps:
 
 - A disabled adapter family adds no shipping dependency to a minimal build.

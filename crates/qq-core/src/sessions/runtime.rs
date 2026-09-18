@@ -214,8 +214,33 @@ impl RuntimeLoadProgress {
     }
 }
 
+/// A child inherits the parent's resolved reviewer, never a newly enabled
+/// workspace default. Roots leave this selection absent to resolve config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointSelection {
+    Disabled,
+    ReviewerIdentity(String),
+}
+
+impl CheckpointSelection {
+    pub(crate) fn from_identity(identity: Option<&str>) -> Self {
+        match identity {
+            None => Self::Disabled,
+            Some(identity) => Self::ReviewerIdentity(identity.to_owned()),
+        }
+    }
+
+    pub(crate) fn matches(&self, identity: Option<&str>) -> bool {
+        match self {
+            Self::Disabled => identity.is_none(),
+            Self::ReviewerIdentity(expected) => identity == Some(expected.as_str()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeLoadRequest {
+    pub checkpoint: Option<CheckpointSelection>,
     pub workspace: String,
     pub model: ModelSelection,
     /// Configured agent profile the session selected. Loaders that know no

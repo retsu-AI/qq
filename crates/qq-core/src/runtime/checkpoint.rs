@@ -17,6 +17,28 @@ pub(crate) struct CheckpointContext {
     evidence: VecDeque<String>,
     evidence_bytes: usize,
     omitted: usize,
+    reviews: u16,
+    repairs: u8,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CheckpointAdmissionError {
+    #[error("Jev reached the per-run limit of 32 review requests")]
+    Requests,
+    #[error("Jev cannot run under a hard cost budget without a maximum request price")]
+    UnknownPrice,
+    #[error("Jev maximum request price exceeds the remaining run budget")]
+    Cost,
+}
+
+impl CheckpointAdmissionError {
+    pub(crate) fn budget_kind(&self) -> Option<qq_protocol::BudgetLimitKind> {
+        match self {
+            Self::Requests => None,
+            Self::UnknownPrice => Some(qq_protocol::BudgetLimitKind::CostUnknown),
+            Self::Cost => Some(qq_protocol::BudgetLimitKind::Cost),
+        }
+    }
 }
 
 impl CheckpointContext {
@@ -30,6 +52,8 @@ impl CheckpointContext {
             evidence: VecDeque::new(),
             evidence_bytes: 0,
             omitted: 0,
+            reviews: 0,
+            repairs: 0,
         };
         for (index, message) in messages.iter().enumerate() {
             for block in message.content() {
@@ -54,6 +78,37 @@ impl CheckpointContext {
             }
         }
         context
+    }
+
+    pub(crate) fn admit(
+        &mut self,
+        cost_limit: Option<u64>,
+        maximum_cost: Option<u64>,
+    ) -> Result<(), CheckpointAdmissionError> {
+        if self.reviews >= 32 {
+            return Err(CheckpointAdmissionError::Requests);
+        }
+        if let Some(limit) = cost_limit {
+            match maximum_cost {
+                None => {
+                    return Err(CheckpointAdmissionError::UnknownPrice);
+                }
+                Some(cost) if cost > limit => {
+                    return Err(CheckpointAdmissionError::Cost);
+                }
+                Some(_) => {}
+            }
+        }
+        self.reviews += 1;
+        Ok(())
+    }
+
+    pub(crate) fn repair(&mut self) -> bool {
+        if self.repairs >= 2 {
+            return false;
+        }
+        self.repairs += 1;
+        true
     }
 
     pub(crate) fn steer(&mut self, text: &str) {
@@ -170,6 +225,7 @@ pub struct CheckpointVerdict {
     pub outcome: CheckpointOutcome,
     pub confidence: Option<f64>,
     pub feedback: String,
+    pub spend: qq_protocol::CheckpointSpend,
 }
 
 pub type CheckpointFuture = Pin<Box<dyn Future<Output = CheckpointVerdict> + Send>>;
@@ -182,7 +238,30 @@ pub trait CheckpointReviewer: Send + Sync {
     fn reviews_tools(&self) -> bool {
         true
     }
+    /// Maximum estimated charge for one request. A hard cost allowance cannot
+    /// admit a reviewer without a bound, even if previous calls were cheap.
+    fn max_cost_usd_nanos(&self) -> Option<u64> {
+        None
+    }
     fn review(&self, request: CheckpointRequest) -> CheckpointFuture;
+}
+
+/// The runtime bounds even custom embedded reviewers. Dropping the future on
+/// timeout stops local work; remote billing remains unknown until reported.
+pub(crate) async fn assess_checkpoint(
+    reviewer: &dyn CheckpointReviewer,
+    request: CheckpointRequest,
+) -> CheckpointVerdict {
+    match tokio::time::timeout(std::time::Duration::from_secs(5), reviewer.review(request)).await {
+        Ok(verdict) => verdict,
+        Err(_) => CheckpointVerdict {
+            outcome: CheckpointOutcome::Unavailable,
+            confidence: None,
+            feedback: "Jev assessment timed out after five seconds; remote spend is unknown"
+                .to_owned(),
+            spend: qq_protocol::CheckpointSpend::default(),
+        },
+    }
 }
 
 pub(crate) fn bounded_checkpoint_text(text: &str) -> String {

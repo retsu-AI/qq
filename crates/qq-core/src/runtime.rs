@@ -20,7 +20,9 @@ pub use audit::{
 pub(crate) use budget::{BUDGET_FINAL_RESPONSE_NOTICE, BudgetDecision, BudgetMeter, ChildBudget};
 #[cfg(test)]
 pub(crate) use checkpoint::MAX_CHECKPOINT_TEXT_BYTES;
-pub(crate) use checkpoint::{CheckpointContext, bounded_checkpoint_text, checkpoint_text_fits};
+pub(crate) use checkpoint::{
+    CheckpointContext, assess_checkpoint, bounded_checkpoint_text, checkpoint_text_fits,
+};
 pub use checkpoint::{
     CheckpointFuture, CheckpointOutcome, CheckpointPhase, CheckpointRequest, CheckpointReviewer,
     CheckpointVerdict,

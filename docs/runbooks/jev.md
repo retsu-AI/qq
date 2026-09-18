@@ -36,7 +36,9 @@ Choose a profile using the existing `--profile` option or session profile
 selection. Explicit environment/runtime overrides win over profiles, which win
 over top-level settings. Workspace activation and changes to profile activation
 require current workspace trust. Active runs keep their compiled profile;
-configuration changes affect subsequent plan loads.
+spawned work inherits that fixed review choice and profile. A later user-submitted
+prompt, including one in a child session, resolves its current configuration.
+Legacy parent-owned work without a recorded reviewer stays off.
 
 Inspect configured values with `qq config show`, provenance with
 `qq config explain jev_review`, and credential metadata with
@@ -51,3 +53,14 @@ a paired task evaluation.
 
 Implementation/qualification progress for the stacked work is in
 [`../plans/progress/jev-opt-in.md`](../plans/progress/jev-opt-in.md).
+
+Review is bounded to 32 requests and two corrections per run, five seconds per
+request, and 64 KiB per response. It consumes the same run token/cost allowance.
+Pending review and its final criterion outcomes are visible in event streams;
+known reviewer usage and estimated cost are recorded with the verdict. Interrupted
+requests have unknown spend. A positive verdict is evidence support, not proof.
+For current pinned pricing and uncertainty policy, see the architecture document.
+
+Automatic model/effort routing is a separate planned slice. Setting
+`jev_routing: true` currently returns a configuration error; it is never silently
+treated as enabled. `QQ_JEV_ROUTING=off` overrides that reserved setting.

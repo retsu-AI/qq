@@ -71,7 +71,7 @@ mod transcript;
 pub use commands::MAX_DESCENDANTS_PER_ROOT;
 pub use feed::PublishedEvent;
 pub use runtime::{
-    ApprovalReviewer, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime,
+    ApprovalReviewer, CheckpointSelection, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime,
     MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS, PersistenceFault,
     PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest,
     ReviewSpend, ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,

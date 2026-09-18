@@ -162,6 +162,21 @@ async fn prepare_execution(
     resources: &RunResources,
     execution_started: tokio::time::Instant,
 ) -> Result<PreparedExecution, RunOutcome> {
+    let identity = loaded.plan.descriptor().checkpoint.as_deref();
+    if claimed
+        .checkpoint
+        .as_ref()
+        .is_some_and(|selection| !selection.matches(identity))
+    {
+        return Err(RunOutcome::Failed {
+            failure: RunFailure {
+                kind: RunFailureKind::Configuration,
+                message: "child loader did not preserve the parent's inherited reviewer identity"
+                    .to_owned(),
+            },
+        });
+    }
+    claimed.checkpoint = Some(CheckpointSelection::from_identity(identity));
     let deadline = RunDeadline::new(claimed.limits, execution_started);
     if let Some(deadline) = deadline.filter(|deadline| deadline.expired()) {
         return Err(RunOutcome::BudgetExhausted {
@@ -498,6 +513,7 @@ pub(super) async fn execute_run(
     let load_progress = RuntimeLoadProgress::default();
     let mut load = inner.loader.load_with_progress(
         RuntimeLoadRequest {
+            checkpoint: claimed.checkpoint.clone(),
             workspace: claimed.workspace.clone(),
             model: claimed.model.clone(),
             profile: claimed.profile.clone(),
@@ -791,9 +807,7 @@ pub(super) async fn execute_run(
                     inner,
                     claimed,
                     cancellation,
-                    prepared.events,
-                    prepared.tool_cancellation,
-                    &prepared.audit,
+                    prepared,
                     &resources,
                     loaded
                         .plan
@@ -1083,9 +1097,7 @@ async fn run_auto_compaction(
             Arc::clone(inner),
             compaction,
             compaction_cancellation,
-            prepared.events,
-            prepared.tool_cancellation,
-            &prepared.audit,
+            prepared,
             resources,
             loaded
                 .plan
@@ -1235,12 +1247,15 @@ async fn execute_started_run(
     inner: Arc<SessionRuntimeInner>,
     claimed: ClaimedRun,
     mut cancellation: watch::Receiver<bool>,
-    mut events: crate::RuntimeStream,
-    tool_cancellation: RunCancellation,
-    audit: &PreparedRunAudit,
+    prepared: PreparedExecution,
     resources: &RunResources,
     checkpoint_enforced: bool,
 ) {
+    let PreparedExecution {
+        mut events,
+        tool_cancellation,
+        audit,
+    } = prepared;
     let resolved_model = Arc::clone(&audit.resolved_model);
     let context_shape = audit.context_shape;
     let initial_occupancy_basis = context_occupancy_basis(
@@ -1287,6 +1302,7 @@ async fn execute_started_run(
     // flushed when the turn completes, before any of its calls execute.
     let mut pending_tool_call: Option<ToolCallId> = None;
     let mut pending_tool_output = String::new();
+    let mut checkpoint_in_flight = None;
     let mut tools_awaiting_checkpoint = std::collections::HashSet::<ToolCallId>::new();
     // An internal run's streamed output never joins the transcript; the
     // summary accumulates here and persists as a compaction row instead.
@@ -1509,10 +1525,12 @@ async fn execute_started_run(
                         inner.failed.send_replace(true);
                         return;
                     };
-                    if let Err(checkpoint_error) = record_unreviewed_tool_checkpoints(
+                    if let Err(checkpoint_error) = record_unreviewed_checkpoints(
                         &inner,
                         &claimed,
                         &mut tools_awaiting_checkpoint,
+                        &mut checkpoint_in_flight,
+                        &mut accounting,
                         "failed while settling cancellation",
                     )
                     .await
@@ -1552,10 +1570,12 @@ async fn execute_started_run(
                         inner.failed.send_replace(true);
                         return;
                     };
-                    if let Err(checkpoint_error) = record_unreviewed_tool_checkpoints(
+                    if let Err(checkpoint_error) = record_unreviewed_checkpoints(
                         &inner,
                         &claimed,
                         &mut tools_awaiting_checkpoint,
+                        &mut checkpoint_in_flight,
+                        &mut accounting,
                         "failed while settling cancellation",
                     )
                     .await
@@ -1597,10 +1617,12 @@ async fn execute_started_run(
                 } else {
                     "interrupted"
                 };
-                if let Err(error) = record_unreviewed_tool_checkpoints(
+                if let Err(error) = record_unreviewed_checkpoints(
                     &inner,
                     &claimed,
                     &mut tools_awaiting_checkpoint,
+                    &mut checkpoint_in_flight,
+                    &mut accounting,
                     cancellation_label,
                 )
                 .await
@@ -1641,10 +1663,12 @@ async fn execute_started_run(
                         inner.failed.send_replace(true);
                         return;
                     };
-                    if let Err(checkpoint_error) = record_unreviewed_tool_checkpoints(
+                    if let Err(checkpoint_error) = record_unreviewed_checkpoints(
                         &inner,
                         &claimed,
                         &mut tools_awaiting_checkpoint,
+                        &mut checkpoint_in_flight,
+                        &mut accounting,
                         "failed while settling a runtime failure",
                     )
                     .await
@@ -1684,10 +1708,12 @@ async fn execute_started_run(
                         inner.failed.send_replace(true);
                         return;
                     };
-                    if let Err(checkpoint_error) = record_unreviewed_tool_checkpoints(
+                    if let Err(checkpoint_error) = record_unreviewed_checkpoints(
                         &inner,
                         &claimed,
                         &mut tools_awaiting_checkpoint,
+                        &mut checkpoint_in_flight,
+                        &mut accounting,
                         "failed while settling a runtime failure",
                     )
                     .await
@@ -1717,10 +1743,12 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
-                if let Err(error) = record_unreviewed_tool_checkpoints(
+                if let Err(error) = record_unreviewed_checkpoints(
                     &inner,
                     &claimed,
                     &mut tools_awaiting_checkpoint,
+                    &mut checkpoint_in_flight,
+                    &mut accounting,
                     "failed",
                 )
                 .await
@@ -2155,6 +2183,31 @@ async fn execute_started_run(
             })) => {
                 accounting.record_review(usage, cost_usd_nanos);
             }
+            RunInput::Event(Some(RuntimeEvent::CheckpointStarted {
+                correlation,
+                phase,
+                tool_call_id,
+            })) => {
+                if let Err(error) = inner
+                    .store
+                    .record_checkpoint_started(&claimed, correlation.clone(), phase, tool_call_id)
+                    .await
+                {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure("failed to persist Jev review start", &error),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
+                checkpoint_in_flight = Some((correlation, phase, tool_call_id));
+            }
             RunInput::Event(Some(RuntimeEvent::CheckpointReviewed {
                 correlation,
                 phase,
@@ -2162,19 +2215,27 @@ async fn execute_started_run(
                 outcome,
                 confidence,
                 feedback,
+                spend,
             })) => {
+                if let Some(spend) = spend {
+                    accounting.record_review(spend.usage, spend.estimated_cost_usd_nanos);
+                }
                 let confidence_basis_points =
                     confidence.map(|value| (value.clamp(0.0, 1.0) * 10_000.0).round() as u16);
                 if let Err(error) = inner
                     .store
                     .record_checkpoint(
                         &claimed,
-                        correlation,
-                        phase,
-                        tool_call_id,
-                        outcome,
-                        confidence_basis_points,
-                        feedback,
+                        streaming::CheckpointRecord {
+                            correlation,
+                            phase,
+                            tool_call_id,
+                            outcome,
+                            confidence_basis_points,
+                            feedback,
+                            spend,
+                        },
+                        Some(accounting.snapshot()),
                     )
                     .await
                 {
@@ -2191,6 +2252,7 @@ async fn execute_started_run(
                     .await;
                     return;
                 }
+                checkpoint_in_flight = None;
                 if let Some(tool_call_id) = tool_call_id {
                     tools_awaiting_checkpoint.remove(&tool_call_id);
                 }
@@ -2600,10 +2662,12 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
-                let unreviewed = match record_unreviewed_tool_checkpoints(
+                let unreviewed = match record_unreviewed_checkpoints(
                     &inner,
                     &claimed,
                     &mut tools_awaiting_checkpoint,
+                    &mut checkpoint_in_flight,
+                    &mut accounting,
                     "completed",
                 )
                 .await
@@ -2676,10 +2740,12 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
-                if let Err(error) = record_unreviewed_tool_checkpoints(
+                if let Err(error) = record_unreviewed_checkpoints(
                     &inner,
                     &claimed,
                     &mut tools_awaiting_checkpoint,
+                    &mut checkpoint_in_flight,
+                    &mut accounting,
                     "stopped by its budget",
                 )
                 .await
@@ -2736,10 +2802,12 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
-                if let Err(error) = record_unreviewed_tool_checkpoints(
+                if let Err(error) = record_unreviewed_checkpoints(
                     &inner,
                     &claimed,
                     &mut tools_awaiting_checkpoint,
+                    &mut checkpoint_in_flight,
+                    &mut accounting,
                     "failed",
                 )
                 .await
@@ -2820,10 +2888,12 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
-                if let Err(error) = record_unreviewed_tool_checkpoints(
+                if let Err(error) = record_unreviewed_checkpoints(
                     &inner,
                     &claimed,
                     &mut tools_awaiting_checkpoint,
+                    &mut checkpoint_in_flight,
+                    &mut accounting,
                     "ended without a terminal event",
                 )
                 .await
@@ -2968,28 +3038,45 @@ async fn persist_text(
 /// Persists an explicit fail-closed status for every durable tool result whose
 /// reviewer future was cut short by terminal run settlement. This is separate
 /// from the terminal outcome: it never claims that the remote reviewer ran.
-async fn record_unreviewed_tool_checkpoints(
+async fn record_unreviewed_checkpoints(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
     pending: &mut HashSet<ToolCallId>,
+    in_flight: &mut Option<(String, qq_protocol::CheckpointPhase, Option<ToolCallId>)>,
+    accounting: &mut RunAccountingAccumulator,
     terminal_reason: &str,
 ) -> Result<usize, SessionRuntimeError> {
+    let mut count = 0;
+    if let Some((correlation, phase, tool_call_id)) = in_flight.take() {
+        accounting.record_review(None, None);
+        inner.store.record_checkpoint(claimed, streaming::CheckpointRecord {
+            correlation, phase, tool_call_id, outcome: qq_protocol::CheckpointOutcome::Unavailable, confidence_basis_points: None,
+            feedback: format!("No Jev reviewer verdict was durably recorded before the run {terminal_reason}; remote spend is unknown"),
+            spend: Some(qq_protocol::CheckpointSpend::default()),
+        }, Some(accounting.snapshot())).await?;
+        if let Some(id) = tool_call_id {
+            pending.remove(&id);
+        }
+        count += 1;
+    }
     let mut tool_call_ids = pending.drain().collect::<Vec<_>>();
     tool_call_ids.sort_by_key(ToString::to_string);
-    let count = tool_call_ids.len();
+    count += tool_call_ids.len();
     for tool_call_id in tool_call_ids {
         inner
             .store
             .record_checkpoint(
                 claimed,
-                format!("tool:{tool_call_id}"),
-                qq_protocol::CheckpointPhase::ToolResult,
-                Some(tool_call_id),
-                qq_protocol::CheckpointOutcome::Unavailable,
+                streaming::CheckpointRecord {
+                    correlation: format!("tool:{tool_call_id}"),
+                    phase: qq_protocol::CheckpointPhase::ToolResult,
+                    tool_call_id: Some(tool_call_id),
+                    outcome: qq_protocol::CheckpointOutcome::Unavailable,
+                    confidence_basis_points: None,
+                    feedback: format!("No JEV reviewer verdict was durably recorded before the run {terminal_reason} after the tool result became durable"),
+                    spend: None,
+                },
                 None,
-                format!(
-                    "No JEV reviewer verdict was durably recorded before the run {terminal_reason} after the tool result became durable"
-                ),
             )
             .await?;
     }

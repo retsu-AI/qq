@@ -49,15 +49,15 @@ pub use qq_reasoning::{ReasoningEvent, ReasoningKind};
 pub use sessions::{
     AccountingTotal, ApprovalDecision, ApprovalGrant, ApprovalMode, ApprovalResolution,
     AuditOutcome, AuditRecord, BudgetExhaustion, BudgetLimitKind, COMMAND_ROUTES,
-    CapabilitySupport, CheckpointOutcome, CheckpointPhase, ChildAuthority, CommandOutcome,
-    CommandReceipt, CommandRequest, ContentHash, ContentHashError, ContextSourceOutcome,
-    ContextSourceRecord, CursorError, DEFAULT_OUTPUT_REPAIR_TURNS, EditPreview, EventCursor,
-    FetchPreview, FinalOutput, GenerationCapabilities, GuidanceIdentity, GuidanceKind,
-    InstructionHash, InstructionHashError, MAX_INCLUDED_SESSIONS, MAX_OUTPUT_ERROR_BYTES,
-    MAX_OUTPUT_REPAIR_TURNS, MAX_OUTPUT_SCHEMA_BYTES, MAX_OUTPUT_SCHEMA_DEPTH,
-    MAX_OUTPUT_SCHEMA_VALUES, MessageRole, MessageSnapshot, MessageState, ModelCatalogRequest,
-    ModelDescriptor, ModelPricing, ModelPricingTier, ModelSelection, OutputContract,
-    PromptCacheCapabilities, PromptVersion, ProviderRequestShapeIdentity,
+    CapabilitySupport, CheckpointOutcome, CheckpointPhase, CheckpointSpend, ChildAuthority,
+    CommandOutcome, CommandReceipt, CommandRequest, ContentHash, ContentHashError,
+    ContextSourceOutcome, ContextSourceRecord, CursorError, DEFAULT_OUTPUT_REPAIR_TURNS,
+    EditPreview, EventCursor, FetchPreview, FinalOutput, GenerationCapabilities, GuidanceIdentity,
+    GuidanceKind, InstructionHash, InstructionHashError, MAX_INCLUDED_SESSIONS,
+    MAX_OUTPUT_ERROR_BYTES, MAX_OUTPUT_REPAIR_TURNS, MAX_OUTPUT_SCHEMA_BYTES,
+    MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MessageRole, MessageSnapshot, MessageState,
+    ModelCatalogRequest, ModelDescriptor, ModelPricing, ModelPricingTier, ModelSelection,
+    OutputContract, PromptCacheCapabilities, PromptVersion, ProviderRequestShapeIdentity,
     ProviderRequestShapeVersion, Question, QuestionPreview, ResolvedModel, ResolvedModelVersion,
     RunActivity, RunFailure, RunLimits, RunOutcome, RunPromptIdentity, RunSnapshot, RunStatus,
     SessionAccounting, SessionCommand, SessionCommandKind, SessionEvent, SessionEventEnvelope,
@@ -67,7 +67,7 @@ pub use sessions::{
     WorkspaceSnapshot, WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 23;
+pub const PROTOCOL_VERSION: u16 = 24;
 
 /// Slash commands owned by interactive clients rather than the shared
 /// runtime. Keeping this vocabulary in the transport-neutral protocol avoids
@@ -154,6 +154,11 @@ pub enum RunEvent {
     Usage {
         usage: TokenUsage,
     },
+    CheckpointStarted {
+        correlation: String,
+        phase: CheckpointPhase,
+        tool_call_id: Option<ToolCallId>,
+    },
     CheckpointReviewed {
         correlation: String,
         phase: CheckpointPhase,
@@ -161,6 +166,8 @@ pub enum RunEvent {
         outcome: CheckpointOutcome,
         confidence_basis_points: Option<u16>,
         feedback: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spend: Option<CheckpointSpend>,
     },
     Completed,
     Failed {

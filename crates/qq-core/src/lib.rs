@@ -71,16 +71,16 @@ pub use runtime::{
     MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
 };
 pub use sessions::{
-    ApprovalReviewer, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, MAX_CHILD_DEPTH,
-    MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN, MAX_DELEGATION_ROSTER,
-    MAX_DESCENDANTS_PER_ROOT, MAX_PENDING_PROMPTS, MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES,
-    MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN,
-    PersistenceFault, PublishedEvent, PublishedEventStream, RecentAction, ReviewDecision,
-    ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend, ReviewVerdict, RuntimeLoadError,
-    RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader,
-    STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime, SessionRuntimeError,
-    SessionRuntimeOptions, SpawnModelValidationFuture, WorkerRuntimeLoadFuture,
-    WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
+    ApprovalReviewer, CheckpointSelection, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime,
+    MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN,
+    MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT, MAX_PENDING_PROMPTS, MAX_REPLAY_EVENTS,
+    MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS,
+    MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent, PublishedEventStream,
+    RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend,
+    ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest,
+    RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime,
+    SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture,
+    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 pub use workspace::skills::{MAX_INDEXED_SKILLS, MAX_SKILL_DESCRIPTION_BYTES};
 pub use workspace::{SkillEntry, SkillIndex, SkillKind};
@@ -1306,8 +1306,6 @@ impl plan::CompiledAgentPlan {
             let mut audit_actions: Vec<runtime::AuditedAction> = Vec::new();
             let mut audit_revisions = 0_u16;
             let mut checkpoint_context = checkpoint.as_ref().map(|_| runtime::CheckpointContext::new(&messages));
-            let mut checkpoint_evidence_version = 0_u32;
-            let mut checkpoint_required_evidence_version = None;
             // Repair turns spent against the output contract, for the whole
             // run: neither an audit revision nor steering resets them.
             let mut output_repairs = 0_u8;
@@ -2246,24 +2244,12 @@ impl plan::CompiledAgentPlan {
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
-                        if checkpoint_required_evidence_version
-                            .is_some_and(|required| checkpoint_evidence_version < required)
-                        {
-                            irreducible_message_bytes = irreducible_message_bytes
-                                .saturating_add(measure_message(&assistant));
-                            Arc::make_mut(&mut messages).push(assistant);
-                            Arc::make_mut(&mut messages).push(Message::user(
-                                "JEV requires a fresh tool observation before another final checkpoint; rewording the same evidence is not a correction"
-                            ));
-                            irreducible_message_bytes = irreducible_message_bytes
-                                .saturating_add(measure_message(messages.last().expect("just pushed")));
-                            continue;
-                        }
-                        let context = checkpoint_context.as_ref().expect("enabled review context");
+                        let context = checkpoint_context.as_mut().expect("enabled review context");
                         let correlation = format!("final:{turn_ordinal}");
                         if context.task_overflow {
                             let feedback = "JEV final checkpoint was not sent because the original task exceeded the exact review bound".to_owned();
                             yield RuntimeEvent::CheckpointReviewed {
+                                spend: None,
                                 correlation,
                                 phase: qq_protocol::CheckpointPhase::FinalCandidate,
                                 tool_call_id: None,
@@ -2277,6 +2263,7 @@ impl plan::CompiledAgentPlan {
                         let Some(final_evidence) = context.final_evidence(answer) else {
                             let feedback = "JEV final checkpoint was not sent because the combined candidate and tool evidence exceeded the exact review bound".to_owned();
                             yield RuntimeEvent::CheckpointReviewed {
+                                spend: None,
                                 correlation,
                                 phase: qq_protocol::CheckpointPhase::FinalCandidate,
                                 tool_call_id: None,
@@ -2290,6 +2277,21 @@ impl plan::CompiledAgentPlan {
                             };
                             return;
                         };
+                        let remaining = match budget.remaining(tokio::time::Instant::now()) {
+                            Ok(remaining) => remaining,
+                            Err(kind) => {
+                                yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                                return;
+                            }
+                        };
+                        if let Err(error) = context.admit(remaining.max_cost_usd_nanos, reviewer.max_cost_usd_nanos()) {
+                            if let Some(kind) = error.budget_kind() {
+                                yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                            } else {
+                                yield RuntimeEvent::Failed { kind: RunFailureKind::Policy, message: error.to_string() };
+                            }
+                            return;
+                        }
                         let request = runtime::CheckpointRequest {
                             correlation: correlation.clone(),
                             phase: runtime::CheckpointPhase::FinalCandidate,
@@ -2299,13 +2301,18 @@ impl plan::CompiledAgentPlan {
                             evidence: final_evidence,
                             is_error: false,
                         };
-                                let verdict = tokio::select! {
+                                yield RuntimeEvent::CheckpointStarted {
+                            correlation: correlation.clone(), phase: qq_protocol::CheckpointPhase::FinalCandidate, tool_call_id: None,
+                        };
+                        let verdict = tokio::select! {
                                     biased;
                                     () = interrupt_requested(&mut steering, handled_interrupt) => None,
-                                    verdict = reviewer.review(request) => Some(verdict),
+                                    verdict = runtime::assess_checkpoint(reviewer.as_ref(), request) => Some(verdict),
                                 };
                                 let Some(verdict) = verdict else {
+                                    budget.charge_child(None, None);
                                     yield RuntimeEvent::CheckpointReviewed {
+                                        spend: Some(qq_protocol::CheckpointSpend::default()),
                                         correlation,
                                         phase: qq_protocol::CheckpointPhase::FinalCandidate,
                                         tool_call_id: None,
@@ -2324,7 +2331,9 @@ impl plan::CompiledAgentPlan {
                                     }
                                     continue;
                                 };
+                        budget.charge_child(verdict.spend.usage, verdict.spend.estimated_cost_usd_nanos);
                         yield RuntimeEvent::CheckpointReviewed {
+                                spend: Some(verdict.spend),
                             correlation,
                             phase: qq_protocol::CheckpointPhase::FinalCandidate,
                             tool_call_id: None,
@@ -2332,6 +2341,10 @@ impl plan::CompiledAgentPlan {
                             confidence: verdict.confidence,
                             feedback: runtime::bounded_checkpoint_text(&verdict.feedback),
                         };
+                        if let Some(kind) = budget.exceeded(tokio::time::Instant::now()) {
+                            yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                            return;
+                        }
                         if verdict.outcome == runtime::CheckpointOutcome::Unavailable {
                             yield RuntimeEvent::Failed {
                                 kind: RunFailureKind::Policy,
@@ -2340,14 +2353,15 @@ impl plan::CompiledAgentPlan {
                             return;
                         }
                         if !verdict.outcome.allows_progress() {
-                            checkpoint_required_evidence_version = Some(
-                                checkpoint_evidence_version.saturating_add(1),
-                            );
+                            if !checkpoint_context.as_mut().expect("enabled review context").repair() {
+                                yield RuntimeEvent::Failed { kind: RunFailureKind::Policy, message: "Jev exhausted its two correction attempts; revise the task or collect missing evidence in a new run".to_owned() };
+                                return;
+                            }
                             irreducible_message_bytes = irreducible_message_bytes
                                 .saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
                             let notice = format!(
-                                "JEV RED {}. Correct the candidate using fresh direct evidence before attempting completion. Feedback: {}",
+                                "JEV RED {}. Correct the candidate or gather missing direct evidence before attempting completion. Feedback: {}",
                                 verdict.outcome.label(), verdict.feedback
                             );
                             Arc::make_mut(&mut messages).push(Message::user(notice));
@@ -2955,7 +2969,6 @@ impl plan::CompiledAgentPlan {
                         let evidence = tools::output::mask_secrets(evidence);
                         context.record(format!("{correlation}\n{evidence}"));
                         if !reviewer.reviews_tools() {
-                            checkpoint_evidence_version = checkpoint_evidence_version.saturating_add(1);
                             continue;
                         }
                         let overflow = if context.task_overflow {
@@ -2970,6 +2983,7 @@ impl plan::CompiledAgentPlan {
                                 "JEV tool checkpoint was not sent because {field} exceeded the exact review bound"
                             );
                             yield RuntimeEvent::CheckpointReviewed {
+                                spend: None,
                                 correlation,
                                 phase: qq_protocol::CheckpointPhase::ToolResult,
                                 tool_call_id: Some(call.id),
@@ -2983,6 +2997,21 @@ impl plan::CompiledAgentPlan {
                             };
                             return;
                         }
+                        let remaining = match budget.remaining(tokio::time::Instant::now()) {
+                            Ok(remaining) => remaining,
+                            Err(kind) => {
+                                yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                                return;
+                            }
+                        };
+                        if let Err(error) = context.admit(remaining.max_cost_usd_nanos, reviewer.max_cost_usd_nanos()) {
+                            if let Some(kind) = error.budget_kind() {
+                                yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                            } else {
+                                yield RuntimeEvent::Failed { kind: RunFailureKind::Policy, message: error.to_string() };
+                            }
+                            return;
+                        }
                         let request = runtime::CheckpointRequest {
                             correlation: correlation.clone(),
                             phase: runtime::CheckpointPhase::ToolResult,
@@ -2992,8 +3021,13 @@ impl plan::CompiledAgentPlan {
                             evidence,
                             is_error: retained.is_error,
                         };
-                        let verdict = reviewer.review(request).await;
+                        yield RuntimeEvent::CheckpointStarted {
+                            correlation: correlation.clone(), phase: qq_protocol::CheckpointPhase::ToolResult, tool_call_id: Some(call.id),
+                        };
+                        let verdict = runtime::assess_checkpoint(reviewer.as_ref(), request).await;
+                        budget.charge_child(verdict.spend.usage, verdict.spend.estimated_cost_usd_nanos);
                         yield RuntimeEvent::CheckpointReviewed {
+                                spend: Some(verdict.spend),
                             correlation,
                             phase: qq_protocol::CheckpointPhase::ToolResult,
                             tool_call_id: Some(call.id),
@@ -3007,7 +3041,10 @@ impl plan::CompiledAgentPlan {
                             verdict.outcome.label(),
                             runtime::bounded_checkpoint_text(&verdict.feedback)
                         ));
-                        checkpoint_evidence_version = checkpoint_evidence_version.saturating_add(1);
+                        if let Some(kind) = budget.exceeded(tokio::time::Instant::now()) {
+                            yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                            return;
+                        }
                         if verdict.outcome == runtime::CheckpointOutcome::Unavailable {
                             unavailable.get_or_insert_with(|| format!(
                                 "JEV tool checkpoint {} for {}: {}",
@@ -3022,6 +3059,10 @@ impl plan::CompiledAgentPlan {
                         return;
                     }
                     if !correction.is_empty() {
+                        if !context.repair() {
+                            yield RuntimeEvent::Failed { kind: RunFailureKind::Policy, message: "Jev exhausted its two correction attempts; revise the task or collect missing evidence in a new run".to_owned() };
+                            return;
+                        }
                         checkpoint_correction_notice = Some(format!(
                             "JEV RED. Do not claim completion. Produce fresh direct evidence or correct the work, then retry one tool call. Feedback:\n- {}",
                             correction.join("\n- ")
@@ -3172,6 +3213,9 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 | RuntimeEvent::OutputTruncated { .. }
                 // Direct runs carry no output contract.
                 | RuntimeEvent::OutputRepairRequested { .. } => {}
+                RuntimeEvent::CheckpointStarted { correlation, phase, tool_call_id } => {
+                    yield RunEvent::CheckpointStarted { correlation, phase, tool_call_id };
+                }
                 RuntimeEvent::CheckpointReviewed {
                     correlation,
                     phase,
@@ -3179,6 +3223,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                     outcome,
                     confidence,
                     feedback,
+                    spend,
                 } => {
                     yield RunEvent::CheckpointReviewed {
                         correlation,
@@ -3189,6 +3234,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                             (value.clamp(0.0, 1.0) * 10_000.0).round() as u16
                         }),
                         feedback,
+                        spend,
                     };
                 }
                 RuntimeEvent::Completed { .. } => {
@@ -4562,6 +4608,7 @@ mod tests {
                             .unwrap();
                     }
                     CheckpointVerdict {
+                        spend: qq_protocol::CheckpointSpend::default(),
                         outcome: CheckpointOutcome::Supported,
                         confidence: Some(1.0),
                         feedback: "supported".into(),
@@ -4643,6 +4690,7 @@ mod tests {
                         std::future::pending::<()>().await;
                     }
                     CheckpointVerdict {
+                        spend: qq_protocol::CheckpointSpend::default(),
                         outcome: CheckpointOutcome::Supported,
                         confidence: Some(1.0),
                         feedback: "supported".into(),
@@ -4702,6 +4750,7 @@ mod tests {
         impl CheckpointReviewer for Supports {
             fn review(&self, _request: CheckpointRequest) -> CheckpointFuture {
                 Box::pin(std::future::ready(CheckpointVerdict {
+                    spend: qq_protocol::CheckpointSpend::default(),
                     outcome: CheckpointOutcome::Supported,
                     confidence: Some(0.99),
                     feedback: "final evidence is supported".to_owned(),
@@ -5308,6 +5357,7 @@ mod tests {
         impl CheckpointReviewer for Supports {
             fn review(&self, _request: CheckpointRequest) -> CheckpointFuture {
                 Box::pin(std::future::ready(CheckpointVerdict {
+                    spend: qq_protocol::CheckpointSpend::default(),
                     outcome: CheckpointOutcome::Supported,
                     confidence: Some(1.0),
                     feedback: "supported".into(),
@@ -5371,6 +5421,7 @@ mod tests {
             fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
                 self.0.lock().unwrap().push(request);
                 Box::pin(std::future::ready(CheckpointVerdict {
+                    spend: qq_protocol::CheckpointSpend::default(),
                     outcome: CheckpointOutcome::Supported,
                     confidence: Some(1.0),
                     feedback: "supported".into(),
@@ -5421,6 +5472,291 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn final_checkpoint_spend_exhausts_the_shared_run_budget() {
+        struct FinalProvider;
+        impl Provider for FinalProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "done".into(),
+                    }),
+                    Ok(ProviderEvent::Completed {
+                        usage: Some(qq_provider::ProviderUsage {
+                            input_tokens: 1,
+                            cache_read_input_tokens: 0,
+                            cache_write_input_tokens: 0,
+                            output_tokens: 0,
+                            reasoning_tokens: None,
+                        }),
+                    }),
+                ]))
+            }
+        }
+        struct Reviewer;
+        impl CheckpointReviewer for Reviewer {
+            fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome: CheckpointOutcome::Supported,
+                    confidence: Some(1.0),
+                    feedback: "supported".into(),
+                    spend: qq_protocol::CheckpointSpend {
+                        usage: Some(TokenUsage {
+                            input_tokens: 20,
+                            output_tokens: 2,
+                            ..TokenUsage::default()
+                        }),
+                        estimated_cost_usd_nanos: Some(840),
+                    },
+                }))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(FinalProvider, "test", 256)
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(Reviewer));
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("finish")],
+                directory.path().into(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::ReadOnly,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).with_limits(
+                    RunLimits {
+                        max_total_tokens: Some(10),
+                        ..RunLimits::default()
+                    },
+                    None,
+                ),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(events.iter().any(|event| matches!(event, RuntimeEvent::CheckpointReviewed { spend: Some(spend), .. } if spend.usage.unwrap().input_tokens == 20)));
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::BudgetExhausted { .. })),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_request_and_repair_limits_stop_repeated_tool_loops() {
+        struct RepeatingProvider;
+        impl Provider for RepeatingProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::ToolCallStarted {
+                        id: "read".into(),
+                        name: "read_file".into(),
+                    }),
+                    Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: "read".into(),
+                        json: r#"{"path":"note"}"#.into(),
+                    }),
+                    Ok(ProviderEvent::ToolCallCompleted { id: "read".into() }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        struct Reviewer(CheckpointOutcome, Arc<AtomicUsize>);
+        impl CheckpointReviewer for Reviewer {
+            fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome: self.0,
+                    confidence: Some(1.0),
+                    feedback: "criterion: test evidence".into(),
+                    spend: qq_protocol::CheckpointSpend::default(),
+                }))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note"), "evidence").unwrap();
+        for (outcome, expected_calls, message) in [
+            (CheckpointOutcome::Supported, 32, "32 review requests"),
+            (
+                CheckpointOutcome::Contradicted,
+                3,
+                "two correction attempts",
+            ),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let runtime = Runtime::new(RepeatingProvider, "test", 256)
+                .unwrap()
+                .with_checkpoint_reviewer(Arc::new(Reviewer(outcome, Arc::clone(&calls))));
+            let events = runtime
+                .run_messages_in_workspace(vec![Message::user("inspect")], directory.path().into())
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Failed { message: actual, .. }) if actual.contains(message)),
+                "{events:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_checkpoint_timeout_records_unknown_spend_and_fails() {
+        struct Reviewer;
+        impl CheckpointReviewer for Reviewer {
+            fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
+                Box::pin(std::future::pending())
+            }
+        }
+        let runtime = Runtime::new(
+            ScriptedProvider {
+                request: Arc::new(Mutex::new(None)),
+                fails: false,
+            },
+            "test",
+            256,
+        )
+        .unwrap()
+        .with_checkpoint_reviewer(Arc::new(Reviewer));
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("answer")], directory.path().into())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(events.iter().any(|event| matches!(event, RuntimeEvent::CheckpointReviewed { outcome: qq_protocol::CheckpointOutcome::Unavailable, spend: Some(spend), feedback, .. } if spend.usage.is_none() && feedback.contains("five seconds"))));
+        assert!(matches!(events.last(), Some(RuntimeEvent::Failed { .. })));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_cost_admission_refuses_unknown_or_unaffordable_charge_before_dispatch() {
+        struct Reviewer(Option<u64>);
+        impl CheckpointReviewer for Reviewer {
+            fn max_cost_usd_nanos(&self) -> Option<u64> {
+                self.0
+            }
+            fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
+                panic!("over-budget reviewer must not dispatch");
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        for (maximum, expected) in [
+            (None, qq_protocol::BudgetLimitKind::CostUnknown),
+            (Some(2), qq_protocol::BudgetLimitKind::Cost),
+        ] {
+            let runtime = Runtime::new(
+                ScriptedProvider {
+                    request: Arc::new(Mutex::new(None)),
+                    fails: false,
+                },
+                "test",
+                256,
+            )
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(Reviewer(maximum)));
+            let events = runtime
+                .run_loop_with_spawner(
+                    vec![Message::user("finish")],
+                    directory.path().into(),
+                    RunCancellation::new(),
+                    Arc::new(StaticPolicyGate {
+                        mode: ApprovalMode::ReadOnly,
+                        grants: approval::SessionGrants::default(),
+                        network: Arc::default(),
+                    }),
+                    Arc::new(workspace::FileState::default()),
+                    RunCapabilities::user(None).with_limits(
+                        RunLimits {
+                            max_cost_usd_nanos: Some(1),
+                            ..RunLimits::default()
+                        },
+                        Some(qq_protocol::ModelPricing {
+                            input_usd_nanos_per_token: 0,
+                            output_usd_nanos_per_token: 0,
+                            cache_read_usd_nanos_per_token: Some(0),
+                            cache_write_usd_nanos_per_token: Some(0),
+                            context_tier: None,
+                            provenance: "fixture".into(),
+                        }),
+                    ),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::BudgetExhausted { exhaustion }) if exhaustion.limit == expected),
+                "{events:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn final_checkpoint_can_correct_a_claim_without_an_extra_tool_call() {
+        struct ProviderWithCorrection(AtomicUsize);
+        impl Provider for ProviderWithCorrection {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                let text = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    "deployed"
+                } else {
+                    "built locally; deployment unverified"
+                };
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta { text: text.into() }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        struct Reviewer(AtomicUsize);
+        impl CheckpointReviewer for Reviewer {
+            fn reviews_tools(&self) -> bool {
+                false
+            }
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                let first = self.0.fetch_add(1, Ordering::SeqCst) == 0;
+                if !first {
+                    assert!(request.evidence.contains("deployment unverified"));
+                }
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome: if first {
+                        CheckpointOutcome::Contradicted
+                    } else {
+                        CheckpointOutcome::Supported
+                    },
+                    confidence: Some(1.0),
+                    feedback: "consistency: do not infer deployment from a local build".into(),
+                    spend: qq_protocol::CheckpointSpend::default(),
+                }))
+            }
+        }
+        let runtime = Runtime::new(ProviderWithCorrection(AtomicUsize::new(0)), "test", 256)
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(Reviewer(AtomicUsize::new(0))));
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(
+                vec![Message::user(
+                    "Summarize: a local build passed; deployment was not performed",
+                )],
+                directory.path().into(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, RuntimeEvent::CheckpointReviewed { .. }))
+                .count(),
+            2
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::ToolCallStarted { .. }))
+        );
+    }
+
+    #[tokio::test]
     async fn selective_checkpoint_preserves_batching_and_finishes_large_evidence_run() {
         struct BatchProvider(AtomicUsize);
         impl Provider for BatchProvider {
@@ -5458,6 +5794,7 @@ mod tests {
             fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
                 self.0.lock().unwrap().push(request);
                 Box::pin(std::future::ready(CheckpointVerdict {
+                    spend: qq_protocol::CheckpointSpend::default(),
                     outcome: CheckpointOutcome::Supported,
                     confidence: Some(1.0),
                     feedback: "supported".into(),
@@ -5526,6 +5863,7 @@ mod tests {
             fn review(&self, _request: CheckpointRequest) -> CheckpointFuture {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Box::pin(std::future::ready(CheckpointVerdict {
+                    spend: qq_protocol::CheckpointSpend::default(),
                     outcome: CheckpointOutcome::Supported,
                     confidence: Some(1.0),
                     feedback: "must not be used".into(),
@@ -5596,6 +5934,7 @@ mod tests {
             fn review(&self, _request: CheckpointRequest) -> CheckpointFuture {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Box::pin(std::future::ready(CheckpointVerdict {
+                    spend: qq_protocol::CheckpointSpend::default(),
                     outcome: CheckpointOutcome::Supported,
                     confidence: Some(1.0),
                     feedback: "must not be used".into(),
@@ -5737,6 +6076,7 @@ mod tests {
                 self.requests.lock().unwrap().push(request);
                 let outcome = self.outcome;
                 Box::pin(std::future::ready(CheckpointVerdict {
+                    spend: qq_protocol::CheckpointSpend::default(),
                     outcome,
                     confidence: Some(1.0),
                     feedback: outcome.label().to_owned(),

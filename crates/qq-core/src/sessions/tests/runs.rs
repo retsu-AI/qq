@@ -2561,3 +2561,78 @@ async fn call_only_turns_persist_no_message_row() {
     assert_eq!(focused.messages[1].output, "done");
     assert_eq!(focused.tool_calls[0].turn_ordinal, 1);
 }
+
+#[tokio::test]
+async fn cancellation_during_tool_and_final_checkpoint_records_unknown_spend() {
+    struct Loader(bool);
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            struct Reviewer(bool);
+            impl CheckpointReviewer for Reviewer {
+                fn reviews_tools(&self) -> bool {
+                    self.0
+                }
+                fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
+                    Box::pin(std::future::pending())
+                }
+            }
+            let review_tools = self.0;
+            Box::pin(async move {
+                let runtime = Runtime::new(
+                    ToolLoopProvider {
+                        requests: Arc::new(StdMutex::new(Vec::new())),
+                    },
+                    "test",
+                    256,
+                )
+                .unwrap()
+                .with_checkpoint_reviewer(Arc::new(Reviewer(review_tools)));
+                Ok(loaded_runtime(runtime, &request.workspace, None))
+            })
+        }
+    }
+    for (review_tools, expected_phase) in [
+        (true, qq_protocol::CheckpointPhase::ToolResult),
+        (false, qq_protocol::CheckpointPhase::FinalCandidate),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.txt"), "evidence").unwrap();
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(Loader(review_tools)),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created =
+            create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session");
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+        let run_id = queue_prompt(&runtime, session_id, "inspect".into()).await;
+        let mut observed = collect_until(&mut events, |event| matches!(event, SessionEvent::CheckpointStarted { phase, .. } if *phase == expected_phase)).await;
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::CancelRun { run_id },
+            )
+            .await
+            .unwrap();
+        observed.extend(collect_until(&mut events, finished_for(run_id)).await);
+        assert_eq!(observed.iter().filter(|event| matches!(&event.event, SessionEvent::CheckpointReviewed { phase, spend: Some(spend), outcome: qq_protocol::CheckpointOutcome::Unavailable, .. } if *phase == expected_phase && spend.usage.is_none() && spend.estimated_cost_usd_nanos.is_none())).count(), 1);
+        assert!(matches!(
+            observed.last().map(|event| &event.event),
+            Some(SessionEvent::RunFinished {
+                outcome: RunOutcome::Cancelled,
+                usage: None,
+                ..
+            })
+        ));
+    }
+}

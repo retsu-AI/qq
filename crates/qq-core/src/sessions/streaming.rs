@@ -354,18 +354,78 @@ pub(super) fn record_run_audit(
     Ok(event)
 }
 
-pub(super) fn record_checkpoint(
+pub(super) fn record_checkpoint_started(
     connection: &mut Connection,
     store_id: StoreId,
     identity: RunIdentity,
     correlation: String,
     phase: qq_protocol::CheckpointPhase,
     tool_call_id: Option<qq_protocol::ToolCallId>,
-    outcome: qq_protocol::CheckpointOutcome,
-    confidence_basis_points: Option<u16>,
-    feedback: String,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    // A crash after dispatch must not leave a known total that omits it.
+    // A completed receipt restores totals from the live accumulator atomically.
+    transaction.execute(
+        "UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = NULL WHERE id = ?1",
+        [identity.run_id.to_string()],
+    )?;
+    let event = append_event(
+        &transaction,
+        EventContext::for_run(store_id, identity, now_ms()),
+        SessionEvent::CheckpointStarted {
+            run_id: identity.run_id,
+            correlation,
+            phase,
+            tool_call_id,
+        },
+    )?;
+    transaction.commit()?;
+    Ok(event)
+}
+
+pub(super) struct CheckpointRecord {
+    pub(super) correlation: String,
+    pub(super) phase: qq_protocol::CheckpointPhase,
+    pub(super) tool_call_id: Option<qq_protocol::ToolCallId>,
+    pub(super) outcome: qq_protocol::CheckpointOutcome,
+    pub(super) confidence_basis_points: Option<u16>,
+    pub(super) feedback: String,
+    pub(super) spend: Option<qq_protocol::CheckpointSpend>,
+}
+
+pub(super) fn record_checkpoint(
+    connection: &mut Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+    review: CheckpointRecord,
+    accounting: Option<RunAccounting>,
+) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+    let CheckpointRecord {
+        correlation,
+        phase,
+        tool_call_id,
+        outcome,
+        confidence_basis_points,
+        feedback,
+        spend,
+    } = review;
+    let transaction = store::begin_unit(connection)?;
+    if let Some(accounting) = accounting {
+        let usage_json = accounting
+            .usage
+            .map(|usage| serde_json::to_string(&usage))
+            .transpose()?;
+        transaction.execute(
+            "UPDATE runs SET usage_json = ?2, estimated_cost_usd_nanos = ?3 WHERE id = ?1",
+            params![
+                identity.run_id.to_string(),
+                usage_json,
+                accounting
+                    .estimated_cost_usd_nanos
+                    .and_then(|cost| i64::try_from(cost).ok())
+            ],
+        )?;
+    }
     let event = append_event(
         &transaction,
         EventContext::for_run(store_id, identity, now_ms()),
@@ -377,6 +437,7 @@ pub(super) fn record_checkpoint(
             outcome,
             confidence_basis_points,
             feedback,
+            spend,
         },
     )?;
     transaction.commit()?;
