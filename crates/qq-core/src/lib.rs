@@ -167,10 +167,14 @@ fn apply_steering(
     messages: &mut Vec<Message>,
     irreducible_message_bytes: &mut u64,
     _turn_ordinal: u32,
+    mut checkpoint: Option<&mut runtime::CheckpointContext>,
 ) -> Option<Vec<qq_protocol::MessageId>> {
     let steering = steering.as_mut()?;
     let mut applied = Vec::new();
     while let Ok(message) = steering.messages.try_recv() {
+        if let Some(context) = checkpoint.as_deref_mut() {
+            context.steer(&message.text);
+        }
         let user = Message::user(message.text);
         *irreducible_message_bytes =
             irreducible_message_bytes.saturating_add(measure_message(&user));
@@ -1301,10 +1305,7 @@ impl plan::CompiledAgentPlan {
             let mut audit_triggers = runtime::AuditTriggers::default();
             let mut audit_actions: Vec<runtime::AuditedAction> = Vec::new();
             let mut audit_revisions = 0_u16;
-            let mut checkpoint_evidence = String::new();
-            let mut checkpoint_evidence_truncated = false;
-            let mut checkpoint_cache =
-                HashMap::<runtime::CheckpointRequest, runtime::CheckpointVerdict>::new();
+            let mut checkpoint_context = checkpoint.as_ref().map(|_| runtime::CheckpointContext::new(&messages));
             let mut checkpoint_evidence_version = 0_u32;
             let mut checkpoint_required_evidence_version = None;
             // Repair turns spent against the output contract, for the whole
@@ -1903,7 +1904,7 @@ impl plan::CompiledAgentPlan {
                     };
                     return;
                 }
-                if checkpoint.is_some()
+                if checkpoint.as_ref().is_some_and(|reviewer| reviewer.reviews_tools())
                     && calls.iter().filter(|call| call.rejection.is_none()).count() > 1
                 {
                     for call in &mut calls {
@@ -1978,8 +1979,7 @@ impl plan::CompiledAgentPlan {
                         &mut steering,
                         Arc::make_mut(&mut messages),
                         &mut irreducible_message_bytes,
-                        turn_ordinal.saturating_add(1),
-                    ) {
+                        turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
                         for message_id in applied {
                             yield RuntimeEvent::SteeringApplied {
                                 message_id,
@@ -2049,8 +2049,7 @@ impl plan::CompiledAgentPlan {
                         &mut steering,
                         Arc::make_mut(&mut messages),
                         &mut irreducible_message_bytes,
-                        turn_ordinal.saturating_add(1),
-                    ) {
+                        turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
                         irreducible_message_bytes = irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
@@ -2162,7 +2161,7 @@ impl plan::CompiledAgentPlan {
                             irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
                             yield RuntimeEvent::Interrupted { turn_ordinal };
-                            if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1)) {
+                            if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
                                 for message_id in applied {
                                     yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) };
                                 }
@@ -2186,7 +2185,7 @@ impl plan::CompiledAgentPlan {
                         }
                     }
                     // Steering accepted while an audit ran still owns the next boundary.
-                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1)) {
+                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
                         irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(&mut messages).split_off(keep);
@@ -2260,15 +2259,9 @@ impl plan::CompiledAgentPlan {
                                 .saturating_add(measure_message(messages.last().expect("just pushed")));
                             continue;
                         }
-                        if checkpoint_evidence_truncated {
-                            yield RuntimeEvent::Failed {
-                                kind: RunFailureKind::Policy,
-                                message: "JEV final checkpoint cannot verify completion because retained tool evidence exceeded the review bound".to_owned(),
-                            };
-                            return;
-                        }
+                        let context = checkpoint_context.as_ref().expect("enabled review context");
                         let correlation = format!("final:{turn_ordinal}");
-                        if !runtime::checkpoint_text_fits(&audit_prompt) {
+                        if context.task_overflow {
                             let feedback = "JEV final checkpoint was not sent because the original task exceeded the exact review bound".to_owned();
                             yield RuntimeEvent::CheckpointReviewed {
                                 correlation,
@@ -2281,10 +2274,7 @@ impl plan::CompiledAgentPlan {
                             yield RuntimeEvent::Failed { kind: RunFailureKind::Policy, message: feedback };
                             return;
                         }
-                        let final_evidence = format!(
-                            "final candidate:\n{answer}\n\nretained tool evidence:\n{checkpoint_evidence}"
-                        );
-                        if !runtime::checkpoint_text_fits(&final_evidence) {
+                        let Some(final_evidence) = context.final_evidence(answer) else {
                             let feedback = "JEV final checkpoint was not sent because the combined candidate and tool evidence exceeded the exact review bound".to_owned();
                             yield RuntimeEvent::CheckpointReviewed {
                                 correlation,
@@ -2299,23 +2289,20 @@ impl plan::CompiledAgentPlan {
                                 message: feedback,
                             };
                             return;
-                        }
+                        };
                         let request = runtime::CheckpointRequest {
                             correlation: correlation.clone(),
                             phase: runtime::CheckpointPhase::FinalCandidate,
                             tool_call_id: None,
                             tool: None,
-                            task: audit_prompt.clone(),
+                            task: context.task.clone(),
                             evidence: final_evidence,
                             is_error: false,
                         };
-                        let verdict = match checkpoint_cache.get(&request) {
-                            Some(verdict) => verdict.clone(),
-                            None => {
                                 let verdict = tokio::select! {
                                     biased;
                                     () = interrupt_requested(&mut steering, handled_interrupt) => None,
-                                    verdict = reviewer.review(request.clone()) => Some(verdict),
+                                    verdict = reviewer.review(request) => Some(verdict),
                                 };
                                 let Some(verdict) = verdict else {
                                     yield RuntimeEvent::CheckpointReviewed {
@@ -2330,17 +2317,13 @@ impl plan::CompiledAgentPlan {
                                     irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                                     Arc::make_mut(&mut messages).push(assistant);
                                     yield RuntimeEvent::Interrupted { turn_ordinal };
-                                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1)) {
+                                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
                                         for message_id in applied {
                                             yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) };
                                         }
                                     }
                                     continue;
                                 };
-                                checkpoint_cache.insert(request, verdict.clone());
-                                verdict
-                            }
-                        };
                         yield RuntimeEvent::CheckpointReviewed {
                             correlation,
                             phase: qq_protocol::CheckpointPhase::FinalCandidate,
@@ -2375,7 +2358,7 @@ impl plan::CompiledAgentPlan {
                     }
                     // A review may await remote inference. Input accepted during
                     // that wait belongs to this run, not its successor.
-                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1)) {
+                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
                         irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(&mut messages).split_off(keep);
@@ -2957,6 +2940,7 @@ impl plan::CompiledAgentPlan {
                 // so this cannot recursively checkpoint itself.
                 let mut checkpoint_correction_notice = None;
                 if let Some(reviewer) = &checkpoint {
+                    let context = checkpoint_context.as_mut().expect("enabled review context");
                     let mut unavailable = None;
                     let mut correction = Vec::new();
                     for (call, retained) in calls.iter().zip(results.iter_mut()) {
@@ -2968,7 +2952,13 @@ impl plan::CompiledAgentPlan {
                             tools::output::mask_secrets(call.arguments.clone()),
                             retained.model_text
                         );
-                        let overflow = if !runtime::checkpoint_text_fits(&audit_prompt) {
+                        let evidence = tools::output::mask_secrets(evidence);
+                        context.record(format!("{correlation}\n{evidence}"));
+                        if !reviewer.reviews_tools() {
+                            checkpoint_evidence_version = checkpoint_evidence_version.saturating_add(1);
+                            continue;
+                        }
+                        let overflow = if context.task_overflow {
                             Some("original task")
                         } else if !runtime::checkpoint_text_fits(&evidence) {
                             Some("tool arguments and result")
@@ -2998,18 +2988,11 @@ impl plan::CompiledAgentPlan {
                             phase: runtime::CheckpointPhase::ToolResult,
                             tool_call_id: Some(call.id),
                             tool: Some(call.name.clone()),
-                            task: audit_prompt.clone(),
+                            task: context.task.clone(),
                             evidence,
                             is_error: retained.is_error,
                         };
-                        let verdict = match checkpoint_cache.get(&request) {
-                            Some(verdict) => verdict.clone(),
-                            None => {
-                                let verdict = reviewer.review(request.clone()).await;
-                                checkpoint_cache.insert(request, verdict.clone());
-                                verdict
-                            }
-                        };
+                        let verdict = reviewer.review(request).await;
                         yield RuntimeEvent::CheckpointReviewed {
                             correlation,
                             phase: qq_protocol::CheckpointPhase::ToolResult,
@@ -3024,18 +3007,6 @@ impl plan::CompiledAgentPlan {
                             verdict.outcome.label(),
                             runtime::bounded_checkpoint_text(&verdict.feedback)
                         ));
-                        checkpoint_evidence.push_str(&format!(
-                            "\n- {} ({}) args={} result={} verdict={}\n",
-                            call.name,
-                            call.id,
-                            tools::output::mask_secrets(call.arguments.clone()),
-                            retained.model_text,
-                            verdict.outcome.label(),
-                        ));
-                        checkpoint_evidence_truncated |=
-                            !runtime::checkpoint_text_fits(&checkpoint_evidence);
-                        let bounded_evidence = runtime::bounded_checkpoint_text(&checkpoint_evidence);
-                        checkpoint_evidence = bounded_evidence;
                         checkpoint_evidence_version = checkpoint_evidence_version.saturating_add(1);
                         if verdict.outcome == runtime::CheckpointOutcome::Unavailable {
                             unavailable.get_or_insert_with(|| format!(
@@ -3094,8 +3065,7 @@ impl plan::CompiledAgentPlan {
                     &mut steering,
                     Arc::make_mut(&mut messages),
                     &mut irreducible_message_bytes,
-                    turn_ordinal.saturating_add(1),
-                ) {
+                    turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
                     for message_id in applied {
                         yield RuntimeEvent::SteeringApplied {
                             message_id,
@@ -4568,8 +4538,14 @@ mod tests {
             message_id: qq_protocol::MessageId,
         }
         impl CheckpointReviewer for SteeringReviewer {
-            fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
                 let send = !self.sent.swap(true, std::sync::atomic::Ordering::SeqCst);
+                if !send {
+                    assert!(
+                        request.task.contains("Also explain the result"),
+                        "review must use the steered task"
+                    );
+                }
                 let sender = self.sender.clone();
                 let message_id = self.message_id;
                 Box::pin(async move {
@@ -5375,6 +5351,161 @@ mod tests {
             events.last(),
             Some(RuntimeEvent::Completed { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn final_checkpoint_uses_continued_history_all_task_blocks_and_masks_secrets() {
+        struct FinalProvider;
+        impl Provider for FinalProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "API_KEY=abcdefgh12345".into(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        struct Reviewer(Arc<Mutex<Vec<CheckpointRequest>>>);
+        impl CheckpointReviewer for Reviewer {
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                self.0.lock().unwrap().push(request);
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome: CheckpointOutcome::Supported,
+                    confidence: Some(1.0),
+                    feedback: "supported".into(),
+                }))
+            }
+        }
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(FinalProvider, "test", 256)
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(Reviewer(Arc::clone(&requests))));
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(
+                vec![
+                    Message::user("Earlier requirement: retain attribution"),
+                    Message::tool_results(vec![ContentBlock::ToolResult {
+                        call_id: "prior-call".into(),
+                        content: "Prior source API_KEY=abcdefgh12345".into(),
+                        is_error: false,
+                    }]),
+                    Message::new(
+                        Role::User,
+                        vec![
+                            ContentBlock::Text {
+                                text: "Summarize API_KEY=abcdefgh12345".into(),
+                            },
+                            ContentBlock::Text {
+                                text: "Include uncertainties".into(),
+                            },
+                        ],
+                    ),
+                ],
+                directory.path().into(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].task.contains("Include uncertainties"));
+        assert!(requests[0].evidence.contains("Earlier requirement"));
+        assert!(requests[0].evidence.contains("prior-call"));
+        assert!(!requests[0].task.contains("abcdefgh12345"));
+        assert!(!requests[0].evidence.contains("abcdefgh12345"));
+    }
+
+    #[tokio::test]
+    async fn selective_checkpoint_preserves_batching_and_finishes_large_evidence_run() {
+        struct BatchProvider(AtomicUsize);
+        impl Provider for BatchProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                let mut events = Vec::new();
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    for i in 0..8 {
+                        let id = format!("read-{i}");
+                        events.extend([
+                            Ok(ProviderEvent::ToolCallStarted {
+                                id: id.clone(),
+                                name: "read_file".into(),
+                            }),
+                            Ok(ProviderEvent::ToolCallArgumentsDelta {
+                                id: id.clone(),
+                                json: format!(r#"{{"path":"file-{i}"}}"#),
+                            }),
+                            Ok(ProviderEvent::ToolCallCompleted { id }),
+                        ]);
+                    }
+                } else {
+                    events.push(Ok(ProviderEvent::OutputTextDelta {
+                        text: "Read all eight files.".into(),
+                    }));
+                }
+                events.push(Ok(ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
+            }
+        }
+        struct FinalReviewer(Arc<Mutex<Vec<CheckpointRequest>>>);
+        impl CheckpointReviewer for FinalReviewer {
+            fn reviews_tools(&self) -> bool {
+                false
+            }
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                self.0.lock().unwrap().push(request);
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome: CheckpointOutcome::Supported,
+                    confidence: Some(1.0),
+                    feedback: "supported".into(),
+                }))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        for i in 0..8 {
+            std::fs::write(
+                directory.path().join(format!("file-{i}")),
+                "evidence line\n".repeat(400),
+            )
+            .unwrap();
+        }
+        let reviews = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(BatchProvider(AtomicUsize::new(0)), "test", 256)
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(FinalReviewer(Arc::clone(&reviews))));
+        let events = runtime
+            .run_messages_in_workspace(
+                vec![Message::user("Read all eight files")],
+                directory.path().into(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RuntimeEvent::ToolCallFinished {
+                        is_error: false,
+                        ..
+                    }
+                ))
+                .count(),
+            8
+        );
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let requests = reviews.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].phase, CheckpointPhase::FinalCandidate);
+        assert!(requests[0].evidence.len() <= runtime::MAX_CHECKPOINT_TEXT_BYTES);
+        assert!(requests[0].evidence.contains("file-7"));
+        assert!(requests[0].evidence.contains("omitted"));
     }
 
     #[tokio::test]

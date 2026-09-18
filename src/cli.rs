@@ -103,7 +103,7 @@ pub enum Command {
         command: AuthCommand,
     },
 
-    /// Configure enforced TypeSafe JEV checkpoints.
+    /// Store credentials for optional TypeSafe Jev review.
     Jev {
         #[command(subcommand)]
         command: JevCommand,

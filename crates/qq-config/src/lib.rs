@@ -79,6 +79,21 @@ impl LoadRequest {
         request.overrides.model = optional_environment("QQ_MODEL")?;
         request.overrides.organization = optional_environment("QQ_ORGANIZATION")?;
         request.overrides.max_output_tokens = max_output_tokens;
+        if let Some(value) = optional_environment("QQ_JEV_CHECKPOINTS")? {
+            request.overrides.jev_review = Some(value.parse()?);
+        }
+        if let Some(value) = optional_environment("QQ_JEV_ROUTING")? {
+            request.overrides.jev_routing = Some(match value.as_str() {
+                "on" => true,
+                "off" => false,
+                _ => {
+                    return Err(ConfigError::InvalidJevSetting {
+                        setting: "QQ_JEV_ROUTING",
+                        value,
+                    });
+                }
+            });
+        }
         Ok(request)
     }
 
@@ -160,6 +175,8 @@ pub struct RuntimeOverrides {
     organization: Option<String>,
     model: Option<String>,
     max_output_tokens: Option<u32>,
+    jev_review: Option<JevReviewMode>,
+    jev_routing: Option<bool>,
 }
 
 impl RuntimeOverrides {
@@ -201,8 +218,34 @@ impl RuntimeOverrides {
         self.max_output_tokens
     }
 
+    #[must_use]
+    pub const fn with_jev_review(mut self, mode: JevReviewMode) -> Self {
+        self.jev_review = Some(mode);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_jev_routing(mut self, enabled: bool) -> Self {
+        self.jev_routing = Some(enabled);
+        self
+    }
+
+    #[must_use]
+    pub const fn jev_review(&self) -> Option<JevReviewMode> {
+        self.jev_review
+    }
+
+    #[must_use]
+    pub const fn jev_routing(&self) -> Option<bool> {
+        self.jev_routing
+    }
+
     fn is_empty(&self) -> bool {
-        self.organization.is_none() && self.model.is_none() && self.max_output_tokens.is_none()
+        self.organization.is_none()
+            && self.model.is_none()
+            && self.max_output_tokens.is_none()
+            && self.jev_review.is_none()
+            && self.jev_routing.is_none()
     }
 }
 
@@ -1310,6 +1353,8 @@ pub enum ConfigKey {
     ReviewerModel,
     Delegation,
     Audit,
+    JevReview,
+    JevRouting,
     MaxOutputTokens,
     Providers,
     Provider(String),
@@ -1362,6 +1407,8 @@ pub struct ConfigProvenance {
     reviewer_model: Option<SourceIdentity>,
     delegation: Option<SourceIdentity>,
     audit: Option<SourceIdentity>,
+    jev_review: Option<SourceIdentity>,
+    jev_routing: Option<SourceIdentity>,
     max_output_tokens: Option<SourceIdentity>,
     providers: BTreeMap<String, SourceIdentity>,
     profiles: BTreeMap<String, SourceIdentity>,
@@ -1408,6 +1455,16 @@ impl ConfigProvenance {
     #[must_use]
     pub const fn delegation(&self) -> Option<&SourceIdentity> {
         self.delegation.as_ref()
+    }
+
+    #[must_use]
+    pub const fn jev_review(&self) -> Option<&SourceIdentity> {
+        self.jev_review.as_ref()
+    }
+
+    #[must_use]
+    pub const fn jev_routing(&self) -> Option<&SourceIdentity> {
+        self.jev_routing.as_ref()
     }
 
     #[must_use]
@@ -1484,6 +1541,8 @@ pub struct ConfigSnapshot {
     reviewer_model: Option<ModelRoute>,
     delegation: DelegationConfig,
     audit: AuditConfig,
+    jev_review: JevReviewMode,
+    jev_routing: bool,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
     mcp: BTreeMap<String, McpServerConfig>,
@@ -1701,6 +1760,45 @@ impl Default for AuditConfig {
     }
 }
 
+/// Optional assessment boundaries. Credential storage never selects a mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JevReviewMode {
+    #[default]
+    Off,
+    /// Assess only final candidates, preserving ordinary tool batching.
+    Final,
+    /// Assess every tool boundary and final candidate.
+    Enforce,
+}
+
+impl JevReviewMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Final => "final",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
+impl std::str::FromStr for JevReviewMode {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "off" => Ok(Self::Off),
+            "final" => Ok(Self::Final),
+            "enforce" => Ok(Self::Enforce),
+            _ => Err(ConfigError::InvalidJevSetting {
+                setting: "QQ_JEV_CHECKPOINTS (off, final, enforce)",
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
 /// Per-session approval policy a profile may preselect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1720,6 +1818,8 @@ pub struct AgentProfileConfig {
     organization: Option<String>,
     max_output_tokens: Option<u32>,
     approval_mode: Option<ProfileApprovalMode>,
+    jev_review: Option<JevReviewMode>,
+    jev_routing: Option<bool>,
     /// Set when this profile came from an agent pack rather than `profiles`.
     pack: Option<PackProfileRef>,
 }
@@ -1772,6 +1872,16 @@ impl PackProfileRef {
 }
 
 impl AgentProfileConfig {
+    #[must_use]
+    pub const fn jev_review(&self) -> Option<JevReviewMode> {
+        self.jev_review
+    }
+
+    #[must_use]
+    pub const fn jev_routing(&self) -> Option<bool> {
+        self.jev_routing
+    }
+
     /// The pack resources this profile carries, when it came from a pack.
     #[must_use]
     pub const fn pack(&self) -> Option<&PackProfileRef> {
@@ -1802,6 +1912,16 @@ impl AgentProfileConfig {
 }
 
 impl ConfigSnapshot {
+    #[must_use]
+    pub const fn jev_review(&self) -> JevReviewMode {
+        self.jev_review
+    }
+
+    #[must_use]
+    pub const fn jev_routing(&self) -> bool {
+        self.jev_routing
+    }
+
     #[must_use]
     pub fn organization(&self) -> Option<&str> {
         self.organization.as_deref()
@@ -1929,6 +2049,11 @@ pub enum ConfigError {
     },
     #[error("environment variable {0} is not valid Unicode")]
     NonUnicodeEnvironment(&'static str),
+    #[error("invalid {setting} value {value:?}")]
+    InvalidJevSetting {
+        setting: &'static str,
+        value: String,
+    },
     #[error("configuration working directory is invalid: {path}")]
     InvalidWorkingDirectory { path: PathBuf },
     #[error("explicit configuration file does not exist: {path}")]

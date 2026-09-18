@@ -871,6 +871,8 @@ fn config_command(
                     "worker_model" => snapshot.provenance().worker_model(),
                     "delegation" => snapshot.provenance().delegation(),
                     "audit" => snapshot.provenance().audit(),
+                    "jev_review" => snapshot.provenance().jev_review(),
+                    "jev_routing" => snapshot.provenance().jev_routing(),
                     "max_output_tokens" => snapshot.provenance().max_output_tokens(),
                     _ => field
                         .strip_prefix("pack.")
@@ -964,6 +966,8 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
         snapshot.audit().max_revisions(),
         snapshot.audit().role().as_str()
     );
+    println!("jev_review: {}", snapshot.jev_review().as_str());
+    println!("jev_routing: {}", snapshot.jev_routing());
     println!("max_output_tokens: {}", snapshot.max_output_tokens());
     println!("providers:");
     for (name, provider) in snapshot.providers() {
@@ -1294,9 +1298,15 @@ fn jev_command(command: cli::JevCommand) -> Result<(), Box<dyn Error>> {
             let store = auth::CredentialStore::system()?;
             let backend = store_typesafe_jev_credential(&store, &secret, allow_file)?;
             println!("stored {TYPESAFE_JEV_CREDENTIAL} in {backend}");
-            println!("start QQ with enforced JEV checkpoints:");
+            println!("credentials stored; Jev remains off until explicitly enabled");
+            println!(
+                "Jev sends task and selected tool evidence to TypeSafe; enable only for work you allow it to process"
+            );
+            println!("enable final-answer review: QQ_JEV_CHECKPOINTS=final qq");
+            println!("enable review after every tool and final answer:");
             println!("  QQ_JEV_CHECKPOINTS=enforce qq");
-            println!("inspect: qq auth status {TYPESAFE_JEV_CREDENTIAL}");
+            println!("disable reviews without removing credentials: QQ_JEV_CHECKPOINTS=off qq");
+            println!("inspect: qq config show; qq auth status {TYPESAFE_JEV_CREDENTIAL}");
             println!("remove:  qq auth logout {TYPESAFE_JEV_CREDENTIAL}");
         }
     }

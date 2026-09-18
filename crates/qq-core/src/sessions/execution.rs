@@ -795,7 +795,12 @@ pub(super) async fn execute_run(
                     prepared.tool_cancellation,
                     &prepared.audit,
                     &resources,
-                    loaded.plan.descriptor().checkpoint.is_some(),
+                    loaded
+                        .plan
+                        .runtime
+                        .checkpoint
+                        .as_ref()
+                        .is_some_and(|reviewer| reviewer.reviews_tools()),
                 )
                 .await;
                 return;
@@ -1082,7 +1087,12 @@ async fn run_auto_compaction(
             prepared.tool_cancellation,
             &prepared.audit,
             resources,
-            loaded.plan.descriptor().checkpoint.is_some(),
+            loaded
+                .plan
+                .runtime
+                .checkpoint
+                .as_ref()
+                .is_some_and(|reviewer| reviewer.reviews_tools()),
         )
         .await;
     }

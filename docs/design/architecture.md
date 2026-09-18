@@ -42,9 +42,9 @@ The binary has multiple process modes:
   It admits only the selected loopback-HTTP `Custom` provider with `NoAuth`
   and no static headers, and omits authentication probes for every unselected
   provider. MCP, additional agent routes, delegation, audit, profiles, packs,
-  and enforced JEV are rejected rather than disabled. The ordinary no-flag
-  path continues to use the user-scoped system directories and mandatory JEV
-  activation rules. This fixture demonstrates TUI behavior only; it is not
+  and enabled Jev capabilities are rejected rather than disabled. The ordinary
+  no-flag path uses the user-scoped system directories. Jev review defaults off
+  even when a credential is stored (ADR-0030). This fixture demonstrates TUI behavior only; it is not
   evidence for a real provider or reviewer integration.
 - `qq serve [ARGS]` runs the server without a TUI. It is suitable for a
   persistent process on a desktop or home server.
@@ -1205,7 +1205,7 @@ Application configuration types must not leak into `qq-core`.
 | Native tools | Static Rust registration | Build/startup | Direct dispatch | Fully trusted; capability-scoped execution |
 | General tools | MCP and the embedded `ExternalToolHost` | Startup catalog; call on demand | One selected adapter call | MCP process/HTTP boundary or trusted embedder |
 | Context/memory | Typed bounded `ContextSource` | Plan compile plus pre-turn fetch | No per-delta hook | Time/byte/token budgets; explicit fail policy |
-| JEV checkpoints | Typed `CheckpointReviewer` | Explicit enforced profile at plan compile | One bounded decision after each retained tool result and the root final candidate | Fixed endpoint/model/policy; fail closed; durable correlated status |
+| Jev review | Typed `CheckpointReviewer` | Trusted `jev_review` setting/profile, default off | `final`: final candidate only; `enforce`: each tool result and final candidate | Fixed endpoint/model/policy; bounded evidence; fail closed; durable correlated status |
 | Observers | Durable SSE/outbox | Subscription | Post-commit only | Cannot affect authoritative execution |
 | Process execution | Local implementation plus one real sandbox adapter (deferred sandbox adapter) | Startup | Direct selected backend | Explicit filesystem/network/process capabilities |
 | Surface adapters | Versioned `qq-client` contract | Client startup | Outside agent loop | Product owns remote auth and UX |
@@ -1216,15 +1216,26 @@ selects one precompiled tool entry and never runs before/after hook lists;
 product memory is not a synchronous observer of every token and ordinary
 retrieval fails open with a visible diagnostic; synchronous decisions remain
 limited to typed approval, exact tool validation, budget admission, and the
-explicit enforced JEV checkpoint profile from ADR-0028; provider
+explicit Jev review modes from ADR-0030; provider
 adapter families are feature-gated inside `qq-provider` (`provider-bedrock`
 owns the AWS SDK closure) rather than split into crates.
 
-An enforced checkpoint request is admitted only when its original task and
-complete phase-specific evidence fit the exact reviewer bound; these fields are
-never truncated into a potentially green assessment. Its memoization identity
-contains every typed request field. Cancellation does not wait for remote
-review: when a tool result is already durable but its checkpoint is not, the
+Review activation is independent of credential storage. Environment/runtime
+choices override named profiles and top-level settings; workspace/profile changes
+participate in the trust fingerprint and compiled cache identity. Off runs create
+no reviewer client or evidence projection. `final` preserves normal tool batching;
+`enforce` retains the strict one-executable-call-per-turn contract.
+
+Review uses the latest user task, all its text blocks and subsequently applied
+steering. Earlier user context and tool observations enter a bounded selection:
+at most 32 items and 16 KiB, with 2 KiB excerpts marked with source IDs and masked
+content hashes. Final requests select recent observations within the 24 KiB
+payload allowance and state that omissions are not proof. Oversized tasks and
+final candidates fail visibly; large history alone does not permanently disable
+completion. Strict individual tool requests still require their full bounded
+arguments/result. There is no cross-request verdict cache.
+
+Cancellation does not wait for remote review: when a tool result is already durable but its checkpoint is not, the
 session durably records a local `unavailable`/not-performed checkpoint before
 any cancellation, deadline, runtime/provider failure, premature stream end, or
 defensive nominal completion settlement. The marker means no reviewer verdict

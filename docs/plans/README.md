@@ -76,3 +76,6 @@ system boundaries and [`workflow.md`](./workflow.md) before starting a slice.
   `../design/`, not in the plan.
 - When a plan is fully shipped, move any durable contract into `../design/`,
   delete the plan, and update this index.
+
+Optional Jev stacked repairs: [`jev-opt-in.md`](jev-opt-in.md);
+[ledger](progress/jev-opt-in.md).

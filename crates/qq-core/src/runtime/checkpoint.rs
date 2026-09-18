@@ -1,8 +1,127 @@
-use std::{future::Future, pin::Pin};
+use std::{collections::VecDeque, future::Future, pin::Pin};
 
 use qq_protocol::ToolCallId;
+use qq_provider::{ContentBlock, Message, Role};
+use sha2::{Digest, Sha256};
 
 pub const MAX_CHECKPOINT_TEXT_BYTES: usize = 24 * 1024;
+const MAX_EVIDENCE_BYTES: usize = 16 * 1024;
+const MAX_EVIDENCE_ITEM_BYTES: usize = 2048;
+const MAX_EVIDENCE_ITEMS: usize = 32;
+
+/// A bounded selection of observations, never a claim that omitted history was
+/// assessed. Only enabled review runs allocate or maintain this projection.
+pub(crate) struct CheckpointContext {
+    pub(crate) task: String,
+    pub(crate) task_overflow: bool,
+    evidence: VecDeque<String>,
+    evidence_bytes: usize,
+    omitted: usize,
+}
+
+impl CheckpointContext {
+    pub(crate) fn new(messages: &[Message]) -> Self {
+        let latest_user = messages
+            .iter()
+            .rposition(|message| message.role() == Role::User);
+        let mut context = Self {
+            task: String::new(),
+            task_overflow: false,
+            evidence: VecDeque::new(),
+            evidence_bytes: 0,
+            omitted: 0,
+        };
+        for (index, message) in messages.iter().enumerate() {
+            for block in message.content() {
+                match block {
+                    ContentBlock::Text { text } if Some(index) == latest_user => {
+                        context.steer(text)
+                    }
+                    ContentBlock::Text { text } if message.role() == Role::User => {
+                        context.record(format!("prior user context {index}: {text}"));
+                    }
+                    ContentBlock::ToolResult {
+                        call_id,
+                        content,
+                        is_error,
+                    } => {
+                        context.record(format!(
+                            "prior tool observation {index}/{call_id}, error={is_error}: {content}"
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        context
+    }
+
+    pub(crate) fn steer(&mut self, text: &str) {
+        if self.task_overflow {
+            return;
+        }
+        let text = crate::tools::output::mask_secrets(text.to_owned());
+        if self
+            .task
+            .len()
+            .saturating_add(text.len())
+            .saturating_add(if self.task.is_empty() { 0 } else { 2 })
+            > MAX_CHECKPOINT_TEXT_BYTES
+        {
+            self.task_overflow = true;
+            return;
+        }
+        if !self.task.is_empty() {
+            self.task.push_str("\n\n");
+        }
+        self.task.push_str(&text);
+    }
+
+    pub(crate) fn record(&mut self, text: String) {
+        let mut text = crate::tools::output::mask_secrets(text);
+        if text.len() > MAX_EVIDENCE_ITEM_BYTES {
+            let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+            let original_bytes = text.len();
+            let mut end = MAX_EVIDENCE_ITEM_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            text.push_str(&format!("\n[excerpt only; remaining bytes omitted; full masked observation {original_bytes} bytes sha256:{digest}]"));
+        }
+        self.evidence_bytes += text.len();
+        self.evidence.push_back(text);
+        while self.evidence_bytes > MAX_EVIDENCE_BYTES || self.evidence.len() > MAX_EVIDENCE_ITEMS {
+            let removed = self
+                .evidence
+                .pop_front()
+                .expect("over budget implies evidence");
+            self.evidence_bytes -= removed.len();
+            self.omitted = self.omitted.saturating_add(1);
+        }
+    }
+
+    pub(crate) fn final_evidence(&self, answer: String) -> Option<String> {
+        let answer = crate::tools::output::mask_secrets(answer);
+        let mut evidence = format!(
+            "final candidate:\n{answer}\n\nSelected recent evidence only; {omitted} earlier observations omitted from retention. Additional retained items may be omitted to fit this request. Excerpts and omissions are not proof. Missing required evidence must be reported.\n",
+            omitted = self.omitted
+        );
+        if evidence.len() > MAX_CHECKPOINT_TEXT_BYTES {
+            return None;
+        }
+        // Most recent observations first; whole retained items only. Their IDs
+        // let the agent retrieve fresh evidence if a criterion is unsupported.
+        for item in self.evidence.iter().rev() {
+            if evidence.len() + item.len() + 1 > MAX_CHECKPOINT_TEXT_BYTES {
+                break;
+            }
+            evidence.push_str(item);
+            evidence.push('\n');
+        }
+        Some(evidence)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CheckpointPhase {
@@ -59,6 +178,10 @@ pub trait CheckpointReviewer: Send + Sync {
     fn identity(&self) -> &'static str {
         "custom/enforce"
     }
+    /// Whether tool results require assessment before the next model turn.
+    fn reviews_tools(&self) -> bool {
+        true
+    }
     fn review(&self, request: CheckpointRequest) -> CheckpointFuture;
 }
 
@@ -79,12 +202,7 @@ pub(crate) fn checkpoint_text_fits(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use super::{
-        CheckpointOutcome, CheckpointPhase, CheckpointRequest, CheckpointVerdict,
-        MAX_CHECKPOINT_TEXT_BYTES, checkpoint_text_fits,
-    };
+    use super::{MAX_CHECKPOINT_TEXT_BYTES, checkpoint_text_fits};
 
     #[test]
     fn checkpoint_bound_accepts_boundary_and_rejects_first_byte_over() {
@@ -99,31 +217,5 @@ mod tests {
         let evidence = "x".repeat(MAX_CHECKPOINT_TEXT_BYTES);
         let payload = format!("final candidate:\nok\n\nretained tool evidence:\n{evidence}");
         assert!(!checkpoint_text_fits(&payload));
-    }
-
-    #[test]
-    fn checkpoint_cache_identity_includes_error_semantics() {
-        let request = CheckpointRequest {
-            correlation: "tool:call-1".to_owned(),
-            phase: CheckpointPhase::ToolResult,
-            tool_call_id: None,
-            tool: Some("read_file".to_owned()),
-            task: "read it".to_owned(),
-            evidence: "same bytes".to_owned(),
-            is_error: false,
-        };
-        let mut cache = HashMap::new();
-        cache.insert(
-            request.clone(),
-            CheckpointVerdict {
-                outcome: CheckpointOutcome::Supported,
-                confidence: Some(1.0),
-                feedback: "supported".to_owned(),
-            },
-        );
-
-        let mut error_request = request;
-        error_request.is_error = true;
-        assert!(!cache.contains_key(&error_request));
     }
 }

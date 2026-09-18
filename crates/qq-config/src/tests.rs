@@ -400,6 +400,75 @@ fn delegation_roster_layers_validates_and_falls_back_to_worker_model_sugar() {
 }
 
 #[test]
+fn jev_is_off_by_default_and_can_be_explicitly_disabled() {
+    let tree = TempTree::new();
+    let bare = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(bare.jev_review(), JevReviewMode::Off);
+    assert!(!bare.jev_routing());
+    assert!(bare.provenance().jev_review().is_none());
+
+    let enabled = tree
+        .request()
+        .with_explicit_content(r#"(version: 1, jev_review: final, jev_routing: true)"#);
+    let snapshot = tree.loader().load(&enabled).unwrap();
+    assert_eq!(snapshot.jev_review(), JevReviewMode::Final);
+    assert!(snapshot.jev_routing());
+    assert_eq!(
+        snapshot.provenance().jev_review().unwrap().kind(),
+        SourceKind::Inline
+    );
+
+    let disabled = tree
+        .loader()
+        .load(
+            &enabled.with_overrides(
+                RuntimeOverrides::new()
+                    .with_model("openai/test-model")
+                    .with_jev_review(JevReviewMode::Off)
+                    .with_jev_routing(false),
+            ),
+        )
+        .unwrap();
+    assert_eq!(disabled.jev_review(), JevReviewMode::Off);
+    assert!(!disabled.jev_routing());
+    assert_eq!(
+        disabled.provenance().jev_review().unwrap().kind(),
+        SourceKind::Runtime
+    );
+}
+
+#[test]
+fn jev_workspace_and_profile_activation_require_current_trust() {
+    let tree = TempTree::new();
+    tree.write(
+        "work/qq.ron",
+        r#"(version: 1, jev_review: enforce,
+        profiles: { "review": Profile(jev_review: final, jev_routing: true) })"#,
+    );
+    let request = tree.request();
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    tree.loader().grant_pending_trust(&request).unwrap();
+    let trusted = tree.loader().load(&request).unwrap();
+    assert_eq!(trusted.jev_review(), JevReviewMode::Enforce);
+    assert_eq!(
+        trusted.profile("review").unwrap().jev_review(),
+        Some(JevReviewMode::Final)
+    );
+    tree.write(
+        "work/qq.ron",
+        r#"(version: 1, jev_review: enforce,
+        profiles: { "review": Profile(jev_review: enforce, jev_routing: true) })"#,
+    );
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+}
+
+#[test]
 fn audit_settings_default_to_off_and_validate_revisions() {
     let tree = TempTree::new();
     let bare = tree.loader().load(&tree.request()).unwrap();

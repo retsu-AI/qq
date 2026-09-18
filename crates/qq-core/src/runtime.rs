@@ -20,11 +20,11 @@ pub use audit::{
 pub(crate) use budget::{BUDGET_FINAL_RESPONSE_NOTICE, BudgetDecision, BudgetMeter, ChildBudget};
 #[cfg(test)]
 pub(crate) use checkpoint::MAX_CHECKPOINT_TEXT_BYTES;
+pub(crate) use checkpoint::{CheckpointContext, bounded_checkpoint_text, checkpoint_text_fits};
 pub use checkpoint::{
     CheckpointFuture, CheckpointOutcome, CheckpointPhase, CheckpointRequest, CheckpointReviewer,
     CheckpointVerdict,
 };
-pub(crate) use checkpoint::{bounded_checkpoint_text, checkpoint_text_fits};
 pub(crate) use deadline::RunDeadline;
 pub(crate) use events::{
     PendingToolCall, PreparedRequestWeight, PreparedStaticPrefix, RuntimeEvent, RuntimeToolCall,

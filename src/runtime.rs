@@ -447,9 +447,16 @@ impl RuntimeFactory {
         let invalid = |reason: &str| RuntimeBuildError::InvalidTuiQaProfile {
             reason: reason.to_owned(),
         };
-        if std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref() == Some("enforce") {
+        if snapshot.jev_review() != qq_config::JevReviewMode::Off
+            || snapshot.jev_routing()
+            || matches!(
+                std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref(),
+                Some("final" | "enforce")
+            )
+            || std::env::var("QQ_JEV_ROUTING").ok().as_deref() == Some("on")
+        {
             return Err(invalid(
-                "QQ_JEV_CHECKPOINTS=enforce requires a real reviewer credential; use the ordinary profile",
+                "enabled Jev capabilities require external inference; use the ordinary profile",
             ));
         }
         if !self.inner.credentials.list()?.is_empty() {
@@ -873,6 +880,8 @@ impl RuntimeFactory {
             profile: profile.clone(),
             explicit_config_path: request.explicit_path().map(Path::to_owned),
             explicit_config_content: request.explicit_content().map(str::to_owned),
+            jev_review: request.overrides().jev_review(),
+            jev_routing: request.overrides().jev_routing(),
         };
         let lookup = self.inner.plans.load(&key, || {
             self.compile_generation(request, profile, &workspace, progress)
@@ -982,6 +991,16 @@ impl RuntimeFactory {
                 {
                     overrides = overrides.with_max_output_tokens(cap);
                 }
+                if request.overrides().jev_review().is_none()
+                    && let Some(mode) = profile.jev_review()
+                {
+                    overrides = overrides.with_jev_review(mode);
+                }
+                if request.overrides().jev_routing().is_none()
+                    && let Some(enabled) = profile.jev_routing()
+                {
+                    overrides = overrides.with_jev_routing(enabled);
+                }
                 let snapshot = self.load(&request.clone().with_overrides(overrides))?;
                 if !configuration_sources.contains(snapshot.sources()) {
                     configuration_sources.push(snapshot.sources().clone());
@@ -1025,15 +1044,15 @@ impl RuntimeFactory {
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone());
-        if let Some(progress) = progress {
-            progress.set(qq_core::RuntimeLoadStage::ResolvingCheckpointCredential);
-        }
-        let jev_enforced = !self.is_isolated_tui_qa()
-            && (std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref() == Some("enforce")
-                || self.inner.credentials.is_registered("typesafe-jev")?);
-        if jev_enforced {
+        if snapshot.jev_review() != qq_config::JevReviewMode::Off {
+            if let Some(progress) = progress {
+                progress.set(qq_core::RuntimeLoadStage::ResolvingCheckpointCredential);
+            }
             profile = profile.with_checkpoint_reviewer(Arc::new(
-                TypeSafeCheckpointReviewer::from_credentials(&self.inner.credentials)?,
+                TypeSafeCheckpointReviewer::from_credentials(
+                    &self.inner.credentials,
+                    snapshot.jev_review(),
+                )?,
             ));
         }
         let mcp_subset = match pack_selection {
@@ -2551,10 +2570,14 @@ fn update_digest(digest: &mut Sha256, value: &[u8]) {
 struct TypeSafeCheckpointReviewer {
     client: reqwest::Client,
     endpoint: &'static str,
+    mode: qq_config::JevReviewMode,
 }
 
 impl TypeSafeCheckpointReviewer {
-    fn from_credentials(store: &CredentialStore) -> Result<Self, RuntimeBuildError> {
+    fn from_credentials(
+        store: &CredentialStore,
+        mode: qq_config::JevReviewMode,
+    ) -> Result<Self, RuntimeBuildError> {
         let secret = resolve_provider_credential(
             store,
             None,
@@ -2582,13 +2605,24 @@ impl TypeSafeCheckpointReviewer {
         Ok(Self {
             client,
             endpoint: "https://api.typesafe.ai/v1/systemone",
+            mode,
         })
     }
 }
 
 impl CheckpointReviewer for TypeSafeCheckpointReviewer {
     fn identity(&self) -> &'static str {
-        "typesafe/jev-1.13.0/completion-2026-09-17.1/enforce"
+        match self.mode {
+            qq_config::JevReviewMode::Final => "typesafe/jev-1.13.0/completion-2026-09-17.1/final",
+            qq_config::JevReviewMode::Enforce => {
+                "typesafe/jev-1.13.0/completion-2026-09-17.1/enforce"
+            }
+            qq_config::JevReviewMode::Off => unreachable!("disabled reviewers are not constructed"),
+        }
+    }
+
+    fn reviews_tools(&self) -> bool {
+        self.mode == qq_config::JevReviewMode::Enforce
     }
 
     fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
@@ -2802,7 +2836,7 @@ pub enum RuntimeBuildError {
     #[error(transparent)]
     CatalogClientUnavailable(#[from] crate::catalog::ModelDiscoveryError),
     #[error(
-        "JEV enforcement requires the stored typesafe-jev credential or TYPESAFE_API_KEY before the agent starts"
+        "JEV review requires the stored typesafe-jev credential or TYPESAFE_API_KEY before the agent starts"
     )]
     JevKeyRequired,
     #[error("TYPESAFE_API_KEY cannot be encoded as an authorization header")]
@@ -4911,6 +4945,19 @@ mod tests {
         .unwrap();
         let request = LoadRequest::new(&workspace);
         let snapshot = factory.load(&request).unwrap();
+        for mode in [
+            qq_config::JevReviewMode::Final,
+            qq_config::JevReviewMode::Enforce,
+        ] {
+            let enabled = request
+                .clone()
+                .with_overrides(RuntimeOverrides::new().with_jev_review(mode));
+            assert!(matches!(
+                factory.load(&enabled),
+                Err(RuntimeBuildError::InvalidTuiQaProfile { .. })
+            ));
+        }
+
         assert_eq!(factory.configured_model_options(&snapshot).len(), 1);
 
         let catalog = ModelCatalogRequest {
@@ -5751,6 +5798,8 @@ mod tests {
             profile: profile.clone(),
             explicit_config_path: None,
             explicit_config_content: None,
+            jev_review: None,
+            jev_routing: None,
         };
         let (first, _) = factory
             .inner
@@ -6406,6 +6455,90 @@ mod tests {
             parse_reviewer_decision(""),
             ReviewDecision::Escalate { .. }
         ));
+    }
+
+    #[test]
+    fn stored_jev_credential_does_not_enable_or_read_the_reviewer() {
+        let fixture = RuntimeFixture::new();
+        let paths = CredentialPaths::new(fixture.path("data"));
+        let store =
+            CredentialStore::with_backend(paths.clone(), Arc::new(MemoryKeyring::default()));
+        store
+            .set_with_metadata(
+                "typesafe-jev",
+                b"test-key",
+                false,
+                Some("typesafe-jev"),
+                Some("https://api.typesafe.ai"),
+            )
+            .unwrap();
+        let factory = fixture
+            .factory_with_credentials(CredentialStore::with_backend(paths, Arc::new(PanicKeyring)));
+        let request = fixture.request(r#"(
+            version: 1, model: "custom/test",
+            providers: { "custom": Custom(
+                connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth),
+                models: { "test": (name: "test") },
+            ) },
+        )"#);
+        let plan = factory.plan_for(&request).unwrap();
+        assert!(plan.descriptor().checkpoint.is_none());
+    }
+
+    #[test]
+    fn jev_profiles_and_explicit_off_have_distinct_cached_plans() {
+        let fixture = RuntimeFixture::new();
+        let paths = CredentialPaths::new(fixture.path("data"));
+        let store = CredentialStore::with_backend(paths, Arc::new(MemoryKeyring::default()));
+        store
+            .set_with_metadata(
+                "typesafe-jev",
+                b"test-key",
+                false,
+                Some("typesafe-jev"),
+                Some("https://api.typesafe.ai"),
+            )
+            .unwrap();
+        let factory = fixture.factory_with_credentials(store);
+        let request = fixture.request(r#"(
+            version: 1, model: "custom/test", jev_review: enforce,
+            profiles: { "review": Profile(jev_review: final), "plain": Profile(jev_review: off) },
+            providers: { "custom": Custom(
+                connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth),
+                models: { "test": (name: "test") },
+            ) },
+        )"#);
+        let profile = AgentProfileId::new("review").unwrap();
+        let final_plan = factory.plan_for_profile(&request, &profile).unwrap();
+        assert!(
+            final_plan
+                .descriptor()
+                .checkpoint
+                .as_deref()
+                .unwrap()
+                .ends_with("/final")
+        );
+        let disabled_request = request.clone().with_overrides(
+            request
+                .overrides()
+                .clone()
+                .with_jev_review(qq_config::JevReviewMode::Off),
+        );
+        let disabled = factory
+            .plan_for_profile(&disabled_request, &profile)
+            .unwrap();
+        assert!(disabled.descriptor().checkpoint.is_none());
+        let enabled_again = factory.plan_for_profile(&request, &profile).unwrap();
+        assert_eq!(enabled_again.digest(), final_plan.digest());
+        assert_ne!(disabled.digest(), final_plan.digest());
+        assert!(
+            factory
+                .plan_for_profile(&request, &AgentProfileId::new("plain").unwrap())
+                .unwrap()
+                .descriptor()
+                .checkpoint
+                .is_none()
+        );
     }
 
     #[test]
