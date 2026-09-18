@@ -45,6 +45,14 @@ may append a **request** row; only root changes a request's status.
 | 0027 | `qq-core` is a public embedding API | docs cleanup 2026-09-16 | Accepted (merged in #52) |
 | 0028 | Mandatory typed JEV checkpoints after tool results and final candidates | JEV runtime checkpoint slice | Accepted locally; unpushed candidate |
 | 0029 | Native JEV model-and-effort routing and durable selection identity | Startup Manager / ENG-791 | Reserved; no accepted decision document yet |
+| 0030 | Default-off independent Jev review/routing and bounded evidence | Stacked Jev implementation / user direction 2026-09-18 | Reserved; supersedes ADR-0028 activation when implemented |
+
+Stacked Jev scope request (2026-09-18): the user authorizes implementing the
+review recommendations on top of #72, with quick focused delivery and current
+docs. Root owns required architecture/protocol/doc-index amendments and any
+benchmark registration. No dependency additions planned. R2/R3 work in this
+stack follows explicit optional routing; it does not inherit mandatory global
+checkpoint activation. Ledger: `progress/jev-opt-in.md`.
 
 2026-09-18 — JEV checkpoint hardening remains in progress on
 `feat/jev-runtime-checkpoints`: complete task/tool payloads now fail closed

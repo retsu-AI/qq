@@ -4515,6 +4515,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn review_regression_final_checkpoint_preserves_steering() {
+        struct FinalProvider;
+        impl Provider for FinalProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "done".into(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        struct SteeringReviewer {
+            sender: runtime::SteeringSender,
+            sent: std::sync::atomic::AtomicBool,
+            message_id: qq_protocol::MessageId,
+        }
+        impl CheckpointReviewer for SteeringReviewer {
+            fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
+                let send = !self.sent.swap(true, std::sync::atomic::Ordering::SeqCst);
+                let sender = self.sender.clone();
+                let message_id = self.message_id;
+                Box::pin(async move {
+                    // Deliver steering after the final checkpoint has started,
+                    // before its successful result is returned to the run loop.
+                    if send {
+                        sender
+                            .messages
+                            .send(runtime::SteeringMessage {
+                                message_id,
+                                text: "Also explain the result".into(),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    CheckpointVerdict {
+                        outcome: CheckpointOutcome::Supported,
+                        confidence: Some(1.0),
+                        feedback: "supported".into(),
+                    }
+                })
+            }
+        }
+        let (sender, receiver) = runtime::steering_channel();
+        let message_id = qq_protocol::MessageId::from_bytes([42; 16]);
+        let runtime = Runtime::new(FinalProvider, "test", 256)
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(SteeringReviewer {
+                sender,
+                sent: std::sync::atomic::AtomicBool::new(false),
+                message_id,
+            }));
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("answer directly")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Ask,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).with_steering(receiver),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            events.iter().any(|event| matches!(event,
+                RuntimeEvent::SteeringApplied { message_id: applied, .. } if *applied == message_id
+            )),
+            "steering accepted during final review must be applied before completion: {events:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn direct_run_exposes_checkpoint_review_events() {
         struct FinalProvider;
         impl Provider for FinalProvider {
