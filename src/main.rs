@@ -3,7 +3,6 @@
 use std::{
     error::Error,
     io::{self, IsTerminal, Read},
-    net::IpAddr,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
@@ -334,6 +333,7 @@ async fn prepare_headless(
     let handler = runtime::RuntimeHandler::open(factory)
         .await
         .map_err(|error| match error {
+            runtime::RuntimeHandlerError::Build(error) => invalid(error.to_string()),
             runtime::RuntimeHandlerError::Config(error) => invalid(error.to_string()),
             runtime::RuntimeHandlerError::Sessions(error) => harness(error.to_string()),
         })?;
@@ -478,22 +478,12 @@ async fn interactive(
     let loader = environment.config;
     let server_paths = environment.server_paths;
     let workspace = environment.workspace;
-    let tui_qa = environment.tui_qa;
     let config_factory = factory.clone();
     let (snapshot, tui, themes, models) = tokio::task::spawn_blocking(move || {
         let snapshot = config_factory.load(&request)?;
-        if tui_qa {
-            validate_tui_qa_snapshot(&snapshot, jev_enforcement_requested())?;
-        }
         let (tui_snapshot, tui) = load_tui_config(&loader, request.cwd())?;
         let themes = load_tui_themes(&loader, request.cwd(), tui_snapshot.settings().theme())?;
-        let models = if tui_qa {
-            vec![runtime::RuntimeFactory::isolated_tui_qa_model_option(
-                &snapshot,
-            )]
-        } else {
-            config_factory.configured_model_options(&snapshot)
-        };
+        let models = config_factory.configured_model_options(&snapshot);
         Ok::<_, runtime::RuntimeBuildError>((snapshot, tui, themes, models))
     })
     .await??;
@@ -520,6 +510,9 @@ async fn interactive(
         let model = model.clone();
         let server_paths = server_paths.clone();
         async move {
+            factory
+                .validate_isolated_tui_qa_state()
+                .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?;
             let options =
                 server::ServerOptions::new(server_paths.clone()).with_version(cli::BUILD_VERSION);
             // Which session to show first. `--session` opens that one. Bare
@@ -538,7 +531,7 @@ async fn interactive(
                 server::ReserveOutcome::Existing(connection) => (connection, initial(false)),
                 server::ReserveOutcome::Reserved(reservation) => {
                     let handler = Arc::new(
-                        runtime::RuntimeHandler::open(factory)
+                        runtime::RuntimeHandler::open(factory.clone())
                             .await
                             .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?,
                     );
@@ -563,7 +556,9 @@ async fn interactive(
                 initial,
                 move || {
                     let server_paths = server_paths.clone();
+                    let factory = factory.clone();
                     async move {
+                        factory.validate_isolated_tui_qa_state().ok()?;
                         server::discover_at(&server_paths)
                             .await
                             .ok()
@@ -604,7 +599,6 @@ struct InteractiveEnvironment {
     request: config::LoadRequest,
     server_paths: server::ServerPaths,
     workspace: PathBuf,
-    tui_qa: bool,
 }
 
 impl InteractiveEnvironment {
@@ -622,44 +616,10 @@ impl InteractiveEnvironment {
                 request: overrides.load_request()?,
                 server_paths: server::ServerPaths::for_user()?,
                 workspace: std::fs::canonicalize(std::env::current_dir()?)?,
-                tui_qa: false,
             });
         };
 
-        let root = std::fs::canonicalize(&root).map_err(|source| {
-            io::Error::new(
-                source.kind(),
-                format!(
-                    "could not open --tui-qa-root `{}`: {source}",
-                    root.display()
-                ),
-            )
-        })?;
-        if !root.is_dir() {
-            return Err(io::Error::other(format!(
-                "--tui-qa-root `{}` is not a directory",
-                root.display()
-            ))
-            .into());
-        }
-        for child in [
-            "config",
-            "data",
-            "credentials",
-            "managed",
-            "runtime",
-            "workspace",
-        ] {
-            std::fs::create_dir_all(root.join(child)).map_err(|source| {
-                io::Error::new(
-                    source.kind(),
-                    format!(
-                        "could not create isolated TUI QA directory `{}`: {source}",
-                        root.join(child).display()
-                    ),
-                )
-            })?;
-        }
+        let root = prepare_tui_qa_root(&root)?;
         let config = config::ConfigLoader::new(config::ConfigPaths::new(
             root.join("config"),
             root.join("data"),
@@ -667,87 +627,142 @@ impl InteractiveEnvironment {
         ));
         let credentials =
             auth::CredentialStore::with_paths(auth::CredentialPaths::new(root.join("credentials")));
-        let factory = runtime::RuntimeFactory::new(config.clone(), credentials)?;
-        let request = overrides.apply(config::LoadRequest::new(root.join("workspace")))?;
+        let workspace = root.join("workspace");
+        let factory = runtime::RuntimeFactory::isolated_tui_qa(
+            config.clone(),
+            credentials,
+            workspace.clone(),
+        )?;
+        let request = overrides.apply(config::LoadRequest::new(&workspace))?;
         Ok(Self {
             factory,
             config,
             request,
             server_paths: server::ServerPaths::new(root.join("runtime")),
-            workspace: root.join("workspace"),
-            tui_qa: true,
+            workspace,
         })
     }
 }
 
-fn jev_enforcement_requested() -> bool {
-    std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref() == Some("enforce")
+fn prepare_tui_qa_root(requested: &Path) -> Result<PathBuf, io::Error> {
+    let root = std::fs::canonicalize(requested).map_err(|source| {
+        io::Error::new(
+            source.kind(),
+            format!(
+                "could not open --tui-qa-root `{}`: {source}",
+                requested.display()
+            ),
+        )
+    })?;
+    let root_metadata = std::fs::symlink_metadata(&root)?;
+    if !root_metadata.is_dir() {
+        return Err(io::Error::other(format!(
+            "--tui-qa-root `{}` is not a directory",
+            root.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if root_metadata.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::other(format!(
+                "--tui-qa-root `{}` must be accessible only by its owner",
+                root.display()
+            )));
+        }
+    }
+
+    for entry in std::fs::read_dir(&root)? {
+        let entry = entry?;
+        if entry.file_name() != "config" {
+            return Err(io::Error::other(format!(
+                "--tui-qa-root `{}` must be fresh; found pre-existing `{}`",
+                root.display(),
+                entry.path().display()
+            )));
+        }
+    }
+    let config = root.join("config");
+    match std::fs::symlink_metadata(&config) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            if std::fs::canonicalize(&config)? != config {
+                return Err(io::Error::other(
+                    "the TUI QA config directory escapes its root",
+                ));
+            }
+            let mut found_config = false;
+            for entry in std::fs::read_dir(&config)? {
+                let entry = entry?;
+                let metadata = std::fs::symlink_metadata(entry.path())?;
+                if entry.file_name() != "config.ron"
+                    || !metadata.is_file()
+                    || metadata.file_type().is_symlink()
+                {
+                    return Err(io::Error::other(format!(
+                        "isolated TUI QA config accepts only a regular config.ron; found `{}`",
+                        entry.path().display()
+                    )));
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt as _;
+                    if metadata.nlink() != 1 {
+                        return Err(io::Error::other(
+                            "isolated TUI QA config.ron must not be hard-linked",
+                        ));
+                    }
+                }
+                found_config = true;
+            }
+            if !found_config {
+                return Err(io::Error::other(
+                    "isolated TUI QA root must contain config/config.ron",
+                ));
+            }
+        }
+        Ok(_) => {
+            return Err(io::Error::other(
+                "the TUI QA config path must be a real directory inside the fixture",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(io::Error::other(
+                "isolated TUI QA root must contain config/config.ron",
+            ));
+        }
+        Err(error) => return Err(error),
+    }
+
+    for child in ["data", "credentials", "managed", "runtime", "workspace"] {
+        let path = root.join(child);
+        std::fs::create_dir(&path).map_err(|source| {
+            io::Error::new(
+                source.kind(),
+                format!(
+                    "could not create isolated TUI QA directory `{}`: {source}",
+                    path.display()
+                ),
+            )
+        })?;
+        make_tui_qa_directory_private(&path)?;
+        if std::fs::canonicalize(&path)? != path {
+            return Err(io::Error::other(format!(
+                "isolated TUI QA directory `{}` escapes its root",
+                path.display()
+            )));
+        }
+    }
+    Ok(root)
 }
 
-fn validate_tui_qa_snapshot(
-    snapshot: &config::ConfigSnapshot,
-    jev_enforced: bool,
-) -> Result<(), runtime::RuntimeBuildError> {
-    let invalid = |reason: &str| runtime::RuntimeBuildError::InvalidTuiQaProfile {
-        reason: reason.to_owned(),
-    };
-    if jev_enforced {
-        return Err(invalid(
-            "QQ_JEV_CHECKPOINTS=enforce requires a real reviewer credential; use the ordinary profile",
-        ));
-    }
-    let provider = snapshot
-        .providers()
-        .get(snapshot.model().provider())
-        .ok_or_else(|| invalid("the selected provider is unavailable"))?;
-    if provider.kind() != config::ProviderKind::Custom {
-        return Err(invalid("the selected provider must be Custom"));
-    }
-    let Some(config::ProviderAccess::Http(access)) = provider.access() else {
-        return Err(invalid("the selected provider must use HTTP"));
-    };
-    if !matches!(
-        access.auth(),
-        config::HttpCredential::Configured(config::ProviderAuth::NoAuth)
-    ) || !access.headers().is_empty()
+fn make_tui_qa_directory_private(path: &Path) -> Result<(), io::Error> {
+    #[cfg(unix)]
     {
-        return Err(invalid(
-            "the selected provider must use NoAuth with no static headers",
-        ));
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
-    let endpoint = reqwest::Url::parse(access.endpoint())
-        .map_err(|_| invalid("the selected provider endpoint is invalid"))?;
-    let loopback = endpoint.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("localhost")
-            || host
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .parse::<IpAddr>()
-                .is_ok_and(|address| address.is_loopback())
-    });
-    if endpoint.scheme() != "http"
-        || !loopback
-        || !endpoint.username().is_empty()
-        || endpoint.password().is_some()
-        || endpoint.query().is_some()
-        || endpoint.fragment().is_some()
-    {
-        return Err(invalid(
-            "the selected provider endpoint must be credential-free loopback HTTP",
-        ));
-    }
-    if !snapshot.mcp_servers().is_empty()
-        || snapshot.worker_model().is_some()
-        || snapshot.reviewer_model().is_some()
-        || !snapshot.delegation().roster().is_empty()
-        || snapshot.audit().mode() != config::AuditMode::Off
-        || !snapshot.profiles().is_empty()
-        || !snapshot.packs().is_empty()
-    {
-        return Err(invalid(
-            "MCP, worker/reviewer routes, delegation, audit, profiles, and packs are not allowed",
-        ));
-    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -1390,6 +1405,27 @@ async fn run_blocking_command(
 mod tests {
     use super::*;
 
+    fn private_tempdir() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        directory
+    }
+
+    fn write_tui_qa_config(root: &Path) {
+        let config = root.join("config");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::write(
+            config.join("config.ron"),
+            r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test-model": (name: "Test model") }) })"#,
+        )
+        .unwrap();
+    }
+
     #[derive(Default)]
     struct TestKeyring(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
 
@@ -1459,15 +1495,24 @@ mod tests {
         validate_tui_qa_invocation(&None, true).unwrap();
     }
 
-    fn tui_qa_snapshot(document: &str) -> (tempfile::TempDir, config::ConfigSnapshot) {
-        let root = tempfile::tempdir().unwrap();
+    fn tui_qa_factory(
+        document: &str,
+    ) -> (
+        tempfile::TempDir,
+        runtime::RuntimeFactory,
+        config::LoadRequest,
+    ) {
+        let root = private_tempdir();
         let canonical = root.path().canonicalize().unwrap();
         let global = canonical.join("config");
         let data = canonical.join("data");
         let managed = canonical.join("managed");
+        let credentials = canonical.join("credentials");
         let workspace = canonical.join("workspace");
-        std::fs::create_dir_all(&global).unwrap();
-        std::fs::create_dir_all(&workspace).unwrap();
+        for directory in [&global, &data, &managed, &credentials, &workspace] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        std::fs::create_dir_all(canonical.join("runtime")).unwrap();
         let config_path = global.join("config.ron");
         std::fs::write(&config_path, document).unwrap();
         #[cfg(unix)]
@@ -1476,19 +1521,21 @@ mod tests {
             std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         let loader = config::ConfigLoader::new(config::ConfigPaths::new(global, data, managed));
-        let snapshot = loader.load(&config::LoadRequest::new(workspace)).unwrap();
-        (root, snapshot)
+        let store = auth::CredentialStore::with_backend(
+            auth::CredentialPaths::new(credentials),
+            Arc::new(PanicKeyring),
+        );
+        let request = config::LoadRequest::new(&workspace);
+        let factory = runtime::RuntimeFactory::isolated_tui_qa(loader, store, workspace).unwrap();
+        (root, factory, request)
     }
 
     #[test]
     fn isolated_tui_qa_profile_accepts_only_loopback_custom_no_auth() {
-        let (_root, snapshot) = tui_qa_snapshot(
+        let (_root, factory, request) = tui_qa_factory(
             r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test-model": (name: "Test model") }) })"#,
         );
-        validate_tui_qa_snapshot(&snapshot, false).unwrap();
-
-        let error = validate_tui_qa_snapshot(&snapshot, true).unwrap_err();
-        assert!(error.to_string().contains("real reviewer credential"));
+        factory.load(&request).unwrap();
     }
 
     #[test]
@@ -1504,15 +1551,16 @@ mod tests {
             ),
         ];
         for (document, expected) in cases {
-            let (_root, snapshot) = tui_qa_snapshot(document);
-            let error = validate_tui_qa_snapshot(&snapshot, false).unwrap_err();
+            let (_root, factory, request) = tui_qa_factory(document);
+            let error = factory.load(&request).unwrap_err();
             assert!(error.to_string().contains(expected), "{error}");
         }
     }
 
     #[test]
     fn isolated_tui_qa_environment_uses_only_explicit_roots() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
+        write_tui_qa_config(root.path());
         let environment =
             InteractiveEnvironment::open(&CliOverrides::default(), Some(root.path().to_owned()))
                 .unwrap();
@@ -1544,31 +1592,322 @@ mod tests {
             "workspace",
         ] {
             assert!(canonical.join(child).is_dir(), "{child}");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                if child != "config" {
+                    assert_eq!(
+                        std::fs::metadata(canonical.join(child))
+                            .unwrap()
+                            .permissions()
+                            .mode()
+                            & 0o077,
+                        0,
+                        "{child}"
+                    );
+                }
+            }
         }
     }
 
     #[test]
-    fn isolated_tui_qa_plan_does_not_consult_the_os_keyring() {
-        let root = tempfile::tempdir().unwrap();
+    fn isolated_tui_qa_rejects_mixed_configuration_roots() {
+        let root = private_tempdir();
+        let other = private_tempdir();
+        for child in ["config", "data", "managed", "credentials", "workspace"] {
+            std::fs::create_dir(root.path().join(child)).unwrap();
+        }
+        let canonical = root.path().canonicalize().unwrap();
+        let loader = config::ConfigLoader::new(config::ConfigPaths::new(
+            canonical.join("config"),
+            other.path().join("data"),
+            canonical.join("managed"),
+        ));
+        let store = auth::CredentialStore::with_backend(
+            auth::CredentialPaths::new(canonical.join("credentials")),
+            Arc::new(PanicKeyring),
+        );
+        let Err(error) =
+            runtime::RuntimeFactory::isolated_tui_qa(loader, store, canonical.join("workspace"))
+        else {
+            panic!("mixed QA roots were accepted");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("share the isolated fixture root")
+        );
+    }
+
+    #[test]
+    fn isolated_tui_qa_accepts_only_a_fresh_root_with_regular_config() {
+        let missing_config = private_tempdir();
+        let error = prepare_tui_qa_root(missing_config.path()).unwrap_err();
+        assert!(error.to_string().contains("config/config.ron"), "{error}");
+
+        let root = private_tempdir();
+        let config = root.path().join("config");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::write(config.join("config.ron"), "(version: 1)").unwrap();
+        prepare_tui_qa_root(root.path()).unwrap();
+
+        let reused = private_tempdir();
+        std::fs::create_dir(reused.path().join("data")).unwrap();
+        std::fs::write(
+            reused.path().join("data/sessions.sqlite3"),
+            b"not a QA database",
+        )
+        .unwrap();
+        let error = prepare_tui_qa_root(reused.path()).unwrap_err();
+        assert!(error.to_string().contains("must be fresh"), "{error}");
+
+        let credential_root = private_tempdir();
+        std::fs::create_dir(credential_root.path().join("credentials")).unwrap();
+        std::fs::write(
+            credential_root.path().join("credentials/index.ron"),
+            "user state must not be opened",
+        )
+        .unwrap();
+        let error = prepare_tui_qa_root(credential_root.path()).unwrap_err();
+        assert!(error.to_string().contains("must be fresh"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_tui_qa_rejects_symlinked_children_and_config_files() {
+        use std::os::unix::fs::symlink;
+
+        let outside = private_tempdir();
+        let root = private_tempdir();
+        symlink(outside.path(), root.path().join("workspace")).unwrap();
+        let error = prepare_tui_qa_root(root.path()).unwrap_err();
+        assert!(error.to_string().contains("must be fresh"), "{error}");
+
+        let root = private_tempdir();
+        std::fs::create_dir(root.path().join("config")).unwrap();
+        let outside_config = outside.path().join("config.ron");
+        std::fs::write(&outside_config, "(version: 1)").unwrap();
+        symlink(&outside_config, root.path().join("config/config.ron")).unwrap();
+        let error = prepare_tui_qa_root(root.path()).unwrap_err();
+        assert!(error.to_string().contains("regular config.ron"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_tui_qa_rejects_config_hardlink_substitution_during_callbacks() {
+        let root = private_tempdir();
+        write_tui_qa_config(root.path());
         let environment =
             InteractiveEnvironment::open(&CliOverrides::default(), Some(root.path().to_owned()))
                 .unwrap();
-        let config_path = environment.config.paths().global_dir().join("config.ron");
+        environment.factory.load(&environment.request).unwrap();
+
+        let outside = private_tempdir();
+        let outside_config = outside.path().join("config.ron");
         std::fs::write(
-            &config_path,
-            r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test-model": (name: "Test model") }) })"#,
+            &outside_config,
+            r#"(version: 1, model: "custom/other", providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9081/v1", api: OpenAiResponses, auth: NoAuth), models: { "other": (name: "Other") }) })"#,
         )
         .unwrap();
+        let fixture_config = root.path().join("config/config.ron");
+        std::fs::remove_file(&fixture_config).unwrap();
+        std::fs::hard_link(&outside_config, &fixture_config).unwrap();
+
+        let error = environment
+            .factory
+            .models_for(&qq_protocol::ModelCatalogRequest {
+                workspace: environment.workspace.display().to_string(),
+                selection: qq_protocol::ModelSelection::default(),
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("hard-linked"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn isolated_tui_qa_rejects_hardlinked_database_before_open() {
+        let root = private_tempdir();
+        write_tui_qa_config(root.path());
+        let environment =
+            InteractiveEnvironment::open(&CliOverrides::default(), Some(root.path().to_owned()))
+                .unwrap();
+        let outside = private_tempdir();
+        let outside_database = outside.path().join("sessions.sqlite3");
+        let sentinel = b"outside database must remain untouched";
+        std::fs::write(&outside_database, sentinel).unwrap();
+        std::fs::hard_link(&outside_database, root.path().join("data/sessions.sqlite3")).unwrap();
+
+        let error = match runtime::RuntimeHandler::open(environment.factory).await {
+            Ok(_) => panic!("hard-linked database was opened"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("hard-linked"), "{error}");
+        assert_eq!(std::fs::read(outside_database).unwrap(), sentinel);
+    }
+
+    #[test]
+    fn isolated_tui_qa_plan_does_not_consult_the_os_keyring() {
+        let root = private_tempdir();
+        write_tui_qa_config(root.path());
+        let environment =
+            InteractiveEnvironment::open(&CliOverrides::default(), Some(root.path().to_owned()))
+                .unwrap();
         let credentials = auth::CredentialStore::with_backend(
             auth::CredentialPaths::new(root.path().canonicalize().unwrap().join("credentials")),
             Arc::new(PanicKeyring),
         );
-        let factory = runtime::RuntimeFactory::new(environment.config, credentials).unwrap();
+        let factory = runtime::RuntimeFactory::isolated_tui_qa(
+            environment.config,
+            credentials,
+            environment.workspace,
+        )
+        .unwrap();
         let snapshot = factory.load(&environment.request).unwrap();
-        validate_tui_qa_snapshot(&snapshot, false).unwrap();
         let option = runtime::RuntimeFactory::isolated_tui_qa_model_option(&snapshot);
         assert_eq!(option.selection.model.as_deref(), Some("custom/test-model"));
         factory.plan_for(&environment.request).unwrap();
+    }
+
+    #[test]
+    fn isolated_tui_qa_ignores_unselected_providers_without_authentication() {
+        let (_root, factory, request) = tui_qa_factory(
+            r#"(
+                version: 1,
+                model: "custom/test-model",
+                providers: {
+                    "custom": Custom(
+                        connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth),
+                        models: {"test-model": (name: "Test model")},
+                    ),
+                    "unused": Custom(
+                        connection: (base_url: "https://example.test/v1", api: OpenAiResponses, auth: Bearer(Stored("user-secret"))),
+                        models: {"unused": (name: "Unused")},
+                    ),
+                },
+            )"#,
+        );
+        let snapshot = factory.load(&request).unwrap();
+        let options = factory.configured_model_options(&snapshot);
+        assert_eq!(options.len(), 1);
+        assert_eq!(
+            options[0].selection.model.as_deref(),
+            Some("custom/test-model")
+        );
+    }
+
+    #[test]
+    fn isolated_tui_qa_callbacks_ignore_process_configuration() {
+        let root = private_tempdir();
+        let config = root.path().join("config");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::write(
+            config.join("config.ron"),
+            r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test-model": (name: "Test model") }) })"#,
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::isolated_tui_qa_process_environment_child",
+                "--nocapture",
+            ])
+            .env("QQ_TUI_QA_CHILD_ROOT", root.path())
+            .env(
+                "QQ_CONFIG_CONTENT",
+                r#"(version: 1, model: "openai/gpt-5.6")"#,
+            )
+            .env("QQ_MODEL", "openai/gpt-5.6")
+            .env("QQ_ORGANIZATION", "outside-fixture")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn isolated_tui_qa_process_environment_child() {
+        let Some(root) = std::env::var_os("QQ_TUI_QA_CHILD_ROOT") else {
+            return;
+        };
+        let environment =
+            InteractiveEnvironment::open(&CliOverrides::default(), Some(PathBuf::from(root)))
+                .unwrap();
+        let credentials = auth::CredentialStore::with_backend(
+            auth::CredentialPaths::new(environment.workspace.parent().unwrap().join("credentials")),
+            Arc::new(PanicKeyring),
+        );
+        let factory = runtime::RuntimeFactory::isolated_tui_qa(
+            environment.config,
+            credentials,
+            environment.workspace.clone(),
+        )
+        .unwrap();
+        let snapshot = factory.load(&environment.request).unwrap();
+        assert_eq!(snapshot.model().as_str(), "custom/test-model");
+        assert!(snapshot.organization().is_none());
+        factory.plan_for(&environment.request).unwrap();
+        let models = factory
+            .models_for(&qq_protocol::ModelCatalogRequest {
+                workspace: environment.workspace.display().to_string(),
+                selection: qq_protocol::ModelSelection::default(),
+            })
+            .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models[0].selection.model.as_deref(),
+            Some("custom/test-model")
+        );
+    }
+
+    #[test]
+    fn isolated_tui_qa_rejects_registered_jev_without_reading_its_value() {
+        let root = private_tempdir();
+        let canonical = root.path().canonicalize().unwrap();
+        let config = canonical.join("config");
+        let workspace = canonical.join("workspace");
+        let credential_paths = auth::CredentialPaths::new(canonical.join("credentials"));
+        for directory in [
+            &config,
+            &workspace,
+            &canonical.join("data"),
+            &canonical.join("managed"),
+            &canonical.join("runtime"),
+        ] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        std::fs::write(
+            config.join("config.ron"),
+            r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test-model": (name: "Test model") }) })"#,
+        )
+        .unwrap();
+        let seed = auth::CredentialStore::with_backend(
+            credential_paths.clone(),
+            Arc::new(TestKeyring::default()),
+        );
+        seed.set_with_metadata(
+            TYPESAFE_JEV_CREDENTIAL,
+            b"fake-test-value",
+            false,
+            Some("typesafe-jev"),
+            Some(TYPESAFE_JEV_ENDPOINT),
+        )
+        .unwrap();
+        let store = auth::CredentialStore::with_backend(credential_paths, Arc::new(PanicKeyring));
+        let loader = config::ConfigLoader::new(config::ConfigPaths::new(
+            config,
+            canonical.join("data"),
+            canonical.join("managed"),
+        ));
+        let factory =
+            runtime::RuntimeFactory::isolated_tui_qa(loader, store, workspace.clone()).unwrap();
+        let error = factory
+            .plan_for(&config::LoadRequest::new(workspace))
+            .unwrap_err();
+        assert!(error.to_string().contains("stored credentials"), "{error}");
     }
 
     #[test]

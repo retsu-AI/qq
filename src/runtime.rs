@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    net::IpAddr,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -10,7 +11,7 @@ use qq_auth::{AuthError, CredentialStore, Secret, resolve_provider_credential};
 use qq_config::{
     AwsAuth, BedrockAuth, ConfigError, ConfigLoader, ConfigSnapshot, EndpointMode, HttpAccess,
     HttpCredential, LoadRequest, PromotionOutcome, ProviderAccess, ProviderApi, ProviderAuth,
-    ProviderConfig, WorkspaceGrant,
+    ProviderConfig, RuntimeOverrides, WorkspaceGrant,
 };
 use qq_core::{
     ApprovalReviewer, CheckpointFuture, CheckpointOutcome, CheckpointRequest, CheckpointReviewer,
@@ -61,10 +62,61 @@ pub struct RuntimeFactory {
 struct RuntimeFactoryInner {
     config: ConfigLoader,
     credentials: CredentialStore,
+    mode: RuntimeMode,
     providers: ProviderCompiler,
     discovery: ModelDiscovery,
     mcp: crate::mcp::McpRegistryCache,
     plans: PlanCache,
+}
+
+#[derive(Clone)]
+enum RuntimeMode {
+    Standard,
+    IsolatedTuiQa { root: PathBuf, workspace: PathBuf },
+}
+
+fn validate_tui_qa_tree(path: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(path).map_err(|error| {
+        format!(
+            "could not inspect isolated fixture directory `{}`: {error}",
+            path.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "could not inspect an entry in isolated fixture directory `{}`: {error}",
+                path.display()
+            )
+        })?;
+        let entry_path = entry.path();
+        let metadata = std::fs::symlink_metadata(&entry_path).map_err(|error| {
+            format!(
+                "could not inspect isolated fixture entry `{}`: {error}",
+                entry_path.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "isolated fixture entry `{}` must not be a symbolic link",
+                entry_path.display()
+            ));
+        }
+        #[cfg(unix)]
+        if metadata.is_file() {
+            use std::os::unix::fs::MetadataExt as _;
+            if metadata.nlink() != 1 {
+                return Err(format!(
+                    "isolated fixture entry `{}` must not be hard-linked",
+                    entry_path.display()
+                ));
+            }
+        }
+        if metadata.is_dir() {
+            validate_tui_qa_tree(&entry_path)?;
+        }
+    }
+    Ok(())
 }
 
 impl RuntimeFactory {
@@ -76,10 +128,51 @@ impl RuntimeFactory {
         config: ConfigLoader,
         credentials: CredentialStore,
     ) -> Result<Self, RuntimeBuildError> {
+        Self::with_mode(config, credentials, RuntimeMode::Standard)
+    }
+
+    pub(crate) fn isolated_tui_qa(
+        config: ConfigLoader,
+        credentials: CredentialStore,
+        workspace: PathBuf,
+    ) -> Result<Self, RuntimeBuildError> {
+        let Some(root) = workspace.parent() else {
+            return Err(RuntimeBuildError::InvalidTuiQaProfile {
+                reason: "the isolated workspace has no fixture root".to_owned(),
+            });
+        };
+        let paths = config.paths();
+        if std::fs::canonicalize(&workspace).ok().as_ref() != Some(&workspace)
+            || paths.global_dir() != root.join("config")
+            || paths.data_dir() != root.join("data")
+            || paths.managed_dir() != root.join("managed")
+            || credentials.paths().data_dir() != root.join("credentials")
+        {
+            return Err(RuntimeBuildError::InvalidTuiQaProfile {
+                reason: "configuration, credential, and workspace paths must share the isolated fixture root"
+                    .to_owned(),
+            });
+        }
+        Self::with_mode(
+            config,
+            credentials,
+            RuntimeMode::IsolatedTuiQa {
+                root: root.to_owned(),
+                workspace,
+            },
+        )
+    }
+
+    fn with_mode(
+        config: ConfigLoader,
+        credentials: CredentialStore,
+        mode: RuntimeMode,
+    ) -> Result<Self, RuntimeBuildError> {
         Ok(Self {
             inner: Arc::new(RuntimeFactoryInner {
                 config,
                 credentials,
+                mode,
                 providers: ProviderCompiler::new()?,
                 discovery: ModelDiscovery::new()?,
                 mcp: crate::mcp::McpRegistryCache::new(),
@@ -89,11 +182,21 @@ impl RuntimeFactory {
     }
 
     pub fn load(&self, request: &LoadRequest) -> Result<ConfigSnapshot, RuntimeBuildError> {
-        self.inner.config.load(request).map_err(Into::into)
+        self.validate_isolated_tui_qa_state()?;
+        self.validate_tui_qa_workspace(request.cwd())?;
+        let snapshot = self.inner.config.load(request)?;
+        if self.is_isolated_tui_qa() {
+            self.validate_tui_qa_snapshot(&snapshot)?;
+        }
+        Ok(snapshot)
     }
 
     pub fn configured_model_options(&self, snapshot: &ConfigSnapshot) -> Vec<ModelDescriptor> {
-        self.model_options_with_discovery(snapshot, &BTreeMap::new())
+        if self.is_isolated_tui_qa() {
+            vec![Self::isolated_tui_qa_model_option(snapshot)]
+        } else {
+            self.model_options_with_discovery(snapshot, &BTreeMap::new())
+        }
     }
 
     /// Returns only the already-validated selected model without probing any
@@ -215,6 +318,9 @@ impl RuntimeFactory {
     }
 
     fn discovered_model_options(&self, snapshot: &ConfigSnapshot) -> Vec<ModelDescriptor> {
+        if self.is_isolated_tui_qa() {
+            return vec![Self::isolated_tui_qa_model_option(snapshot)];
+        }
         let allowed = snapshot.policy().allowed_providers();
         let denied = snapshot.policy().denied_providers();
         let mut discovered = BTreeMap::new();
@@ -239,6 +345,177 @@ impl RuntimeFactory {
             }
         }
         self.model_options_with_discovery(snapshot, &discovered)
+    }
+
+    fn is_isolated_tui_qa(&self) -> bool {
+        matches!(self.inner.mode, RuntimeMode::IsolatedTuiQa { .. })
+    }
+
+    fn validate_tui_qa_workspace(&self, workspace: &Path) -> Result<(), RuntimeBuildError> {
+        let RuntimeMode::IsolatedTuiQa {
+            workspace: isolated,
+            ..
+        } = &self.inner.mode
+        else {
+            return Ok(());
+        };
+        if workspace != isolated {
+            return Err(RuntimeBuildError::InvalidTuiQaProfile {
+                reason: format!(
+                    "workspace `{}` is outside the isolated fixture",
+                    workspace.display()
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Revalidates the isolated fixture immediately before each lifecycle
+    /// operation. This prevents a caller from replacing an initially-safe
+    /// config or database path with a symlink or hard link after startup.
+    pub(crate) fn validate_isolated_tui_qa_state(&self) -> Result<(), RuntimeBuildError> {
+        let RuntimeMode::IsolatedTuiQa { root, workspace } = &self.inner.mode else {
+            return Ok(());
+        };
+        let invalid = |reason: String| RuntimeBuildError::InvalidTuiQaProfile { reason };
+        let root_metadata = std::fs::symlink_metadata(root).map_err(|error| {
+            invalid(format!(
+                "could not revalidate isolated fixture root `{}`: {error}",
+                root.display()
+            ))
+        })?;
+        if !root_metadata.is_dir()
+            || root_metadata.file_type().is_symlink()
+            || std::fs::canonicalize(root).ok().as_ref() != Some(root)
+        {
+            return Err(invalid(
+                "the isolated fixture root was replaced after startup".to_owned(),
+            ));
+        }
+        let required_directories = [
+            root.join("config"),
+            root.join("data"),
+            root.join("credentials"),
+            root.join("managed"),
+            root.join("runtime"),
+            workspace.clone(),
+        ];
+        for path in required_directories {
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                invalid(format!(
+                    "could not revalidate isolated fixture directory `{}`: {error}",
+                    path.display()
+                ))
+            })?;
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || std::fs::canonicalize(&path).ok().as_ref() != Some(&path)
+            {
+                return Err(invalid(format!(
+                    "isolated fixture directory `{}` was replaced after startup",
+                    path.display()
+                )));
+            }
+        }
+        if workspace.parent() != Some(root.as_path()) {
+            return Err(invalid(
+                "the isolated workspace no longer belongs to its fixture root".to_owned(),
+            ));
+        }
+        validate_tui_qa_tree(root).map_err(invalid)
+    }
+
+    fn request_for_workspace(
+        &self,
+        workspace: &Path,
+        max_output_tokens: Option<u32>,
+    ) -> Result<LoadRequest, RuntimeBuildError> {
+        self.validate_isolated_tui_qa_state()?;
+        self.validate_tui_qa_workspace(workspace)?;
+        if self.is_isolated_tui_qa() {
+            let mut overrides = RuntimeOverrides::new();
+            if let Some(max_output_tokens) = max_output_tokens {
+                overrides = overrides.with_max_output_tokens(max_output_tokens);
+            }
+            Ok(LoadRequest::new(workspace).with_overrides(overrides))
+        } else {
+            Ok(LoadRequest::from_process_env(workspace, max_output_tokens)?)
+        }
+    }
+
+    fn validate_tui_qa_snapshot(&self, snapshot: &ConfigSnapshot) -> Result<(), RuntimeBuildError> {
+        let invalid = |reason: &str| RuntimeBuildError::InvalidTuiQaProfile {
+            reason: reason.to_owned(),
+        };
+        if std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref() == Some("enforce") {
+            return Err(invalid(
+                "QQ_JEV_CHECKPOINTS=enforce requires a real reviewer credential; use the ordinary profile",
+            ));
+        }
+        if !self.inner.credentials.list()?.is_empty() {
+            return Err(invalid(
+                "stored credentials are not allowed in an isolated TUI QA fixture",
+            ));
+        }
+        let provider = snapshot
+            .providers()
+            .get(snapshot.model().provider())
+            .ok_or_else(|| invalid("the selected provider is unavailable"))?;
+        if provider.kind() != qq_config::ProviderKind::Custom {
+            return Err(invalid("the selected provider must be Custom"));
+        }
+        if !provider.models().contains_key(snapshot.model().model()) {
+            return Err(invalid(
+                "the selected model must be declared by the provider",
+            ));
+        }
+        let Some(ProviderAccess::Http(access)) = provider.access() else {
+            return Err(invalid("the selected provider must use HTTP"));
+        };
+        if !matches!(
+            access.auth(),
+            HttpCredential::Configured(ProviderAuth::NoAuth)
+        ) || !access.headers().is_empty()
+        {
+            return Err(invalid(
+                "the selected provider must use NoAuth with no static headers",
+            ));
+        }
+        let endpoint = reqwest::Url::parse(access.endpoint())
+            .map_err(|_| invalid("the selected provider endpoint is invalid"))?;
+        let loopback = endpoint.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+        if endpoint.scheme() != "http"
+            || !loopback
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+        {
+            return Err(invalid(
+                "the selected provider endpoint must be credential-free loopback HTTP",
+            ));
+        }
+        if snapshot.organization().is_some()
+            || !snapshot.mcp_servers().is_empty()
+            || snapshot.worker_model().is_some()
+            || snapshot.reviewer_model().is_some()
+            || !snapshot.delegation().roster().is_empty()
+            || snapshot.audit().mode() != qq_config::AuditMode::Off
+            || !snapshot.profiles().is_empty()
+            || !snapshot.packs().is_empty()
+        {
+            return Err(invalid(
+                "organizations, MCP, worker/reviewer routes, delegation, audit, profiles, and packs are not allowed",
+            ));
+        }
+        Ok(())
     }
 
     /// The agent profiles a workspace's configuration declares, `default`
@@ -320,7 +597,7 @@ impl RuntimeFactory {
             .into());
         }
         let mut load =
-            LoadRequest::from_process_env(&workspace, request.selection.max_output_tokens)?;
+            self.request_for_workspace(&workspace, request.selection.max_output_tokens)?;
         let mut overrides = load.overrides().clone();
         if let Some(model) = &request.selection.model {
             overrides = overrides.with_model(model.clone());
@@ -425,7 +702,7 @@ impl RuntimeFactory {
             }
             .into());
         }
-        let mut load = LoadRequest::from_process_env(&workspace, selection.max_output_tokens)?;
+        let mut load = self.request_for_workspace(&workspace, selection.max_output_tokens)?;
         let mut overrides = load.overrides().clone();
         if let Some(model) = &selection.model {
             overrides = overrides.with_model(model.clone());
@@ -583,6 +860,8 @@ impl RuntimeFactory {
         profile: &AgentProfileId,
         progress: Option<&qq_core::RuntimeLoadProgress>,
     ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), RuntimeBuildError> {
+        self.validate_isolated_tui_qa_state()?;
+        self.validate_tui_qa_workspace(request.cwd())?;
         let workspace = qq_config::canonical_working_directory(request.cwd())?;
         let key = PlanKey {
             workspace: workspace.clone(),
@@ -749,8 +1028,9 @@ impl RuntimeFactory {
         if let Some(progress) = progress {
             progress.set(qq_core::RuntimeLoadStage::ResolvingCheckpointCredential);
         }
-        let jev_enforced = std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref() == Some("enforce")
-            || self.inner.credentials.is_registered("typesafe-jev")?;
+        let jev_enforced = !self.is_isolated_tui_qa()
+            && (std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref() == Some("enforce")
+                || self.inner.credentials.is_registered("typesafe-jev")?);
         if jev_enforced {
             profile = profile.with_checkpoint_reviewer(Arc::new(
                 TypeSafeCheckpointReviewer::from_credentials(&self.inner.credentials)?,
@@ -1297,7 +1577,7 @@ impl RuntimeLoader for RuntimeFactory {
                 }
                 progress.set(qq_core::RuntimeLoadStage::LoadingConfiguration);
                 let mut load =
-                    LoadRequest::from_process_env(&workspace, request.model.max_output_tokens)?;
+                    factory.request_for_workspace(&workspace, request.model.max_output_tokens)?;
                 let mut overrides = load.overrides().clone();
                 if let Some(model) = request.model.model {
                     overrides = overrides.with_model(model);
@@ -1333,7 +1613,7 @@ impl WorkspaceGrantAuthority for RuntimeFactory {
         let workspace = workspace.to_owned();
         Box::pin(async move {
             let seed = tokio::task::spawn_blocking(move || {
-                let load = LoadRequest::from_process_env(&workspace, None).ok()?;
+                let load = factory.request_for_workspace(&workspace, None).ok()?;
                 let snapshot = factory.load(&load).ok()?;
                 let grants = snapshot.grants();
                 Some(WorkspaceGrantSeed {
@@ -1359,6 +1639,14 @@ impl WorkspaceGrantAuthority for RuntimeFactory {
             ApprovalGrant::Host { host } => WorkspaceGrant::Host(host.clone()),
         };
         Box::pin(async move {
+            if let Err(error) = factory
+                .validate_isolated_tui_qa_state()
+                .and_then(|()| factory.validate_tui_qa_workspace(&workspace))
+            {
+                return WorkspaceGrantOutcome::Failed {
+                    message: error.to_string(),
+                };
+            }
             let config = factory.inner.config.clone();
             let written = tokio::task::spawn_blocking(move || {
                 config.promote_workspace_grant(&workspace, &grant)
@@ -1443,8 +1731,10 @@ impl ModelApprovalReviewer {
         {
             return Ok(cached.clone());
         }
-        let load =
-            LoadRequest::from_process_env(workspace, None).map_err(|error| error.to_string())?;
+        let load = self
+            .factory
+            .request_for_workspace(workspace, None)
+            .map_err(|error| error.to_string())?;
         let snapshot = self
             .factory
             .load(&load)
@@ -1762,6 +2052,7 @@ pub struct RuntimeHandler {
 
 impl RuntimeHandler {
     pub async fn open(factory: RuntimeFactory) -> Result<Self, RuntimeHandlerError> {
+        factory.validate_isolated_tui_qa_state()?;
         let database_path = factory.inner.config.session_database_path()?;
         // The factory is both the runtime loader and the workspace grant
         // authority: config grants seed each new session's grant set, and
@@ -1934,7 +2225,7 @@ impl ServerHandler for RuntimeHandler {
                 .await
                 .map_err(map_session_runtime_error)?;
             tokio::task::spawn_blocking(move || {
-                let load = LoadRequest::from_process_env(&workspace, None)?;
+                let load = factory.request_for_workspace(Path::new(&workspace), None)?;
                 let plan = factory.plan_for(&load)?;
                 Ok::<_, RuntimeBuildError>(workspace_tool_capabilities(&plan))
             })
@@ -2009,6 +2300,8 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 
 #[derive(Debug, Error)]
 pub enum RuntimeHandlerError {
+    #[error(transparent)]
+    Build(#[from] RuntimeBuildError),
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
@@ -2625,6 +2918,22 @@ mod tests {
                 .remove(name)
                 .map(|_| ())
                 .ok_or(KeyringError::Missing)
+        }
+    }
+
+    struct PanicKeyring;
+
+    impl KeyringBackend for PanicKeyring {
+        fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
+            panic!("isolated TUI QA attempted to read keyring entry {name:?}")
+        }
+
+        fn set(&self, name: &str, _secret: &[u8]) -> Result<(), KeyringError> {
+            panic!("isolated TUI QA attempted to write keyring entry {name:?}")
+        }
+
+        fn remove(&self, name: &str) -> Result<(), KeyringError> {
+            panic!("isolated TUI QA attempted to remove keyring entry {name:?}")
         }
     }
 
@@ -4541,6 +4850,137 @@ mod tests {
         let content = fs::read_to_string(workspace.join(".qq/config.ron")).unwrap();
         assert!(content.contains("edit_file"), "{content}");
         assert!(content.contains("cargo test"), "{content}");
+    }
+
+    #[tokio::test]
+    async fn isolated_tui_qa_policy_survives_runtime_callbacks_and_reconnect() {
+        let fixture = RuntimeFixture::new();
+        fs::create_dir(fixture.path("config")).unwrap();
+        fs::write(
+            fixture.path("config/config.ron"),
+            r#"(
+                version: 1,
+                model: "custom/test-model",
+                providers: {
+                    "custom": Custom(
+                        connection: (
+                            base_url: "http://127.0.0.1:9080/v1",
+                            api: OpenAiResponses,
+                            auth: NoAuth,
+                        ),
+                        models: {"test-model": (name: "Test model")},
+                    ),
+                    "unused": Custom(
+                        connection: (
+                            base_url: "https://example.test/v1",
+                            api: OpenAiResponses,
+                            auth: Bearer(Stored("outside-credential")),
+                        ),
+                        models: {"unused": (name: "Unused")},
+                    ),
+                },
+            )"#,
+        )
+        .unwrap();
+        let canonical_root = fs::canonicalize(&fixture.root).unwrap();
+        for child in ["credentials", "managed", "runtime"] {
+            fs::create_dir_all(canonical_root.join(child)).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(
+                canonical_root.join("data"),
+                fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+        let workspace = fs::canonicalize(fixture.path("work")).unwrap();
+        let factory = RuntimeFactory::isolated_tui_qa(
+            ConfigLoader::new(ConfigPaths::new(
+                canonical_root.join("config"),
+                canonical_root.join("data"),
+                canonical_root.join("managed"),
+            )),
+            CredentialStore::with_backend(
+                CredentialPaths::new(canonical_root.join("credentials")),
+                Arc::new(PanicKeyring),
+            ),
+            workspace.clone(),
+        )
+        .unwrap();
+        let request = LoadRequest::new(&workspace);
+        let snapshot = factory.load(&request).unwrap();
+        assert_eq!(factory.configured_model_options(&snapshot).len(), 1);
+
+        let catalog = ModelCatalogRequest {
+            workspace: workspace.display().to_string(),
+            selection: ModelSelection::default(),
+        };
+        let models = factory.models_for(&catalog).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models[0].selection.model.as_deref(),
+            Some("custom/test-model")
+        );
+
+        RuntimeLoader::validate_spawn_model(
+            &factory,
+            workspace.display().to_string(),
+            ModelSelection {
+                model: Some("custom/test-model".to_owned()),
+                ..ModelSelection::default()
+            },
+        )
+        .await
+        .unwrap();
+        let worker = RuntimeLoader::resolve_worker_model(
+            &factory,
+            workspace.display().to_string(),
+            ModelSelection {
+                model: Some("custom/test-model".to_owned()),
+                ..ModelSelection::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(worker.model.as_deref(), Some("custom/test-model"));
+        let grants = WorkspaceGrantAuthority::seed_grants(&factory, &workspace).await;
+        assert_eq!(grants.tools, snapshot.grants().tools());
+        assert_eq!(grants.shell_prefixes, snapshot.grants().shell_prefixes());
+        assert_eq!(grants.hosts, snapshot.grants().hosts());
+        let outside = canonical_root.join("outside");
+        fs::create_dir(&outside).unwrap();
+        let outcome = WorkspaceGrantAuthority::promote_grant(
+            &factory,
+            &outside,
+            &ApprovalGrant::Tool {
+                name: "edit_file".to_owned(),
+            },
+        )
+        .await;
+        assert!(matches!(outcome, WorkspaceGrantOutcome::Failed { .. }));
+        assert!(!outside.join(".qq").exists());
+        RuntimeLoader::load(
+            &factory,
+            RuntimeLoadRequest {
+                workspace: workspace.display().to_string(),
+                model: ModelSelection::default(),
+                profile: AgentProfileId::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let reviewer = ModelApprovalReviewer::new(factory.clone());
+        let Err(error) = reviewer.prepare(&workspace) else {
+            panic!("isolated QA unexpectedly configured an approval reviewer");
+        };
+        assert!(error.contains("no reviewer model"), "{error}");
+
+        let handler = RuntimeHandler::open(factory).await.unwrap();
+        let reconnect_models = ServerHandler::models(&handler, catalog).await.unwrap();
+        assert_eq!(reconnect_models.len(), 1);
+        handler.shutdown().await.unwrap();
     }
 
     #[test]

@@ -7,9 +7,11 @@ production acceptance test.
 
 ## Prepare the fixture
 
-Choose an empty directory and a free loopback port. The application creates
-the six child directories itself; the only fixture input is the local provider
-configuration:
+Choose a new private directory and a free loopback port. Before QQ starts, the
+root must contain exactly a real `config` directory with one regular, non-linked
+`config.ron`; QQ refuses pre-existing data, credential, runtime, managed, or
+workspace paths. It then creates those five state directories itself. The only
+fixture input is the local provider configuration:
 
 ```sh
 QA_ROOT="$(mktemp -d /tmp/qq-tui-qa.XXXXXX)"
@@ -74,10 +76,17 @@ qq --tui-qa-root "$QA_ROOT"
 
 The profile fails before runtime startup if `QQ_JEV_CHECKPOINTS=enforce` is
 present, because a credential-free fixture cannot satisfy mandatory review.
-It also rejects remote endpoints, authentication/static headers, MCP, worker
-or reviewer routes, delegation, audit, profiles, and packs. It never changes
-or unsets those settings. Bare `qq`, `qq run`, and every other command retain
-their production behavior; the option is valid only for bare interactive QQ.
+It ignores unselected providers and rejects a remote or authenticated selected
+provider, static headers, stored credentials, organizations, MCP, worker or
+reviewer routes, delegation, audit, profiles, and packs. The isolation policy
+remains attached to the runtime factory across model catalogs, session loads,
+reconnects, spawn checks, grant reads, and capability refreshes; none of those
+callbacks reconstructs QA configuration from the process environment. It never
+changes or unsets those settings. Fixture directories and files are rechecked
+throughout that lifecycle, and QQ fails closed if a path is replaced by a
+symbolic link or a regular file is hard-linked outside the fixture. Bare `qq`,
+`qq run`, and every other command retain their production behavior; the option
+is valid only for bare interactive QQ.
 
 ## Expected isolated paths
 
@@ -101,5 +110,5 @@ esac
 ```
 
 Do not use a user configuration, data, credential, or runtime directory as
-`QA_ROOT`. Preserve the fixture instead of removing it when its SQLite state
-or logs are needed for a defect report.
+`QA_ROOT`. Each launch requires a new root; preserve an old fixture instead of
+reopening it when its SQLite state or logs are needed for a defect report.
