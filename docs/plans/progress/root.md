@@ -61,6 +61,10 @@ Final candidate checks also passed repository formatting, `cargo check -p
 qq-core -p qq-protocol -p qq`, and `cargo build -p qq`. The resulting debug
 binary SHA-256 is
 `6df98591a8a8aa2f1c7da3f40284b090003415d3e5e427a4141cf0c8fff5eaea`.
+That binary was built from runtime commit `5def457` plus the auth worker's
+concurrent uncommitted `qq-auth` candidate; bind the final integrated binary
+again after the auth commit exists rather than treating this hash as a build
+of the runtime commit alone.
 
 Next free number: 0029. Reserve here before opening a PR that adds an ADR.
 
