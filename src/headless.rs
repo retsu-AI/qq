@@ -1928,11 +1928,16 @@ mod tests {
 
     async fn fixture_with_loader(loader: Arc<dyn RuntimeLoader>) -> Fixture {
         let directory = tempfile::tempdir().unwrap();
-        let workspace = directory.path().join("work");
+        // macOS commonly exposes TMPDIR through `/var`, which is a symlink to
+        // `/private/var`. Store databases deliberately use SQLite NOFOLLOW, so
+        // fixtures must construct both workspace and database paths from the
+        // canonical temporary root.
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let workspace = root.join("work");
         std::fs::create_dir_all(&workspace).unwrap();
         let workspace = std::fs::canonicalize(&workspace).unwrap();
         let sessions = SessionRuntime::open(
-            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            SessionRuntimeOptions::new(root.join("sessions.sqlite3")),
             loader,
         )
         .await
