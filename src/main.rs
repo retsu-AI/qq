@@ -52,6 +52,9 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         Some(cli::Command::Auth { command }) => {
             run_blocking_command(move || auth_command(command)).await?
         }
+        Some(cli::Command::Jev { command }) => {
+            run_blocking_command(move || jev_command(command)).await?
+        }
         Some(cli::Command::Org { command }) => organization_command(command)?,
         Some(cli::Command::Trust) => trust_command(&overrides)?,
         Some(cli::Command::Version) => print!("{}", version_report()),
@@ -1084,6 +1087,39 @@ fn auth_command(command: cli::AuthCommand) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+const TYPESAFE_JEV_CREDENTIAL: &str = "typesafe-jev";
+const TYPESAFE_JEV_ENDPOINT: &str = "https://api.typesafe.ai";
+
+fn jev_command(command: cli::JevCommand) -> Result<(), Box<dyn Error>> {
+    match command {
+        cli::JevCommand::Setup { allow_file } => {
+            let secret = read_secret("TypeSafe API key: ")?;
+            let store = auth::CredentialStore::system()?;
+            let backend = store_typesafe_jev_credential(&store, &secret, allow_file)?;
+            println!("stored {TYPESAFE_JEV_CREDENTIAL} in {backend}");
+            println!("start QQ with enforced JEV checkpoints:");
+            println!("  QQ_JEV_CHECKPOINTS=enforce qq");
+            println!("inspect: qq auth status {TYPESAFE_JEV_CREDENTIAL}");
+            println!("remove:  qq auth logout {TYPESAFE_JEV_CREDENTIAL}");
+        }
+    }
+    Ok(())
+}
+
+fn store_typesafe_jev_credential(
+    store: &auth::CredentialStore,
+    secret: &auth::Secret,
+    allow_file: bool,
+) -> Result<auth::CredentialBackend, auth::AuthError> {
+    store.set_with_metadata(
+        TYPESAFE_JEV_CREDENTIAL,
+        secret.expose_secret_bytes(),
+        allow_file,
+        Some("typesafe-jev"),
+        Some(TYPESAFE_JEV_ENDPOINT),
+    )
+}
+
 fn organization_command(command: cli::OrgCommand) -> Result<(), Box<dyn Error>> {
     let loader = config::ConfigLoader::system()?;
     match command {
@@ -1172,6 +1208,33 @@ async fn run_blocking_command(
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct TestKeyring(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+
+    impl auth::KeyringBackend for TestKeyring {
+        fn get(&self, name: &str) -> Result<Vec<u8>, auth::KeyringError> {
+            self.0
+                .lock()
+                .unwrap()
+                .get(name)
+                .cloned()
+                .ok_or(auth::KeyringError::Missing)
+        }
+
+        fn set(&self, name: &str, secret: &[u8]) -> Result<(), auth::KeyringError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(name.to_owned(), secret.to_vec());
+            Ok(())
+        }
+
+        fn remove(&self, name: &str) -> Result<(), auth::KeyringError> {
+            self.0.lock().unwrap().remove(name);
+            Ok(())
+        }
+    }
+
     #[test]
     fn version_report_names_every_compatibility_contract() {
         let report = version_report();
@@ -1187,6 +1250,30 @@ mod tests {
             assert!(contracts.contains(&expected), "{report:?}");
         }
         assert_eq!(lines.next(), None);
+    }
+
+    #[test]
+    fn jev_setup_registers_the_endpoint_bound_runtime_credential() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = auth::CredentialStore::with_backend(
+            auth::CredentialPaths::new(directory.path()),
+            Arc::new(TestKeyring::default()),
+        );
+        let secret = auth::Secret::from_secret_bytes(b"secret-test-value".to_vec());
+
+        let backend = store_typesafe_jev_credential(&store, &secret, false).unwrap();
+
+        assert_eq!(backend, auth::CredentialBackend::Keyring);
+        let metadata = store.status(TYPESAFE_JEV_CREDENTIAL).unwrap().unwrap();
+        assert_eq!(metadata.kind.as_deref(), Some("typesafe-jev"));
+        assert_eq!(metadata.endpoint.as_deref(), Some(TYPESAFE_JEV_ENDPOINT));
+        let resolved = store
+            .resolve_with_endpoint(
+                &qq_provider::SecretRef::Stored(TYPESAFE_JEV_CREDENTIAL.to_owned()),
+                Some(TYPESAFE_JEV_ENDPOINT),
+            )
+            .unwrap();
+        assert_eq!(resolved.expose_secret_bytes(), b"secret-test-value");
     }
 
     fn run_args(prompt: &str, extra: &[&str]) -> cli::RunArgs {

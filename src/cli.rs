@@ -98,6 +98,12 @@ pub enum Command {
         command: AuthCommand,
     },
 
+    /// Configure enforced TypeSafe JEV checkpoints.
+    Jev {
+        #[command(subcommand)]
+        command: JevCommand,
+    },
+
     /// Enroll and manage organization configuration manifests.
     Org {
         #[command(subcommand)]
@@ -300,6 +306,16 @@ pub enum AuthCommand {
     Status { name: String },
     /// Remove a stored credential.
     Logout { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JevCommand {
+    /// Prompt for and securely store the TypeSafe API key.
+    Setup {
+        /// Allow an explicit user-only plaintext file if the OS keyring is unavailable.
+        #[arg(long)]
+        allow_file: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -642,6 +658,15 @@ mod tests {
                 command: ConfigCommand::Explain { field }
             }) if field == "model"
         ));
+        assert!(matches!(
+            Cli::try_parse_from(["qq", "jev", "setup", "--allow-file"])
+                .unwrap()
+                .command,
+            Some(Command::Jev {
+                command: JevCommand::Setup { allow_file: true }
+            })
+        ));
+        assert!(Cli::try_parse_from(["qq", "jev", "setup", "secret-in-argv"]).is_err());
         assert!(matches!(
             Cli::try_parse_from([
                 "qq",
