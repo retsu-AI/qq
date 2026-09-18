@@ -262,6 +262,17 @@ Application/configuration tests are rerunning on that representation change.
 Refreshed #76: open/draft, head 2a56015, hosted CI 35394821612 successful.
 
 Final representation check: 249 application/config tests passed, one ignored;
-workspace build and formatting pass. No inference credentials or live APIs used.
+workspace build and formatting pass. No real inference credentials or live APIs used.
 Descriptor 8→9 golden encoding and routing candidate fingerprints are covered.
 The retained #76 release binaries are the off-path comparison baseline.
+
+#### J6b performance receipt — 2026-09-18
+Candidate cf61126 versus retained #76 binaries; 30 alternating A/B and 30 A/A
+pairs per fixture, with no overlapping build/test during measurements.
+Tool-loop median 54,392 → 56,136.5 ns (+3.21%); p95 70,945 → 70,783 ns.
+A/A tool median +1.23%; p95 75,752 → 69,457 ns.
+Plan compile median 24,977.5 → 24,715.5 ns (−1.05%); digest +0.69%.
+I/O some avg10 sampled 18.03–22.40%. Raw evidence:
+`target/qq-perf/jev-routing-2026-09-18/paired.json` (untracked).
+This increment is within the 5% median budget. The earlier #76 gate and
+quiet-host full-stack qualification remain unresolved; no Jev speed claim.
