@@ -42,6 +42,26 @@ may append a **request** row; only root changes a request's status.
 | 0027 | `qq-core` is a public embedding API | docs cleanup 2026-09-16 | Accepted (merged in #52) |
 | 0028 | Mandatory typed JEV checkpoints after tool results and final candidates | JEV runtime checkpoint slice | Accepted locally; unpushed candidate |
 
+2026-09-18 — JEV checkpoint hardening remains in progress on
+`feat/jev-runtime-checkpoints`: complete task/tool payloads now fail closed
+before assessment when over bound, cache identity is the typed request,
+post-result cancellation records a durable not-performed checkpoint, and
+direct `qq ask` routes notices to stderr. Credential-free compile and focused
+bound/cache/output tests are green. A task-owned temporary directory bypassed
+the host default-temp SQLite open failure and the cancellation regression is
+green: durable tool result, durable local unavailable/not-performed review,
+then cancelled terminal. That test also exposed and repaired a real
+`LoadedRuntime` adapter omission that had discarded the reviewer while
+compiling embedded runtimes into session plans.
+The focused final run passed 13 QQ-core checkpoint tests, including child-final
+checkpoint before child settlement and parent spawn-result delivery, plus the
+direct stderr notice regression and all qq-protocol unit/headless/wire fixtures.
+Raw logs are retained under `target/qq-checkpoint-tests/`.
+Final candidate checks also passed repository formatting, `cargo check -p
+qq-core -p qq-protocol -p qq`, and `cargo build -p qq`. The resulting debug
+binary SHA-256 is
+`6df98591a8a8aa2f1c7da3f40284b090003415d3e5e427a4141cf0c8fff5eaea`.
+
 Next free number: 0029. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests

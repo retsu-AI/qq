@@ -1302,7 +1302,8 @@ impl plan::CompiledAgentPlan {
             let mut audit_revisions = 0_u16;
             let mut checkpoint_evidence = String::new();
             let mut checkpoint_evidence_truncated = false;
-            let mut checkpoint_cache = HashMap::<String, runtime::CheckpointVerdict>::new();
+            let mut checkpoint_cache =
+                HashMap::<runtime::CheckpointRequest, runtime::CheckpointVerdict>::new();
             let mut checkpoint_evidence_version = 0_u32;
             let mut checkpoint_required_evidence_version = None;
             // Repair turns spent against the output contract, for the whole
@@ -2265,32 +2266,53 @@ impl plan::CompiledAgentPlan {
                             };
                             return;
                         }
+                        let correlation = format!("final:{turn_ordinal}");
+                        if !runtime::checkpoint_text_fits(&audit_prompt) {
+                            let feedback = "JEV final checkpoint was not sent because the original task exceeded the exact review bound".to_owned();
+                            yield RuntimeEvent::CheckpointReviewed {
+                                correlation,
+                                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                                tool_call_id: None,
+                                outcome: qq_protocol::CheckpointOutcome::Unavailable,
+                                confidence: None,
+                                feedback: feedback.clone(),
+                            };
+                            yield RuntimeEvent::Failed { kind: RunFailureKind::Policy, message: feedback };
+                            return;
+                        }
                         let final_evidence = format!(
                             "final candidate:\n{answer}\n\nretained tool evidence:\n{checkpoint_evidence}"
                         );
                         if !runtime::checkpoint_text_fits(&final_evidence) {
+                            let feedback = "JEV final checkpoint was not sent because the combined candidate and tool evidence exceeded the exact review bound".to_owned();
+                            yield RuntimeEvent::CheckpointReviewed {
+                                correlation,
+                                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                                tool_call_id: None,
+                                outcome: qq_protocol::CheckpointOutcome::Unavailable,
+                                confidence: None,
+                                feedback: feedback.clone(),
+                            };
                             yield RuntimeEvent::Failed {
                                 kind: RunFailureKind::Policy,
-                                message: "JEV final checkpoint cannot verify completion because the combined candidate and tool evidence exceeded the review bound".to_owned(),
+                                message: feedback,
                             };
                             return;
                         }
-                        let correlation = format!("final:{turn_ordinal}");
                         let request = runtime::CheckpointRequest {
                             correlation: correlation.clone(),
                             phase: runtime::CheckpointPhase::FinalCandidate,
                             tool_call_id: None,
                             tool: None,
-                            task: runtime::bounded_checkpoint_text(&audit_prompt),
+                            task: audit_prompt.clone(),
                             evidence: final_evidence,
                             is_error: false,
                         };
-                        let cache_key = format!("final\u{0}{}\u{0}{}", request.task, request.evidence);
-                        let verdict = match checkpoint_cache.get(&cache_key) {
+                        let verdict = match checkpoint_cache.get(&request) {
                             Some(verdict) => verdict.clone(),
                             None => {
-                                let verdict = reviewer.review(request).await;
-                                checkpoint_cache.insert(cache_key, verdict.clone());
+                                let verdict = reviewer.review(request.clone()).await;
+                                checkpoint_cache.insert(request, verdict.clone());
                                 verdict
                             }
                         };
@@ -2904,29 +2926,51 @@ impl plan::CompiledAgentPlan {
                     for (call, retained) in calls.iter().zip(results.iter_mut()) {
                         let retained = retained.as_mut().expect("every tool outcome is retained before checkpointing");
                         let correlation = format!("tool:{}", call.id);
+                        let evidence = format!(
+                            "tool: {}\narguments: {}\nresult: {}",
+                            call.name,
+                            tools::output::mask_secrets(call.arguments.clone()),
+                            retained.model_text
+                        );
+                        let overflow = if !runtime::checkpoint_text_fits(&audit_prompt) {
+                            Some("original task")
+                        } else if !runtime::checkpoint_text_fits(&evidence) {
+                            Some("tool arguments and result")
+                        } else {
+                            None
+                        };
+                        if let Some(field) = overflow {
+                            let feedback = format!(
+                                "JEV tool checkpoint was not sent because {field} exceeded the exact review bound"
+                            );
+                            yield RuntimeEvent::CheckpointReviewed {
+                                correlation,
+                                phase: qq_protocol::CheckpointPhase::ToolResult,
+                                tool_call_id: Some(call.id),
+                                outcome: qq_protocol::CheckpointOutcome::Unavailable,
+                                confidence: None,
+                                feedback: feedback.clone(),
+                            };
+                            yield RuntimeEvent::Failed {
+                                kind: RunFailureKind::Policy,
+                                message: feedback,
+                            };
+                            return;
+                        }
                         let request = runtime::CheckpointRequest {
                             correlation: correlation.clone(),
                             phase: runtime::CheckpointPhase::ToolResult,
                             tool_call_id: Some(call.id),
                             tool: Some(call.name.clone()),
-                            task: runtime::bounded_checkpoint_text(&audit_prompt),
-                            evidence: runtime::bounded_checkpoint_text(&format!(
-                                "tool: {}\narguments: {}\nresult: {}",
-                                call.name,
-                                tools::output::mask_secrets(call.arguments.clone()),
-                                retained.model_text
-                            )),
+                            task: audit_prompt.clone(),
+                            evidence,
                             is_error: retained.is_error,
                         };
-                        let cache_key = format!(
-                            "tool\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
-                            call.name, call.arguments, request.task, request.evidence
-                        );
-                        let verdict = match checkpoint_cache.get(&cache_key) {
+                        let verdict = match checkpoint_cache.get(&request) {
                             Some(verdict) => verdict.clone(),
                             None => {
-                                let verdict = reviewer.review(request).await;
-                                checkpoint_cache.insert(cache_key, verdict.clone());
+                                let verdict = reviewer.review(request.clone()).await;
+                                checkpoint_cache.insert(request, verdict.clone());
                                 verdict
                             }
                         };
@@ -3117,12 +3161,30 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 // Direct runs have no reviewer or auditor either.
                 | RuntimeEvent::ReviewCharged { .. }
                 | RuntimeEvent::Audited { .. }
-                | RuntimeEvent::CheckpointReviewed { .. }
                 // Continuation is transparent to the direct stream: the text
                 // keeps flowing and the typed failure names exhaustion.
                 | RuntimeEvent::OutputTruncated { .. }
                 // Direct runs carry no output contract.
                 | RuntimeEvent::OutputRepairRequested { .. } => {}
+                RuntimeEvent::CheckpointReviewed {
+                    correlation,
+                    phase,
+                    tool_call_id,
+                    outcome,
+                    confidence,
+                    feedback,
+                } => {
+                    yield RunEvent::CheckpointReviewed {
+                        correlation,
+                        phase,
+                        tool_call_id,
+                        outcome,
+                        confidence_basis_points: confidence.map(|value| {
+                            (value.clamp(0.0, 1.0) * 10_000.0).round() as u16
+                        }),
+                        feedback,
+                    };
+                }
                 RuntimeEvent::Completed { .. } => {
                     yield RunEvent::Completed;
                     return;
@@ -4452,6 +4514,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_run_exposes_checkpoint_review_events() {
+        struct FinalProvider;
+        impl Provider for FinalProvider {
+            fn stream(&self, _request: ModelRequest) -> ProviderStream {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "done".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        struct Supports;
+        impl CheckpointReviewer for Supports {
+            fn review(&self, _request: CheckpointRequest) -> CheckpointFuture {
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome: CheckpointOutcome::Supported,
+                    confidence: Some(0.99),
+                    feedback: "final evidence is supported".to_owned(),
+                }))
+            }
+        }
+        let runtime = Runtime::new(FinalProvider, "test", 256)
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(Supports));
+
+        let events = runtime
+            .run(RunCommand::new("answer directly"))
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RunEvent::CheckpointReviewed {
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                outcome: qq_protocol::CheckpointOutcome::Supported,
+                confidence_basis_points: Some(9_900),
+                feedback,
+                ..
+            } if feedback == "final evidence is supported"
+        )));
+        assert!(matches!(events.last(), Some(RunEvent::Completed)));
+    }
+
+    #[tokio::test]
     async fn maps_reasoning_lifecycle_without_joining_answer_text() {
         struct ReasoningProvider;
 
@@ -5071,6 +5178,130 @@ mod tests {
         assert!(matches!(
             events.last(),
             Some(RuntimeEvent::Completed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn enforced_checkpoint_does_not_assess_an_oversized_original_task() {
+        struct FinalProvider;
+        impl Provider for FinalProvider {
+            fn stream(&self, _request: ModelRequest) -> ProviderStream {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "done".into(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        struct CountingReviewer(Arc<AtomicUsize>);
+        impl CheckpointReviewer for CountingReviewer {
+            fn review(&self, _request: CheckpointRequest) -> CheckpointFuture {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome: CheckpointOutcome::Supported,
+                    confidence: Some(1.0),
+                    feedback: "must not be used".into(),
+                }))
+            }
+        }
+
+        let reviews = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(FinalProvider, "test", 256)
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(CountingReviewer(Arc::clone(&reviews))));
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(
+                vec![Message::user(
+                    "x".repeat(runtime::MAX_CHECKPOINT_TEXT_BYTES + 1),
+                )],
+                directory.path().into(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(reviews.load(Ordering::SeqCst), 0);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::CheckpointReviewed {
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                outcome: qq_protocol::CheckpointOutcome::Unavailable,
+                feedback,
+                ..
+            } if feedback.contains("original task exceeded")
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Failed {
+                kind: RunFailureKind::Policy,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn enforced_checkpoint_does_not_assess_oversized_tool_evidence() {
+        struct ToolProvider;
+        impl Provider for ToolProvider {
+            fn stream(&self, _request: ModelRequest) -> ProviderStream {
+                let arguments = serde_json::json!({
+                    "delay_ms": 0,
+                    "result": "x".repeat(runtime::MAX_CHECKPOINT_TEXT_BYTES)
+                })
+                .to_string();
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::ToolCallStarted {
+                        id: "large".into(),
+                        name: "__test_read".into(),
+                    }),
+                    Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: "large".into(),
+                        json: arguments,
+                    }),
+                    Ok(ProviderEvent::ToolCallCompleted { id: "large".into() }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        struct CountingReviewer(Arc<AtomicUsize>);
+        impl CheckpointReviewer for CountingReviewer {
+            fn review(&self, _request: CheckpointRequest) -> CheckpointFuture {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome: CheckpointOutcome::Supported,
+                    confidence: Some(1.0),
+                    feedback: "must not be used".into(),
+                }))
+            }
+        }
+
+        let reviews = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(ToolProvider, "test", 256)
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(CountingReviewer(Arc::clone(&reviews))));
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("inspect")], directory.path().into())
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(reviews.load(Ordering::SeqCst), 0);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::CheckpointReviewed {
+                phase: qq_protocol::CheckpointPhase::ToolResult,
+                outcome: qq_protocol::CheckpointOutcome::Unavailable,
+                feedback,
+                ..
+            } if feedback.contains("tool arguments and result exceeded")
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Failed {
+                kind: RunFailureKind::Policy,
+                ..
+            })
         ));
     }
 

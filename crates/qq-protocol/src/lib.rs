@@ -154,6 +154,14 @@ pub enum RunEvent {
     Usage {
         usage: TokenUsage,
     },
+    CheckpointReviewed {
+        correlation: String,
+        phase: CheckpointPhase,
+        tool_call_id: Option<ToolCallId>,
+        outcome: CheckpointOutcome,
+        confidence_basis_points: Option<u16>,
+        feedback: String,
+    },
     Completed,
     Failed {
         kind: RunFailureKind,

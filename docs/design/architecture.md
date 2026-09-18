@@ -1202,6 +1202,20 @@ explicit enforced JEV checkpoint profile from ADR-0028; provider
 adapter families are feature-gated inside `qq-provider` (`provider-bedrock`
 owns the AWS SDK closure) rather than split into crates.
 
+An enforced checkpoint request is admitted only when its original task and
+complete phase-specific evidence fit the exact reviewer bound; these fields are
+never truncated into a potentially green assessment. Its memoization identity
+contains every typed request field. Cancellation does not wait for remote
+review: when a tool result is already durable but its checkpoint is not, the
+session durably records a local `unavailable`/not-performed checkpoint before
+terminal settlement. Direct automation preserves answer-only stdout and writes
+human-readable checkpoint notices to stderr.
+The `LoadedRuntime` adapter preserves the reviewer when compiling an embedded
+runtime into a session plan, so every execution surface shares the same gate.
+A parent receives a `spawn_agent` result only after the child final checkpoint
+and child terminal outcome are durable; the parent then checkpoints that tool
+result before its next model turn.
+
 Invariants every lane keeps:
 
 - A disabled adapter family adds no shipping dependency to a minimal build.

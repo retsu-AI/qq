@@ -1,4 +1,5 @@
 use super::*;
+use crate::CheckpointPhase;
 
 #[tokio::test]
 async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
@@ -253,6 +254,139 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
         )
         .await
         .expect("root sessions are unaffected");
+}
+
+#[tokio::test]
+async fn child_final_checkpoint_is_durable_before_parent_spawn_result() {
+    let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        script: vec![(
+            "spawn_agent",
+            r#"{"task":"survey","model":"test/child"}"#.to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let child: Arc<dyn Provider> = Arc::new(StaticTextProvider);
+    let reviewed = Arc::new(StdMutex::new(Vec::new()));
+    let mut harness = spawn_harness_with_loader(
+        Arc::new(CheckpointQueueLoader {
+            inner: QueueLoader {
+                routed: vec![("test/child", child)],
+                queue: StdMutex::new(vec![parent]),
+            },
+            reviewed: Arc::clone(&reviewed),
+        }),
+        8,
+    )
+    .await;
+    let parent_run = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
+    let observed = collect_until_run_finished(&mut harness.events, parent_run).await;
+
+    let child_run = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::PromptQueued { session, run, .. }
+                if session.parent_id == Some(harness.session_id) =>
+            {
+                Some(run.id)
+            }
+            _ => None,
+        })
+        .expect("spawn creates a child run");
+    let child_checkpoint = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                SessionEventEnvelope {
+                    run_id: Some(run_id),
+                    event: SessionEvent::CheckpointReviewed {
+                        phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                        outcome: qq_protocol::CheckpointOutcome::Supported,
+                        ..
+                    },
+                    ..
+                } if *run_id == child_run
+            )
+        })
+        .expect("child final checkpoint is durable");
+    let child_finished = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                event.event,
+                SessionEvent::RunFinished { run_id, .. } if run_id == child_run
+            )
+        })
+        .expect("child settles");
+    let parent_spawn_result = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                SessionEvent::ToolCallFinished { tool_call }
+                    if tool_call.run_id == parent_run && tool_call.name == "spawn_agent"
+            )
+        })
+        .expect("parent receives the spawn result");
+    let parent_tool_checkpoint = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                SessionEventEnvelope {
+                    run_id: Some(run_id),
+                    event: SessionEvent::CheckpointReviewed {
+                        phase: qq_protocol::CheckpointPhase::ToolResult,
+                        outcome: qq_protocol::CheckpointOutcome::Supported,
+                        ..
+                    },
+                    ..
+                } if *run_id == parent_run
+            )
+        })
+        .expect("parent spawn result is checkpointed");
+    let parent_final_checkpoint = observed
+        .iter()
+        .rposition(|event| {
+            matches!(
+                event,
+                SessionEventEnvelope {
+                    run_id: Some(run_id),
+                    event: SessionEvent::CheckpointReviewed {
+                        phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                        outcome: qq_protocol::CheckpointOutcome::Supported,
+                        ..
+                    },
+                    ..
+                } if *run_id == parent_run
+            )
+        })
+        .expect("parent final candidate is checkpointed");
+    let parent_finished = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                event.event,
+                SessionEvent::RunFinished { run_id, .. } if run_id == parent_run
+            )
+        })
+        .expect("parent settles");
+
+    assert!(child_checkpoint < child_finished);
+    assert!(child_finished < parent_spawn_result);
+    assert!(parent_spawn_result < parent_tool_checkpoint);
+    assert!(parent_tool_checkpoint < parent_final_checkpoint);
+    assert!(parent_final_checkpoint < parent_finished);
+    assert_eq!(
+        reviewed
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.phase == CheckpointPhase::FinalCandidate)
+            .count(),
+        2
+    );
 }
 
 #[tokio::test]

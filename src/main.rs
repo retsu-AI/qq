@@ -581,7 +581,9 @@ async fn render_events(
         output::OutputMode::Raw
     };
     let mut stdout = stdout.lock();
-    output::render(events, &mut stdout, mode).await?;
+    let stderr = io::stderr();
+    let mut stderr = stderr.lock();
+    output::render(events, &mut stdout, &mut stderr, mode).await?;
     Ok(())
 }
 

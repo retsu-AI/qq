@@ -785,6 +785,7 @@ pub(super) async fn execute_run(
                     prepared.tool_cancellation,
                     &prepared.audit,
                     &resources,
+                    loaded.plan.descriptor().checkpoint.is_some(),
                 )
                 .await;
                 return;
@@ -1071,6 +1072,7 @@ async fn run_auto_compaction(
             prepared.tool_cancellation,
             &prepared.audit,
             resources,
+            loaded.plan.descriptor().checkpoint.is_some(),
         )
         .await;
     }
@@ -1217,6 +1219,7 @@ async fn execute_started_run(
     tool_cancellation: RunCancellation,
     audit: &PreparedRunAudit,
     resources: &RunResources,
+    checkpoint_enforced: bool,
 ) {
     let resolved_model = Arc::clone(&audit.resolved_model);
     let context_shape = audit.context_shape;
@@ -1264,6 +1267,7 @@ async fn execute_started_run(
     // flushed when the turn completes, before any of its calls execute.
     let mut pending_tool_call: Option<ToolCallId> = None;
     let mut pending_tool_output = String::new();
+    let mut tools_awaiting_checkpoint = std::collections::HashSet::<ToolCallId>::new();
     // An internal run's streamed output never joins the transcript; the
     // summary accumulates here and persists as a compaction row instead.
     let mut summary_text = String::new();
@@ -1528,6 +1532,40 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
+                let cancellation_label = if matches!(stopped, RunInput::Cancelled) {
+                    "cancelled"
+                } else {
+                    "interrupted"
+                };
+                for tool_call_id in tools_awaiting_checkpoint.drain() {
+                    if let Err(error) = inner
+                        .store
+                        .record_checkpoint(
+                            &claimed,
+                            format!("tool:{tool_call_id}"),
+                            qq_protocol::CheckpointPhase::ToolResult,
+                            Some(tool_call_id),
+                            qq_protocol::CheckpointOutcome::Unavailable,
+                            None,
+                            format!(
+                                "JEV review was not performed because the run was {cancellation_label} after the tool result became durable"
+                            ),
+                        )
+                        .await
+                    {
+                        finish_run(
+                            &inner,
+                            &claimed,
+                            persistence_failure(
+                                "failed to persist cancelled JEV checkpoint status",
+                                &error,
+                            ),
+                            teardown,
+                        )
+                        .await;
+                        return;
+                    }
+                }
                 finish_run_accounted(
                     &inner,
                     &claimed,
@@ -2042,6 +2080,9 @@ async fn execute_started_run(
                     .await;
                     return;
                 }
+                if let Some(tool_call_id) = tool_call_id {
+                    tools_awaiting_checkpoint.remove(&tool_call_id);
+                }
             }
             RunInput::Event(Some(RuntimeEvent::ToolCallStarted { id })) => {
                 if internal {
@@ -2159,6 +2200,12 @@ async fn execute_started_run(
                     .await;
                     return;
                 }
+                if checkpoint_enforced {
+                    // Mark before the durable write awaits: subscribers can
+                    // observe the committed result and request cancellation
+                    // before this task resumes from the store actor.
+                    tools_awaiting_checkpoint.insert(id);
+                }
                 match inner
                     .store
                     .finish_tool_call(&claimed, id, result, is_error, file_states, display, spill)
@@ -2166,6 +2213,7 @@ async fn execute_started_run(
                 {
                     Ok(_) => {}
                     Err(error) => {
+                        tools_awaiting_checkpoint.remove(&id);
                         let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;

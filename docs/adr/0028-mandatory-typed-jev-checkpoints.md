@@ -35,6 +35,20 @@ recovery is bounded by the run's explicit turn/time budgets and cancellation,
 not a checkpoint-local attempt cap. A final retry requires a fresh reviewed tool observation; an
 unavailable or malformed reviewer response fails immediately.
 
+The exact task and complete per-tool request must fit the reviewer bound before
+dispatch. QQ records `unavailable` and fails closed instead of silently
+truncating either into an assessable request. Memoization keys the complete
+typed request, including phase, correlation, tool identity, and error status.
+If cancellation wins after a tool result is durable but before its checkpoint
+is durable, the session records a local `unavailable` checkpoint stating that
+review was not performed, then settles cancellation. Direct `qq ask` keeps
+answer bytes on stdout and renders checkpoint notices on stderr. The
+`LoadedRuntime` embedding adapter propagates the installed reviewer into its
+compiled profile; loading a session cannot silently discard enforcement.
+Child execution uses that same compiled profile: its supported final checkpoint
+is durable before the child settles, and the parent receives the
+`spawn_agent` result only after that settlement.
+
 This supersedes ADR-0003's narrower statement that synchronous decisions are
 limited to approval, validation, and budgets. Persist-before-publish remains in
 force: checkpoint status is committed before clients observe it. JEV is an
@@ -47,7 +61,7 @@ internal runtime capability, never a tool call, so it cannot recurse.
 - Negative: enforced runs serialize tool work and add one bounded remote call
   per result plus one for the final candidate.
 - Limitation: cancellation and failures before a tool result or final candidate
-  retain their existing durable settlement and do not yet produce a JEV event.
+  retain their existing durable settlement and do not produce a JEV event.
 
 ## Alternatives considered
 

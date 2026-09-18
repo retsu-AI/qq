@@ -1159,6 +1159,76 @@ async fn cancellation_at_the_slice_checkpoint_has_one_cancelled_terminal() {
 }
 
 #[tokio::test]
+async fn cancellation_after_durable_tool_result_records_unavailable_checkpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("note.txt"), "tool result\n").unwrap();
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        Arc::new(BlockingCheckpointLoader { requests }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("unexpected receipt")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    let run_id = queue_prompt(&runtime, session_id, "inspect the note".to_owned()).await;
+
+    let mut observed = collect_until(&mut events, |event| {
+        matches!(event, SessionEvent::ToolCallFinished { .. })
+    })
+    .await;
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelRun { run_id },
+        )
+        .await
+        .unwrap();
+    observed.extend(collect_until(&mut events, finished_for(run_id)).await);
+
+    let finished = observed
+        .iter()
+        .position(|event| matches!(event.event, SessionEvent::ToolCallFinished { .. }))
+        .expect("tool result is durable");
+    let checkpoint = observed.iter().position(|event| {
+        matches!(
+            &event.event,
+            SessionEvent::CheckpointReviewed {
+                outcome: qq_protocol::CheckpointOutcome::Unavailable,
+                feedback,
+                ..
+            } if feedback.contains("review was not performed") && feedback.contains("cancelled")
+        )
+    });
+    let checkpoint = checkpoint.unwrap_or_else(|| {
+        panic!("cancelled unreviewed result has durable checkpoint status; observed={observed:#?}")
+    });
+    let terminal = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                event.event,
+                SessionEvent::RunFinished {
+                    run_id: finished,
+                    outcome: RunOutcome::Cancelled,
+                    ..
+                } if finished == run_id
+            )
+        })
+        .expect("run is cancelled");
+    assert!(finished < checkpoint && checkpoint < terminal);
+}
+
+#[tokio::test]
 async fn empty_checkpoint_failure_retains_the_billed_turn_accounting() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "tool result\n").unwrap();

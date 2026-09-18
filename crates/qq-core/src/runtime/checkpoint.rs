@@ -4,13 +4,13 @@ use qq_protocol::ToolCallId;
 
 pub const MAX_CHECKPOINT_TEXT_BYTES: usize = 24 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CheckpointPhase {
     ToolResult,
     FinalCandidate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CheckpointRequest {
     pub correlation: String,
     pub phase: CheckpointPhase,
@@ -79,7 +79,12 @@ pub(crate) fn checkpoint_text_fits(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_CHECKPOINT_TEXT_BYTES, checkpoint_text_fits};
+    use std::collections::HashMap;
+
+    use super::{
+        CheckpointOutcome, CheckpointPhase, CheckpointRequest, CheckpointVerdict,
+        MAX_CHECKPOINT_TEXT_BYTES, checkpoint_text_fits,
+    };
 
     #[test]
     fn checkpoint_bound_accepts_boundary_and_rejects_first_byte_over() {
@@ -94,5 +99,31 @@ mod tests {
         let evidence = "x".repeat(MAX_CHECKPOINT_TEXT_BYTES);
         let payload = format!("final candidate:\nok\n\nretained tool evidence:\n{evidence}");
         assert!(!checkpoint_text_fits(&payload));
+    }
+
+    #[test]
+    fn checkpoint_cache_identity_includes_error_semantics() {
+        let request = CheckpointRequest {
+            correlation: "tool:call-1".to_owned(),
+            phase: CheckpointPhase::ToolResult,
+            tool_call_id: None,
+            tool: Some("read_file".to_owned()),
+            task: "read it".to_owned(),
+            evidence: "same bytes".to_owned(),
+            is_error: false,
+        };
+        let mut cache = HashMap::new();
+        cache.insert(
+            request.clone(),
+            CheckpointVerdict {
+                outcome: CheckpointOutcome::Supported,
+                confidence: Some(1.0),
+                feedback: "supported".to_owned(),
+            },
+        );
+
+        let mut error_request = request;
+        error_request.is_error = true;
+        assert!(!cache.contains_key(&error_request));
     }
 }

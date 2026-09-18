@@ -74,6 +74,9 @@ impl LoadedRuntime {
         for registered in runtime.context_sources.iter() {
             profile = profile.with_context_source(Arc::clone(&registered.source));
         }
+        if let Some(reviewer) = &runtime.checkpoint {
+            profile = profile.with_checkpoint_reviewer(Arc::clone(reviewer));
+        }
         profile = profile.with_context_cache(Arc::clone(&runtime.context_cache));
         Ok(Self {
             plan: CompiledAgentPlan::compile_blocking(profile)?,
