@@ -43,14 +43,14 @@ Related documents:
    `snake_case` names. Unknown fields are rejected on request bodies that use
    `deny_unknown_fields`.
 
-Plan descriptor version 8 records optional `reasoning_effort` in its canonical
-identity. It does not alter the wire envelope version or require a database
+Plan descriptor version 9 records optional `reasoning_effort`, routing policy
+and candidate-configuration fingerprint in its canonical identity. It does not alter the wire envelope version or require a database
 migration; historical descriptor JSON remains historical evidence.
 
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 24
+PROTOCOL_VERSION = 25
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -1956,3 +1956,15 @@ Protocol 24 adds `checkpoint_started` and optional typed `spend` on
 unknown. A settled receipt and updated run totals commit together. Cancellation
 settles a pending tool or final assessment as unavailable with unknown spend.
 Historical verdicts without `spend` decode as absent, never as a priced receipt.
+
+Protocol 25 adds `routing_started` and `routing_completed`. Routing occurs before
+`run_started`; a decision carries the selected or fallback model, effort, reason
+and typed usage/cost. Missing spend remains unknown. A cancelled pending request
+may have only `routing_started` followed by `run_finished`; this is not a free
+request or a successful decision. Older versioned event fixtures remain readable.
+
+Model selections and session summaries carry optional `model_is_fallback`
+(default false). True identifies a configured fallback eligible for independently
+opted-in routing. False preserves explicit and legacy choices as pins. Schema 32
+persists the flag; model changes and reconnect snapshots retain it. A TUI model
+pick clears it. This field does not enable Jev or grant access to any model.

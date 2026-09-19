@@ -55,6 +55,7 @@ fn correlation(pairs: &[(&str, &str)]) -> Correlation {
 
 fn summary() -> SessionSummary {
     SessionSummary {
+        model_is_fallback: false,
         id: SessionId::from_bytes([3; 16]),
         workspace_id: WorkspaceId::from_bytes([2; 16]),
         parent_id: None,
@@ -205,7 +206,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 24);
+    assert_eq!(PROTOCOL_VERSION, 25);
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
@@ -221,6 +222,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 workspace_id: WorkspaceId::from_bytes([2; 16]),
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("openai/gpt-5.6".to_owned()),
                     max_output_tokens: Some(4096),
                     organization: None,
@@ -477,6 +479,32 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 session: Box::new(summary()),
                 run_id,
                 plan: Some(Box::new(plan_identity())),
+            },
+        ),
+    );
+    check(
+        "event_routing_started",
+        &envelope(25, SessionEvent::RoutingStarted { run_id }),
+    );
+    check(
+        "event_routing_completed",
+        &envelope(
+            26,
+            SessionEvent::RoutingCompleted {
+                run_id,
+                decision: Box::new(qq_protocol::RoutingDecision {
+                    model: ModelSelection {
+                        model_is_fallback: false,
+                        model: Some("openai/gpt-5".to_owned()),
+                        max_output_tokens: Some(1024),
+                        organization: None,
+                    },
+                    reasoning_effort: Some(qq_reasoning::ReasoningEffort::Low),
+                    outcome: qq_protocol::RoutingOutcome::Selected,
+                    reason: "selected from authorized candidates".to_owned(),
+                    usage: Some(TokenUsage::default()),
+                    estimated_cost_usd_nanos: Some(0),
+                }),
             },
         ),
     );

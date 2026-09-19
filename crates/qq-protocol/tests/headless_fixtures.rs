@@ -40,6 +40,7 @@ fn trial() -> HeadlessTrial {
         protocol_version: PROTOCOL_VERSION,
         workspace_identity: ContentHash::from_bytes([0x44; 32]),
         model: ModelSelection {
+            model_is_fallback: false,
             model: Some("anthropic/claude-sonnet-4-5".to_owned()),
             max_output_tokens: Some(32_000),
             organization: None,
@@ -63,6 +64,7 @@ fn trial() -> HeadlessTrial {
 
 fn summary(status: SessionStatus, active: bool) -> SessionSummary {
     SessionSummary {
+        model_is_fallback: false,
         id: SESSION,
         workspace_id: WORKSPACE,
         parent_id: None,
@@ -172,6 +174,7 @@ fn run_events(outcome: RunOutcome, final_output: Option<Box<FinalOutput>>) -> Ve
                 run_id: RUN,
                 turn_ordinal: 1,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("anthropic/claude-sonnet-4-5".to_owned()),
                     max_output_tokens: Some(32_000),
                     organization: None,
@@ -322,7 +325,7 @@ fn assert_well_formed<'a>(
 
 #[test]
 fn current_version_streams_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 24);
+    assert_eq!(PROTOCOL_VERSION, 25);
 
     let stream = |trial: HeadlessTrial, events: Vec<HeadlessRecord>, outcome: HeadlessOutcome| {
         let mut stream = Vec::with_capacity(events.len() + 2);

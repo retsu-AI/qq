@@ -17,9 +17,31 @@ pub type SpawnModelValidationFuture =
 #[derive(Clone)]
 pub struct LoadedRuntime {
     pub plan: Arc<CompiledAgentPlan>,
+    pub router: Option<Arc<dyn TaskRouter>>,
+    pub(crate) routing_spend: Option<qq_protocol::CheckpointSpend>,
+}
+
+pub type TaskRoutingFuture = Pin<Box<dyn Future<Output = qq_protocol::RoutingDecision> + Send>>;
+
+/// Optional task selection performed once before ordinary run preparation.
+/// Implementations return a declared fallback on inference failure.
+pub trait TaskRouter: Send + Sync + 'static {
+    fn identity(&self) -> &'static str;
+    fn configuration_identity(&self) -> &str;
+    fn route(&self, task: String) -> TaskRoutingFuture;
+    fn max_cost_usd_nanos(&self) -> Option<u64>;
 }
 
 impl LoadedRuntime {
+    #[must_use]
+    pub fn new(plan: Arc<CompiledAgentPlan>) -> Self {
+        Self {
+            router: plan.runtime.task_router.clone(),
+            plan,
+            routing_spend: None,
+        }
+    }
+
     /// Compiles a plan from an already constructed runtime and its resolved
     /// model, for loaders that build runtimes directly (embedders, tests,
     /// benchmarks). The runtime's provider, MCP registry, spawn routes, and
@@ -78,13 +100,14 @@ impl LoadedRuntime {
         if let Some(effort) = runtime.reasoning_effort {
             profile = profile.with_reasoning_effort(effort);
         }
+        if let Some(router) = &runtime.task_router {
+            profile = profile.with_task_router(Arc::clone(router));
+        }
         if let Some(reviewer) = &runtime.checkpoint {
             profile = profile.with_checkpoint_reviewer(Arc::clone(reviewer));
         }
         profile = profile.with_context_cache(Arc::clone(&runtime.context_cache));
-        Ok(Self {
-            plan: CompiledAgentPlan::compile_blocking(profile)?,
-        })
+        Ok(Self::new(CompiledAgentPlan::compile_blocking(profile)?))
     }
 
     #[must_use]
@@ -241,9 +264,33 @@ impl CheckpointSelection {
     }
 }
 
+/// Owned children retain the parent's routing policy, including disabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoutingSelection {
+    Disabled,
+    RouterIdentity(String),
+}
+
+impl RoutingSelection {
+    pub(crate) fn from_identity(identity: Option<&str>) -> Self {
+        match identity {
+            None => Self::Disabled,
+            Some(identity) => Self::RouterIdentity(identity.to_owned()),
+        }
+    }
+    pub(crate) fn matches(&self, identity: Option<&str>) -> bool {
+        match self {
+            Self::Disabled => identity.is_none(),
+            Self::RouterIdentity(expected) => identity == Some(expected.as_str()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeLoadRequest {
+    pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
     pub checkpoint: Option<CheckpointSelection>,
+    pub routing: Option<RoutingSelection>,
     pub workspace: String,
     pub model: ModelSelection,
     /// Configured agent profile the session selected. Loaders that know no

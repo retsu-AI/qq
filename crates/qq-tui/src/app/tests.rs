@@ -751,6 +751,7 @@ fn rollback_sends_for_an_idle_session_and_reports_the_receipt() {
 #[test]
 fn new_slash_command_creates_a_root_session_with_the_selected_model() {
     let model = ModelSelection {
+        model_is_fallback: false,
         model: Some("openai/gpt-test".to_owned()),
         max_output_tokens: Some(4_096),
         organization: None,
@@ -835,6 +836,7 @@ fn session_picker_searches_titles_and_focuses_the_match() {
     initial.sessions[0].title = "Deploy API".to_owned();
     initial.focused.as_mut().unwrap().summary.title = "Deploy API".to_owned();
     initial.sessions.push(SessionSummary {
+        model_is_fallback: false,
         title: "Fix Login Redirect".to_owned(),
         updated_at_ms: 2,
         ..fixtures::session_summary(target)
@@ -975,6 +977,7 @@ fn session_deleted_event_drops_state_and_refocuses_a_neighbor() {
     let deleted = initial.sessions[0].id;
     let neighbor = id(9, SessionId::from_bytes);
     initial.sessions.push(SessionSummary {
+        model_is_fallback: false,
         title: "Neighbor".to_owned(),
         updated_at_ms: 0,
         ..fixtures::session_summary(neighbor)
@@ -1081,6 +1084,7 @@ fn session_updated_event_repoints_the_session_model() {
 
 fn context_meter_app() -> App {
     let selection = ModelSelection {
+        model_is_fallback: false,
         model: Some("openai/gpt-test".to_owned()),
         max_output_tokens: Some(4_096),
         organization: None,
@@ -1378,6 +1382,7 @@ fn discovered_models_refresh_existing_session_metadata() {
             name: Some("GPT Test".to_owned()),
             context_window: Some(128_000),
             selection: ModelSelection {
+                model_is_fallback: false,
                 model: Some("openai/gpt-test".to_owned()),
                 max_output_tokens: Some(4_096),
                 organization: None,
@@ -1394,6 +1399,7 @@ fn discovered_models_refresh_existing_session_metadata() {
 #[test]
 fn model_refresh_preserves_the_open_picker_selection_by_identity() {
     let selection = ModelSelection {
+        model_is_fallback: false,
         model: Some("zeta/model-z".to_owned()),
         max_output_tokens: Some(4_096),
         organization: None,
@@ -1422,6 +1428,7 @@ fn model_refresh_preserves_the_open_picker_selection_by_identity() {
                 name: Some("Alpha".to_owned()),
                 context_window: Some(64_000),
                 selection: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("alpha/model-a".to_owned()),
                     max_output_tokens: Some(4_096),
                     organization: None,
@@ -1470,6 +1477,7 @@ fn first_focused_snapshot_can_arrive_after_the_workspace_snapshot() {
 #[test]
 fn model_picker_applies_to_the_focused_session_and_ctrl_n_creates() {
     let selection = ModelSelection {
+        model_is_fallback: false,
         model: Some("anthropic/claude-sonnet-5".to_owned()),
         max_output_tokens: Some(8_192),
         organization: None,
@@ -1538,6 +1546,7 @@ fn model_picker_applies_to_the_focused_session_and_ctrl_n_creates() {
 #[test]
 fn model_picker_enter_without_a_focused_session_creates_one() {
     let selection = ModelSelection {
+        model_is_fallback: false,
         model: Some("anthropic/claude-sonnet-5".to_owned()),
         max_output_tokens: Some(8_192),
         organization: None,
@@ -1584,11 +1593,13 @@ fn model_picker_enter_without_a_focused_session_creates_one() {
 #[test]
 fn model_picker_selection_becomes_the_default_for_new_sessions() {
     let initial = ModelSelection {
+        model_is_fallback: false,
         model: Some("openai/gpt-test".to_owned()),
         max_output_tokens: Some(4_096),
         organization: None,
     };
     let switched = ModelSelection {
+        model_is_fallback: false,
         model: Some("anthropic/claude-sonnet-5".to_owned()),
         max_output_tokens: Some(8_192),
         organization: None,
@@ -1879,6 +1890,7 @@ fn stale_snapshot_cannot_change_the_selected_session() {
     let old_focus = initial.focused.as_ref().unwrap().summary.id;
     let new_focus = id(9, SessionId::from_bytes);
     initial.sessions.push(SessionSummary {
+        model_is_fallback: false,
         workspace_id: initial.workspace.id,
         title: "New focus".to_owned(),
         updated_at_ms: 2,
@@ -2164,6 +2176,7 @@ fn transcript_scroll_controls_are_ignored_by_overlays() {
 
 fn summary_named(byte: u8, title: &str) -> SessionSummary {
     SessionSummary {
+        model_is_fallback: false,
         title: title.to_owned(),
         updated_at_ms: u64::from(byte),
         ..fixtures::session_summary(id(byte, SessionId::from_bytes))
@@ -2936,6 +2949,7 @@ fn attention_is_requested_only_while_the_terminal_is_unfocused() {
     let (mut app, session_id, run_id, mut event) = running_app();
     let finish = |run_id| SessionEvent::RunFinished {
         session: Box::new(SessionSummary {
+            model_is_fallback: false,
             status: SessionStatus::Idle,
             active_run_id: None,
             ..summary_named(2, "Deploy")
@@ -3017,6 +3031,7 @@ fn a_rejected_model_change_or_deletion_is_attributed_to_its_session_not_the_focu
     let set = request(app.set_session_model(
         other,
         ModelSelection {
+            model_is_fallback: false,
             model: Some("openai/gpt-x".to_owned()),
             ..ModelSelection::default()
         },
@@ -3430,6 +3445,7 @@ fn profile_picker_sets_the_focused_idle_session_profile_and_refuses_running_ones
 #[test]
 fn profile_chosen_without_a_focused_session_applies_to_the_next_create() {
     let selection = ModelSelection {
+        model_is_fallback: false,
         model: Some("openai/gpt-test".to_owned()),
         max_output_tokens: Some(4_096),
         organization: None,
@@ -3574,6 +3590,7 @@ fn approval_mode_chosen_without_a_focused_session_applies_to_the_next_create() {
     let mut app = App::new(TuiOptions {
         settings: Settings::default(),
         model: ModelSelection {
+            model_is_fallback: false,
             model: Some("openai/gpt-test".to_owned()),
             max_output_tokens: Some(4_096),
             organization: None,

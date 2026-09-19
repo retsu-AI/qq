@@ -285,7 +285,7 @@ pub(super) const ACCOUNTING_ROWS_SQL: &str = "WITH RECURSIVE subtree(root, id, d
      )
      SELECT subtree.root, r.session_id, r.status, r.usage_json, r.estimated_cost_usd_nanos,
             EXISTS(SELECT 1 FROM model_turns turn WHERE turn.run_id = r.id),
-            r.started_at_ms
+            r.started_at_ms, r.routing_json IS NOT NULL
      FROM runs r
      JOIN subtree ON subtree.id = r.session_id
      ORDER BY r.rowid";
@@ -333,13 +333,15 @@ pub(super) fn load_accounting_folds(
                 row.get::<_, Option<u64>>(4)?,
                 row.get::<_, bool>(5)?,
                 row.get::<_, Option<u64>>(6)?,
+                row.get::<_, bool>(7)?,
             ))
         },
     )?;
 
     let mut folds: HashMap<String, SessionAccountingFold> = HashMap::new();
     for row in rows {
-        let (session_id, owner_id, status, encoded_usage, cost, saw_turn, started_at_ms) = row?;
+        let (session_id, owner_id, status, encoded_usage, cost, saw_turn, started_at_ms, routed) =
+            row?;
         let fold = folds.entry(session_id.clone()).or_default();
         let SessionAccountingFold { direct, inclusive } = fold;
         let Some(encoded_usage) = encoded_usage else {
@@ -351,7 +353,8 @@ pub(super) fn load_accounting_folds(
             // request and preserves known prior accounting. Other terminal
             // rows without usage stay unknown for legacy/provider-failure
             // compatibility; a committed turn is always an explicit unknown.
-            if saw_turn || (terminal && status != "cancelled" && started_at_ms.is_some()) {
+            if routed || saw_turn || (terminal && status != "cancelled" && started_at_ms.is_some())
+            {
                 inclusive.mark_unknown();
                 if owner_id == session_id {
                     direct.mark_unknown();
@@ -399,7 +402,7 @@ pub(super) fn load_session_summary_with_accounting(
                       ORDER BY finished_at_ms DESC, rowid DESC LIMIT 1),
                      s.owner_run_id, s.spawned_by_tool_call_id, s.profile, s.correlation_json,
                      s.approval_mode, s.depth, s.purpose,
-                     (SELECT activity FROM runs WHERE id = s.active_run_id)
+                     (SELECT activity FROM runs WHERE id = s.active_run_id), s.model_is_fallback
               FROM sessions s WHERE s.id = ?1",
             [session_id.to_string()],
             |row| {
@@ -422,6 +425,7 @@ pub(super) fn load_session_summary_with_accounting(
                     row.get::<_, u16>(15)?,
                     row.get::<_, String>(16)?,
                     row.get::<_, Option<String>>(17)?,
+                    row.get::<_, bool>(18)?,
                 ))
             },
         )
@@ -447,6 +451,7 @@ pub(super) fn load_session_summary_with_accounting(
                 depth,
                 purpose,
                 activity,
+                model_is_fallback,
             )| {
                 let direct_cost = accounting.direct.estimated_cost_usd_nanos;
                 let active_run_id: Option<RunId> = active.as_deref().map(parse_id).transpose()?;
@@ -463,6 +468,7 @@ pub(super) fn load_session_summary_with_accounting(
                     None => None,
                 };
                 Ok(SessionSummary {
+                    model_is_fallback,
                     id: session_id,
                     workspace_id: parse_id(&workspace)?,
                     parent_id: parent.as_deref().map(parse_id).transpose()?,

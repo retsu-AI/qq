@@ -555,3 +555,115 @@ pub(super) fn append_reasoning(
     transaction.commit()?;
     Ok(event)
 }
+
+// A non-null value proves routing may have spent money before RunStarted.
+// Pending is replaced once by the receipt, never reset for another dispatch.
+const ROUTING_PENDING: &str = "{\"state\":\"pending\"}";
+
+pub(super) fn record_routing_started(
+    connection: &mut Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    let changed = transaction.execute(
+        "UPDATE runs SET routing_json = ?2, usage_json = NULL, estimated_cost_usd_nanos = NULL
+         WHERE id = ?1 AND status = 'queued' AND outcome_json IS NULL
+           AND cancel_requested = 0 AND routing_json IS NULL
+           AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = runs.session_id
+                       AND s.preparing_run_id = runs.id)",
+        params![identity.run_id.to_string(), ROUTING_PENDING],
+    )?;
+    if changed != 1 {
+        return Ok(None);
+    }
+    let event = append_event(
+        &transaction,
+        EventContext::for_run(store_id, identity, now_ms()),
+        SessionEvent::RoutingStarted {
+            run_id: identity.run_id,
+        },
+    )?;
+    transaction.commit()?;
+    Ok(Some(event))
+}
+
+/// Retain reported spend before loading the selected provider. The decision
+/// stays pending until the replacement plan has been validated.
+pub(super) fn record_routing_spend(
+    connection: &mut Connection,
+    identity: RunIdentity,
+    spend: qq_protocol::CheckpointSpend,
+) -> Result<bool, SessionRuntimeError> {
+    let usage = spend
+        .usage
+        .map(|usage| serde_json::to_string(&usage))
+        .transpose()?;
+    let cost = spend
+        .estimated_cost_usd_nanos
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| SessionRuntimeError::AccountingUnavailable)?;
+    let transaction = store::begin_unit(connection)?;
+    let changed = transaction.execute(
+        "UPDATE runs SET usage_json = ?2, estimated_cost_usd_nanos = ?3
+         WHERE id = ?1 AND status = 'queued' AND outcome_json IS NULL
+           AND cancel_requested = 0 AND routing_json = ?4
+           AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = runs.session_id
+                       AND s.preparing_run_id = runs.id)",
+        params![identity.run_id.to_string(), usage, cost, ROUTING_PENDING],
+    )?;
+    transaction.commit()?;
+    Ok(changed == 1)
+}
+
+pub(super) fn record_routing_completed(
+    connection: &mut Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+    decision: qq_protocol::RoutingDecision,
+) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+    let encoded = serde_json::to_string(&decision)?;
+    // The decision is a bounded route/reason receipt, never the task payload.
+    if encoded.len() > 4096 {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    let cost = match decision.estimated_cost_usd_nanos {
+        Some(cost) => {
+            Some(i64::try_from(cost).map_err(|_| SessionRuntimeError::AccountingUnavailable)?)
+        }
+        None => None,
+    };
+    let usage = decision
+        .usage
+        .map(|usage| serde_json::to_string(&usage))
+        .transpose()?;
+    let transaction = store::begin_unit(connection)?;
+    let changed = transaction.execute(
+        "UPDATE runs SET routing_json = ?2, usage_json = ?3, estimated_cost_usd_nanos = ?4
+         WHERE id = ?1 AND status = 'queued' AND outcome_json IS NULL
+           AND cancel_requested = 0 AND routing_json = ?5
+           AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = runs.session_id
+                       AND s.preparing_run_id = runs.id)",
+        params![
+            identity.run_id.to_string(),
+            encoded,
+            usage,
+            cost,
+            ROUTING_PENDING
+        ],
+    )?;
+    if changed != 1 {
+        return Ok(None);
+    }
+    let event = append_event(
+        &transaction,
+        EventContext::for_run(store_id, identity, now_ms()),
+        SessionEvent::RoutingCompleted {
+            run_id: identity.run_id,
+            decision: Box::new(decision),
+        },
+    )?;
+    transaction.commit()?;
+    Ok(Some(event))
+}

@@ -586,6 +586,7 @@ async fn compaction_sends_and_persists_the_effective_output_cap() {
             SessionEvent::ModelTurnCompleted {
                 run_id,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     max_output_tokens: Some(cap),
                     ..
                 },

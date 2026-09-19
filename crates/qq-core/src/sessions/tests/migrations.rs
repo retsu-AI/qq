@@ -144,7 +144,7 @@ fn version_one_migration_is_atomic_and_marks_historical_cost_unknown() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     assert!(
         !connection
@@ -271,7 +271,7 @@ fn version_five_migration_defaults_existing_messages_to_turn_zero() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     assert!(has_column(&connection, "tool_calls", "display_json").unwrap());
     let (turn_ordinal, output, state) = connection
@@ -339,7 +339,7 @@ fn version_six_migration_adds_the_display_column_and_keeps_existing_calls_bare()
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     let (display_json, result) = connection
         .query_row(
@@ -398,7 +398,7 @@ fn version_seven_migration_adds_compaction_storage_and_run_kinds() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     assert!(has_column(&connection, "runs", "kind").unwrap());
     assert_eq!(
@@ -463,7 +463,7 @@ fn version_ten_migration_adds_context_and_child_ownership_without_guessing() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     assert!(has_column(&connection, "sessions", "context_tokens").unwrap());
     assert!(has_column(&connection, "sessions", "owner_run_id").unwrap());
@@ -551,7 +551,7 @@ fn version_eleven_migration_adds_child_ownership_and_preserves_context() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     assert!(has_column(&connection, "sessions", "owner_run_id").unwrap());
     assert_eq!(
@@ -607,7 +607,7 @@ fn version_twelve_migration_adds_prompt_identity_without_guessing() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     assert!(has_column(&connection, "runs", "prompt_identity_json").unwrap());
     assert_eq!(
@@ -651,7 +651,7 @@ fn version_thirteen_migration_adds_per_turn_audit_columns() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     for column in [
         "model_json",
@@ -718,7 +718,7 @@ fn version_fourteen_migration_adds_chunks_and_incremental_capacity_columns() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     assert!(has_column(&connection, "message_chunks", "chunk_ordinal").unwrap());
     assert!(has_column(&connection, "message_chunks", "text").unwrap());
@@ -792,7 +792,7 @@ fn version_fourteen_store_with_implicit_primary_key_outbox_migrates() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     let command_id_not_null: bool = connection
         .query_row(
@@ -831,7 +831,7 @@ fn partially_applied_version_fourteen_linear_migration_completes_atomically() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     assert!(has_column(&connection, "message_chunks", "text").unwrap());
     assert!(has_column(&connection, "runs", "context_base_bytes").unwrap());
@@ -901,7 +901,7 @@ fn version_fifteen_migration_keeps_historical_resolved_model_unknown() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     assert!(has_column(&connection, "runs", "resolved_model_json").unwrap());
     assert_eq!(
@@ -993,7 +993,7 @@ fn version_seventeen_migration_adds_preparation_and_exact_compaction_ownership()
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     let preparing_shape: (String, bool, Option<String>) = connection
         .query_row(
@@ -1116,7 +1116,7 @@ fn version_eighteen_migration_adds_unknown_occupancy_basis_without_losing_the_me
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     let occupancy_shape: (String, bool, Option<String>) = connection
         .query_row(
@@ -1222,7 +1222,7 @@ fn partially_applied_version_eighteen_migration_completes_atomically() {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "30"
+            "32"
         );
     }
 }
@@ -1343,7 +1343,7 @@ fn version_twenty_migration_adds_spawn_call_ownership_without_guessing() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     // A historical child keeps its parent run but has no recorded call:
     // the summary says so explicitly instead of inventing one.
@@ -1425,7 +1425,7 @@ fn version_twenty_five_migration_adds_activity_and_backfills_the_command_counter
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     assert_eq!(
         connection
@@ -1551,7 +1551,7 @@ fn version_twenty_six_migration_adds_the_tool_call_effect_and_keeps_history_unkn
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     // A historical call has no recorded effect: assembly falls back to
     // the name rather than guessing a class for it.
@@ -1593,7 +1593,7 @@ fn version_twenty_seven_migration_adds_the_output_contract_columns_and_keeps_his
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     let (contract, final_output): (Option<String>, Option<String>) = connection
         .query_row(
@@ -1628,7 +1628,7 @@ fn version_twenty_eight_migration_adds_the_spill_table_empty() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     let rows: u32 = connection
         .query_row("SELECT COUNT(*) FROM tool_spills", [], |row| row.get(0))
@@ -1659,7 +1659,7 @@ fn version_twenty_nine_migration_adds_the_attachment_tables_empty() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     for table in ["attachment_blobs", "message_attachments"] {
         let rows: u32 = connection
@@ -1696,7 +1696,7 @@ fn version_thirty_migration_adds_the_messages_run_index() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     let plan: Vec<String> = connection
         .prepare(
@@ -1956,7 +1956,7 @@ fn version_twenty_two_migration_adds_truncation_state_as_never_truncated() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     let message = load_message(&connection, message_id).unwrap();
     assert!(!message.truncated);
@@ -2044,7 +2044,7 @@ fn version_nineteen_migration_keeps_historical_runs_unlimited() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
     let shape: (String, bool, Option<String>) = connection
         .query_row(
@@ -2126,7 +2126,7 @@ fn partially_applied_version_seventeen_migration_completes_atomically() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "30"
+        "32"
     );
 }
 
@@ -2630,4 +2630,131 @@ fn version_fourteen_store_missing_audit_columns_is_rejected() {
         open_database(&path).unwrap_err(),
         SessionRuntimeError::CONSTRAINT
     );
+}
+
+#[test]
+fn version_thirty_one_migration_keeps_old_runs_unrouted() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, _) = open_database(&path).unwrap();
+    let workspace_id = WorkspaceId::generate().unwrap();
+    let session_id = SessionId::generate().unwrap();
+    connection
+        .execute(
+            "INSERT INTO workspaces(id, path) VALUES (?1, '/routing-migration')",
+            [workspace_id.to_string()],
+        )
+        .unwrap();
+    insert_accounting_session(&connection, workspace_id, session_id, None);
+    let run = insert_accounting_run(&connection, session_id, "queued", None, None);
+    connection
+        .execute("ALTER TABLE runs DROP COLUMN routing_json", [])
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE metadata SET value = '30' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let (mut connection, store_id) = open_database(&path).unwrap();
+    let routed: Option<String> = connection
+        .query_row(
+            "SELECT routing_json FROM runs WHERE id = ?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(routed.is_none());
+    recover_interrupted_runs(&mut connection, store_id).unwrap();
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM runs WHERE id = ?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        status, "queued",
+        "ordinary unstarted runs retain existing recovery behavior"
+    );
+}
+
+#[test]
+fn malformed_version_thirty_one_routing_column_is_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, _) = open_database(&path).unwrap();
+    connection
+        .execute("ALTER TABLE runs DROP COLUMN routing_json", [])
+        .unwrap();
+    connection
+        .execute("ALTER TABLE runs ADD COLUMN routing_json INTEGER", [])
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        open_database(&path),
+        Err(SessionRuntimeError::CONSTRAINT)
+    ));
+}
+
+#[test]
+fn version_thirty_two_migration_preserves_legacy_model_pins() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, _) = open_database(&path).unwrap();
+    let workspace_id = WorkspaceId::generate().unwrap();
+    let session_id = SessionId::generate().unwrap();
+    connection
+        .execute(
+            "INSERT INTO workspaces(id, path) VALUES (?1, '/model-migration')",
+            [workspace_id.to_string()],
+        )
+        .unwrap();
+    insert_accounting_session(&connection, workspace_id, session_id, None);
+    connection
+        .execute("ALTER TABLE sessions DROP COLUMN model_is_fallback", [])
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE metadata SET value = '31' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    for _ in 0..2 {
+        let (connection, _) = open_database(&path).unwrap();
+        let fallback: bool = connection
+            .query_row(
+                "SELECT model_is_fallback FROM sessions WHERE id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !fallback,
+            "migration must not opt legacy model choices into routing"
+        );
+    }
+}
+
+#[test]
+fn malformed_model_fallback_column_is_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, _) = open_database(&path).unwrap();
+    connection
+        .execute("ALTER TABLE sessions DROP COLUMN model_is_fallback", [])
+        .unwrap();
+    connection
+        .execute(
+            "ALTER TABLE sessions ADD COLUMN model_is_fallback INTEGER NOT NULL DEFAULT 1",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        open_database(&path),
+        Err(SessionRuntimeError::CONSTRAINT)
+    ));
 }

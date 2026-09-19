@@ -415,3 +415,9 @@ Current gaps:
 A provider feature is complete only when its matrix rows exist, offline tests
 pass, the required live check passes, and failures remain diagnosable without
 exposing credentials or private model traffic.
+
+Automatic Jev effort selection additionally requires explicit model metadata
+`reasoning_efforts: [low, medium, high]` (use only values the remote model accepts).
+An empty or absent declaration means unknown support and preserves omission.
+This declaration does not enable routing and does not claim remote validation;
+it constrains the bounded candidate list used after independent trusted opt-in.

@@ -417,7 +417,7 @@ values, secret hashes, live handles, and the credential epoch never enter the
 descriptor or its digest.
 
 Explicit `reasoning_effort` is resolved from trusted configuration and profiles,
-with runtime overrides first. Descriptor version 8 records the choice and its
+with runtime overrides first. Descriptor version 9 records the choice and its
 cache key distinguishes overrides. Every model turn uses the compiled choice;
 omission uses provider defaults, while explicit `none` requests disabled
 reasoning. This does not enable Jev. HTTP OpenAI Responses/Chat adapters carry
@@ -1366,3 +1366,53 @@ following yet:
 The HTTP/SSE server and client crates are designed to permit future surfaces,
 but future client code must not add placeholder crates or speculative
 extension points before it exists.
+
+### Optional task routing during session preparation
+
+A compiled runtime may contain a `TaskRouter`. The session
+executor calls it once before ordinary preparation, outside the compaction loop.
+Absent routers allocate no task projection and dispatch no inference. Compaction
+and non-task internal runs skip routing. The production Jev adapter is constructed only when trusted `jev_routing` is enabled.
+
+The routing projection contains at most 16 KiB of the latest task text, masked
+before dispatch; oversized or textless tasks retain the configured model. A
+five-second inference deadline falls back visibly. A selected route goes through
+the ordinary loader again, with fixed workspace, profile and reviewer identity;
+an unavailable or incompatible selection retains the original plan. Explicit
+effort on that original plan remains authoritative.
+
+Schema 31 adds nullable `runs.routing_json`. A committed pending marker precedes
+dispatch and clears usage/cost to unknown; a bounded completed receipt restores
+reported spend atomically with its event. Reported spend is also persisted before
+loading a selected provider, so cancellation during that load retains it. All
+writes require the live queued
+reservation and reject cancellation, duplicate dispatch and terminal mutations.
+Cancelled/failed preparation retains the receipt. Recovery interrupts billed
+reservations rather than requeueing another paid decision. Session and child
+accounting distinguish these requests from never-started zero-spend runs.
+
+Routing spend seeds the runtime budget and durable accumulator once, without
+pretending a main-model turn occurred or resetting context occupancy. The budget
+is checked again before main-model work. Internal compaction does not receive
+that seed again. Client notices expose pending, selected and fallback decisions.
+
+Session model choices distinguish configured fallbacks from explicit pins
+(ADR-0033). Schema 32 stores `model_is_fallback`; older sessions remain pinned.
+The composition root reloads the configured route for fallback selections and
+applies explicit selections as overrides. Optional routing cannot replace a pin.
+CLI/environment overrides, TUI picks and explicit child choices establish pins;
+this provenance does not itself enable routing.
+
+The concrete adapter considers at most eight authenticated, authorized configured
+models and 32 combined model/effort choices, without live model discovery.
+Automatic effort values come only from model `reasoning_efforts` declarations on
+supported adapters; unknown capabilities retain omission. Pinned effort limits
+alternative models to those declaring support for that value. Descriptor 9
+records both the routing policy and the candidate/constraint fingerprint, so
+cache refresh cannot discard changed candidate metadata or profile pin intent.
+One-choice plans skip inference. Invalid or uncertain answers retain the fallback;
+confidence and winning probability must each reach the initial 0.7 threshold.
+Owned children inherit enabled/disabled routing from the parent's persisted
+plan; user followups resolve current configuration. Direct `ask` uses the same
+router and loader before its existing core run and prints pending/outcome/spend
+to stderr; its execution remains ephemeral. No live speed benefit is asserted.

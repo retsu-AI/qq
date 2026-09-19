@@ -489,6 +489,7 @@ async fn streams_committed_run_events_and_snapshots_the_result() {
         SessionEvent::ModelTurnCompleted {
             turn_ordinal: 1,
             model: ModelSelection {
+                model_is_fallback: false,
                 model: Some(model),
                 max_output_tokens: Some(256),
                 organization: None,
@@ -1433,6 +1434,7 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
                     workspace_id,
                     parent_id: None,
                     model: ModelSelection {
+                        model_is_fallback: false,
                         model: Some("test/model".to_owned()),
                         max_output_tokens: Some(256),
                         organization: None,
@@ -1678,6 +1680,7 @@ async fn cancelled_unclaimed_prompt_remains_explicit_in_follow_up_context() {
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -1950,6 +1953,7 @@ async fn interrupted_uncommitted_assistant_text_stays_out_of_model_context() {
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -2081,6 +2085,7 @@ async fn historical_flat_assistant_output_precedes_the_terminal_notice() {
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -2223,6 +2228,7 @@ async fn manual_and_auto_compaction_share_the_terminal_run_projection() {
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,

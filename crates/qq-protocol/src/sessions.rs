@@ -70,6 +70,10 @@ impl std::error::Error for CursorError {}
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSelection {
+    /// The route is a configured fallback, not a user pin. Routing still
+    /// requires independent trusted opt-in. Legacy selections remain pinned.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_is_fallback: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1068,6 +1072,10 @@ const fn default_spawn_depth() -> u16 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSummary {
+    /// The route is a configured fallback, not a user pin. Routing still
+    /// requires independent trusted opt-in. Legacy selections remain pinned.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_is_fallback: bool,
     pub id: SessionId,
     pub workspace_id: WorkspaceId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1749,6 +1757,13 @@ pub enum SessionEvent {
     /// root final candidate. Persisted before publication and correlated to
     /// the reviewed boundary. `supported` permits progress; every other
     /// outcome is fail-closed.
+    RoutingStarted {
+        run_id: RunId,
+    },
+    RoutingCompleted {
+        run_id: RunId,
+        decision: Box<RoutingDecision>,
+    },
     CheckpointStarted {
         run_id: RunId,
         correlation: String,
@@ -1825,6 +1840,25 @@ pub enum SessionEvent {
     },
 }
 
+/// One optional routing request, including the declared fallback on failure.
+/// Missing usage or cost means unknown spend, never a free request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutingDecision {
+    pub model: ModelSelection,
+    pub reasoning_effort: Option<qq_reasoning::ReasoningEffort>,
+    pub outcome: RoutingOutcome,
+    pub reason: String,
+    pub usage: Option<TokenUsage>,
+    pub estimated_cost_usd_nanos: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingOutcome {
+    Selected,
+    Fallback,
+}
+
 /// One reviewer request's accounting. Missing usage or price means unknown,
 /// including a request interrupted after dispatch; it never means free.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1852,6 +1886,29 @@ pub enum CheckpointOutcome {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_model_selections_remain_pinned() {
+        let legacy: super::ModelSelection =
+            serde_json::from_str(r#"{"model":"provider/model"}"#).unwrap();
+        assert!(!legacy.model_is_fallback);
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("model_is_fallback")
+                .is_none()
+        );
+        let fallback = super::ModelSelection {
+            model_is_fallback: true,
+            ..legacy
+        };
+        let value = serde_json::to_value(&fallback).unwrap();
+        assert_eq!(value["model_is_fallback"], true);
+        assert_eq!(
+            serde_json::from_value::<super::ModelSelection>(value).unwrap(),
+            fallback
+        );
+    }
+
     use super::*;
 
     /// The summary-carrying variants are boxed so the event enum stays small:
@@ -1997,6 +2054,7 @@ mod tests {
             run_id: id(1),
             turn_ordinal: 2,
             model: ModelSelection {
+                model_is_fallback: false,
                 model: Some("provider/model".to_owned()),
                 max_output_tokens: Some(4096),
                 organization: Some("org".to_owned()),
@@ -2457,6 +2515,7 @@ mod tests {
         let set_model = SessionCommand::SetSessionModel {
             session_id,
             model: ModelSelection {
+                model_is_fallback: false,
                 model: Some("test/model".to_owned()),
                 max_output_tokens: Some(256),
                 organization: None,
@@ -2491,6 +2550,7 @@ mod tests {
         let model_set = CommandOutcome::SessionModelSet {
             session_id,
             model: ModelSelection {
+                model_is_fallback: false,
                 model: Some("test/model".to_owned()),
                 max_output_tokens: None,
                 organization: None,
@@ -2549,6 +2609,7 @@ mod tests {
 
         let event = SessionEvent::SessionCompacted {
             session: Box::new(SessionSummary {
+                model_is_fallback: false,
                 activity: None,
                 spawned_by: None,
                 purpose: SessionPurpose::Task,
@@ -2607,6 +2668,7 @@ mod tests {
         let session_id = id::<SessionId>(3);
         let updated = SessionEvent::SessionUpdated {
             session: Box::new(SessionSummary {
+                model_is_fallback: false,
                 activity: None,
                 spawned_by: None,
                 purpose: SessionPurpose::Task,
@@ -2664,6 +2726,7 @@ mod tests {
         let session_id = id::<SessionId>(3);
         let event = SessionEvent::RunFinished {
             session: Box::new(SessionSummary {
+                model_is_fallback: false,
                 activity: None,
                 spawned_by: None,
                 purpose: SessionPurpose::Task,
@@ -2717,6 +2780,7 @@ mod tests {
         assert_eq!(decoded.estimated_cost_usd_nanos, Some(7));
 
         let current = SessionSummary {
+            model_is_fallback: false,
             accounting: Some(SessionAccounting {
                 direct: AccountingTotal {
                     usage: Some(TokenUsage {
@@ -2777,6 +2841,7 @@ mod tests {
         );
 
         let current = SessionSummary {
+            model_is_fallback: false,
             spawned_by: Some(SpawnOrigin {
                 run_id: id(8),
                 tool_call_id: Some(id(7)),
@@ -2893,6 +2958,7 @@ mod tests {
 
         let finished = SessionEvent::RunFinished {
             session: Box::new(SessionSummary {
+                model_is_fallback: false,
                 activity: None,
                 spawned_by: None,
                 purpose: SessionPurpose::Task,
@@ -3119,7 +3185,7 @@ mod tests {
         // Version 22 added `ApprovalGrant::Host` and the `fetch` preview on
         // `tool_approval_requested` for the network tool.
         // Version 24 adds review start markers and typed spend receipts.
-        assert_eq!(crate::PROTOCOL_VERSION, 24);
+        assert_eq!(crate::PROTOCOL_VERSION, 25);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
@@ -3332,6 +3398,7 @@ mod tests {
         let legacy = serde_json::json!({
             "type": "run_started",
             "session": serde_json::to_value(SessionSummary {
+                model_is_fallback: false,
                 activity: None,
                 spawned_by: None,
                 purpose: SessionPurpose::Task,

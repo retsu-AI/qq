@@ -760,6 +760,7 @@ mod tests {
         let (_directory, server) = start_test_server(Arc::new(CatalogHandler)).await;
         let client = SessionClient::new(server.connection().clone()).unwrap();
         let selection = ModelSelection {
+            model_is_fallback: false,
             model: Some("openai/gpt-test".to_owned()),
             max_output_tokens: Some(100),
             organization: None,
@@ -793,6 +794,7 @@ mod tests {
             SessionCommand::SetSessionModel {
                 session_id,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,

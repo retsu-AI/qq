@@ -51,6 +51,7 @@ pub fn cursor(sequence: u64) -> EventCursor {
 #[must_use]
 pub fn session_summary(id: SessionId) -> SessionSummary {
     SessionSummary {
+        model_is_fallback: false,
         id,
         workspace_id: WORKSPACE,
         parent_id: None,

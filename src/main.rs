@@ -127,7 +127,25 @@ impl CliOverrides {
 async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
     let factory = runtime::RuntimeFactory::system()?;
     let load = overrides.load_request()?;
-    let plan = tokio::task::spawn_blocking(move || factory.plan_for(&load)).await??;
+    let compiler = factory.clone();
+    let mut plan = tokio::task::spawn_blocking(move || compiler.plan_for(&load)).await??;
+    if plan.descriptor().routing.is_some() {
+        eprintln!("[jev] routing pending: selecting model and effort");
+        let (selected, decision) = factory.route_direct(plan, prompt.clone()).await;
+        plan = selected;
+        let cost = decision.estimated_cost_usd_nanos.map_or_else(
+            || "unknown".to_owned(),
+            |cost| format!("${:.6}", cost as f64 / 1_000_000_000.0),
+        );
+        eprintln!(
+            "[jev] routing {:?}: {} ({:?}); {}; estimated routing cost {}",
+            decision.outcome,
+            decision.model.model.as_deref().unwrap_or("configured"),
+            decision.reasoning_effort,
+            decision.reason,
+            cost
+        );
+    }
     render_events(plan.run(RunCommand::new(prompt))).await
 }
 
@@ -283,6 +301,7 @@ async fn prepare_headless(
     let load = overrides
         .load_request_in(&workspace)
         .map_err(|error| invalid(error.to_string()))?;
+    let model_is_fallback = load.overrides().model().is_none();
     let config_factory = factory.clone();
     let snapshot = tokio::task::spawn_blocking(move || config_factory.load(&load))
         .await
@@ -326,6 +345,7 @@ async fn prepare_headless(
     };
 
     let model = qq_protocol::ModelSelection {
+        model_is_fallback,
         model: Some(snapshot.model().as_str().to_owned()),
         max_output_tokens: Some(snapshot.max_output_tokens()),
         organization: snapshot.organization().map(str::to_owned),
@@ -478,6 +498,7 @@ async fn interactive(
     let loader = environment.config;
     let server_paths = environment.server_paths;
     let workspace = environment.workspace;
+    let model_is_fallback = request.overrides().model().is_none();
     let config_factory = factory.clone();
     let (snapshot, tui, themes, models) = tokio::task::spawn_blocking(move || {
         let snapshot = config_factory.load(&request)?;
@@ -493,6 +514,7 @@ async fn interactive(
         .collect::<Vec<qq_tui::ModelOption>>();
     let workspace_root = workspace.clone();
     let configured_model = qq_protocol::ModelSelection {
+        model_is_fallback,
         model: Some(snapshot.model().as_str().to_owned()),
         max_output_tokens: Some(snapshot.max_output_tokens()),
         organization: snapshot.organization().map(str::to_owned),

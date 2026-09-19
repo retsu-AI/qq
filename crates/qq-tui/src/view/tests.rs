@@ -1602,6 +1602,7 @@ fn refreshed_chrome_shows_identity_status_and_session_metrics() {
         name: Some("GPT Test".to_owned()),
         context_window: Some(128_000),
         selection: ModelSelection {
+            model_is_fallback: false,
             model: Some("openai/gpt-test".to_owned()),
             max_output_tokens: Some(4_096),
             organization: None,
@@ -1855,6 +1856,7 @@ fn session_picker_pins_search_and_keeps_the_selection_visible() {
             selected = Some(session_id);
         }
         let summary = SessionSummary {
+            model_is_fallback: false,
             title: format!("Session {byte}"),
             updated_at_ms: u64::from(byte),
             ..fixtures::session_summary(session_id)
@@ -1932,6 +1934,7 @@ fn model_picker_hint_reflects_apply_versus_create() {
         name: Some("GPT Test".to_owned()),
         context_window: None,
         selection: ModelSelection {
+            model_is_fallback: false,
             model: Some("openai/gpt-test".to_owned()),
             max_output_tokens: None,
             organization: None,
@@ -2037,6 +2040,7 @@ fn sidebar_appears_at_wide_widths_and_shows_live_status_for_cold_sessions() {
             child_id,
             SessionEvent::SessionCreated {
                 session: Box::new(SessionSummary {
+                    model_is_fallback: false,
                     parent_id: Some(parent),
                     title: "Survey callers".to_owned(),
                     status: SessionStatus::Running,
@@ -2166,6 +2170,7 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
             child_id,
             SessionEvent::SessionCreated {
                 session: Box::new(SessionSummary {
+                    model_is_fallback: false,
                     parent_id: Some(parent),
                     spawned_by: Some(qq_protocol::SpawnOrigin {
                         run_id,
@@ -2232,6 +2237,7 @@ fn background_approvals_surface_a_banner_that_ctrl_g_jumps_to() {
         child_id,
         SessionEvent::SessionCreated {
             session: Box::new(SessionSummary {
+                model_is_fallback: false,
                 parent_id: Some(parent),
                 title: "Deploy helper".to_owned(),
                 status: SessionStatus::Running,
@@ -2299,6 +2305,7 @@ fn alt_arrows_walk_the_session_tree_in_spawn_order() {
                 id,
                 SessionEvent::SessionCreated {
                     session: Box::new(SessionSummary {
+                        model_is_fallback: false,
                         parent_id: parent,
                         title: format!("s{byte}"),
                         model: None,
@@ -2795,6 +2802,7 @@ fn app_with_child_awaiting_approval() -> (App, SessionId, SessionId, RunId, Tool
     let run_id = RunId::from_bytes([0x41; 16]);
     let call_id = ToolCallId::from_bytes([0x42; 16]);
     let child = SessionSummary {
+        model_is_fallback: false,
         parent_id: Some(parent),
         title: "Deploy helper".to_owned(),
         status: SessionStatus::Running,
@@ -2942,6 +2950,7 @@ fn the_sidebar_groups_sessions_by_what_the_user_should_do() {
     let done_id = SessionId::from_bytes([0x50; 16]);
     let done_run = RunId::from_bytes([0x51; 16]);
     let mut done = SessionSummary {
+        model_is_fallback: false,
         title: "Refactor".to_owned(),
         status: SessionStatus::Running,
         active_run_id: Some(done_run),
@@ -3396,6 +3405,7 @@ fn the_completion_line_names_the_plan_and_an_overridden_route() {
         run_id,
         turn_ordinal: 1,
         model: ModelSelection {
+            model_is_fallback: false,
             model: Some("anthropic/claude-opus".to_owned()),
             max_output_tokens: None,
             organization: None,

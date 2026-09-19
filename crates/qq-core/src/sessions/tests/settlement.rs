@@ -306,6 +306,7 @@ async fn recovery_interrupts_only_the_current_turns_message() {
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -477,6 +478,7 @@ async fn recovery_interrupts_running_tools_without_reexecuting_them() {
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -643,6 +645,7 @@ async fn orphaned_tool_call_blocks_replay_with_synthesized_interrupted_results()
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -2148,6 +2151,7 @@ async fn reservation_is_publicly_queued_exclusive_and_cancel_wins_before_start()
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -2339,6 +2343,7 @@ async fn delayed_old_panic_cannot_settle_a_newer_auto_compaction() {
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -2480,6 +2485,7 @@ async fn recovery_ignores_legacy_overflow_evidence_without_spending_a_second_att
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -2642,6 +2648,7 @@ async fn version_sixteen_active_auto_compaction_backfills_exact_attempt_ownershi
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,

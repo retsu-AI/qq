@@ -813,6 +813,15 @@ async fn stream_run(
                             let _ = writeln!(stderr, "[tool] {} {verdict}", tool_call.name);
                         }
                     }
+                    SessionEvent::RoutingStarted { .. } if ours => {
+                        if text { let _ = writeln!(stderr, "[jev] routing pending"); }
+                    }
+                    SessionEvent::RoutingCompleted { decision, .. } if ours => {
+                        if text {
+                            let _ = writeln!(stderr, "[jev] routing {:?}: {}; {}", decision.outcome,
+                                decision.model.model.as_deref().unwrap_or("configured model"), concise(&decision.reason));
+                        }
+                    }
                     SessionEvent::CheckpointReviewed {
                         correlation,
                         phase,
@@ -1955,6 +1964,7 @@ mod tests {
             workspace: workspace.to_owned(),
             session: None,
             model: ModelSelection {
+                model_is_fallback: false,
                 model: Some("test/model".to_owned()),
                 max_output_tokens: Some(256),
                 organization: None,
@@ -2663,6 +2673,7 @@ mod tests {
             session: Some(session_id),
             approval: HeadlessApproval::Auto,
             model: ModelSelection {
+                model_is_fallback: false,
                 model: Some("test/model".to_owned()),
                 max_output_tokens: Some(128),
                 organization: None,

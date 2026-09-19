@@ -77,10 +77,11 @@ pub use sessions::{
     MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS,
     MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent, PublishedEventStream,
     RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend,
-    ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest,
-    RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime,
-    SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture,
-    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
+    ReviewVerdict, RoutingSelection, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
+    RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream,
+    SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture,
+    TaskRouter, TaskRoutingFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority,
+    WorkspaceGrantSeed, run_cost,
 };
 pub use workspace::skills::{MAX_INDEXED_SKILLS, MAX_SKILL_DESCRIPTION_BYTES};
 pub use workspace::{SkillEntry, SkillIndex, SkillKind};
@@ -435,6 +436,7 @@ pub(crate) struct RunCapabilities {
     /// measurable. Admission rejects a cost cap without pricing before this
     /// struct is built.
     limits: RunLimits,
+    routing_spend: Option<qq_protocol::CheckpointSpend>,
     execution_started: Option<tokio::time::Instant>,
     pricing: Option<ModelPricing>,
     /// Full-transcript recall for `search_history`. Session runs install one;
@@ -466,6 +468,7 @@ impl RunCapabilities {
             read_only: false,
             max_output_tokens: None,
             limits: RunLimits::default(),
+            routing_spend: None,
             execution_started: None,
             pricing: None,
             history: None,
@@ -569,6 +572,7 @@ impl RunCapabilities {
                 max_children: None,
                 max_concurrent_children: None,
             },
+            routing_spend: None,
             execution_started: None,
             pricing: None,
             history: None,
@@ -633,6 +637,7 @@ pub struct Runtime {
     /// Mandatory, non-recursive post-result and final-candidate reviewer.
     pub(crate) checkpoint: Option<Arc<dyn runtime::CheckpointReviewer>>,
     pub(crate) checkpoint_identity: Option<Arc<str>>,
+    pub(crate) task_router: Option<Arc<dyn sessions::TaskRouter>>,
     /// Environment allowlist and built-in preference for `shell` calls.
     pub(crate) shell: Arc<runtime::ShellPolicy>,
     pub(crate) network: Arc<tools::network::NetworkPolicy>,
@@ -681,14 +686,21 @@ impl Runtime {
             audit: runtime::AuditPolicy::default(),
             checkpoint: None,
             checkpoint_identity: None,
+            task_router: None,
             reasoning_effort: None,
             shell: Arc::new(runtime::ShellPolicy::default()),
             network: Arc::new(tools::network::NetworkPolicy::default()),
         })
     }
 
-    /// Installs the typed reviewer that must support every tool result and final
-    /// candidate before the run may advance.
+    /// Carries an optional pre-run router into compiled plans for orchestration.
+    #[must_use]
+    pub fn with_task_router(mut self, router: Arc<dyn sessions::TaskRouter>) -> Self {
+        self.task_router = Some(router);
+        self
+    }
+
+    /// Installs the typed reviewer for its selected tool/final boundaries.
     #[must_use]
     pub fn with_checkpoint_reviewer(
         mut self,
@@ -1084,6 +1096,7 @@ impl plan::CompiledAgentPlan {
                 read_only,
                 max_output_tokens,
                 limits,
+                routing_spend,
                 execution_started: _,
                 pricing,
                 history,
@@ -1104,6 +1117,9 @@ impl plan::CompiledAgentPlan {
             // The session owner supplies the original execution admission,
             // including time spent loading or automatically compacting.
             let mut budget = BudgetMeter::new(limits, pricing, started);
+            if let Some(spend) = routing_spend {
+                budget.charge_child(spend.usage, spend.estimated_cost_usd_nanos);
+            }
             let _cancel_on_drop = CancelOnDrop(cancelled.clone());
             yield RuntimeEvent::Started;
 

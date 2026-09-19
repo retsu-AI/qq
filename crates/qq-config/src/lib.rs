@@ -711,6 +711,7 @@ pub struct ModelMetadata {
     api: Option<ProviderApi>,
     name: Option<String>,
     reasoning: bool,
+    reasoning_efforts: Vec<qq_provider::ReasoningEffort>,
     input: Vec<InputModality>,
     context_window: Option<u32>,
     max_output_tokens: Option<u32>,
@@ -764,6 +765,12 @@ impl ModelMetadata {
         self.reasoning
     }
 
+    /// Declared remote model values eligible for automatic effort selection.
+    #[must_use]
+    pub fn reasoning_efforts(&self) -> &[qq_provider::ReasoningEffort] {
+        &self.reasoning_efforts
+    }
+
     #[must_use]
     pub fn input(&self) -> &[InputModality] {
         &self.input
@@ -798,6 +805,7 @@ impl ModelMetadata {
             api,
             name: Some(name.to_owned()),
             reasoning,
+            reasoning_efforts: Vec::new(),
             input: vec![InputModality::Text],
             context_window: Some(context_window),
             max_output_tokens: Some(max_output_tokens),

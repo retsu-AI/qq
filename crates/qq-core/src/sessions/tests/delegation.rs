@@ -2,6 +2,50 @@ use super::*;
 use crate::CheckpointPhase;
 
 #[tokio::test]
+async fn owned_child_inherits_the_persisted_routing_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (_, _, parent) = create_claimed_parent(&store, directory.path()).await;
+    let parent_id = parent.identity.run_id;
+    store
+        .call(Priority::Control, move |connection| {
+            connection.execute(
+                "UPDATE runs SET plan_descriptor_json = ?1 WHERE id = ?2",
+                params![r#"{"routing":"fixture/routing"}"#, parent_id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let child = store
+        .create_child_run(
+            &parent,
+            ToolCallId::from_bytes([0x5b; 16]),
+            ChildAdmission {
+                profile: AgentProfileId::default(),
+                model: parent.model.clone(),
+                task: "child".to_owned(),
+                limits: RunLimits::default(),
+                approval_mode: ApprovalMode::ReadOnly,
+                purpose: SessionPurpose::Task,
+            },
+        )
+        .await
+        .unwrap();
+    let claimed = store.claim_next_run(true).await.unwrap().unwrap();
+    assert_eq!(claimed.identity.run_id, child.run_id);
+    assert_eq!(
+        claimed.routing,
+        Some(RoutingSelection::RouterIdentity(
+            "fixture/routing".to_owned()
+        ))
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn child_checkpoint_inheritance_preserves_profile_but_not_user_followups() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path().join("sessions.sqlite3"))
@@ -28,6 +72,7 @@ async fn child_checkpoint_inheritance_preserves_profile_but_not_user_followups()
     assert_eq!(claimed.identity.run_id, child.run_id);
     assert_eq!(claimed.profile, profile);
     assert_eq!(claimed.checkpoint, Some(CheckpointSelection::Disabled));
+    assert_eq!(claimed.routing, Some(RoutingSelection::Disabled));
     store
         .finish_run(
             &claimed,
@@ -52,6 +97,7 @@ async fn child_checkpoint_inheritance_preserves_profile_but_not_user_followups()
         .unwrap();
     let followup = store.claim_next_run(true).await.unwrap().unwrap();
     assert!(followup.user_initiated);
+    assert_eq!(followup.routing, None);
     assert_eq!(followup.profile, profile);
     assert_eq!(
         followup.checkpoint, None,
@@ -93,6 +139,7 @@ async fn child_checkpoint_inheritance_preserves_profile_but_not_user_followups()
     let public = store.claim_next_run(true).await.unwrap().unwrap();
     assert_eq!(public.identity.session_id, public_id);
     assert_eq!(public.profile, profile);
+    assert_eq!(public.routing, None);
     assert_eq!(
         public.checkpoint, None,
         "parented public sessions use their own configuration"
@@ -685,6 +732,7 @@ async fn parent_cancellation_linearizes_with_in_flight_child_creation() {
                     ChildAdmission {
                         profile: AgentProfileId::default(),
                         model: ModelSelection {
+                            model_is_fallback: false,
                             model: Some("test/child".to_owned()),
                             max_output_tokens: Some(256),
                             organization: None,
@@ -763,6 +811,7 @@ async fn parent_cancellation_linearizes_with_in_flight_child_creation() {
             ChildAdmission {
                 profile: AgentProfileId::default(),
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/child".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -801,6 +850,7 @@ async fn replayed_parent_cancellation_rediscovers_its_running_child() {
             ChildAdmission {
                 profile: AgentProfileId::default(),
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/child".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -861,6 +911,7 @@ async fn restart_cancels_a_queued_child_owned_by_an_interrupted_parent() {
             ChildAdmission {
                 profile: AgentProfileId::default(),
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/child".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -1071,6 +1122,7 @@ async fn configured_worker_model_wins_and_preserves_parent_selection_fields() {
     let resolutions = Arc::new(AtomicUsize::new(0));
     let loads = Arc::new(StdMutex::new(Vec::new()));
     let worker = ModelSelection {
+        model_is_fallback: false,
         model: Some("test/worker".to_owned()),
         max_output_tokens: Some(123),
         organization: Some("worker-org".to_owned()),
@@ -1141,6 +1193,7 @@ async fn explicit_spawn_model_bypasses_configured_worker_resolution() {
             parent,
             child: Arc::new(StaticTextProvider),
             worker: Some(ModelSelection {
+                model_is_fallback: false,
                 model: Some("test/worker".to_owned()),
                 max_output_tokens: Some(111),
                 organization: Some("worker-org".to_owned()),
@@ -1340,6 +1393,7 @@ async fn rejected_spawn_validation_creates_no_child_state_and_names_the_check() 
 async fn spawn_validation_covers_worker_and_parent_fallback_routes() {
     for worker in [
         Some(ModelSelection {
+            model_is_fallback: false,
             model: Some("test/worker".to_owned()),
             max_output_tokens: Some(64),
             organization: None,
@@ -1997,6 +2051,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
     let parent_run = RunId::generate().unwrap();
     let parent = ClaimedRun {
         checkpoint: None,
+        routing: None,
         identity: RunIdentity {
             workspace_id,
             session_id,
@@ -2013,11 +2068,13 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
         user_initiated: true,
         literal_slash: false,
         session_model: ModelSelection {
+            model_is_fallback: false,
             model: Some("test/model".to_owned()),
             max_output_tokens: Some(256),
             organization: None,
         },
         model: ModelSelection {
+            model_is_fallback: false,
             model: Some("test/model".to_owned()),
             max_output_tokens: Some(256),
             organization: None,
@@ -3530,6 +3587,7 @@ async fn owned_spend_session_deletion_checks_followup_owners_after_the_original_
             SessionCommand::SetSessionModel {
                 session_id: child,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/followup".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,
@@ -3907,6 +3965,7 @@ async fn depth_one_keeps_children_from_spawning_and_the_ceiling_is_enforced() {
                 workspace_id: harness.workspace_id,
                 parent_id: Some(parent_id),
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some("test/model".to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,

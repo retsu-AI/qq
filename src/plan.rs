@@ -587,6 +587,7 @@ mod tests {
         PlanKey {
             workspace: workspace.to_owned(),
             model: ModelSelection {
+                model_is_fallback: false,
                 model: Some(model.to_owned()),
                 max_output_tokens: None,
                 organization: None,

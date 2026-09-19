@@ -5,8 +5,9 @@ Owner: this stacked implementation session. Base `dc59d14` / draft #72.
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
 | J1–J5 + visible J7 | Optional review, correctness and receipts | In review | [#74](https://github.com/retsu-AI/qq/pull/74), stacked on #72 | Local and hosted checks green; quiet-host tails open |
-| J6a | Explicit model effort | In review | [#76](https://github.com/retsu-AI/qq/pull/76), stacked on #74 | Local checks/reviews green; performance gate unresolved; hosted checks pending |
-| J6b + passive J7 | Optional routing and advisory observer | Planned | Follow-up slices | Independent acceptance; not shipping in #74 |
+| J6a | Explicit model effort | In review | [#76](https://github.com/retsu-AI/qq/pull/76), stacked on #74 | Local checks/reviews green; performance gate unresolved; hosted CI 35394821612 successful |
+| J6b | Optional routing | In review | [#77](https://github.com/retsu-AI/qq/pull/77), stacked on #76 | Local checks/reviews green; incremental median within budget; hosted and full-stack qualification pending |
+| Passive J7 | Advisory observer | Planned | Follow-up slice | Independent acceptance; not shipping in #74 |
 | J8–J9 | Qualification and delivery | In progress | #74 | Live evaluation and remaining slices open |
 
 ## Entries
@@ -188,3 +189,98 @@ write PR metadata (403); authenticated CLI performed the authorized draft/update
 #74 body now accurately records successful hosted CI. #76 does not claim its
 performance gate, automatic routing or advisory observation are complete.
 No merge, paid evaluation or Linear update. Broader goal remains in progress.
+
+### J6b durable routing start — 2026-09-18
+
+Branch `feat/eng-791-jev-routing-accounting` starts from #76 head 2a56015.
+First regression covers known/unknown routing spend through cancellation and
+restart, duplicate dispatch and late responses. Routing occurs before ordinary
+plan preparation; its receipt must survive failure and seed budgets once.
+The #76 release binaries remain the pre-change baseline. No paid calls.
+
+J6b focused evidence: four routing tests pass (selection/fallback, budget charge,
+pending cancellation, restart/late-response guards and context observation).
+Independent accounting review found routing-only settlement cleared the main
+context meter; separate spend/turn flags repair it. New schema migration keeps
+old runs unrouted and ordinary queued recovery unchanged. Protocol 25 fixtures
+include routing events; production routing remains unavailable pending adapter,
+pin provenance, inherited opt-in and direct-CLI integration. Work is uncommitted.
+
+J6b core suite after integration: 667 passed, three ignored, with loopback
+fixtures authorized outside the sandbox. Standards review approves the current
+core seam; production activation remains outside that verdict. Follow-up repair
+persists known routing spend before selected-provider loading. Four focused
+routing tests include pending known-spend cancellation/recovery, and workspace
+verification is running on that final repair. No change pushed in this slice.
+
+#### J6b core preparation receipt — 2026-09-18
+Workspace: 1,584 passed, five ignored after accounting/protocol repairs.
+Final schema validation addition: migration suite 44 passed, one ignored.
+Strict workspace all-target/all-feature Clippy, formatting and workspace build pass.
+Independent accounting/Standards reviews approve the core seam and corrections.
+Schema 30→31; protocol 24→25 with retained old and new wire/headless fixtures.
+ADR-0032, architecture/protocol docs and ledger updated; no dependency added.
+Known routing spend persists before provider reload; main context meter preserved.
+Unfinished: production Jev adapter, model-pin provenance, inherited opt-in,
+direct ask routing, passive advisory, performance/live qualification.
+This is local implementation progress, not a shipping routing capability or PR.
+
+### J6b model-choice provenance — 2026-09-18
+
+Schema 32 and protocol-25 selections retain configured fallback versus explicit
+pin intent across commands, reservation, reconnect and child creation. Root
+loading resolves fallbacks from configuration; routing cannot replace a pin.
+Added legacy wire/migration, pin rejection and root-resolution regressions.
+Independent read-only spec/standards reviews approve the bounded change, with
+requested pin/loader coverage now added. Production adapter remains unfinished.
+No paid inference, new dependency, push or shipping claim in this session.
+
+J6b provenance receipt: workspace 1,590 passed, five ignored; formatting,
+strict all-target/all-feature Clippy and workspace build pass. Pin rejection
+retains the chosen provider and charges auxiliary spend once. Root loader tests
+cover a conflicting configured default; migration and legacy-wire tests preserve
+pins. ADR-0033 and architecture/protocol/plan docs updated. Protocol 25 is still
+unpublished and includes both the routing and provenance changes. Performance
+qualification remains open; no speed claim or additional hosted PR yet.
+
+### J6b concrete adapter and activation — 2026-09-18
+
+Connected TypeSafe task selection to compiled plans, sessions and direct ask.
+Owned children inherit routing identity/off before credentials; user followups
+reload current settings. Added declared model effort capabilities and bounded
+candidate fingerprinting after independent review found stale-cache and unknown
+model-effort risks. Embedded compilation now preserves the router too.
+HTTP contract tests cover masking, bounds, invalid/uncertain choices and spend;
+cache/pin/inheritance regressions are running. ADR-0034 and runbook updated.
+No paid calls or new dependency. Performance and live qualification remain open.
+
+J6b verification: 1,597 workspace tests passed, five ignored. Independent
+Spec/Standards rechecks approve candidate identity, declared effort support and
+embedded router preservation. Strict workspace Clippy passes after boxing the
+configuration-only model patch and moving the masking re-export before tests.
+Application/configuration tests are rerunning on that representation change.
+Refreshed #76: open/draft, head 2a56015, hosted CI 35394821612 successful.
+
+Final representation check: 249 application/config tests passed, one ignored;
+workspace build and formatting pass. No real inference credentials or live APIs used.
+Descriptor 8→9 golden encoding and routing candidate fingerprints are covered.
+The retained #76 release binaries are the off-path comparison baseline.
+
+#### J6b performance receipt — 2026-09-18
+Candidate cf61126 versus retained #76 binaries; 30 alternating A/B and 30 A/A
+pairs per fixture, with no overlapping build/test during measurements.
+Tool-loop median 54,392 → 56,136.5 ns (+3.21%); p95 70,945 → 70,783 ns.
+A/A tool median +1.23%; p95 75,752 → 69,457 ns.
+Plan compile median 24,977.5 → 24,715.5 ns (−1.05%); digest +0.69%.
+I/O some avg10 sampled 18.03–22.40%. Raw evidence:
+`target/qq-perf/jev-routing-2026-09-18/paired.json` (untracked).
+This increment is within the 5% median budget. The earlier #76 gate and
+quiet-host full-stack qualification remain unresolved; no Jev speed claim.
+
+### J6b stacked delivery — 2026-09-18
+
+Pushed b7a537a and opened draft [#77](https://github.com/retsu-AI/qq/pull/77),
+base `feat/eng-791-jev-routing` (#76). GitHub connector creation still returned
+403; authenticated CLI created the authorized draft. No merge or paid inference.
+Remaining full-goal work: passive advisory observation, hosted checks and
+full-stack performance/live qualification. Linear reauthentication remains open.

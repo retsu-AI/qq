@@ -356,6 +356,7 @@ async fn run_sample(case: Case) -> Sample {
                 workspace_id,
                 parent_id: None,
                 model: ModelSelection {
+                    model_is_fallback: false,
                     model: Some(ROUTES[0].to_owned()),
                     max_output_tokens: Some(256),
                     organization: None,

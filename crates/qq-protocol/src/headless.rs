@@ -223,6 +223,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             workspace_identity: ContentHash::from_bytes([0x44; 32]),
             model: ModelSelection {
+                model_is_fallback: false,
                 model: Some("openai/gpt-5.6".to_owned()),
                 max_output_tokens: None,
                 organization: None,

@@ -74,10 +74,11 @@ pub use runtime::{
     ApprovalReviewer, CheckpointSelection, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime,
     MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS, PersistenceFault,
     PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest,
-    ReviewSpend, ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
-    RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, SessionEventStream, SessionRuntime,
-    SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture,
-    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
+    ReviewSpend, ReviewVerdict, RoutingSelection, RuntimeLoadError, RuntimeLoadFuture,
+    RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, SessionEventStream,
+    SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture,
+    TaskRouter, TaskRoutingFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority,
+    WorkspaceGrantSeed,
 };
 pub use snapshots::run_cost;
 pub use store::STORE_SCHEMA_VERSION;

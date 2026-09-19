@@ -115,6 +115,7 @@ pub struct AgentProfile {
     delegation: DelegationRoster,
     audit: AuditPolicy,
     checkpoint: Option<Arc<dyn crate::runtime::CheckpointReviewer>>,
+    task_router: Option<Arc<dyn crate::sessions::TaskRouter>>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     shell: ShellPolicy,
     network: crate::tools::network::NetworkPolicy,
@@ -155,6 +156,7 @@ impl AgentProfile {
             delegation: DelegationRoster::default(),
             audit: AuditPolicy::default(),
             checkpoint: None,
+            task_router: None,
             reasoning_effort: None,
             shell: ShellPolicy::default(),
             network: crate::tools::network::NetworkPolicy::default(),
@@ -167,6 +169,12 @@ impl AgentProfile {
             context_sources: Vec::new(),
             context_cache: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_task_router(mut self, router: Arc<dyn crate::sessions::TaskRouter>) -> Self {
+        self.task_router = Some(router);
+        self
     }
 
     #[must_use]
@@ -199,6 +207,7 @@ impl AgentProfile {
             delegation: runtime.delegation.as_ref().clone(),
             audit: runtime.audit,
             checkpoint: runtime.checkpoint.clone(),
+            task_router: runtime.task_router.clone(),
             reasoning_effort: runtime.reasoning_effort,
             shell: runtime.shell.as_ref().clone(),
             network: runtime.network.as_ref().clone(),
@@ -502,6 +511,7 @@ impl CompiledAgentPlan {
             delegation,
             audit,
             checkpoint,
+            task_router,
             reasoning_effort,
             shell,
             network,
@@ -533,6 +543,9 @@ impl CompiledAgentPlan {
         .with_network_policy(network);
         if let Some(effort) = reasoning_effort {
             runtime = runtime.with_reasoning_effort(effort);
+        }
+        if let Some(router) = task_router {
+            runtime = runtime.with_task_router(router);
         }
         if let Some(reviewer) = checkpoint {
             runtime = runtime.with_checkpoint_reviewer(reviewer);
@@ -739,6 +752,14 @@ impl CompiledAgentPlan {
             delegation: runtime.delegation.as_ref().clone(),
             audit: AuditDescriptor::from(runtime.audit),
             checkpoint: runtime.checkpoint_identity.as_deref().map(str::to_owned),
+            routing_configuration: runtime
+                .task_router
+                .as_ref()
+                .map(|router| router.configuration_identity().to_owned()),
+            routing: runtime
+                .task_router
+                .as_ref()
+                .map(|router| router.identity().to_owned()),
             reasoning_effort: runtime.reasoning_effort,
             skills: SkillIndexDescriptor {
                 digest: skills.digest(),
@@ -1203,6 +1224,8 @@ mod tests {
                 role: qq_protocol::DelegationRole::Strong,
             },
             checkpoint: None,
+            routing: None,
+            routing_configuration: None,
             reasoning_effort: None,
             skills: SkillIndexDescriptor {
                 digest: qq_protocol::ContentHash::from_bytes([3; 32]),
@@ -1250,7 +1273,7 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v8\0{\"version\":8,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v9\0{\"version\":9,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
@@ -1258,10 +1281,10 @@ mod tests {
         // from a different encoding.
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "2264d2971b8abe079c82becef6798660534b72d39275daae2a47a77006eade7d"
+            "f6fbe410226e6543e6f9ad931ba67ac4820d141388ecf1126ad97c044352dc29"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v8\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v9\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }
@@ -1385,6 +1408,10 @@ mod tests {
             (
                 "checkpoint",
                 Box::new(|d| d.checkpoint = Some("typesafe/jev/enforce".to_owned())),
+            ),
+            (
+                "routing",
+                Box::new(|d| d.routing = Some("typesafe/jev/routing".to_owned())),
             ),
             (
                 "reasoning_effort",

@@ -47,6 +47,9 @@ may append a **request** row; only root changes a request's status.
 | 0029 | Native JEV model-and-effort routing and durable selection identity | Startup Manager / ENG-791 | Reserved; no accepted decision document yet |
 | 0030 | Default-off independent Jev review/routing and bounded evidence | Stacked Jev implementation / user direction 2026-09-18 | Accepted in stacked work; supersedes ADR-0028 credential activation |
 | 0031 | Explicit reasoning effort in immutable plan identity | J6a optional routing foundation | Accepted locally; descriptor 8 |
+| 0032 | Durable optional routing before run preparation | J6b stacked Jev implementation | Accepted locally; protocol 25, schema 31 |
+| 0033 | Preserve explicit model choices during optional routing | J6b stacked Jev implementation | Accepted locally; schema 32 |
+| 0034 | Bounded concrete Jev routing and inherited activation | J6b stacked Jev implementation | Accepted locally; descriptor 9 |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -117,7 +120,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0032. Reserve here before opening a PR that adds an ADR.
+Next free number: 0035. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 

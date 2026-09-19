@@ -177,6 +177,9 @@ async fn prepare_execution(
         });
     }
     claimed.checkpoint = Some(CheckpointSelection::from_identity(identity));
+    claimed.routing = Some(RoutingSelection::from_identity(
+        loaded.plan.descriptor().routing.as_deref(),
+    ));
     let deadline = RunDeadline::new(claimed.limits, execution_started);
     if let Some(deadline) = deadline.filter(|deadline| deadline.expired()) {
         return Err(RunOutcome::BudgetExhausted {
@@ -287,7 +290,7 @@ async fn prepare_execution(
             }
         }
     }
-    let capabilities = if internal {
+    let mut capabilities = if internal {
         RunCapabilities::restricted()
             .with_limits(
                 RunLimits {
@@ -408,6 +411,9 @@ async fn prepare_execution(
     .with_execution_started(execution_started)
     .with_tool_tasks(resources.tools.clone())
     .with_output(claimed.output.clone());
+    if !internal {
+        capabilities.routing_spend = loaded.routing_spend;
+    }
     // The claimed workspace is the plan's workspace: the loader compiled the
     // plan for exactly this session's canonical root, so no per-run
     // canonicalization or directory open happens here.
@@ -498,6 +504,237 @@ async fn prepare_execution(
     }
 }
 
+async fn route_run(
+    inner: &Arc<SessionRuntimeInner>,
+    claimed: &ClaimedRun,
+    loaded: &mut LoadedRuntime,
+    cancellation: &mut watch::Receiver<bool>,
+    started: tokio::time::Instant,
+) -> Result<(), RunOutcome> {
+    if claimed
+        .routing
+        .as_ref()
+        .is_some_and(|selection| !selection.matches(loaded.plan.descriptor().routing.as_deref()))
+    {
+        return Err(RunOutcome::Failed {
+            failure: RunFailure {
+                kind: RunFailureKind::Configuration,
+                message: "child loader did not preserve the parent's routing policy".to_owned(),
+            },
+        });
+    }
+    if claimed.identity.kind != RunKind::Prompt || claimed.purpose != SessionPurpose::Task {
+        return Ok(());
+    }
+    let Some(router) = loaded.router.clone() else {
+        return Ok(());
+    };
+    let deadline = RunDeadline::new(claimed.limits, started);
+    let mut budget = crate::runtime::BudgetMeter::new(
+        claimed.limits,
+        loaded.resolved_model().pricing.clone(),
+        started,
+    );
+    if let Err(kind) = budget.remaining(tokio::time::Instant::now()) {
+        return Err(RunOutcome::BudgetExhausted {
+            exhaustion: Box::new(budget.exhaustion(kind, false, tokio::time::Instant::now())),
+        });
+    }
+    if let Some(limit) = claimed.limits.max_cost_usd_nanos {
+        let kind = match router.max_cost_usd_nanos() {
+            None => Some(qq_protocol::BudgetLimitKind::CostUnknown),
+            Some(cost) if cost > limit => Some(qq_protocol::BudgetLimitKind::Cost),
+            Some(_) => None,
+        };
+        if let Some(kind) = kind {
+            return Err(RunOutcome::BudgetExhausted {
+                exhaustion: Box::new(budget.exhaustion(kind, false, tokio::time::Instant::now())),
+            });
+        }
+    }
+    let fallback = ModelSelection {
+        model_is_fallback: false,
+        model: Some(loaded.resolved_model().route.clone()),
+        max_output_tokens: Some(loaded.resolved_model().max_output_tokens),
+        organization: loaded.resolved_model().organization.clone(),
+    };
+    let pinned_effort = loaded.plan.descriptor().reasoning_effort;
+    let fallback_decision = |reason: &str, spent: bool| qq_protocol::RoutingDecision {
+        model: fallback.clone(),
+        reasoning_effort: pinned_effort,
+        outcome: qq_protocol::RoutingOutcome::Fallback,
+        reason: reason.to_owned(),
+        usage: (!spent).then_some(TokenUsage::default()),
+        estimated_cost_usd_nanos: (!spent).then_some(0),
+    };
+    let mut task = String::new();
+    let mut oversized = false;
+    if let Some(message) = claimed
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role() == Role::User)
+    {
+        for block in message.content() {
+            if let ContentBlock::Text { text } = block {
+                if task.len().saturating_add(text.len()).saturating_add(1) > 16 * 1024 {
+                    oversized = true;
+                    break;
+                }
+                task.push_str(text);
+                task.push('\n');
+            }
+        }
+    }
+    if *cancellation.borrow() {
+        return Err(RunOutcome::Cancelled);
+    }
+    match inner.store.record_routing_started(claimed).await {
+        Ok(Some(event)) => inner.notify(event.cursor),
+        Ok(None) => return Err(RunOutcome::Cancelled),
+        Err(error) => {
+            return Err(persistence_failure(
+                "failed to persist routing dispatch",
+                &error,
+            ));
+        }
+    }
+    let mut decision = if oversized || task.is_empty() {
+        fallback_decision(
+            "task exceeds routing bounds or has no text; configured model retained",
+            false,
+        )
+    } else {
+        let task = crate::tools::output::mask_secrets(task);
+        let response = tokio::time::timeout(Duration::from_secs(5), router.route(task));
+        tokio::select! {
+            biased;
+            () = RunDeadline::wait(deadline) => return Err(RunOutcome::BudgetExhausted {
+                exhaustion: Box::new(deadline.expect("finite deadline woke").exhaustion()),
+            }),
+            changed = cancellation.changed() => return Err(if changed.is_ok() && *cancellation.borrow() { RunOutcome::Cancelled } else { RunOutcome::Interrupted }),
+            result = response => match result {
+                Ok(decision) => decision,
+                Err(_) => fallback_decision("routing timed out; configured model retained", true),
+            },
+        }
+    };
+    decision.reason = truncate_utf8(decision.reason, 1024);
+    // A router may optimize omission, but an already pinned effort is authoritative.
+    if pinned_effort.is_some() {
+        decision.reasoning_effort = pinned_effort;
+    }
+    if !claimed.session_model.model_is_fallback && decision.model.model != fallback.model {
+        decision.outcome = qq_protocol::RoutingOutcome::Fallback;
+        decision.reason = "explicit model choice retained".to_owned();
+    }
+    if decision.outcome == qq_protocol::RoutingOutcome::Fallback {
+        decision.model = fallback.clone();
+        decision.reasoning_effort = pinned_effort;
+    } else {
+        match inner
+            .store
+            .record_routing_spend(
+                claimed,
+                qq_protocol::CheckpointSpend {
+                    usage: decision.usage,
+                    estimated_cost_usd_nanos: decision.estimated_cost_usd_nanos,
+                },
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return Err(RunOutcome::Cancelled),
+            Err(error) => {
+                return Err(persistence_failure(
+                    "failed to persist routing spend",
+                    &error,
+                ));
+            }
+        }
+        decision.model.max_output_tokens = claimed.model.max_output_tokens;
+        decision.model.organization = claimed.model.organization.clone();
+        let mut load = inner.loader.load(RuntimeLoadRequest {
+            reasoning_effort: decision.reasoning_effort,
+            routing: Some(RoutingSelection::from_identity(
+                loaded.plan.descriptor().routing.as_deref(),
+            )),
+            checkpoint: Some(CheckpointSelection::from_identity(
+                loaded.plan.descriptor().checkpoint.as_deref(),
+            )),
+            workspace: claimed.workspace.clone(),
+            model: decision.model.clone(),
+            profile: claimed.profile.clone(),
+        });
+        let selected = tokio::select! {
+            biased;
+            () = RunDeadline::wait(deadline) => {
+                let _ = load.await;
+                return Err(RunOutcome::BudgetExhausted { exhaustion: Box::new(deadline.expect("finite deadline woke").exhaustion()) });
+            },
+            changed = cancellation.changed() => {
+                let _ = load.await;
+                return Err(if changed.is_ok() && *cancellation.borrow() { RunOutcome::Cancelled } else { RunOutcome::Interrupted });
+            },
+            result = &mut load => result,
+        };
+        match selected {
+            Ok(selected)
+                if selected.plan.workspace_path() == loaded.plan.workspace_path()
+                    && Some(selected.resolved_model().route.as_str())
+                        == decision.model.model.as_deref()
+                    && selected.plan.descriptor().reasoning_effort == decision.reasoning_effort
+                    && selected.plan.descriptor().routing == loaded.plan.descriptor().routing
+                    && selected.plan.descriptor().checkpoint
+                        == loaded.plan.descriptor().checkpoint
+                    && selected.plan.descriptor().profile == loaded.plan.descriptor().profile =>
+            {
+                decision.model = ModelSelection {
+                    model_is_fallback: false,
+                    model: Some(selected.resolved_model().route.clone()),
+                    max_output_tokens: Some(selected.resolved_model().max_output_tokens),
+                    organization: selected.resolved_model().organization.clone(),
+                };
+                *loaded = selected;
+            }
+            _ => {
+                decision.model = fallback;
+                decision.reasoning_effort = pinned_effort;
+                decision.outcome = qq_protocol::RoutingOutcome::Fallback;
+                decision.reason =
+                    "selected route unavailable or incompatible; configured model retained"
+                        .to_owned();
+            }
+        }
+    }
+    let spend = qq_protocol::CheckpointSpend {
+        usage: decision.usage,
+        estimated_cost_usd_nanos: decision.estimated_cost_usd_nanos,
+    };
+    match inner
+        .store
+        .record_routing_completed(claimed, decision)
+        .await
+    {
+        Ok(Some(event)) => inner.notify(event.cursor),
+        Ok(None) => return Err(RunOutcome::Cancelled),
+        Err(error) => {
+            return Err(persistence_failure(
+                "failed to persist routing receipt",
+                &error,
+            ));
+        }
+    }
+    loaded.routing_spend = Some(spend);
+    budget.charge_child(spend.usage, spend.estimated_cost_usd_nanos);
+    if let Err(kind) = budget.remaining(tokio::time::Instant::now()) {
+        return Err(RunOutcome::BudgetExhausted {
+            exhaustion: Box::new(budget.exhaustion(kind, false, tokio::time::Instant::now())),
+        });
+    }
+    Ok(())
+}
+
 pub(super) async fn execute_run(
     inner: Arc<SessionRuntimeInner>,
     mut claimed: ClaimedRun,
@@ -513,14 +750,16 @@ pub(super) async fn execute_run(
     let load_progress = RuntimeLoadProgress::default();
     let mut load = inner.loader.load_with_progress(
         RuntimeLoadRequest {
+            reasoning_effort: None,
             checkpoint: claimed.checkpoint.clone(),
+            routing: claimed.routing.clone(),
             workspace: claimed.workspace.clone(),
             model: claimed.model.clone(),
             profile: claimed.profile.clone(),
         },
         load_progress.clone(),
     );
-    let loaded = tokio::select! {
+    let mut loaded = tokio::select! {
         biased;
         () = RunDeadline::wait(deadline) => {
             let unfinished_stage = load_progress.stage();
@@ -581,6 +820,18 @@ pub(super) async fn execute_run(
             },
         )
         .await;
+        return;
+    }
+    if let Err(outcome) = route_run(
+        &inner,
+        &claimed,
+        &mut loaded,
+        &mut cancellation,
+        execution_started,
+    )
+    .await
+    {
+        finish_reserved_run(&inner, &claimed, outcome).await;
         return;
     }
     let mut bounded_manual_compaction = false;
@@ -755,10 +1006,23 @@ pub(super) async fn execute_run(
                     }
                 };
                 claimed.model = ModelSelection {
+                    model_is_fallback: claimed.session_model.model_is_fallback,
                     model: Some(prepared.audit.resolved_model.route.clone()),
                     max_output_tokens: Some(prepared.audit.resolved_model.max_output_tokens),
                     organization: prepared.audit.resolved_model.organization.clone(),
                 };
+                let initial_accounting = loaded.routing_spend.map(|spend| {
+                    RunAccountingAccumulator::new(
+                        prepared.audit.resolved_model.pricing.clone(),
+                        context_occupancy_basis(
+                            prepared.audit.context_shape.digest,
+                            prepared.audit.static_prefix,
+                            prepared.audit.weight.input_bytes(),
+                        ),
+                    )
+                    .with_routing_spend(Some(spend))
+                    .snapshot()
+                });
                 let cancelled = match cancellation_requested(&inner, claimed.identity.run_id).await
                 {
                     Ok(cancelled) => cancelled || *cancellation.borrow(),
@@ -769,10 +1033,11 @@ pub(super) async fn execute_run(
                             inner.failed.send_replace(true);
                             return;
                         };
-                        finish_run(
+                        finish_run_accounted(
                             &inner,
                             &claimed,
                             persistence_failure("failed to re-read run cancellation", &error),
+                            initial_accounting.clone(),
                             teardown,
                         )
                         .await;
@@ -785,10 +1050,11 @@ pub(super) async fn execute_run(
                         inner.failed.send_replace(true);
                         return;
                     };
-                    finish_run(
+                    finish_run_accounted(
                         &inner,
                         &claimed,
                         internal_failure("session runtime failed before provider work"),
+                        initial_accounting.clone(),
                         teardown,
                     )
                     .await;
@@ -800,7 +1066,14 @@ pub(super) async fn execute_run(
                         inner.failed.send_replace(true);
                         return;
                     };
-                    finish_run(&inner, &claimed, RunOutcome::Cancelled, teardown).await;
+                    finish_run_accounted(
+                        &inner,
+                        &claimed,
+                        RunOutcome::Cancelled,
+                        initial_accounting,
+                        teardown,
+                    )
+                    .await;
                     return;
                 }
                 execute_started_run(
@@ -809,6 +1082,7 @@ pub(super) async fn execute_run(
                     cancellation,
                     prepared,
                     &resources,
+                    loaded.routing_spend,
                     loaded
                         .plan
                         .runtime
@@ -1057,6 +1331,7 @@ async fn run_auto_compaction(
         return false;
     }
     compaction.model = ModelSelection {
+        model_is_fallback: false,
         model: Some(prepared.audit.resolved_model.route.clone()),
         max_output_tokens: Some(prepared.audit.resolved_model.max_output_tokens),
         organization: prepared.audit.resolved_model.organization.clone(),
@@ -1099,6 +1374,7 @@ async fn run_auto_compaction(
             compaction_cancellation,
             prepared,
             resources,
+            None,
             loaded
                 .plan
                 .runtime
@@ -1249,6 +1525,7 @@ async fn execute_started_run(
     mut cancellation: watch::Receiver<bool>,
     prepared: PreparedExecution,
     resources: &RunResources,
+    routing_spend: Option<qq_protocol::CheckpointSpend>,
     checkpoint_enforced: bool,
 ) {
     let PreparedExecution {
@@ -1263,6 +1540,9 @@ async fn execute_started_run(
         audit.static_prefix,
         audit.weight.input_bytes(),
     );
+    let mut accounting =
+        RunAccountingAccumulator::new(resolved_model.pricing.clone(), initial_occupancy_basis)
+            .with_routing_spend(routing_spend);
     let mut runtime_failed = inner.failed.subscribe();
     if *runtime_failed.borrow() {
         tool_cancellation.cancel();
@@ -1270,18 +1550,17 @@ async fn execute_started_run(
             inner.failed.send_replace(true);
             return;
         };
-        finish_run(
+        finish_run_accounted(
             &inner,
             &claimed,
             internal_failure("session runtime failed before provider work"),
+            routing_spend.map(|_| accounting.snapshot()),
             teardown,
         )
         .await;
         return;
     }
     let internal = claimed.identity.kind == RunKind::Compaction;
-    let mut accounting =
-        RunAccountingAccumulator::new(resolved_model.pricing.clone(), initial_occupancy_basis);
     let mut pending_text = String::new();
     let mut pending_channel = None;
     let mut reasoning_kind = None;
@@ -3142,6 +3421,7 @@ pub(super) struct RunAccountingAccumulator {
     estimated_cost_usd_nanos: Option<u64>,
     pricing: Option<ModelPricing>,
     saw_turn: bool,
+    saw_spend: bool,
     request_basis: ContextOccupancyBasis,
 }
 
@@ -3153,15 +3433,28 @@ impl RunAccountingAccumulator {
             estimated_cost_usd_nanos: pricing.as_ref().map(|_| 0),
             pricing,
             saw_turn: false,
+            saw_spend: false,
             request_basis,
         }
+    }
+
+    pub(super) fn with_routing_spend(
+        mut self,
+        spend: Option<qq_protocol::CheckpointSpend>,
+    ) -> Self {
+        if let Some(spend) = spend {
+            self.usage = spend.usage;
+            self.estimated_cost_usd_nanos = spend.estimated_cost_usd_nanos;
+            self.saw_spend = true;
+        }
+        self
     }
 
     /// Adds a reviewer's provider spend to the run's totals. It is not a turn
     /// of this run (context occupancy is untouched) but the run is
     /// accountable for it; unknown spend makes the totals unknown.
     pub(super) fn record_review(&mut self, usage: Option<TokenUsage>, cost_usd_nanos: Option<u64>) {
-        self.saw_turn = true;
+        self.saw_spend = true;
         match usage {
             Some(usage) => self.usage = self.usage.and_then(|total| add_usage(total, usage)),
             None => self.usage = None,
@@ -3174,6 +3467,7 @@ impl RunAccountingAccumulator {
 
     pub(super) fn record_turn(&mut self, usage: Option<TokenUsage>) {
         self.saw_turn = true;
+        self.saw_spend = true;
         let Some(usage) = usage else {
             self.usage = None;
             // A newer completed request without usage makes the run's and
@@ -3199,10 +3493,10 @@ impl RunAccountingAccumulator {
 
     pub(super) fn snapshot(&self) -> RunAccounting {
         RunAccounting {
-            usage: self.saw_turn.then_some(self.usage).flatten(),
+            usage: self.saw_spend.then_some(self.usage).flatten(),
             context_tokens: self.context_tokens,
             estimated_cost_usd_nanos: self
-                .saw_turn
+                .saw_spend
                 .then_some(self.estimated_cost_usd_nanos)
                 .flatten(),
             saw_turn: self.saw_turn,
