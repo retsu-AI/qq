@@ -27,21 +27,33 @@ pub async fn render(
             | RunEvent::ReasoningDelta { .. }
             | RunEvent::ReasoningCompleted { .. }
             | RunEvent::Usage { .. } => {}
+            RunEvent::CheckpointStarted {
+                correlation, phase, ..
+            } => {
+                writeln!(
+                    notices,
+                    "[jev] pending {phase:?} {correlation}: assessing selected evidence"
+                )?;
+                notices.flush()?;
+            }
             RunEvent::CheckpointReviewed {
                 correlation,
                 phase,
                 outcome,
                 feedback,
+                spend,
                 ..
             } => {
-                let marker = if outcome == qq_protocol::CheckpointOutcome::Supported {
-                    "GREEN"
-                } else {
-                    "RED"
+                let cost = match spend {
+                    Some(spend) => spend.estimated_cost_usd_nanos.map_or_else(
+                        || "unknown".to_owned(),
+                        |cost| format!("${:.6}", cost as f64 / 1_000_000_000.0),
+                    ),
+                    None => "not dispatched or legacy receipt".to_owned(),
                 };
                 writeln!(
                     notices,
-                    "[jev] {marker} {phase:?} {correlation}: {feedback}"
+                    "[jev] {outcome:?} {phase:?} {correlation}: {feedback}; estimated reviewer cost {cost}"
                 )?;
                 notices.flush()?;
             }
@@ -203,6 +215,7 @@ mod tests {
     async fn writes_checkpoint_notices_separately_from_answer_stdout() {
         let events = stream::iter([
             RunEvent::CheckpointReviewed {
+                spend: None,
                 correlation: "tool:call-1".to_owned(),
                 phase: qq_protocol::CheckpointPhase::ToolResult,
                 tool_call_id: Some(qq_protocol::ToolCallId::generate().unwrap()),
@@ -224,7 +237,7 @@ mod tests {
 
         assert_eq!(output, b"answer\n");
         let notices = String::from_utf8(notices).unwrap();
-        assert!(notices.contains("[jev] GREEN ToolResult tool:call-1"));
+        assert!(notices.contains("[jev] Supported ToolResult tool:call-1"));
         assert!(notices.contains("evidence is usable"));
     }
 }

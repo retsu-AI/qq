@@ -447,9 +447,16 @@ impl RuntimeFactory {
         let invalid = |reason: &str| RuntimeBuildError::InvalidTuiQaProfile {
             reason: reason.to_owned(),
         };
-        if std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref() == Some("enforce") {
+        if snapshot.jev_review() != qq_config::JevReviewMode::Off
+            || snapshot.jev_routing()
+            || matches!(
+                std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref(),
+                Some("final" | "enforce")
+            )
+            || std::env::var("QQ_JEV_ROUTING").ok().as_deref() == Some("on")
+        {
             return Err(invalid(
-                "QQ_JEV_CHECKPOINTS=enforce requires a real reviewer credential; use the ordinary profile",
+                "enabled Jev capabilities require external inference; use the ordinary profile",
             ));
         }
         if !self.inner.credentials.list()?.is_empty() {
@@ -873,6 +880,8 @@ impl RuntimeFactory {
             profile: profile.clone(),
             explicit_config_path: request.explicit_path().map(Path::to_owned),
             explicit_config_content: request.explicit_content().map(str::to_owned),
+            jev_review: request.overrides().jev_review(),
+            jev_routing: request.overrides().jev_routing(),
         };
         let lookup = self.inner.plans.load(&key, || {
             self.compile_generation(request, profile, &workspace, progress)
@@ -982,6 +991,16 @@ impl RuntimeFactory {
                 {
                     overrides = overrides.with_max_output_tokens(cap);
                 }
+                if request.overrides().jev_review().is_none()
+                    && let Some(mode) = profile.jev_review()
+                {
+                    overrides = overrides.with_jev_review(mode);
+                }
+                if request.overrides().jev_routing().is_none()
+                    && let Some(enabled) = profile.jev_routing()
+                {
+                    overrides = overrides.with_jev_routing(enabled);
+                }
                 let snapshot = self.load(&request.clone().with_overrides(overrides))?;
                 if !configuration_sources.contains(snapshot.sources()) {
                     configuration_sources.push(snapshot.sources().clone());
@@ -989,6 +1008,9 @@ impl RuntimeFactory {
                 snapshot
             }
         };
+        if snapshot.jev_routing() {
+            return Err(RuntimeBuildError::JevRoutingUnavailable);
+        }
         let resolved_model = self.resolved_model_for_snapshot(&snapshot)?;
         let provider_id = snapshot.model().provider();
         let provider_config = snapshot
@@ -1025,15 +1047,15 @@ impl RuntimeFactory {
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone());
-        if let Some(progress) = progress {
-            progress.set(qq_core::RuntimeLoadStage::ResolvingCheckpointCredential);
-        }
-        let jev_enforced = !self.is_isolated_tui_qa()
-            && (std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref() == Some("enforce")
-                || self.inner.credentials.is_registered("typesafe-jev")?);
-        if jev_enforced {
+        if snapshot.jev_review() != qq_config::JevReviewMode::Off {
+            if let Some(progress) = progress {
+                progress.set(qq_core::RuntimeLoadStage::ResolvingCheckpointCredential);
+            }
             profile = profile.with_checkpoint_reviewer(Arc::new(
-                TypeSafeCheckpointReviewer::from_credentials(&self.inner.credentials)?,
+                TypeSafeCheckpointReviewer::from_credentials(
+                    &self.inner.credentials,
+                    snapshot.jev_review(),
+                )?,
             ));
         }
         let mcp_subset = match pack_selection {
@@ -1579,6 +1601,27 @@ impl RuntimeLoader for RuntimeFactory {
                 let mut load =
                     factory.request_for_workspace(&workspace, request.model.max_output_tokens)?;
                 let mut overrides = load.overrides().clone();
+                if let Some(selection) = &request.checkpoint {
+                    let mode = match selection {
+                        qq_core::CheckpointSelection::Disabled => qq_config::JevReviewMode::Off,
+                        qq_core::CheckpointSelection::ReviewerIdentity(identity) => {
+                            match identity.as_str() {
+                                "typesafe/jev-1.13.0/criteria-2026-09-18.1/final" => {
+                                    qq_config::JevReviewMode::Final
+                                }
+                                "typesafe/jev-1.13.0/criteria-2026-09-18.1/enforce" => {
+                                    qq_config::JevReviewMode::Enforce
+                                }
+                                _ => {
+                                    return Err(RuntimeBuildError::InheritedCheckpoint(
+                                        identity.clone(),
+                                    ));
+                                }
+                            }
+                        }
+                    };
+                    overrides = overrides.with_jev_review(mode);
+                }
                 if let Some(model) = request.model.model {
                     overrides = overrides.with_model(model);
                 }
@@ -2550,11 +2593,15 @@ fn update_digest(digest: &mut Sha256, value: &[u8]) {
 #[derive(Clone)]
 struct TypeSafeCheckpointReviewer {
     client: reqwest::Client,
-    endpoint: &'static str,
+    endpoint: Arc<str>,
+    mode: qq_config::JevReviewMode,
 }
 
 impl TypeSafeCheckpointReviewer {
-    fn from_credentials(store: &CredentialStore) -> Result<Self, RuntimeBuildError> {
+    fn from_credentials(
+        store: &CredentialStore,
+        mode: qq_config::JevReviewMode,
+    ) -> Result<Self, RuntimeBuildError> {
         let secret = resolve_provider_credential(
             store,
             None,
@@ -2581,19 +2628,36 @@ impl TypeSafeCheckpointReviewer {
             .map_err(|_| RuntimeBuildError::JevClientUnavailable)?;
         Ok(Self {
             client,
-            endpoint: "https://api.typesafe.ai/v1/systemone",
+            endpoint: "https://api.typesafe.ai/v1/systemone".into(),
+            mode,
         })
     }
 }
 
 impl CheckpointReviewer for TypeSafeCheckpointReviewer {
+    fn max_cost_usd_nanos(&self) -> Option<u64> {
+        // Jev 1.13: at most 64k input tokens, $0.042/M input, free output.
+        // Published pricing checked 2026-09-18; this is an estimate, not billing.
+        Some(65_536 * 42)
+    }
+
     fn identity(&self) -> &'static str {
-        "typesafe/jev-1.13.0/completion-2026-09-17.1/enforce"
+        match self.mode {
+            qq_config::JevReviewMode::Final => "typesafe/jev-1.13.0/criteria-2026-09-18.1/final",
+            qq_config::JevReviewMode::Enforce => {
+                "typesafe/jev-1.13.0/criteria-2026-09-18.1/enforce"
+            }
+            qq_config::JevReviewMode::Off => unreachable!("disabled reviewers are not constructed"),
+        }
+    }
+
+    fn reviews_tools(&self) -> bool {
+        self.mode == qq_config::JevReviewMode::Enforce
     }
 
     fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
         let client = self.client.clone();
-        let endpoint = self.endpoint;
+        let endpoint = Arc::clone(&self.endpoint);
         Box::pin(async move {
             let phase = match request.phase {
                 qq_core::CheckpointPhase::ToolResult => "tool_result",
@@ -2601,6 +2665,19 @@ impl CheckpointReviewer for TypeSafeCheckpointReviewer {
             };
             let tool_phase = phase == "tool_result";
             let (claim, instructions) = checkpoint_claim_and_instructions(tool_phase);
+            let questions = [
+                    ("task_coverage", if tool_phase { "Does this outcome cover the requested invocation, including a clearly reported failure? Do not judge the whole task." } else { "Does the final candidate address the latest task and all its explicit acceptance criteria? Identify omissions as partial support." }),
+                    ("direct_evidence", if tool_phase { "Is the invocation outcome concrete enough to guide the next step? A clear failure is valid evidence." } else { "Are material completion claims grounded in the supplied direct observations? Excerpts, omitted observations, claims and summaries cannot prove missing requirements." }),
+                    ("consistency", "Are the claims consistent with the recorded arguments, result/error flag and observations? An acknowledged error is not a contradiction; claiming that a failed operation succeeded is."),
+                ].into_iter().map(|(id, criterion)| (id.to_owned(), serde_json::json!({
+                    "type": "choice", "instructions": [instructions, criterion],
+                    "criteria": {
+                        "supported": "The supplied evidence directly satisfies this criterion.",
+                        "partially_supported": "Part is supported but a material part of this criterion is missing.",
+                        "contradicted": "Direct observations conflict with this criterion.",
+                        "insufficient_evidence": "The supplied evidence cannot establish meaningful support or contradiction."
+                    }
+                }))).collect::<serde_json::Map<_, _>>();
             let body = serde_json::json!({
                 "state": {
                     "claim": claim,
@@ -2623,24 +2700,14 @@ impl CheckpointReviewer for TypeSafeCheckpointReviewer {
                         "resultIsError": request.is_error,
                     }
                 },
-                "questions": {
-                    "support": {
-                        "type": "choice",
-                        "instructions": instructions,
-                        "criteria": {
-                            "supported": if tool_phase { "The invocation outcome is direct, internally consistent, and usable for the next step, including a clearly reported failure." } else { "Evidence directly covers the entire claim and all applicable acceptance criteria with no unresolved contradiction." },
-                            "partially_supported": if tool_phase { "The outcome contains useful evidence but omits or ambiguously reports a material part of this invocation." } else { "Evidence directly covers part of the claim, but identified parts or acceptance criteria remain unverified." },
-                            "contradicted": "Direct evidence conflicts with a material part of the claim, such as an explicitly failed required test or a stated feature being absent.",
-                            "insufficient_evidence": "Evidence is absent, only repeats the claim, or is too unrelated or ambiguous to establish meaningful support or contradiction."
-                        }
-                    }
-                },
+                "questions": questions,
                 "model": "jev-1.13.0"
             });
-            let response = match client.post(endpoint).json(&body).send().await {
+            let mut response = match client.post(endpoint.as_ref()).json(&body).send().await {
                 Ok(response) if response.status().is_success() => response,
                 Ok(response) => {
                     return CheckpointVerdict {
+                        spend: qq_protocol::CheckpointSpend::default(),
                         outcome: CheckpointOutcome::Unavailable,
                         confidence: None,
                         feedback: format!("TypeSafe returned HTTP {}", response.status()),
@@ -2648,6 +2715,7 @@ impl CheckpointReviewer for TypeSafeCheckpointReviewer {
                 }
                 Err(error) => {
                     return CheckpointVerdict {
+                        spend: qq_protocol::CheckpointSpend::default(),
                         outcome: CheckpointOutcome::Unavailable,
                         confidence: None,
                         feedback: if error.is_timeout() {
@@ -2658,10 +2726,39 @@ impl CheckpointReviewer for TypeSafeCheckpointReviewer {
                     };
                 }
             };
-            let value: serde_json::Value = match response.json().await {
+            const MAX_REVIEW_RESPONSE_BYTES: usize = 64 * 1024;
+            let unavailable = |feedback: &str| CheckpointVerdict {
+                outcome: CheckpointOutcome::Unavailable,
+                confidence: None,
+                feedback: feedback.to_owned(),
+                spend: qq_protocol::CheckpointSpend::default(),
+            };
+            if response
+                .content_length()
+                .is_some_and(|length| length > MAX_REVIEW_RESPONSE_BYTES as u64)
+            {
+                return unavailable("TypeSafe checkpoint response exceeded 64 KiB");
+            }
+            let mut bytes = Vec::new();
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if chunk.len() > MAX_REVIEW_RESPONSE_BYTES - bytes.len() {
+                            return unavailable("TypeSafe checkpoint response exceeded 64 KiB");
+                        }
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        return unavailable("TypeSafe checkpoint response body was interrupted");
+                    }
+                }
+            }
+            let value: serde_json::Value = match serde_json::from_slice(&bytes) {
                 Ok(value) => value,
                 Err(_) => {
                     return CheckpointVerdict {
+                        spend: qq_protocol::CheckpointSpend::default(),
                         outcome: CheckpointOutcome::Unavailable,
                         confidence: None,
                         feedback: "TypeSafe returned an invalid checkpoint response".to_owned(),
@@ -2688,66 +2785,120 @@ fn checkpoint_claim_and_instructions(tool_phase: bool) -> (&'static str, &'stati
 }
 
 fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
+    let usage = value["usage"]["input_tokens"]
+        .as_u64()
+        .zip(value["usage"]["output_tokens"].as_u64())
+        .map(|(input_tokens, output_tokens)| qq_protocol::TokenUsage {
+            input_tokens,
+            output_tokens,
+            ..qq_protocol::TokenUsage::default()
+        });
+    let spend = qq_protocol::CheckpointSpend {
+        usage,
+        estimated_cost_usd_nanos: usage
+            .filter(|_| value["model"].as_str() == Some("jev-1.13.0"))
+            .and_then(|usage| usage.input_tokens.checked_mul(42)),
+    };
     let unavailable = || CheckpointVerdict {
+        spend,
         outcome: CheckpointOutcome::Unavailable,
         confidence: None,
         feedback: "TypeSafe returned a checkpoint response outside the pinned contract".to_owned(),
     };
-    if value["model"].as_str() != Some("jev-1.13.0") {
+    if value["model"].as_str() != Some("jev-1.13.0") || usage.is_none() {
         return unavailable();
     }
-    let answer = &value["answers"]["support"];
-    if answer["type"].as_str() != Some("choice") {
-        return unavailable();
-    }
-    let Some(confidence) = answer["confidence"]
-        .as_f64()
-        .filter(|v| (0.0..=1.0).contains(v))
-    else {
-        return unavailable();
-    };
-    let labels = [
-        "supported",
-        "partially_supported",
-        "contradicted",
-        "insufficient_evidence",
-    ];
-    let probabilities = &answer["probabilities"];
-    let mut sum = 0.0;
-    for label in labels {
-        let Some(value) = probabilities[label]
+    let mut outcome = CheckpointOutcome::Supported;
+    let mut minimum_confidence = 1.0_f64;
+    let mut findings = Vec::new();
+    for id in ["task_coverage", "direct_evidence", "consistency"] {
+        let answer = &value["answers"][id];
+        if answer["type"].as_str() != Some("choice") {
+            return unavailable();
+        }
+        let Some(confidence) = answer["confidence"]
             .as_f64()
-            .filter(|v| (0.0..=1.0).contains(v))
+            .filter(|value| (0.0..=1.0).contains(value))
         else {
             return unavailable();
         };
-        sum += value;
+        minimum_confidence = minimum_confidence.min(confidence);
+        let labels = [
+            "supported",
+            "partially_supported",
+            "contradicted",
+            "insufficient_evidence",
+        ];
+        let probabilities = &answer["probabilities"];
+        if probabilities.as_object().map(|values| values.len()) != Some(labels.len()) {
+            return unavailable();
+        }
+        let mut sum = 0.0;
+        let mut maximum = 0.0_f64;
+        for label in labels {
+            let Some(probability) = probabilities[label]
+                .as_f64()
+                .filter(|value| (0.0..=1.0).contains(value))
+            else {
+                return unavailable();
+            };
+            sum += probability;
+            maximum = maximum.max(probability);
+        }
+        if (sum - 1.0).abs() > 0.001 {
+            return unavailable();
+        }
+        let Some(choice) = answer["choice"]
+            .as_str()
+            .filter(|choice| labels.contains(choice))
+        else {
+            return unavailable();
+        };
+        let probability = probabilities[choice]
+            .as_f64()
+            .expect("validated distribution");
+        if probability < maximum {
+            return unavailable();
+        }
+        // Conservative initial policy, not calibrated accuracy: a weak winner
+        // asks for evidence rather than allowing a completion claim.
+        let classified = if confidence < 0.7 || probability < 0.7 {
+            CheckpointOutcome::InsufficientEvidence
+        } else {
+            match choice {
+                "supported" => CheckpointOutcome::Supported,
+                "partially_supported" => CheckpointOutcome::PartiallySupported,
+                "contradicted" => CheckpointOutcome::Contradicted,
+                "insufficient_evidence" => CheckpointOutcome::InsufficientEvidence,
+                _ => unreachable!("validated choice"),
+            }
+        };
+        if classified != CheckpointOutcome::Supported {
+            findings.push(format!("{id}={}", classified.label()));
+            outcome = match (outcome, classified) {
+                (CheckpointOutcome::Contradicted, _) | (_, CheckpointOutcome::Contradicted) => {
+                    CheckpointOutcome::Contradicted
+                }
+                (CheckpointOutcome::InsufficientEvidence, _)
+                | (_, CheckpointOutcome::InsufficientEvidence) => {
+                    CheckpointOutcome::InsufficientEvidence
+                }
+                _ => classified,
+            };
+        }
     }
-    if (sum - 1.0).abs() > 0.001 {
-        return unavailable();
-    }
-    let Some(choice) = answer["choice"].as_str() else {
-        return unavailable();
-    };
-    let Some(input_tokens) = value["usage"]["input_tokens"].as_u64() else {
-        return unavailable();
-    };
-    let Some(output_tokens) = value["usage"]["output_tokens"].as_u64() else {
-        return unavailable();
-    };
-    let outcome = match choice {
-        "supported" => CheckpointOutcome::Supported,
-        "partially_supported" => CheckpointOutcome::PartiallySupported,
-        "contradicted" => CheckpointOutcome::Contradicted,
-        "insufficient_evidence" => CheckpointOutcome::InsufficientEvidence,
-        _ => return unavailable(),
-    };
     CheckpointVerdict {
+        spend,
         outcome,
-        confidence: Some(confidence),
-        feedback: format!(
-            "JEV jev-1.13.0 policy completion-2026-09-17.1 classified the supplied evidence as {choice} (usage input={input_tokens} output={output_tokens}); green means evidence support, not guaranteed correctness"
-        ),
+        confidence: Some(minimum_confidence),
+        feedback: if findings.is_empty() {
+            "Jev criteria-2026-09-18.1: supplied evidence supports task_coverage, direct_evidence and consistency; this is not proof of correctness".to_owned()
+        } else {
+            format!(
+                "Jev criteria-2026-09-18.1: {}. Next: correct conflicting claims or gather direct evidence for these criterion IDs; omitted observations are not proof. Low-confidence choices count as insufficient evidence.",
+                findings.join("; ")
+            )
+        },
     }
 }
 
@@ -2802,13 +2953,19 @@ pub enum RuntimeBuildError {
     #[error(transparent)]
     CatalogClientUnavailable(#[from] crate::catalog::ModelDiscoveryError),
     #[error(
-        "JEV enforcement requires the stored typesafe-jev credential or TYPESAFE_API_KEY before the agent starts"
+        "JEV review requires the stored typesafe-jev credential or TYPESAFE_API_KEY before the agent starts"
     )]
     JevKeyRequired,
+    #[error("unsupported inherited reviewer identity: {0}")]
+    InheritedCheckpoint(String),
     #[error("TYPESAFE_API_KEY cannot be encoded as an authorization header")]
     JevKeyInvalid,
     #[error("the TypeSafe JEV checkpoint client could not be constructed")]
     JevClientUnavailable,
+    #[error(
+        "Jev routing is not implemented in this build; set jev_routing to false or QQ_JEV_ROUTING=off"
+    )]
+    JevRoutingUnavailable,
     #[error("isolated TUI QA profile is invalid: {reason}")]
     InvalidTuiQaProfile { reason: String },
 }
@@ -2843,8 +3000,10 @@ impl RuntimeBuildError {
             | Self::UnknownModel { .. }
             | Self::UnknownProfile(_)
             | Self::PackRequiresNewerProtocol { .. }
+            | Self::InheritedCheckpoint(_)
             | Self::JevKeyRequired
             | Self::JevKeyInvalid
+            | Self::JevRoutingUnavailable
             | Self::JevClientUnavailable
             | Self::InvalidTuiQaProfile { .. } => RunFailureKind::Configuration,
             Self::UnauthenticatedProvider(_) => RunFailureKind::Authentication,
@@ -4911,6 +5070,19 @@ mod tests {
         .unwrap();
         let request = LoadRequest::new(&workspace);
         let snapshot = factory.load(&request).unwrap();
+        for mode in [
+            qq_config::JevReviewMode::Final,
+            qq_config::JevReviewMode::Enforce,
+        ] {
+            let enabled = request
+                .clone()
+                .with_overrides(RuntimeOverrides::new().with_jev_review(mode));
+            assert!(matches!(
+                factory.load(&enabled),
+                Err(RuntimeBuildError::InvalidTuiQaProfile { .. })
+            ));
+        }
+
         assert_eq!(factory.configured_model_options(&snapshot).len(), 1);
 
         let catalog = ModelCatalogRequest {
@@ -4964,6 +5136,7 @@ mod tests {
         RuntimeLoader::load(
             &factory,
             RuntimeLoadRequest {
+                checkpoint: None,
                 workspace: workspace.display().to_string(),
                 model: ModelSelection::default(),
                 profile: AgentProfileId::default(),
@@ -5751,6 +5924,8 @@ mod tests {
             profile: profile.clone(),
             explicit_config_path: None,
             explicit_config_content: None,
+            jev_review: None,
+            jev_routing: None,
         };
         let (first, _) = factory
             .inner
@@ -6408,9 +6583,240 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn inherited_checkpoint_off_wins_before_credentials_and_unknown_identity_is_rejected() {
+        let fixture = RuntimeFixture::new();
+        fs::write(fixture.path("global/config.ron"), r#"(
+            version: 1, model: "custom/test", jev_review: enforce,
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test": (name: "test") }) },
+        )"#).unwrap();
+        let factory = fixture.factory();
+        let workspace = std::fs::canonicalize(fixture.path("work"))
+            .unwrap()
+            .display()
+            .to_string();
+        let request = RuntimeLoadRequest {
+            workspace,
+            model: ModelSelection::default(),
+            profile: AgentProfileId::default(),
+            checkpoint: Some(qq_core::CheckpointSelection::Disabled),
+        };
+        let runtime = RuntimeLoader::load(&factory, request.clone())
+            .await
+            .unwrap();
+        assert!(runtime.plan.descriptor().checkpoint.is_none());
+        let error = match RuntimeLoader::load(
+            &factory,
+            RuntimeLoadRequest {
+                checkpoint: Some(qq_core::CheckpointSelection::ReviewerIdentity(
+                    "unknown/reviewer".into(),
+                )),
+                ..request
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("unknown inherited review cannot fall back to current configuration"),
+            Err(error) => error,
+        };
+        assert!(
+            error.message.contains("inherited reviewer identity"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn reserved_routing_opt_in_is_rejected_instead_of_silently_ignored() {
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let request = fixture.request(r#"(
+            version: 1, model: "custom/test", jev_routing: true,
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test": (name: "test") }) },
+        )"#);
+        assert!(matches!(
+            factory.plan_for(&request),
+            Err(RuntimeBuildError::JevRoutingUnavailable)
+        ));
+        let disabled = request
+            .clone()
+            .with_overrides(request.overrides().clone().with_jev_routing(false));
+        assert!(factory.plan_for(&disabled).is_ok());
+    }
+
+    #[test]
+    fn stored_jev_credential_does_not_enable_or_read_the_reviewer() {
+        let fixture = RuntimeFixture::new();
+        let paths = CredentialPaths::new(fixture.path("data"));
+        let store =
+            CredentialStore::with_backend(paths.clone(), Arc::new(MemoryKeyring::default()));
+        store
+            .set_with_metadata(
+                "typesafe-jev",
+                b"test-key",
+                false,
+                Some("typesafe-jev"),
+                Some("https://api.typesafe.ai"),
+            )
+            .unwrap();
+        let factory = fixture
+            .factory_with_credentials(CredentialStore::with_backend(paths, Arc::new(PanicKeyring)));
+        let request = fixture.request(r#"(
+            version: 1, model: "custom/test",
+            providers: { "custom": Custom(
+                connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth),
+                models: { "test": (name: "test") },
+            ) },
+        )"#);
+        let plan = factory.plan_for(&request).unwrap();
+        assert!(plan.descriptor().checkpoint.is_none());
+    }
+
+    #[test]
+    fn jev_profiles_and_explicit_off_have_distinct_cached_plans() {
+        let fixture = RuntimeFixture::new();
+        let paths = CredentialPaths::new(fixture.path("data"));
+        let store = CredentialStore::with_backend(paths, Arc::new(MemoryKeyring::default()));
+        store
+            .set_with_metadata(
+                "typesafe-jev",
+                b"test-key",
+                false,
+                Some("typesafe-jev"),
+                Some("https://api.typesafe.ai"),
+            )
+            .unwrap();
+        let factory = fixture.factory_with_credentials(store);
+        let request = fixture.request(r#"(
+            version: 1, model: "custom/test", jev_review: enforce,
+            profiles: { "review": Profile(jev_review: final), "plain": Profile(jev_review: off) },
+            providers: { "custom": Custom(
+                connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth),
+                models: { "test": (name: "test") },
+            ) },
+        )"#);
+        let profile = AgentProfileId::new("review").unwrap();
+        let final_plan = factory.plan_for_profile(&request, &profile).unwrap();
+        assert!(
+            final_plan
+                .descriptor()
+                .checkpoint
+                .as_deref()
+                .unwrap()
+                .ends_with("/final")
+        );
+        let disabled_request = request.clone().with_overrides(
+            request
+                .overrides()
+                .clone()
+                .with_jev_review(qq_config::JevReviewMode::Off),
+        );
+        let disabled = factory
+            .plan_for_profile(&disabled_request, &profile)
+            .unwrap();
+        assert!(disabled.descriptor().checkpoint.is_none());
+        let enabled_again = factory.plan_for_profile(&request, &profile).unwrap();
+        assert_eq!(enabled_again.digest(), final_plan.digest());
+        assert_ne!(disabled.digest(), final_plan.digest());
+        assert!(
+            factory
+                .plan_for_profile(&request, &AgentProfileId::new("plain").unwrap())
+                .unwrap()
+                .descriptor()
+                .checkpoint
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn typesafe_checkpoint_rejects_oversized_chunked_responses() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0; 4096];
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+                assert!(request.len() <= 64 * 1024);
+                if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&request[..end]).unwrap();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let body_start = request
+                .windows(4)
+                .position(|part| part == b"\r\n\r\n")
+                .unwrap()
+                + 4;
+            let body: serde_json::Value = serde_json::from_slice(&request[body_start..]).unwrap();
+            assert_eq!(body["model"], "jev-1.13.0");
+            let questions = body["questions"].as_object().unwrap();
+            assert_eq!(questions.len(), 3);
+            for criterion in ["task_coverage", "direct_evidence", "consistency"] {
+                assert_eq!(questions[criterion]["type"], "choice");
+                assert_eq!(
+                    questions[criterion]["criteria"].as_object().unwrap().len(),
+                    4
+                );
+            }
+            assert_eq!(body["state"]["facts"]["task"], "answer");
+            assert_eq!(body["state"]["facts"]["result"], "answer");
+            assert_eq!(body["state"]["facts"]["phase"], "final_candidate");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            for length in [32 * 1024, 32 * 1024, 1] {
+                socket
+                    .write_all(format!("{length:x}\r\n").as_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(&vec![b'x'; length]).await.unwrap();
+                socket.write_all(b"\r\n").await.unwrap();
+            }
+            socket.write_all(b"0\r\n\r\n").await.unwrap();
+        });
+        let reviewer = TypeSafeCheckpointReviewer {
+            client: reqwest::Client::new(),
+            endpoint: format!("http://{address}/").into(),
+            mode: qq_config::JevReviewMode::Final,
+        };
+        let verdict = reviewer
+            .review(CheckpointRequest {
+                correlation: "final:1".into(),
+                phase: qq_core::CheckpointPhase::FinalCandidate,
+                tool_call_id: None,
+                tool: None,
+                task: "answer".into(),
+                evidence: "answer".into(),
+                is_error: false,
+            })
+            .await;
+        server.await.unwrap();
+        assert_eq!(verdict.outcome, CheckpointOutcome::Unavailable);
+        assert!(verdict.feedback.contains("64 KiB"), "{}", verdict.feedback);
+        assert!(verdict.spend.usage.is_none());
+    }
+
     #[test]
     fn typesafe_checkpoint_requires_the_pinned_complete_distribution() {
-        let valid = serde_json::json!({
+        let mut valid = serde_json::json!({
             "model": "jev-1.13.0",
             "answers": { "support": {
                 "type": "choice", "choice": "supported", "confidence": 0.8,
@@ -6421,6 +6827,25 @@ mod tests {
             }},
             "usage": {"input_tokens": 10, "output_tokens": 2}
         });
+        let answer = valid["answers"]["support"].clone();
+        valid["answers"] = serde_json::json!({
+            "task_coverage": answer.clone(), "direct_evidence": answer.clone(), "consistency": answer,
+        });
+        let mut uncertain = valid.clone();
+        uncertain["answers"]["direct_evidence"]["confidence"] = serde_json::json!(0.2);
+        let verdict = parse_typesafe_checkpoint(&uncertain);
+        assert_eq!(verdict.outcome, CheckpointOutcome::InsufficientEvidence);
+        assert!(verdict.feedback.contains("direct_evidence"));
+        assert_eq!(verdict.spend.usage.unwrap().input_tokens, 10);
+        assert_eq!(verdict.spend.estimated_cost_usd_nanos, Some(420));
+        let mut conflicting = valid.clone();
+        conflicting["answers"]["consistency"]["choice"] = serde_json::json!("contradicted");
+        conflicting["answers"]["consistency"]["probabilities"] = serde_json::json!({
+            "supported": 0.05, "partially_supported": 0.05, "contradicted": 0.85, "insufficient_evidence": 0.05,
+        });
+        let verdict = parse_typesafe_checkpoint(&conflicting);
+        assert_eq!(verdict.outcome, CheckpointOutcome::Contradicted);
+        assert!(verdict.feedback.contains("consistency=contradicted"));
         assert_eq!(
             parse_typesafe_checkpoint(&valid).outcome,
             CheckpointOutcome::Supported

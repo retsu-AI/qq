@@ -361,10 +361,22 @@ impl SessionStore {
                     text,
                 });
             }
+            SessionEvent::CheckpointStarted {
+                correlation, phase, ..
+            } => {
+                effects.push(StateEffect::Notice {
+                    session: Some(session_id),
+                    level: NoticeLevel::Info,
+                    text: format!(
+                        "Jev review pending ({phase:?}, {correlation}); assessing selected evidence"
+                    ),
+                });
+            }
             SessionEvent::CheckpointReviewed {
                 correlation,
                 outcome,
                 feedback,
+                spend,
                 ..
             } => {
                 let supported = matches!(outcome, qq_protocol::CheckpointOutcome::Supported);
@@ -376,8 +388,14 @@ impl SessionStore {
                         NoticeLevel::Error
                     },
                     text: format!(
-                        "JEV {} {correlation}: {feedback}",
-                        if supported { "GREEN" } else { "RED" }
+                        "Jev {outcome:?} {correlation}: {feedback}; reviewer spend {}",
+                        spend
+                            .as_ref()
+                            .and_then(|spend| spend.estimated_cost_usd_nanos)
+                            .map_or_else(
+                                || "unknown or not dispatched".to_owned(),
+                                |cost| format!("${:.6}", cost as f64 / 1_000_000_000.0)
+                            )
                     ),
                 });
             }

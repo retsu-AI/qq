@@ -38,6 +38,8 @@ written.
 | 0027 | [`qq-core` is a public embedding API; its exports are a contract, not leakage](0027-qq-core-public-embedding-api.md) | Accepted |
 | 0028 | [Mandatory typed JEV checkpoints after tool results and final candidates](0028-mandatory-typed-jev-checkpoints.md) | Accepted; narrowly supersedes ADR-0003's synchronous-decision list |
 
+| 0030 | [Explicit, independent Jev capabilities](0030-optional-jev-decisions.md) | Accepted; supersedes ADR-0028 activation |
+
 ## When to write one
 
 Write an ADR when a change:

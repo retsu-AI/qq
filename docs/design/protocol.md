@@ -46,7 +46,7 @@ Related documents:
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 23
+PROTOCOL_VERSION = 24
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -1946,3 +1946,9 @@ reset by an audit revision or steering. The run then settles `completed` with
 No verdict is published for a cancelled, failed, or budget-exhausted run
 (including a repair turn that became the reserved budget-final response). A
 valid document is not a correct answer; the caller still verifies it.
+
+Protocol 24 adds `checkpoint_started` and optional typed `spend` on
+`checkpoint_reviewed`. Start is durable before inference; pending spend is
+unknown. A settled receipt and updated run totals commit together. Cancellation
+settles a pending tool or final assessment as unavailable with unknown spend.
+Historical verdicts without `spend` decode as absent, never as a priced receipt.

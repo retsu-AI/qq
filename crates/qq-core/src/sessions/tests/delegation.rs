@@ -2,6 +2,104 @@ use super::*;
 use crate::CheckpointPhase;
 
 #[tokio::test]
+async fn child_checkpoint_inheritance_preserves_profile_but_not_user_followups() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (workspace_id, session_id, parent) = create_claimed_parent(&store, directory.path()).await;
+    let profile = AgentProfileId::new("plain").unwrap();
+    let child = store
+        .create_child_run(
+            &parent,
+            ToolCallId::from_bytes([0x5a; 16]),
+            ChildAdmission {
+                profile: profile.clone(),
+                model: parent.model.clone(),
+                task: "child task".into(),
+                limits: RunLimits::default(),
+                approval_mode: ApprovalMode::ReadOnly,
+                purpose: SessionPurpose::Task,
+            },
+        )
+        .await
+        .unwrap();
+    let claimed = store.claim_next_run(true).await.unwrap().unwrap();
+    assert_eq!(claimed.identity.run_id, child.run_id);
+    assert_eq!(claimed.profile, profile);
+    assert_eq!(claimed.checkpoint, Some(CheckpointSelection::Disabled));
+    store
+        .finish_run(
+            &claimed,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id: child.session_id,
+                input: vec![InputPart::text("user followup")],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let followup = store.claim_next_run(true).await.unwrap().unwrap();
+    assert!(followup.user_initiated);
+    assert_eq!(followup.profile, profile);
+    assert_eq!(
+        followup.checkpoint, None,
+        "user-selected configuration must take effect"
+    );
+    let public_child = store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CreateSession {
+                workspace_id,
+                parent_id: Some(session_id),
+                model: parent.model.clone(),
+                approval_mode: ApprovalMode::ReadOnly,
+                profile: profile.clone(),
+                correlation: Correlation::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::SessionCreated {
+        session_id: public_id,
+    } = public_child.receipt.outcome
+    else {
+        panic!("session expected")
+    };
+    store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id: public_id,
+                input: vec![InputPart::text("public child task")],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let public = store.claim_next_run(true).await.unwrap().unwrap();
+    assert_eq!(public.identity.session_id, public_id);
+    assert_eq!(public.profile, profile);
+    assert_eq!(
+        public.checkpoint, None,
+        "parented public sessions use their own configuration"
+    );
+}
+
+#[tokio::test]
 async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
     let parent_requests = Arc::new(StdMutex::new(Vec::new()));
     let child_requests = Arc::new(StdMutex::new(Vec::new()));
@@ -585,6 +683,7 @@ async fn parent_cancellation_linearizes_with_in_flight_child_creation() {
                         root_run_id: create_parent.identity.run_id,
                     },
                     ChildAdmission {
+                        profile: AgentProfileId::default(),
                         model: ModelSelection {
                             model: Some("test/child".to_owned()),
                             max_output_tokens: Some(256),
@@ -662,6 +761,7 @@ async fn parent_cancellation_linearizes_with_in_flight_child_creation() {
             &cancelling_parent,
             ToolCallId::from_bytes([0x5a; 16]),
             ChildAdmission {
+                profile: AgentProfileId::default(),
                 model: ModelSelection {
                     model: Some("test/child".to_owned()),
                     max_output_tokens: Some(256),
@@ -699,6 +799,7 @@ async fn replayed_parent_cancellation_rediscovers_its_running_child() {
             &parent,
             ToolCallId::from_bytes([0x5a; 16]),
             ChildAdmission {
+                profile: AgentProfileId::default(),
                 model: ModelSelection {
                     model: Some("test/child".to_owned()),
                     max_output_tokens: Some(256),
@@ -758,6 +859,7 @@ async fn restart_cancels_a_queued_child_owned_by_an_interrupted_parent() {
             &parent,
             ToolCallId::from_bytes([0x5a; 16]),
             ChildAdmission {
+                profile: AgentProfileId::default(),
                 model: ModelSelection {
                     model: Some("test/child".to_owned()),
                     max_output_tokens: Some(256),
@@ -1894,6 +1996,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
     };
     let parent_run = RunId::generate().unwrap();
     let parent = ClaimedRun {
+        checkpoint: None,
         identity: RunIdentity {
             workspace_id,
             session_id,
@@ -3625,6 +3728,7 @@ async fn nested_spend_receipt_distinguishes_never_started_from_unknown_cancelled
             &parent,
             ToolCallId::generate().unwrap(),
             ChildAdmission {
+                profile: AgentProfileId::default(),
                 model: parent.model.clone(),
                 task: "never starts".to_owned(),
                 limits: RunLimits::default(),

@@ -154,6 +154,7 @@ pub(super) fn start_auto_compaction(
     transaction.commit()?;
     Ok(Some((
         ClaimedRun {
+            checkpoint: None,
             identity: RunIdentity {
                 workspace_id: original.identity.workspace_id,
                 session_id: original.identity.session_id,

@@ -144,31 +144,6 @@ impl Edit {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{Edit, Form};
-
-    #[test]
-    fn empty_optional_insert_modes_do_not_conflict_with_replace() {
-        let edit: Edit = serde_json::from_value(serde_json::json!({
-            "path": "README.md",
-            "old": "before",
-            "new": "after",
-            "insert_before": "",
-            "insert_after": ""
-        }))
-        .expect("valid edit arguments");
-
-        assert!(matches!(
-            edit.form(),
-            Ok(Form::Replace {
-                old: "before",
-                new: "after"
-            })
-        ));
-    }
-}
-
 /// One file's planned change: its original bytes and permissions, the text
 /// after every edit in the batch, and the per-edit summaries for the result.
 struct Planned {
@@ -821,4 +796,29 @@ pub(super) fn apply_atomically(
         let _ = workspace.root().remove_file(&temp_path);
     }
     applied
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Edit, Form};
+
+    #[test]
+    fn empty_optional_insert_modes_do_not_conflict_with_replace() {
+        let edit: Edit = serde_json::from_value(serde_json::json!({
+            "path": "README.md",
+            "old": "before",
+            "new": "after",
+            "insert_before": "",
+            "insert_after": ""
+        }))
+        .expect("valid edit arguments");
+
+        assert!(matches!(
+            edit.form(),
+            Ok(Form::Replace {
+                old: "before",
+                new: "after"
+            })
+        ));
+    }
 }

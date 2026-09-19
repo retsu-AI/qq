@@ -16,11 +16,12 @@ use super::{
     ConfigError, ConfigKey, ConfigProvenance, ConfigSnapshot, ConfigSources, Connection,
     DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MCP_CALL_TIMEOUT_SECONDS, DEFAULT_MCP_MAX_CONCURRENT_CALLS,
     DelegationConfig, DelegationEntry, DelegationRole, EffectivePolicy, HttpAccess, HttpCredential,
-    InputModality, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH, MAX_DELEGATION_NOTE_BYTES,
-    MAX_DELEGATION_ROSTER, MAX_MCP_CALL_TIMEOUT_SECONDS, MAX_MCP_MAX_CONCURRENT_CALLS,
-    MAX_PROFILE_NAME_BYTES, McpServerConfig, McpTransport, ModelMetadata, ModelPricing, ModelRoute,
-    PolicyGrants, ProfileApprovalMode, ProviderAccess, ProviderApi, ProviderConfig, ProviderKind,
-    RuntimeOverrides, SecretRef, SourceIdentity, SourceKind, SourceReport, WorkspaceGrant,
+    InputModality, JevReviewMode, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH,
+    MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER, MAX_MCP_CALL_TIMEOUT_SECONDS,
+    MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES, McpServerConfig, McpTransport,
+    ModelMetadata, ModelPricing, ModelRoute, PolicyGrants, ProfileApprovalMode, ProviderAccess,
+    ProviderApi, ProviderConfig, ProviderKind, RuntimeOverrides, SecretRef, SourceIdentity,
+    SourceKind, SourceReport, WorkspaceGrant,
 };
 
 pub(super) fn deserialize_unique_btree_map<'de, D, K, V>(
@@ -518,6 +519,10 @@ pub(super) struct Document {
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     audit: Field<AuditPatch>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
+    jev_review: Field<JevReviewMode>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    jev_routing: Field<bool>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
     max_output_tokens: Field<u32>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     providers: Field<UniqueMap<String, ProviderEntryPatch>>,
@@ -588,6 +593,10 @@ enum ProfilePatch {
         max_output_tokens: Option<u32>,
         #[serde(default)]
         approval_mode: Option<ProfileApprovalMode>,
+        #[serde(default)]
+        jev_review: Option<JevReviewMode>,
+        #[serde(default)]
+        jev_routing: Option<bool>,
     },
     Remove,
 }
@@ -667,6 +676,9 @@ impl Document {
             || self.reviewer_model.is_present()
             || self.delegation.is_present()
             || self.audit.is_present()
+            || self.jev_review.is_present()
+            || self.jev_routing.is_present()
+            || self.profiles.is_present()
             || self.providers.is_present()
             || self.mcp.is_present()
             || self.packs.is_present()
@@ -711,6 +723,12 @@ impl Document {
             #[serde(skip_serializing_if = "Option::is_none")]
             audit: Option<&'a Field<AuditPatch>>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            jev_review: Option<&'a Field<JevReviewMode>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            jev_routing: Option<&'a Field<bool>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            profiles: Option<&'a Field<UniqueMap<String, ProfilePatch>>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             providers: Option<&'a Field<UniqueMap<String, ProviderEntryPatch>>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             mcp: Option<&'a Field<UniqueMap<String, McpServerPatch>>>,
@@ -734,6 +752,9 @@ impl Document {
                 .then_some(&self.reviewer_model),
             delegation: present(&self.delegation),
             audit: present(&self.audit),
+            jev_review: present(&self.jev_review),
+            jev_routing: present(&self.jev_routing),
+            profiles: present(&self.profiles),
             providers: present(&self.providers),
             mcp: present(&self.mcp),
             packs: present(&self.packs),
@@ -777,6 +798,12 @@ impl Document {
         }
         if self.delegation.is_present() {
             touched.push(ConfigKey::Delegation);
+        }
+        if self.jev_review.is_present() {
+            touched.push(ConfigKey::JevReview);
+        }
+        if self.jev_routing.is_present() {
+            touched.push(ConfigKey::JevRouting);
         }
         if self.audit.is_present() {
             touched.push(ConfigKey::Audit);
@@ -1310,6 +1337,8 @@ pub(super) struct MergeState {
     reviewer_model: Option<String>,
     delegation: Option<DelegationPatch>,
     audit: Option<AuditPatch>,
+    jev_review: JevReviewMode,
+    jev_routing: bool,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
     mcp: BTreeMap<String, McpServerConfig>,
@@ -1383,6 +1412,8 @@ impl MergeState {
                 reviewer_model: None,
                 delegation: None,
                 audit: None,
+                jev_review: JevReviewMode::Off,
+                jev_routing: false,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
                 providers,
                 mcp: BTreeMap::new(),
@@ -1459,6 +1490,18 @@ impl MergeState {
                 self.provenance.delegation = Some(source.clone());
             }
         }
+        apply_default(
+            &document.jev_review,
+            &mut self.jev_review,
+            JevReviewMode::Off,
+        );
+        apply_default(&document.jev_routing, &mut self.jev_routing, false);
+        if document.jev_review.is_present() {
+            self.provenance.jev_review = Some(source.clone());
+        }
+        if document.jev_routing.is_present() {
+            self.provenance.jev_routing = Some(source.clone());
+        }
         match &document.audit {
             Field::Missing => {}
             Field::Set(patch) => {
@@ -1519,6 +1562,8 @@ impl MergeState {
                             organization,
                             max_output_tokens,
                             approval_mode,
+                            jev_review,
+                            jev_routing,
                         } => {
                             self.profiles.insert(
                                 name.clone(),
@@ -1527,6 +1572,8 @@ impl MergeState {
                                     organization: organization.clone(),
                                     max_output_tokens: *max_output_tokens,
                                     approval_mode: *approval_mode,
+                                    jev_review: *jev_review,
+                                    jev_routing: *jev_routing,
                                     pack: None,
                                 },
                             );
@@ -1546,6 +1593,16 @@ impl MergeState {
         source: &SourceIdentity,
     ) -> Vec<ConfigKey> {
         let mut touched = Vec::new();
+        if let Some(mode) = overrides.jev_review {
+            self.jev_review = mode;
+            self.provenance.jev_review = Some(source.clone());
+            touched.push(ConfigKey::JevReview);
+        }
+        if let Some(enabled) = overrides.jev_routing {
+            self.jev_routing = enabled;
+            self.provenance.jev_routing = Some(source.clone());
+            touched.push(ConfigKey::JevRouting);
+        }
         if let Some(organization) = &overrides.organization {
             self.organization = Some(organization.clone());
             self.provenance.organization = Some(source.clone());
@@ -1905,6 +1962,8 @@ impl MergeState {
                             organization: profile.organization().map(str::to_owned),
                             max_output_tokens: profile.max_output_tokens(),
                             approval_mode: profile.approval_mode(),
+                            jev_review: None,
+                            jev_routing: None,
                             pack: Some(crate::PackProfileRef::new(pack, profile.clone())),
                         },
                     ),
@@ -2107,6 +2166,8 @@ impl MergeState {
             reviewer_model,
             delegation,
             audit,
+            jev_review: self.jev_review,
+            jev_routing: self.jev_routing,
             max_output_tokens: self.max_output_tokens,
             providers: self.providers,
             mcp: self.mcp,

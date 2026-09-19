@@ -461,6 +461,7 @@ async fn run_owned_child(
         if let Err(error) = inner
             .loader
             .load(RuntimeLoadRequest {
+                checkpoint: parent.checkpoint.clone(),
                 workspace: parent.workspace.clone(),
                 model: selection.clone(),
                 profile: parent.profile.clone(),
@@ -513,6 +514,7 @@ async fn run_owned_child(
             &parent,
             call_id,
             ChildAdmission {
+                profile: parent.profile.clone(),
                 model: selection,
                 task,
                 limits: child_limits,

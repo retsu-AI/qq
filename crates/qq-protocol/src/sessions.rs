@@ -1749,6 +1749,12 @@ pub enum SessionEvent {
     /// root final candidate. Persisted before publication and correlated to
     /// the reviewed boundary. `supported` permits progress; every other
     /// outcome is fail-closed.
+    CheckpointStarted {
+        run_id: RunId,
+        correlation: String,
+        phase: CheckpointPhase,
+        tool_call_id: Option<ToolCallId>,
+    },
     CheckpointReviewed {
         run_id: RunId,
         correlation: String,
@@ -1759,6 +1765,8 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         confidence_basis_points: Option<u16>,
         feedback: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spend: Option<CheckpointSpend>,
     },
     CancellationRequested {
         session: Box<SessionSummary>,
@@ -1815,6 +1823,14 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         final_output: Option<Box<FinalOutput>>,
     },
+}
+
+/// One reviewer request's accounting. Missing usage or price means unknown,
+/// including a request interrupted after dispatch; it never means free.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointSpend {
+    pub usage: Option<TokenUsage>,
+    pub estimated_cost_usd_nanos: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3102,7 +3118,8 @@ mod tests {
         // `ApprovalResolution::Answered`.
         // Version 22 added `ApprovalGrant::Host` and the `fetch` preview on
         // `tool_approval_requested` for the network tool.
-        assert_eq!(crate::PROTOCOL_VERSION, 23);
+        // Version 24 adds review start markers and typed spend receipts.
+        assert_eq!(crate::PROTOCOL_VERSION, 24);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

@@ -55,6 +55,7 @@ pub(super) struct ChildRunParent {
 /// What a new child is admitted with: its model, task, remaining budget, and
 /// the authority and purpose its parent granted.
 pub(super) struct ChildAdmission {
+    pub(super) profile: AgentProfileId,
     pub(super) model: ModelSelection,
     pub(super) task: String,
     pub(super) limits: RunLimits,
@@ -74,6 +75,7 @@ pub(super) fn create_child_run(
     admission: ChildAdmission,
 ) -> Result<CreatedChildRun, SessionRuntimeError> {
     let ChildAdmission {
+        profile,
         model,
         task,
         limits,
@@ -162,8 +164,8 @@ pub(super) fn create_child_run(
             "INSERT INTO sessions(
                 id, workspace_id, parent_id, owner_run_id, spawned_by_tool_call_id, title,
                 status, queued_prompts, model, max_output_tokens, organization, approval_mode,
-                created_at_ms, updated_at_ms, depth, root_run_id, purpose
-             ) VALUES (?1, ?2, ?3, ?4, ?10, ?5, 'queued', 1, ?6, ?7, ?8, ?11, ?9, ?9, ?12, ?13, ?14)",
+                created_at_ms, updated_at_ms, depth, root_run_id, purpose, profile
+             ) VALUES (?1, ?2, ?3, ?4, ?10, ?5, 'queued', 1, ?6, ?7, ?8, ?11, ?9, ?9, ?12, ?13, ?14, ?15)",
             params![
                 session_id.to_string(),
                 workspace_id.to_string(),
@@ -179,6 +181,7 @@ pub(super) fn create_child_run(
                 depth,
                 root_run_id.to_string(),
                 purpose.as_str(),
+                profile.as_str(),
             ],
         )
         ?;

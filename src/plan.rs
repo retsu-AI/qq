@@ -55,6 +55,8 @@ pub struct PlanKey {
     pub profile: AgentProfileId,
     pub explicit_config_path: Option<PathBuf>,
     pub explicit_config_content: Option<String>,
+    pub jev_review: Option<qq_config::JevReviewMode>,
+    pub jev_routing: Option<bool>,
 }
 
 impl std::fmt::Debug for PlanKey {
@@ -591,6 +593,8 @@ mod tests {
             profile: AgentProfileId::default(),
             explicit_config_path: None,
             explicit_config_content: None,
+            jev_review: None,
+            jev_routing: None,
         }
     }
 

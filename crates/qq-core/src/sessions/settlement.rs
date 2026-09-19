@@ -599,6 +599,7 @@ pub(super) fn settle_panicked_execution(
         {
             let active_run_id: RunId = parse_id(&active_run)?;
             let active_claim = ClaimedRun {
+                checkpoint: None,
                 identity: RunIdentity {
                     workspace_id: original.identity.workspace_id,
                     session_id: original.identity.session_id,
@@ -965,6 +966,7 @@ pub(super) fn recover_interrupted_runs(
         let session_id = parse_id(&session)?;
         let workspace_id = parse_id(&workspace)?;
         let claimed = ClaimedRun {
+            checkpoint: None,
             identity: RunIdentity {
                 workspace_id,
                 session_id,

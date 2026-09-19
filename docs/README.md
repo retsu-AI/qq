@@ -72,3 +72,6 @@ evidence.
 4. Ledgers are append-only evidence with one writer each; raw measurements
    stay under `target/qq-perf/` and out of Git.
 5. Research that motivated a plan lives in `design/`, not in the plan.
+
+Jev: [review and direction](design/jev-runtime-review-2026-09-18.md),
+[opt-in runbook](runbooks/jev.md), [implementation plan](plans/jev-opt-in.md).
