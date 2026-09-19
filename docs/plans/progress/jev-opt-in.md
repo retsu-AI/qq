@@ -7,7 +7,7 @@ Owner: this stacked implementation session. Base `dc59d14` / draft #72.
 | J1–J5 + visible J7 | Optional review, correctness and receipts | In review | [#74](https://github.com/retsu-AI/qq/pull/74), stacked on #72 | Local and hosted checks green; quiet-host tails open |
 | J6a | Explicit model effort | In review | [#76](https://github.com/retsu-AI/qq/pull/76), stacked on #74 | Local checks/reviews green; performance gate unresolved; hosted CI 35394821612 successful |
 | J6b | Optional routing | In review | [#77](https://github.com/retsu-AI/qq/pull/77), stacked on #76 | Hosted CI 35406214280 successful; incremental median within budget; full-stack qualification pending |
-| Passive J7 | Advisory observer | In progress | `feat/eng-791-jev-advisory`, stacked on #77 | Explicit client observer and durable external receipts implemented; verification in progress |
+| Passive J7 | Advisory observer | In review | [#78](https://github.com/retsu-AI/qq/pull/78), stacked on #77 | Local workspace gates and independent review passed; hosted CI running |
 | J8–J9 | Qualification and delivery | In progress | #74 | Live evaluation and remaining slices open |
 
 ## Entries
@@ -304,3 +304,26 @@ Workspace build passed. Independent Standards review approved the passive
 observer with no concrete blockers; documented evidence-window and pending-spend
 limitations remain. No protocol, schema, runtime hot-path or dependency change
 in this slice. Full-stack performance qualification is still outstanding.
+
+### Passive J7 stacked delivery — 2026-09-18
+
+Published d405afb as draft [#78](https://github.com/retsu-AI/qq/pull/78),
+verified base `feat/eng-791-jev-routing-accounting` and matching remote head.
+Hosted CI 35407824495 started. Retained release fixtures compare original
+dc59d14 against the current core implementation, unchanged by passive J7;
+30 alternating pairs and same-binary controls run under
+`target/qq-perf/jev-full-stack-2026-09-18/`. This comparison does not measure
+CLI startup or live inference. No merge or paid requests.
+
+### Full repair-stack focused performance — 2026-09-18
+
+Retained dc59d14/cf61126 release fixtures, 30 alternating A/B and 30 A/A pairs
+per fixture; verified no core/config/provider/manifest/lock changes between
+cf61126 and d405afb. Tool-loop median 53,166→53,906 ns (+1.39%); p95
+70,438→70,447 ns. Same-binary median +2.68%, p95 73,641→80,467 ns (+9.27%).
+Plan compilation median 25,474→24,793.5 ns (-2.67%); digest -6.00%.
+Raw receipt: `target/qq-perf/jev-full-stack-2026-09-18/paired.json`.
+The measured repair-stack median fits 5%, but I/O pressure 20.78–39.18% and
+the failing same-binary tail prevent quiet-host tail qualification. This is
+relative to PR #72, not main, and does not qualify absolute budgets, startup,
+fanout or live Jev quality/savings. Those acceptance limits remain open.
