@@ -73,6 +73,7 @@ jobs:
         shell: bash
         run: |
           echo "QQ_GIT_SHA=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+          echo "QQ_GIT_FULL_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "QQ_GIT_DATE=$(git log -1 --format=%cs)" >> "$GITHUB_ENV"
 
       - name: Add target

@@ -14,6 +14,9 @@ may append a **request** row; only root changes a request's status.
 | ROOT-4 | Current QQ and four-reference harness audit; lean-core priorities | Shipped (`445d740`, #65) | 2026-09-16; `docs/design/harness-scale-audit-2026-09-16.md`; source baseline `7956e8e`; F01/F02/F14 repaired (#55, #57, #63); F03–F28 unowned |
 | ROOT-5 | Context usability stack C1–C6: 4 bytes/token estimate, summarizer past the window, proactive and in-run compaction, audit default `off`, Anthropic/Bedrock cache breakpoints, overlapped leading reads and soft 16-call cap, measured occupancy across pruning/checkpoints | Shipped (#56 `d4fd971`, #58 `3446c54`, #59 `1c4467b`, #61 `49d4a03` incl. C5, #64 `4715226`) | 2026-09-16. Plan and ledger deleted with #66; design in `architecture.md` § run loop step 3, § resolved model, § audit; `providers.md` § breakpoints; `tools.md` § Loop Bounds. Deferred: true mid-run summarization (needs a store cutoff inside a run), estimator calibration from observed `usage`. Live qualification (cache reads on turn 2; a real long session) not yet run |
 | ROOT-6 | Docs cleanup: delete shipped plans/ledgers and superseded research; collapse speed-first to open items; move extension contract and perf targets into `architecture.md` | Shipped (#66) | 2026-09-16 |
+| ENG-791.R1 | Typed reasoning effort reaches the real provider request | Under independent review (`abe71f34`) | Author repaired actual wire/retry, zero-connection and lazy-initialization tests. Default provider 208 + interface 17 pass (one ignored); minimal provider 161 + interface 17 pass. Reviewer `qa_root_candidate_review`; manager integration. This dependency is not automatic routing |
+| ENG-791.R2 | JEV selects authorized model/effort pairs for root and child tasks | Planned; depends on R1 | Same ENG-791 requirement, not a separate backlog. Actual dispatch, overrides, current capability/authorization checks, cancellation and declared fallback must agree with the selection; mandatory completion checkpoints remain enforced |
+| ENG-791.R3 | Durable routing identity, TUI visibility and observed runtime qualification | Planned; depends on R2 | Retain candidate set, selection/distribution, actual model/effort, usage and outcomes across replay; real-model and fixed-baseline comparison before any savings claim. Recorded demonstration and canonical release remain separate gates |
 | F07 | Control and cleanup commands admitted past `MAX_COMMANDS` | In review ([ENG-786](https://linear.app/retsu-ai/issue/ENG-786), [#68](https://github.com/retsu-AI/qq/pull/68)) | 2026-09-16. `SessionCommandKind::creates_work` splits the thirteen kinds; new work bounded at 100 000 receipts, control/cleanup at +10 000 headroom, runtime settlement cancels unbounded (`CommandOrigin`). Receipts never trimmed; replay unchanged. Two regression tests fill the counter and drive cancel/approve/delete/prune/shutdown |
 | F05 | Attachments reconstructed as the model first saw them | In review ([ENG-788](https://linear.app/retsu-ai/issue/ENG-788), #69) | 2026-09-17. Schema 28 → 29: `attachment_blobs` (per-session, keyed by whole-file hash + range, 64 MiB cap with explicit evicted rendering) and `message_attachments`, written in the `RunStarted` transaction; `load_model_context` re-renders `<attached-file>` blocks from the store; `ClaimedRun.resolved_input` carries the first read across the auto-compaction retry. Three regression tests (modify/delete/reopen/dedup/cascade; eviction stub; auto-compaction retry) plus the reference-assembly oracle |
 | F06 | Context assembly and history search bounded by retained context, not archive size | In review ([ENG-790](https://linear.app/retsu-ai/issue/ENG-790), #70) | 2026-09-17. Turn/result/steering/attachment queries joined to the retained prompt window; schema 29 → 30 adds `messages(run_id, steering, state)`. `search_history` newest-first with an 8 MiB scan budget and a `truncated` note. New `context_assembly` bench: assembly 83 µs / 25 ms / 98 ms → 50 / 47 / 82 µs at 10 / 1 000 / 10 000 archived runs; absent-term search 433 ms → 54 ms (truncated) at 10 000 |
@@ -40,8 +43,72 @@ may append a **request** row; only root changes a request's status.
 | 0025 | SSE framing per chunk, parse once (D10) | speed-first H19 | Accepted (merged in #39) |
 | 0026 | Run cancellation token replaces polled flag (D8 remainder) | speed-first H22.2 | Accepted (merged in #47) |
 | 0027 | `qq-core` is a public embedding API | docs cleanup 2026-09-16 | Accepted (merged in #52) |
+| 0028 | Mandatory typed JEV checkpoints after tool results and final candidates | JEV runtime checkpoint slice | Accepted locally; unpushed candidate |
+| 0029 | Native JEV model-and-effort routing and durable selection identity | Startup Manager / ENG-791 | Reserved; no accepted decision document yet |
 
-Next free number: 0028. Reserve here before opening a PR that adds an ADR.
+2026-09-18 — JEV checkpoint hardening remains in progress on
+`feat/jev-runtime-checkpoints`: complete task/tool payloads now fail closed
+before assessment when over bound, cache identity is the typed request,
+post-result cancellation records a durable not-performed checkpoint, and
+direct `qq ask` routes notices to stderr. Credential-free compile and focused
+bound/cache/output tests are green. A task-owned temporary directory bypassed
+the host default-temp SQLite open failure and the cancellation regression is
+green: durable tool result, durable local unavailable/not-performed review,
+then cancelled terminal. That test also exposed and repaired a real
+`LoadedRuntime` adapter omission that had discarded the reviewer while
+compiling embedded runtimes into session plans.
+The focused final run passed 13 QQ-core checkpoint tests, including child-final
+checkpoint before child settlement and parent spawn-result delivery, plus the
+direct stderr notice regression and all qq-protocol unit/headless/wire fixtures.
+Raw logs are retained under `target/qq-checkpoint-tests/`.
+ENG-791 extends that settlement invariant to deadlines, runtime/provider
+failures, premature stream end, and defensive nominal completion. Focused
+deadline and runtime-failure regressions prove durable `tool_call_finished`,
+then local `unavailable` checkpoint, then the true terminal outcome; cancellation
+remains covered by its existing ordering regression.
+Final candidate checks also passed repository formatting, `cargo check -p
+qq-core -p qq-protocol -p qq`, and `cargo build -p qq`. The resulting debug
+binary SHA-256 is
+`fecfdffd08ac3185b188220c121d1529dec1f838965e17e189094e17dd1f36e8`.
+That isolated binary reports `qq 0.1.0 (368dfbc 2026-09-18)` and was built
+from clean integrated commit `368dfbc`.
+
+Test-isolation follow-up: runtime and MCP fixtures now establish their own VCS
+root, so a repository-local `TMPDIR` cannot make them inherit the caller's
+project configuration or trust state. Mention fixtures use a minimal valid Git
+root, preventing `@diff` from attaching the parent checkout. This exposed and
+repaired two stale plan-descriptor v6 assertions after the v7 checkpoint
+identity change. Harbor JSONL fixtures were regenerated by their checked-in
+generator for protocol v23; the Rust current-wire decoder passes. The full
+workspace test suite passes with the host's `NO_COLOR` variable removed for
+the exact ANSI-color TUI assertions. The optional Python Harbor validation
+still requires the documented external `harbor==0.20.0` dependency.
+
+Runtime-load diagnostics follow-up: a real headless proof at source `47d3a95`
+persisted only `prompt_queued`, then exceeded its 180 second duration budget
+after 197342 ms with no `run_started`, model usage, tool, or checkpoint event.
+The deadline path intentionally retained loader ownership for the extra time.
+Runtime preparation now publishes a secret-free in-process stage to core; a
+duration outcome records the stage observed at expiry and that no model request
+started. A deterministic held-loader regression covers the checkpoint-reviewer
+credential stage while preserving the existing no-detached-loader invariant.
+This does not claim to cancel an OS credential read: safely interrupting that
+operation requires a cancellable credential-backend boundary, not dropping a
+started blocking task.
+
+2026-09-18 — Isolated TUI QA profile follow-up: bare interactive
+`qq --tui-qa-root PATH` now composes configuration/trust/session data, an empty
+credential index, server discovery, and its workspace below one canonical
+fixture root. Admission is restricted to a selected loopback HTTP
+`Custom`/`NoAuth` model and rejects enforced JEV or other credential-bearing
+and multi-agent integrations rather than weakening them. Focused tests cover
+root composition, subcommand rejection, remote/header rejection, mandatory
+review rejection, explicit server discovery, and a panic-on-Keychain backend.
+This is a deterministic TUI fixture only; no real provider, JEV, credential,
+or customer acceptance is claimed. Exact final commit and artifact evidence
+will be appended after gates and independent review.
+
+Next free number: 0030. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -63,6 +130,53 @@ sections, `docs/adr/README.md`, `docs/README.md`, `docs/plans/README.md`,
 `AGENTS.md`. A lane may edit a design doc section it owns without a request.
 
 ## Entries
+
+### 2026-09-18 — ENG-791 native routing dependency start
+
+Source readback: clean `c210d968ebda475a5997a6cf7efe50ed96d8637c`.
+The source map confirms no effort field in `qq-provider::ModelRequest`; the
+current completion reviewer also cannot represent a routing distribution.
+R1 owns `crates/qq-provider/`, a neutral effort type in `qq-reasoning/` only if
+needed, and `docs/design/providers.md`. Root owns this ledger; the writer owns
+the sole heavy local test lane. The existing accepted, unmerged feature head
+is the intentional dependency: none of this is claimed integrated into main.
+Tests must capture emitted requests and prove rejection before transport,
+preserve the default wire shape and retry/request sharing, then obtain
+non-author review of the exact candidate. No credentials or Keychain probes.
+JEV task receipt `958fb4de-c85b-487b-a2e6-3ca385c27073` advised native routing;
+sequence receipt `3f770f0d-0d64-42b5-95c4-bcb38c92355b` advised effort first.
+The parent goal and all ENG-791 requirements remain open after this dependency.
+
+R1 review follow-up: `26de3724cb6a8181d0b1316b6abd5f94184af3f9` adds
+typed request effort and OpenAI Responses/Chat serialization. Manager inspected
+all changed lines and returned it for missing unsupported-adapter rejection.
+`b6f200e6b791c3670a99bc5288c25f783b900e1f` adds the missing guards, but its
+new helper-only test never invokes an adapter stream. The reported full suite
+predates that guard; actual request capture, retry and no-transport acceptance
+are still missing. Both commits are retained, not discarded or called ready.
+The existing Daybreak parent now owns this finite repair and the sole heavy
+lane; the Sol writer has stopped. Its distinct child remains the non-author
+reviewer. JEV `c18edb8a-c96b-49d2-9e4c-dccf98b5c7dd` advised changes required;
+`5a3a34da-d318-48c2-8d1b-1e6f5688d683` advised the ownership transfer.
+
+R1 candidate follow-up: `abe71f34bd5088e548fa7c352fa9ea6f62e51011`
+adds real compiled-provider loopback tests for all six effort values through
+Responses, static/request-time Codex, and Chat; 503 retry capture; exact legacy
+bodies when effort is absent; and unsupported-adapter pre-use rejection.
+Raw author logs are in `target/qq-routing-r1/`; preserved copies and independent
+review live in the existing private Mondello PR112 evidence directory. The
+independent review's first build hit ENOSPC and is retained as a failure, not a
+test pass. Matching the author's `CARGO_INCREMENTAL=0 TMPDIR=/private/tmp`
+profile is the next changed check. No live credential or provider call occurred.
+
+Romy's subsequent September 18 instruction is one canonical QQ PR for the
+implemented checkpoint/auth/QA/provider work, two independent reviewers, a
+Slack handoff to Zach, and merge only after exact-head checks and normal GitHub
+requirements pass. `qa_root_candidate_review` owns the sole runtime-test lane;
+the distinct `qq_pr_full_review` owns read-only full source/security/release
+review. The manager integrates findings and owns publication. R2/R3 remain
+explicitly unimplemented; this PR must not claim an automatic router, a passing
+real-model demo, released binaries, or customer acceptance.
 
 ### F14 shared CI request — 2026-09-16
 

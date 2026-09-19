@@ -426,28 +426,31 @@ impl CredentialStore {
             && record.endpoint == endpoint
         {
             match record.backend {
-                CredentialBackend::Keyring => match self.keyring.set(name, secret) {
-                    Ok(()) => {
-                        // In-place rotation leaves the record unchanged, but
-                        // the index is still rewritten so the credential
-                        // epoch advances for every durable secret change.
-                        self.save_index(&index)?;
-                        return Ok(CredentialBackend::Keyring);
+                CredentialBackend::Keyring => {
+                    self.advance_index_epoch(&mut index)?;
+                    match self.keyring.set(name, secret) {
+                        Ok(()) => {
+                            // In-place rotation leaves the record unchanged, but
+                            // the index is still rewritten so the credential
+                            // epoch advances for every durable secret change.
+                            self.save_index(&index)?;
+                            return Ok(CredentialBackend::Keyring);
+                        }
+                        Err(KeyringError::TooLarge) => {}
+                        Err(KeyringError::Unavailable) if allow_file_fallback => {}
+                        Err(KeyringError::Unavailable) => {
+                            return Err(AuthError::FileFallbackNotAllowed {
+                                name: name.to_owned(),
+                            });
+                        }
+                        Err(KeyringError::Missing | KeyringError::Failure) => {
+                            return Err(AuthError::KeyringFailure {
+                                operation: "store",
+                                name: name.to_owned(),
+                            });
+                        }
                     }
-                    Err(KeyringError::TooLarge) => {}
-                    Err(KeyringError::Unavailable) if allow_file_fallback => {}
-                    Err(KeyringError::Unavailable) => {
-                        return Err(AuthError::FileFallbackNotAllowed {
-                            name: name.to_owned(),
-                        });
-                    }
-                    Err(KeyringError::Missing | KeyringError::Failure) => {
-                        return Err(AuthError::KeyringFailure {
-                            operation: "store",
-                            name: name.to_owned(),
-                        });
-                    }
-                },
+                }
                 CredentialBackend::File if allow_file_fallback => {
                     let mut fallback = self.load_fallback()?;
                     if !fallback.contains(name) {
@@ -456,6 +459,7 @@ impl CredentialStore {
                             backend: CredentialBackend::File,
                         });
                     }
+                    self.advance_index_epoch(&mut index)?;
                     fallback.upsert(name, secret);
                     self.save_fallback(&fallback)?;
                     self.save_index(&index)?;
@@ -463,6 +467,7 @@ impl CredentialStore {
                 }
                 CredentialBackend::File => {}
                 CredentialBackend::WindowsProtectedFile => {
+                    self.advance_index_epoch(&mut index)?;
                     self.windows_protected
                         .set(name, secret)
                         .map_err(|error| windows_protected_auth_error(error, "store", name))?;
@@ -489,6 +494,10 @@ impl CredentialStore {
         } else {
             None
         };
+
+        if old_record.is_some() {
+            self.advance_index_epoch(&mut index)?;
+        }
 
         if old_record
             .as_ref()
@@ -596,6 +605,7 @@ impl CredentialStore {
             return Ok(false);
         };
         ensure_atomic_replacement_supported(self.paths.index_file())?;
+        self.advance_index_epoch(&mut index)?;
 
         match record.backend {
             CredentialBackend::Keyring => match self.keyring.remove(name) {
@@ -709,6 +719,7 @@ impl CredentialStore {
                 backend: record.backend,
             });
         }
+        self.advance_index_epoch(&mut index)?;
 
         match record.backend {
             CredentialBackend::Keyring => match self.keyring.set(name, secret) {
@@ -1107,6 +1118,16 @@ impl CredentialStore {
         state.sort();
         let bytes = serialize_state(&state, self.paths.index_file())?;
         atomic_write(self.paths.index_file(), &bytes)
+    }
+
+    /// Durably invalidates request-time caches before mutating any credential
+    /// backend. If the later backend or index update fails, readers still see
+    /// a different epoch and cannot reuse material from before the attempt.
+    fn advance_index_epoch(&self, state: &mut IndexState) -> Result<(), AuthError> {
+        self.save_index(state)?;
+        state.version = INDEX_STATE_VERSION;
+        state.revision = state.revision.wrapping_add(1);
+        Ok(())
     }
 
     fn load_fallback(&self) -> Result<FallbackState, AuthError> {

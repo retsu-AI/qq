@@ -11,10 +11,10 @@ use super::PlanCompileError;
 /// Version of the descriptor's canonical encoding. Bump it whenever a field is
 /// added, removed, renamed, or its normalization changes, so historical digests
 /// are never compared against a different encoding.
-pub const DESCRIPTOR_VERSION: u16 = 6;
+pub const DESCRIPTOR_VERSION: u16 = 7;
 
 /// Domain separator prepended to the canonical bytes before hashing.
-const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v6\0";
+const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v7\0";
 
 /// Where a credential comes from, without its value. Two plans that read the
 /// same environment variable or stored credential name share a reference and
@@ -186,6 +186,9 @@ pub struct AgentPlanDescriptor {
     pub delegation: DelegationRoster,
     /// When the root run's final answer is audited (version 4).
     pub audit: AuditDescriptor,
+    /// Mandatory post-result/final reviewer identity; absent means disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
     pub skills: SkillIndexDescriptor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pack: Option<PackDescriptor>,

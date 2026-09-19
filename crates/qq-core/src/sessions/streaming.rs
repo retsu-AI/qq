@@ -354,6 +354,35 @@ pub(super) fn record_run_audit(
     Ok(event)
 }
 
+pub(super) fn record_checkpoint(
+    connection: &mut Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+    correlation: String,
+    phase: qq_protocol::CheckpointPhase,
+    tool_call_id: Option<qq_protocol::ToolCallId>,
+    outcome: qq_protocol::CheckpointOutcome,
+    confidence_basis_points: Option<u16>,
+    feedback: String,
+) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    let event = append_event(
+        &transaction,
+        EventContext::for_run(store_id, identity, now_ms()),
+        SessionEvent::CheckpointReviewed {
+            run_id: identity.run_id,
+            correlation,
+            phase,
+            tool_call_id,
+            outcome,
+            confidence_basis_points,
+            feedback,
+        },
+    )?;
+    transaction.commit()?;
+    Ok(event)
+}
+
 /// Persists the continuation counter and publishes `run_output_truncated`
 /// in one transaction. The truncated turn itself was committed by the
 /// preceding `persist_model_turn`; the counter is the run's authoritative

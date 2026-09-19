@@ -25,7 +25,7 @@ class AtifConversionTests(unittest.TestCase):
                 self.assertEqual(first["agent"]["name"], "qq")
                 self.assertTrue(first["steps"])
                 qq = first["extra"]["qq"]
-                self.assertEqual(qq["protocol_version"], 16)
+                self.assertEqual(qq["protocol_version"], 23)
                 self.assertEqual(qq["qq_source_revision"], "fixture-revision")
                 self.assertEqual(qq["outcome"]["prompt_identity"]["version"], 7)
                 json.dumps(first)

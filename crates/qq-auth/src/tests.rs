@@ -31,6 +31,8 @@ struct FakeKeyring {
     mode: Mutex<FakeMode>,
     max_secret_len: Mutex<Option<usize>>,
     values: Mutex<BTreeMap<String, Vec<u8>>>,
+    reads: Mutex<BTreeMap<String, usize>>,
+    break_index_after_set: Mutex<Option<PathBuf>>,
 }
 
 impl FakeKeyring {
@@ -44,6 +46,14 @@ impl FakeKeyring {
 
     fn value(&self, name: &str) -> Option<Vec<u8>> {
         self.values.lock().unwrap().get(name).cloned()
+    }
+
+    fn read_count(&self, name: &str) -> usize {
+        self.reads.lock().unwrap().get(name).copied().unwrap_or(0)
+    }
+
+    fn break_index_after_next_set(&self, path: &Path) {
+        *self.break_index_after_set.lock().unwrap() = Some(path.to_owned());
     }
 
     fn set_max_secret_len(&self, limit: usize) {
@@ -62,6 +72,12 @@ impl FakeKeyring {
 impl KeyringBackend for FakeKeyring {
     fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
         self.check_mode()?;
+        *self
+            .reads
+            .lock()
+            .unwrap()
+            .entry(name.to_owned())
+            .or_default() += 1;
         self.value(name).ok_or(KeyringError::Missing)
     }
 
@@ -79,6 +95,10 @@ impl KeyringBackend for FakeKeyring {
             .lock()
             .unwrap()
             .insert(name.to_owned(), secret.to_vec());
+        if let Some(path) = self.break_index_after_set.lock().unwrap().take() {
+            fs::remove_file(&path).unwrap();
+            fs::create_dir(&path).unwrap();
+        }
         Ok(())
     }
 
@@ -148,6 +168,44 @@ struct FakeCodexTokenClient {
     refreshes: Mutex<Vec<String>>,
     exchanged: codex::ExchangedTokens,
     refreshed: codex::RefreshedTokens,
+}
+
+#[derive(Clone, Copy)]
+enum FakeCodexRefreshFailure {
+    Rejected,
+    Unavailable,
+}
+
+struct FailingCodexTokenClient(FakeCodexRefreshFailure);
+
+impl codex::CodexTokenClient for FailingCodexTokenClient {
+    fn exchange(
+        &self,
+        _code: &str,
+        _redirect_uri: &str,
+        _code_verifier: &str,
+    ) -> Result<codex::ExchangedTokens, codex::CodexAuthError> {
+        Err(codex::CodexAuthError::TokenRequestFailed {
+            operation: "exchange",
+        })
+    }
+
+    fn refresh(
+        &self,
+        _refresh_token: &str,
+    ) -> Result<codex::RefreshedTokens, codex::CodexAuthError> {
+        match self.0 {
+            FakeCodexRefreshFailure::Rejected => Err(codex::CodexAuthError::TokenRequestRejected {
+                operation: "refresh",
+                status: 401,
+            }),
+            FakeCodexRefreshFailure::Unavailable => {
+                Err(codex::CodexAuthError::TokenRequestFailed {
+                    operation: "refresh",
+                })
+            }
+        }
+    }
 }
 
 impl FakeCodexTokenClient {
@@ -263,6 +321,35 @@ fn test_store_with_protected() -> (
 fn jwt(payload: serde_json::Value) -> String {
     let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
     format!("e30.{payload}.signature")
+}
+
+fn stored_codex_credential(access_token: String, refresh_token: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "version": 1,
+        "id_token": jwt(serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "workspace-test-id",
+                "chatgpt_account_is_fedramp": false
+            }
+        })),
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "account_id": "workspace-test-id",
+        "is_fedramp": false,
+        "refreshed_at": 0
+    }))
+    .unwrap()
+}
+
+fn codex_request_provider(
+    store: &CredentialStore,
+    profile: &str,
+) -> codex::CodexRequestCredentials {
+    codex::CodexRequestCredentials {
+        store: store.clone(),
+        profile: profile.to_owned(),
+        cache: tokio::sync::Mutex::new(None),
+    }
 }
 
 fn callback(port: u16, query: &str) -> String {
@@ -956,6 +1043,357 @@ fn codex_resolution_refreshes_an_expired_access_token_once() {
         client.refreshes.lock().unwrap().as_slice(),
         ["original-refresh-token"]
     );
+}
+
+#[tokio::test]
+async fn codex_request_credentials_reuse_one_keyring_read_for_concurrent_requests() {
+    let (store, keyring, _directory) = test_store();
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3_600;
+    store
+        .set_with_metadata(
+            "openai-codex/work",
+            stored_codex_credential(jwt(serde_json::json!({"exp": expires_at})), "refresh"),
+            false,
+            Some("openai-codex"),
+            Some("https://chatgpt.com"),
+        )
+        .unwrap();
+    let provider = Arc::new(codex_request_provider(&store, "work"));
+
+    let requests = (0..8)
+        .map(|_| {
+            let provider = Arc::clone(&provider);
+            tokio::spawn(async move {
+                qq_provider::RequestCredentialProvider::credential(provider.as_ref()).await
+            })
+        })
+        .collect::<Vec<_>>();
+    for request in requests {
+        request.await.unwrap().unwrap();
+    }
+
+    assert_eq!(keyring.read_count("openai-codex/work"), 1);
+}
+
+#[tokio::test]
+async fn codex_request_cache_reloads_after_rotation_and_rejects_deletion() {
+    let (store, keyring, _directory) = test_store();
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3_600;
+    let metadata = (Some("openai-codex"), Some("https://chatgpt.com"));
+    store
+        .set_with_metadata(
+            "openai-codex/work",
+            stored_codex_credential(jwt(serde_json::json!({"exp": expires_at})), "refresh-1"),
+            false,
+            metadata.0,
+            metadata.1,
+        )
+        .unwrap();
+    let provider = codex_request_provider(&store, "work");
+    qq_provider::RequestCredentialProvider::credential(&provider)
+        .await
+        .unwrap();
+
+    let rotated_access_token = jwt(serde_json::json!({"exp": expires_at + 1}));
+    store
+        .set_with_metadata(
+            "openai-codex/work",
+            stored_codex_credential(rotated_access_token.clone(), "refresh-2"),
+            false,
+            metadata.0,
+            metadata.1,
+        )
+        .unwrap();
+    qq_provider::RequestCredentialProvider::credential(&provider)
+        .await
+        .unwrap();
+    assert_eq!(keyring.read_count("openai-codex/work"), 2);
+    assert_eq!(
+        provider
+            .cache
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .credential
+            .access_token()
+            .expose_secret_str()
+            .unwrap(),
+        rotated_access_token
+    );
+
+    assert!(store.remove("openai-codex/work").unwrap());
+    assert_eq!(
+        qq_provider::RequestCredentialProvider::credential(&provider)
+            .await
+            .unwrap_err(),
+        qq_provider::RequestCredentialError::Missing
+    );
+    assert_eq!(keyring.read_count("openai-codex/work"), 2);
+}
+
+#[tokio::test]
+async fn codex_request_cache_rechecks_endpoint_binding_after_index_revision() {
+    let (store, keyring, _directory) = test_store();
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3_600;
+    let stored = stored_codex_credential(jwt(serde_json::json!({"exp": expires_at})), "refresh");
+    store
+        .set_with_metadata(
+            "openai-codex/work",
+            &stored,
+            false,
+            Some("openai-codex"),
+            Some("https://chatgpt.com"),
+        )
+        .unwrap();
+    let provider = codex_request_provider(&store, "work");
+    qq_provider::RequestCredentialProvider::credential(&provider)
+        .await
+        .unwrap();
+
+    store
+        .set_with_metadata(
+            "openai-codex/work",
+            &stored,
+            false,
+            Some("openai-codex"),
+            Some("https://other.example.test"),
+        )
+        .unwrap();
+    assert_eq!(
+        qq_provider::RequestCredentialProvider::credential(&provider)
+            .await
+            .unwrap_err(),
+        qq_provider::RequestCredentialError::StorageUnavailable
+    );
+    assert_eq!(keyring.read_count("openai-codex/work"), 1);
+}
+
+#[tokio::test]
+async fn codex_request_cache_coalesces_expired_refresh() {
+    let (mut store, keyring, _directory) = test_store();
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3_600;
+    let client = Arc::new(FakeCodexTokenClient::new(
+        codex::ExchangedTokens {
+            id_token: String::new(),
+            access_token: String::new(),
+            refresh_token: String::new(),
+        },
+        codex::RefreshedTokens {
+            id_token: None,
+            access_token: Some(jwt(serde_json::json!({"exp": expires_at}))),
+            refresh_token: Some("rotated-refresh".to_owned()),
+        },
+    ));
+    store.codex_client = client.clone();
+    store
+        .set_with_metadata(
+            "openai-codex/work",
+            stored_codex_credential(jwt(serde_json::json!({"exp": 1})), "original-refresh"),
+            false,
+            Some("openai-codex"),
+            Some("https://chatgpt.com"),
+        )
+        .unwrap();
+    let provider = Arc::new(codex_request_provider(&store, "work"));
+
+    let requests = (0..4)
+        .map(|_| {
+            let provider = Arc::clone(&provider);
+            tokio::spawn(async move {
+                qq_provider::RequestCredentialProvider::credential(provider.as_ref()).await
+            })
+        })
+        .collect::<Vec<_>>();
+    for request in requests {
+        request.await.unwrap().unwrap();
+    }
+
+    assert_eq!(
+        client.refreshes.lock().unwrap().as_slice(),
+        ["original-refresh"]
+    );
+    assert_eq!(keyring.read_count("openai-codex/work"), 3);
+}
+
+#[tokio::test]
+async fn codex_request_cache_fails_closed_when_rotation_index_commit_fails() {
+    let (store, keyring, _directory) = test_store();
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3_600;
+    store
+        .set_with_metadata(
+            "openai-codex/work",
+            stored_codex_credential(jwt(serde_json::json!({"exp": expires_at})), "refresh-1"),
+            false,
+            Some("openai-codex"),
+            Some("https://chatgpt.com"),
+        )
+        .unwrap();
+    let provider = codex_request_provider(&store, "work");
+    qq_provider::RequestCredentialProvider::credential(&provider)
+        .await
+        .unwrap();
+
+    keyring.break_index_after_next_set(store.paths().index_file());
+    let rotated =
+        stored_codex_credential(jwt(serde_json::json!({"exp": expires_at + 1})), "refresh-2");
+    assert!(
+        store
+            .set_with_metadata(
+                "openai-codex/work",
+                &rotated,
+                false,
+                Some("openai-codex"),
+                Some("https://chatgpt.com"),
+            )
+            .is_err()
+    );
+    assert_eq!(keyring.value("openai-codex/work").unwrap(), rotated);
+    assert_eq!(
+        qq_provider::RequestCredentialProvider::credential(&provider)
+            .await
+            .unwrap_err(),
+        qq_provider::RequestCredentialError::StorageUnavailable
+    );
+}
+
+#[tokio::test]
+async fn codex_rotation_does_not_touch_backend_when_pre_invalidation_fails() {
+    let (store, keyring, _directory) = test_store();
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3_600;
+    let original =
+        stored_codex_credential(jwt(serde_json::json!({"exp": expires_at})), "refresh-1");
+    store
+        .set_with_metadata(
+            "openai-codex/work",
+            &original,
+            false,
+            Some("openai-codex"),
+            Some("https://chatgpt.com"),
+        )
+        .unwrap();
+
+    fs::remove_file(store.paths().index_file()).unwrap();
+    fs::create_dir(store.paths().index_file()).unwrap();
+    assert!(
+        store
+            .set_with_metadata(
+                "openai-codex/work",
+                stored_codex_credential(
+                    jwt(serde_json::json!({"exp": expires_at + 1})),
+                    "refresh-2",
+                ),
+                false,
+                Some("openai-codex"),
+                Some("https://chatgpt.com"),
+            )
+            .is_err()
+    );
+    assert_eq!(keyring.value("openai-codex/work").unwrap(), original);
+}
+
+#[tokio::test]
+async fn codex_request_cache_does_not_mask_refresh_failures_after_rotation() {
+    for (failure, expected) in [
+        (
+            FakeCodexRefreshFailure::Rejected,
+            qq_provider::RequestCredentialError::RefreshRejected,
+        ),
+        (
+            FakeCodexRefreshFailure::Unavailable,
+            qq_provider::RequestCredentialError::RefreshUnavailable,
+        ),
+    ] {
+        let (mut store, _keyring, _directory) = test_store();
+        store.codex_client = Arc::new(FailingCodexTokenClient(failure));
+        let expires_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3_600;
+        store
+            .set_with_metadata(
+                "openai-codex/work",
+                stored_codex_credential(jwt(serde_json::json!({"exp": expires_at})), "refresh"),
+                false,
+                Some("openai-codex"),
+                Some("https://chatgpt.com"),
+            )
+            .unwrap();
+        let provider = codex_request_provider(&store, "work");
+        qq_provider::RequestCredentialProvider::credential(&provider)
+            .await
+            .unwrap();
+
+        store
+            .set_with_metadata(
+                "openai-codex/work",
+                stored_codex_credential(jwt(serde_json::json!({"exp": 1})), "refresh"),
+                false,
+                Some("openai-codex"),
+                Some("https://chatgpt.com"),
+            )
+            .unwrap();
+        assert_eq!(
+            qq_provider::RequestCredentialProvider::credential(&provider)
+                .await
+                .unwrap_err(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn codex_request_cache_rechecks_store_at_its_refresh_deadline() {
+    let (store, keyring, _directory) = test_store();
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3_600;
+    store
+        .set_with_metadata(
+            "openai-codex/work",
+            stored_codex_credential(jwt(serde_json::json!({"exp": expires_at})), "refresh"),
+            false,
+            Some("openai-codex"),
+            Some("https://chatgpt.com"),
+        )
+        .unwrap();
+    let provider = codex_request_provider(&store, "work");
+    qq_provider::RequestCredentialProvider::credential(&provider)
+        .await
+        .unwrap();
+    provider.cache.lock().await.as_mut().unwrap().refresh_after = 0;
+
+    qq_provider::RequestCredentialProvider::credential(&provider)
+        .await
+        .unwrap();
+    assert_eq!(keyring.read_count("openai-codex/work"), 2);
 }
 
 #[test]

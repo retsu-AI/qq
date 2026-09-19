@@ -1150,10 +1150,14 @@ fn read_connection(paths: &ServerPaths) -> Result<Option<ServerConnection>, Serv
 
 /// Discovers and probes the current user's running QQ server.
 pub async fn discover() -> Result<Option<ServerConnection>, ServerError> {
-    discover_with_paths(&ServerPaths::for_user()?).await
+    discover_at(&ServerPaths::for_user()?).await
 }
 
-async fn discover_with_paths(paths: &ServerPaths) -> Result<Option<ServerConnection>, ServerError> {
+/// Discovers and probes a QQ server rooted at explicit instance paths.
+///
+/// This is intended for isolated embeddings and test fixtures. Ordinary
+/// callers should use [`discover`], which retains the user-scoped default.
+pub async fn discover_at(paths: &ServerPaths) -> Result<Option<ServerConnection>, ServerError> {
     let client = probe_client().map_err(|()| ServerError::ExistingServerUnavailable)?;
 
     for attempt in 0..DISCOVERY_RETRIES {
@@ -2613,7 +2617,7 @@ mod tests {
         let server = start_test_server(paths.clone(), handler).await;
 
         assert_eq!(
-            discover_with_paths(&paths).await.unwrap(),
+            discover_at(&paths).await.unwrap(),
             Some(server.connection().clone())
         );
 
@@ -2769,7 +2773,7 @@ mod tests {
             .unwrap();
         assert_eq!(health, *info);
 
-        let discovered = discover_with_paths(&paths).await.unwrap().unwrap();
+        let discovered = discover_at(&paths).await.unwrap().unwrap();
         assert_eq!(discovered.server_info().server_id, identity.server_id());
         assert_eq!(discovered, *server.connection());
 

@@ -353,9 +353,7 @@ pub async fn run(
     });
     let trial = HeadlessTrial {
         qq_version: env!("CARGO_PKG_VERSION").to_owned(),
-        qq_source_revision: option_env!("QQ_SOURCE_REVISION")
-            .unwrap_or("unknown")
-            .to_owned(),
+        qq_source_revision: env!("QQ_SOURCE_REVISION").to_owned(),
         protocol_version: qq_protocol::PROTOCOL_VERSION,
         workspace_identity: workspace_identity(&options.workspace),
         model: options.model.clone(),
@@ -813,6 +811,29 @@ async fn stream_run(
                                 _ => "failed",
                             };
                             let _ = writeln!(stderr, "[tool] {} {verdict}", tool_call.name);
+                        }
+                    }
+                    SessionEvent::CheckpointReviewed {
+                        correlation,
+                        phase,
+                        outcome,
+                        confidence_basis_points,
+                        feedback,
+                        ..
+                    } if ours => {
+                        if text {
+                            let color = if matches!(outcome, qq_protocol::CheckpointOutcome::Supported) {
+                                "GREEN"
+                            } else {
+                                "RED"
+                            };
+                            let confidence = confidence_basis_points
+                                .map(|value| format!(" confidence={:.2}%", f64::from(value) / 100.0))
+                                .unwrap_or_default();
+                            let _ = writeln!(
+                                stderr,
+                                "[jev] {color} {phase:?} {correlation} outcome={outcome:?}{confidence}: {feedback}"
+                            );
                         }
                     }
                     SessionEvent::ToolApprovalRequested { tool_call, question: Some(question), .. }
@@ -1907,11 +1928,16 @@ mod tests {
 
     async fn fixture_with_loader(loader: Arc<dyn RuntimeLoader>) -> Fixture {
         let directory = tempfile::tempdir().unwrap();
-        let workspace = directory.path().join("work");
+        // macOS commonly exposes TMPDIR through `/var`, which is a symlink to
+        // `/private/var`. Store databases deliberately use SQLite NOFOLLOW, so
+        // fixtures must construct both workspace and database paths from the
+        // canonical temporary root.
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let workspace = root.join("work");
         std::fs::create_dir_all(&workspace).unwrap();
         let workspace = std::fs::canonicalize(&workspace).unwrap();
         let sessions = SessionRuntime::open(
-            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            SessionRuntimeOptions::new(root.join("sessions.sqlite3")),
             loader,
         )
         .await
@@ -3158,7 +3184,7 @@ mod tests {
         assert_eq!(records[0]["workspace_identity"].as_str().unwrap().len(), 64);
         assert_eq!(records[0]["context_window"], 128_000);
         assert_eq!(records[0]["pricing_provenance"], "test fixture");
-        assert!(records[0]["qq_source_revision"].is_string());
+        assert_eq!(records[0]["qq_source_revision"], env!("QQ_SOURCE_REVISION"));
 
         let mut previous = None;
         for record in event_records(&records) {
@@ -3189,6 +3215,23 @@ mod tests {
             "outcome",
             "the outcome must be the final record"
         );
+    }
+
+    #[test]
+    fn embedded_source_revision_is_exact_and_matches_display_revision() {
+        let source = env!("QQ_SOURCE_REVISION");
+        let display = env!("QQ_BUILD_REVISION");
+        let source = source.strip_suffix("-dirty").unwrap_or(source);
+        let display = display.strip_suffix("-dirty").unwrap_or(display);
+
+        if source == "unknown" {
+            assert_eq!(display, "unknown");
+            return;
+        }
+
+        assert_eq!(source.len(), 40);
+        assert!(source.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(source.starts_with(display));
     }
 
     #[tokio::test]

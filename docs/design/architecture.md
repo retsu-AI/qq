@@ -36,6 +36,16 @@ The binary has multiple process modes:
 - `qq` opens the TUI scoped to the current working directory. By default it
   starts a local server runtime in the same process and communicates with it
   through the same HTTP/SSE interface used by remote clients.
+- `qq --tui-qa-root PATH` is an explicit diagnostic-fixture mode for local TUI
+  testing. It roots configuration, trust/session data, the empty credential
+  index, server discovery, and the workspace beneath the canonical `PATH`.
+  It admits only the selected loopback-HTTP `Custom` provider with `NoAuth`
+  and no static headers, and omits authentication probes for every unselected
+  provider. MCP, additional agent routes, delegation, audit, profiles, packs,
+  and enforced JEV are rejected rather than disabled. The ordinary no-flag
+  path continues to use the user-scoped system directories and mandatory JEV
+  activation rules. This fixture demonstrates TUI behavior only; it is not
+  evidence for a real provider or reviewer integration.
 - `qq serve [ARGS]` runs the server without a TUI. It is suitable for a
   persistent process on a desktop or home server.
 - `qq ask PROMPT` is the initial direct, automation-oriented path. It streams
@@ -801,7 +811,15 @@ deadline task or stream wrapper. Expiry requests cancellation and drops dispatch
 started blocking work and owned tools/children drain before typed settlement.
 Already-dispatched store operations remain awaited, so cleanup and terminal
 publication can finish after the execution deadline. Unconfirmed cleanup fails
-the runtime closed instead of releasing its session. A cost cap without configured
+the runtime closed instead of releasing its session. Runtime preparation reports
+a secret-free stage before each named construction phase. If its deadline
+expires, the terminal message retains the stage observed at expiry and states
+that provider work did not start. The loader still retains ownership until its
+blocking work returns: abandoning a started blocking credential read would only
+detach it and could leave an OS credential prompt active after false terminal
+settlement. The wall-clock bound therefore remains a cancellation request plus
+owned drain, not a promise that an uninterruptible platform operation ends at the
+deadline. A cost cap without configured
 pricing is rejected before provider work. When the countable budget is nearly
 spent the last permitted turn becomes a tool-free final status response; an
 elapsed wall clock or a provider turn that omits usage under a cost cap grants
@@ -1187,6 +1205,7 @@ Application configuration types must not leak into `qq-core`.
 | Native tools | Static Rust registration | Build/startup | Direct dispatch | Fully trusted; capability-scoped execution |
 | General tools | MCP and the embedded `ExternalToolHost` | Startup catalog; call on demand | One selected adapter call | MCP process/HTTP boundary or trusted embedder |
 | Context/memory | Typed bounded `ContextSource` | Plan compile plus pre-turn fetch | No per-delta hook | Time/byte/token budgets; explicit fail policy |
+| JEV checkpoints | Typed `CheckpointReviewer` | Explicit enforced profile at plan compile | One bounded decision after each retained tool result and the root final candidate | Fixed endpoint/model/policy; fail closed; durable correlated status |
 | Observers | Durable SSE/outbox | Subscription | Post-commit only | Cannot affect authoritative execution |
 | Process execution | Local implementation plus one real sandbox adapter (deferred sandbox adapter) | Startup | Direct selected backend | Explicit filesystem/network/process capabilities |
 | Surface adapters | Versioned `qq-client` contract | Client startup | Outside agent loop | Product owns remote auth and UX |
@@ -1196,9 +1215,27 @@ path and are never wrapped in RPC or a plugin abstraction; the hot path
 selects one precompiled tool entry and never runs before/after hook lists;
 product memory is not a synchronous observer of every token and ordinary
 retrieval fails open with a visible diagnostic; synchronous decisions remain
-limited to approval, exact tool validation, and budget admission; provider
+limited to typed approval, exact tool validation, budget admission, and the
+explicit enforced JEV checkpoint profile from ADR-0028; provider
 adapter families are feature-gated inside `qq-provider` (`provider-bedrock`
 owns the AWS SDK closure) rather than split into crates.
+
+An enforced checkpoint request is admitted only when its original task and
+complete phase-specific evidence fit the exact reviewer bound; these fields are
+never truncated into a potentially green assessment. Its memoization identity
+contains every typed request field. Cancellation does not wait for remote
+review: when a tool result is already durable but its checkpoint is not, the
+session durably records a local `unavailable`/not-performed checkpoint before
+any cancellation, deadline, runtime/provider failure, premature stream end, or
+defensive nominal completion settlement. The marker means no reviewer verdict
+was durably recorded; it does not claim whether remote work started. A nominal
+completion with such a pending result fails closed. Direct automation preserves answer-only stdout and writes
+human-readable checkpoint notices to stderr.
+The `LoadedRuntime` adapter preserves the reviewer when compiling an embedded
+runtime into a session plan, so every execution surface shares the same gate.
+A parent receives a `spawn_agent` result only after the child final checkpoint
+and child terminal outcome are durable; the parent then checkpoints that tool
+result before its next model turn.
 
 Invariants every lane keeps:
 

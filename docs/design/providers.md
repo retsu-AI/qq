@@ -361,6 +361,29 @@ provider changes, was the failing variable.
 
 ## Current Coverage And Gaps
 
+### Reasoning effort controls
+
+The provider-neutral request may carry an optional `ReasoningEffort`. The OpenAI
+Responses codec serializes it as `reasoning.effort`; the OpenAI-compatible Chat
+Completions codec serializes it as `reasoning_effort`. When absent, both codecs
+omit the field, preserving their prior request shape. The enum values currently
+supported by these API contracts are `none`, `minimal`, `low`, `medium`,
+`high`, and `xhigh`; model-specific availability is not inferred by QQ and must
+be established by the runtime capability/catalog layer before selection.
+
+Reference: [OpenAI Responses API reference](https://platform.openai.com/docs/api-reference/responses)
+(reasoning.effort) and [OpenAI Chat Completions API reference](https://platform.openai.com/docs/api-reference/chat)
+(reasoning_effort), consulted 2026-09-18. This is request encoding only; model
+selection, capability authorization, JEV routing, and durable receipts remain
+runtime work.
+
+Offline interface tests drive all six values through
+`ProviderCompiler::compile` and `Provider::stream` for standard Responses,
+Codex Responses, and Chat Completions. They capture both attempts of a
+retryable request, pin the byte-exact request body when effort is absent, and
+invoke every unsupported adapter to require a configuration error before HTTP,
+request-time authorization, or lazy AWS provider initialization.
+
 Current strengths:
 
 - OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, and Google

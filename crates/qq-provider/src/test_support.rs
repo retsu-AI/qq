@@ -4,15 +4,17 @@
 //! package's own integration tests. Not part of the crate's public API.
 
 use std::{
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     net::{TcpListener, TcpStream},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub struct CapturedRequest {
     wire: String,
 }
+
+pub type LoopbackResponse = (u16, Option<&'static str>, Vec<Vec<u8>>);
 
 impl CapturedRequest {
     pub fn request_line(&self) -> Option<&str> {
@@ -39,7 +41,7 @@ impl CapturedRequest {
             .0
     }
 
-    fn body(&self) -> &str {
+    pub fn body(&self) -> &str {
         self.wire
             .split_once("\r\n\r\n")
             .expect("captured request must contain an HTTP body separator")
@@ -49,7 +51,7 @@ impl CapturedRequest {
 
 pub struct LoopbackServer {
     pub base_url: String,
-    request: JoinHandle<CapturedRequest>,
+    requests: JoinHandle<Vec<CapturedRequest>>,
 }
 
 impl LoopbackServer {
@@ -76,45 +78,94 @@ impl LoopbackServer {
         content_type: Option<&'static str>,
         chunks: Vec<Vec<u8>>,
     ) -> Self {
+        Self::respond_sequence(vec![(status, content_type, chunks)])
+    }
+
+    /// Serves several responses on one listener and captures each request.
+    pub fn respond_sequence(responses: Vec<LoopbackResponse>) -> Self {
+        assert!(
+            !responses.is_empty(),
+            "a loopback sequence needs a response"
+        );
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener must bind");
+        listener
+            .set_nonblocking(true)
+            .expect("loopback listener must support bounded acceptance");
         let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let request = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("loopback request must connect");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .expect("loopback read timeout must be configurable");
-            let request = read_request(&mut stream);
-            let reason = match status {
-                200 => "OK",
-                401 => "Unauthorized",
-                _ => "Test Response",
-            };
-            let content_type_header = content_type
-                .map(|value| format!("Content-Type: {value}\r\n"))
-                .unwrap_or_default();
-            let content_length = chunks.iter().map(Vec::len).sum::<usize>();
-            let head = format!(
-                "HTTP/1.1 {status} {reason}\r\n{content_type_header}Content-Length: {content_length}\r\nConnection: close\r\n\r\n"
-            );
-            stream
-                .write_all(head.as_bytes())
-                .expect("loopback response head must be written");
-            for chunk in chunks {
+        let requests = thread::spawn(move || {
+            let mut captured = Vec::with_capacity(responses.len());
+            for (status, content_type, chunks) in responses {
+                let mut stream = accept_before(&listener, Duration::from_secs(5));
                 stream
-                    .write_all(&chunk)
-                    .expect("loopback response chunk must be written");
-                stream.flush().expect("loopback response chunk must flush");
-                thread::sleep(Duration::from_millis(1));
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("loopback read timeout must be configurable");
+                let request = read_request(&mut stream);
+                let reason = match status {
+                    200 => "OK",
+                    401 => "Unauthorized",
+                    503 => "Service Unavailable",
+                    _ => "Test Response",
+                };
+                let content_type_header = content_type
+                    .map(|value| format!("Content-Type: {value}\r\n"))
+                    .unwrap_or_default();
+                let content_length = chunks.iter().map(Vec::len).sum::<usize>();
+                let head = format!(
+                    "HTTP/1.1 {status} {reason}\r\n{content_type_header}Content-Length: {content_length}\r\nConnection: close\r\n\r\n"
+                );
+                stream
+                    .write_all(head.as_bytes())
+                    .expect("loopback response head must be written");
+                for chunk in chunks {
+                    stream
+                        .write_all(&chunk)
+                        .expect("loopback response chunk must be written");
+                    stream.flush().expect("loopback response chunk must flush");
+                    thread::sleep(Duration::from_millis(1));
+                }
+                captured.push(CapturedRequest {
+                    wire: String::from_utf8(request).expect("captured request must be UTF-8"),
+                });
             }
-            CapturedRequest {
-                wire: String::from_utf8(request).expect("captured request must be UTF-8"),
-            }
+            captured
         });
-        Self { base_url, request }
+        Self { base_url, requests }
     }
 
     pub fn capture(self) -> CapturedRequest {
-        self.request.join().expect("loopback server must not panic")
+        let mut requests = self
+            .requests
+            .join()
+            .expect("loopback server must not panic");
+        assert_eq!(requests.len(), 1, "capture expects exactly one request");
+        requests.pop().unwrap()
+    }
+
+    pub fn capture_all(self) -> Vec<CapturedRequest> {
+        self.requests
+            .join()
+            .expect("loopback server must not panic")
+    }
+}
+
+fn accept_before(listener: &TcpListener, timeout: Duration) -> TcpStream {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .expect("accepted loopback stream must return to blocking reads");
+                return stream;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                panic!("loopback request did not connect within {timeout:?}")
+            }
+            Err(error) => panic!("loopback request failed to connect: {error}"),
+        }
     }
 }
 
@@ -326,5 +377,27 @@ mod tests {
         assert_eq!(request.header("content-type"), Some("application/json"));
         assert_eq!(request.header("x-absent"), None);
         assert_eq!(request.json_body()["model"], "test-model");
+    }
+
+    #[test]
+    fn response_sequence_captures_each_request_in_order() {
+        let server = LoopbackServer::respond_sequence(vec![
+            (503, Some("application/json"), vec![b"{}".to_vec()]),
+            (
+                200,
+                Some("text/event-stream"),
+                vec![b"data: done\n\n".to_vec()],
+            ),
+        ]);
+
+        let (first_head, _) = raw_exchange(&server.base_url, "{\"attempt\":1}");
+        assert!(first_head.starts_with("HTTP/1.1 503"));
+        let (second_head, _) = raw_exchange(&server.base_url, "{\"attempt\":2}");
+        assert!(second_head.starts_with("HTTP/1.1 200"));
+
+        let requests = server.capture_all();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].json_body()["attempt"], 1);
+        assert_eq!(requests[1].json_body()["attempt"], 2);
     }
 }

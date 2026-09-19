@@ -27,7 +27,10 @@ CHILD_SESSION = "ae" * 16
 CHILD_RUN = "af" * 16
 
 QQ_VERSION = "0.1.0"
-PROTOCOL_VERSION = 16
+# Keep generated trace identity aligned with qq_protocol::PROTOCOL_VERSION.
+# Version 23 adds checkpoint_reviewed; traces need not contain that optional
+# event, but they must identify the wire contract their envelopes target.
+PROTOCOL_VERSION = 23
 MODEL = {"model": "anthropic/claude-sonnet-4-5", "max_output_tokens": 32000}
 PROMPT_IDENTITY = {
     "version": 7,

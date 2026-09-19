@@ -8,6 +8,7 @@ use super::{
     },
 };
 use crate::runtime::RunDeadline;
+use std::collections::HashSet;
 
 /// Denies every tool call. Compaction runs summarize existing context; a
 /// call the instruction forbade costs one denied round trip and persists
@@ -494,18 +495,27 @@ pub(super) async fn execute_run(
         finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await;
         return;
     }
-    let mut load = inner.loader.load(RuntimeLoadRequest {
-        workspace: claimed.workspace.clone(),
-        model: claimed.model.clone(),
-        profile: claimed.profile.clone(),
-    });
+    let load_progress = RuntimeLoadProgress::default();
+    let mut load = inner.loader.load_with_progress(
+        RuntimeLoadRequest {
+            workspace: claimed.workspace.clone(),
+            model: claimed.model.clone(),
+            profile: claimed.profile.clone(),
+        },
+        load_progress.clone(),
+    );
     let loaded = tokio::select! {
         biased;
         () = RunDeadline::wait(deadline) => {
+            let unfinished_stage = load_progress.stage();
             // The loader owns construction until it returns, even after expiry.
             let _ = load.await;
+            let mut exhaustion = deadline.expect("only a finite deadline wakes").exhaustion();
+            exhaustion.message.push_str("; runtime preparation was still ");
+            exhaustion.message.push_str(unfinished_stage.description());
+            exhaustion.message.push_str(" when the budget expired; no model request was started");
             finish_reserved_run(&inner, &claimed, RunOutcome::BudgetExhausted {
-                exhaustion: Box::new(deadline.expect("only a finite deadline wakes").exhaustion()),
+                exhaustion: Box::new(exhaustion),
             }).await;
             return;
         }
@@ -785,6 +795,7 @@ pub(super) async fn execute_run(
                     prepared.tool_cancellation,
                     &prepared.audit,
                     &resources,
+                    loaded.plan.descriptor().checkpoint.is_some(),
                 )
                 .await;
                 return;
@@ -1071,6 +1082,7 @@ async fn run_auto_compaction(
             prepared.tool_cancellation,
             &prepared.audit,
             resources,
+            loaded.plan.descriptor().checkpoint.is_some(),
         )
         .await;
     }
@@ -1217,6 +1229,7 @@ async fn execute_started_run(
     tool_cancellation: RunCancellation,
     audit: &PreparedRunAudit,
     resources: &RunResources,
+    checkpoint_enforced: bool,
 ) {
     let resolved_model = Arc::clone(&audit.resolved_model);
     let context_shape = audit.context_shape;
@@ -1264,6 +1277,7 @@ async fn execute_started_run(
     // flushed when the turn completes, before any of its calls execute.
     let mut pending_tool_call: Option<ToolCallId> = None;
     let mut pending_tool_output = String::new();
+    let mut tools_awaiting_checkpoint = std::collections::HashSet::<ToolCallId>::new();
     // An internal run's streamed output never joins the transcript; the
     // summary accumulates here and persists as a compaction row instead.
     let mut summary_text = String::new();
@@ -1485,6 +1499,26 @@ async fn execute_started_run(
                         inner.failed.send_replace(true);
                         return;
                     };
+                    if let Err(checkpoint_error) = record_unreviewed_tool_checkpoints(
+                        &inner,
+                        &claimed,
+                        &mut tools_awaiting_checkpoint,
+                        "failed while settling cancellation",
+                    )
+                    .await
+                    {
+                        finish_run(
+                            &inner,
+                            &claimed,
+                            persistence_failure(
+                                "failed to persist terminal JEV checkpoint status",
+                                &checkpoint_error,
+                            ),
+                            teardown,
+                        )
+                        .await;
+                        return;
+                    }
                     finish_run(
                         &inner,
                         &claimed,
@@ -1508,6 +1542,26 @@ async fn execute_started_run(
                         inner.failed.send_replace(true);
                         return;
                     };
+                    if let Err(checkpoint_error) = record_unreviewed_tool_checkpoints(
+                        &inner,
+                        &claimed,
+                        &mut tools_awaiting_checkpoint,
+                        "failed while settling cancellation",
+                    )
+                    .await
+                    {
+                        finish_run(
+                            &inner,
+                            &claimed,
+                            persistence_failure(
+                                "failed to persist terminal JEV checkpoint status",
+                                &checkpoint_error,
+                            ),
+                            teardown,
+                        )
+                        .await;
+                        return;
+                    }
                     finish_run(
                         &inner,
                         &claimed,
@@ -1528,6 +1582,31 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
+                let cancellation_label = if matches!(stopped, RunInput::Cancelled) {
+                    "cancelled"
+                } else {
+                    "interrupted"
+                };
+                if let Err(error) = record_unreviewed_tool_checkpoints(
+                    &inner,
+                    &claimed,
+                    &mut tools_awaiting_checkpoint,
+                    cancellation_label,
+                )
+                .await
+                {
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure(
+                            "failed to persist terminal JEV checkpoint status",
+                            &error,
+                        ),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
                 finish_run_accounted(
                     &inner,
                     &claimed,
@@ -1552,6 +1631,26 @@ async fn execute_started_run(
                         inner.failed.send_replace(true);
                         return;
                     };
+                    if let Err(checkpoint_error) = record_unreviewed_tool_checkpoints(
+                        &inner,
+                        &claimed,
+                        &mut tools_awaiting_checkpoint,
+                        "failed while settling a runtime failure",
+                    )
+                    .await
+                    {
+                        finish_run(
+                            &inner,
+                            &claimed,
+                            persistence_failure(
+                                "failed to persist terminal JEV checkpoint status",
+                                &checkpoint_error,
+                            ),
+                            teardown,
+                        )
+                        .await;
+                        return;
+                    }
                     finish_run(
                         &inner,
                         &claimed,
@@ -1575,6 +1674,26 @@ async fn execute_started_run(
                         inner.failed.send_replace(true);
                         return;
                     };
+                    if let Err(checkpoint_error) = record_unreviewed_tool_checkpoints(
+                        &inner,
+                        &claimed,
+                        &mut tools_awaiting_checkpoint,
+                        "failed while settling a runtime failure",
+                    )
+                    .await
+                    {
+                        finish_run(
+                            &inner,
+                            &claimed,
+                            persistence_failure(
+                                "failed to persist terminal JEV checkpoint status",
+                                &checkpoint_error,
+                            ),
+                            teardown,
+                        )
+                        .await;
+                        return;
+                    }
                     finish_run(
                         &inner,
                         &claimed,
@@ -1588,6 +1707,26 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
+                if let Err(error) = record_unreviewed_tool_checkpoints(
+                    &inner,
+                    &claimed,
+                    &mut tools_awaiting_checkpoint,
+                    "failed",
+                )
+                .await
+                {
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure(
+                            "failed to persist terminal JEV checkpoint status",
+                            &error,
+                        ),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
                 finish_run_accounted(
                     &inner,
                     &claimed,
@@ -2006,6 +2145,46 @@ async fn execute_started_run(
             })) => {
                 accounting.record_review(usage, cost_usd_nanos);
             }
+            RunInput::Event(Some(RuntimeEvent::CheckpointReviewed {
+                correlation,
+                phase,
+                tool_call_id,
+                outcome,
+                confidence,
+                feedback,
+            })) => {
+                let confidence_basis_points =
+                    confidence.map(|value| (value.clamp(0.0, 1.0) * 10_000.0).round() as u16);
+                if let Err(error) = inner
+                    .store
+                    .record_checkpoint(
+                        &claimed,
+                        correlation,
+                        phase,
+                        tool_call_id,
+                        outcome,
+                        confidence_basis_points,
+                        feedback,
+                    )
+                    .await
+                {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure("failed to persist JEV checkpoint", &error),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
+                if let Some(tool_call_id) = tool_call_id {
+                    tools_awaiting_checkpoint.remove(&tool_call_id);
+                }
+            }
             RunInput::Event(Some(RuntimeEvent::ToolCallStarted { id })) => {
                 if internal {
                     continue;
@@ -2122,6 +2301,12 @@ async fn execute_started_run(
                     .await;
                     return;
                 }
+                if checkpoint_enforced {
+                    // Mark before the durable write awaits: subscribers can
+                    // observe the committed result and request cancellation
+                    // before this task resumes from the store actor.
+                    tools_awaiting_checkpoint.insert(id);
+                }
                 match inner
                     .store
                     .finish_tool_call(&claimed, id, result, is_error, file_states, display, spill)
@@ -2129,6 +2314,7 @@ async fn execute_started_run(
                 {
                     Ok(_) => {}
                     Err(error) => {
+                        tools_awaiting_checkpoint.remove(&id);
                         let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
@@ -2404,6 +2590,42 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
+                let unreviewed = match record_unreviewed_tool_checkpoints(
+                    &inner,
+                    &claimed,
+                    &mut tools_awaiting_checkpoint,
+                    "completed",
+                )
+                .await
+                {
+                    Ok(count) => count,
+                    Err(error) => {
+                        finish_run(
+                            &inner,
+                            &claimed,
+                            persistence_failure(
+                                "failed to persist terminal JEV checkpoint status",
+                                &error,
+                            ),
+                            teardown,
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                if unreviewed != 0 {
+                    finish_run_accounted(
+                        &inner,
+                        &claimed,
+                        internal_failure(
+                            "run attempted completion with a durable tool result that was not reviewed",
+                        ),
+                        Some(accounting.snapshot()),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
                 let mut settled = accounting.snapshot();
                 settled.final_output = final_output;
                 finish_run_accounted(
@@ -2444,6 +2666,26 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
+                if let Err(error) = record_unreviewed_tool_checkpoints(
+                    &inner,
+                    &claimed,
+                    &mut tools_awaiting_checkpoint,
+                    "stopped by its budget",
+                )
+                .await
+                {
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure(
+                            "failed to persist terminal JEV checkpoint status",
+                            &error,
+                        ),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
                 finish_run_accounted(
                     &inner,
                     &claimed,
@@ -2484,6 +2726,26 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
+                if let Err(error) = record_unreviewed_tool_checkpoints(
+                    &inner,
+                    &claimed,
+                    &mut tools_awaiting_checkpoint,
+                    "failed",
+                )
+                .await
+                {
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure(
+                            "failed to persist terminal JEV checkpoint status",
+                            &error,
+                        ),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
                 finish_run_accounted(
                     &inner,
                     &claimed,
@@ -2548,6 +2810,26 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
+                if let Err(error) = record_unreviewed_tool_checkpoints(
+                    &inner,
+                    &claimed,
+                    &mut tools_awaiting_checkpoint,
+                    "ended without a terminal event",
+                )
+                .await
+                {
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure(
+                            "failed to persist terminal JEV checkpoint status",
+                            &error,
+                        ),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
                 finish_run_accounted(
                     &inner,
                     &claimed,
@@ -2671,6 +2953,37 @@ async fn persist_text(
         remaining = &remaining[end..];
     }
     Ok(())
+}
+
+/// Persists an explicit fail-closed status for every durable tool result whose
+/// reviewer future was cut short by terminal run settlement. This is separate
+/// from the terminal outcome: it never claims that the remote reviewer ran.
+async fn record_unreviewed_tool_checkpoints(
+    inner: &SessionRuntimeInner,
+    claimed: &ClaimedRun,
+    pending: &mut HashSet<ToolCallId>,
+    terminal_reason: &str,
+) -> Result<usize, SessionRuntimeError> {
+    let mut tool_call_ids = pending.drain().collect::<Vec<_>>();
+    tool_call_ids.sort_by_key(ToString::to_string);
+    let count = tool_call_ids.len();
+    for tool_call_id in tool_call_ids {
+        inner
+            .store
+            .record_checkpoint(
+                claimed,
+                format!("tool:{tool_call_id}"),
+                qq_protocol::CheckpointPhase::ToolResult,
+                Some(tool_call_id),
+                qq_protocol::CheckpointOutcome::Unavailable,
+                None,
+                format!(
+                    "No JEV reviewer verdict was durably recorded before the run {terminal_reason} after the tool result became durable"
+                ),
+            )
+            .await?;
+    }
+    Ok(count)
 }
 
 /// Settles a started run. `teardown` proves the run's tools and children were

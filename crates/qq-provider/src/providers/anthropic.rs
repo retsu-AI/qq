@@ -158,6 +158,9 @@ impl AnthropicMessages {
 
 impl Provider for AnthropicMessages {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
+        if let Some(error) = request.unsupported_reasoning_effort("Anthropic Messages") {
+            return Box::pin(async_stream::stream! { yield Err(error); });
+        }
         let exchange = self.exchange.clone();
         let endpoint = self.endpoint.clone();
         let headers = self.headers.clone();

@@ -3,6 +3,7 @@ use super::*;
 use crate::plan::{
     AgentProfile, CompiledAgentPlan, HostSnapshot, PlanCompileError, ProviderDescriptor,
 };
+use std::sync::atomic::{AtomicU8, Ordering};
 
 pub type RuntimeLoadFuture =
     Pin<Box<dyn Future<Output = Result<LoadedRuntime, RuntimeLoadError>> + Send + 'static>>;
@@ -74,6 +75,9 @@ impl LoadedRuntime {
         for registered in runtime.context_sources.iter() {
             profile = profile.with_context_source(Arc::clone(&registered.source));
         }
+        if let Some(reviewer) = &runtime.checkpoint {
+            profile = profile.with_checkpoint_reviewer(Arc::clone(reviewer));
+        }
         profile = profile.with_context_cache(Arc::clone(&runtime.context_cache));
         Ok(Self {
             plan: CompiledAgentPlan::compile_blocking(profile)?,
@@ -88,6 +92,17 @@ impl LoadedRuntime {
 
 pub trait RuntimeLoader: Send + Sync + 'static {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture;
+
+    /// Loads a runtime while reporting secret-free preparation progress. The
+    /// default preserves the embedding contract for loaders without stages.
+    fn load_with_progress(
+        &self,
+        request: RuntimeLoadRequest,
+        progress: RuntimeLoadProgress,
+    ) -> RuntimeLoadFuture {
+        let _ = progress;
+        self.load(request)
+    }
 
     /// Resolves the application-configured worker route against the same
     /// workspace configuration and policy used by ordinary runtime loading.
@@ -121,7 +136,85 @@ pub trait RuntimeLoader: Send + Sync + 'static {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Secret-free progress for runtime preparation. A loader should advance this
+/// before work that may block so a deadline can identify the unfinished stage
+/// without exposing configuration or credential values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RuntimeLoadStage {
+    Starting,
+    CanonicalizingWorkspace,
+    LoadingConfiguration,
+    ReadingCredentialMetadata,
+    CompilingProvider,
+    ResolvingCheckpointCredential,
+    LoadingTools,
+    CompilingPlan,
+    Complete,
+}
+
+impl RuntimeLoadStage {
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Starting => "starting runtime preparation",
+            Self::CanonicalizingWorkspace => "canonicalizing the workspace",
+            Self::LoadingConfiguration => "loading configuration",
+            Self::ReadingCredentialMetadata => "reading credential metadata",
+            Self::CompilingProvider => "compiling the model provider",
+            Self::ResolvingCheckpointCredential => "resolving checkpoint reviewer credentials",
+            Self::LoadingTools => "loading tool integrations",
+            Self::CompilingPlan => "compiling the agent plan",
+            Self::Complete => "finishing runtime preparation",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeLoadProgress(Arc<AtomicU8>);
+
+impl Default for RuntimeLoadProgress {
+    fn default() -> Self {
+        Self(Arc::new(AtomicU8::new(RuntimeLoadStage::Starting as u8)))
+    }
+}
+
+impl RuntimeLoadProgress {
+    pub fn set(&self, stage: RuntimeLoadStage) {
+        self.0.store(stage as u8, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn stage(&self) -> RuntimeLoadStage {
+        match self.0.load(Ordering::Acquire) {
+            value if value == RuntimeLoadStage::CanonicalizingWorkspace as u8 => {
+                RuntimeLoadStage::CanonicalizingWorkspace
+            }
+            value if value == RuntimeLoadStage::LoadingConfiguration as u8 => {
+                RuntimeLoadStage::LoadingConfiguration
+            }
+            value if value == RuntimeLoadStage::ReadingCredentialMetadata as u8 => {
+                RuntimeLoadStage::ReadingCredentialMetadata
+            }
+            value if value == RuntimeLoadStage::CompilingProvider as u8 => {
+                RuntimeLoadStage::CompilingProvider
+            }
+            value if value == RuntimeLoadStage::ResolvingCheckpointCredential as u8 => {
+                RuntimeLoadStage::ResolvingCheckpointCredential
+            }
+            value if value == RuntimeLoadStage::LoadingTools as u8 => {
+                RuntimeLoadStage::LoadingTools
+            }
+            value if value == RuntimeLoadStage::CompilingPlan as u8 => {
+                RuntimeLoadStage::CompilingPlan
+            }
+            value if value == RuntimeLoadStage::Complete as u8 => RuntimeLoadStage::Complete,
+            _ => RuntimeLoadStage::Starting,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct RuntimeLoadRequest {
     pub workspace: String,
     pub model: ModelSelection,

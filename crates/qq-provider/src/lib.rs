@@ -36,7 +36,7 @@ pub use model::{
     ContentBlock, IncompleteReason, Message, ModelRequest, ProviderError, ProviderErrorKind,
     ProviderEvent, ProviderUsage, Role, ToolSpec,
 };
-pub use qq_reasoning::ReasoningKind;
+pub use qq_reasoning::{ReasoningEffort, ReasoningKind};
 pub use request_auth::{
     RequestCredential, RequestCredentialError, RequestCredentialFuture, RequestCredentialProvider,
     SharedRequestCredentialProvider,

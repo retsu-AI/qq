@@ -46,7 +46,7 @@ Related documents:
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 22
+PROTOCOL_VERSION = 23
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -151,6 +151,12 @@ added the network tool (ADR-0021): the `host` grant shape and an optional
 `shell` preview is now boxed in memory, which is wire-identical. Golden
 fixtures live under `crates/qq-protocol/tests/fixtures/v22/`; the
 `v17`–`v21` directories are retained decode-only.
+
+Version 23 adds the durable `checkpoint_reviewed` session event. It correlates
+the pinned JEV outcome to a tool result or final candidate and carries bounded
+feedback plus basis-point confidence. Headless JSONL emits the event and text
+mode renders an explicit GREEN/RED notice; v22 fixtures remain historical wire
+evidence.
 
 Clients and servers must agree on this value.
 

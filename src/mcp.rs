@@ -473,6 +473,9 @@ mod tests {
     impl ConfigFixture {
         fn new() -> Self {
             let root = tempfile::tempdir().unwrap();
+            // A caller may set TMPDIR inside a configured checkout. Bound
+            // project discovery to this fixture regardless of its parent.
+            fs::create_dir(root.path().join(".git")).unwrap();
             let paths = ConfigPaths::new(
                 root.path().join("global"),
                 root.path().join("data"),

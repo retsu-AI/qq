@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use qq_reasoning::ReasoningKind;
+use qq_reasoning::{ReasoningEffort, ReasoningKind};
 use serde_json::value::RawValue;
 use thiserror::Error;
 
@@ -19,6 +19,7 @@ pub struct ModelRequest {
     tools: Arc<[ToolSpec]>,
     system: Option<Arc<str>>,
     max_output_tokens: u32,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl ModelRequest {
@@ -34,6 +35,7 @@ impl ModelRequest {
             tools: Arc::from([]),
             system: None,
             max_output_tokens,
+            reasoning_effort: None,
         }
     }
 
@@ -85,6 +87,29 @@ impl ModelRequest {
     #[must_use]
     pub const fn max_output_tokens(&self) -> u32 {
         self.max_output_tokens
+    }
+
+    /// Requests a provider-native reasoning effort. The selected adapter
+    /// validates whether it can encode the value before transport.
+    #[must_use]
+    pub const fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(effort);
+        self
+    }
+
+    #[must_use]
+    pub const fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+        self.reasoning_effort
+    }
+
+    /// Returns a configuration error for an adapter that cannot encode effort.
+    /// This guard runs before transport or request-time credential authorization.
+    pub(crate) fn unsupported_reasoning_effort(&self, adapter: &str) -> Option<ProviderError> {
+        self.reasoning_effort.map(|effort| {
+            ProviderError::Configuration(format!(
+                "reasoning effort `{effort:?}` is unsupported by {adapter}"
+            ))
+        })
     }
 
     /// A lower bound on the encoded request body, from the payload bytes the
@@ -534,5 +559,16 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(spec, raw);
+    }
+
+    #[test]
+    fn unsupported_effort_helper_constructs_an_adapter_specific_error() {
+        let request = ModelRequest::new("m", vec![Message::user("hello")], 16)
+            .with_reasoning_effort(ReasoningEffort::Xhigh);
+        assert!(matches!(
+            request.unsupported_reasoning_effort("Anthropic Messages"),
+            Some(ProviderError::Configuration(message))
+                if message.contains("unsupported by Anthropic Messages")
+        ));
     }
 }

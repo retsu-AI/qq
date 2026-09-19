@@ -103,6 +103,9 @@ impl Mantle {
 
 impl Provider for Mantle {
     fn stream(&self, request: crate::ModelRequest) -> ProviderStream {
+        if let Some(error) = request.unsupported_reasoning_effort("Mantle") {
+            return Box::pin(async_stream::stream! { yield Err(error); });
+        }
         if let Some(provider) = self.inner.provider.get() {
             #[cfg(test)]
             self.inner
@@ -379,6 +382,39 @@ mod tests {
 
         assert!(second.is_ok());
         assert!(provider.get().is_some());
+    }
+
+    #[tokio::test]
+    async fn rejects_reasoning_effort_before_aws_provider_initialization() {
+        for protocol in [
+            HttpProtocol::OpenAiResponses,
+            HttpProtocol::OpenAiChatCompletions,
+            HttpProtocol::AnthropicMessages,
+        ] {
+            let provider = Mantle::new(
+                reqwest::Client::new(),
+                Some("us-east-1".to_owned()),
+                protocol,
+                BedrockAuth::DefaultChain,
+                HttpRetryMode::Default,
+            )
+            .unwrap();
+            assert!(provider.inner.provider.get().is_none());
+
+            let events = provider
+                .stream(
+                    ModelRequest::new("test-model", vec![Message::user("hello")], 64)
+                        .with_reasoning_effort(crate::ReasoningEffort::Medium),
+                )
+                .collect::<Vec<_>>()
+                .await;
+
+            assert!(matches!(
+                events.as_slice(),
+                [Err(ProviderError::Configuration(message))] if message.contains("Mantle")
+            ));
+            assert!(provider.inner.provider.get().is_none());
+        }
     }
 
     #[tokio::test]

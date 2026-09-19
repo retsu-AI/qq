@@ -426,6 +426,16 @@ mod tests {
 
     fn workspace() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
+        // `@diff` must describe only this fixture even when TMPDIR is nested
+        // under the repository running the tests.
+        std::fs::create_dir_all(dir.path().join(".git/objects")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".git/refs/heads")).unwrap();
+        std::fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            dir.path().join(".git/config"),
+            "[core]\nrepositoryformatversion = 0\nbare = false\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(dir.path().join("src/inner")).unwrap();
         std::fs::create_dir_all(dir.path().join("target")).unwrap();
         std::fs::write(dir.path().join("src/lib.rs"), "one\ntwo\nthree\n").unwrap();
@@ -549,10 +559,13 @@ mod tests {
             text_of(&resolved),
             " the change (fetch https://x.test/doc and use its contents)"
         );
-        // @diff outside a git repository is left literal with a note.
+        // A clean isolated repository cannot inherit the caller's diff.
         let resolved = resolve_prompt(&root, "explain @diff");
-        assert_eq!(text_of(&resolved), "explain @diff");
-        assert_eq!(resolved.notes.len(), 1);
+        assert_eq!(
+            text_of(&resolved),
+            "explain (the working tree has no changes)"
+        );
+        assert!(resolved.notes.is_empty());
     }
 
     #[test]
