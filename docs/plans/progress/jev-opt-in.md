@@ -368,3 +368,23 @@ It does not reproduce candidate idle-shutdown, long-shell or eight-stream
 control/cancellation/output-gap failures. Those five candidate failures remain
 unresolved and require focused paired measurement, not a blanket noise waiver.
 Latest documentation head d336048 passed hosted CI 35408821021.
+
+### Focused follow-up and qualification boundary — 2026-09-18
+
+Thirty alternating main/candidate pairs plus thirty same-binary pairs per
+eight-stream/shell fixture completed. Candidate control/cancellation/output-gap
+p95 were 36.82/45.23/42.00 ms versus main 32.25/42.10/40.00 ms; each passes
+its 20% relative and absolute fixture limits. Shell p95 110.54 versus 137.23 ms
+also passes. Relevant medians differ by at most 0.39%. I/O pressure ranged
+5.66–33.01%. Raw pairs: `r4-paired.json` in the candidate receipt directory.
+
+The full candidate repeat at dbb3da8 passes idle shutdown: median 73,358 ns,
+p95 106,931 ns versus main 75,282/111,810. Report `candidate-repeat-h0.json`
+retains all 77 metrics. Its overall budget check still fails: both inherited
+size limits and a different set of startup/replay/stream/load metrics, including
+100-session throughput. Do not discard either recording or claim qualification.
+The prior five unmatched failures are not stable across these measurements;
+quiet-host full-suite acceptance remains unresolved. Stop shared-host reruns
+here; a quiet host or explicit lead decision is needed to close this gate.
+No source change follows the independently reviewed implementation. Latest
+hosted CI 35409246345 passed at dbb3da8. Live Jev quality/savings remain unclaimed.
