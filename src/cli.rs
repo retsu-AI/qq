@@ -315,12 +315,38 @@ pub enum AuthCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum JevCommand {
+    /// Assess future completed runs without gating or changing their outcomes.
+    Observe(JevObserveArgs),
     /// Prompt for and securely store the TypeSafe API key.
     Setup {
         /// Allow an explicit user-only plaintext file if the OS keyring is unavailable.
         #[arg(long)]
         allow_file: bool,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct JevObserveArgs {
+    /// Workspace UUID from a session/run event. Uses the running local server.
+    #[arg(long)]
+    pub workspace_id: qq_protocol::WorkspaceId,
+    /// Restrict observation to one session.
+    #[arg(long)]
+    pub session_id: Option<qq_protocol::SessionId>,
+    /// Durable JSONL journal; reuse the same file and limits to resume safely.
+    #[arg(long)]
+    pub receipts: PathBuf,
+    /// Maximum estimated external-advisory spend in USD, across journal restarts.
+    #[arg(long)]
+    pub max_cost_usd: f64,
+    #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u16).range(1..=32))]
+    pub max_requests: u16,
+    /// Includes input/cache/output tokens; conservatively reserves 131072 per request.
+    #[arg(long, default_value_t = 4_194_304)]
+    pub max_total_tokens: u64,
+    /// Maximum time this invocation follows events.
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=86400))]
+    pub duration_seconds: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -377,6 +403,32 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn advisory_cli_requires_scope_receipts_and_explicit_budget() {
+        assert!(Cli::try_parse_from(["qq", "jev", "observe"]).is_err());
+        let workspace = qq_protocol::WorkspaceId::from_bytes([1; 16]).to_string();
+        let base = [
+            "qq",
+            "jev",
+            "observe",
+            "--workspace-id",
+            &workspace,
+            "--receipts",
+            "advisory.jsonl",
+            "--max-cost-usd",
+            "0.01",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(base).unwrap().command,
+            Some(Command::Jev {
+                command: JevCommand::Observe(_)
+            })
+        ));
+        let mut oversized = base.to_vec();
+        oversized.extend(["--max-requests", "33"]);
+        assert!(Cli::try_parse_from(oversized).is_err());
+    }
 
     #[test]
     fn version_names_the_crate_version_and_the_source_revision() {

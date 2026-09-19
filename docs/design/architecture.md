@@ -54,6 +54,16 @@ The binary has multiple process modes:
 - Additional direct CLI commands must reuse the same runtime rather than create
   another agent implementation.
 
+`qq jev observe` is an explicitly launched client of the existing local server's
+committed event stream. It assesses completed task runs independently of runtime
+review and routing. The observer reuses the bounded Jev reviewer with selected
+run-specific snapshot evidence, an explicit finite spending allowance and a
+synced external receipt journal. It cannot change authoritative outcomes or gate
+the next run. Pending dispatch is recorded before inference; interrupted requests
+remain unknown and are not automatically retried. External advisory accounting
+stays separate from the completed run, and combined totals preserve uncertainty.
+See the [Jev runbook](../runbooks/jev.md) for scope and restart behavior.
+
 Keeping the TUI and server in one executable provides a zero-setup local path
 while still allowing several TUI or future browser clients to attach to a
 long-running server. Agents and sessions belong to the server, so they may

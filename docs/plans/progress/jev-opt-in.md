@@ -6,8 +6,8 @@ Owner: this stacked implementation session. Base `dc59d14` / draft #72.
 | --- | --- | --- | --- | --- |
 | J1–J5 + visible J7 | Optional review, correctness and receipts | In review | [#74](https://github.com/retsu-AI/qq/pull/74), stacked on #72 | Local and hosted checks green; quiet-host tails open |
 | J6a | Explicit model effort | In review | [#76](https://github.com/retsu-AI/qq/pull/76), stacked on #74 | Local checks/reviews green; performance gate unresolved; hosted CI 35394821612 successful |
-| J6b | Optional routing | In review | [#77](https://github.com/retsu-AI/qq/pull/77), stacked on #76 | Local checks/reviews green; incremental median within budget; hosted and full-stack qualification pending |
-| Passive J7 | Advisory observer | Planned | Follow-up slice | Independent acceptance; not shipping in #74 |
+| J6b | Optional routing | In review | [#77](https://github.com/retsu-AI/qq/pull/77), stacked on #76 | Hosted CI 35406214280 successful; incremental median within budget; full-stack qualification pending |
+| Passive J7 | Advisory observer | In review | [#78](https://github.com/retsu-AI/qq/pull/78), stacked on #77 | Local workspace gates, independent review and hosted CI 35407913885 passed |
 | J8–J9 | Qualification and delivery | In progress | #74 | Live evaluation and remaining slices open |
 
 ## Entries
@@ -284,3 +284,107 @@ base `feat/eng-791-jev-routing` (#76). GitHub connector creation still returned
 403; authenticated CLI created the authorized draft. No merge or paid inference.
 Remaining full-goal work: passive advisory observation, hosted checks and
 full-stack performance/live qualification. Linear reauthentication remains open.
+
+### Passive J7 verification — 2026-09-18
+
+Branch `feat/eng-791-jev-advisory` adds explicit `qq jev observe` with finite
+external budgets, bounded run-specific evidence and a synced JSONL journal.
+Five focused advisory tests pass, including a real local server demonstration
+that a held assessment does not delay the next run and cancellation preserves
+the pending dispatch. No paid inference. Runbook updated with restart and
+unknown-spend behavior. Workspace gates, independent review and publication
+remain outstanding. PR #77 CI 35406214280 completed successfully.
+
+Full workspace tests now pass: 1,602 passed, five ignored, no failures.
+`cargo fmt --all -- --check`, workspace Clippy with all targets/features and
+`-D warnings`, and `git diff --check` pass. Independent review requested;
+workspace build and publication remain in progress.
+
+Workspace build passed. Independent Standards review approved the passive
+observer with no concrete blockers; documented evidence-window and pending-spend
+limitations remain. No protocol, schema, runtime hot-path or dependency change
+in this slice. Full-stack performance qualification is still outstanding.
+
+### Passive J7 stacked delivery — 2026-09-18
+
+Published d405afb as draft [#78](https://github.com/retsu-AI/qq/pull/78),
+verified base `feat/eng-791-jev-routing-accounting` and matching remote head.
+Hosted CI 35407824495 started. Retained release fixtures compare original
+dc59d14 against the current core implementation, unchanged by passive J7;
+30 alternating pairs and same-binary controls run under
+`target/qq-perf/jev-full-stack-2026-09-18/`. This comparison does not measure
+CLI startup or live inference. No merge or paid requests.
+
+### Full repair-stack focused performance — 2026-09-18
+
+Retained dc59d14/cf61126 release fixtures, 30 alternating A/B and 30 A/A pairs
+per fixture; verified no core/config/provider/manifest/lock changes between
+cf61126 and d405afb. Tool-loop median 53,166→53,906 ns (+1.39%); p95
+70,438→70,447 ns. Same-binary median +2.68%, p95 73,641→80,467 ns (+9.27%).
+Plan compilation median 25,474→24,793.5 ns (-2.67%); digest -6.00%.
+Raw receipt: `target/qq-perf/jev-full-stack-2026-09-18/paired.json`.
+The measured repair-stack median fits 5%, but I/O pressure 20.78–39.18% and
+the failing same-binary tail prevent quiet-host tail qualification. This is
+relative to PR #72, not main, and does not qualify absolute budgets, startup,
+fanout or live Jev quality/savings. Those acceptance limits remain open.
+
+### Complete candidate recording and hosted checks — 2026-09-18
+
+PR #78 head 8264d77 passed hosted CI 35407913885 (Linux checks, wasm client,
+native Windows teardown). Full H0 recording at that clean head completed with
+77 metrics and all 25 correctness checks passing, 100 requested samples and
+10 warmups. Receipt: `target/qq-perf/jev-full-stack-2026-09-18/candidate-h0.json`.
+Default binary 48,725,376 bytes exceeds 48,000,000; minimal 42,079,152 exceeds
+41,000,000. These are the two observed absolute-budget failures. Matching
+main c404ae5 recording is running in `/tmp/qq-jev-main-perf`; no relative
+conclusion yet. Budgets have not been changed or waived.
+
+Landing requires incorporating the follow-up fixes before the original #72
+reaches main: #72's old head still fails Clippy and a Windows teardown test,
+while #74/#76/#77/#78 pass. Maintainers can merge the reviewed stack downward
+(#78 into #77, then #77 into #76, #76 into #74, #74 into #72), preserving
+ancestry and rerunning the resulting #72 checks before merging to main.
+No PR has been merged by this session. Live Jev evaluation remains required
+for speed/quality claims; this implementation makes none.
+
+### Main comparison — 2026-09-18
+
+Clean main c404ae5 full H0 recording completed with 77 metrics. Candidate
+8264d77 versus main: default binary 48,090,784→48,725,376 bytes (+1.32%);
+minimal 41,441,744→42,079,152 (+1.54%). Both absolute size failures predate
+the stack. Startup medians improve: version -2.98%, server readiness -6.05%.
+The budget checker exits 1: two absolute size and eight relative p95 failures
+(idle shutdown, HTTP replay, eight-subscriber fanout, long shell, eight-stream
+control/cancellation/output gap, restart replay). Same-binary full main control
+is running; do not classify those tails as noise or waive them yet.
+Reports: `/tmp/qq-jev-main-perf/target/qq-perf/jev-full-stack-2026-09-18/main-h0.json`
+and candidate directory above; checker output retained as `main-comparison.txt`.
+
+Full same-binary control completed (`main-aa-h0.json` in the baseline directory).
+It reproduces the absolute size failures and HTTP replay, eight-subscriber
+fanout and restart-replay p95 failures; other control failures include cursor
+replay, fanout command acknowledgement and restart snapshot reconstruction.
+It does not reproduce candidate idle-shutdown, long-shell or eight-stream
+control/cancellation/output-gap failures. Those five candidate failures remain
+unresolved and require focused paired measurement, not a blanket noise waiver.
+Latest documentation head d336048 passed hosted CI 35408821021.
+
+### Focused follow-up and qualification boundary — 2026-09-18
+
+Thirty alternating main/candidate pairs plus thirty same-binary pairs per
+eight-stream/shell fixture completed. Candidate control/cancellation/output-gap
+p95 were 36.82/45.23/42.00 ms versus main 32.25/42.10/40.00 ms; each passes
+its 20% relative and absolute fixture limits. Shell p95 110.54 versus 137.23 ms
+also passes. Relevant medians differ by at most 0.39%. I/O pressure ranged
+5.66–33.01%. Raw pairs: `r4-paired.json` in the candidate receipt directory.
+
+The full candidate repeat at dbb3da8 passes idle shutdown: median 73,358 ns,
+p95 106,931 ns versus main 75,282/111,810. Report `candidate-repeat-h0.json`
+retains all 77 metrics. Its overall budget check still fails: both inherited
+size limits and a different set of startup/replay/stream/load metrics, including
+100-session throughput. Do not discard either recording or claim qualification.
+The prior five unmatched failures are not stable across these measurements;
+quiet-host full-suite acceptance remains unresolved. Stop shared-host reruns
+here; a quiet host or explicit lead decision is needed to close this gate.
+No source change follows the independently reviewed implementation. Latest
+hosted CI 35409246345 passed at dbb3da8. Live Jev quality/savings remain unclaimed.
