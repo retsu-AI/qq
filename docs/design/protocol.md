@@ -43,6 +43,10 @@ Related documents:
    `snake_case` names. Unknown fields are rejected on request bodies that use
    `deny_unknown_fields`.
 
+Plan descriptor version 8 records optional `reasoning_effort` in its canonical
+identity. It does not alter the wire envelope version or require a database
+migration; historical descriptor JSON remains historical evidence.
+
 ## Protocol Version
 
 ```text

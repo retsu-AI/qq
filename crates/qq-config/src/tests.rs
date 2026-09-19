@@ -400,6 +400,82 @@ fn delegation_roster_layers_validates_and_falls_back_to_worker_model_sugar() {
 }
 
 #[test]
+fn reasoning_effort_is_explicit_layered_and_distinct_from_omission() {
+    use qq_provider::ReasoningEffort;
+    let tree = TempTree::new();
+    assert_eq!(
+        tree.loader()
+            .load(&tree.request())
+            .unwrap()
+            .reasoning_effort(),
+        None
+    );
+    let request = tree.request().with_explicit_content(r#"(version: 1, reasoning_effort: high, profiles: { "quick": Profile(reasoning_effort: Some(low)) })"#);
+    let snapshot = tree.loader().load(&request).unwrap();
+    assert_eq!(snapshot.reasoning_effort(), Some(ReasoningEffort::High));
+    assert_eq!(
+        snapshot.profile("quick").unwrap().reasoning_effort(),
+        Some(ReasoningEffort::Low)
+    );
+    assert_eq!(
+        snapshot.provenance().reasoning_effort().unwrap().kind(),
+        SourceKind::Inline
+    );
+    let overrides = request
+        .overrides()
+        .clone()
+        .with_reasoning_effort(ReasoningEffort::None);
+    let override_request = request.with_overrides(overrides);
+    assert_eq!(
+        tree.loader()
+            .load(&override_request)
+            .unwrap()
+            .reasoning_effort(),
+        Some(ReasoningEffort::None)
+    );
+}
+
+#[test]
+fn reasoning_effort_clear_and_workspace_changes_obey_trust() {
+    let tree = TempTree::new();
+    tree.write("global/config.ron", "(version: 1, reasoning_effort: high)");
+    let cleared = tree
+        .request()
+        .with_explicit_content("(version: 1, reasoning_effort: Clear)");
+    assert_eq!(
+        tree.loader().load(&cleared).unwrap().reasoning_effort(),
+        None
+    );
+    tree.write("work/qq.ron", "(version: 1, reasoning_effort: low)");
+    assert!(matches!(
+        tree.loader().load(&tree.request()),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    tree.loader().grant_pending_trust(&tree.request()).unwrap();
+    assert_eq!(
+        tree.loader()
+            .load(&tree.request())
+            .unwrap()
+            .reasoning_effort(),
+        Some(qq_provider::ReasoningEffort::Low)
+    );
+    tree.write("work/qq.ron", "(version: 1, reasoning_effort: xhigh)");
+    assert!(matches!(
+        tree.loader().load(&tree.request()),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    let clean = TempTree::new();
+    assert!(matches!(
+        clean.loader().load(
+            &clean
+                .request()
+                .with_explicit_content("(version: 1, reasoning_effort: turbo)")
+        ),
+        Err(ConfigError::Parse { .. })
+    ));
+}
+
+#[test]
 fn jev_is_off_by_default_and_can_be_explicitly_disabled() {
     let tree = TempTree::new();
     let bare = tree.loader().load(&tree.request()).unwrap();

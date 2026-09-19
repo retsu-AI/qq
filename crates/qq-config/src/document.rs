@@ -523,6 +523,8 @@ pub(super) struct Document {
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     jev_routing: Field<bool>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
+    reasoning_effort: Field<qq_provider::ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
     max_output_tokens: Field<u32>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     providers: Field<UniqueMap<String, ProviderEntryPatch>>,
@@ -597,6 +599,8 @@ enum ProfilePatch {
         jev_review: Option<JevReviewMode>,
         #[serde(default)]
         jev_routing: Option<bool>,
+        #[serde(default)]
+        reasoning_effort: Option<qq_provider::ReasoningEffort>,
     },
     Remove,
 }
@@ -678,6 +682,7 @@ impl Document {
             || self.audit.is_present()
             || self.jev_review.is_present()
             || self.jev_routing.is_present()
+            || self.reasoning_effort.is_present()
             || self.profiles.is_present()
             || self.providers.is_present()
             || self.mcp.is_present()
@@ -727,6 +732,8 @@ impl Document {
             #[serde(skip_serializing_if = "Option::is_none")]
             jev_routing: Option<&'a Field<bool>>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            reasoning_effort: Option<&'a Field<qq_provider::ReasoningEffort>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             profiles: Option<&'a Field<UniqueMap<String, ProfilePatch>>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             providers: Option<&'a Field<UniqueMap<String, ProviderEntryPatch>>>,
@@ -754,6 +761,7 @@ impl Document {
             audit: present(&self.audit),
             jev_review: present(&self.jev_review),
             jev_routing: present(&self.jev_routing),
+            reasoning_effort: present(&self.reasoning_effort),
             profiles: present(&self.profiles),
             providers: present(&self.providers),
             mcp: present(&self.mcp),
@@ -801,6 +809,9 @@ impl Document {
         }
         if self.jev_review.is_present() {
             touched.push(ConfigKey::JevReview);
+        }
+        if self.reasoning_effort.is_present() {
+            touched.push(ConfigKey::ReasoningEffort);
         }
         if self.jev_routing.is_present() {
             touched.push(ConfigKey::JevRouting);
@@ -1339,6 +1350,7 @@ pub(super) struct MergeState {
     audit: Option<AuditPatch>,
     jev_review: JevReviewMode,
     jev_routing: bool,
+    reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
     mcp: BTreeMap<String, McpServerConfig>,
@@ -1414,6 +1426,7 @@ impl MergeState {
                 audit: None,
                 jev_review: JevReviewMode::Off,
                 jev_routing: false,
+                reasoning_effort: None,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
                 providers,
                 mcp: BTreeMap::new(),
@@ -1496,6 +1509,14 @@ impl MergeState {
             JevReviewMode::Off,
         );
         apply_default(&document.jev_routing, &mut self.jev_routing, false);
+        match document.reasoning_effort {
+            Field::Missing => {}
+            Field::Set(effort) => self.reasoning_effort = Some(effort),
+            Field::Clear => self.reasoning_effort = None,
+        }
+        if document.reasoning_effort.is_present() {
+            self.provenance.reasoning_effort = Some(source.clone());
+        }
         if document.jev_review.is_present() {
             self.provenance.jev_review = Some(source.clone());
         }
@@ -1564,6 +1585,7 @@ impl MergeState {
                             approval_mode,
                             jev_review,
                             jev_routing,
+                            reasoning_effort,
                         } => {
                             self.profiles.insert(
                                 name.clone(),
@@ -1574,6 +1596,7 @@ impl MergeState {
                                     approval_mode: *approval_mode,
                                     jev_review: *jev_review,
                                     jev_routing: *jev_routing,
+                                    reasoning_effort: *reasoning_effort,
                                     pack: None,
                                 },
                             );
@@ -1593,6 +1616,11 @@ impl MergeState {
         source: &SourceIdentity,
     ) -> Vec<ConfigKey> {
         let mut touched = Vec::new();
+        if let Some(effort) = overrides.reasoning_effort {
+            self.reasoning_effort = Some(effort);
+            self.provenance.reasoning_effort = Some(source.clone());
+            touched.push(ConfigKey::ReasoningEffort);
+        }
         if let Some(mode) = overrides.jev_review {
             self.jev_review = mode;
             self.provenance.jev_review = Some(source.clone());
@@ -1964,6 +1992,7 @@ impl MergeState {
                             approval_mode: profile.approval_mode(),
                             jev_review: None,
                             jev_routing: None,
+                            reasoning_effort: None,
                             pack: Some(crate::PackProfileRef::new(pack, profile.clone())),
                         },
                     ),
@@ -2168,6 +2197,7 @@ impl MergeState {
             audit,
             jev_review: self.jev_review,
             jev_routing: self.jev_routing,
+            reasoning_effort: self.reasoning_effort,
             max_output_tokens: self.max_output_tokens,
             providers: self.providers,
             mcp: self.mcp,

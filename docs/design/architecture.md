@@ -416,6 +416,14 @@ encoding in declaration order (`DESCRIPTOR_VERSION` pins the encoding). Secret
 values, secret hashes, live handles, and the credential epoch never enter the
 descriptor or its digest.
 
+Explicit `reasoning_effort` is resolved from trusted configuration and profiles,
+with runtime overrides first. Descriptor version 8 records the choice and its
+cache key distinguishes overrides. Every model turn uses the compiled choice;
+omission uses provider defaults, while explicit `none` requests disabled
+reasoning. This does not enable Jev. HTTP OpenAI Responses/Chat adapters carry
+effort; other adapter families reject it before credential lookup. Capability
+means transport support, not that every remote model accepts every effort value.
+
 Credential rotation is tracked separately by an opaque `CredentialEpoch` owned
 by `qq-auth`: every durable credential write advances the store's index
 revision, including in-place rotation of an existing entry. The root records

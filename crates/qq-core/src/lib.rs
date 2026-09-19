@@ -618,6 +618,7 @@ pub struct Runtime {
     model: Arc<str>,
     max_output_tokens: u32,
     context_window: Option<u32>,
+    reasoning_effort: Option<qq_provider::ReasoningEffort>,
     /// External tool hosts in contribution order. A compiled plan snapshots
     /// their catalogs; direct runs snapshot them per run.
     pub(crate) hosts: Arc<[Arc<dyn ExternalToolHost>]>,
@@ -638,6 +639,13 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Pins effort for every provider request, including continuation turns.
+    #[must_use]
+    pub const fn with_reasoning_effort(mut self, effort: qq_provider::ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(effort);
+        self
+    }
+
     pub fn new(
         provider: impl Provider + 'static,
         model: impl Into<Arc<str>>,
@@ -673,6 +681,7 @@ impl Runtime {
             audit: runtime::AuditPolicy::default(),
             checkpoint: None,
             checkpoint_identity: None,
+            reasoning_effort: None,
             shell: Arc::new(runtime::ShellPolicy::default()),
             network: Arc::new(tools::network::NetworkPolicy::default()),
         })
@@ -1065,6 +1074,7 @@ impl plan::CompiledAgentPlan {
         let shell_policy = Arc::clone(&plan.runtime.shell);
         let network_policy = Arc::clone(&plan.runtime.network);
         let checkpoint = plan.runtime.checkpoint.clone();
+        let reasoning_effort = plan.runtime.reasoning_effort;
         let events: RuntimeStream = Box::pin(stream! {
             let RunCapabilities {
                 spawner,
@@ -1466,6 +1476,10 @@ impl plan::CompiledAgentPlan {
                     Arc::clone(&messages),
                     max_output_tokens,
                 );
+                let request = match reasoning_effort {
+                    Some(effort) => request.with_reasoning_effort(effort),
+                    None => request,
+                };
                 let request = if request_has_tools {
                     request
                         .with_tools(Arc::clone(&tool_specs))
@@ -3442,6 +3456,61 @@ mod tests {
                     }),
                 }),
             ]))
+        }
+    }
+
+    #[tokio::test]
+    async fn compiled_effort_reaches_provider_and_distinguishes_omission() {
+        struct EffortProvider(Arc<Mutex<Vec<Option<qq_provider::ReasoningEffort>>>>);
+        impl Provider for EffortProvider {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let mut seen = self.0.lock().unwrap();
+                seen.push(request.reasoning_effort());
+                if seen.len() == 1 {
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::ToolCallStarted {
+                            id: "read".into(),
+                            name: "tree".into(),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: "read".into(),
+                            json: r#"{"path":".","depth":1}"#.into(),
+                        }),
+                        Ok(ProviderEvent::ToolCallCompleted { id: "read".into() }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".into(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
+            }
+        }
+        for effort in [
+            None,
+            Some(qq_provider::ReasoningEffort::None),
+            Some(qq_provider::ReasoningEffort::High),
+        ] {
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let mut runtime =
+                Runtime::new(EffortProvider(Arc::clone(&captured)), "test", 128).unwrap();
+            if let Some(effort) = effort {
+                runtime = runtime.with_reasoning_effort(effort);
+            }
+            let directory = tempfile::tempdir().unwrap();
+            let plan = crate::plan::CompiledAgentPlan::compile_blocking(
+                crate::plan::AgentProfile::embedded(&runtime, directory.path().to_owned()),
+            )
+            .unwrap();
+            assert_eq!(plan.descriptor().reasoning_effort, effort);
+            let _events = plan
+                .run(RunCommand::new("answer"))
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(*captured.lock().unwrap(), vec![effort, effort]);
         }
     }
 

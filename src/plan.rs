@@ -57,6 +57,7 @@ pub struct PlanKey {
     pub explicit_config_content: Option<String>,
     pub jev_review: Option<qq_config::JevReviewMode>,
     pub jev_routing: Option<bool>,
+    pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
 }
 
 impl std::fmt::Debug for PlanKey {
@@ -595,6 +596,7 @@ mod tests {
             explicit_config_content: None,
             jev_review: None,
             jev_routing: None,
+            reasoning_effort: None,
         }
     }
 

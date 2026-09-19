@@ -64,3 +64,21 @@ For current pinned pricing and uncertainty policy, see the architecture document
 Automatic model/effort routing is a separate planned slice. Setting
 `jev_routing: true` currently returns a configuration error; it is never silently
 treated as enabled. `QQ_JEV_ROUTING=off` overrides that reserved setting.
+
+Explicit effort can be pinned independently of Jev in trusted configuration:
+
+```ron
+(
+    version: 1,
+    reasoning_effort: high,
+    profiles: { "quick": Profile(reasoning_effort: Some(low)) },
+)
+```
+
+Values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`. Omission
+preserves provider defaults; top-level `Clear` removes an inherited setting.
+Profile values override top-level settings; explicit runtime overrides win.
+`qq config show` and `qq config explain reasoning_effort` expose the value and
+source. Unsupported adapter families reject the choice before credential lookup.
+Remote model restrictions still apply. This is a pinned choice, not automatic
+routing; it makes no speed or quality promise.

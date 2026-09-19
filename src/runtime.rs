@@ -882,6 +882,7 @@ impl RuntimeFactory {
             explicit_config_content: request.explicit_content().map(str::to_owned),
             jev_review: request.overrides().jev_review(),
             jev_routing: request.overrides().jev_routing(),
+            reasoning_effort: request.overrides().reasoning_effort(),
         };
         let lookup = self.inner.plans.load(&key, || {
             self.compile_generation(request, profile, &workspace, progress)
@@ -991,6 +992,11 @@ impl RuntimeFactory {
                 {
                     overrides = overrides.with_max_output_tokens(cap);
                 }
+                if request.overrides().reasoning_effort().is_none()
+                    && let Some(effort) = profile.reasoning_effort()
+                {
+                    overrides = overrides.with_reasoning_effort(effort);
+                }
                 if request.overrides().jev_review().is_none()
                     && let Some(mode) = profile.jev_review()
                 {
@@ -1012,6 +1018,15 @@ impl RuntimeFactory {
             return Err(RuntimeBuildError::JevRoutingUnavailable);
         }
         let resolved_model = self.resolved_model_for_snapshot(&snapshot)?;
+        if snapshot.reasoning_effort().is_some()
+            && resolved_model.generation.reasoning_effort
+                == qq_protocol::CapabilitySupport::Unsupported
+        {
+            return Err(RuntimeBuildError::UnsupportedReasoningEffort(
+                snapshot.model().as_str().to_owned(),
+            ));
+        }
+
         let provider_id = snapshot.model().provider();
         let provider_config = snapshot
             .providers()
@@ -1047,6 +1062,9 @@ impl RuntimeFactory {
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone());
+        if let Some(effort) = snapshot.reasoning_effort() {
+            profile = profile.with_reasoning_effort(effort);
+        }
         if snapshot.jev_review() != qq_config::JevReviewMode::Off {
             if let Some(progress) = progress {
                 progress.set(qq_core::RuntimeLoadStage::ResolvingCheckpointCredential);
@@ -1202,7 +1220,15 @@ impl RuntimeFactory {
                 CapabilitySupport::Native
             },
             generation: GenerationCapabilities {
-                reasoning_effort: CapabilitySupport::Unsupported,
+                reasoning_effort: if matches!(access, ProviderAccess::Http(_))
+                    && matches!(
+                        api,
+                        ProviderApi::OpenAiResponses | ProviderApi::OpenAiChatCompletions
+                    ) {
+                    CapabilitySupport::Native
+                } else {
+                    CapabilitySupport::Unsupported
+                },
             },
             prompt_cache: PromptCacheCapabilities {
                 control: cache_control,
@@ -2966,6 +2992,10 @@ pub enum RuntimeBuildError {
         "Jev routing is not implemented in this build; set jev_routing to false or QQ_JEV_ROUTING=off"
     )]
     JevRoutingUnavailable,
+    #[error(
+        "model route {0:?} uses a provider API that does not support reasoning_effort; remove that setting or choose a supported route"
+    )]
+    UnsupportedReasoningEffort(String),
     #[error("isolated TUI QA profile is invalid: {reason}")]
     InvalidTuiQaProfile { reason: String },
 }
@@ -3003,6 +3033,7 @@ impl RuntimeBuildError {
             | Self::InheritedCheckpoint(_)
             | Self::JevKeyRequired
             | Self::JevKeyInvalid
+            | Self::UnsupportedReasoningEffort(_)
             | Self::JevRoutingUnavailable
             | Self::JevClientUnavailable
             | Self::InvalidTuiQaProfile { .. } => RunFailureKind::Configuration,
@@ -4076,7 +4107,7 @@ mod tests {
         assert_eq!(resolved.output_token_control, CapabilitySupport::Native);
         assert_eq!(
             resolved.generation.reasoning_effort,
-            CapabilitySupport::Unsupported
+            CapabilitySupport::Native
         );
         assert_eq!(
             resolved.prompt_cache.control,
@@ -4336,10 +4367,7 @@ mod tests {
         let codex = factory.resolved_model_for_snapshot(&codex).unwrap();
         assert_eq!(codex.credential_profile.as_deref(), Some("work"));
         assert_eq!(codex.output_token_control, CapabilitySupport::Unsupported);
-        assert_eq!(
-            codex.generation.reasoning_effort,
-            CapabilitySupport::Unsupported
-        );
+        assert_eq!(codex.generation.reasoning_effort, CapabilitySupport::Native);
         assert_eq!(codex.prompt_cache.control, CapabilitySupport::Unsupported);
         assert!(codex.prompt_cache.cache_read_usage);
         assert!(!codex.prompt_cache.cache_write_usage);
@@ -4459,7 +4487,7 @@ mod tests {
                 )"#,
             ))
             .unwrap();
-        assert_eq!(plan.descriptor().version, 7);
+        assert_eq!(plan.descriptor().version, 8);
         assert_eq!(plan.descriptor().delegation.roster.len(), 1);
         assert_eq!(plan.descriptor().delegation.roster[0].route, "custom/fast");
         assert_eq!(
@@ -5926,6 +5954,7 @@ mod tests {
             explicit_config_content: None,
             jev_review: None,
             jev_routing: None,
+            reasoning_effort: None,
         };
         let (first, _) = factory
             .inner
@@ -6460,7 +6489,7 @@ mod tests {
                 "descriptor leaked {forbidden}"
             );
         }
-        assert!(canonical.starts_with("qq-agent-plan-descriptor-v7\0{"));
+        assert!(canonical.starts_with("qq-agent-plan-descriptor-v8\0{"));
     }
 
     #[test]
@@ -6624,6 +6653,57 @@ mod tests {
             "{}",
             error.message
         );
+    }
+
+    #[test]
+    fn reasoning_effort_profiles_overrides_and_cache_preserve_explicit_choices() {
+        use qq_provider::ReasoningEffort;
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let request = fixture.request(r#"(
+            version: 1, model: "custom/test", reasoning_effort: high,
+            profiles: { "quick": Profile(reasoning_effort: Some(low)) },
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test": (name: "test") }) },
+        )"#);
+        let high = factory.plan_for(&request).unwrap();
+        assert_eq!(
+            high.descriptor().reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+        assert!(high.descriptor().checkpoint.is_none());
+        let profile = AgentProfileId::new("quick").unwrap();
+        let low = factory.plan_for_profile(&request, &profile).unwrap();
+        assert_eq!(
+            low.descriptor().reasoning_effort,
+            Some(ReasoningEffort::Low)
+        );
+        let explicit = request.clone().with_overrides(
+            request
+                .overrides()
+                .clone()
+                .with_reasoning_effort(ReasoningEffort::None),
+        );
+        let none = factory.plan_for_profile(&explicit, &profile).unwrap();
+        assert_eq!(
+            none.descriptor().reasoning_effort,
+            Some(ReasoningEffort::None)
+        );
+        assert_ne!(low.digest(), none.digest());
+        assert_eq!(
+            factory
+                .plan_for_profile(&request, &profile)
+                .unwrap()
+                .digest(),
+            low.digest()
+        );
+        let unsupported = fixture.request(r#"(
+            version: 1, model: "custom/test", reasoning_effort: high,
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: AnthropicMessages, auth: ApiKey(Stored("missing-key"))), models: { "test": (name: "test") }) },
+        )"#);
+        assert!(matches!(
+            factory.plan_for(&unsupported),
+            Err(RuntimeBuildError::UnsupportedReasoningEffort(_))
+        ));
     }
 
     #[test]

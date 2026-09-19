@@ -40,6 +40,8 @@ written.
 
 | 0030 | [Explicit, independent Jev capabilities](0030-optional-jev-decisions.md) | Accepted; supersedes ADR-0028 activation |
 
+- [ADR-0031: explicit reasoning effort in compiled plans](0031-explicit-reasoning-effort.md) — Accepted.
+
 ## When to write one
 
 Write an ADR when a change:

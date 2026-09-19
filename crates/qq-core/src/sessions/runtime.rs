@@ -75,6 +75,9 @@ impl LoadedRuntime {
         for registered in runtime.context_sources.iter() {
             profile = profile.with_context_source(Arc::clone(&registered.source));
         }
+        if let Some(effort) = runtime.reasoning_effort {
+            profile = profile.with_reasoning_effort(effort);
+        }
         if let Some(reviewer) = &runtime.checkpoint {
             profile = profile.with_checkpoint_reviewer(Arc::clone(reviewer));
         }

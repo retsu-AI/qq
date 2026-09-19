@@ -4,8 +4,9 @@ Owner: this stacked implementation session. Base `dc59d14` / draft #72.
 
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
-| J1–J5 + visible J7 | Optional review, correctness and receipts | In review | [#74](https://github.com/retsu-AI/qq/pull/74), stacked on #72 | Local checks green; quiet-host tails and hosted qualification open |
-| J6 + passive J7 | Optional routing and advisory observer | Planned | Follow-up slices | Independent acceptance; not shipping in #74 |
+| J1–J5 + visible J7 | Optional review, correctness and receipts | In review | [#74](https://github.com/retsu-AI/qq/pull/74), stacked on #72 | Local and hosted checks green; quiet-host tails open |
+| J6a | Explicit model effort | In review | [#76](https://github.com/retsu-AI/qq/pull/76), stacked on #74 | Local checks/reviews green; performance gate unresolved; hosted checks pending |
+| J6b + passive J7 | Optional routing and advisory observer | Planned | Follow-up slices | Independent acceptance; not shipping in #74 |
 | J8–J9 | Qualification and delivery | In progress | #74 | Live evaluation and remaining slices open |
 
 ## Entries
@@ -133,3 +134,57 @@ Pushed `1d2b3604ffd1393a285cc2070799c88df7d2b26d`; opened draft
 created the authorized PR. Local workspace is clean after the implementation
 commit. Linear connector remains unavailable; issue state was not changed.
 No merge or release. Broader routing/advisory work remains planned.
+
+### J6a explicit effort foundation — 2026-09-18
+
+Follow-up branch `feat/eng-791-jev-routing` starts from #74 head 1405ff0.
+Scope: explicit effort in trusted config/profiles, request dispatch and immutable
+plan identity. Routing will preserve this pinned choice. Default omission remains
+unchanged; no Jev activation is coupled to effort. Prior candidate benchmark
+binaries are the pre-change baseline for this slice. No new dependency or runtime.
+
+J6a tests went red for missing effort config/runtime methods, then green.
+Config/profile precedence, explicit none versus omission, workspace re-trust,
+cache isolation and provider dispatch are covered. Independent Spec/Standards
+reviewers approve this bounded slice. The root suite hit an existing one-second
+silent-turn timeout under load (156 passed, one failed, one ignored); the exact
+regression passed alone in 0.19 s. No timeout was widened. Final suite pending.
+PR #74 hosted CI run 35392565866 completed successfully at 1405ff0.
+
+#### J6a local receipt — 2026-09-18
+Workspace tests: 1,579 passed, five ignored, no failures, NO_COLOR unset.
+`cargo fmt --all -- --check`, strict workspace all-target/all-feature Clippy,
+and workspace build pass (locked/offline, shared target directory).
+Core regression observes the same effort on both sides of a real tool turn.
+Independent Spec/Standards: approve. Descriptor 7→8; ADR-0031 and runbook updated.
+No new dependency, migration or Jev inference. This commit is local to the
+routing follow-up branch; #74 remains at its independently green head.
+J6b selection/admission/accounting and J7 passive observer remain unfinished.
+
+### J6a delivery qualification — 2026-09-18
+
+Rechecked #74: open/draft, head 1405ff0, hosted CI 35392565866 succeeded.
+Explicit effort remains the bounded follow-up; automatic routing and passive
+observation are not represented as implemented. Release A/B and A/A use the
+retained #74 candidate binaries as baseline and ecc6a1f as candidate.
+Raw evidence: `target/qq-perf/jev-effort-2026-09-18/paired.json`.
+
+#### J6a performance receipt — 2026-09-18
+Thirty release A/B pairs against #74, followed by 30 same-binary A/A pairs.
+Tool loop median: 52,282.5 → 55,146 ns (+5.48%); sample p95 71,741 → 85,339 ns.
+A/A median: 54,681.5 → 51,717.5 ns (−5.42%); p95 82,130 → 80,980 ns.
+Plan compile median: 24,729.5 → 24,583.5 ns (−0.59%).
+Descriptor digest median: 2,433.5 → 2,343.5 ns (−3.70%).
+Host I/O some avg10: 31.38–47.17%. No overlapping root build/test during samples.
+The tool-loop 5% gate is not met; noisy control does not waive it. Quiet-host
+measurement remains required before merge qualification. This draft delivers
+reviewable functionality, not a performance or Jev acceleration claim.
+
+### J6a stacked delivery — 2026-09-18
+
+Pushed c5feef4 and opened draft [#76](https://github.com/retsu-AI/qq/pull/76),
+base `feat/eng-791-jev-opt-in` (#74, 1405ff0). The GitHub connector still cannot
+write PR metadata (403); authenticated CLI performed the authorized draft/update.
+#74 body now accurately records successful hosted CI. #76 does not claim its
+performance gate, automatic routing or advisory observation are complete.
+No merge, paid evaluation or Linear update. Broader goal remains in progress.
