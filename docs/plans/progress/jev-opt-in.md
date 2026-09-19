@@ -7,7 +7,7 @@ Owner: this stacked implementation session. Base `dc59d14` / draft #72.
 | J1–J5 + visible J7 | Optional review, correctness and receipts | In review | [#74](https://github.com/retsu-AI/qq/pull/74), stacked on #72 | Local and hosted checks green; quiet-host tails open |
 | J6a | Explicit model effort | In review | [#76](https://github.com/retsu-AI/qq/pull/76), stacked on #74 | Local checks/reviews green; performance gate unresolved; hosted CI 35394821612 successful |
 | J6b | Optional routing | In review | [#77](https://github.com/retsu-AI/qq/pull/77), stacked on #76 | Hosted CI 35406214280 successful; incremental median within budget; full-stack qualification pending |
-| Passive J7 | Advisory observer | In review | [#78](https://github.com/retsu-AI/qq/pull/78), stacked on #77 | Local workspace gates and independent review passed; hosted CI running |
+| Passive J7 | Advisory observer | In review | [#78](https://github.com/retsu-AI/qq/pull/78), stacked on #77 | Local workspace gates, independent review and hosted CI 35407913885 passed |
 | J8–J9 | Qualification and delivery | In progress | #74 | Live evaluation and remaining slices open |
 
 ## Entries
@@ -327,3 +327,22 @@ The measured repair-stack median fits 5%, but I/O pressure 20.78–39.18% and
 the failing same-binary tail prevent quiet-host tail qualification. This is
 relative to PR #72, not main, and does not qualify absolute budgets, startup,
 fanout or live Jev quality/savings. Those acceptance limits remain open.
+
+### Complete candidate recording and hosted checks — 2026-09-18
+
+PR #78 head 8264d77 passed hosted CI 35407913885 (Linux checks, wasm client,
+native Windows teardown). Full H0 recording at that clean head completed with
+77 metrics and all 25 correctness checks passing, 100 requested samples and
+10 warmups. Receipt: `target/qq-perf/jev-full-stack-2026-09-18/candidate-h0.json`.
+Default binary 48,725,376 bytes exceeds 48,000,000; minimal 42,079,152 exceeds
+41,000,000. These are the two observed absolute-budget failures. Matching
+main c404ae5 recording is running in `/tmp/qq-jev-main-perf`; no relative
+conclusion yet. Budgets have not been changed or waived.
+
+Landing requires incorporating the follow-up fixes before the original #72
+reaches main: #72's old head still fails Clippy and a Windows teardown test,
+while #74/#76/#77/#78 pass. Maintainers can merge the reviewed stack downward
+(#78 into #77, then #77 into #76, #76 into #74, #74 into #72), preserving
+ancestry and rerunning the resulting #72 checks before merging to main.
+No PR has been merged by this session. Live Jev evaluation remains required
+for speed/quality claims; this implementation makes none.
