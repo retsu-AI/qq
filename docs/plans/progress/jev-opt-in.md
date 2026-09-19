@@ -346,3 +346,25 @@ while #74/#76/#77/#78 pass. Maintainers can merge the reviewed stack downward
 ancestry and rerunning the resulting #72 checks before merging to main.
 No PR has been merged by this session. Live Jev evaluation remains required
 for speed/quality claims; this implementation makes none.
+
+### Main comparison — 2026-09-18
+
+Clean main c404ae5 full H0 recording completed with 77 metrics. Candidate
+8264d77 versus main: default binary 48,090,784→48,725,376 bytes (+1.32%);
+minimal 41,441,744→42,079,152 (+1.54%). Both absolute size failures predate
+the stack. Startup medians improve: version -2.98%, server readiness -6.05%.
+The budget checker exits 1: two absolute size and eight relative p95 failures
+(idle shutdown, HTTP replay, eight-subscriber fanout, long shell, eight-stream
+control/cancellation/output gap, restart replay). Same-binary full main control
+is running; do not classify those tails as noise or waive them yet.
+Reports: `/tmp/qq-jev-main-perf/target/qq-perf/jev-full-stack-2026-09-18/main-h0.json`
+and candidate directory above; checker output retained as `main-comparison.txt`.
+
+Full same-binary control completed (`main-aa-h0.json` in the baseline directory).
+It reproduces the absolute size failures and HTTP replay, eight-subscriber
+fanout and restart-replay p95 failures; other control failures include cursor
+replay, fanout command acknowledgement and restart snapshot reconstruction.
+It does not reproduce candidate idle-shutdown, long-shell or eight-stream
+control/cancellation/output-gap failures. Those five candidate failures remain
+unresolved and require focused paired measurement, not a blanket noise waiver.
+Latest documentation head d336048 passed hosted CI 35408821021.
