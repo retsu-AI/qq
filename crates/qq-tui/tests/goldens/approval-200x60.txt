@@ -1,0 +1,60 @@
+ qq  Session 0                                                                                                                                                                   openai/gpt-test  $0.00
+ ▌ YOU                                                                                                                                                                      │ NEEDS YOU  1
+ ▌ fix the off-by-one in wrap.rs                                                                                                                                            │ ◇ Session 0
+                                                                                                                                                                            │    ◇ approve edit
+   QQ                                                                                                                                                                       │
+   I’ll patch the loop bound.                                                                                                                                               │ IDLE  2
+                                                                                                                                                                            │ ○ Session 1
+   ◇ Edit   crates/qq-tui/src/view/wrap.rs                    awaiting approval                                                                                             │ ○ Session 2
+     ◇ approval needed                                                                                                                                                      │
+       crates/qq-tui/src/view/wrap.rs                                                                                                                                       │
+       @@ -40,3 +40,3 @@                                                                                                                                                    │
+     40      let mut column = 0;                                                                                                                                            │
+        -    while column <= width {                                                                                                                                        │
+     41 +    while column < width {                                                                                                                                         │
+     42          column += 1;                                                                                                                                               │
+       y once   a session   w workspace   n deny                                                                                                                            │
+   ✓ 0.0s · ttft 0.0s                                                                                                                                                       │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+                                                                                                                                                                            │
+ ◐ working ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── F1 help
+ ✎ Answer the approval above

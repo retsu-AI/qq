@@ -73,6 +73,15 @@ const PLAIN_TEXT_CHECKPOINT_ROWS: usize = 1024;
 const MAX_PLAIN_TEXT_CHECKPOINTS: usize = 4 * 1024;
 const MAX_PLAIN_TEXT_ROW_BYTES: usize = 4 * 1024;
 
+/// The cells a frame lays out for a terminal of `actual_size`: clamped to the
+/// render bounds so a huge or degenerate size costs a bounded frame.
+pub(crate) fn render_size(actual_size: (u16, u16)) -> (usize, usize) {
+    (
+        usize::from(actual_size.0.clamp(1, MAX_RENDER_WIDTH)),
+        usize::from(actual_size.1.clamp(1, MAX_RENDER_HEIGHT)),
+    )
+}
+
 /// Frame assembly and the row diff against the previous frame. Retained
 /// transcript state lives in one [`TranscriptCache`]; the highlighter is
 /// separate because its results are keyed by message and width.
@@ -115,9 +124,8 @@ impl FrameRenderer {
     /// return the bytes that bring the terminal from the previous frame to
     /// this one. Only changed rows are emitted unless the size changed.
     pub fn draw(&mut self, app: &mut App, actual_size: (u16, u16)) -> io::Result<Vec<u8>> {
-        let width = actual_size.0.clamp(1, MAX_RENDER_WIDTH);
-        let height = actual_size.1.clamp(1, MAX_RENDER_HEIGHT);
-        let frame = self.frame(app, usize::from(width), usize::from(height));
+        let (width, height) = render_size(actual_size);
+        let frame = self.frame(app, width, height);
         self.commit(app);
         let resized = self.size != Some(actual_size);
         let mut output = Vec::with_capacity(4096);
@@ -302,7 +310,7 @@ impl FrameRenderer {
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-support"))]
 impl FrameRenderer {
     /// Build a frame and hand its geometry back to the app, as `draw` does.
     pub(crate) fn frame_and_commit(

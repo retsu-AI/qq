@@ -67,6 +67,96 @@ ThreadingHTTPServer(("127.0.0.1", 18081), Handler).serve_forever()
 PY
 ```
 
+To review transcript rendering end to end, run this endpoint instead. It
+streams the markdown gallery (the same text `qq_tui::bench_support::
+MARKDOWN_GALLERY` pins in `crates/qq-tui/tests/goldens/`) as one delta per
+line with a short pause, so streaming layout, the settled-prefix cache, and
+off-tick highlighting are all exercised in a real terminal:
+
+```sh
+python3 - <<'PY'
+import json, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+GALLERY = """First paragraph of prose.
+
+Second paragraph of prose, directly after the first.
+
+# Level one heading
+
+## Level two heading
+
+### Level three heading
+
+1. First numbered item
+2. Second numbered item that is deliberately long enough to wrap onto a second row at this width
+3. Third numbered item
+   - nested bullet under three
+
+- A bullet item that is also deliberately long enough to wrap onto a second physical row here
+- Short bullet
+
+- [ ] open task
+- [x] done task
+
+> A quote long enough to wrap onto a second row so we can see whether the rail repeats.
+
+Some *emphasis*, some **strong**, some `inline code`, a [link](https://example.com/x), a footnote[^1], and math $x^2$.
+
+[^1]: The footnote body.
+
+```rust
+fn main() {
+    let x = 1;
+    if x > 0 {
+        println!("{x}");
+    }
+}
+```
+
+| Role | Default |
+| --- | --- |
+| text | white |
+| muted | dark grey |
+
+---
+
+Tail paragraph.
+"""
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        if self.path != "/v1/responses":
+            self.send_error(404)
+            return
+        length = int(self.headers.get("content-length", "0"))
+        self.rfile.read(length)
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("cache-control", "no-cache")
+        self.end_headers()
+        for line in GALLERY.splitlines(keepends=True):
+            event = {"type": "response.output_text.delta", "delta": line}
+            self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
+            self.wfile.flush()
+            time.sleep(0.04)
+        done = {"type": "response.completed",
+                "response": {"usage": {"input_tokens": 1, "output_tokens": 200}}}
+        self.wfile.write(f"data: {json.dumps(done)}\n\n".encode())
+        self.wfile.flush()
+    def log_message(self, *_args):
+        pass
+
+ThreadingHTTPServer(("127.0.0.1", 18081), Handler).serve_forever()
+PY
+```
+
+Ask anything; the reply is always the gallery. Check it at a full-screen
+window and again at 80 × 24 (`resize` or a split), and with `/theme` to
+switch palettes. The same frames without a terminal are written by
+`cargo test -p qq-tui --test gallery -- --ignored` to
+`target/qq-tui-gallery/<theme>/<scene>-<w>x<h>.ans` for `cat`.
+
 From a real terminal, with no enforced-review environment override, start the
 fixture:
 
