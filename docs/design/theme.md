@@ -57,6 +57,9 @@ compiled defaults
   → project .qq/tui.ron from repository root to cwd
 ```
 
+A global `tui.ron` or `themes/N.ron` may be a leaf symlink to a regular file.
+Project `.qq/tui.ron` and `.qq/themes/N.ron` still reject symbolic links.
+
 Later layers may override the theme name. The resolved name is then loaded once
 when TUI settings are compiled.
 

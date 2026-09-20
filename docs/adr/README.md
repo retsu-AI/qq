@@ -44,6 +44,7 @@ written.
 - [ADR-0032: durable optional task routing](0032-durable-task-routing.md) — Accepted.
 - [ADR-0033: model-choice provenance](0033-model-choice-provenance.md) — Accepted.
 - [ADR-0034: concrete Jev routing](0034-concrete-jev-routing.md) — Accepted.
+- [ADR-0035: global configuration leaf symlinks](0035-global-leaf-config-symlinks.md) — Accepted.
 
 ## When to write one
 

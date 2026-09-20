@@ -54,7 +54,8 @@ evidence.
 - [`local-dev.md`](runbooks/local-dev.md) — toolchain, gates, test
   environment, worktrees.
 - [`tui-qa.md`](runbooks/tui-qa.md) — explicit credential-free, loopback-only
-  TUI diagnostic fixture and cleanup.
+  TUI diagnostic fixture and cleanup. The ordinary user-global config path
+  may be a leaf symlink; this fixture still requires a regular `config.ron`.
 - [`perf-recording.md`](runbooks/perf-recording.md) — baseline/candidate
   procedure, focused fixtures, same-binary control, host conditions.
 - [`windows-ci.md`](runbooks/windows-ci.md) — the targeted Windows job and how
