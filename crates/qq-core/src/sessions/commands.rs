@@ -1510,8 +1510,10 @@ pub(super) fn apply_steering_message(
     identity: RunIdentity,
     message_id: MessageId,
     turn_ordinal: u32,
+    attachments: &[crate::input::ResolvedAttachment],
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    let now = now_ms();
     let changed = transaction.execute(
         "UPDATE messages SET state = 'complete', turn_ordinal = ?3
              WHERE id = ?1 AND run_id = ?2 AND steering = 1 AND state = 'queued'",
@@ -1523,6 +1525,17 @@ pub(super) fn apply_steering_message(
     )?;
     if changed != 1 {
         return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    // The bytes the model saw ride the same transaction as the state change,
+    // exactly as a prompt's attachments ride `RunStarted`.
+    if !attachments.is_empty() {
+        store_message_attachments(
+            &transaction,
+            identity.session_id,
+            &message_id.to_string(),
+            attachments,
+            now,
+        )?;
     }
     let event = append_event(
         &transaction,
@@ -1577,19 +1590,29 @@ pub(super) fn pending_steering_rows(
     run_id: RunId,
 ) -> Result<Vec<crate::runtime::SteeringMessage>, SessionRuntimeError> {
     let mut statement = connection.prepare_cached(
-        "SELECT id, output FROM messages
+        "SELECT id, output, input_json FROM messages
              WHERE run_id = ?1 AND steering = 1 AND state = 'queued' ORDER BY ordinal",
     )?;
     let rows = statement
         .query_map([run_id.to_string()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     rows.into_iter()
-        .map(|(id, text)| {
+        .map(|(id, text, input_json)| {
+            // Rows written before `input_json` was recorded carry only their
+            // rendered text; that text is the whole input.
+            let input = match input_json {
+                Some(json) => parse_input_parts(Some(&json))?,
+                None => vec![qq_protocol::InputPart::Text { text }],
+            };
             Ok(crate::runtime::SteeringMessage {
                 message_id: parse_id(&id)?,
-                text,
+                input,
             })
         })
         .collect()

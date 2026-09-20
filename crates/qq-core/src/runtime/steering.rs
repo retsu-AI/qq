@@ -10,7 +10,7 @@
 //! futures are dropped, partial text stands, and unfinished calls settle as
 //! interrupted before the injected message is sent.
 
-use qq_protocol::MessageId;
+use qq_protocol::{InputPart, MessageId};
 use tokio::sync::{mpsc, watch};
 
 /// Most steering messages that may wait for a boundary per run. Admission
@@ -21,8 +21,20 @@ pub const MAX_PENDING_STEERING: u16 = 4;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SteeringMessage {
     pub(crate) message_id: MessageId,
-    /// Provider-visible text, already resolved from its input parts.
-    pub(crate) text: String,
+    /// The structured input as submitted. File parts are read when the
+    /// message is applied at a turn boundary, so the model sees the bytes as
+    /// they are then and the store keeps them like a prompt's attachments.
+    pub(crate) input: Vec<InputPart>,
+}
+
+#[cfg(test)]
+impl SteeringMessage {
+    pub(crate) fn text(message_id: MessageId, text: impl Into<String>) -> Self {
+        Self {
+            message_id,
+            input: vec![InputPart::Text { text: text.into() }],
+        }
+    }
 }
 
 /// The run loop's end of a steering channel.

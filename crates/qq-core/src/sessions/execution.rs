@@ -2782,10 +2782,11 @@ async fn execute_started_run(
             RunInput::Event(Some(RuntimeEvent::SteeringApplied {
                 message_id,
                 turn_ordinal,
+                attachments,
             })) => {
                 match inner
                     .store
-                    .apply_steering(&claimed, message_id, turn_ordinal)
+                    .apply_steering(&claimed, message_id, turn_ordinal, attachments)
                     .await
                 {
                     Ok(_) => {}

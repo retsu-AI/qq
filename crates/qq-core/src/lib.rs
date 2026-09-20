@@ -159,28 +159,79 @@ async fn interrupt_requested(steering: &mut Option<runtime::SteeringReceiver>, h
     }
 }
 
+/// One steering message the loop has injected: its id and the files it read.
+struct AppliedSteering {
+    message_id: qq_protocol::MessageId,
+    attachments: Vec<input::ResolvedAttachment>,
+}
+
 /// Drains every steering message that is ready and appends each as a user
-/// message. Returns the ids applied, in order, or `None` when nothing was
-/// pending. Never waits: steering that arrives after this point waits for
-/// the next boundary.
-fn apply_steering(
+/// message. Returns what was applied, in order, or `None` when nothing was
+/// pending. Never waits for more steering: messages that arrive after the
+/// drain wait for the next boundary. A message with file parts reads them
+/// here — off the executor, through the plan's workspace — so the model sees
+/// the bytes as they are at the boundary and the store can keep them as
+/// this message's attachments. A file that cannot be read is reported to the
+/// model in place of the attachment rather than failing the run: the user's
+/// text still lands, and the message names what was missing.
+async fn apply_steering(
     steering: &mut Option<runtime::SteeringReceiver>,
     messages: &mut Vec<Message>,
     irreducible_message_bytes: &mut u64,
-    _turn_ordinal: u32,
     mut checkpoint: Option<&mut runtime::CheckpointContext>,
-) -> Option<Vec<qq_protocol::MessageId>> {
+    workspace: &workspace::Workspace,
+    file_state: &Arc<workspace::FileState>,
+) -> Option<Vec<AppliedSteering>> {
     let steering = steering.as_mut()?;
     let mut applied = Vec::new();
     while let Ok(message) = steering.messages.try_recv() {
+        let has_files = message
+            .input
+            .iter()
+            .any(|part| matches!(part, qq_protocol::InputPart::WorkspaceFile { .. }));
+        let (text, attachments) = if has_files {
+            let workspace = workspace.clone();
+            let file_state = Arc::clone(file_state);
+            let parts = message.input;
+            let resolved = tokio::task::spawn_blocking(move || {
+                input::resolve_blocking(&parts, &workspace, &file_state)
+                    .map_err(|error| (input::render_text(&parts), error))
+            })
+            .await;
+            match resolved {
+                Ok(Ok(resolved)) => (resolved.text, resolved.attachments),
+                Ok(Err((placeholder, error))) => (
+                    format!(
+                        "{}\n\n[QQ runtime notice; not a user instruction]\nAn attached file \
+                         could not be read: {error}",
+                        placeholder.trim()
+                    ),
+                    Vec::new(),
+                ),
+                Err(_) => (
+                    "[QQ runtime notice; not a user instruction]\nA steering message's \
+                     attachments could not be resolved."
+                        .to_owned(),
+                    Vec::new(),
+                ),
+            }
+        } else {
+            (
+                input::render_text(&message.input).trim().to_owned(),
+                Vec::new(),
+            )
+        };
         if let Some(context) = checkpoint.as_deref_mut() {
-            context.steer(&message.text);
+            context.steer(&text);
         }
-        let user = Message::user(message.text);
+        let user = Message::user(text);
         *irreducible_message_bytes =
             irreducible_message_bytes.saturating_add(measure_message(&user));
         messages.push(user);
-        applied.push(message.message_id);
+        applied.push(AppliedSteering {
+            message_id: message.message_id,
+            attachments,
+        });
     }
     (!applied.is_empty()).then_some(applied)
 }
@@ -2003,15 +2054,12 @@ impl plan::CompiledAgentPlan {
                     // The interrupt exists to apply steering now. Nothing
                     // queued means the client raced a finishing run; continue
                     // with the next turn so the model resumes from its text.
-                    if let Some(applied) = apply_steering(
-                        &mut steering,
-                        Arc::make_mut(&mut messages),
-                        &mut irreducible_message_bytes,
-                        turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
-                        for message_id in applied {
+                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                        for steer in applied {
                             yield RuntimeEvent::SteeringApplied {
-                                message_id,
+                                message_id: steer.message_id,
                                 turn_ordinal: turn_ordinal.saturating_add(1),
+                                attachments: steer.attachments,
                             };
                         }
                     }
@@ -2073,21 +2121,18 @@ impl plan::CompiledAgentPlan {
                     // Steering that arrived during the final turn is not
                     // dropped: the run continues with it instead of
                     // completing, exactly as if the model had called a tool.
-                    if let Some(applied) = apply_steering(
-                        &mut steering,
-                        Arc::make_mut(&mut messages),
-                        &mut irreducible_message_bytes,
-                        turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
+                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                         irreducible_message_bytes = irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let steering_messages = Arc::make_mut(&mut messages).split_off(keep);
                         Arc::make_mut(&mut messages).push(assistant);
                         Arc::make_mut(&mut messages).extend(steering_messages);
-                        for message_id in applied {
+                        for steer in applied {
                             yield RuntimeEvent::SteeringApplied {
-                                message_id,
+                                message_id: steer.message_id,
                                 turn_ordinal: turn_ordinal.saturating_add(1),
+                                attachments: steer.attachments,
                             };
                         }
                         continue;
@@ -2189,9 +2234,9 @@ impl plan::CompiledAgentPlan {
                             irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
                             yield RuntimeEvent::Interrupted { turn_ordinal };
-                            if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
-                                for message_id in applied {
-                                    yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) };
+                            if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                                for steer in applied {
+                                    yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments };
                                 }
                             }
                             continue;
@@ -2213,13 +2258,13 @@ impl plan::CompiledAgentPlan {
                         }
                     }
                     // Steering accepted while an audit ran still owns the next boundary.
-                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
+                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                         irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(&mut messages).split_off(keep);
                         Arc::make_mut(&mut messages).push(assistant);
                         Arc::make_mut(&mut messages).extend(queued);
-                        for message_id in applied { yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) }; }
+                        for steer in applied { yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments }; }
                         continue;
                     }
                     if let Some(kind) = budget.exceeded(tokio::time::Instant::now()) {
@@ -2354,9 +2399,9 @@ impl plan::CompiledAgentPlan {
                                     irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                                     Arc::make_mut(&mut messages).push(assistant);
                                     yield RuntimeEvent::Interrupted { turn_ordinal };
-                                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
-                                        for message_id in applied {
-                                            yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) };
+                                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                                        for steer in applied {
+                                            yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments };
                                         }
                                     }
                                     continue;
@@ -2402,13 +2447,13 @@ impl plan::CompiledAgentPlan {
                     }
                     // A review may await remote inference. Input accepted during
                     // that wait belongs to this run, not its successor.
-                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
+                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                         irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(&mut messages).split_off(keep);
                         Arc::make_mut(&mut messages).push(assistant);
                         Arc::make_mut(&mut messages).extend(queued);
-                        for message_id in applied { yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) }; }
+                        for steer in applied { yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments }; }
                         continue;
                     }
                     yield RuntimeEvent::Completed { final_output };
@@ -3132,15 +3177,12 @@ impl plan::CompiledAgentPlan {
                 // The boundary: every result of this turn is in context, and
                 // the next request has not been built. Steering joins here as
                 // a user message after the tool results.
-                if let Some(applied) = apply_steering(
-                    &mut steering,
-                    Arc::make_mut(&mut messages),
-                    &mut irreducible_message_bytes,
-                    turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
-                    for message_id in applied {
+                if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                    for steer in applied {
                         yield RuntimeEvent::SteeringApplied {
-                            message_id,
+                            message_id: steer.message_id,
                             turn_ordinal: turn_ordinal.saturating_add(1),
+                            attachments: steer.attachments,
                         };
                     }
                 }
@@ -4685,10 +4727,10 @@ mod tests {
                     if send {
                         sender
                             .messages
-                            .send(runtime::SteeringMessage {
+                            .send(runtime::SteeringMessage::text(
                                 message_id,
-                                text: "Also explain the result".into(),
-                            })
+                                "Also explain the result",
+                            ))
                             .await
                             .unwrap();
                     }
@@ -4763,10 +4805,10 @@ mod tests {
                     if send {
                         sender
                             .messages
-                            .send(runtime::SteeringMessage {
+                            .send(runtime::SteeringMessage::text(
                                 message_id,
-                                text: "Also explain the result".into(),
-                            })
+                                "Also explain the result",
+                            ))
                             .await
                             .unwrap();
                     }
