@@ -159,7 +159,11 @@ xtask/
   `https`; plaintext off loopback is unconstructible) and has two transports
   behind cargo features: `native` (default; Tokio, `TuiClient`, `observer`)
   and `wasm` (browser `fetch`; decoder, cursor validation, and `ClientPort`
-  only). The transport-neutral decoder tests compile for both.
+  only). The transport-neutral decoder tests compile for both. Every JSON
+  exchange (send, headers, and body) runs under one 30 s deadline and fails
+  as `ClientError::Timeout`, distinct from `Unavailable` (transport) and
+  `ResponseTooLarge` (size cap); the SSE stream keeps its own 10 s header and
+  45 s idle deadlines.
   `qq_client::state` is the surface-neutral session model every client shares:
   `SessionStore` (per-session `SessionView` with warm body, `LiveStatus`,
   `RunStats`, `Reasoning`, bounded tails, and the lazily rebuilt tree index),

@@ -20,6 +20,7 @@ may append a **request** row; only root changes a request's status.
 | F07 | Control and cleanup commands admitted past `MAX_COMMANDS` | In review ([ENG-786](https://linear.app/retsu-ai/issue/ENG-786), [#68](https://github.com/retsu-AI/qq/pull/68)) | 2026-09-16. `SessionCommandKind::creates_work` splits the thirteen kinds; new work bounded at 100 000 receipts, control/cleanup at +10 000 headroom, runtime settlement cancels unbounded (`CommandOrigin`). Receipts never trimmed; replay unchanged. Two regression tests fill the counter and drive cancel/approve/delete/prune/shutdown |
 | F05 | Attachments reconstructed as the model first saw them | In review ([ENG-788](https://linear.app/retsu-ai/issue/ENG-788), #69) | 2026-09-17. Schema 28 → 29: `attachment_blobs` (per-session, keyed by whole-file hash + range, 64 MiB cap with explicit evicted rendering) and `message_attachments`, written in the `RunStarted` transaction; `load_model_context` re-renders `<attached-file>` blocks from the store; `ClaimedRun.resolved_input` carries the first read across the auto-compaction retry. Three regression tests (modify/delete/reopen/dedup/cascade; eviction stub; auto-compaction retry) plus the reference-assembly oracle |
 | F06 | Context assembly and history search bounded by retained context, not archive size | In review ([ENG-790](https://linear.app/retsu-ai/issue/ENG-790), #70) | 2026-09-17. Turn/result/steering/attachment queries joined to the retained prompt window; schema 29 → 30 adds `messages(run_id, steering, state)`. `search_history` newest-first with an 8 MiB scan budget and a `truncated` note. New `context_assembly` bench: assembly 83 µs / 25 ms / 98 ms → 50 / 47 / 82 µs at 10 / 1 000 / 10 000 archived runs; absent-term search 433 ms → 54 ms (truncated) at 10 000 |
+| F10 | Client JSON exchange bounded end to end | In review ([ENG-792](https://linear.app/retsu-ai/issue/ENG-792), #79) | 2026-09-19. `post_json` wrapped send+headers+body in one `REQUEST_TIMEOUT`; new `ClientError::Timeout`; mid-body transport failure is `Unavailable`, size cap `ResponseTooLarge`. Regression probe: the stalled-body test hangs indefinitely on the prior code. SSE deadlines unchanged |
 | F04 | Bounded summarizer input; compactions fold until the prompt fits | In review ([ENG-789](https://linear.app/retsu-ai/issue/ENG-789), [#71](https://github.com/retsu-AI/qq/pull/71)) | 2026-09-17. Summarizer reads at most one window of whole prompt/run units after the cutoff (`load_summarizer_input`); each step commits a marker at its unit boundary; `context_compaction_attempted` counts steps (no schema change), fold stops on full coverage, a failed step, or 32 steps; single oversized unit fails as `OversizedUnit`, not "already attempted"; manual `/compact` takes one bounded step. Six regression tests incl. shutdown/reopen resume. Deferred: estimator calibration from observed usage; provider tokenizers |
 
 ## ADR number allocation
@@ -284,3 +285,14 @@ a `run_id` index. After: assembly 50 / 47 / 82 µs (flat); absent search
 recall (FTS) would be the next step if that shows up in practice — not
 built, no evidence yet. Order 2 remaining: F03, F04, F10, F11, F20, F23,
 F24, F28.
+
+### 2026-09-19 — F10 client body deadline
+
+F04 shipped separately (#71, ENG-789) while F06 was in review; order 2 now
+has F03, F11, F20, F23, F24, F28 open. F10 reproduced on `main` `22b0e0a`:
+`post_json` timed out `.send()` only, so headers followed by a stalled or
+dripped body held the request future — and in the TUI one of its
+`TUI_CONCURRENT_REQUESTS` permits — with no error. Fixed by one deadline over
+the whole exchange; three raw-socket tests (stalled, chunked drip, mid-body
+close) plus connection refused. The `Timeout` variant is not added to the
+reconnect policy's re-resolve set: a slow server is not evidence it restarted.

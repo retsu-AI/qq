@@ -81,13 +81,26 @@ pub type SessionEventStream =
 pub struct SessionClient {
     connection: Connection,
     http: reqwest::Client,
+    request_timeout: Duration,
 }
 
 impl SessionClient {
     pub fn new(connection: impl Into<Connection>) -> Result<Self, ClientError> {
         let connection = connection.into();
         let http = http_client()?;
-        Ok(Self { connection, http })
+        Ok(Self {
+            connection,
+            http,
+            request_timeout: REQUEST_TIMEOUT,
+        })
+    }
+
+    /// The tests drive stalled and dripping servers over real sockets, where
+    /// the paused Tokio clock cannot shorten the deadline.
+    #[cfg(test)]
+    fn with_request_timeout(mut self, request_timeout: Duration) -> Self {
+        self.request_timeout = request_timeout;
+        self
     }
 
     #[must_use]
@@ -362,28 +375,33 @@ impl SessionClient {
         if body.len() > MAX_REQUEST_BYTES {
             return Err(ClientError::RequestTooLarge);
         }
-        let response = authorize(
+        let request = authorize(
             &self.connection,
             self.http.post(self.connection.endpoint(path)),
         )
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json")
-        .body(body)
-        .send();
-        let response = time::timeout(REQUEST_TIMEOUT, response)
+        .body(body);
+        // One deadline spans the whole exchange. Bounding only `send()` left
+        // the body read open-ended: headers followed by a stalled or dripped
+        // body held the request — and in the TUI its concurrency permit —
+        // indefinitely (harness-scale audit F10). JSON responses are small
+        // and complete; SSE keeps its own header and idle deadlines.
+        let exchange = async {
+            let response = request.send().await.map_err(|_| ClientError::Unavailable)?;
+            let status = response.status().as_u16();
+            if response
+                .content_length()
+                .is_some_and(|length| length > response_limit as u64)
+            {
+                return Err(ClientError::ResponseTooLarge);
+            }
+            let bytes = read_response_bounded(response, response_limit).await?;
+            Ok((status, bytes))
+        };
+        let (status, bytes) = time::timeout(self.request_timeout, exchange)
             .await
-            .map_err(|_| ClientError::Unavailable)?
-            .map_err(|_| ClientError::Unavailable)?;
-        let status = response.status().as_u16();
-        if response
-            .content_length()
-            .is_some_and(|length| length > response_limit as u64)
-        {
-            return Err(ClientError::ResponseTooLarge);
-        }
-        let bytes = read_response_bounded(response, response_limit)
-            .await
-            .map_err(|()| ClientError::ResponseTooLarge)?;
+            .map_err(|_| ClientError::Timeout)??;
         if !(200..300).contains(&status) {
             return Err(server_response_error(status, &bytes));
         }
@@ -453,13 +471,18 @@ fn http_client() -> Result<reqwest::Client, ClientError> {
         .map_err(|_| ClientError::Unavailable)
 }
 
-async fn read_response_bounded(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, ()> {
+/// Reads a complete response body of at most `limit` bytes. A transport
+/// failure mid-body is `Unavailable`, distinct from the size cap.
+async fn read_response_bounded(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, ClientError> {
     let mut body = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = body.next().await {
-        let chunk = chunk.map_err(|_| ())?;
+        let chunk = chunk.map_err(|_| ClientError::Unavailable)?;
         if bytes.len().saturating_add(chunk.len()) > limit {
-            return Err(());
+            return Err(ClientError::ResponseTooLarge);
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -654,6 +677,8 @@ where
 pub enum ClientError {
     #[error("server is unavailable")]
     Unavailable,
+    #[error("server did not complete the request in time")]
+    Timeout,
     #[error("request cannot be encoded")]
     InvalidRequestEncoding,
     #[error("request exceeds the wire size limit")]
@@ -867,6 +892,145 @@ mod tests {
 
         assert_eq!(error, ClientError::ResponseTooLarge);
         raw_server.await.unwrap();
+    }
+
+    /// A raw server that answers one request with `headers`, then drives the
+    /// body through `body`, which receives the socket after the headers are
+    /// flushed. `release` fires when the client has given up so the server
+    /// task can stop.
+    async fn raw_server<F, Fut>(
+        headers: &'static [u8],
+        body: F,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>)
+    where
+        F: FnOnce(tokio::net::TcpStream) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await;
+            let _ = socket.write_all(headers).await;
+            body(socket).await;
+        });
+        (address, task)
+    }
+
+    fn connection_to(address: std::net::SocketAddr) -> LocalServerConnection {
+        LocalServerConnection::new(
+            address,
+            "e".repeat(64),
+            ServerInfo {
+                protocol_version: PROTOCOL_VERSION,
+                version: "test".to_owned(),
+                pid: 1,
+                server_id: StoreId::from_bytes([0xAA; 16]),
+                display_name: "test".to_owned(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn delete_command() -> SessionCommand {
+        SessionCommand::DeleteSession {
+            session_id: SessionId::from_bytes([3; 16]),
+        }
+    }
+
+    /// F10: headers followed by a body that never arrives must fail at the
+    /// request deadline, not hold the future (and its TUI permit) forever.
+    #[tokio::test]
+    async fn a_stalled_body_times_out_within_the_request_deadline() {
+        let (address, server) = raw_server(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n",
+            |socket| async move {
+                // Hold the socket open without writing until the client hangs up.
+                let mut socket = socket;
+                let mut sink = [0_u8; 16];
+                let _ = socket.read(&mut sink).await;
+            },
+        )
+        .await;
+        let client = SessionClient::new(connection_to(address))
+            .unwrap()
+            .with_request_timeout(Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        let error = client
+            .command(CommandId::from_bytes([9; 16]), delete_command())
+            .await
+            .unwrap_err();
+        assert_eq!(error, ClientError::Timeout);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the deadline bounds the whole exchange: {:?}",
+            started.elapsed()
+        );
+        server.abort();
+    }
+
+    /// F10: a body dripped slowly under the size cap is a timeout, not a
+    /// size failure, and not an indefinite wait.
+    #[tokio::test]
+    async fn a_dripping_body_times_out_rather_than_waiting_for_completion() {
+        let (address, server) = raw_server(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n",
+            |socket| async move {
+                let mut socket = socket;
+                loop {
+                    if socket.write_all(b"1\r\n{\r\n").await.is_err() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            },
+        )
+        .await;
+        let client = SessionClient::new(connection_to(address))
+            .unwrap()
+            .with_request_timeout(Duration::from_millis(300));
+        let error = client
+            .command(CommandId::from_bytes([9; 16]), delete_command())
+            .await
+            .unwrap_err();
+        assert_eq!(error, ClientError::Timeout);
+        server.abort();
+    }
+
+    /// Transport failure stays `Unavailable`, distinct from the deadline: a
+    /// server that closes the connection mid-body and one that is not
+    /// listening at all.
+    #[tokio::test]
+    async fn transport_failures_are_unavailable_not_timeouts() {
+        let (address, server) = raw_server(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n",
+            |socket| async move {
+                let mut socket = socket;
+                let _ = socket.write_all(b"{\"partial").await;
+                drop(socket);
+            },
+        )
+        .await;
+        let client = SessionClient::new(connection_to(address))
+            .unwrap()
+            .with_request_timeout(Duration::from_secs(5));
+        let error = client
+            .command(CommandId::from_bytes([9; 16]), delete_command())
+            .await
+            .unwrap_err();
+        assert_eq!(error, ClientError::Unavailable);
+        server.await.unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let client = SessionClient::new(connection_to(address)).unwrap();
+        let error = client
+            .command(CommandId::from_bytes([9; 16]), delete_command())
+            .await
+            .unwrap_err();
+        assert_eq!(error, ClientError::Unavailable);
     }
 }
 
