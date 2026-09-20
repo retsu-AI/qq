@@ -821,8 +821,7 @@ pub(super) fn search_session_history(
                       citation: String,
                       text: &str| {
             *scanned = scanned.saturating_add(text.len());
-            let lowered = text.to_lowercase();
-            if let Some(excerpt) = excerpt_around(text, &lowered, &needle) {
+            if let Some(excerpt) = excerpt_around(text, &needle) {
                 run_hits.push(HistoryMatch { citation, excerpt });
             }
         };
