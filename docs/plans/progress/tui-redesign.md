@@ -7,7 +7,7 @@ Raw frames and bench reports live under `target/qq-perf/tui-<slice>-<date>/`
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | U0 ([ENG-844](https://linear.app/retsu-ai/issue/ENG-844)) | Review harness: goldens at five sizes, gallery dump, QA fixture body | In review | `feat/eng-844-u0-tui-goldens` | Started 2026-09-20 from `51ccf13`; parent [ENG-843](https://linear.app/retsu-ai/issue/ENG-843) |
-| L1 ([ENG-845](https://linear.app/retsu-ai/issue/ENG-845)) | Layout engine, tiers, raised clamps, centered measure | Planned | | Needs U0 |
+| L1 ([ENG-845](https://linear.app/retsu-ai/issue/ENG-845)) | Layout engine, tiers, raised clamps, placed measure | In review | `feat/eng-845-l1-tui-layout` | Stacked on U0 |
 | L2 ([ENG-846](https://linear.app/retsu-ai/issue/ENG-846)) | Per-pane transcript state | Planned | | Needs L1 |
 | U1 ([ENG-847](https://linear.app/retsu-ai/issue/ENG-847)) | Block rhythm and lists | Planned | | Needs U0 |
 | U2 ([ENG-848](https://linear.app/retsu-ai/issue/ENG-848)) | Inline styling, `Style.underline` | Planned | | Needs U0 |
@@ -67,3 +67,39 @@ Baseline: `cargo bench -p qq-tui --bench render` on `51ccf13` recorded to
   right 160 are unpainted; the sidebar takes 28 columns and the transcript
   wraps at 120 left-aligned; tool detail output is bare muted lines; the
   gallery confirms every S3 defect in the plan's evidence table.
+
+### 2026-09-20 — L1 receipt
+
+- `view/layout.rs`: `Tier::of(width)` at 90/160/240; `LayoutPrefs { rail,
+  inspector }` with `PanePref::{Auto, Shown, Hidden}` replaces `app::Sidebar`;
+  `compute_layout` returns `Rect`s for top row, body, transcript pane(s),
+  inspector, and rail, plus `strip` and `max_composer_rows`. Ten unit tests
+  at every breakpoint and bound (rail never starves the transcript below 32
+  columns; inspector carved only past the measure; hidden/shown override).
+- `view.rs::frame` composes from the layout: pickers and the transcript take
+  the pane width; side panes blit column-wise; rows pad to the terminal
+  width. Render clamp 320 × 160 → 1024 × 512. `MAX_LIVE_MARKDOWN_ROWS` fixed
+  at 160 (was derived from the clamp).
+- Measure 120 → 100, placed a third across the pane's spare width.
+  `Line::indent` carries the margin as a count; `write_line` emits one
+  `MoveRight` per row. First attempt inserted a leading `Span` per row and
+  cost +14 % on `steady_state_frame` (28.0 vs 24.2 µs baseline); the count
+  form brought it back (22.2 µs).
+- Inspector `Auto` resolves to hidden until L3 paints it (an empty bordered
+  column cost ~3 µs of diff per frame for nothing); `Shown` opens it now.
+- Goldens: 21 of 35 moved (every size ≥ 90 columns). New tests:
+  `frames_fill_every_golden_size` (widest row reaches the last column at all
+  five sizes; body rows carry the rail), `prose_is_placed_at_the_measure`.
+  Removed the U0 pin that a 480-column terminal got a 320-wide frame.
+- Bench (`target/qq-perf/tui-L1-2026-09-20/final-{1,2}.txt` vs U0
+  baseline): `steady_state_frame` 24.2 → 22.2 / 22.3 µs; `golden_path`
+  37.2 → 38.0 / 38.5; `keystroke` 28.2 → 27.5 / 27.7; `resize_horizontal`
+  35.2 → 33.2 / 33.5; `streaming_run_on_32kb` 414.5 → 442.0 / 450.8 (+7 %,
+  within the U0 A/A spread of 414–445). New: `compact_80x24` 19.9 µs,
+  `wide_160x48_full` 35.1 µs (inspector shown), `resize_ultra_480x120`
+  123.8 µs full repaint.
+- Docs: new `docs/design/layout.md`; `architecture.md` `qq-tui` bullet points
+  at it; `docs/README.md` index entry (root request updated).
+- Gates: fmt, clippy `-D warnings`, 255 lib + 5 golden tests.
+- Deviation: the plan said "centered"; shipped a one-third placement and
+  recorded why in `layout.md`. Decision D5 amended to match.

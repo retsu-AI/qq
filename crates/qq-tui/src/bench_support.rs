@@ -142,12 +142,17 @@ impl BenchHarness {
 
     /// Force the session sidebar on regardless of width.
     pub fn show_sidebar(&mut self) {
-        self.app.sidebar = crate::app::Sidebar::Shown;
+        self.app.layout.rail = crate::view::PanePref::Shown;
     }
 
     /// Force the session sidebar off regardless of width.
     pub fn hide_sidebar(&mut self) {
-        self.app.sidebar = crate::app::Sidebar::Hidden;
+        self.app.layout.rail = crate::view::PanePref::Hidden;
+    }
+
+    /// Force the inspector pane on regardless of width.
+    pub fn show_inspector(&mut self) {
+        self.app.layout.inspector = crate::view::PanePref::Shown;
     }
 
     /// Load `messages` completed assistant messages into session `index`
@@ -686,7 +691,8 @@ impl BenchHarness {
         frame
             .iter()
             .map(|line| {
-                let mut row: String = line.spans.iter().map(|span| span.text.as_str()).collect();
+                let mut row = " ".repeat(line.indent);
+                row.extend(line.spans.iter().map(|span| span.text.as_str()));
                 let trimmed = row.trim_end().len();
                 row.truncate(trimmed);
                 row

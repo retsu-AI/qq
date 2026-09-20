@@ -61,12 +61,17 @@ pub(crate) struct Span {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Line {
+    /// Blank cells before the first span. A pane wider than its content
+    /// shifts every row by the same margin; carrying it as a count keeps the
+    /// shift free for rows shared with the width-keyed caches.
+    pub(crate) indent: usize,
     pub(crate) spans: Vec<Span>,
 }
 
 impl Line {
     pub(crate) fn styled(text: impl Into<String>, style: Style) -> Self {
         Self {
+            indent: 0,
             spans: vec![Span {
                 text: text.into(),
                 style,
@@ -89,11 +94,13 @@ impl Line {
     }
 
     pub(crate) fn width(&self) -> usize {
-        self.spans
-            .iter()
-            .flat_map(|span| span.text.chars())
-            .map(|character| UnicodeWidthChar::width(character).unwrap_or_default())
-            .sum()
+        self.indent
+            + self
+                .spans
+                .iter()
+                .flat_map(|span| span.text.chars())
+                .map(|character| UnicodeWidthChar::width(character).unwrap_or_default())
+                .sum::<usize>()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -215,6 +222,14 @@ pub(crate) fn diff_line_style(line: &str) -> Style {
 /// reset, which then re-applies the surviving colors.
 pub(crate) fn write_line(output: &mut impl Write, line: &Line) -> io::Result<()> {
     let mut current = Style::default();
+    if line.indent > 0 {
+        // The caller cleared the row, so a cursor move paints the margin
+        // without emitting spaces.
+        queue!(
+            output,
+            crossterm::cursor::MoveRight(u16::try_from(line.indent).unwrap_or(u16::MAX))
+        )?;
+    }
     for span in &line.spans {
         if span.text.is_empty() {
             continue;

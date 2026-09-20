@@ -3,6 +3,7 @@
 
 mod chrome;
 mod highlight;
+mod layout;
 mod markdown;
 mod overlay;
 mod sidebar;
@@ -40,6 +41,8 @@ use chrome::*;
 pub(crate) use chrome::{ComposerMode, CursorPosition};
 use highlight::HighlightKey;
 pub(crate) use highlight::{Highlighted, Highlighter};
+use layout::{FIXED_CHROME_ROWS, TranscriptPane, compute_layout};
+pub(crate) use layout::{LayoutPrefs, PanePref};
 use markdown::{has_fenced_code, markdown_lines, settled_prefix_end};
 use overlay::*;
 use sidebar::*;
@@ -54,16 +57,16 @@ use wrap::{
     wrap_line_chars,
 };
 
-/// Rows the composer may grow to before it scrolls around the caret.
-const MAX_COMPOSER_ROWS: usize = 8;
-const MAX_RENDER_WIDTH: u16 = 320;
-const MAX_RENDER_HEIGHT: u16 = 160;
+/// Bounds on the cells one frame lays out. A 48-inch display at a small font
+/// is around 500 × 130; the bound exists so a pathological size costs a
+/// bounded frame, not to describe any real terminal.
+const MAX_RENDER_WIDTH: u16 = 1024;
+const MAX_RENDER_HEIGHT: u16 = 512;
 const MAX_LIVE_MARKDOWN_BYTES: usize = 32 * 1024;
 const MAX_VISIBLE_MESSAGES: usize = 64;
-/// Widest the transcript body lays out; the rest of a wider terminal is
-/// left blank rather than stretching prose past a readable line length.
-const MAX_TRANSCRIPT_WIDTH: usize = 120;
-const MAX_LIVE_MARKDOWN_ROWS: usize = MAX_RENDER_HEIGHT as usize;
+/// Rows of a streaming message's open tail laid out per frame. Bounded by
+/// the tallest body a frame can show plus headroom, not by the terminal.
+const MAX_LIVE_MARKDOWN_ROWS: usize = 160;
 /// Completed messages at or below these bounds retain full markdown styling.
 /// Larger messages use a sparse plain-text row index so scrolling stays
 /// complete without caching every rendered row.
@@ -80,6 +83,13 @@ pub(crate) fn render_size(actual_size: (u16, u16)) -> (usize, usize) {
         usize::from(actual_size.0.clamp(1, MAX_RENDER_WIDTH)),
         usize::from(actual_size.1.clamp(1, MAX_RENDER_HEIGHT)),
     )
+}
+
+/// Whether the sessions rail is on screen at `width` under `prefs`. Shared
+/// with the app so event visibility and the toggle command agree with the
+/// frame.
+pub(crate) fn rail_visible(width: usize, prefs: LayoutPrefs, sessions: usize) -> bool {
+    compute_layout(width, layout::MIN_HEIGHT, 0, prefs, sessions).rail_visible()
 }
 
 /// Frame assembly and the row diff against the previous frame. Retained
@@ -174,7 +184,7 @@ impl FrameRenderer {
             self.cache = TranscriptCache::default();
             self.invalidate();
         }
-        if width < 32 || height < 9 {
+        if width < layout::MIN_WIDTH || height < layout::MIN_HEIGHT {
             return fit_height(
                 vec![
                     Line::styled(" qq", brand().bold()),
@@ -190,49 +200,40 @@ impl FrameRenderer {
         let mut lines = vec![top_row(app, width)];
         // The top row and the composer rule are fixed; the rule doubles as
         // the status and hint line so no row is spent on either. The composer
-        // can grow with wrapped multi-line input, so body height is computed
-        // after the composer is laid out against the remaining space.
-        let fixed_chrome_rows = 2;
+        // can grow with wrapped multi-line input, so it is laid out first and
+        // the body takes what remains.
         let max_composer_rows = height
-            .saturating_sub(fixed_chrome_rows)
+            .saturating_sub(FIXED_CHROME_ROWS)
             .saturating_sub(1)
-            .clamp(1, MAX_COMPOSER_ROWS);
-        let mut draft_lines = queued_drafts(app, width);
-        let sidebar_width = app.sidebar.width(width, app.sessions.len());
-        if sidebar_width == 0
-            && let Some(strip) = agent_strip(app, width)
-        {
-            draft_lines.insert(0, strip);
-        }
+            .clamp(1, layout::max_composer_rows(width, height));
+        let draft_lines = queued_drafts(app, width);
         let (composer_lines, caret) = composer(app, width, max_composer_rows);
-        let body_height = height
-            .saturating_sub(fixed_chrome_rows)
-            .saturating_sub(draft_lines.len())
-            .saturating_sub(composer_lines.len());
-        // The sidebar takes a column on the right; the body renders in what
-        // remains so its cache keys see one stable width per terminal size.
-        let body_width = width.saturating_sub(sidebar_width);
+        let chrome_rows = FIXED_CHROME_ROWS - 1 + draft_lines.len() + composer_lines.len();
+        let layout = compute_layout(width, height, chrome_rows, app.layout, app.sessions.len());
+        let body_height = layout.body.height;
         let mode = app.mode();
+        let pane = layout.transcripts[0];
+        // Overlays take the transcript pane's cells; the rail stays so the
+        // picker is read in context. The transcript caches stay warm behind
+        // an overlay so closing one costs no relayout or highlight storm.
+        let pane_width = pane.area.width;
         let mut body = match mode {
-            // Overlays hide the transcript; its caches stay warm so closing
-            // one costs no relayout or highlight storm. Memory stays bounded
-            // by the per-pane byte budget, not by pruning here.
-            Mode::Models => model_picker(app, body_width, body_height),
-            Mode::Profiles => profile_picker(app, body_width, body_height),
-            Mode::ApprovalModes => approval_mode_picker(app, body_width, body_height),
-            Mode::Skills => skill_picker(app, body_width, body_height),
-            Mode::Themes => theme_picker(app, body_width, body_height),
-            Mode::Sessions => session_picker(app, body_width, body_height),
-            Mode::Commands => command_picker(app, body_width, body_height),
-            Mode::History => history_picker(app, body_width, body_height),
+            Mode::Models => model_picker(app, pane_width, body_height),
+            Mode::Profiles => profile_picker(app, pane_width, body_height),
+            Mode::ApprovalModes => approval_mode_picker(app, pane_width, body_height),
+            Mode::Skills => skill_picker(app, pane_width, body_height),
+            Mode::Themes => theme_picker(app, pane_width, body_height),
+            Mode::Sessions => session_picker(app, pane_width, body_height),
+            Mode::Commands => command_picker(app, pane_width, body_height),
+            Mode::History => history_picker(app, pane_width, body_height),
             // An approval keeps the transcript on screen and adds its block
             // under the awaiting call, so the decision is made in context.
-            Mode::Approval => self.body(app, body_width, body_height),
+            Mode::Approval => self.body(app, pane, body_height),
             Mode::Compose => {
-                let mut body = self.body(app, body_width, body_height);
-                let menu = mention_autocomplete(app, body_width, body_height);
+                let mut body = self.body(app, pane, body_height);
+                let menu = mention_autocomplete(app, pane_width, body_height);
                 let menu = if menu.is_empty() {
-                    slash_autocomplete(app, body_width, body_height)
+                    slash_autocomplete(app, pane_width, body_height)
                 } else {
                     menu
                 };
@@ -240,18 +241,41 @@ impl FrameRenderer {
                 body
             }
         };
-        if sidebar_width > 0 {
-            let sidebar = sidebar(app, sidebar_width, body_height);
-            body = fit_height(body, body_height);
-            for (row, column) in body.iter_mut().zip(sidebar) {
-                pad_line(row, body_width);
-                for span in column.spans {
+        body = fit_height(body, body_height);
+        // Side panes are blitted column-wise onto the body rows: each row is
+        // padded to the pane's `x`, then the pane's cells appended. Columns
+        // are built at pane width so a blit never re-measures the row.
+        let mut columns: Vec<(usize, Vec<Line>)> = Vec::with_capacity(2);
+        if let Some(inspector) = layout.inspector {
+            columns.push((
+                inspector.x,
+                inspector_pane(app, inspector.width, body_height),
+            ));
+        }
+        if let Some(rail) = layout.rail {
+            columns.push((rail.x, sidebar(app, rail.width, body_height)));
+        }
+        for (x, column) in columns {
+            for (row, cells) in body.iter_mut().zip(column) {
+                pad_line(row, x);
+                for span in cells.spans {
                     row.push(span.text, span.style);
                 }
+            }
+        }
+        // With side panes glued on, every body row is exactly the terminal
+        // width so the border columns line up and nothing overflows.
+        if layout.rail.is_some() || layout.inspector.is_some() {
+            for row in &mut body {
                 pad_line(row, width);
             }
         }
         lines.extend(body);
+        if layout.strip
+            && let Some(strip) = agent_strip(app, width)
+        {
+            lines.push(strip);
+        }
         lines.extend(draft_lines);
         lines.push(composer_rule(app, width));
         let composer_top = lines.len();
@@ -268,11 +292,21 @@ impl FrameRenderer {
         fit_height(lines, height)
     }
 
-    /// Render the main area through the transcript cache and remember the
-    /// reconciled viewport for `commit`.
-    fn body(&mut self, app: &App, width: usize, height: usize) -> Vec<Line> {
-        let (lines, viewport) = self.cache.body(&mut self.highlighter, app, width, height);
+    /// Render the main area through the transcript cache into `pane` and
+    /// remember the reconciled viewport for `commit`. Rows come back at the
+    /// pane's full width with the content column centered.
+    fn body(&mut self, app: &App, pane: TranscriptPane, height: usize) -> Vec<Line> {
+        let (mut lines, viewport) =
+            self.cache
+                .body(&mut self.highlighter, app, pane.content_width, height);
         self.viewport_update = Some(viewport);
+        if pane.inset > 0 {
+            // Cached rows are shared with later frames; the margin lives on
+            // the frame's copy as a count, so centering costs no allocation.
+            for line in &mut lines {
+                line.indent = pane.inset;
+            }
+        }
         lines
     }
 

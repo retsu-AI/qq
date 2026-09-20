@@ -3,8 +3,12 @@
 //! Measures the cost of building and diffing one frame in the situations the
 //! TUI rearchitecture plan budgets: a steady transcript, one streaming message,
 //! many background streaming sessions, and a keystroke echo. Every case runs
-//! fully in memory with a fixed 160x48 terminal; no TTY or client transport is
-//! involved. Run with `cargo bench -p qq-tui --bench render`.
+//! fully in memory; no TTY or client transport is involved. Run with
+//! `cargo bench -p qq-tui --bench render`.
+//!
+//! The legacy scenes use a 160x48 terminal; `compact_80x24`,
+//! `wide_160x48_full`, and `resize_ultra` measure the responsive tiers as a
+//! user sees them, including the inspector pane.
 
 use std::{hint::black_box, time::Instant};
 
@@ -50,6 +54,9 @@ fn main() {
     sessions_200_with_sidebar(iterations);
     picker_open_close(iterations);
     resize_horizontal(iterations);
+    compact_80x24(iterations);
+    wide_160x48_full(iterations);
+    resize_ultra(iterations);
 }
 
 /// Sixty-four completed messages, no changes between frames. Measures the
@@ -240,6 +247,42 @@ fn resize_horizontal(iterations: u32) {
         harness.resize(delta).len()
     });
     report_samples("resize_horizontal_full_frame", &samples);
+}
+
+/// A laptop-sized terminal in the Compact tier: one column, an agent strip,
+/// no rail or inspector. Steady frames with three sessions.
+fn compact_80x24(iterations: u32) {
+    let mut harness = BenchHarness::new((80, 24), 3, STEADY_MESSAGES);
+    harness.settle_highlights();
+    black_box(harness.draw());
+    let samples = collect(iterations, || harness.draw().len());
+    report_samples("compact_80x24_frame", &samples);
+}
+
+/// The Wide tier as laid out by default: transcript, inspector, and rail all
+/// on. The same content as `steady_state_with_sidebar` so the difference is
+/// the inspector column and the wider diff.
+fn wide_160x48_full(iterations: u32) {
+    let mut harness = BenchHarness::new(SIZE, 9, STEADY_MESSAGES);
+    harness.show_inspector();
+    harness.settle_highlights();
+    black_box(harness.draw());
+    let samples = collect(iterations, || harness.draw().len());
+    report_samples("wide_160x48_full_frame", &samples);
+}
+
+/// A full repaint of a 480x120 frame in the Ultra tier, alternating one
+/// column of width so every row is rewritten. The largest frame a real
+/// display produces today.
+fn resize_ultra(iterations: u32) {
+    let mut harness = BenchHarness::new((480, 120), 3, STEADY_MESSAGES);
+    harness.settle_highlights();
+    let mut delta = 1;
+    let samples = collect(iterations, || {
+        delta = -delta;
+        harness.resize(delta).len()
+    });
+    report_samples("resize_ultra_480x120_full_frame", &samples);
 }
 
 fn timed<T>(mut work: impl FnMut() -> T) -> (u128, T) {
