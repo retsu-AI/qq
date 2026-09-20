@@ -52,6 +52,7 @@ may append a **request** row; only root changes a request's status.
 | 0032 | Durable optional routing before run preparation | J6b stacked Jev implementation | Accepted locally; protocol 25, schema 31 |
 | 0033 | Preserve explicit model choices during optional routing | J6b stacked Jev implementation | Accepted locally; schema 32 |
 | 0034 | Bounded concrete Jev routing and inherited activation | J6b stacked Jev implementation | Accepted locally; descriptor 9 |
+| 0035 | Allow regular-file leaf targets for global configuration sources | GitHub #83 / Home Manager global config | Accepted locally; `docs/adr/0035-global-leaf-config-symlinks.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -122,7 +123,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0035. Reserve here before opening a PR that adds an ADR.
+Next free number: 0036. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 

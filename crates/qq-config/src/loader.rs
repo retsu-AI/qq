@@ -911,6 +911,10 @@ fn check_optional_directory(path: &Path, probes: &mut Probes) -> Result<bool, Co
     Ok(true)
 }
 
+fn allows_leaf_symlink(kind: SourceKind) -> bool {
+    matches!(kind, SourceKind::Global)
+}
+
 pub(super) fn discover_file(
     path: PathBuf,
     kind: SourceKind,
@@ -918,7 +922,13 @@ pub(super) fn discover_file(
     probes: &mut Probes,
 ) -> Result<Option<FileCandidate>, ConfigError> {
     probes.record(&path);
-    probes.reject_symlink_components(&path)?;
+    if allows_leaf_symlink(kind) {
+        if let Some(parent) = path.parent() {
+            probes.reject_symlink_components(parent)?;
+        }
+    } else {
+        probes.reject_symlink_components(&path)?;
+    }
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -930,15 +940,32 @@ pub(super) fn discover_file(
         Err(error) => return Err(ConfigError::Io { path, error }),
     };
     if metadata.file_type().is_symlink() {
-        return Err(ConfigError::SymlinkSource { path });
-    }
-    if !metadata.is_file() {
+        if !allows_leaf_symlink(kind) {
+            return Err(ConfigError::SymlinkSource { path });
+        }
+        let target = fs::metadata(&path).map_err(|error| ConfigError::Io {
+            path: path.clone(),
+            error,
+        })?;
+        if !target.is_file() {
+            return Err(ConfigError::NotRegularFile { path });
+        }
+    } else if !metadata.is_file() {
         return Err(ConfigError::NotRegularFile { path });
     }
     let canonical = fs::canonicalize(&path).map_err(|error| ConfigError::Io {
         path: path.clone(),
         error,
     })?;
+    if !fs::metadata(&canonical)
+        .map_err(|error| ConfigError::Io {
+            path: canonical.clone(),
+            error,
+        })?
+        .is_file()
+    {
+        return Err(ConfigError::NotRegularFile { path: canonical });
+    }
     Ok(Some(FileCandidate {
         path: canonical,
         kind,

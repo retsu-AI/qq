@@ -53,6 +53,10 @@ cargo run -- ask "Reply with pong"      # needs a configured model
 cargo run -- config check               # validates configuration; a model is not required (it is checked at run time)
 ```
 
+User-global `~/.config/qq/config.ron` may be a Home Manager (or similar) leaf
+symlink to a regular file. Project `.qq/config.ron` still cannot be a symlink.
+`QQ_CONFIG_CONTENT` remains the inline supervisor path.
+
 ## Concurrent agents
 
 Use one worktree per writing agent:

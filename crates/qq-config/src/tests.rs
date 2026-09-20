@@ -1574,6 +1574,94 @@ fn rejects_symlink_sources() {
     ));
 }
 
+#[cfg(unix)]
+#[test]
+fn accepts_global_leaf_symlink_to_a_regular_file() {
+    use std::os::unix::fs::symlink;
+
+    let tree = TempTree::new();
+    let target = tree.write("store/config.ron", r#"(version: 1, model: "xai/grok-4.6")"#);
+    symlink(&target, tree.path("global/config.ron")).unwrap();
+
+    let snapshot = tree
+        .loader()
+        .load(&LoadRequest::new(tree.path("work")))
+        .unwrap();
+
+    assert_eq!(snapshot.model().as_str(), "xai/grok-4.6");
+    assert_eq!(
+        snapshot.provenance().model().unwrap().kind(),
+        SourceKind::Global
+    );
+    assert_eq!(
+        snapshot.provenance().model().unwrap().path(),
+        Some(fs::canonicalize(&target).unwrap().as_path())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn accepts_global_fragment_leaf_symlink_to_a_regular_file() {
+    use std::os::unix::fs::symlink;
+
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/test-model")"#,
+    );
+    let target = tree.write(
+        "store/20-tokens.ron",
+        r#"(version: 1, max_output_tokens: 42)"#,
+    );
+    fs::create_dir_all(tree.path("global/config.d")).unwrap();
+    symlink(&target, tree.path("global/config.d/20-tokens.ron")).unwrap();
+
+    let snapshot = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(snapshot.max_output_tokens(), 42);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_project_leaf_symlink_sources() {
+    use std::os::unix::fs::symlink;
+
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/test-model")"#,
+    );
+    let target = tree.write("store/project.ron", r#"(version: 1, max_output_tokens: 7)"#);
+    fs::create_dir_all(tree.path("work/.qq")).unwrap();
+    symlink(&target, tree.path("work/.qq/config.ron")).unwrap();
+
+    assert!(matches!(
+        tree.loader().load(&tree.request()),
+        Err(ConfigError::SymlinkSource { path }) if path == tree.path("work/.qq/config.ron")
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_global_directory_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let tree = TempTree::new();
+    let store = tree.path("store/qq");
+    fs::create_dir_all(&store).unwrap();
+    fs::write(
+        store.join("config.ron"),
+        r#"(version: 1, model: "xai/grok-4.6")"#,
+    )
+    .unwrap();
+    fs::remove_dir_all(tree.path("global")).unwrap();
+    symlink(&store, tree.path("global")).unwrap();
+
+    assert!(matches!(
+        tree.loader().load(&LoadRequest::new(tree.path("work"))),
+        Err(ConfigError::SymlinkSource { path }) if path == tree.path("global")
+    ));
+}
+
 #[test]
 fn tui_config_layers_defaults_global_and_root_to_current_projects() {
     let tree = TempTree::new();

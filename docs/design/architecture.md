@@ -180,7 +180,9 @@ xtask/
 - `qq-config` contains layered configuration, built-in provider/model presets,
   managed policy, remote organization documents, and config provenance. It
   returns config-owned TUI values; the root translates them into `qq-tui`
-  settings.
+  settings. A user-global file (`config.ron`, `config.d/*.ron`, `tui.ron`,
+  `themes/*.ron`) may be a leaf symlink to a regular file; project, explicit,
+  managed, pack, and trust sources still reject symbolic links (ADR-0035).
 - `qq-core` contains the agent loop, session behavior, tool integration, and
   persistence behavior. It consumes the command and event vocabulary from
   `qq-protocol` and exposes a small interface that hides orchestration details
