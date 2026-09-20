@@ -14,14 +14,14 @@ may append a **request** row; only root changes a request's status.
 | ROOT-4 | Current QQ and four-reference harness audit; lean-core priorities | Shipped (`445d740`, #65) | 2026-09-16; `docs/design/harness-scale-audit-2026-09-16.md`; source baseline `7956e8e`; F01/F02/F14 repaired (#55, #57, #63); F03–F28 unowned |
 | ROOT-5 | Context usability stack C1–C6: 4 bytes/token estimate, summarizer past the window, proactive and in-run compaction, audit default `off`, Anthropic/Bedrock cache breakpoints, overlapped leading reads and soft 16-call cap, measured occupancy across pruning/checkpoints | Shipped (#56 `d4fd971`, #58 `3446c54`, #59 `1c4467b`, #61 `49d4a03` incl. C5, #64 `4715226`) | 2026-09-16. Plan and ledger deleted with #66; design in `architecture.md` § run loop step 3, § resolved model, § audit; `providers.md` § breakpoints; `tools.md` § Loop Bounds. Deferred: true mid-run summarization (needs a store cutoff inside a run), estimator calibration from observed `usage`. Live qualification (cache reads on turn 2; a real long session) not yet run |
 | ROOT-6 | Docs cleanup: delete shipped plans/ledgers and superseded research; collapse speed-first to open items; move extension contract and perf targets into `architecture.md` | Shipped (#66) | 2026-09-16 |
-| ENG-791.R1 | Typed reasoning effort reaches the real provider request | Under independent review (`abe71f34`) | Author repaired actual wire/retry, zero-connection and lazy-initialization tests. Default provider 208 + interface 17 pass (one ignored); minimal provider 161 + interface 17 pass. Reviewer `qa_root_candidate_review`; manager integration. This dependency is not automatic routing |
-| ENG-791.R2 | JEV selects authorized model/effort pairs for root and child tasks | Planned; depends on R1 | Same ENG-791 requirement, not a separate backlog. Actual dispatch, overrides, current capability/authorization checks, cancellation and declared fallback must agree with the selection; mandatory completion checkpoints remain enforced |
-| ENG-791.R3 | Durable routing identity, TUI visibility and observed runtime qualification | Planned; depends on R2 | Retain candidate set, selection/distribution, actual model/effort, usage and outcomes across replay; real-model and fixed-baseline comparison before any savings claim. Recorded demonstration and canonical release remain separate gates |
-| F07 | Control and cleanup commands admitted past `MAX_COMMANDS` | In review ([ENG-786](https://linear.app/retsu-ai/issue/ENG-786), [#68](https://github.com/retsu-AI/qq/pull/68)) | 2026-09-16. `SessionCommandKind::creates_work` splits the thirteen kinds; new work bounded at 100 000 receipts, control/cleanup at +10 000 headroom, runtime settlement cancels unbounded (`CommandOrigin`). Receipts never trimmed; replay unchanged. Two regression tests fill the counter and drive cancel/approve/delete/prune/shutdown |
-| F05 | Attachments reconstructed as the model first saw them | In review ([ENG-788](https://linear.app/retsu-ai/issue/ENG-788), #69) | 2026-09-17. Schema 28 → 29: `attachment_blobs` (per-session, keyed by whole-file hash + range, 64 MiB cap with explicit evicted rendering) and `message_attachments`, written in the `RunStarted` transaction; `load_model_context` re-renders `<attached-file>` blocks from the store; `ClaimedRun.resolved_input` carries the first read across the auto-compaction retry. Three regression tests (modify/delete/reopen/dedup/cascade; eviction stub; auto-compaction retry) plus the reference-assembly oracle |
-| F06 | Context assembly and history search bounded by retained context, not archive size | In review ([ENG-790](https://linear.app/retsu-ai/issue/ENG-790), #70) | 2026-09-17. Turn/result/steering/attachment queries joined to the retained prompt window; schema 29 → 30 adds `messages(run_id, steering, state)`. `search_history` newest-first with an 8 MiB scan budget and a `truncated` note. New `context_assembly` bench: assembly 83 µs / 25 ms / 98 ms → 50 / 47 / 82 µs at 10 / 1 000 / 10 000 archived runs; absent-term search 433 ms → 54 ms (truncated) at 10 000 |
-| F10 | Client JSON exchange bounded end to end | In review ([ENG-792](https://linear.app/retsu-ai/issue/ENG-792), #79) | 2026-09-19. `post_json` wrapped send+headers+body in one `REQUEST_TIMEOUT`; new `ClientError::Timeout`; mid-body transport failure is `Unavailable`, size cap `ResponseTooLarge`. Regression probe: the stalled-body test hangs indefinitely on the prior code. SSE deadlines unchanged |
-| F04 | Bounded summarizer input; compactions fold until the prompt fits | In review ([ENG-789](https://linear.app/retsu-ai/issue/ENG-789), [#71](https://github.com/retsu-AI/qq/pull/71)) | 2026-09-17. Summarizer reads at most one window of whole prompt/run units after the cutoff (`load_summarizer_input`); each step commits a marker at its unit boundary; `context_compaction_attempted` counts steps (no schema change), fold stops on full coverage, a failed step, or 32 steps; single oversized unit fails as `OversizedUnit`, not "already attempted"; manual `/compact` takes one bounded step. Six regression tests incl. shutdown/reopen resume. Deferred: estimator calibration from observed usage; provider tokenizers |
+| ENG-791.R1 | Typed reasoning effort reaches the real provider request | Shipped (#76 J6a; superseded row) | Author repaired actual wire/retry, zero-connection and lazy-initialization tests. Default provider 208 + interface 17 pass (one ignored); minimal provider 161 + interface 17 pass. Reviewer `qa_root_candidate_review`; manager integration. This dependency is not automatic routing |
+| ENG-791.R2 | JEV selects authorized model/effort pairs for root and child tasks | Shipped (#77 J6b; superseded row) | Same ENG-791 requirement, not a separate backlog. Actual dispatch, overrides, current capability/authorization checks, cancellation and declared fallback must agree with the selection; mandatory completion checkpoints remain enforced |
+| ENG-791.R3 | Durable routing identity, TUI visibility and observed runtime qualification | Partly shipped (#77 durable identity); remainder [ENG-815](https://linear.app/retsu-ai/issue/ENG-815) | Retain candidate set, selection/distribution, actual model/effort, usage and outcomes across replay; real-model and fixed-baseline comparison before any savings claim. Recorded demonstration and canonical release remain separate gates |
+| F07 | Control and cleanup commands admitted past `MAX_COMMANDS` | Shipped (`c8b1120`, #68; ENG-786 Done) | 2026-09-16. `SessionCommandKind::creates_work` splits the thirteen kinds; new work bounded at 100 000 receipts, control/cleanup at +10 000 headroom, runtime settlement cancels unbounded (`CommandOrigin`). Receipts never trimmed; replay unchanged. Two regression tests fill the counter and drive cancel/approve/delete/prune/shutdown |
+| F05 | Attachments reconstructed as the model first saw them | Shipped (`e0f5655`, #69; ENG-788 Done) | 2026-09-17. Schema 28 → 29: `attachment_blobs` (per-session, keyed by whole-file hash + range, 64 MiB cap with explicit evicted rendering) and `message_attachments`, written in the `RunStarted` transaction; `load_model_context` re-renders `<attached-file>` blocks from the store; `ClaimedRun.resolved_input` carries the first read across the auto-compaction retry. Three regression tests (modify/delete/reopen/dedup/cascade; eviction stub; auto-compaction retry) plus the reference-assembly oracle |
+| F06 | Context assembly and history search bounded by retained context, not archive size | Shipped (`ae7deec`, #70; ENG-790 Done) | 2026-09-17. Turn/result/steering/attachment queries joined to the retained prompt window; schema 29 → 30 adds `messages(run_id, steering, state)`. `search_history` newest-first with an 8 MiB scan budget and a `truncated` note. New `context_assembly` bench: assembly 83 µs / 25 ms / 98 ms → 50 / 47 / 82 µs at 10 / 1 000 / 10 000 archived runs; absent-term search 433 ms → 54 ms (truncated) at 10 000 |
+| F04 | Bounded summarizer input; compactions fold until the prompt fits | Shipped (`c404ae5`, #71; ENG-789 Done) | 2026-09-17. Summarizer reads at most one window of whole prompt/run units after the cutoff (`load_summarizer_input`); each step commits a marker at its unit boundary; `context_compaction_attempted` counts steps (no schema change), fold stops on full coverage, a failed step, or 32 steps; single oversized unit fails as `OversizedUnit`, not "already attempted"; manual `/compact` takes one bounded step. Six regression tests incl. shutdown/reopen resume. Deferred: estimator calibration from observed usage; provider tokenizers |
+| F10 | Client JSON exchange bounded end to end | Shipped (`1b8e2c2`, #79; ENG-792) | 2026-09-19. `post_json` wrapped send+headers+body in one `REQUEST_TIMEOUT`; new `ClientError::Timeout`; mid-body transport failure is `Unavailable`, size cap `ResponseTooLarge`. Regression probe: the stalled-body test hangs indefinitely on the prior code. SSE deadlines unchanged |
 
 ## ADR number allocation
 
@@ -143,6 +143,34 @@ sections, `docs/adr/README.md`, `docs/README.md`, `docs/plans/README.md`,
 `AGENTS.md`. A lane may edit a design doc section it owns without a request.
 
 ## Entries
+
+### 2026-09-19 — Linear board reconciled with the plan docs
+
+Linear project `qq` (team `ENG`) is now the tracker of record for open work;
+ledgers keep receipts. 13 merged issues were closed. 50 issues were created
+from the plan docs and the harness audit, grouped by milestone per plan:
+Harness Audit (F03, F08, F09, F11–F13, F15, F17–F20, F23, F24, F26, F28,
+scoped instructions; F10 shipped #79 as ENG-792), Tool Layer (T10, T11, T14,
+T12 steer follow-up, receipt-follow-up bundle), Evaluation Program (ENG-809
+parent: LIVE-QUAL, J8, D6b, T13, TB pilot, ENG-791.R3 — every paid run in one
+place), Speed-First (H10 as an independent lane per the audit, H11, H12, H22
+deferral bundle), Multi-Surface (ADR-0015 decision, S2, S4, W3, S5, S6, docs;
+U/D/M phases not filed until ADR-0017), Terminal-Bench (R7 telemetry + F21,
+R8 remainder), Jev (size-budget failures, ADR/ledger hygiene), Run Snapshots
+and LSP (one gating issue each), Decisions (quiet host, Windows run, retention
+contract, IDN grants; F22 reconcile).
+
+Duplicates filed once with both sources cited: F16=H10=R6 gate; F03=ROOT-5
+mid-run summarization; F09=H22 reviewer deferral; F21=R7 scheduling;
+F13=R8 MCP bounds; T10=R6-terminal; T14=terminal-bench Phase 8 selection;
+F20=F07 retention remainder. Not filed (docs mark won't-do/superseded/done):
+H22 approval-wait sleep, `todo` tool, R6-search/patch, terminal-bench Phase 8
+items shipped as H14/H18/H22.2/PlanCache, F27 (measure first), audit work
+orders 6–7 (product hypotheses without an owning plan), LSP-4 as written.
+
+Decision recorded: H10 sandbox runs as an independent lane and does not wait
+on T13 evidence or a full Windows run (audit recommendation adopted). Windows
+run is its own decision (ENG-840).
 
 ### 2026-09-18 — ENG-791 native routing dependency start
 

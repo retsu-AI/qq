@@ -5,6 +5,14 @@ history and their durable contracts in [`../design/`](../design/). Read
 [`../design/architecture.md`](../design/architecture.md) before changing
 system boundaries and [`workflow.md`](./workflow.md) before starting a slice.
 
+## Tracker
+
+Open work is tracked in Linear project `qq` (team `ENG`), one milestone per
+plan below plus `Harness Audit`, `Evaluation Program`, and `Decisions`.
+Ledgers in [`progress/`](./progress/) hold receipts and gate evidence; when
+they disagree with Linear on status, Linear is current. Reserve ADR numbers
+in [`progress/root.md`](./progress/root.md) as before.
+
 ## How to use this directory
 
 | If you are… | Read, in order |
