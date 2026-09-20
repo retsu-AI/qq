@@ -20,4 +20,6 @@ Status vocabulary: `Planned` · `In progress` · `In review` · `Shipped (sha)`
 · `Blocked (reason)` · `Dropped (reason)`.
 
 Read the ledger before the plan when you want to know what is happening; read
-the plan when you want to know what is intended.
+the plan when you want to know what is intended. Open-work status lives in
+Linear project `qq` (milestones per plan); ledgers record receipts once a
+slice ships and are reconciled to Linear, not the reverse.
