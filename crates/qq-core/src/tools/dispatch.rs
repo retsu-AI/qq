@@ -298,8 +298,7 @@ impl SpillRecord {
     /// The marker token for this record under `call`:
     /// `t:<tool>:<call8>:<digest8>`.
     pub(crate) fn handle(&self, tool: &str, call: qq_protocol::ToolCallId) -> String {
-        let call = call.to_string();
-        format!("t:{tool}:{}:{}", &call[..8], &self.digest[..8])
+        super::output::result_handle(tool, call, &self.digest)
     }
 }
 

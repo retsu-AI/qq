@@ -1124,7 +1124,10 @@ The built-in tool set is deliberately small and is specified in `tools.md`
 `shell`, `exec`, plus `read_tool_result` over spilled outputs and the durable
 `search_history`. Every result passes one bounding boundary (bytes, lines,
 per-turn budget; anything cut is stored under a content-addressed handle,
-ADR-0019); shell and `exec` commands are classified by a CST parser into
+ADR-0019). The per-turn budget is a deterministic projection over the
+persisted per-call results that live execution and context assembly share,
+so replay reproduces the model-facing request byte for byte; shell and
+`exec` commands are classified by a CST parser into
 `Allow`/`Prompt`/`Forbidden` before policy (ADR-0020).
 
 Tool calls and results are persisted and streamed so the user can understand

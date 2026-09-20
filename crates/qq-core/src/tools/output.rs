@@ -8,6 +8,8 @@
 
 use std::fmt::Write as _;
 
+use qq_protocol::ToolCallId;
+
 /// Ceiling for model-facing text from one tool call.
 pub(crate) const MAX_MODEL_TEXT_BYTES: usize = 128 * 1024;
 /// Ceiling for model-facing lines from one tool call.
@@ -759,9 +761,36 @@ pub fn mask_secrets(text: String) -> String {
 // Per-turn budget
 // ---------------------------------------------------------------------------
 
+/// Where the complete text of a result the turn budget cuts can be read
+/// back, so the cut's marker names a recall path.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ResultRecall<'a> {
+    /// No session store (a direct run): the marker says `not stored`.
+    None,
+    /// The store holds the complete output under this spill handle.
+    Spill(&'a str),
+    /// The store holds the per-call result row itself: a result the call's
+    /// own bound left whole, which only the turn budget cut. The marker
+    /// names the row by the digest of that stored text.
+    StoredResult { tool: &'a str, call: ToolCallId },
+}
+
+/// The marker token for a stored output under `call`:
+/// `t:<tool>:<call8>:<digest8>`. Shared by spills and stored result rows so
+/// `read_tool_result` resolves either with one handle grammar.
+pub(crate) fn result_handle(tool: &str, call: ToolCallId, digest: &str) -> String {
+    let call = call.to_string();
+    format!("t:{tool}:{}:{}", &call[..8], &digest[..8])
+}
+
 /// Caps the model-facing text one turn's tool calls add to context. A call
 /// that would overshoot is re-bounded to the remainder (never below
 /// [`MIN_MODEL_TEXT_BYTES`]) and its marker says so.
+///
+/// This is the one projection from persisted per-call results to what the
+/// model sees: the live run applies it as the turn's results enter context,
+/// and context assembly re-applies it to the stored rows in the same call
+/// order, so replay reproduces the live request byte for byte.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TurnOutputBudget {
     remaining: usize,
@@ -775,18 +804,43 @@ impl TurnOutputBudget {
     }
 
     /// Admits one result, shrinking it when the turn is nearly spent, and
-    /// charges what remains of it. When `spill` names the stored complete
-    /// output, the cut's marker points at it.
-    pub(crate) fn admit(&mut self, text: &mut String, spill: Option<&str>) -> bool {
+    /// charges what remains of it. A cut's marker points at `recall`.
+    ///
+    /// Deterministic: the same text and recall produce the same bytes, which
+    /// is what lets assembly reconstruct the projection instead of storing
+    /// it.
+    pub(crate) fn admit(&mut self, text: &mut String, recall: ResultRecall<'_>) -> bool {
         let allowed = self.remaining.max(MIN_MODEL_TEXT_BYTES);
         let mut cut = false;
         if text.len() > allowed {
+            // The stored-result handle digests the row's text, which is the
+            // text before this cut; hashing happens only on this cold path.
+            let stored_result = match recall {
+                ResultRecall::StoredResult { tool, call } => Some(result_handle(
+                    tool,
+                    call,
+                    &crate::workspace::content_hash(text.as_bytes()),
+                )),
+                ResultRecall::None | ResultRecall::Spill(_) => None,
+            };
             let bounds = Bounds::DEFAULT.with_max_bytes(allowed);
             let bounded = bound_text(std::mem::take(text), &bounds, Some("turn budget reached"));
             cut = bounded.truncated();
             *text = bounded.text;
             if bounded.omitted_bytes > 0 {
-                finalize_spill_marker(text, spill, None);
+                match recall {
+                    ResultRecall::None => {}
+                    ResultRecall::Spill(handle) => {
+                        finalize_spill_marker(text, Some(handle), None);
+                    }
+                    ResultRecall::StoredResult { .. } => {
+                        finalize_spill_marker(
+                            text,
+                            stored_result.as_deref(),
+                            Some(bounded.omitted_from_line),
+                        );
+                    }
+                }
             }
         }
         self.remaining = self.remaining.saturating_sub(text.len());
@@ -974,9 +1028,12 @@ mod tests {
     fn the_turn_budget_marker_points_at_the_spill_when_one_exists() {
         let mut budget = TurnOutputBudget::new();
         let mut first = "x".repeat(90 * 1024);
-        budget.admit(&mut first, None);
+        budget.admit(&mut first, ResultRecall::None);
         let mut second = lines(4_000);
-        assert!(budget.admit(&mut second, Some("t:read_file:0123abcd:89ef0123")));
+        assert!(budget.admit(
+            &mut second,
+            ResultRecall::Spill("t:read_file:0123abcd:89ef0123")
+        ));
         assert!(
             second.contains("turn budget reached; full output t:read_file:0123abcd:89ef0123]…"),
             "{second}"
@@ -1201,26 +1258,73 @@ mod tests {
     fn the_turn_budget_shrinks_late_results_to_the_remainder() {
         let mut budget = TurnOutputBudget::new();
         let mut first = "x".repeat(90 * 1024);
-        assert!(!budget.admit(&mut first, None));
+        assert!(!budget.admit(&mut first, ResultRecall::None));
         assert_eq!(first.len(), 90 * 1024);
         assert_eq!(budget.remaining(), 6 * 1024);
 
         let mut second = lines(4_000);
         assert!(second.len() > 6 * 1024);
-        assert!(budget.admit(&mut second, None));
+        assert!(budget.admit(&mut second, ResultRecall::None));
         assert!(second.len() <= 6 * 1024);
-        assert!(second.contains("turn budget reached"));
+        assert!(second.contains("turn budget reached; not stored]"));
         assert!(budget.remaining() < MIN_MODEL_TEXT_BYTES);
 
         // Never below the floor: a spent turn still gets a useful result.
         let mut third = lines(4_000);
-        assert!(budget.admit(&mut third, None));
+        assert!(budget.admit(&mut third, ResultRecall::None));
         assert!(third.len() <= MIN_MODEL_TEXT_BYTES);
         assert!(third.len() > MIN_MODEL_TEXT_BYTES / 2);
 
         let mut small = "fits".to_owned();
-        assert!(!budget.admit(&mut small, None));
+        assert!(!budget.admit(&mut small, ResultRecall::None));
         assert_eq!(small, "fits");
+    }
+
+    #[test]
+    fn a_budget_cut_of_an_unspilled_result_names_the_stored_row() {
+        // The call's own bound kept the result whole (no spill), so the turn
+        // budget's marker points at the persisted result row by digest.
+        let call = ToolCallId::from_bytes([0xab; 16]);
+        let text = lines(1_000);
+        let digest = crate::workspace::content_hash(text.as_bytes());
+        let mut budget = TurnOutputBudget::new();
+        let mut first = "x".repeat(92 * 1024);
+        budget.admit(&mut first, ResultRecall::None);
+        let mut second = text.clone();
+        assert!(budget.admit(
+            &mut second,
+            ResultRecall::StoredResult {
+                tool: "read_file",
+                call
+            }
+        ));
+        let marker = second
+            .lines()
+            .find(|line| line.starts_with(MARKER_PREFIX))
+            .unwrap();
+        let expected = result_handle("read_file", call, &digest);
+        assert_eq!(expected, format!("t:read_file:abababab:{}", &digest[..8]));
+        assert!(
+            marker.contains(&format!(
+                "turn budget reached; full output {expected}; read_tool_result offset="
+            )),
+            "{marker}"
+        );
+        assert!(!marker.contains("not stored"), "{marker}");
+        // Same text, same budget state: the same bytes, so assembly can
+        // reconstruct the projection from the stored row.
+        let mut again = TurnOutputBudget::new();
+        let mut first_again = "x".repeat(92 * 1024);
+        again.admit(&mut first_again, ResultRecall::None);
+        let mut replayed = text;
+        again.admit(
+            &mut replayed,
+            ResultRecall::StoredResult {
+                tool: "read_file",
+                call,
+            },
+        );
+        assert_eq!(replayed, second);
     }
 
     #[test]

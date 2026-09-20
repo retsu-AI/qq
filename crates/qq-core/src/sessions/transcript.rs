@@ -383,13 +383,17 @@ pub(super) fn load_model_context_with_units(
 
     // Every recorded tool result, keyed by run, turn, and provider call id, with the
     // effect class the call was admitted under (absent for rows written
-    // before schema 26).
+    // before schema 26), the call's own id, and the digest of its spill when
+    // one was stored: the turn-budget projection below names one or the
+    // other as the recall path, exactly as the live run did.
     let mut results: HashMap<String, RecordedTurnResults> = HashMap::new();
     let mut statement = transaction.prepare_cached(
-        "SELECT c.run_id, c.provider_call_id, c.result, c.is_error, c.effect, c.turn_ordinal
+        "SELECT c.run_id, c.provider_call_id, c.result, c.is_error, c.effect, c.turn_ordinal,
+                c.id, s.digest
              FROM messages m
              JOIN runs r ON r.id = m.run_id
              JOIN tool_calls c ON c.run_id = r.id
+             LEFT JOIN tool_spills s ON s.tool_call_id = c.id
              WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
                AND m.role = 'user' AND m.steering = 0
                AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
@@ -403,10 +407,12 @@ pub(super) fn load_model_context_with_units(
             row.get::<_, bool>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, u32>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, Option<String>>(7)?,
         ))
     })?;
     for row in rows {
-        let (run_id, call_id, content, is_error, effect, turn_ordinal) = row?;
+        let (run_id, call_id, content, is_error, effect, turn_ordinal, id, spill_digest) = row?;
         let effect = effect.as_deref().and_then(EffectClass::from_stored);
         results
             .entry(run_id)
@@ -419,6 +425,8 @@ pub(super) fn load_model_context_with_units(
                     content,
                     is_error,
                     effect,
+                    id: parse_id(&id)?,
+                    spill_digest,
                 },
             );
     }
@@ -556,6 +564,11 @@ pub(super) struct RecordedResult {
     pub(super) content: String,
     pub(super) is_error: bool,
     pub(super) effect: Option<EffectClass>,
+    /// The call's own id: with `spill_digest`, what a turn-budget cut's
+    /// marker names as the recall path.
+    pub(super) id: ToolCallId,
+    /// The digest of the complete output when the call spilled it.
+    pub(super) spill_digest: Option<String>,
 }
 
 /// Assistant rows from stores that predate `model_turns`: one query per such
@@ -963,6 +976,12 @@ pub(super) fn assembled_context_bytes(
 /// then exactly one result per `ToolCall` block in block order, with applied
 /// steering placed immediately before the turn whose request first carried it
 /// and the continuation notice after a truncated turn.
+///
+/// Results pass through the same per-turn output budget the live run applied
+/// (`TurnOutputBudget`, in block order, which is call order), so a turn whose
+/// results together exceeded the budget replays exactly the reduced text the
+/// model saw rather than the larger per-call rows. The projection is a pure
+/// function of the stored rows; nothing extra is persisted.
 pub(super) fn append_run_turns(
     turns: Vec<(u32, String, bool)>,
     mut recorded: RecordedTurnResults,
@@ -990,32 +1009,50 @@ pub(super) fn append_run_turns(
         // instead of poisoning the session.
         let result_message_index = context.len() + 1;
         let mut result_index = 0;
+        let mut turn_output = crate::tools::TurnOutputBudget::new();
         let results = content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::ToolCall { id, .. } => {
+                ContentBlock::ToolCall { id, name, .. } => {
                     let block_index = result_index;
                     result_index += 1;
                     Some(match recorded_turn.remove(id) {
                         Some(RecordedResult {
-                            content,
+                            mut content,
                             is_error,
                             effect,
+                            id: tool_call_id,
+                            spill_digest,
                         }) => {
                             if let Some(effect) = effect {
                                 effects.insert((result_message_index, block_index), effect);
                             }
+                            let spill_handle = spill_digest.as_deref().map(|digest| {
+                                crate::tools::output::result_handle(name, tool_call_id, digest)
+                            });
+                            let recall = match &spill_handle {
+                                Some(handle) => crate::tools::ResultRecall::Spill(handle),
+                                None => crate::tools::ResultRecall::StoredResult {
+                                    tool: name,
+                                    call: tool_call_id,
+                                },
+                            };
+                            turn_output.admit(&mut content, recall);
                             ContentBlock::ToolResult {
                                 call_id: id.clone(),
                                 content,
                                 is_error,
                             }
                         }
-                        None => ContentBlock::ToolResult {
-                            call_id: id.clone(),
-                            content: INTERRUPTED_TOOL_RESULT.to_owned(),
-                            is_error: true,
-                        },
+                        None => {
+                            let mut content = INTERRUPTED_TOOL_RESULT.to_owned();
+                            turn_output.admit(&mut content, crate::tools::ResultRecall::None);
+                            ContentBlock::ToolResult {
+                                call_id: id.clone(),
+                                content,
+                                is_error: true,
+                            }
+                        }
                     })
                 }
                 ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,

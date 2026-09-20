@@ -263,9 +263,18 @@ dependency); clean text is returned without allocation.
 **Per-turn budget.** The sum of `model_text` across one turn's tool calls is
 capped at 96 KiB (`MAX_TURN_TOOL_OUTPUT_BYTES`). Results enter context in
 call order; a result that would overshoot is re-bounded to the remainder
-(never below 4 KiB) and its marker adds `turn budget reached` — and the
-same handle, when the call spilled. The persisted row keeps the call's own
-bounded text; only what the model sees shrinks.
+(never below 4 KiB) and its marker adds `turn budget reached`. The
+persisted `tool_calls.result` row keeps the call's own bounded text; the
+budget is a **projection** over those rows (`TurnOutputBudget`) that both
+the live run and context assembly (`append_run_turns`) apply, in call
+order, so a replayed turn — follow-up run, reopened store, compaction
+summarizer input — is byte-identical to the request the model saw live.
+Nothing extra is persisted: the projection is a pure function of the stored
+rows. A budget cut always names a recall path in its marker: the spill
+handle when the call spilled, else a handle over the stored result row
+itself (`t:<tool>:<call8>:<digest8>`, the digest being that of the stored
+result text, with `read_tool_result offset=` pointing at the first omitted
+line). `read_tool_result` resolves either kind through one handle grammar.
 
 ### Spilled Outputs
 
@@ -296,8 +305,11 @@ something it already produced, and masking there would make `.env`
 debugging impossible; the inline preview stays masked so secrets do not
 reach context by accident. The tool is declared only in session runs,
 where a `SpillReader` is installed; it is `ReadOnly`, concurrent, and
-prunable. Failures: `handle_invalid`, `spill_missing` (no row, or the
-digest disagrees), `spill_evicted`, `handle_foreign_session`,
+prunable. A handle resolves first against `tool_spills`; when no spill
+row matches the call prefix and digest, the call's own `tool_calls.result`
+answers if its digest agrees — the recall path for a result only the
+per-turn budget cut. Failures: `handle_invalid`, `spill_missing` (no row,
+or the digest disagrees), `spill_evicted`, `handle_foreign_session`,
 `invalid_regex`, `invalid_offset`, `invalid_limit`, `range_out_of_bounds`.
 
 **Bounds.** 8 MiB per item (`MAX_SPILL_ITEM_BYTES`; larger outputs are

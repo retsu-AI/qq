@@ -24,6 +24,7 @@ may append a **request** row; only root changes a request's status.
 | F10 | Client JSON exchange bounded end to end | Shipped (`1b8e2c2`, #79; ENG-792) | 2026-09-19. `post_json` wrapped send+headers+body in one `REQUEST_TIMEOUT`; new `ClientError::Timeout`; mid-body transport failure is `Unavailable`, size cap `ResponseTooLarge`. Regression probe: the stalled-body test hangs indefinitely on the prior code. SSE deadlines unchanged |
 | F24 | History excerpt offsets survive Unicode lowercasing | In review ([ENG-805](https://linear.app/retsu-ai/issue/ENG-805)) | 2026-09-19. `find_case_insensitive` lowers the haystack char by char and keeps original offsets (ASCII keeps the memchr fast path); `excerpt_around` no longer takes a lowered copy. Regressions with `İ`/`ẞ` prefixes incl. a drift larger than the excerpt half-width; `context_assembly` search timings unchanged within noise |
 | T12-f | Steering `@file` parts resolved at the boundary and persisted as attachments | In review ([ENG-819](https://linear.app/retsu-ai/issue/ENG-819)) | 2026-09-19. `SteeringMessage` carries `InputPart`s; `apply_steering` reads files off-executor when the message is injected and the `SteeringApplied` transaction stores them like a prompt's attachments; assembly re-renders steering from the store. Unreadable file → runtime notice in the message, run continues. Regression: steer with `@notes.txt`, provider sees bytes, replay identical after the file changes; reference oracle extended |
+| F23 | Model-facing tool-result projection persisted for replay | In review (ENG-804) | 2026-09-19. The 96 KiB per-turn budget is now one deterministic projection (`TurnOutputBudget`) that both the live run and `append_run_turns` apply over the stored `tool_calls` rows, so follow-up, reopen, and summarizer requests replay the live bytes; budget cuts of unspilled results name the stored row through `read_tool_result`. |
 
 ## ADR number allocation
 
@@ -331,3 +332,21 @@ dripped body held the request future — and in the TUI one of its
 the whole exchange; three raw-socket tests (stalled, chunked drip, mid-body
 close) plus connection refused. The `Timeout` variant is not added to the
 reconnect policy's re-resolve set: a slow server is not evidence it restarted.
+
+### 2026-09-19 — F23 tool-result projection replay
+
+Bug (ENG-804): the per-turn 96 KiB budget re-bounded late results only in
+the live request, after each per-call result was persisted whole; follow-up,
+reopen, and compaction assembly replayed the larger rows, so the model saw a
+different context than it saw live. Reproduced by a session test: four ~30
+KiB `read_file` calls in one turn, live request vs. follow-up assembly.
+Fix: no schema change. `TurnOutputBudget::admit` is the one projection;
+`append_run_turns` (and the test reference oracle) apply it in block order
+over stored `result` + call id + spill digest, so replay is byte-identical.
+A cut of an unspilled result now names the stored row by a
+`t:<tool>:<call8>:<digest8>` handle; `read_tool_spill` falls back to
+`tool_calls.result` when no spill matches. Test:
+`turn_budget_projection_replays_identically_after_follow_up_and_reopen`
+plus a unit test for the stored-row handle. Deferred: JEV checkpoint
+annotations appended to retained results are still live-only (F23 scope was
+the turn budget); `context_assembly` bench unchanged within noise.
