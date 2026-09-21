@@ -5654,7 +5654,7 @@ mod tests {
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
 
-        for model in ["grok-4.6", "grok-4.5", "grok-4.3"] {
+        for model in ["grok-4.7", "grok-4.6", "grok-4.5", "grok-4.3"] {
             let request = fixture.request(format!(
                 r#"(
                     version: 1,

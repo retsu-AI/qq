@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::{ModelMetadata, ModelPricing, ModelPricingTier, ProviderApi};
 
-const PROVENANCE: &str = "models.dev/api.json@2026-09-05";
+const PROVENANCE: &str = "models.dev/api.json@2026-09-21";
 const OPENAI_API: u16 = 1 << 0;
 const OPENAI_CODEX: u16 = 1 << 1;
 const ANTHROPIC_API: u16 = 1 << 2;
@@ -331,6 +331,7 @@ const MODELS: &[ModelDefinition] = &[
     model! { catalogs: BEDROCK_MANTLE, wire: "openai.gpt-5.6-sol", canonical: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", reasoning: true, limits: 272_000 / 128_000, pricing: metered(5_500, 33_000, 0, 0), api: ProviderApi::OpenAiResponses },
     model! { catalogs: BEDROCK_MANTLE, wire: "openai.gpt-5.6-luna", canonical: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", reasoning: true, limits: 272_000 / 128_000, pricing: metered(1_100, 6_600, 0, 0), api: ProviderApi::OpenAiResponses },
     model! { catalogs: BEDROCK_MANTLE, wire: "openai.gpt-5.6-terra", canonical: "openai/gpt-5.6-terra", name: "GPT-5.6 Terra", reasoning: true, limits: 272_000 / 128_000, pricing: metered(2_200, 13_200, 0, 0), api: ProviderApi::OpenAiResponses },
+    model! { catalogs: XAI_API, wire: "grok-4.7", canonical: "xai/grok-4.7", name: "Grok 4.7", reasoning: true, limits: 500_000 / 500_000, pricing: tiered(2_000, 6_000, 500, 0, PricingTierDefinition { above_input_tokens: 200_000, input: 4_000, output: 12_000, cache_read: Some(1_000), cache_write: None }), api: ProviderApi::OpenAiResponses },
     model! { catalogs: XAI_API, wire: "grok-4.6", canonical: "xai/grok-4.6", name: "Grok 4.6", reasoning: true, limits: 500_000 / 500_000, pricing: tiered(2_000, 6_000, 500, 0, PricingTierDefinition { above_input_tokens: 200_000, input: 4_000, output: 12_000, cache_read: Some(1_000), cache_write: None }), api: ProviderApi::OpenAiResponses },
     model! { catalogs: XAI_API, wire: "grok-4.5", canonical: "xai/grok-4.5", name: "Grok 4.5", reasoning: true, limits: 256_000 / 128_000, pricing: None, api: ProviderApi::OpenAiResponses },
     model! { catalogs: XAI_API, wire: "grok-4.3", canonical: "xai/grok-4.3", name: "Grok 4.3", reasoning: true, limits: 131_072 / 32_768, pricing: None, api: ProviderApi::OpenAiChatCompletions },
@@ -404,13 +405,30 @@ mod tests {
             codex["gpt-6-astra"].canonical_id(),
             Some("openai/gpt-6-astra")
         );
-        assert_eq!(xai["grok-4.6"].canonical_id(), Some("xai/grok-4.6"));
-        assert_eq!(xai["grok-4.6"].api(), Some(ProviderApi::OpenAiResponses));
+        assert_eq!(xai["grok-4.7"].canonical_id(), Some("xai/grok-4.7"));
+        assert_eq!(xai["grok-4.7"].api(), Some(ProviderApi::OpenAiResponses));
+        assert_eq!(xai["grok-4.7"].name(), Some("Grok 4.7"));
+        assert!(xai["grok-4.7"].reasoning());
+        assert_eq!(xai["grok-4.7"].context_window(), Some(500_000));
+        assert_eq!(xai["grok-4.7"].max_output_tokens(), Some(500_000));
+        let pricing = xai["grok-4.7"].pricing().expect("grok-4.7 ships pricing");
+        assert_eq!(pricing.input_usd_nanos_per_token, 2_000);
+        assert_eq!(pricing.output_usd_nanos_per_token, 6_000);
+        assert_eq!(pricing.cache_read_usd_nanos_per_token, Some(500));
+        let tier = pricing
+            .context_tier
+            .as_ref()
+            .expect("grok-4.7 prices long context separately");
+        assert_eq!(tier.above_input_tokens, 200_000);
+        assert_eq!(tier.input_usd_nanos_per_token, 4_000);
+        assert_eq!(tier.output_usd_nanos_per_token, 12_000);
+        assert_eq!(pricing.provenance, PROVENANCE);
     }
 
     #[test]
     fn xai_models_select_protocol_per_deployment() {
         let xai = builtin_models(BuiltinCatalog::XAiApi);
+        assert_eq!(xai["grok-4.7"].api(), Some(ProviderApi::OpenAiResponses));
         assert_eq!(xai["grok-4.6"].api(), Some(ProviderApi::OpenAiResponses));
         assert_eq!(xai["grok-4.5"].api(), Some(ProviderApi::OpenAiResponses));
         assert_eq!(
