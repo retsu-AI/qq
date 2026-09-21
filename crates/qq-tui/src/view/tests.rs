@@ -74,7 +74,11 @@ fn frame_text(frame: &[Line]) -> String {
 fn frame_rows(frame: &[Line]) -> Vec<String> {
     frame
         .iter()
-        .map(|line| line.spans.iter().map(|span| span.text.as_str()).collect())
+        .map(|line| {
+            let mut row = " ".repeat(line.indent);
+            row.extend(line.spans.iter().map(|span| span.text.as_str()));
+            row
+        })
         .collect()
 }
 
@@ -1786,7 +1790,7 @@ fn the_composer_glyph_says_what_enter_will_do() {
 #[test]
 fn an_80_by_24_frame_gives_the_transcript_at_least_twenty_rows() {
     let mut app = app_with_messages(30);
-    app.sidebar = crate::app::Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 24);
     let rows = frame_rows(&frame);
     // Body rows are everything between the top row and the composer rule.
@@ -2084,8 +2088,8 @@ fn sidebar_appears_at_wide_widths_and_shows_live_status_for_cold_sessions() {
     let rows_at = |app: &mut App, width| {
         frame_rows(&FrameRenderer::default().frame_and_commit(app, width, 24)).join("\n")
     };
-    let narrow = rows_at(&mut app, 90);
-    assert!(!narrow.contains("WORKING  1"), "auto-hidden when narrow");
+    let narrow = rows_at(&mut app, 89);
+    assert!(!narrow.contains("WORKING  1"), "auto-hidden below Regular");
 
     let wide_frame = FrameRenderer::default().frame_and_commit(&mut app, 160, 24);
     let wide = frame_rows(&wide_frame).join("\n");
@@ -2112,7 +2116,7 @@ fn sidebar_appears_at_wide_widths_and_shows_live_status_for_cold_sessions() {
     assert!(!rows_at(&mut app, 160).contains("WORKING  1"));
     app.handle_terminal_event(toggle);
     assert!(
-        rows_at(&mut app, 90).contains("WORKING  1"),
+        rows_at(&mut app, 70).contains("WORKING  1"),
         "explicitly shown wins over width"
     );
 }
@@ -2127,11 +2131,26 @@ fn the_sidebar_stays_hidden_with_one_session_and_scales_with_width() {
         !rows_at(&mut app, 200).contains("IDLE  1"),
         "one session: nothing to list"
     );
-    let sidebar = crate::app::Sidebar::Auto;
-    assert_eq!(sidebar.width(100, 2), 25);
-    assert_eq!(sidebar.width(200, 2), crate::app::SIDEBAR_MAX_WIDTH);
-    assert_eq!(sidebar.width(99, 2), 0);
-    assert_eq!(crate::app::Sidebar::Shown.width(80, 1), 20);
+    let rail_width = |width, prefs, sessions| {
+        layout::compute_layout(width, 24, 2, prefs, sessions)
+            .rail
+            .map_or(0, |rail| rail.width)
+    };
+    let auto = LayoutPrefs::default();
+    assert_eq!(rail_width(100, auto, 2), 25);
+    assert_eq!(rail_width(200, auto, 2), layout::RAIL_MAX_WIDTH);
+    assert_eq!(rail_width(89, auto, 2), 0);
+    assert_eq!(
+        rail_width(
+            80,
+            LayoutPrefs {
+                rail: PanePref::Shown,
+                inspector: PanePref::Auto,
+            },
+            1
+        ),
+        20
+    );
 }
 
 #[test]
@@ -2189,7 +2208,7 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
             },
         )
     }));
-    app.sidebar = crate::app::Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
 
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 40));
     let spawn_row = rows
@@ -2220,7 +2239,7 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
 #[test]
 fn background_approvals_surface_a_banner_that_ctrl_g_jumps_to() {
     let mut app = app_with_messages(1);
-    app.sidebar = crate::app::Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     let parent = app.focused().unwrap();
     let child_id = SessionId::from_bytes([0x40; 16]);
     let run_id = RunId::from_bytes([0x41; 16]);
@@ -2292,7 +2311,7 @@ fn background_approvals_surface_a_banner_that_ctrl_g_jumps_to() {
 #[test]
 fn alt_arrows_walk_the_session_tree_in_spawn_order() {
     let mut app = app_with_messages(0);
-    app.sidebar = crate::app::Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     let root = app.focused().unwrap();
     let mut sequence = 1;
     let mut created = |app: &mut App, byte: u8, parent: Option<SessionId>, at: u64| {
@@ -2348,7 +2367,7 @@ fn alt_arrows_walk_the_session_tree_in_spawn_order() {
 #[test]
 fn reasoning_renders_collapsed_above_the_runs_message_and_expands_on_toggle() {
     let mut app = app_with_messages(0);
-    app.sidebar = crate::app::Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     let session_id = app.focused().unwrap();
     let run_id = RunId::from_bytes([0x66; 16]);
     let mut sequence = 1;
@@ -2430,7 +2449,7 @@ fn app_with_two_sessions(count: u8) -> (App, SessionId, SessionId) {
 #[test]
 fn a_height_only_resize_keeps_the_transcript_cache() {
     let (mut app, _, other) = app_with_two_sessions(4);
-    app.sidebar = crate::app::Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     app.focus_session(other);
     let mut renderer = FrameRenderer::default();
     renderer.frame_and_commit(&mut app, 101, 24);
@@ -2796,7 +2815,7 @@ fn paths_elide_from_the_middle_and_keep_the_file_name() {
 /// approval; the child's body is warm so the call is known client-side.
 fn app_with_child_awaiting_approval() -> (App, SessionId, SessionId, RunId, ToolCallId) {
     let mut app = app_with_messages(1);
-    app.sidebar = crate::app::Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     let parent = app.focused().unwrap();
     let child_id = SessionId::from_bytes([0x40; 16]);
     let run_id = RunId::from_bytes([0x41; 16]);
@@ -2945,7 +2964,7 @@ fn shift_n_denies_and_steers_with_an_amendment() {
 #[test]
 fn the_sidebar_groups_sessions_by_what_the_user_should_do() {
     let (mut app, parent, child_id, _, _) = app_with_child_awaiting_approval();
-    app.sidebar = crate::app::Sidebar::Shown;
+    app.layout.rail = crate::view::PanePref::Shown;
     // A third session that finished while unfocused.
     let done_id = SessionId::from_bytes([0x50; 16]);
     let done_run = RunId::from_bytes([0x51; 16]);

@@ -84,56 +84,6 @@ pub enum TuiError {
     ClientStopped(Option<String>),
 }
 
-/// Whether the live session tree renders beside the transcript.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum Sidebar {
-    /// Visible when the terminal is at least [`SIDEBAR_AUTO_WIDTH`] columns
-    /// and more than one session exists; one session has nothing to list.
-    #[default]
-    Auto,
-    Shown,
-    Hidden,
-}
-
-/// Terminal width at which `Sidebar::Auto` shows the sidebar.
-pub(crate) const SIDEBAR_AUTO_WIDTH: usize = 100;
-/// The sidebar takes a quarter of the terminal up to this many columns.
-pub(crate) const SIDEBAR_MAX_WIDTH: usize = 28;
-
-impl Sidebar {
-    #[must_use]
-    pub(crate) const fn next(self) -> Self {
-        match self {
-            Self::Auto | Self::Shown => Self::Hidden,
-            Self::Hidden => Self::Shown,
-        }
-    }
-
-    #[must_use]
-    pub(crate) const fn visible(self, width: usize, sessions: usize) -> bool {
-        match self {
-            Self::Auto => width >= SIDEBAR_AUTO_WIDTH && sessions > 1,
-            Self::Shown => true,
-            Self::Hidden => false,
-        }
-    }
-
-    /// Columns the sidebar takes at `width`, or zero when hidden.
-    #[must_use]
-    pub(crate) const fn width(self, width: usize, sessions: usize) -> usize {
-        if self.visible(width, sessions) {
-            let quarter = width / 4;
-            if quarter < SIDEBAR_MAX_WIDTH {
-                quarter
-            } else {
-                SIDEBAR_MAX_WIDTH
-            }
-        } else {
-            0
-        }
-    }
-}
-
 /// How the transcript shows a run's tool calls. One row per call is the
 /// default: while an agent works, what it is doing is the content. Folding
 /// collapses finished quiet blocks to one summary row for reading back a
@@ -357,7 +307,9 @@ pub(crate) struct App {
     pub reasoning_detail: ReasoningDetail,
     /// Session sidebar visibility. `Auto` shows it when the terminal is wide
     /// enough; the toggle command cycles through explicit on and off.
-    pub sidebar: Sidebar,
+    /// Standing layout choices: rail and inspector visibility. `Auto` follows
+    /// the terminal's tier (`view::layout`).
+    pub layout: crate::view::LayoutPrefs,
     /// Whether the terminal reports mouse events to us. On by default so the
     /// wheel scrolls the transcript; `/mouse` turns it off for native
     /// selection and copy (most terminals also select with Shift held).
@@ -418,7 +370,7 @@ impl App {
             expanded_tool_calls: std::collections::HashSet::new(),
             transcript_cursor: None,
             reasoning_detail: ReasoningDetail::default(),
-            sidebar: Sidebar::default(),
+            layout: crate::view::LayoutPrefs::default(),
             terminal_width: 0,
             mouse_capture: true,
             themes: if options.themes.is_empty() {
@@ -889,9 +841,7 @@ impl App {
             return true;
         }
         self.terminal_width == 0
-            || self
-                .sidebar
-                .visible(self.terminal_width, self.sessions.len())
+            || crate::view::rail_visible(self.terminal_width, self.layout, self.sessions.len())
     }
 
     fn set_notice_for(&mut self, session_id: Option<SessionId>, text: String, level: NoticeLevel) {
@@ -1372,7 +1322,7 @@ impl App {
                 Effects::redraw(Redraw::Immediate)
             }
             Command::ToggleSidebar => {
-                self.sidebar = self.sidebar.next();
+                self.layout.rail = self.layout.rail.toggled();
                 Effects::redraw(Redraw::Immediate)
             }
             Command::FocusParent => match self

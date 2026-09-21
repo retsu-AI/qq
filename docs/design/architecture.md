@@ -223,7 +223,9 @@ xtask/
   session, streaming messages lay out only their open block,
   syntax highlighting runs off the render tick, and frames are diffed by row
   against the previous frame with hand-rolled style primitives rather than a
-  widget framework. One command registry drives keybindings, slash commands,
+  widget framework. The terminal's width selects a layout tier and the panes
+  it shows (`docs/design/layout.md`); every pane paints inside a `Rect` from
+  one pure `compute_layout` per frame. One command registry drives keybindings, slash commands,
   and pickers; colors come from a resolved theme the root passes in.
 - `xtask` contains repository maintenance tasks and is not shipped as part of
   QQ.

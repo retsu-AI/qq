@@ -509,10 +509,10 @@ impl TranscriptCache {
                 viewport,
             );
         }
-        // Prose past a readable measure gets no wider: lines stay scannable
-        // on a wide screen, and the width-keyed caches see one width across
-        // every terminal wider than the cap.
-        let content_width = width.min(MAX_TRANSCRIPT_WIDTH);
+        // `width` is already the pane's content width: the layout caps it at
+        // the measure and centers it, so the width-keyed caches see one width
+        // across every pane at least that wide.
+        let content_width = width;
         let body = self.threadline(highlighter, app, session_id, &viewport, content_width);
         viewport.update(app.view, body.rows, height, body.preserve_tail_anchor);
         let offset = viewport.offset();

@@ -151,8 +151,7 @@ paints only inside it.
 | Wide | 160–239 | Sessions rail + transcript + **inspector** pane: the focused session's expanded tool output, diffs, Changes, and Attention render there, so the prose column stays prose. |
 | Ultra | ≥ 240 | Sessions rail + **two or three transcript panes** side by side (auto-filled with WORKING sessions; focus cycles) + inspector. |
 
-- Render clamp 320 × 160 → 1024 × 512 (still bounded; above that the frame
-  is centered and the rest left blank).
+- Render clamp 320 × 160 → 1024 × 512 (still bounded).
 - Panes: `Sessions`, `Transcript(slot)`, `Inspector`, plus the fixed
   `TopRow`, `Drafts`, `ComposerRule`, `Composer`. The composer targets the
   focused transcript pane.
@@ -410,7 +409,7 @@ Resolved 2026-09-20 with the user.
 | D2 | Role headers | Keep `YOU` / `QQ` labels; `QQ` in brand |
 | D3 | Code panel header | Keep, right-aligned, doubles as top padding |
 | D4 | Line numbers in code panels | No |
-| D5 | Measure | 100, centered within the transcript pane |
+| D5 | Measure | 100, placed one third across the pane's spare width (amended in L1: dead center reads adrift on a lone ultra-wide pane; see `docs/design/layout.md`) |
 | D6 | Bullets | `•` |
 | D7 | Heading scheme | As S3 |
 | D8 | Composer bottom padding row | Yes at ≥ 20 rows |

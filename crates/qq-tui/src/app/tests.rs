@@ -3156,7 +3156,7 @@ fn the_reducer_returns_notices_and_attention_as_effects_instead_of_mutating_them
 fn background_streaming_for_an_unshown_session_does_not_redraw_when_the_sidebar_is_hidden() {
     let (mut app, first, other) = two_session_app();
     assert_eq!(app.focused(), Some(first));
-    app.sidebar = Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     app.handle_terminal_event(Event::Resize(100, 30));
     let run_id = id(0x60, RunId::from_bytes);
     let message_id = id(0x61, MessageId::from_bytes);
@@ -3197,7 +3197,7 @@ fn background_streaming_for_an_unshown_session_does_not_redraw_when_the_sidebar_
     );
 
     // With the sidebar showing, the live tail is visible and the delta redraws.
-    app.sidebar = Sidebar::Shown;
+    app.layout.rail = crate::view::PanePref::Shown;
     let delta = app.apply_client_update(event(SessionEvent::TextAppended {
         message_id,
         channel: TextChannel::Output,
@@ -3206,7 +3206,7 @@ fn background_streaming_for_an_unshown_session_does_not_redraw_when_the_sidebar_
     assert!(delta.redraws());
 
     // And a delta for the shown session redraws regardless.
-    app.sidebar = Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     let shown = app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
         run_id: Some(run_id),
         ..fixtures::envelope(

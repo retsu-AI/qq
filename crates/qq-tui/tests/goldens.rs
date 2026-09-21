@@ -80,21 +80,54 @@ fn every_golden_frame_fits_the_terminal() {
     }
 }
 
-/// The render clamp is a bound, not a layout: until the layout engine lands
-/// (slice L1) a terminal wider than 320 columns or taller than 160 rows gets
-/// a 320 x 160 frame in its top-left corner. This pins the current behavior
-/// so L1's change to it is visible in the golden diff.
+/// The frame fills the terminal: at every golden size the widest row reaches
+/// at least the second-to-last column (the top row's right-aligned status
+/// ends one cell in), and where the layout shows a rail its border runs the
+/// full body height at the last column. Before slice L1 a 480-column
+/// terminal received a 320-wide frame with the rest blank.
 #[test]
-fn frames_above_the_render_clamp_are_laid_out_at_the_clamp() {
-    let mut harness = BenchHarness::scene(Scene::MarkdownGallery, (480, 120));
+fn frames_fill_every_golden_size() {
+    for &(width, height) in GOLDEN_SIZES {
+        let mut harness = BenchHarness::scene(Scene::GoldenPath, (width, height));
+        let rows = harness.plain_frame();
+        assert_eq!(rows.len(), usize::from(height), "{width}x{height}");
+        let widest = rows
+            .iter()
+            .map(|row| row.chars().count())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            widest + 1 >= usize::from(width),
+            "{width}x{height}: widest row is {widest} columns"
+        );
+        if width >= 90 {
+            // Body rows between the top row and the chrome all carry the rail.
+            let body_rows = &rows[1..rows.len() - 3];
+            assert!(
+                body_rows
+                    .iter()
+                    .all(|row| row.chars().count() >= usize::from(width) - 28),
+                "{width}x{height}: a body row stops before the rail"
+            );
+        }
+    }
+}
+
+/// Prose lays out at the measure and is placed a third of the way into a
+/// pane wider than it, so a full-screen terminal reads like a page rather
+/// than a left-justified strip.
+#[test]
+fn prose_is_placed_at_the_measure_on_wide_terminals() {
+    let mut harness = BenchHarness::scene(Scene::MarkdownGallery, (320, 90));
     let rows = harness.plain_frame();
-    assert_eq!(rows.len(), 120);
-    let widest = rows
+    let first_paragraph = rows
         .iter()
-        .map(|row| row.chars().count())
-        .max()
-        .unwrap_or(0);
-    assert!(widest <= 320, "widest row is {widest} columns");
+        .find(|row| row.contains("First paragraph of prose."))
+        .expect("gallery paragraph");
+    let indent = first_paragraph.len() - first_paragraph.trim_start().len();
+    // 320 - 28 rail = 292 pane; (292 - 100) / 3 = 64 inset, plus the
+    // transcript's own 3-column prose rail.
+    assert_eq!(indent, 64 + 3, "{first_paragraph:?}");
 }
 
 /// The QA runbook embeds the gallery in its fake endpoint so a real terminal

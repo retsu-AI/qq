@@ -22,8 +22,9 @@
 - [`tools.md`](design/tools.md) — tool loop, built-in tools and their
   bounding/spill boundary, containment, edit semantics, shell classification,
   `@` mentions, approvals, MCP and embedded hosts.
-- [`transcript.md`](design/transcript.md), [`theme.md`](design/theme.md) —
-  TUI rendering.
+- [`layout.md`](design/layout.md), [`transcript.md`](design/transcript.md),
+  [`theme.md`](design/theme.md) — TUI layout tiers and panes, transcript
+  rendering, themes.
 - [`harness-scale-audit-2026-09-16.md`](design/harness-scale-audit-2026-09-16.md)
   — reference audit of Codex, OpenCode, Pi, and fx against QQ: reliability
   findings (F01–F28), comparative capability matrix, core versus adapter
