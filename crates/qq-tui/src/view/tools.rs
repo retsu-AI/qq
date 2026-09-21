@@ -511,8 +511,10 @@ pub(crate) fn elide_path(path: &str, width: usize) -> String {
     };
     // Keep the file name whole when it fits with an ellipsis and one head
     // segment; otherwise fall back to a plain truncation of the name.
+    // `…/{tail}` needs exactly `tail_count + 2` columns; only truncate the
+    // name itself when even that does not fit.
     let tail_count = tail.chars().count();
-    if tail_count + 2 >= width {
+    if tail_count + 2 > width {
         return format!(
             "…{}",
             tail.chars()

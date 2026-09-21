@@ -18,8 +18,10 @@ pub(super) fn validate_compaction_summary(summary: &str) -> Result<(), String> {
         return Err("compaction summary exceeds the 4 MiB session context limit".to_owned());
     }
     // A heading is a line that starts with the section name (optionally
-    // numbered or marked up) followed by a colon. Matching is per line so
-    // body text mentioning "errors:" cannot satisfy the requirement.
+    // numbered or marked up) and then either a colon or nothing else: both
+    // `1. Intent: ...` and a markdown `## 1. Intent` line with the body
+    // below it count. Matching is per line so body text mentioning
+    // "errors:" cannot satisfy the requirement.
     let missing = COMPACTION_REQUIRED_SECTIONS
         .iter()
         .filter(|section| {
@@ -32,10 +34,11 @@ pub(super) fn validate_compaction_summary(summary: &str) -> Result<(), String> {
                     .trim_start_matches(['*', '_']);
                 line.get(..section.len())
                     .is_some_and(|head| head.eq_ignore_ascii_case(section))
-                    && line[section.len()..]
-                        .trim_start_matches(['*', '_'])
-                        .trim_start()
-                        .starts_with(':')
+                    && {
+                        let rest = line[section.len()..]
+                            .trim_matches(|c: char| matches!(c, '*' | '_' | '#' | ' ' | '\t'));
+                        rest.is_empty() || rest.starts_with(':')
+                    }
             })
         })
         .copied()
@@ -175,6 +178,7 @@ pub(super) fn start_auto_compaction(
             context_compaction_remaining: false,
             compaction_cutoff_ordinal: cutoff_ordinal,
             context_compaction_oversized_unit_bytes: None,
+            in_run_turn_cutoff: None,
             context_overflow_basis: None,
             context_occupancy: None,
             limits: RunLimits::default(),
@@ -452,13 +456,16 @@ pub(super) fn complete_compaction(
     Ok(events)
 }
 
-/// One persisted compaction: the summary that replaces everything at or
-/// before `cutoff_ordinal` in assembly.
+/// One persisted between-run compaction: the summary that replaces every
+/// prompt at or before `cutoff_ordinal`, and their runs, in assembly.
 pub(super) struct CompactionRow {
     pub(super) summary: String,
     pub(super) cutoff_ordinal: u64,
 }
 
+/// The newest between-run marker. In-run markers (`scope_run_id` set) are
+/// not candidates: they replace turns inside one run and are read per run
+/// by `in_run_compactions`.
 pub(super) fn latest_compaction(
     connection: &Connection,
     session_id: SessionId,
@@ -466,7 +473,8 @@ pub(super) fn latest_compaction(
     connection
         .query_row(
             "SELECT summary, cutoff_ordinal FROM session_compactions
-             WHERE session_id = ?1 ORDER BY rowid DESC LIMIT 1",
+             WHERE session_id = ?1 AND scope_run_id IS NULL
+             ORDER BY rowid DESC LIMIT 1",
             [session_id.to_string()],
             |row| {
                 Ok(CompactionRow {
@@ -477,6 +485,53 @@ pub(super) fn latest_compaction(
         )
         .optional()
         .map_err(|_| SessionRuntimeError::CODEC)
+}
+
+/// One persisted in-run compaction: within the run it names, the summary
+/// replaces every model turn with ordinal `<= turn_cutoff` (and their tool
+/// results and applied steering). Turns after it stay verbatim.
+pub(super) struct InRunCompaction {
+    pub(super) summary: String,
+    pub(super) turn_cutoff: u32,
+}
+
+/// The newest in-run marker of each run whose prompt is retained. Keyed by
+/// run id. Runs with no marker are absent; the query is bounded by the
+/// retained prompt window like every other assembly query.
+pub(super) fn in_run_compactions(
+    connection: &Connection,
+    session: &str,
+    through_ordinal: u64,
+    cutoff_ordinal: u64,
+) -> Result<HashMap<String, InRunCompaction>, SessionRuntimeError> {
+    let mut statement = connection.prepare_cached(
+        "SELECT c.scope_run_id, c.summary, c.turn_cutoff
+         FROM messages m
+         JOIN session_compactions c ON c.scope_run_id = m.run_id
+         WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
+           AND m.role = 'user' AND m.steering = 0
+           AND c.rowid = (SELECT MAX(rowid) FROM session_compactions
+                          WHERE scope_run_id = m.run_id)",
+    )?;
+    let rows = statement.query_map(params![session, through_ordinal, cutoff_ordinal], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, u32>(2)?,
+        ))
+    })?;
+    let mut markers = HashMap::new();
+    for row in rows {
+        let (run_id, summary, turn_cutoff) = row?;
+        markers.insert(
+            run_id,
+            InRunCompaction {
+                summary,
+                turn_cutoff,
+            },
+        );
+    }
+    Ok(markers)
 }
 
 /// The final user message of a compaction run: the fixed structured-schema
@@ -515,4 +570,229 @@ pub(super) fn compaction_instruction(
         }
     }
     Ok(instruction)
+}
+
+/// Starts an in-run compaction for a prompt run that is `running`. Unlike a
+/// between-run step it never takes the session's active-run slot — the
+/// prompt run holds it — so `settle_run`'s slot release is a no-op for it.
+/// The row carries the prompt run as its owner and the cutoff it will cover.
+/// `None` when the prompt run is no longer running (cancelled or settled
+/// while the loop was at the boundary).
+pub(super) fn start_in_run_compaction(
+    connection: &mut Connection,
+    store_id: StoreId,
+    prompt_run: &ClaimedRun,
+    resolved_model: &ResolvedModel,
+    turn_cutoff: u32,
+) -> Result<Option<(ClaimedRun, SessionEventEnvelope)>, SessionRuntimeError> {
+    let run_id = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
+    let command_id = CommandId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
+    let user_message_id = MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
+    let assistant_message_id =
+        MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
+    let resolved_model_json = serde_json::to_string(resolved_model)?;
+    let now = now_ms();
+    let transaction = store::begin_unit(connection)?;
+    let running: bool = transaction
+        .query_row(
+            "SELECT status = 'running' AND cancel_requested = 0 FROM runs
+                 WHERE id = ?1 AND session_id = ?2",
+            params![
+                prompt_run.identity.run_id.to_string(),
+                prompt_run.identity.session_id.to_string()
+            ],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !running {
+        return Ok(None);
+    }
+    // Every in-run step is a summarizer request charged to this prompt.
+    let admitted = transaction.execute(
+        "UPDATE runs SET context_compaction_attempted = context_compaction_attempted + 1
+             WHERE id = ?1 AND context_compaction_attempted < ?2",
+        params![
+            prompt_run.identity.run_id.to_string(),
+            context::MAX_COMPACTION_STEPS
+        ],
+    )?;
+    if admitted != 1 {
+        return Ok(None);
+    }
+    transaction.execute(
+        "INSERT INTO runs(
+                 id, session_id, command_id, user_message_id, assistant_message_id,
+                 status, kind, auto_compaction, auto_compaction_for_run_id,
+                 resolved_model_json, context_base_bytes, context_increment_bytes,
+                 created_at_ms, started_at_ms
+             ) VALUES (
+                 ?1, ?2, ?3, ?4, ?5, 'running', 'compaction', 1, ?6, ?7, 0, 0, ?8, ?8
+             )",
+        params![
+            run_id.to_string(),
+            prompt_run.identity.session_id.to_string(),
+            command_id.to_string(),
+            user_message_id.to_string(),
+            assistant_message_id.to_string(),
+            prompt_run.identity.run_id.to_string(),
+            resolved_model_json,
+            now,
+        ],
+    )?;
+    let summary = load_session_summary(&transaction, prompt_run.identity.session_id)?;
+    let started = append_event(
+        &transaction,
+        EventContext::for_run_ids(
+            store_id,
+            prompt_run.identity.workspace_id,
+            prompt_run.identity.session_id,
+            run_id,
+            None,
+            now,
+        ),
+        SessionEvent::RunStarted {
+            session: Box::new(summary),
+            run_id,
+            plan: None,
+        },
+    )?;
+    transaction.commit()?;
+    let mut claimed = prompt_run.panic_settlement_claim();
+    claimed.identity.run_id = run_id;
+    claimed.identity.command_id = command_id;
+    claimed.identity.kind = RunKind::Compaction;
+    claimed.compaction_cutoff_ordinal = None;
+    claimed.in_run_turn_cutoff = Some((prompt_run.identity.run_id, turn_cutoff));
+    Ok(Some((claimed, started)))
+}
+
+/// Commits an in-run summary: validates it, inserts the scoped marker, checks
+/// that the prompt run's assembled context shrank, settles the compaction
+/// run, and publishes `SessionCompacted`. Returns the events and whether the
+/// marker stands. All in one transaction, like `complete_compaction`.
+pub(super) fn complete_in_run_compaction(
+    connection: &mut Connection,
+    store_id: StoreId,
+    claimed: &ClaimedRun,
+    summary: String,
+    accounting: Option<RunAccounting>,
+) -> Result<(Vec<SessionEventEnvelope>, bool), SessionRuntimeError> {
+    let Some((scope_run_id, turn_cutoff)) = claimed.in_run_turn_cutoff else {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    };
+    let transaction = store::begin_unit(connection)?;
+    if run_is_settled(&transaction, claimed.identity.run_id)? {
+        return Ok((Vec::new(), false));
+    }
+    let mut outcome =
+        cancellation_wins(&transaction, claimed.identity.run_id, RunOutcome::Completed)?;
+    if matches!(outcome, RunOutcome::Completed)
+        && let Err(reason) = validate_compaction_summary(&summary)
+    {
+        outcome = RunOutcome::Failed {
+            failure: RunFailure {
+                kind: RunFailureKind::Policy,
+                message: reason,
+            },
+        };
+    }
+    let mut events = Vec::with_capacity(3);
+    let mut committed = false;
+    if matches!(outcome, RunOutcome::Completed) {
+        let now = now_ms();
+        let session = claimed.identity.session_id;
+        let before_bytes = assembled_context_bytes(&transaction, session)?;
+        transaction.execute(
+            "INSERT INTO session_compactions(
+                     session_id, run_id, summary, cutoff_ordinal,
+                     before_bytes, after_bytes, created_at_ms, scope_run_id, turn_cutoff
+                 ) VALUES (?1, ?2, ?3, 0, ?4, 0, ?5, ?6, ?7)",
+            params![
+                session.to_string(),
+                claimed.identity.run_id.to_string(),
+                summary,
+                u64::try_from(before_bytes).unwrap_or(u64::MAX),
+                now,
+                scope_run_id.to_string(),
+                turn_cutoff,
+            ],
+        )?;
+        let after_bytes = assembled_context_bytes(&transaction, session)?;
+        let shrinkage_required = before_bytes > COMPACTION_SHRINKAGE_FLOOR_BYTES;
+        if shrinkage_required && after_bytes >= before_bytes {
+            transaction.execute(
+                "DELETE FROM session_compactions WHERE session_id = ?1 AND run_id = ?2",
+                params![session.to_string(), claimed.identity.run_id.to_string()],
+            )?;
+            outcome = RunOutcome::Failed {
+                failure: RunFailure {
+                    kind: RunFailureKind::Policy,
+                    message: format!(
+                        "in-run compaction summary did not shrink the assembled context \
+                         ({after_bytes} bytes after, {before_bytes} before)"
+                    ),
+                },
+            };
+        } else {
+            transaction.execute(
+                "UPDATE session_compactions SET after_bytes = ?3
+                     WHERE session_id = ?1 AND run_id = ?2",
+                params![
+                    session.to_string(),
+                    claimed.identity.run_id.to_string(),
+                    u64::try_from(after_bytes).unwrap_or(u64::MAX),
+                ],
+            )?;
+            // Same bounded history as between-run markers; rollback pops the
+            // newest row of either kind.
+            transaction.execute(
+                "DELETE FROM session_compactions
+                     WHERE session_id = ?1 AND rowid NOT IN (
+                         SELECT rowid FROM session_compactions WHERE session_id = ?1
+                         ORDER BY rowid DESC LIMIT ?2
+                     )",
+                params![session.to_string(), COMPACTION_HISTORY_ROWS],
+            )?;
+            // The prompt run's measured occupancy described the context it
+            // just replaced; the next turn's usage re-seeds it.
+            transaction.execute(
+                "UPDATE sessions SET context_tokens = NULL, context_occupancy_json = NULL
+                     WHERE id = ?1",
+                [session.to_string()],
+            )?;
+            committed = true;
+            events.push(expect_settled(settle_run(
+                &transaction,
+                store_id,
+                claimed,
+                RunOutcome::Completed,
+                accounting.clone(),
+                SettlementCause::Executor,
+            )?)?);
+            let session_summary = load_session_summary(&transaction, session)?;
+            events.push(append_event(
+                &transaction,
+                EventContext::for_run(store_id, claimed.identity, now),
+                SessionEvent::SessionCompacted {
+                    session: Box::new(session_summary),
+                    summary: Some(truncate_utf8(summary, MAX_EVENT_SUMMARY_BYTES)),
+                    before_bytes: u64::try_from(before_bytes).unwrap_or(u64::MAX),
+                    after_bytes: u64::try_from(after_bytes).unwrap_or(u64::MAX),
+                },
+            )?);
+        }
+    }
+    if !committed {
+        events.push(expect_settled(settle_run(
+            &transaction,
+            store_id,
+            claimed,
+            outcome,
+            accounting,
+            SettlementCause::Executor,
+        )?)?);
+    }
+    transaction.commit()?;
+    Ok((events, committed))
 }

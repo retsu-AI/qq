@@ -142,12 +142,17 @@ impl BenchHarness {
 
     /// Force the session sidebar on regardless of width.
     pub fn show_sidebar(&mut self) {
-        self.app.sidebar = crate::app::Sidebar::Shown;
+        self.app.layout.rail = crate::view::PanePref::Shown;
     }
 
     /// Force the session sidebar off regardless of width.
     pub fn hide_sidebar(&mut self) {
-        self.app.sidebar = crate::app::Sidebar::Hidden;
+        self.app.layout.rail = crate::view::PanePref::Hidden;
+    }
+
+    /// Force the inspector pane on regardless of width.
+    pub fn show_inspector(&mut self) {
+        self.app.layout.inspector = crate::view::PanePref::Shown;
     }
 
     /// Load `messages` completed assistant messages into session `index`
@@ -495,5 +500,431 @@ mod tests {
         ] {
             assert!(frame.contains(needle), "{needle} missing from frame");
         }
+    }
+
+    #[test]
+    fn every_scene_builds_at_every_golden_size_and_paints_every_row() {
+        for scene in Scene::ALL {
+            for &(width, height) in GOLDEN_SIZES {
+                let mut harness = BenchHarness::scene(scene, (width, height));
+                let rows = harness.plain_frame();
+                assert!(
+                    rows.len() <= usize::from(height),
+                    "{scene:?} at {width}x{height} produced {} rows",
+                    rows.len()
+                );
+                assert!(
+                    rows.iter()
+                        .all(|row| row.chars().count() <= usize::from(width)),
+                    "{scene:?} at {width}x{height} overflowed a row"
+                );
+            }
+        }
+    }
+}
+
+/// Markdown covering every block and inline element the transcript lays
+/// out. Kept in one place so the golden, the gallery, and the QA fixture
+/// all show the same text.
+pub const MARKDOWN_GALLERY: &str = "\
+First paragraph of prose.
+
+Second paragraph of prose, directly after the first.
+
+# Level one heading
+
+## Level two heading
+
+### Level three heading
+
+1. First numbered item
+2. Second numbered item that is deliberately long enough to wrap onto a second row at this width
+3. Third numbered item
+   - nested bullet under three
+
+- A bullet item that is also deliberately long enough to wrap onto a second physical row here
+- Short bullet
+
+- [ ] open task
+- [x] done task
+
+> A quote long enough to wrap onto a second row so we can see whether the rail repeats.
+
+Some *emphasis*, some **strong**, some `inline code`, a [link](https://example.com/x), a footnote[^1], and math $x^2$.
+
+[^1]: The footnote body.
+
+```rust
+fn main() {
+    let x = 1;
+    if x > 0 {
+        println!(\"{x}\");
+    }
+}
+```
+
+| Role | Default |
+| --- | --- |
+| text | white |
+| muted | dark grey |
+
+---
+
+Tail paragraph.
+";
+
+/// The sizes every golden frame is recorded at: a small laptop window, a
+/// comfortable editor split, and three full-screen tiers up to a 48-inch
+/// display. Widths straddle the responsive breakpoints the layout plan names.
+pub const GOLDEN_SIZES: &[(u16, u16)] = &[(80, 24), (120, 40), (200, 60), (320, 90), (480, 120)];
+
+/// One deterministic transcript state for review frames. Each scene is built
+/// from protocol events only, so the golden pins what a user would see for
+/// the same server output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scene {
+    /// Every markdown element, as a completed message.
+    MarkdownGallery,
+    /// The first minute of a real session: prompt, reads, a failing test,
+    /// an edit in flight, and streaming prose.
+    GoldenPath,
+    /// A finished turn of tool calls with every body expanded.
+    ToolsExpanded,
+    /// A finished turn of tool calls folded to summary rows.
+    ToolsFolded,
+    /// An `edit_file` call held for approval with its diff preview.
+    Approval,
+    /// A completed reasoning block above the run's message.
+    Reasoning,
+    /// Steering rows at every lifecycle state.
+    Steering,
+}
+
+impl Scene {
+    pub const ALL: [Self; 7] = [
+        Self::MarkdownGallery,
+        Self::GoldenPath,
+        Self::ToolsExpanded,
+        Self::ToolsFolded,
+        Self::Approval,
+        Self::Reasoning,
+        Self::Steering,
+    ];
+
+    /// The file stem goldens and gallery frames use for this scene.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::MarkdownGallery => "markdown-gallery",
+            Self::GoldenPath => "golden-path",
+            Self::ToolsExpanded => "tools-expanded",
+            Self::ToolsFolded => "tools-folded",
+            Self::Approval => "approval",
+            Self::Reasoning => "reasoning",
+            Self::Steering => "steering",
+        }
+    }
+}
+
+impl BenchHarness {
+    /// Build `scene` at `size` with the default options: three sessions so the
+    /// sidebar has something to list where the layout shows one.
+    #[must_use]
+    pub fn scene(scene: Scene, size: (u16, u16)) -> Self {
+        Self::scene_with_options(scene, size, TuiOptions::default())
+    }
+
+    /// `scene`, with the TUI options (themes, settings) supplied by the caller.
+    #[must_use]
+    pub fn scene_with_options(scene: Scene, size: (u16, u16), options: TuiOptions) -> Self {
+        let mut harness = Self::with_options(size, 3, 0, options);
+        match scene {
+            Scene::MarkdownGallery => {
+                harness.completed_turn("show me every markdown element", MARKDOWN_GALLERY);
+            }
+            Scene::GoldenPath => {
+                let message = harness.golden_path();
+                harness.append(0, message, " More.");
+            }
+            Scene::ToolsExpanded => {
+                harness.completed_turn("clean up the renderer", "Done. Every file compiles.");
+                harness.add_tool_calls(6);
+                harness.expand_every_tool();
+            }
+            Scene::ToolsFolded => {
+                harness.completed_turn("clean up the renderer", "Done. Every file compiles.");
+                harness.add_tool_calls(6);
+                harness.fold_tools();
+            }
+            Scene::Approval => {
+                harness.completed_turn(
+                    "fix the off-by-one in wrap.rs",
+                    "I'll patch the loop bound.",
+                );
+                harness.request_edit_approval(
+                    "crates/qq-tui/src/view/wrap.rs",
+                    "@@ -40,3 +40,3 @@\n     let mut column = 0;\n-    while column <= width {\n+    while column < width {\n         column += 1;",
+                );
+            }
+            Scene::Reasoning => {
+                harness.reasoned_turn(
+                    "why does the test flake?",
+                    "First consider the callers.\n\nThen the tests: the sleep races the clock.",
+                    "The test slept on wall-clock time; pausing the runtime clock removes the race.",
+                );
+            }
+            Scene::Steering => {
+                harness.steering_turn();
+            }
+        }
+        harness
+    }
+
+    /// The current frame as plain rows, one per rendered row, with no styling
+    /// and trailing spaces trimmed. Laid out at the same clamped size `draw`
+    /// uses, so the golden pins what a terminal of `size` receives. Goldens
+    /// compare this; styles are asserted separately so a palette change does
+    /// not move every golden.
+    pub fn plain_frame(&mut self) -> Vec<String> {
+        let (width, height) = crate::view::render_size(self.size);
+        let frame = self.renderer.frame_and_commit(&mut self.app, width, height);
+        frame
+            .iter()
+            .map(|line| {
+                let mut row = " ".repeat(line.indent);
+                row.extend(line.spans.iter().map(|span| span.text.as_str()));
+                let trimmed = row.trim_end().len();
+                row.truncate(trimmed);
+                row
+            })
+            .collect()
+    }
+
+    /// The last frame as the exact bytes a terminal would receive for a full
+    /// repaint, for viewing with `cat` in a real terminal.
+    pub fn ansi_frame(&mut self) -> Vec<u8> {
+        self.draw_full()
+    }
+
+    /// Select the theme named `name` from the options, if present. Returns
+    /// whether it was found.
+    pub fn select_theme(&mut self, name: &str) -> bool {
+        match self.app.themes.iter().position(|theme| theme.name == name) {
+            Some(index) => {
+                if self.app.theme != index {
+                    self.app.theme = index;
+                    self.app.theme_generation += 1;
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// One completed exchange in session 0: the user's `prompt`, then a
+    /// finished assistant message with `output`.
+    fn completed_turn(&mut self, prompt: &str, output: &str) {
+        let session = session_id(0);
+        let run_id = run_id(0);
+        let mut user = assistant_message(session, 0x10, prompt);
+        user.role = qq_protocol::MessageRole::User;
+        user.state = MessageState::Complete;
+        user.turn_ordinal = 0;
+        self.apply(
+            0,
+            SessionEvent::PromptQueued {
+                session: Box::new(summary(session, SessionStatus::Queued)),
+                message: user,
+                run: Box::new(fixtures::run(
+                    run_id,
+                    session,
+                    qq_protocol::RunStatus::Queued,
+                )),
+                queue_position: 0,
+            },
+        );
+        self.apply(
+            0,
+            SessionEvent::RunStarted {
+                session: Box::new(summary(session, SessionStatus::Running)),
+                run_id,
+                plan: None,
+            },
+        );
+        let mut message = assistant_message(session, 0x11, "");
+        message.turn_ordinal = 1;
+        let id = message.id;
+        self.apply(0, SessionEvent::AssistantMessageStarted { message });
+        self.apply(
+            0,
+            SessionEvent::TextAppended {
+                message_id: id,
+                channel: TextChannel::Output,
+                text: output.to_owned(),
+            },
+        );
+        self.apply(
+            0,
+            SessionEvent::RunFinished {
+                session: Box::new(summary(session, SessionStatus::Idle)),
+                run_id,
+                outcome: qq_protocol::RunOutcome::Completed,
+                usage: None,
+                context_tokens: None,
+                final_output: None,
+            },
+        );
+    }
+
+    /// Hold an `edit_file` call on `path` for approval with `diff` as its
+    /// preview, as the server does before a mutating tool runs.
+    fn request_edit_approval(&mut self, path: &str, diff: &str) {
+        let session = session_id(0);
+        let mut id = [0x50; 16];
+        id[15] = 0x77;
+        let tool_call = ToolCallSnapshot {
+            run_id: run_id(0),
+            turn_ordinal: 2,
+            call_ordinal: 0,
+            arguments: format!(r#"{{"path":"{path}"}}"#),
+            state: qq_protocol::ToolCallState::AwaitingApproval,
+            ..fixtures::tool_call(ToolCallId::from_bytes(id), session, "edit_file")
+        };
+        self.apply(
+            0,
+            SessionEvent::RunStarted {
+                session: Box::new(summary(session, SessionStatus::Running)),
+                run_id: run_id(0),
+                plan: None,
+            },
+        );
+        self.apply(
+            0,
+            SessionEvent::ToolApprovalRequested {
+                tool_call,
+                shell: None,
+                edit: Some(qq_protocol::EditPreview {
+                    path: path.to_owned(),
+                    diff: diff.to_owned(),
+                }),
+                question: None,
+                fetch: None,
+            },
+        );
+    }
+
+    /// A completed turn whose run carried a reasoning summary before the
+    /// assistant message.
+    fn reasoned_turn(&mut self, prompt: &str, reasoning: &str, output: &str) {
+        let session = session_id(0);
+        let run_id = run_id(0);
+        let mut user = assistant_message(session, 0x10, prompt);
+        user.role = qq_protocol::MessageRole::User;
+        user.state = MessageState::Complete;
+        user.turn_ordinal = 0;
+        self.apply(
+            0,
+            SessionEvent::PromptQueued {
+                session: Box::new(summary(session, SessionStatus::Queued)),
+                message: user,
+                run: Box::new(fixtures::run(
+                    run_id,
+                    session,
+                    qq_protocol::RunStatus::Queued,
+                )),
+                queue_position: 0,
+            },
+        );
+        self.apply(
+            0,
+            SessionEvent::RunStarted {
+                session: Box::new(summary(session, SessionStatus::Running)),
+                run_id,
+                plan: None,
+            },
+        );
+        let kind = qq_protocol::ReasoningKind::Summary;
+        self.apply(0, SessionEvent::ReasoningStarted { run_id, kind });
+        self.apply(
+            0,
+            SessionEvent::ReasoningDelta {
+                run_id,
+                kind,
+                text: reasoning.to_owned(),
+            },
+        );
+        self.apply(0, SessionEvent::ReasoningCompleted { run_id, kind });
+        let mut message = assistant_message(session, 0x11, "");
+        message.turn_ordinal = 1;
+        let id = message.id;
+        self.apply(0, SessionEvent::AssistantMessageStarted { message });
+        self.apply(
+            0,
+            SessionEvent::TextAppended {
+                message_id: id,
+                channel: TextChannel::Output,
+                text: output.to_owned(),
+            },
+        );
+        self.apply(
+            0,
+            SessionEvent::RunFinished {
+                session: Box::new(summary(session, SessionStatus::Idle)),
+                run_id,
+                outcome: qq_protocol::RunOutcome::Completed,
+                usage: None,
+                context_tokens: None,
+                final_output: None,
+            },
+        );
+    }
+
+    /// A running session with one model turn followed by steering messages
+    /// in the pending, applied, and late states.
+    fn steering_turn(&mut self) {
+        let session = session_id(0);
+        let run_id = run_id(0);
+        self.apply(
+            0,
+            SessionEvent::RunStarted {
+                session: Box::new(summary(session, SessionStatus::Running)),
+                run_id,
+                plan: None,
+            },
+        );
+        let mut turn = assistant_message(session, 0x20, "the model turn");
+        turn.turn_ordinal = 1;
+        turn.state = MessageState::Complete;
+        self.apply(0, SessionEvent::AssistantMessageStarted { message: turn });
+        let steer = |ordinal: u8, text: &str| {
+            let mut message = assistant_message(session, 0x20 + ordinal, text);
+            message.turn_ordinal = u32::from(ordinal) + 1;
+            message.role = qq_protocol::MessageRole::User;
+            message.state = MessageState::Queued;
+            message.steering = true;
+            message
+        };
+        let pending = steer(1, "pending steer: also check the tests");
+        let applied = steer(2, "applied steer: prefer edit_file");
+        let late = steer(3, "late steer: never mind");
+        let (applied_id, late_id) = (applied.id, late.id);
+        for message in [pending, applied, late] {
+            self.apply(0, SessionEvent::SteeringQueued { run_id, message });
+        }
+        self.apply(
+            0,
+            SessionEvent::SteeringApplied {
+                run_id,
+                message_id: applied_id,
+                turn_ordinal: 3,
+            },
+        );
+        self.apply(
+            0,
+            SessionEvent::SteeringSuperseded {
+                run_id,
+                message_id: late_id,
+            },
+        );
     }
 }

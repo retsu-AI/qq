@@ -1187,11 +1187,19 @@ impl Store {
         claimed: &ClaimedRun,
         message_id: MessageId,
         turn_ordinal: u32,
+        attachments: Vec<crate::input::ResolvedAttachment>,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            apply_steering_message(connection, store_id, identity, message_id, turn_ordinal)
+            apply_steering_message(
+                connection,
+                store_id,
+                identity,
+                message_id,
+                turn_ordinal,
+                &attachments,
+            )
         })
         .await
     }
@@ -1514,6 +1522,74 @@ impl Store {
         let claimed = claimed.clone();
         self.call(Priority::Output, move |connection| {
             complete_run(connection, store_id, &claimed, outcome, accounting)
+        })
+        .await
+    }
+
+    /// Starts the internal run of an in-run compaction for a `running`
+    /// prompt run. Never takes the session's active-run slot.
+    pub(super) async fn start_in_run_compaction(
+        &self,
+        prompt_run: &ClaimedRun,
+        resolved_model: &Arc<ResolvedModel>,
+        turn_cutoff: u32,
+    ) -> Result<Option<(ClaimedRun, SessionEventEnvelope)>, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let prompt_run = prompt_run.clone();
+        let resolved_model = Arc::clone(resolved_model);
+        self.call_write(Priority::AwaitControl, move |connection| {
+            start_in_run_compaction(
+                connection,
+                store_id,
+                &prompt_run,
+                &resolved_model,
+                turn_cutoff,
+            )
+        })
+        .await
+    }
+
+    /// The summarizer's fixed instruction with the session's seeded file
+    /// list, for a request built outside the run loop.
+    pub(super) async fn compaction_instruction(
+        &self,
+        session_id: SessionId,
+    ) -> Result<String, SessionRuntimeError> {
+        self.call(Priority::AwaitControl, move |connection| {
+            compaction_instruction(connection, session_id)
+        })
+        .await
+    }
+
+    /// Commits an in-run summary as a marker scoped to the prompt run and
+    /// settles the internal run. The internal run ran no tools and owned no
+    /// children, so no teardown proof is needed. Returns the events and
+    /// whether the marker stands.
+    pub(super) async fn finish_in_run_compaction(
+        &self,
+        claimed: &ClaimedRun,
+        summary: String,
+        accounting: Option<RunAccounting>,
+    ) -> Result<(Vec<SessionEventEnvelope>, bool), SessionRuntimeError> {
+        let store_id = self.store_id;
+        let claimed = claimed.clone();
+        self.call(Priority::Output, move |connection| {
+            complete_in_run_compaction(connection, store_id, &claimed, summary, accounting)
+        })
+        .await
+    }
+
+    /// Settles an in-run compaction whose summarizer request failed before
+    /// any summary existed.
+    pub(super) async fn finish_in_run_compaction_failed(
+        &self,
+        claimed: &ClaimedRun,
+        outcome: RunOutcome,
+    ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let claimed = claimed.clone();
+        self.call(Priority::Output, move |connection| {
+            complete_run(connection, store_id, &claimed, outcome, None)
         })
         .await
     }

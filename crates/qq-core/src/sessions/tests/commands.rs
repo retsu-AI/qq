@@ -367,6 +367,128 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
 }
 
 #[tokio::test]
+async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
+    // T12 follow-up: steering carried `@path` placeholders to the model and
+    // into every later request. A steering message's file parts are now read
+    // when it is applied at the boundary, persisted as that message's
+    // attachments, and re-rendered from the store afterwards — so the model
+    // sees the bytes as they were, even after the file changes or vanishes.
+    let mut harness = approval_harness(
+        ApprovalMode::Ask,
+        "shell",
+        r#"{"command":"true"}"#,
+        2,
+        DEFAULT_APPROVAL_TIMEOUT,
+    )
+    .await;
+    let workspace = harness._directory.path().to_owned();
+    std::fs::write(workspace.join("notes.txt"), "STEER_ORIGINAL\nsecond\n").unwrap();
+    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    let receipt = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SteerRun {
+                run_id: harness.run_id,
+                input: vec![
+                    InputPart::text("also read this"),
+                    InputPart::WorkspaceFile {
+                        path: "notes.txt".to_owned(),
+                        expected_hash: None,
+                        range: None,
+                    },
+                ],
+                interrupt: false,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::SteeringQueued { message_id, .. } = receipt.outcome else {
+        panic!("steering must be queued")
+    };
+    respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        tool_call.id,
+        ApprovalDecision::ApproveForSession {
+            grant: ApprovalGrant::ShellPrefix {
+                prefix: "true".to_owned(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let observed = collect_through_finished_generously(&mut harness.events).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::SteeringApplied { message_id: applied, .. } if *applied == message_id
+    )));
+    // The durable row keeps the placeholder (titles, snapshots, history
+    // search); the provider request carried the bytes.
+    let queued = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::SteeringQueued { message, .. } => Some(message.output.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(queued.contains("@notes.txt"), "{queued}");
+    let steering_text = |request: &ModelRequest| -> Option<String> {
+        request.messages().iter().find_map(|message| {
+            (message.role() == Role::User)
+                .then(|| {
+                    message.content().iter().find_map(|block| match block {
+                        ContentBlock::Text { text } if text.starts_with("also read this") => {
+                            Some(text.clone())
+                        }
+                        _ => None,
+                    })
+                })
+                .flatten()
+        })
+    };
+    let live = {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        steering_text(&requests[1]).expect("steering in the second request")
+    };
+    assert!(live.contains("STEER_ORIGINAL"), "{live}");
+    assert!(live.contains("<attached-file path=\"notes.txt\""), "{live}");
+    assert!(!live.contains("@notes.txt"), "{live}");
+
+    // The file changes; the next run must still see what the model saw.
+    std::fs::write(workspace.join("notes.txt"), "STEER_MODIFIED\n").unwrap();
+    let store = harness.runtime.inner.store.clone();
+    let session_id = harness.session_id;
+    let context = store
+        .call(Priority::Control, move |connection| {
+            let transaction = connection.transaction().unwrap();
+            load_model_context(&transaction, session_id, u64::MAX)
+        })
+        .await
+        .unwrap();
+    let replayed = context
+        .iter()
+        .find_map(|message| {
+            message.content().iter().find_map(|block| match block {
+                ContentBlock::Text { text } if text.starts_with("also read this") => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+        })
+        .expect("steering replays in durable context");
+    assert_eq!(replayed, live);
+    assert!(!replayed.contains("STEER_MODIFIED"));
+    harness.runtime.shutdown().await.unwrap();
+    drop(store);
+    assert_assembly_matches_reference(
+        &harness._directory.path().join("sessions.sqlite3"),
+        harness.session_id,
+    );
+}
+
+#[tokio::test]
 async fn interrupting_steer_withdraws_the_pending_approval_and_continues() {
     let mut harness = approval_harness(
         ApprovalMode::Ask,

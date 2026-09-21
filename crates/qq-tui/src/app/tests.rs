@@ -539,10 +539,10 @@ fn notices_only_render_for_the_session_that_owns_them() {
         Some(("model request failed", NoticeLevel::Error))
     );
 
-    app.view = View::Transcript(Some(other));
+    app.set_view(View::Transcript(Some(other)));
     assert_eq!(app.visible_status(), None);
 
-    app.view = View::Transcript(Some(owner));
+    app.set_view(View::Transcript(Some(owner)));
     assert_eq!(
         app.visible_status(),
         Some(("model request failed", NoticeLevel::Error))
@@ -2110,14 +2110,14 @@ fn streamed_rows_do_not_move_a_scrolled_transcript() {
 #[test]
 fn session_and_view_changes_return_the_transcript_to_the_live_tail() {
     let mut app = App::new(TuiOptions::default());
-    app.view = View::Transcript(Some(SessionId::from_bytes([1; 16])));
+    app.set_view(View::Transcript(Some(SessionId::from_bytes([1; 16]))));
     app.update_transcript_viewport(100, 10, false);
     app.handle_terminal_event(Event::Key(KeyEvent::new(
         KeyCode::PageUp,
         KeyModifiers::NONE,
     )));
 
-    app.view = View::Transcript(Some(SessionId::from_bytes([2; 16])));
+    app.set_view(View::Transcript(Some(SessionId::from_bytes([2; 16]))));
     app.update_transcript_viewport(100, 10, false);
 
     assert_eq!(app.transcript_scroll_offset(), 0);
@@ -3156,7 +3156,7 @@ fn the_reducer_returns_notices_and_attention_as_effects_instead_of_mutating_them
 fn background_streaming_for_an_unshown_session_does_not_redraw_when_the_sidebar_is_hidden() {
     let (mut app, first, other) = two_session_app();
     assert_eq!(app.focused(), Some(first));
-    app.sidebar = Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     app.handle_terminal_event(Event::Resize(100, 30));
     let run_id = id(0x60, RunId::from_bytes);
     let message_id = id(0x61, MessageId::from_bytes);
@@ -3197,7 +3197,7 @@ fn background_streaming_for_an_unshown_session_does_not_redraw_when_the_sidebar_
     );
 
     // With the sidebar showing, the live tail is visible and the delta redraws.
-    app.sidebar = Sidebar::Shown;
+    app.layout.rail = crate::view::PanePref::Shown;
     let delta = app.apply_client_update(event(SessionEvent::TextAppended {
         message_id,
         channel: TextChannel::Output,
@@ -3206,7 +3206,7 @@ fn background_streaming_for_an_unshown_session_does_not_redraw_when_the_sidebar_
     assert!(delta.redraws());
 
     // And a delta for the shown session redraws regardless.
-    app.sidebar = Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     let shown = app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
         run_id: Some(run_id),
         ..fixtures::envelope(
@@ -3316,14 +3316,14 @@ fn workspace_views_toggle_and_esc_returns_to_the_session_they_replaced() {
     let (mut app, _, other) = two_session_app();
     app.focus_session(other);
     app.execute(Command::ShowAttention);
-    assert_eq!(app.view, View::Attention);
+    assert_eq!(app.view(), View::Attention);
     assert_eq!(app.focused(), None, "no session while a view is up");
     // Esc goes back to where the user was, not to the first session.
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.focused(), Some(other));
     // The same command twice toggles.
     app.execute(Command::ShowChanges);
-    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.view(), View::Changes);
     app.execute(Command::ShowChanges);
     assert_eq!(app.focused(), Some(other));
     // Switching between views keeps the original return point.

@@ -159,28 +159,79 @@ async fn interrupt_requested(steering: &mut Option<runtime::SteeringReceiver>, h
     }
 }
 
+/// One steering message the loop has injected: its id and the files it read.
+struct AppliedSteering {
+    message_id: qq_protocol::MessageId,
+    attachments: Vec<input::ResolvedAttachment>,
+}
+
 /// Drains every steering message that is ready and appends each as a user
-/// message. Returns the ids applied, in order, or `None` when nothing was
-/// pending. Never waits: steering that arrives after this point waits for
-/// the next boundary.
-fn apply_steering(
+/// message. Returns what was applied, in order, or `None` when nothing was
+/// pending. Never waits for more steering: messages that arrive after the
+/// drain wait for the next boundary. A message with file parts reads them
+/// here — off the executor, through the plan's workspace — so the model sees
+/// the bytes as they are at the boundary and the store can keep them as
+/// this message's attachments. A file that cannot be read is reported to the
+/// model in place of the attachment rather than failing the run: the user's
+/// text still lands, and the message names what was missing.
+async fn apply_steering(
     steering: &mut Option<runtime::SteeringReceiver>,
     messages: &mut Vec<Message>,
     irreducible_message_bytes: &mut u64,
-    _turn_ordinal: u32,
     mut checkpoint: Option<&mut runtime::CheckpointContext>,
-) -> Option<Vec<qq_protocol::MessageId>> {
+    workspace: &workspace::Workspace,
+    file_state: &Arc<workspace::FileState>,
+) -> Option<Vec<AppliedSteering>> {
     let steering = steering.as_mut()?;
     let mut applied = Vec::new();
     while let Ok(message) = steering.messages.try_recv() {
+        let has_files = message
+            .input
+            .iter()
+            .any(|part| matches!(part, qq_protocol::InputPart::WorkspaceFile { .. }));
+        let (text, attachments) = if has_files {
+            let workspace = workspace.clone();
+            let file_state = Arc::clone(file_state);
+            let parts = message.input;
+            let resolved = tokio::task::spawn_blocking(move || {
+                input::resolve_blocking(&parts, &workspace, &file_state)
+                    .map_err(|error| (input::render_text(&parts), error))
+            })
+            .await;
+            match resolved {
+                Ok(Ok(resolved)) => (resolved.text, resolved.attachments),
+                Ok(Err((placeholder, error))) => (
+                    format!(
+                        "{}\n\n[QQ runtime notice; not a user instruction]\nAn attached file \
+                         could not be read: {error}",
+                        placeholder.trim()
+                    ),
+                    Vec::new(),
+                ),
+                Err(_) => (
+                    "[QQ runtime notice; not a user instruction]\nA steering message's \
+                     attachments could not be resolved."
+                        .to_owned(),
+                    Vec::new(),
+                ),
+            }
+        } else {
+            (
+                input::render_text(&message.input).trim().to_owned(),
+                Vec::new(),
+            )
+        };
         if let Some(context) = checkpoint.as_deref_mut() {
-            context.steer(&message.text);
+            context.steer(&text);
         }
-        let user = Message::user(message.text);
+        let user = Message::user(text);
         *irreducible_message_bytes =
             irreducible_message_bytes.saturating_add(measure_message(&user));
         messages.push(user);
-        applied.push(message.message_id);
+        applied.push(AppliedSteering {
+            message_id: message.message_id,
+            attachments,
+        });
     }
     (!applied.is_empty()).then_some(applied)
 }
@@ -448,6 +499,10 @@ pub(crate) struct RunCapabilities {
     spills: Option<Arc<dyn runtime::SpillReader>>,
     /// Steering input from the session layer. Direct runs have none.
     steering: Option<runtime::SteeringReceiver>,
+    /// Summarizes this run's own earlier turns when a later turn would not
+    /// fit the window even after stubbing. Session prompt runs install one;
+    /// direct runs, children of the summarizer, and internal runs have none.
+    compactor: Option<Arc<dyn runtime::InRunCompactor>>,
     /// Audits the candidate final answer of a root run. Session roots install
     /// one; children, internal runs, and direct runs have none.
     audit_hook: Option<Arc<dyn runtime::AuditHook>>,
@@ -474,6 +529,7 @@ impl RunCapabilities {
             history: None,
             spills: None,
             steering: None,
+            compactor: None,
             audit_hook: None,
             tool_tasks: None,
             output: None,
@@ -530,6 +586,11 @@ impl RunCapabilities {
         self
     }
 
+    pub(crate) fn with_compactor(mut self, compactor: Arc<dyn runtime::InRunCompactor>) -> Self {
+        self.compactor = Some(compactor);
+        self
+    }
+
     pub(crate) fn with_tool_tasks(mut self, tasks: tools::ToolTasks) -> Self {
         self.tool_tasks = Some(tasks);
         self
@@ -578,6 +639,7 @@ impl RunCapabilities {
             history: None,
             spills: None,
             steering: None,
+            compactor: None,
             audit_hook: None,
             tool_tasks: None,
             output: None,
@@ -693,8 +755,102 @@ impl Runtime {
         })
     }
 
-    /// Carries an optional pre-run router into compiled plans for orchestration.
-    #[must_use]
+    /// The summarizer request of an in-run compaction: provider turns with no
+    /// tools, continued up to `MAX_OUTPUT_CONTINUATIONS` times when the reply
+    /// is cut at the output limit, exactly as the run loop and the
+    /// between-run path do. A cut turn resumes mid-token, so its continuation
+    /// is appended verbatim. Returns the joined text and the summed usage. A
+    /// tool call, refusal, protocol violation, or transport failure is an
+    /// error naming it; the caller settles the compaction run failed. The
+    /// provider owns retries exactly as for any other request.
+    pub(crate) async fn summarize(
+        &self,
+        messages: Vec<Message>,
+        max_output_tokens: u32,
+    ) -> Result<(String, Option<TokenUsage>), String> {
+        let mut messages = messages;
+        let mut summary = String::new();
+        let mut total_usage: Option<TokenUsage> = None;
+        let mut continuations: u16 = 0;
+        loop {
+            let request =
+                ModelRequest::new(Arc::clone(&self.model), messages.clone(), max_output_tokens);
+            let request = match self.reasoning_effort {
+                Some(effort) => request.with_reasoning_effort(effort),
+                None => request,
+            };
+            let mut events = self.provider.stream(request);
+            let mut text = String::new();
+            let mut truncated = false;
+            let mut usage = None;
+            loop {
+                let Some(event) = events.next().await else {
+                    return Err("summarizer stream ended without completing".to_owned());
+                };
+                match event {
+                    Ok(ProviderEvent::OutputTextDelta { text: delta }) => {
+                        if summary
+                            .len()
+                            .saturating_add(text.len())
+                            .saturating_add(delta.len())
+                            > MAX_RUN_MODEL_TEXT_BYTES
+                        {
+                            return Err("summarizer output exceeded the run text bound".to_owned());
+                        }
+                        text.push_str(&delta);
+                    }
+                    Ok(
+                        ProviderEvent::ReasoningStarted { .. }
+                        | ProviderEvent::ReasoningDelta { .. }
+                        | ProviderEvent::ReasoningCompleted { .. },
+                    ) => {}
+                    Ok(ProviderEvent::RefusalDelta { .. }) => {
+                        return Err("summarizer refused".to_owned());
+                    }
+                    Ok(
+                        ProviderEvent::ToolCallStarted { .. }
+                        | ProviderEvent::ToolCallArgumentsDelta { .. }
+                        | ProviderEvent::ToolCallCompleted { .. },
+                    ) => {
+                        return Err("summarizer attempted a tool call".to_owned());
+                    }
+                    Ok(ProviderEvent::Completed { usage: reported }) => {
+                        usage = reported.map(provider_usage);
+                        break;
+                    }
+                    Ok(ProviderEvent::Incomplete { .. }) => {
+                        truncated = true;
+                        break;
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+            summary.push_str(&text);
+            // Overflowing the sum is a provider protocol fault; fail the
+            // compaction rather than persist an understated total.
+            total_usage = match (total_usage, usage) {
+                (Some(total), Some(turn)) => match sessions::add_usage(total, turn) {
+                    Some(sum) => Some(sum),
+                    None => return Err("summarizer usage overflowed".to_owned()),
+                },
+                (Some(total), None) | (None, Some(total)) => Some(total),
+                (None, None) => None,
+            };
+            if !truncated {
+                return Ok((summary, total_usage));
+            }
+            if continuations >= MAX_OUTPUT_CONTINUATIONS {
+                return Err(format!(
+                    "summarizer output was cut off at the output token limit ({max_output_tokens} tokens) on {} consecutive turns",
+                    u32::from(MAX_OUTPUT_CONTINUATIONS) + 1
+                ));
+            }
+            continuations += 1;
+            messages.push(Message::assistant(text));
+            messages.push(Message::user(OUTPUT_TRUNCATED_CONTINUE_NOTICE));
+        }
+    }
+
     pub fn with_task_router(mut self, router: Arc<dyn sessions::TaskRouter>) -> Self {
         self.task_router = Some(router);
         self
@@ -1102,6 +1258,7 @@ impl plan::CompiledAgentPlan {
                 history,
                 spills,
                 steering,
+                compactor,
                 audit_hook,
                 tool_tasks,
                 output,
@@ -1348,6 +1505,10 @@ impl plan::CompiledAgentPlan {
                 .unwrap_or_default();
             let mut model_text_bytes = 0_usize;
             let mut continuing_slice = false;
+            // Durable turns already replaced by in-run compaction: the live
+            // transcript's assistant messages after the summary are turns
+            // `compacted_turns + 1..`, and the next cutoff is durable too.
+            let mut compacted_turns: u32 = 0;
             for turn_ordinal in 1..=u32::MAX {
                 // Caller budgets are decided at the turn boundary, before any
                 // provider request. A spent work budget grants one tool-free
@@ -1447,6 +1608,64 @@ impl plan::CompiledAgentPlan {
                         .saturating_add(tool_schema_bytes)
                         .saturating_add(reducible_message_bytes)
                         .saturating_add(irreducible_message_bytes);
+                }
+                // Still over the window after stubbing: summarize this run's
+                // own earlier turns and continue. This is a safe boundary —
+                // every tool result of the previous turn is durable and in
+                // context, nothing is in flight, and steering was applied.
+                // Everything but the last `CONTEXT_PRUNE_KEEP_TURNS` turns
+                // (and their results) is replaced by one summary message;
+                // the prompt and the session context before it stay. A
+                // failure here is the same context failure the session layer
+                // would have raised, with the compactor's reason attached.
+                let still_overflows = turn_ordinal > 1
+                    && plan.runtime.context_window.is_some_and(|window| {
+                        sessions::context::estimate_tokens(input_bytes)
+                            .saturating_add(u64::from(max_output_tokens))
+                            > u64::from(window)
+                    });
+                if still_overflows && let Some(compactor) = compactor.as_ref() {
+                    let run_start = reducible_messages.saturating_add(1);
+                    let boundary = sessions::in_run_compaction_boundary(
+                        &messages[run_start..],
+                        sessions::CONTEXT_PRUNE_KEEP_TURNS,
+                    );
+                    if let Some((replace_through, replaced_turns)) = boundary {
+                        let turn_cutoff = compacted_turns.saturating_add(replaced_turns);
+                        let transcript = messages[reducible_messages..run_start + replace_through].to_vec();
+                        match compactor
+                            .compact(runtime::InRunCompactionRequest { transcript, turn_cutoff })
+                            .await
+                        {
+                            Ok(summary) => {
+                                let summary = Message::user(format!(
+                                    "{}\n\n{}",
+                                    sessions::IN_RUN_COMPACTION_PREAMBLE, summary.summary
+                                ));
+                                let live = Arc::make_mut(&mut messages);
+                                live.splice(run_start..run_start + replace_through, [summary]);
+                                compacted_turns = turn_cutoff;
+                                // The measured chain covered the replaced
+                                // turns; the next provider usage re-seeds it.
+                                compatible_request = None;
+                                irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
+                                input_bytes = system_bytes
+                                    .saturating_add(tool_schema_bytes)
+                                    .saturating_add(reducible_message_bytes)
+                                    .saturating_add(irreducible_message_bytes);
+                                yield RuntimeEvent::InRunCompacted { turn_ordinal, turn_cutoff };
+                            }
+                            Err(error) => {
+                                yield RuntimeEvent::Failed {
+                                    kind: RunFailureKind::Policy,
+                                    message: format!(
+                                        "the context grew past the model window during this run and in-run compaction did not produce a usable smaller context: {error}; run /compact or start a new session, then retry"
+                                    ),
+                                };
+                                return;
+                            }
+                        }
+                    }
                 }
                 let message_bytes = reducible_message_bytes.saturating_add(irreducible_message_bytes);
                 let compatible_input_tokens = compatible_request.map(
@@ -2003,15 +2222,12 @@ impl plan::CompiledAgentPlan {
                     // The interrupt exists to apply steering now. Nothing
                     // queued means the client raced a finishing run; continue
                     // with the next turn so the model resumes from its text.
-                    if let Some(applied) = apply_steering(
-                        &mut steering,
-                        Arc::make_mut(&mut messages),
-                        &mut irreducible_message_bytes,
-                        turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
-                        for message_id in applied {
+                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                        for steer in applied {
                             yield RuntimeEvent::SteeringApplied {
-                                message_id,
+                                message_id: steer.message_id,
                                 turn_ordinal: turn_ordinal.saturating_add(1),
+                                attachments: steer.attachments,
                             };
                         }
                     }
@@ -2073,21 +2289,18 @@ impl plan::CompiledAgentPlan {
                     // Steering that arrived during the final turn is not
                     // dropped: the run continues with it instead of
                     // completing, exactly as if the model had called a tool.
-                    if let Some(applied) = apply_steering(
-                        &mut steering,
-                        Arc::make_mut(&mut messages),
-                        &mut irreducible_message_bytes,
-                        turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
+                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                         irreducible_message_bytes = irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let steering_messages = Arc::make_mut(&mut messages).split_off(keep);
                         Arc::make_mut(&mut messages).push(assistant);
                         Arc::make_mut(&mut messages).extend(steering_messages);
-                        for message_id in applied {
+                        for steer in applied {
                             yield RuntimeEvent::SteeringApplied {
-                                message_id,
+                                message_id: steer.message_id,
                                 turn_ordinal: turn_ordinal.saturating_add(1),
+                                attachments: steer.attachments,
                             };
                         }
                         continue;
@@ -2189,9 +2402,9 @@ impl plan::CompiledAgentPlan {
                             irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
                             yield RuntimeEvent::Interrupted { turn_ordinal };
-                            if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
-                                for message_id in applied {
-                                    yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) };
+                            if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                                for steer in applied {
+                                    yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments };
                                 }
                             }
                             continue;
@@ -2213,13 +2426,13 @@ impl plan::CompiledAgentPlan {
                         }
                     }
                     // Steering accepted while an audit ran still owns the next boundary.
-                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
+                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                         irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(&mut messages).split_off(keep);
                         Arc::make_mut(&mut messages).push(assistant);
                         Arc::make_mut(&mut messages).extend(queued);
-                        for message_id in applied { yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) }; }
+                        for steer in applied { yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments }; }
                         continue;
                     }
                     if let Some(kind) = budget.exceeded(tokio::time::Instant::now()) {
@@ -2354,9 +2567,9 @@ impl plan::CompiledAgentPlan {
                                     irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                                     Arc::make_mut(&mut messages).push(assistant);
                                     yield RuntimeEvent::Interrupted { turn_ordinal };
-                                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
-                                        for message_id in applied {
-                                            yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) };
+                                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                                        for steer in applied {
+                                            yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments };
                                         }
                                     }
                                     continue;
@@ -2402,13 +2615,13 @@ impl plan::CompiledAgentPlan {
                     }
                     // A review may await remote inference. Input accepted during
                     // that wait belongs to this run, not its successor.
-                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
+                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                         irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(&mut messages).split_off(keep);
                         Arc::make_mut(&mut messages).push(assistant);
                         Arc::make_mut(&mut messages).extend(queued);
-                        for message_id in applied { yield RuntimeEvent::SteeringApplied { message_id, turn_ordinal: turn_ordinal.saturating_add(1) }; }
+                        for steer in applied { yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments }; }
                         continue;
                     }
                     yield RuntimeEvent::Completed { final_output };
@@ -3102,15 +3315,28 @@ impl plan::CompiledAgentPlan {
                 // The per-turn output budget: results enter context in call
                 // order, and a late result that would overshoot is re-bounded
                 // to the remainder. The persisted row keeps the per-call
-                // bounded text; only what the model sees shrinks.
+                // bounded text; context assembly re-applies this same
+                // projection to the stored rows (`append_run_turns`), so a
+                // replayed turn is byte-identical to what the model saw here.
+                // A cut names its recall path: the spill when the call
+                // spilled, else the stored result row itself in a session run.
                 let mut turn_output = tools::TurnOutputBudget::new();
+                let stored = spills.is_some();
                 let result_blocks = calls
                     .iter()
                     .zip(results.into_iter())
                     .map(|(call, result)| {
                         let result = result.expect("every bounded tool execution completed");
                         let mut content = result.model_text;
-                        turn_output.admit(&mut content, result.spill_handle.as_deref());
+                        let recall = match (result.spill_handle.as_deref(), stored) {
+                            (Some(handle), _) => tools::ResultRecall::Spill(handle),
+                            (None, true) => tools::ResultRecall::StoredResult {
+                                tool: &call.name,
+                                call: call.id,
+                            },
+                            (None, false) => tools::ResultRecall::None,
+                        };
+                        turn_output.admit(&mut content, recall);
                         budget.charge_tool_output(content.len());
                         ContentBlock::ToolResult {
                             call_id: call.provider_call_id.clone(),
@@ -3132,15 +3358,12 @@ impl plan::CompiledAgentPlan {
                 // The boundary: every result of this turn is in context, and
                 // the next request has not been built. Steering joins here as
                 // a user message after the tool results.
-                if let Some(applied) = apply_steering(
-                    &mut steering,
-                    Arc::make_mut(&mut messages),
-                    &mut irreducible_message_bytes,
-                    turn_ordinal.saturating_add(1), checkpoint_context.as_mut()) {
-                    for message_id in applied {
+                if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                    for steer in applied {
                         yield RuntimeEvent::SteeringApplied {
-                            message_id,
+                            message_id: steer.message_id,
                             turn_ordinal: turn_ordinal.saturating_add(1),
+                            attachments: steer.attachments,
                         };
                     }
                 }
@@ -3227,6 +3450,8 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                     yield RunEvent::Usage { usage };
                 }
                 RuntimeEvent::AssistantTurnCompleted { usage: None, .. }
+                // Direct runs have no compactor, so this never fires.
+                | RuntimeEvent::InRunCompacted { .. }
                 | RuntimeEvent::ToolCallStarted { .. }
                 | RuntimeEvent::ToolCallDenied { .. }
                 | RuntimeEvent::ToolCallAnswered { .. }
@@ -4685,10 +4910,10 @@ mod tests {
                     if send {
                         sender
                             .messages
-                            .send(runtime::SteeringMessage {
+                            .send(runtime::SteeringMessage::text(
                                 message_id,
-                                text: "Also explain the result".into(),
-                            })
+                                "Also explain the result",
+                            ))
                             .await
                             .unwrap();
                     }
@@ -4763,10 +4988,10 @@ mod tests {
                     if send {
                         sender
                             .messages
-                            .send(runtime::SteeringMessage {
+                            .send(runtime::SteeringMessage::text(
                                 message_id,
-                                text: "Also explain the result".into(),
-                            })
+                                "Also explain the result",
+                            ))
                             .await
                             .unwrap();
                     }

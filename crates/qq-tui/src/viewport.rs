@@ -1,11 +1,19 @@
-//! What the main area shows and how far it is scrolled.
+//! What each transcript pane shows and how far it is scrolled.
 //!
-//! There is one body on screen: a session transcript or a workspace-wide
-//! view. Scroll state is one [`Viewport`], reconciled by the renderer each
-//! frame and handed back to the app after composition so building a frame
-//! never mutates the model.
+//! The body holds one or more [`TranscriptPane`]s side by side (one until
+//! slice L4 adds the split). Each pane follows a [`View`] and owns its scroll
+//! state and live-row anchors; layouts of completed messages are shared
+//! through the renderer's width-keyed cache. The renderer reconciles every
+//! pane each frame and hands the result back to the app after composition so
+//! building a frame never mutates the model.
 
-use qq_protocol::SessionId;
+use std::{collections::HashMap, ops::Range};
+
+use qq_protocol::{MessageId, SessionId};
+
+/// Most transcript panes a frame lays out. Bounds per-frame pane work and
+/// the pane state the app retains; the layout never offers more slots.
+pub(crate) const MAX_PANES: usize = 3;
 
 /// What the main area shows. A transcript follows one session; the other
 /// kinds are workspace-wide views that read every session.
@@ -33,6 +41,19 @@ impl View {
             Self::Attention | Self::Changes => None,
         }
     }
+}
+
+/// One transcript pane's state: what it follows, where it is scrolled, and
+/// where its streaming messages sat on its last frame. Everything a pane
+/// needs that another pane on the same session could disagree about lives
+/// here; everything else is shared through the transcript cache.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct TranscriptPane {
+    pub view: View,
+    pub viewport: Viewport,
+    /// Rows each streaming message occupied on this pane's last frame, so a
+    /// message that settles in place keeps the pane's tail anchor stable.
+    pub live_message_ranges: HashMap<MessageId, Range<usize>>,
 }
 
 /// Scroll state of the body. `offset` counts rows above the live tail; zero
@@ -89,7 +110,7 @@ impl Viewport {
 
     /// Whether `rows` of the body were visible or below the visible window
     /// on the last frame, meaning a change there should keep the tail anchor.
-    pub(crate) fn intersects_or_follows(&self, rows: &std::ops::Range<usize>) -> bool {
+    pub(crate) fn intersects_or_follows(&self, rows: &Range<usize>) -> bool {
         self.height > 0 && self.body_rows.saturating_sub(self.offset) > rows.start
     }
 

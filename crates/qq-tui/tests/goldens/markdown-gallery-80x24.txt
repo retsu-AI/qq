@@ -1,0 +1,24 @@
+ qq  Session 0                                           openai/gpt-test  $0.00
+
+   The footnote body.
+
+   │ rust
+   │ fn main() {
+   │     let x = 1;
+   │     if x > 0 {
+   │         println!("{x}");
+   │     }
+   │ }
+
+   Role  │ Default
+   ──────┼──────────
+   text  │ white
+   muted │ dark grey
+
+   ─────────────────────────────────────────────────────────────────────────────
+
+   Tail paragraph.
+   ✓ 0.0s · ttft 0.0s
+ 3 agents
+─────────────────────────────────────────────── F1 help  ^K commands  ^O detail
+ › Ask QQ...

@@ -56,6 +56,7 @@ pub(crate) mod context;
 mod events;
 mod execution;
 mod feed;
+mod in_run_compaction;
 mod runtime;
 mod scheduler;
 mod settlement;
@@ -262,7 +263,8 @@ pub mod bench_support {
 use approvals::ConcludedApproval;
 #[cfg(test)]
 use execution::RunAccountingAccumulator;
-use execution::{ModelTurnCommit, RunAccounting, TeardownComplete, add_usage};
+pub(crate) use execution::add_usage;
+use execution::{ModelTurnCommit, RunAccounting, TeardownComplete};
 use store::Store;
 use store::open_database;
 #[cfg(test)]
@@ -293,7 +295,7 @@ const MAX_CONTEXT_BYTES: usize = 4 * 1024 * 1024;
 /// one-line stubs during context assembly (the stored rows are untouched).
 /// Sits with the context budget because the budget measures the assembled,
 /// pruned size.
-const CONTEXT_PRUNE_KEEP_TURNS: usize = 4;
+pub(crate) const CONTEXT_PRUNE_KEEP_TURNS: usize = 4;
 /// Longest argument excerpt embedded in a pruned-result stub.
 const CONTEXT_PRUNE_STUB_ARGUMENT_BYTES: usize = 256;
 /// Compaction summaries retained per session, newest first. History is kept
@@ -311,6 +313,14 @@ pub const MAX_REPLAY_EVENTS: u16 = 128;
 const MAX_SNAPSHOT_SESSIONS: u16 = 512;
 const MAX_SNAPSHOT_MESSAGES: u16 = 256;
 const MAX_SNAPSHOT_TOOL_CALLS: usize = 4_096;
+/// Bytes of body text one snapshot may carry across its focused and included
+/// session bodies. Below `qq_protocol::MAX_SNAPSHOT_BYTES` by enough to cover
+/// the fixed per-row envelope and the workspace's session summaries, so a
+/// response assembled under this budget always serializes under the wire cap.
+const SNAPSHOT_BODY_BUDGET_BYTES: usize = 6 * 1024 * 1024;
+/// Serialized overhead charged per snapshot row beyond its text: ids, run and
+/// session references, ordinals, states, and JSON punctuation.
+const SNAPSHOT_ROW_OVERHEAD_BYTES: usize = 512;
 const MAX_TEXT_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_FAILURE_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_WORKSPACES: u32 = 1024;
@@ -383,6 +393,12 @@ const PRUNABLE_READ_ONLY_TOOLS: [&str; 6] = [
 const COMPACTION_SUMMARY_PREAMBLE: &str = "The earlier part of this conversation was compacted \
 into the summary below. Treat it as authoritative context; the verbatim conversation resumes \
 after it.";
+/// Preamble for a summary that replaced earlier turns of the *current* run:
+/// the task prompt stands verbatim above it; the model's own work so far is
+/// what was summarized.
+pub(crate) const IN_RUN_COMPACTION_PREAMBLE: &str = "Your earlier work on this task was compacted into \
+the summary below. Treat it as authoritative: the tool results it describes were real and \
+their effects stand. The verbatim conversation resumes after it; continue the task.";
 /// The fixed instruction appended as the final user message of a compaction
 /// run. It demands the structured schema; the mechanically seeded file list
 /// is appended beneath it.
@@ -408,3 +424,32 @@ const COMPACTION_REQUIRED_SECTIONS: [&str; 6] = [
     "Errors",
     "User messages",
 ];
+
+/// Where an in-run compaction cuts a run's live transcript. `run_messages`
+/// is everything after the prompt: assistant turns, tool results, steering,
+/// notices. Returns the index just past the last message to replace and the
+/// ordinal (1-based, counting assistant turns) of the last replaced turn,
+/// keeping the final `keep_turns` assistant turns and everything after them
+/// verbatim. `None` when fewer than `keep_turns + 1` turns exist: a run that
+/// short has nothing worth summarizing and the caller fails as before.
+pub(crate) fn in_run_compaction_boundary(
+    run_messages: &[Message],
+    keep_turns: usize,
+) -> Option<(usize, u32)> {
+    let assistant_positions: Vec<usize> = run_messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.role() == Role::Assistant)
+        .map(|(index, _)| index)
+        .collect();
+    let replaced_turns = assistant_positions.len().checked_sub(keep_turns)?;
+    if replaced_turns == 0 {
+        return None;
+    }
+    // Replace through the message just before the first kept assistant
+    // turn, so the kept turns' preceding results/steering stay with them. A
+    // prior in-run summary at the head of `run_messages` is replaced too:
+    // the new summary folds it, as between-run summaries fold each other.
+    let first_kept = assistant_positions[replaced_turns];
+    Some((first_kept, u32::try_from(replaced_turns).ok()?))
+}

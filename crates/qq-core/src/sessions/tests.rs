@@ -1906,6 +1906,7 @@ fn denial_capacity_fixture(
         context_compaction_remaining: false,
         compaction_cutoff_ordinal: None,
         context_compaction_oversized_unit_bytes: None,
+        in_run_turn_cutoff: None,
         context_overflow_basis: None,
         context_occupancy: None,
         limits: RunLimits::default(),
@@ -2246,61 +2247,11 @@ mod reference_assembly {
             if snapshot.role != MessageRole::User {
                 return Err(SessionRuntimeError::CODEC);
             }
-            // Per-message attachment lookup: a prompt with stored
-            // attachments is rebuilt from its text parts plus each stored
-            // block; one without keeps the transcript text.
-            let mut statement = transaction.prepare(
-                "SELECT a.path, a.window_start, a.window_end, a.window_total, b.content
-                     FROM message_attachments a
-                     JOIN attachment_blobs b
-                       ON b.session_id = a.session_id AND b.blob_key = a.blob_key
-                     WHERE a.message_id = ?1
-                     ORDER BY a.ordinal",
-            )?;
-            let stored = statement
-                .query_map([&id], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<u64>>(1)?,
-                        row.get::<_, Option<u64>>(2)?,
-                        row.get::<_, Option<u64>>(3)?,
-                        row.get::<_, Option<Vec<u8>>>(4)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            drop(statement);
-            if stored.is_empty() {
-                context.push(Message::user(snapshot.output));
-            } else {
-                let input_json: Option<String> = transaction.query_row(
-                    "SELECT input_json FROM messages WHERE id = ?1",
-                    [&id],
-                    |row| row.get(0),
-                )?;
-                let parts = parse_input_parts(input_json.as_deref())?;
-                let stored: Vec<_> = stored
-                    .into_iter()
-                    .map(|(path, start, end, total, content)| {
-                        let window = match (start, end, total) {
-                            (Some(start), Some(end), Some(total)) => {
-                                Some((start as usize, end as usize, total as usize))
-                            }
-                            _ => None,
-                        };
-                        (
-                            path,
-                            window,
-                            content.map(|bytes| String::from_utf8(bytes).unwrap()),
-                        )
-                    })
-                    .collect();
-                context.push(Message::user(crate::input::render_resolved_prompt(
-                    &crate::input::render_text_parts(&parts),
-                    stored.iter().map(|(path, window, content)| {
-                        (path.as_str(), *window, content.as_deref())
-                    }),
-                )));
-            }
+            context.push(Message::user(render_message(
+                transaction,
+                &id,
+                snapshot.output,
+            )?));
             // Reconstruct each run immediately after its prompt rather than
             // following message-row ordinals. Follow-up prompts can be queued
             // while the prior run is active, so its later committed output still
@@ -2373,6 +2324,67 @@ mod reference_assembly {
         }
         Ok(())
     }
+    /// Per-message attachment lookup, for prompts and steering alike: a row
+    /// with stored attachments is rebuilt from its text parts plus each stored
+    /// block; one without keeps the transcript text.
+    fn render_message(
+        transaction: &Connection,
+        id: &str,
+        output: String,
+    ) -> Result<String, SessionRuntimeError> {
+        let mut statement = transaction.prepare(
+            "SELECT a.path, a.window_start, a.window_end, a.window_total, b.content
+                 FROM message_attachments a
+                 JOIN attachment_blobs b
+                   ON b.session_id = a.session_id AND b.blob_key = a.blob_key
+                 WHERE a.message_id = ?1
+                 ORDER BY a.ordinal",
+        )?;
+        let stored = statement
+            .query_map([id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<u64>>(1)?,
+                    row.get::<_, Option<u64>>(2)?,
+                    row.get::<_, Option<u64>>(3)?,
+                    row.get::<_, Option<Vec<u8>>>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        if stored.is_empty() {
+            return Ok(output);
+        }
+        let input_json: Option<String> = transaction.query_row(
+            "SELECT input_json FROM messages WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        let parts = parse_input_parts(input_json.as_deref())?;
+        let stored: Vec<_> = stored
+            .into_iter()
+            .map(|(path, start, end, total, content)| {
+                let window = match (start, end, total) {
+                    (Some(start), Some(end), Some(total)) => {
+                        Some((start as usize, end as usize, total as usize))
+                    }
+                    _ => None,
+                };
+                (
+                    path,
+                    window,
+                    content.map(|bytes| String::from_utf8(bytes).unwrap()),
+                )
+            })
+            .collect();
+        Ok(crate::input::render_resolved_prompt(
+            &crate::input::render_text_parts(&parts),
+            stored
+                .iter()
+                .map(|(path, window, content)| (path.as_str(), *window, content.as_deref())),
+        ))
+    }
+
     fn reference_append_run_turns(
         transaction: &Connection,
         run_id: RunId,
@@ -2396,16 +2408,53 @@ mod reference_assembly {
         // included it; it is replayed as a user message immediately before that
         // turn, after the preceding turn's tool results.
         let mut statement = transaction.prepare(
-            "SELECT turn_ordinal, output FROM messages
+            "SELECT turn_ordinal, output, id FROM messages
                  WHERE run_id = ?1 AND steering = 1 AND state = 'complete'
                  ORDER BY turn_ordinal, ordinal",
         )?;
-        let mut steering = statement
+        let rows = statement
             .query_map([run_id.to_string()], |row| {
-                Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?
-            .collect::<Result<std::collections::VecDeque<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
+        let mut steering = rows
+            .into_iter()
+            .map(|(turn, output, id)| Ok((turn, render_message(transaction, &id, output)?)))
+            .collect::<Result<std::collections::VecDeque<_>, SessionRuntimeError>>()?;
+        // The newest in-run marker scoped to this run replaces its turns
+        // through `turn_cutoff`, plus the steering applied before them.
+        let marker: Option<(String, u32)> = transaction
+            .query_row(
+                "SELECT summary, turn_cutoff FROM session_compactions
+                     WHERE scope_run_id = ?1 ORDER BY rowid DESC LIMIT 1",
+                [run_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let mut turns = turns;
+        if let Some((summary, turn_cutoff)) = marker {
+            let replaced = turns
+                .iter()
+                .take_while(|(ordinal, _, _)| *ordinal <= turn_cutoff)
+                .count();
+            if replaced > 0 {
+                turns.drain(..replaced);
+                while steering
+                    .front()
+                    .is_some_and(|(applied_before, _)| *applied_before <= turn_cutoff)
+                {
+                    steering.pop_front();
+                }
+                context.push(Message::user(format!(
+                    "{IN_RUN_COMPACTION_PREAMBLE}\n\n{summary}"
+                )));
+            }
+        }
         for (turn_ordinal, content_json, truncated) in turns {
             while steering
                 .front()
@@ -2421,38 +2470,64 @@ mod reference_assembly {
                     .collect();
 
             let mut statement = transaction.prepare(
-                "SELECT provider_call_id, result, is_error FROM tool_calls
-                     WHERE run_id = ?1 AND turn_ordinal = ?2 AND result IS NOT NULL
-                     ORDER BY call_ordinal",
+                "SELECT c.provider_call_id, c.result, c.is_error, c.id, s.digest
+                     FROM tool_calls c LEFT JOIN tool_spills s ON s.tool_call_id = c.id
+                     WHERE c.run_id = ?1 AND c.turn_ordinal = ?2 AND c.result IS NOT NULL
+                     ORDER BY c.call_ordinal",
             )?;
             let mut recorded = statement
                 .query_map(params![run_id.to_string(), turn_ordinal], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        (row.get::<_, String>(1)?, row.get::<_, bool>(2)?),
+                        (
+                            row.get::<_, String>(1)?,
+                            row.get::<_, bool>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        ),
                     ))
                 })?
-                .collect::<Result<HashMap<String, (String, bool)>, _>>()?;
+                .collect::<Result<HashMap<String, (String, bool, String, Option<String>)>, _>>()?;
             drop(statement);
-            // Emit exactly one result per ToolCall block, in block order.
+            // Emit exactly one result per ToolCall block, in block order,
+            // through the same per-turn output budget the live run applied.
             // A block without a recorded result (a crash between the
             // turn commit and its tool_calls rows in an older store)
             // gets an explicit interrupted result so replayed context
             // stays provider-valid instead of poisoning the session.
+            let mut turn_output = crate::tools::TurnOutputBudget::new();
             let results = content
                 .iter()
                 .filter_map(|block| match block {
-                    ContentBlock::ToolCall { id, .. } => Some(match recorded.remove(id) {
-                        Some((content, is_error)) => ContentBlock::ToolResult {
-                            call_id: id.clone(),
-                            content,
-                            is_error,
-                        },
-                        None => ContentBlock::ToolResult {
-                            call_id: id.clone(),
-                            content: INTERRUPTED_TOOL_RESULT.to_owned(),
-                            is_error: true,
-                        },
+                    ContentBlock::ToolCall { id, name, .. } => Some(match recorded.remove(id) {
+                        Some((mut content, is_error, tool_call_id, spill_digest)) => {
+                            let tool_call_id = parse_id::<ToolCallId>(&tool_call_id).unwrap();
+                            let spill_handle = spill_digest.as_deref().map(|digest| {
+                                crate::tools::output::result_handle(name, tool_call_id, digest)
+                            });
+                            let recall = match &spill_handle {
+                                Some(handle) => crate::tools::ResultRecall::Spill(handle),
+                                None => crate::tools::ResultRecall::StoredResult {
+                                    tool: name,
+                                    call: tool_call_id,
+                                },
+                            };
+                            turn_output.admit(&mut content, recall);
+                            ContentBlock::ToolResult {
+                                call_id: id.clone(),
+                                content,
+                                is_error,
+                            }
+                        }
+                        None => {
+                            let mut content = INTERRUPTED_TOOL_RESULT.to_owned();
+                            turn_output.admit(&mut content, crate::tools::ResultRecall::None);
+                            ContentBlock::ToolResult {
+                                call_id: id.clone(),
+                                content,
+                                is_error: true,
+                            }
+                        }
                     }),
                     ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,
                 })
@@ -2542,6 +2617,26 @@ async fn collect_through_compacted(events: &mut SessionEventStream) -> Vec<Sessi
 
 /// A structurally valid summarizer reply carrying `body` under every
 /// required section, so validation passes and tests can still grep for it.
+/// Turns a prior in-run summary in `request` says were already done, read
+/// back from the `turns_done=N` line the scripted summarizer wrote.
+fn summarized_turns(request: &ModelRequest) -> usize {
+    request
+        .messages()
+        .iter()
+        .flat_map(Message::content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => text.lines().find_map(|line| {
+                line.strip_prefix("turns_done=")?
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+            }),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 fn valid_summary(body: &str) -> String {
     format!(
         "1. Intent: {body}\n2. Decisions and constraints: {body}\n3. Work state: {body}\n\
@@ -2622,12 +2717,35 @@ fn assert_tool_results_are_exact(messages: &[Message]) {
 enum AutoCompactScript {
     /// Streams the text and completes.
     Text(String),
+    /// Streams the text and stops at the output token limit, so the runtime
+    /// continues the turn with the next scripted request.
+    Truncated(String),
     /// Reads `note.txt` on the first turn, then streams the text: seeds a
     /// prunable read-only result into the transcript.
     ReadNoteThenText(String),
     /// Reads `note.txt` once per turn for `turns` turns, then streams the
     /// text: grows one run's own transcript with prunable results.
     ReadNoteRepeatedly { turns: usize, text: String },
+    /// Runs `shell` (a mutating effect, so never stubbed) once per turn for
+    /// `turns` turns, then streams the text. Any request ending with the
+    /// summarizer instruction is answered with `summary` instead, so one
+    /// loaded provider serves both the run and its in-run compactions. The
+    /// turn count is taken from the request's own tool results plus the
+    /// turns a summary in context says were already done.
+    ShellRepeatedlyWithSummaries {
+        turns: usize,
+        text: String,
+        summary: String,
+    },
+    /// `ShellRepeatedlyWithSummaries` whose summarizer reply is cut at the
+    /// output limit after `cut` bytes on the first request and completed on
+    /// the continuation, so an in-run summary exercises the truncation join.
+    ShellRepeatedlyWithTruncatedSummaries {
+        turns: usize,
+        text: String,
+        summary: String,
+        cut: usize,
+    },
     /// Calls `search_history` with the query on the first turn, then
     /// streams the text.
     SearchHistoryThenText(String, String),
@@ -2753,11 +2871,29 @@ impl Provider for AutoCompactProvider {
                 _ => None,
             })
             .collect();
+        let summarized_before = summarized_turns(&request);
+        let last_text = request
+            .messages()
+            .last()
+            .and_then(|message| {
+                message.content().iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+            })
+            .unwrap_or_default();
         self.requests.lock().unwrap().push(request);
         match &self.script {
             AutoCompactScript::Text(text) => Box::pin(stream::iter([
                 Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
                 Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+            ])),
+            AutoCompactScript::Truncated(text) => Box::pin(stream::iter([
+                Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                Ok(qq_provider::ProviderEvent::Incomplete {
+                    usage: None,
+                    reason: qq_provider::IncompleteReason::OutputTokens,
+                }),
             ])),
             AutoCompactScript::ReadNoteThenText(text) => {
                 if already_read {
@@ -2809,6 +2945,104 @@ impl Provider for AutoCompactProvider {
                             id: "call_read".to_owned(),
                         }),
                         Ok(qq_provider::ProviderEvent::Completed { usage }),
+                    ]))
+                }
+            }
+            AutoCompactScript::ShellRepeatedlyWithTruncatedSummaries {
+                turns,
+                text,
+                summary,
+                cut,
+            } => {
+                // A continuation request ends with the truncation notice; the
+                // summarizer request proper ends with the instruction.
+                if last_text.contains("cut off at the output token limit") {
+                    let summarized = prior_results.len() + summarized_before;
+                    let full = format!("{summary}\nturns_done={summarized}");
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: full[*cut..].to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                if last_text.contains("Summarize this conversation") {
+                    let summarized = prior_results.len() + summarized_before;
+                    let full = format!("{summary}\nturns_done={summarized}");
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: full[..*cut].to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Incomplete {
+                            usage: None,
+                            reason: qq_provider::IncompleteReason::OutputTokens,
+                        }),
+                    ]));
+                }
+                let done = prior_results.len() + summarized_before;
+                if done >= *turns {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    let id = format!("call_shell_{done}");
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: id.clone(),
+                            name: "shell".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: id.clone(),
+                            json: format!(
+                                r#"{{"command":"echo step {done}; head -c 6000 /dev/zero | tr '\\0' x"}}"#
+                            ),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
+            }
+            AutoCompactScript::ShellRepeatedlyWithSummaries {
+                turns,
+                text,
+                summary,
+            } => {
+                if last_text.contains("Summarize this conversation") {
+                    if summary == "__STALL__" {
+                        return Box::pin(stream::pending());
+                    }
+                    // Fold the count of turns already summarized into the
+                    // summary so the next request can resume the count.
+                    let summarized = prior_results.len() + summarized_before;
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: format!("{summary}\nturns_done={summarized}"),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let done = prior_results.len() + summarized_before;
+                if done >= *turns {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    let id = format!("call_shell_{done}");
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: id.clone(),
+                            name: "shell".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: id.clone(),
+                            json: format!(
+                                r#"{{"command":"echo step {done}; head -c 6000 /dev/zero | tr '\\0' x"}}"#
+                            ),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
                     ]))
                 }
             }

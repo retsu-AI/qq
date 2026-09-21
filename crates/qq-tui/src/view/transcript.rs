@@ -1,9 +1,18 @@
 use super::*;
 use crate::render::Span;
 
-/// Retained rendering for the transcript: completed messages cached
-/// by width, the settled prefix of streaming messages, and the row ranges
-/// the live messages occupied on the last frame.
+/// Retained rendering shared by every transcript pane: completed messages
+/// cached by width, derived tool rows, and the settled prefix of streaming
+/// messages. Per-pane state (scroll, live-row anchors) lives on the
+/// [`TranscriptPane`] the app owns; the cache only reads it and hands back a
+/// [`PaneUpdate`] per frame.
+///
+/// Layouts key on message id and carry their width. Two panes showing one
+/// session at different content widths would relay out its messages every
+/// frame; the layout gives every transcript slot the same content width
+/// (`layout::TranscriptSlot::content_width`), so panes share layouts instead
+/// of fighting over them, and a frame holds at most `MAX_VISIBLE_MESSAGES`
+/// per pane.
 #[derive(Default)]
 pub(crate) struct TranscriptCache {
     pub(super) markdown: HashMap<MessageId, CachedMarkdown>,
@@ -18,8 +27,13 @@ pub(crate) struct TranscriptCache {
     /// holds the layout of the message's block-boundary-settled prefix so a
     /// frame only lays out the trailing open block.
     live: HashMap<MessageId, LiveMarkdown>,
-    live_message_ranges: HashMap<MessageId, Range<usize>>,
-    preserve_tail_anchor: bool,
+}
+
+/// What one pane's frame reconciled: the scroll state to hand back and the
+/// live-row anchors the next frame compares against.
+pub(crate) struct PaneUpdate {
+    pub viewport: Viewport,
+    pub live_message_ranges: HashMap<MessageId, Range<usize>>,
 }
 
 pub(super) struct LiveMarkdown {
@@ -54,6 +68,9 @@ pub(super) struct CachedMarkdown {
 /// Heap bytes the cache may hold in completed-message layouts. Larger than
 /// any single message the cache admits so the newest message always fits.
 const MAX_CACHE_BYTES: usize = 8 * 1024 * 1024;
+/// Completed-message layouts the cache holds: the visible window of every
+/// pane the layout can show at once, so panes never evict each other.
+pub(super) const MAX_CACHED_MESSAGES: usize = MAX_VISIBLE_MESSAGES * MAX_PANES;
 
 impl CachedMessageBody {
     fn bytes(&self) -> usize {
@@ -478,23 +495,33 @@ impl<'a> TurnIndex<'a> {
 }
 
 impl TranscriptCache {
-    /// Render the main area: the session transcript or a workspace view,
-    /// scrolled to the app's viewport. Every row is exactly `width` cells
-    /// wide. Returns the rows and the reconciled viewport, which the caller
-    /// hands back to the app after composition so rendering never writes
-    /// into the model mid-frame.
+    /// Render one pane's main area: the session transcript or a workspace
+    /// view, scrolled to the pane's viewport. Every row is exactly `width`
+    /// cells wide. Returns the rows and the pane's reconciled state, which
+    /// the caller hands back to the app after composition so rendering never
+    /// writes into the model mid-frame.
+    ///
+    /// A pane following a session that no longer exists shows the empty
+    /// prompt: the id is stale navigation state, not a body to wait for.
     pub(super) fn body(
         &mut self,
         highlighter: &mut Highlighter,
         app: &App,
+        pane: &TranscriptPane,
         width: usize,
         height: usize,
-    ) -> (Vec<Line>, Viewport) {
-        let session_id = app.view.session();
-        let mut viewport = app.viewport.clone();
+    ) -> (Vec<Line>, PaneUpdate) {
+        let view = match pane.view {
+            View::Transcript(Some(session_id)) if !app.sessions.contains_key(&session_id) => {
+                View::Transcript(None)
+            }
+            view => view,
+        };
+        let session_id = view.session();
+        let mut viewport = pane.viewport.clone();
         // Workspace-wide views are cheap lists; they draw without the
         // transcript caches and scroll like any other body.
-        let workspace_rows = match app.view {
+        let workspace_rows = match view {
             View::Attention => Some(attention_body(app, width)),
             View::Changes => Some(changes_body(app, width)),
             View::Transcript(_) => None,
@@ -502,24 +529,26 @@ impl TranscriptCache {
         if let Some(rows) = workspace_rows {
             let mut body = VirtualBody::default();
             body.extend_owned(rows);
-            viewport.update(app.view, body.rows, height, false);
+            viewport.update(view, body.rows, height, false);
             let offset = viewport.offset();
             return (
                 fit_height(body.viewport(app, height, offset), height),
-                viewport,
+                PaneUpdate {
+                    viewport,
+                    live_message_ranges: HashMap::new(),
+                },
             );
         }
-        // Prose past a readable measure gets no wider: lines stay scannable
-        // on a wide screen, and the width-keyed caches see one width across
-        // every terminal wider than the cap.
-        let content_width = width.min(MAX_TRANSCRIPT_WIDTH);
-        let body = self.threadline(highlighter, app, session_id, &viewport, content_width);
-        viewport.update(app.view, body.rows, height, body.preserve_tail_anchor);
+        // `width` is already the pane's content width: the layout caps it at
+        // the measure and centers it, so the width-keyed caches see one width
+        // across every pane at least that wide.
+        let content_width = width;
+        let body = self.threadline(highlighter, app, session_id, pane, content_width);
+        viewport.update(view, body.rows, height, body.preserve_tail_anchor);
         let offset = viewport.offset();
-        let live_message_ranges = body.live_message_ranges.clone();
+        let live_message_ranges = body.live_message_ranges.iter().cloned().collect();
         let mut rows = body.viewport(app, height, offset);
         drop(body);
-        self.live_message_ranges = live_message_ranges.into_iter().collect();
         // Scrolled up while the session runs: a pill on the last row says
         // how much has arrived below, so the user knows to jump back.
         let running = session_id
@@ -538,12 +567,18 @@ impl TranscriptCache {
             clipped.push(pill, accent().bold());
             *last = clipped;
         }
-        (fit_height(rows, height), viewport)
+        (
+            fit_height(rows, height),
+            PaneUpdate {
+                viewport,
+                live_message_ranges,
+            },
+        )
     }
 
-    /// Drop every cached layout, keeping live-row anchors: an overlay hides
-    /// the transcript but a completion behind it must still preserve the
-    /// user's viewport when the transcript returns.
+    /// Drop every cached layout. Live-row anchors live on the panes, so an
+    /// overlay that hides the transcript still lets a completion behind it
+    /// preserve the user's viewport when the transcript returns.
     pub(super) fn prune_all(&mut self) {
         self.markdown.clear();
         self.cached_bytes = 0;
@@ -551,60 +586,71 @@ impl TranscriptCache {
         self.tool_rows.clear();
     }
 
-    /// Keep only the layouts for messages the pane can show this frame.
-    fn prune_markdown(&mut self, app: &App, session_id: Option<SessionId>) {
-        let visible = session_id
-            .and_then(|session_id| app.sessions.get(&session_id))
-            .and_then(|session| {
-                session
-                    .messages
-                    .as_ref()
-                    .map(|messages| (session, messages))
-            })
-            .map(|(_, messages)| {
+    /// Keep only the layouts for messages and calls some pane can show this
+    /// frame. Runs once per frame over every shown session, so two panes on
+    /// different sessions never evict each other's layouts.
+    pub(super) fn retain_visible(&mut self, app: &App, shown: &[Option<SessionId>]) {
+        let mut visible = std::collections::HashSet::new();
+        let mut any_warm = false;
+        let warm = || {
+            shown
+                .iter()
+                .filter_map(|session_id| app.sessions.get(session_id.as_ref()?))
+        };
+        for session in warm() {
+            let Some(messages) = session.messages.as_ref() else {
+                continue;
+            };
+            any_warm = true;
+            visible.extend(
                 messages
                     .iter()
                     .rev()
                     .take(MAX_VISIBLE_MESSAGES)
-                    .map(|message| message.id)
-                    .collect::<std::collections::HashSet<_>>()
-            });
-        match visible {
-            Some(visible) => {
-                self.markdown.retain(|id, cached| {
-                    let keep = visible.contains(id);
-                    if !keep {
-                        self.cached_bytes = self.cached_bytes.saturating_sub(cached.bytes);
-                    }
-                    keep
-                });
-                self.live.retain(|id, _| visible.contains(id));
-                self.live_message_ranges
-                    .retain(|id, _| visible.contains(id));
-            }
-            None => self.prune_all(),
+                    .map(|message| message.id),
+            );
         }
+        if !any_warm {
+            self.prune_all();
+            return;
+        }
+        self.markdown.retain(|id, cached| {
+            let keep = visible.contains(id);
+            if !keep {
+                self.cached_bytes = self.cached_bytes.saturating_sub(cached.bytes);
+            }
+            keep
+        });
+        self.live.retain(|id, _| visible.contains(id));
+        // A scan over the shown sessions' calls: the rows are bounded by the
+        // calls themselves, and building a set per frame costs more than the
+        // compares on the tool-heavy scenes the render bench measures.
+        self.tool_rows.retain(|id, _| {
+            warm()
+                .filter_map(|session| session.tool_calls.as_deref())
+                .any(|calls| calls.iter().any(|call| call.id == *id))
+        });
     }
 
+    /// Lay out what `session_id` needs this frame and report whether a live
+    /// message the pane was following settled in place, so the pane keeps
+    /// its tail anchor rather than its top row.
     fn prepare_markdown(
         &mut self,
         highlighter: &mut Highlighter,
         app: &App,
         session_id: Option<SessionId>,
-        viewport: &Viewport,
+        pane: &TranscriptPane,
         width: usize,
-    ) {
+    ) -> bool {
         self.clock += 1;
-        self.prune_markdown(app, session_id);
         let Some(session) = session_id.and_then(|session_id| app.sessions.get(&session_id)) else {
-            return;
+            return false;
         };
         let Some(messages) = session.messages.as_ref() else {
-            return;
+            return false;
         };
         if let Some(calls) = session.tool_calls.as_ref() {
-            self.tool_rows
-                .retain(|id, _| calls.iter().any(|call| call.id == *id));
             for call in calls {
                 let key = ToolRowKey::of(call);
                 let stale = self
@@ -615,18 +661,17 @@ impl TranscriptCache {
                     self.tool_rows.insert(call.id, (key, ToolRow::derive(call)));
                 }
             }
-        } else {
-            self.tool_rows.clear();
         }
+        let mut preserve_tail_anchor = false;
         for message in messages.iter().rev().take(MAX_VISIBLE_MESSAGES) {
             if message_is_terminal(message) {
                 self.live.remove(&message.id);
-                if self
+                if pane
                     .live_message_ranges
-                    .remove(&message.id)
-                    .is_some_and(|range| viewport.intersects_or_follows(&range))
+                    .get(&message.id)
+                    .is_some_and(|range| pane.viewport.intersects_or_follows(range))
                 {
-                    self.preserve_tail_anchor = true;
+                    preserve_tail_anchor = true;
                 }
                 self.cache_message(highlighter, message, width, session.loaded_through);
             } else {
@@ -634,6 +679,7 @@ impl TranscriptCache {
                 self.refresh_live(message, width);
             }
         }
+        preserve_tail_anchor
     }
 
     /// Extend the settled-prefix layout of a streaming message. Only the bytes
@@ -738,7 +784,7 @@ impl TranscriptCache {
         // Evict least-recently-used layouts until both the entry count and
         // the byte budget admit the new one.
         while !self.markdown.is_empty()
-            && (self.markdown.len() >= MAX_VISIBLE_MESSAGES
+            && (self.markdown.len() >= MAX_CACHED_MESSAGES
                 || self.cached_bytes + bytes > MAX_CACHE_BYTES)
         {
             let Some(stale) = self
@@ -814,10 +860,10 @@ impl TranscriptCache {
         highlighter: &mut Highlighter,
         app: &App,
         session_id: Option<SessionId>,
-        viewport: &Viewport,
+        pane: &TranscriptPane,
         width: usize,
     ) -> VirtualBody<'a> {
-        let transcript = self.transcript(highlighter, app, session_id, viewport, width);
+        let transcript = self.transcript(highlighter, app, session_id, pane, width);
         let mut body = VirtualBody::default();
         body.extend_virtual(transcript);
         if let Some(focused) = session_id {
@@ -851,12 +897,12 @@ impl TranscriptCache {
         highlighter: &mut Highlighter,
         app: &App,
         session_id: Option<SessionId>,
-        viewport: &Viewport,
+        pane: &TranscriptPane,
         width: usize,
     ) -> VirtualBody<'a> {
-        self.prepare_markdown(highlighter, app, session_id, viewport, width);
+        let preserve_tail_anchor = self.prepare_markdown(highlighter, app, session_id, pane, width);
         let mut body = VirtualBody {
-            preserve_tail_anchor: std::mem::take(&mut self.preserve_tail_anchor),
+            preserve_tail_anchor,
             ..VirtualBody::default()
         };
         let Some(session_id) = session_id else {

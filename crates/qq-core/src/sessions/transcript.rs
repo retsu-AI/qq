@@ -108,9 +108,10 @@ pub(super) fn store_message_attachments(
 }
 
 /// Every stored attachment of the retained prompts (those in the ordinal
-/// window), keyed by message id and in prompt order, with the blob bytes
-/// joined in. Sessions without attachments pay one indexed lookup that
-/// returns nothing; archived prompts behind the cutoff are never read.
+/// window) and of the steering applied to their runs, keyed by message id
+/// and in prompt order, with the blob bytes joined in. Sessions without
+/// attachments pay one indexed lookup that returns nothing; archived prompts
+/// behind the cutoff are never read.
 fn load_retained_attachments(
     transaction: &Connection,
     session: &str,
@@ -120,7 +121,8 @@ fn load_retained_attachments(
     let mut statement = transaction.prepare_cached(
         "SELECT a.message_id, a.path, a.window_start, a.window_end, a.window_total, b.content
          FROM messages m
-         JOIN message_attachments a ON a.message_id = m.id
+         JOIN messages s ON s.run_id = m.run_id AND s.role = 'user'
+         JOIN message_attachments a ON a.message_id = s.id
          JOIN attachment_blobs b ON b.session_id = a.session_id AND b.blob_key = a.blob_key
          WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
            AND m.role = 'user' AND m.steering = 0
@@ -344,6 +346,7 @@ pub(super) fn load_model_context_with_units(
     drop(statement);
     let mut attachments =
         load_retained_attachments(transaction, &session, through_ordinal, cutoff_ordinal)?;
+    let mut in_run = in_run_compactions(transaction, &session, through_ordinal, cutoff_ordinal)?;
 
     // Every committed turn of a retained run, grouped by run. The retained
     // runs are exactly those whose prompt the query above selected: the
@@ -381,13 +384,17 @@ pub(super) fn load_model_context_with_units(
 
     // Every recorded tool result, keyed by run, turn, and provider call id, with the
     // effect class the call was admitted under (absent for rows written
-    // before schema 26).
+    // before schema 26), the call's own id, and the digest of its spill when
+    // one was stored: the turn-budget projection below names one or the
+    // other as the recall path, exactly as the live run did.
     let mut results: HashMap<String, RecordedTurnResults> = HashMap::new();
     let mut statement = transaction.prepare_cached(
-        "SELECT c.run_id, c.provider_call_id, c.result, c.is_error, c.effect, c.turn_ordinal
+        "SELECT c.run_id, c.provider_call_id, c.result, c.is_error, c.effect, c.turn_ordinal,
+                c.id, s.digest
              FROM messages m
              JOIN runs r ON r.id = m.run_id
              JOIN tool_calls c ON c.run_id = r.id
+             LEFT JOIN tool_spills s ON s.tool_call_id = c.id
              WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
                AND m.role = 'user' AND m.steering = 0
                AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
@@ -401,10 +408,12 @@ pub(super) fn load_model_context_with_units(
             row.get::<_, bool>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, u32>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, Option<String>>(7)?,
         ))
     })?;
     for row in rows {
-        let (run_id, call_id, content, is_error, effect, turn_ordinal) = row?;
+        let (run_id, call_id, content, is_error, effect, turn_ordinal, id, spill_digest) = row?;
         let effect = effect.as_deref().and_then(EffectClass::from_stored);
         results
             .entry(run_id)
@@ -417,6 +426,8 @@ pub(super) fn load_model_context_with_units(
                     content,
                     is_error,
                     effect,
+                    id: parse_id(&id)?,
+                    spill_digest,
                 },
             );
     }
@@ -426,7 +437,7 @@ pub(super) fn load_model_context_with_units(
     // the ordinal of the turn whose request first included it.
     let mut steering: HashMap<String, std::collections::VecDeque<(u32, String)>> = HashMap::new();
     let mut statement = transaction.prepare_cached(
-        "SELECT s.run_id, s.turn_ordinal, s.output
+        "SELECT s.run_id, s.turn_ordinal, s.output, s.id, s.input_json
              FROM messages m
              JOIN messages s ON s.run_id = m.run_id
              WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
@@ -440,10 +451,31 @@ pub(super) fn load_model_context_with_units(
             row.get::<_, String>(0)?,
             row.get::<_, u32>(1)?,
             row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
         ))
     })?;
     for row in rows {
-        let (run_id, ordinal, text) = row?;
+        let (run_id, ordinal, text, message_id, input_json) = row?;
+        // Steering that attached files is re-rendered from the stored bytes
+        // like a prompt; text-only steering (and rows without attachments)
+        // keep their rendered text.
+        let text = match attachments.remove(&message_id) {
+            Some(stored) => {
+                let parts = parse_input_parts(input_json.as_deref())?;
+                crate::input::render_resolved_prompt(
+                    &crate::input::render_text_parts(&parts),
+                    stored.iter().map(|attachment| {
+                        (
+                            attachment.path.as_str(),
+                            attachment.window,
+                            attachment.content.as_deref(),
+                        )
+                    }),
+                )
+            }
+            None => text,
+        };
         steering
             .entry(run_id)
             .or_default()
@@ -495,6 +527,7 @@ pub(super) fn load_model_context_with_units(
                     run_turns,
                     results.remove(&prompt.run_id).unwrap_or_default(),
                     steering.remove(&prompt.run_id).unwrap_or_default(),
+                    in_run.remove(&prompt.run_id),
                     &mut context,
                     &mut effects,
                 )?,
@@ -533,6 +566,11 @@ pub(super) struct RecordedResult {
     pub(super) content: String,
     pub(super) is_error: bool,
     pub(super) effect: Option<EffectClass>,
+    /// The call's own id: with `spill_digest`, what a turn-budget cut's
+    /// marker names as the recall path.
+    pub(super) id: ToolCallId,
+    /// The digest of the complete output when the call spilled it.
+    pub(super) spill_digest: Option<String>,
 }
 
 /// Assistant rows from stores that predate `model_turns`: one query per such
@@ -940,13 +978,48 @@ pub(super) fn assembled_context_bytes(
 /// then exactly one result per `ToolCall` block in block order, with applied
 /// steering placed immediately before the turn whose request first carried it
 /// and the continuation notice after a truncated turn.
+///
+/// Results pass through the same per-turn output budget the live run applied
+/// (`TurnOutputBudget`, in block order, which is call order), so a turn whose
+/// results together exceeded the budget replays exactly the reduced text the
+/// model saw rather than the larger per-call rows. The projection is a pure
+/// function of the stored rows; nothing extra is persisted.
 pub(super) fn append_run_turns(
     turns: Vec<(u32, String, bool)>,
     mut recorded: RecordedTurnResults,
     mut steering: std::collections::VecDeque<(u32, String)>,
+    compaction: Option<InRunCompaction>,
     context: &mut Vec<Message>,
     effects: &mut HashMap<(usize, usize), EffectClass>,
 ) -> Result<(), SessionRuntimeError> {
+    // An in-run marker replaces the run's turns through `turn_cutoff` — and
+    // the steering those turns carried — with one summary message where the
+    // first replaced turn stood. The model sees prompt, summary, then the
+    // retained recent turns verbatim, exactly what the live run saw after
+    // it compacted.
+    let mut turns = turns;
+    if let Some(marker) = compaction {
+        let replaced = turns
+            .iter()
+            .take_while(|(ordinal, _, _)| *ordinal <= marker.turn_cutoff)
+            .count();
+        if replaced > 0 {
+            turns.drain(..replaced);
+            for ordinal in 1..=marker.turn_cutoff {
+                recorded.remove(&ordinal);
+            }
+            while steering
+                .front()
+                .is_some_and(|(applied_before, _)| *applied_before <= marker.turn_cutoff)
+            {
+                steering.pop_front();
+            }
+            context.push(Message::user(format!(
+                "{IN_RUN_COMPACTION_PREAMBLE}\n\n{}",
+                marker.summary
+            )));
+        }
+    }
     for (turn_ordinal, content_json, truncated) in turns {
         let mut recorded_turn = recorded.remove(&turn_ordinal).unwrap_or_default();
         while steering
@@ -967,32 +1040,50 @@ pub(super) fn append_run_turns(
         // instead of poisoning the session.
         let result_message_index = context.len() + 1;
         let mut result_index = 0;
+        let mut turn_output = crate::tools::TurnOutputBudget::new();
         let results = content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::ToolCall { id, .. } => {
+                ContentBlock::ToolCall { id, name, .. } => {
                     let block_index = result_index;
                     result_index += 1;
                     Some(match recorded_turn.remove(id) {
                         Some(RecordedResult {
-                            content,
+                            mut content,
                             is_error,
                             effect,
+                            id: tool_call_id,
+                            spill_digest,
                         }) => {
                             if let Some(effect) = effect {
                                 effects.insert((result_message_index, block_index), effect);
                             }
+                            let spill_handle = spill_digest.as_deref().map(|digest| {
+                                crate::tools::output::result_handle(name, tool_call_id, digest)
+                            });
+                            let recall = match &spill_handle {
+                                Some(handle) => crate::tools::ResultRecall::Spill(handle),
+                                None => crate::tools::ResultRecall::StoredResult {
+                                    tool: name,
+                                    call: tool_call_id,
+                                },
+                            };
+                            turn_output.admit(&mut content, recall);
                             ContentBlock::ToolResult {
                                 call_id: id.clone(),
                                 content,
                                 is_error,
                             }
                         }
-                        None => ContentBlock::ToolResult {
-                            call_id: id.clone(),
-                            content: INTERRUPTED_TOOL_RESULT.to_owned(),
-                            is_error: true,
-                        },
+                        None => {
+                            let mut content = INTERRUPTED_TOOL_RESULT.to_owned();
+                            turn_output.admit(&mut content, crate::tools::ResultRecall::None);
+                            ContentBlock::ToolResult {
+                                call_id: id.clone(),
+                                content,
+                                is_error: true,
+                            }
+                        }
                     })
                 }
                 ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,

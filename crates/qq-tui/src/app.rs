@@ -28,7 +28,7 @@ use crate::{
     picker::Picker,
     terminal,
     theme::Theme,
-    viewport::{View, Viewport},
+    viewport::{TranscriptPane, View, Viewport},
 };
 mod pickers;
 
@@ -82,56 +82,6 @@ pub enum TuiError {
     /// explained on the restored terminal rather than as a bare "stopped".
     #[error("TUI client stopped{}", .0.as_ref().map(|reason| format!(": {reason}")).unwrap_or_default())]
     ClientStopped(Option<String>),
-}
-
-/// Whether the live session tree renders beside the transcript.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum Sidebar {
-    /// Visible when the terminal is at least [`SIDEBAR_AUTO_WIDTH`] columns
-    /// and more than one session exists; one session has nothing to list.
-    #[default]
-    Auto,
-    Shown,
-    Hidden,
-}
-
-/// Terminal width at which `Sidebar::Auto` shows the sidebar.
-pub(crate) const SIDEBAR_AUTO_WIDTH: usize = 100;
-/// The sidebar takes a quarter of the terminal up to this many columns.
-pub(crate) const SIDEBAR_MAX_WIDTH: usize = 28;
-
-impl Sidebar {
-    #[must_use]
-    pub(crate) const fn next(self) -> Self {
-        match self {
-            Self::Auto | Self::Shown => Self::Hidden,
-            Self::Hidden => Self::Shown,
-        }
-    }
-
-    #[must_use]
-    pub(crate) const fn visible(self, width: usize, sessions: usize) -> bool {
-        match self {
-            Self::Auto => width >= SIDEBAR_AUTO_WIDTH && sessions > 1,
-            Self::Shown => true,
-            Self::Hidden => false,
-        }
-    }
-
-    /// Columns the sidebar takes at `width`, or zero when hidden.
-    #[must_use]
-    pub(crate) const fn width(self, width: usize, sessions: usize) -> usize {
-        if self.visible(width, sessions) {
-            let quarter = width / 4;
-            if quarter < SIDEBAR_MAX_WIDTH {
-                quarter
-            } else {
-                SIDEBAR_MAX_WIDTH
-            }
-        } else {
-            0
-        }
-    }
 }
 
 /// How the transcript shows a run's tool calls. One row per call is the
@@ -297,11 +247,13 @@ pub(crate) struct App {
     /// client has the tree.
     pub(crate) workspace_root: Option<std::path::PathBuf>,
     pub sessions: SessionStore,
-    /// What the main area shows. Its session is the one the composer,
-    /// approvals, footers, and tree navigation act on.
-    pub(crate) view: View,
-    /// Scroll state of the main area, reconciled by the renderer each frame.
-    pub(crate) viewport: Viewport,
+    /// Transcript panes left to right, each following its own view with its
+    /// own scroll state; the renderer reconciles them every frame. One pane
+    /// until slice L4 splits the body; never more than `viewport::MAX_PANES`.
+    pub(crate) panes: Vec<TranscriptPane>,
+    /// Index into `panes` of the pane the composer, approvals, footers,
+    /// scrolling, and tree navigation act on.
+    pub(crate) focused_pane: usize,
     /// The session a workspace view replaced, so Esc can return to it.
     view_return: Option<SessionId>,
     /// Monotonic counter bumped on every focus change; stamps `last_focused`.
@@ -357,7 +309,9 @@ pub(crate) struct App {
     pub reasoning_detail: ReasoningDetail,
     /// Session sidebar visibility. `Auto` shows it when the terminal is wide
     /// enough; the toggle command cycles through explicit on and off.
-    pub sidebar: Sidebar,
+    /// Standing layout choices: rail and inspector visibility. `Auto` follows
+    /// the terminal's tier (`view::layout`).
+    pub layout: crate::view::LayoutPrefs,
     /// Whether the terminal reports mouse events to us. On by default so the
     /// wheel scrolls the transcript; `/mouse` turns it off for native
     /// selection and copy (most terminals also select with Shift held).
@@ -392,8 +346,8 @@ impl App {
             workspace_path: String::new(),
             workspace_root: options.workspace_root,
             sessions: SessionStore::with_sanitizer(terminal_safe_character),
-            view: View::default(),
-            viewport: Viewport::default(),
+            panes: vec![TranscriptPane::default()],
+            focused_pane: 0,
             view_return: None,
             focus_clock: 0,
             overlay: None,
@@ -418,7 +372,7 @@ impl App {
             expanded_tool_calls: std::collections::HashSet::new(),
             transcript_cursor: None,
             reasoning_detail: ReasoningDetail::default(),
-            sidebar: Sidebar::default(),
+            layout: crate::view::LayoutPrefs::default(),
             terminal_width: 0,
             mouse_capture: true,
             themes: if options.themes.is_empty() {
@@ -487,7 +441,9 @@ impl App {
                 self.workspace_id = None;
                 self.workspace_path.clear();
                 self.sessions.clear();
-                self.view = View::Transcript(None);
+                for pane in &mut self.panes {
+                    pane.view = View::Transcript(None);
+                }
                 self.overlay = None;
                 self.last_sequence = 0;
                 self.recent_events.clear();
@@ -753,7 +709,7 @@ impl App {
                 StateEffect::RequestSnapshot(request) => {
                     effects.push(Effect::Send(ClientRequest::Snapshot(request)));
                 }
-                StateEffect::Refocus(target) => self.view = View::Transcript(target),
+                StateEffect::Refocus(target) => self.set_view(View::Transcript(target)),
                 StateEffect::AdoptCreated(session_id) => self.adopt_created_session(session_id),
                 StateEffect::SubmitDraft { session_id, text } => {
                     effects.extend(self.submit_text(session_id, text));
@@ -811,7 +767,7 @@ impl App {
     /// recently viewed sessions. Does not request anything. Focusing a
     /// session always means reading it, so a workspace view gives way.
     fn set_focus(&mut self, session_id: SessionId) {
-        self.view = View::Transcript(Some(session_id));
+        self.set_view(View::Transcript(Some(session_id)));
         self.set_focus_clock(session_id);
     }
 
@@ -889,9 +845,7 @@ impl App {
             return true;
         }
         self.terminal_width == 0
-            || self
-                .sidebar
-                .visible(self.terminal_width, self.sessions.len())
+            || crate::view::rail_visible(self.terminal_width, self.layout, self.sessions.len())
     }
 
     fn set_notice_for(&mut self, session_id: Option<SessionId>, text: String, level: NoticeLevel) {
@@ -1010,8 +964,8 @@ impl App {
                 // a wheel over the chrome still does something useful.
                 let rows = isize::try_from(MOUSE_SCROLL_ROWS).unwrap_or(isize::MAX);
                 let changed = match mouse.kind {
-                    MouseEventKind::ScrollUp => self.viewport.scroll(rows),
-                    MouseEventKind::ScrollDown => self.viewport.scroll(-rows),
+                    MouseEventKind::ScrollUp => self.viewport_mut().scroll(rows),
+                    MouseEventKind::ScrollDown => self.viewport_mut().scroll(-rows),
                     _ => false,
                 };
                 Effects::changed_now(changed)
@@ -1081,7 +1035,7 @@ impl App {
                     return Effects::redraw(Redraw::Immediate);
                 }
                 // A workspace view returns to the session it replaced.
-                if matches!(self.view, View::Attention | View::Changes) {
+                if matches!(self.view(), View::Attention | View::Changes) {
                     return self.leave_workspace_view();
                 }
                 // A sticky error notice dismisses first: acknowledging the
@@ -1156,11 +1110,11 @@ impl App {
             KeyCode::PageDown => Effects::changed_now(self.scroll_focused_page(false)),
             KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
                 let rows = isize::try_from(MOUSE_SCROLL_ROWS).unwrap_or(isize::MAX);
-                Effects::changed_now(self.viewport.scroll(rows))
+                Effects::changed_now(self.viewport_mut().scroll(rows))
             }
             KeyCode::Down if key.modifiers == KeyModifiers::SHIFT => {
                 let rows = isize::try_from(MOUSE_SCROLL_ROWS).unwrap_or(isize::MAX);
-                Effects::changed_now(self.viewport.scroll(-rows))
+                Effects::changed_now(self.viewport_mut().scroll(-rows))
             }
             KeyCode::Backspace
                 if key
@@ -1203,10 +1157,10 @@ impl App {
             KeyCode::Right => Effects::changed_now(self.composer.move_right()),
             // Ctrl-Home/End jump the transcript; plain Home/End edit the line.
             KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Effects::changed_now(self.viewport.scroll(isize::MAX))
+                Effects::changed_now(self.viewport_mut().scroll(isize::MAX))
             }
             KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Effects::changed_now(self.viewport.scroll(isize::MIN))
+                Effects::changed_now(self.viewport_mut().scroll(isize::MIN))
             }
             KeyCode::Home => Effects::changed_now(self.composer.move_line_start()),
             KeyCode::End => Effects::changed_now(self.composer.move_line_end()),
@@ -1252,10 +1206,41 @@ impl App {
         }
     }
 
-    /// The session shown; what every focus-dependent surface (composer,
-    /// approvals, footers, tree navigation) acts on.
+    /// The session shown in the focused pane; what every focus-dependent
+    /// surface (composer, approvals, footers, tree navigation) acts on.
     pub(crate) fn focused(&self) -> Option<SessionId> {
-        self.view.session()
+        self.view().session()
+    }
+
+    /// The focused transcript pane. `panes` always holds at least one and
+    /// `focused_pane` is kept in range, so this never fails.
+    pub(crate) fn pane(&self) -> &TranscriptPane {
+        &self.panes[self.focused_pane.min(self.panes.len() - 1)]
+    }
+
+    fn pane_mut(&mut self) -> &mut TranscriptPane {
+        let index = self.focused_pane.min(self.panes.len() - 1);
+        &mut self.panes[index]
+    }
+
+    /// What the focused pane shows.
+    pub(crate) fn view(&self) -> View {
+        self.pane().view
+    }
+
+    /// Point the focused pane at `view`. Its viewport returns to the tail on
+    /// the next frame, as `Viewport::update` does for any view change.
+    pub(crate) fn set_view(&mut self, view: View) {
+        self.pane_mut().view = view;
+    }
+
+    /// Scroll state of the focused pane, as of its last frame.
+    pub(crate) fn viewport(&self) -> &Viewport {
+        &self.pane().viewport
+    }
+
+    fn viewport_mut(&mut self) -> &mut Viewport {
+        &mut self.pane_mut().viewport
     }
 
     fn steering(&self) -> Option<SteeringCapabilities> {
@@ -1267,13 +1252,13 @@ impl App {
     /// Show a workspace-wide view. Invoking the one already shown returns to
     /// the transcript, so `/attention` toggles.
     fn show_workspace_view(&mut self, view: View) -> Effects {
-        if self.view == view {
+        if self.view() == view {
             return self.leave_workspace_view();
         }
-        if let Some(session) = self.view.session() {
+        if let Some(session) = self.focused() {
             self.view_return = Some(session);
         }
-        self.view = view;
+        self.set_view(view);
         Effects::redraw(Redraw::Immediate)
     }
 
@@ -1288,13 +1273,14 @@ impl App {
         match target {
             Some(session) => self.focus_session(session),
             None => {
-                self.view = View::Transcript(None);
+                self.set_view(View::Transcript(None));
                 Effects::redraw(Redraw::Immediate)
             }
         }
     }
 
-    /// Test view of the viewport through the renderer's reconcile step.
+    /// Test view of the focused pane's viewport through the renderer's
+    /// reconcile step.
     #[cfg(test)]
     pub(crate) fn update_transcript_viewport(
         &mut self,
@@ -1302,18 +1288,19 @@ impl App {
         height: usize,
         preserve_tail_anchor: bool,
     ) {
-        self.viewport
-            .update(self.view, body_rows, height, preserve_tail_anchor);
+        let view = self.view();
+        self.viewport_mut()
+            .update(view, body_rows, height, preserve_tail_anchor);
     }
 
     #[cfg(test)]
     pub(crate) fn transcript_scroll_offset(&self) -> usize {
-        self.viewport.offset()
+        self.viewport().offset()
     }
 
     fn scroll_focused_page(&mut self, up: bool) -> bool {
-        let page = isize::try_from(self.viewport.height()).unwrap_or(isize::MAX);
-        self.viewport.scroll(if up { page } else { -page })
+        let page = isize::try_from(self.viewport().height()).unwrap_or(isize::MAX);
+        self.viewport_mut().scroll(if up { page } else { -page })
     }
 
     /// Run one command from the registry. Every command surface — keybinding,
@@ -1372,7 +1359,7 @@ impl App {
                 Effects::redraw(Redraw::Immediate)
             }
             Command::ToggleSidebar => {
-                self.sidebar = self.sidebar.next();
+                self.layout.rail = self.layout.rail.toggled();
                 Effects::redraw(Redraw::Immediate)
             }
             Command::FocusParent => match self

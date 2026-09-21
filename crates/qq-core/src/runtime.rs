@@ -1,6 +1,7 @@
 mod audit;
 mod budget;
 mod checkpoint;
+mod compaction;
 mod deadline;
 mod events;
 mod gate;
@@ -26,6 +27,10 @@ pub(crate) use checkpoint::{
 pub use checkpoint::{
     CheckpointFuture, CheckpointOutcome, CheckpointPhase, CheckpointRequest, CheckpointReviewer,
     CheckpointVerdict,
+};
+pub(crate) use compaction::{
+    InRunCompaction, InRunCompactionError, InRunCompactionFuture, InRunCompactionRequest,
+    InRunCompactor,
 };
 pub(crate) use deadline::RunDeadline;
 pub(crate) use events::{

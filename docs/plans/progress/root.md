@@ -23,6 +23,11 @@ may append a **request** row; only root changes a request's status.
 | F04 | Bounded summarizer input; compactions fold until the prompt fits | Shipped (`c404ae5`, #71; ENG-789 Done) | 2026-09-17. Summarizer reads at most one window of whole prompt/run units after the cutoff (`load_summarizer_input`); each step commits a marker at its unit boundary; `context_compaction_attempted` counts steps (no schema change), fold stops on full coverage, a failed step, or 32 steps; single oversized unit fails as `OversizedUnit`, not "already attempted"; manual `/compact` takes one bounded step. Six regression tests incl. shutdown/reopen resume. Deferred: estimator calibration from observed usage; provider tokenizers |
 | F10 | Client JSON exchange bounded end to end | Shipped (`1b8e2c2`, #79; ENG-792) | 2026-09-19. `post_json` wrapped send+headers+body in one `REQUEST_TIMEOUT`; new `ClientError::Timeout`; mid-body transport failure is `Unavailable`, size cap `ResponseTooLarge`. Regression probe: the stalled-body test hangs indefinitely on the prior code. SSE deadlines unchanged |
 | F24 | History excerpt offsets survive Unicode lowercasing | In review ([ENG-805](https://linear.app/retsu-ai/issue/ENG-805)) | 2026-09-19. `find_case_insensitive` lowers the haystack char by char and keeps original offsets (ASCII keeps the memchr fast path); `excerpt_around` no longer takes a lowered copy. Regressions with `İ`/`ẞ` prefixes incl. a drift larger than the excerpt half-width; `context_assembly` search timings unchanged within noise |
+| T12-f | Steering `@file` parts resolved at the boundary and persisted as attachments | Shipped (`2e5e2ce`, #84; ENG-819) | 2026-09-19. `SteeringMessage` carries `InputPart`s; `apply_steering` reads files off-executor when the message is injected and the `SteeringApplied` transaction stores them like a prompt's attachments; assembly re-renders steering from the store. Unreadable file → runtime notice in the message, run continues. Regression: steer with `@notes.txt`, provider sees bytes, replay identical after the file changes; reference oracle extended |
+| F23 | Model-facing tool-result projection persisted for replay | In review (ENG-804) | 2026-09-19. The 96 KiB per-turn budget is now one deterministic projection (`TurnOutputBudget`) that both the live run and `append_run_turns` apply over the stored `tool_calls` rows, so follow-up, reopen, and summarizer requests replay the live bytes; budget cuts of unspilled results name the stored row through `read_tool_result`. |
+| F11 | Snapshot assembly byte-budgeted under the 8 MiB wire cap | In review (ENG-796) | 2026-09-19. Bodies admit rows newest-first under one 6 MiB escaped-text budget (focused first, then included); cuts surface as `has_older_*`. No wire change |
+| F20 | Retention contract | Proposed ([ENG-803](https://linear.app/retsu-ai/issue/ENG-803); ADR-0038) | 2026-09-20. Archive is a session state, not a location; age-based auto-archive of idle roots with subtree; deletion explicit and cascading incl. events; receipts never trimmed; approaching-limit events at 80/95 %. Awaits acceptance before a plan |
+| F03 | A long run compacts its own turns at a tool boundary and continues | In review ([ENG-793](https://linear.app/retsu-ai/issue/ENG-793), #92; ADR-0039 Accepted) | 2026-09-20. Implemented in parallel with `docs/plans/mid-run-compaction.md`; ADR-0039 records the design as built and why the plan's Durable Protocol (resume marker, `RunCompacting`, `cutoff_turn_ordinal`) was not adopted. Plan's MRC-0..3 superseded by #92; MRC-4 (surfaces) and MRC-5 (live evidence) remain. Schema 32 → 33: `session_compactions.scope_run_id` + `turn_cutoff`. `runtime::InRunCompactor` capability; loop asks at the boundary after stubbing fails; `SessionInRunCompactor` runs one summarizer turn under an owned `compaction` run (no session slot), commits a scoped marker atomically with settlement, shrinkage-checked. Assembly (`append_run_turns`) renders prompt + summary + retained turns; between-run markers supersede; rollback pops either kind. Cancel cascades via `auto_compaction_for_run_id`; drop-guard settles a torn-down compaction. Tests: 48-turn run in a 16k window completes with ≥2 in-run compactions and every request under the window; rejected summary fails closed w/o resending; cancel settles both once; restart renders the marker and a later between-run compaction folds it; boundary unit test; reference oracle extended |
 
 ## ADR number allocation
 
@@ -53,6 +58,10 @@ may append a **request** row; only root changes a request's status.
 | 0033 | Preserve explicit model choices during optional routing | J6b stacked Jev implementation | Accepted locally; schema 32 |
 | 0034 | Bounded concrete Jev routing and inherited activation | J6b stacked Jev implementation | Accepted locally; descriptor 9 |
 | 0035 | Allow regular-file leaf targets for global configuration sources | GitHub #83 / Home Manager global config | Accepted locally; `docs/adr/0035-global-leaf-config-symlinks.md` |
+| 0036 | Designed truecolor default theme `ink` with `terminal` ANSI fallback | tui-redesign U5 | Reserved 2026-09-20 |
+| 0037 | Responsive TUI layout: width-selected tiers and panes, never features | tui-redesign U8 (L1–L4) | Reserved 2026-09-20 |
+| 0038 | Session retention: archive by session, never by row; receipts and cursors outlive their sessions | ENG-803 (F20 + F07 retention remainder) | Proposed: `docs/adr/0038-session-retention.md` |
+| 0039 | In-run compaction: run-scoped marker, owned summarizer run, no session slot | ENG-793 (F03), #92 | Accepted 2026-09-20: `docs/adr/0039-in-run-compaction.md`; supersedes the plan's Durable Protocol |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -123,7 +132,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0036. Reserve here before opening a PR that adds an ADR.
+Next free number: 0040. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -137,6 +146,8 @@ Next free number: 0036. Reserve here before opening a PR that adds an ADR.
 | 2026-09-11 | tool-layer plan | `docs/plans/README.md`, `docs/README.md` | Plan row, priority entry, catalog link | Done |
 | 2026-09-12 | tool-layer T2 | root `Cargo.toml`, `Cargo.lock` | Add `ignore = "0.4"` and `regex = "1"` to `[workspace.dependencies]` for `qq-core` (no version bumps; `regex` was already locked via tree-sitter) | Done (#32; `Cargo.toml` rows present) |
 | 2026-09-14 | tool-layer T6 (ahead of start) | root `Cargo.toml`, `Cargo.lock` | Promote `tree-sitter` and `tree-sitter-bash` to `[workspace.dependencies]` for the shell classifier (`approval/classify.rs`); `qq-tui` already depends on `tree-sitter = "0.26"` / `tree-sitter-bash = "0.25"` directly; promote those rows to the workspace table and point `qq-tui` at them so `qq-core` shares one version. No lock delta | Done (#40; `Cargo.toml` `[workspace.dependencies]`, both crates `.workspace = true`) |
+| 2026-09-20 | tui-redesign | `AGENTS.md` § Git And Reviews | Linear team is `ENG` (per the 2026-09-19 entry below and the live board), not `DEV`; fix the reference and the branch-name examples | Open |
+| 2026-09-20 | tui-redesign | `docs/plans/README.md`, `docs/README.md`, `docs/design/architecture.md` § repository map (`qq-tui` bullet) | Plan row and priority entry for `tui-redesign.md`. The `docs/README.md` index entry and a one-sentence `architecture.md` pointer to `docs/design/layout.md` were made in the L1 PR (index and pointer only; no boundary change) | Partly done (L1) |
 
 Shared files: root `Cargo.toml` and `Cargo.lock` version bumps,
 `rust-toolchain.toml`, `flake.nix`, `.github/workflows/*`,
@@ -326,3 +337,49 @@ dripped body held the request future — and in the TUI one of its
 the whole exchange; three raw-socket tests (stalled, chunked drip, mid-body
 close) plus connection refused. The `Timeout` variant is not added to the
 reconnect policy's re-resolve set: a slow server is not evidence it restarted.
+
+### 2026-09-19 — F23 tool-result projection replay
+
+Bug (ENG-804): the per-turn 96 KiB budget re-bounded late results only in
+the live request, after each per-call result was persisted whole; follow-up,
+reopen, and compaction assembly replayed the larger rows, so the model saw a
+different context than it saw live. Reproduced by a session test: four ~30
+KiB `read_file` calls in one turn, live request vs. follow-up assembly.
+Fix: no schema change. `TurnOutputBudget::admit` is the one projection;
+`append_run_turns` (and the test reference oracle) apply it in block order
+over stored `result` + call id + spill digest, so replay is byte-identical.
+A cut of an unspilled result now names the stored row by a
+`t:<tool>:<call8>:<digest8>` handle; `read_tool_spill` falls back to
+`tool_calls.result` when no spill matches. Test:
+`turn_budget_projection_replays_identically_after_follow_up_and_reopen`
+plus a unit test for the stored-row handle. Deferred: JEV checkpoint
+annotations appended to retained results are still live-only (F23 scope was
+the turn budget); `context_assembly` bench unchanged within noise.
+### 2026-09-19 — F11 snapshot byte budget
+
+Reproduced on `main`: `load_snapshot` bounded bodies by row count only, so a
+session with 40 x 300 KiB retained tool results produced a 12.3 MiB body the
+8 MiB wire cap refuses — the TUI could never attach to it. Fix in
+`sessions/snapshots.rs`: one `SnapshotBudget` (6 MiB of escaped text plus a
+512-byte per-row charge) spans the focused and included bodies; messages and
+tool calls are admitted newest-first and a cut sets the existing
+`has_older_messages` / `has_older_tool_calls` flags, so no protocol change and
+no new endpoint. Run rows and summaries are never cut by transcript size. The
+tool-call ordering query also gained `r.rowid DESC` so same-millisecond runs
+keep a deterministic newest tail. Test:
+`snapshots_stay_under_the_wire_cap_for_large_sessions` (assembly ~1 s for the
+12 MiB seed). Deferred: the TUI does not yet page older rows on demand beyond
+its existing cold-body fetch; a clipped focused body simply shows the newest
+tail with the flag set.
+
+### 2026-09-20 — F03 plan and F20 ADR (stacked on F23, F11)
+
+Order 2 of the audit is now: F03 planned, F04/F06/F10 shipped, F11 and F23
+in review (this stack), F20 proposed, F24 in review (ENG-805, other lane),
+F28 filed as a paid eval (ENG-807). F03 was not coded: it needs a decision on
+the boundary and the resume protocol first, so `docs/plans/mid-run-compaction.md`
+states both concretely and reserves ADR-0039 for MRC-0. Two facts checked
+while writing ADR-0038: `commands` already has no reference to `sessions`
+(receipts survive deletion by accident today), and `delete_idle_session`
+removes every session-scoped table except the session's rows in `events` —
+the event log grows regardless of deletion, which the ADR's decision 6 fixes.

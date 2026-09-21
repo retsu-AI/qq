@@ -74,7 +74,11 @@ fn frame_text(frame: &[Line]) -> String {
 fn frame_rows(frame: &[Line]) -> Vec<String> {
     frame
         .iter()
-        .map(|line| line.spans.iter().map(|span| span.text.as_str()).collect())
+        .map(|line| {
+            let mut row = " ".repeat(line.indent);
+            row.extend(line.spans.iter().map(|span| span.text.as_str()));
+            row
+        })
         .collect()
 }
 
@@ -1328,10 +1332,12 @@ fn completed_markdown_cache_is_bounded_and_keeps_one_width() {
     assert_eq!(renderer.markdown().len(), 1);
     assert_eq!(renderer.markdown()[&message.id].width, 80);
 
-    for byte in 2..=u8::try_from(MAX_VISIBLE_MESSAGES + 8).unwrap() {
+    // The bound covers every pane's visible window at once, so panes on
+    // different sessions never evict each other's layouts.
+    for byte in 2..=u8::try_from(MAX_CACHED_MESSAGES + 8).unwrap() {
         renderer.render_message(&completed_message(byte, byte.to_string()), 80);
     }
-    assert!(renderer.markdown().len() <= MAX_VISIBLE_MESSAGES);
+    assert!(renderer.markdown().len() <= MAX_CACHED_MESSAGES);
 }
 
 #[test]
@@ -1786,7 +1792,7 @@ fn the_composer_glyph_says_what_enter_will_do() {
 #[test]
 fn an_80_by_24_frame_gives_the_transcript_at_least_twenty_rows() {
     let mut app = app_with_messages(30);
-    app.sidebar = crate::app::Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 24);
     let rows = frame_rows(&frame);
     // Body rows are everything between the top row and the composer rule.
@@ -1946,7 +1952,7 @@ fn model_picker_hint_reflects_apply_versus_create() {
     let text = frame_text(&frame);
     assert!(text.contains("Enter sets the session model, Ctrl-N creates a session"));
 
-    app.view = View::Transcript(None);
+    app.set_view(View::Transcript(None));
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 100, 12);
     let text = frame_text(&frame);
     assert!(text.contains("Enter creates session"));
@@ -2084,8 +2090,8 @@ fn sidebar_appears_at_wide_widths_and_shows_live_status_for_cold_sessions() {
     let rows_at = |app: &mut App, width| {
         frame_rows(&FrameRenderer::default().frame_and_commit(app, width, 24)).join("\n")
     };
-    let narrow = rows_at(&mut app, 90);
-    assert!(!narrow.contains("WORKING  1"), "auto-hidden when narrow");
+    let narrow = rows_at(&mut app, 89);
+    assert!(!narrow.contains("WORKING  1"), "auto-hidden below Regular");
 
     let wide_frame = FrameRenderer::default().frame_and_commit(&mut app, 160, 24);
     let wide = frame_rows(&wide_frame).join("\n");
@@ -2112,7 +2118,7 @@ fn sidebar_appears_at_wide_widths_and_shows_live_status_for_cold_sessions() {
     assert!(!rows_at(&mut app, 160).contains("WORKING  1"));
     app.handle_terminal_event(toggle);
     assert!(
-        rows_at(&mut app, 90).contains("WORKING  1"),
+        rows_at(&mut app, 70).contains("WORKING  1"),
         "explicitly shown wins over width"
     );
 }
@@ -2127,11 +2133,26 @@ fn the_sidebar_stays_hidden_with_one_session_and_scales_with_width() {
         !rows_at(&mut app, 200).contains("IDLE  1"),
         "one session: nothing to list"
     );
-    let sidebar = crate::app::Sidebar::Auto;
-    assert_eq!(sidebar.width(100, 2), 25);
-    assert_eq!(sidebar.width(200, 2), crate::app::SIDEBAR_MAX_WIDTH);
-    assert_eq!(sidebar.width(99, 2), 0);
-    assert_eq!(crate::app::Sidebar::Shown.width(80, 1), 20);
+    let rail_width = |width, prefs, sessions| {
+        layout::compute_layout(width, 24, 2, prefs, sessions)
+            .rail
+            .map_or(0, |rail| rail.width)
+    };
+    let auto = LayoutPrefs::default();
+    assert_eq!(rail_width(100, auto, 2), 25);
+    assert_eq!(rail_width(200, auto, 2), layout::RAIL_MAX_WIDTH);
+    assert_eq!(rail_width(89, auto, 2), 0);
+    assert_eq!(
+        rail_width(
+            80,
+            LayoutPrefs {
+                rail: PanePref::Shown,
+                inspector: PanePref::Auto,
+            },
+            1
+        ),
+        20
+    );
 }
 
 #[test]
@@ -2189,7 +2210,7 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
             },
         )
     }));
-    app.sidebar = crate::app::Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
 
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 40));
     let spawn_row = rows
@@ -2220,7 +2241,7 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
 #[test]
 fn background_approvals_surface_a_banner_that_ctrl_g_jumps_to() {
     let mut app = app_with_messages(1);
-    app.sidebar = crate::app::Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     let parent = app.focused().unwrap();
     let child_id = SessionId::from_bytes([0x40; 16]);
     let run_id = RunId::from_bytes([0x41; 16]);
@@ -2292,7 +2313,7 @@ fn background_approvals_surface_a_banner_that_ctrl_g_jumps_to() {
 #[test]
 fn alt_arrows_walk_the_session_tree_in_spawn_order() {
     let mut app = app_with_messages(0);
-    app.sidebar = crate::app::Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     let root = app.focused().unwrap();
     let mut sequence = 1;
     let mut created = |app: &mut App, byte: u8, parent: Option<SessionId>, at: u64| {
@@ -2348,7 +2369,7 @@ fn alt_arrows_walk_the_session_tree_in_spawn_order() {
 #[test]
 fn reasoning_renders_collapsed_above_the_runs_message_and_expands_on_toggle() {
     let mut app = app_with_messages(0);
-    app.sidebar = crate::app::Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     let session_id = app.focused().unwrap();
     let run_id = RunId::from_bytes([0x66; 16]);
     let mut sequence = 1;
@@ -2430,7 +2451,7 @@ fn app_with_two_sessions(count: u8) -> (App, SessionId, SessionId) {
 #[test]
 fn a_height_only_resize_keeps_the_transcript_cache() {
     let (mut app, _, other) = app_with_two_sessions(4);
-    app.sidebar = crate::app::Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     app.focus_session(other);
     let mut renderer = FrameRenderer::default();
     renderer.frame_and_commit(&mut app, 101, 24);
@@ -2445,6 +2466,117 @@ fn a_height_only_resize_keeps_the_transcript_cache() {
             .values()
             .all(|cached| cached.width == width)
     );
+}
+
+/// Two panes following the two warm sessions of `app_with_two_sessions`,
+/// each with `rows` lines of transcript so both can scroll.
+fn app_with_two_panes(rows: u8) -> (App, SessionId, SessionId) {
+    let (mut app, first, other) = app_with_two_sessions(rows);
+    app.layout.rail = crate::view::PanePref::Hidden;
+    app.panes.push(TranscriptPane {
+        view: View::Transcript(Some(other)),
+        ..TranscriptPane::default()
+    });
+    assert_eq!(app.focused(), Some(first));
+    (app, first, other)
+}
+
+fn scroll_up(app: &mut App) {
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::PageUp,
+        KeyModifiers::NONE,
+    )));
+}
+
+#[test]
+fn panes_on_different_sessions_scroll_independently() {
+    let (mut app, first, other) = app_with_two_panes(40);
+    let mut renderer = FrameRenderer::default();
+    renderer.frame_and_commit(&mut app, 80, 12);
+    // The layout offers one slot until L4, so only pane 0 was reconciled;
+    // the second pane keeps its untouched default state.
+    assert!(app.panes[0].viewport.height() > 0);
+    assert_eq!(app.panes[1].viewport, Viewport::default());
+
+    scroll_up(&mut app);
+    let scrolled = app.panes[0].viewport.offset();
+    assert!(scrolled > 0, "the focused pane scrolls");
+    assert_eq!(app.panes[1].viewport.offset(), 0, "the other pane stays");
+
+    // Focus the second pane: the composer now acts on the other session and
+    // scrolling moves only that pane, after a frame has measured it.
+    app.focused_pane = 1;
+    assert_eq!(app.focused(), Some(other));
+    let frame = frame_text(&renderer.frame_and_commit(&mut app, 80, 12));
+    assert!(
+        frame.contains("other 39"),
+        "the focused pane paints: {frame}"
+    );
+    assert!(!frame.contains("row 39"));
+    scroll_up(&mut app);
+    assert!(app.panes[1].viewport.offset() > 0);
+    assert_eq!(app.panes[0].viewport.offset(), scrolled);
+
+    // Back to the first pane: its offset survived the detour.
+    app.focused_pane = 0;
+    assert_eq!(app.focused(), Some(first));
+    renderer.frame_and_commit(&mut app, 80, 12);
+    assert_eq!(app.panes[0].viewport.offset(), scrolled);
+}
+
+#[test]
+fn a_non_zero_pane_keeps_its_tail_anchor_when_its_live_message_settles() {
+    let (mut app, _, other) = app_with_two_panes(1);
+    let session = app.sessions.get_mut(&other).unwrap();
+    let message = &mut session.messages.as_mut().unwrap()[0];
+    message.state = MessageState::Streaming;
+    message.output = (0..2_000)
+        .map(|row| format!("LIVE-ROW-{row:04}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.focused_pane = 1;
+
+    let mut renderer = FrameRenderer::default();
+    renderer.frame_and_commit(&mut app, 80, 24);
+    assert!(
+        !app.panes[1].live_message_ranges.is_empty(),
+        "the pane records where its streaming message sat"
+    );
+    assert!(app.panes[0].live_message_ranges.is_empty());
+    scroll_up(&mut app);
+    let live_offset = app.panes[1].viewport.offset();
+    assert!(live_offset > 0);
+
+    let session = app.sessions.get_mut(&other).unwrap();
+    session.messages.as_mut().unwrap()[0].state = MessageState::Complete;
+    session.loaded_through += 1;
+    renderer.frame_and_commit(&mut app, 80, 24);
+
+    assert_eq!(app.panes[1].viewport.offset(), live_offset);
+    assert!(app.panes[1].live_message_ranges.is_empty());
+    assert_eq!(app.panes[0].viewport.offset(), 0);
+}
+
+#[test]
+fn a_pane_following_a_deleted_session_shows_the_empty_prompt() {
+    let (mut app, _, other) = app_with_two_sessions(2);
+    app.layout.rail = crate::view::PanePref::Hidden;
+    app.focus_session(other);
+    let mut renderer = FrameRenderer::default();
+    assert!(frame_text(&renderer.frame_and_commit(&mut app, 80, 12)).contains("other 1"));
+
+    // The session vanishes from the store without a refocus effect reaching
+    // this pane, as a second pane's session could after L4.
+    app.sessions.remove(&other);
+    assert_eq!(app.view(), View::Transcript(Some(other)));
+
+    let frame = frame_text(&renderer.frame_and_commit(&mut app, 80, 12));
+    assert!(
+        frame.contains("creates the first session"),
+        "stale pane falls back to the empty prompt: {frame}"
+    );
+    assert!(!frame.contains("Loading session history"));
+    assert_eq!(app.panes[0].viewport.offset(), 0);
 }
 
 #[test]
@@ -2792,11 +2924,31 @@ fn paths_elide_from_the_middle_and_keep_the_file_name() {
     assert_eq!(elide_path("crates/qq-tui/src/view/tools.rs", 8), "…ools.rs");
 }
 
+/// Regression: a width equal to `…/` plus the file name used to underflow
+/// the skip count and panic in debug builds.
+#[test]
+fn paths_elide_at_exact_tail_boundary_without_panicking() {
+    assert_eq!(
+        elide_path("crates/qq-tui/src/view/tools.rs", 10),
+        "…/tools.rs"
+    );
+    assert_eq!(
+        elide_path("crates/qq-tui/src/view/tools.rs", 9),
+        "…tools.rs"
+    );
+    for width in 0..=40 {
+        let out = elide_path("crates/qq-tui/src/view/tools.rs", width);
+        if width >= 6 {
+            assert!(out.chars().count() <= width, "{width}: {out:?}");
+        }
+    }
+}
+
 /// A parent with a child session that is running and waiting on a `shell`
 /// approval; the child's body is warm so the call is known client-side.
 fn app_with_child_awaiting_approval() -> (App, SessionId, SessionId, RunId, ToolCallId) {
     let mut app = app_with_messages(1);
-    app.sidebar = crate::app::Sidebar::Hidden;
+    app.layout.rail = crate::view::PanePref::Hidden;
     let parent = app.focused().unwrap();
     let child_id = SessionId::from_bytes([0x40; 16]);
     let run_id = RunId::from_bytes([0x41; 16]);
@@ -2945,7 +3097,7 @@ fn shift_n_denies_and_steers_with_an_amendment() {
 #[test]
 fn the_sidebar_groups_sessions_by_what_the_user_should_do() {
     let (mut app, parent, child_id, _, _) = app_with_child_awaiting_approval();
-    app.sidebar = crate::app::Sidebar::Shown;
+    app.layout.rail = crate::view::PanePref::Shown;
     // A third session that finished while unfocused.
     let done_id = SessionId::from_bytes([0x50; 16]);
     let done_run = RunId::from_bytes([0x51; 16]);
@@ -3061,7 +3213,7 @@ fn the_attention_pane_lists_needs_most_urgent_first_and_the_changes_pane_flags_o
 
     // Focusing a session returns to its transcript.
     app.focus_session(parent);
-    assert_eq!(app.view, View::Transcript(Some(parent)));
+    assert_eq!(app.view(), View::Transcript(Some(parent)));
 }
 
 #[test]

@@ -166,9 +166,19 @@ pub(crate) enum RuntimeEvent {
     /// Queued steering entered model context: the message will be part of
     /// the request for `turn_ordinal`. Emitted at the boundary, before that
     /// turn is prepared.
+    /// The run summarized its own turns through `turn_cutoff` before
+    /// preparing `turn_ordinal`; the compactor already committed the marker.
+    /// Informational for the session layer (occupancy is unknown again).
+    InRunCompacted {
+        turn_ordinal: u32,
+        turn_cutoff: u32,
+    },
     SteeringApplied {
         message_id: MessageId,
         turn_ordinal: u32,
+        /// Files the applied message read, for the store to keep as this
+        /// message's attachments. Empty for text-only steering.
+        attachments: Vec<crate::input::ResolvedAttachment>,
     },
     /// An interrupting steer aborted turn `turn_ordinal` in flight. Emitted
     /// after the partial turn (if any text streamed) is committed via

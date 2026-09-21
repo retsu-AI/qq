@@ -1198,6 +1198,17 @@ Response `WorkspaceSnapshot`:
 Snapshots are the catch-up mechanism after connect or cursor loss. Live SSE
 then advances the client from `cursor`.
 
+`session_limit` and `message_limit` are count bounds. Body rows are also
+admitted under one byte budget (6 MiB of escaped text plus a fixed per-row
+charge) spent by the focused body first and then by `included` bodies in
+request order, so a response always serializes under the 8 MiB snapshot cap
+however large the transcripts are. Within a body, messages and tool calls are
+admitted newest-first; when the budget runs out the body keeps a contiguous
+newest tail and sets `has_older_messages` / `has_older_tool_calls`, exactly
+as a count cut does. Older rows remain reachable through a later snapshot
+(the TUI already fetches non-prewarmed bodies cold) and tool-result recall.
+Session summaries and run rows are never cut by transcript size.
+
 ### `POST /v1/models`
 
 Model catalog lookup for a workspace and selection hint.
@@ -1832,6 +1843,7 @@ Current server/client bounds that affect interoperability:
 | Agent profile id | 64 bytes |
 | Snapshot `session_limit` | 1..=512 |
 | Bootstrap snapshot used by the shipped TUI client | 512 sessions / 256 messages |
+| Snapshot body text across focused and included bodies | 6 MiB escaped, newest rows first |
 
 Field-level validation rejects empty prompts/paths where applicable and
 unknown fields on structured request bodies.

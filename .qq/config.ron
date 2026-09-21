@@ -1,6 +1,7 @@
 (
     policy: (
         allow_tools: [
+            "exec",
             "edit_file",
         ],
         allow_shell_prefixes: [

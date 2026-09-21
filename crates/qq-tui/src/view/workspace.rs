@@ -185,3 +185,20 @@ fn diff_counts(diff: &str) -> (usize, usize) {
     }
     (added, removed)
 }
+
+/// The inspector column at Wide and above. Until slice L3 moves tool detail
+/// here it is a reserved region drawn as a bordered pane so the layout is
+/// visible and cheap: one header row, then bare borders. Always `height`
+/// rows so it zips onto the body.
+pub(super) fn inspector_pane(_app: &App, width: usize, height: usize) -> Vec<Line> {
+    let mut lines = Vec::with_capacity(height);
+    let mut header = Line::styled("│ ", border());
+    header.push("INSPECTOR", muted().bold());
+    lines.push(truncate_line(header, width));
+    let rule = Line::styled("│", border());
+    while lines.len() < height {
+        lines.push(rule.clone());
+    }
+    lines.truncate(height);
+    lines
+}

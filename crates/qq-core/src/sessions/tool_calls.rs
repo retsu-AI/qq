@@ -213,6 +213,12 @@ pub(super) fn store_tool_spill(
 /// One stored output for `read_tool_result`. The call-id prefix locates the
 /// row; the digest prefix must agree so a handle from another store cannot
 /// alias a row here; the session must be the caller's.
+///
+/// Two kinds of row answer a handle. A `tool_spills` row holds the complete
+/// output of a call whose own bound cut it. When no spill matches, the
+/// call's persisted `tool_calls.result` answers instead: that is the text a
+/// turn-budget cut names when the call itself did not spill, digested as
+/// stored, so the handle in the marker pins exactly the row it was made from.
 pub(super) fn read_tool_spill(
     connection: &Connection,
     session_id: SessionId,
@@ -239,23 +245,55 @@ pub(super) fn read_tool_spill(
             },
         )
         .optional()?;
-    let Some((owner, tool, digest, content, omitted_from_line)) = row else {
-        return Ok(SpillRead::Missing);
-    };
-    if !digest.starts_with(digest_prefix) {
-        return Ok(SpillRead::Missing);
+    match row {
+        Some((owner, tool, digest, content, omitted_from_line))
+            if digest.starts_with(digest_prefix) =>
+        {
+            if owner != session_id.to_string() {
+                return Ok(SpillRead::ForeignSession);
+            }
+            let Some(content) = content else {
+                return Ok(SpillRead::Evicted);
+            };
+            Ok(SpillRead::Found {
+                tool,
+                text: String::from_utf8_lossy(&content).into_owned(),
+                omitted_from_line: usize::try_from(omitted_from_line).unwrap_or(0),
+            })
+        }
+        Some(_) | None => {
+            let row = connection
+                .query_row(
+                    "SELECT r.session_id, c.name, c.result FROM tool_calls c
+                     JOIN runs r ON r.id = c.run_id
+                     WHERE c.id >= ?1 AND c.id < ?2 AND c.result IS NOT NULL
+                     ORDER BY c.id LIMIT 1",
+                    params![tool_call_prefix, upper],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((owner, tool, result)) = row else {
+                return Ok(SpillRead::Missing);
+            };
+            if !crate::workspace::content_hash(result.as_bytes()).starts_with(digest_prefix) {
+                return Ok(SpillRead::Missing);
+            }
+            if owner != session_id.to_string() {
+                return Ok(SpillRead::ForeignSession);
+            }
+            Ok(SpillRead::Found {
+                tool,
+                text: result,
+                omitted_from_line: 0,
+            })
+        }
     }
-    if owner != session_id.to_string() {
-        return Ok(SpillRead::ForeignSession);
-    }
-    let Some(content) = content else {
-        return Ok(SpillRead::Evicted);
-    };
-    Ok(SpillRead::Found {
-        tool,
-        text: String::from_utf8_lossy(&content).into_owned(),
-        omitted_from_line: usize::try_from(omitted_from_line).unwrap_or(0),
-    })
 }
 
 /// Upserts one file-state entry, evicting the least-recently recorded paths

@@ -1,5 +1,5 @@
 use super::*;
-use crate::render::{diff_line_style, surface_color};
+use crate::render::{border, diff_line_style, surface_color};
 use unicode_width::UnicodeWidthChar;
 
 fn frame_rows(frame: &[Line]) -> Vec<String> {
@@ -116,7 +116,7 @@ fn soft_breaks_reflow_paragraphs_to_the_render_width() {
     // ...and rewraps at the terminal width, not the source width.
     assert_eq!(
         frame_rows(&markdown_lines("alpha beta\ngamma delta", 12, false)),
-        ["alpha beta ", "gamma delta"]
+        ["alpha beta", "gamma delta"]
     );
     // A hard break still forces an explicit line break.
     assert_eq!(
@@ -358,7 +358,10 @@ fn headings_get_a_blank_line_above_and_lists_stay_tight() {
         false,
     ));
 
-    assert_eq!(rows, ["intro", "", "Title", "- alpha", "- beta"]);
+    assert_eq!(
+        rows,
+        ["intro", "", "Title", "─────", "", "• alpha", "• beta"]
+    );
 }
 
 #[test]
@@ -442,4 +445,198 @@ mod settled_prefix_tests {
             previous = settled;
         }
     }
+}
+
+/// Every block element the transcript lays out, in one message.
+const GALLERY: &str = "\
+First paragraph of prose.
+
+Second paragraph of prose, directly after the first.
+
+# Level one heading
+
+## Level two heading
+
+### Level three heading
+
+1. First numbered item
+2. Second numbered item that is deliberately long enough to wrap onto a second row at this width
+3. Third numbered item
+   - nested bullet under three
+
+- A bullet item that is also deliberately long enough to wrap onto a second physical row here
+- Short bullet
+
+- [ ] open task
+- [x] done task
+
+> A quote long enough to wrap onto a second row so we can see whether the rail repeats.
+
+Some *emphasis*, some **strong**, some `inline code`, a [link](https://example.com/x), a footnote[^1], and math $x^2$.
+
+[^1]: The footnote body.
+
+```rust
+fn main() {
+    let x = 1;
+}
+```
+
+| Role | Default |
+| --- | --- |
+| text | white |
+
+---
+
+Tail paragraph.
+";
+
+#[test]
+fn ordered_lists_keep_their_numbers_right_aligned() {
+    let rows = frame_rows(&markdown_lines(
+        "1. one\n2. two\n3. three\n4. four\n5. five\n6. six\n7. seven\n8. eight\n9. nine\n10. ten",
+        40,
+        false,
+    ));
+    assert_eq!(rows[0], " 1. one");
+    assert_eq!(rows[8], " 9. nine");
+    assert_eq!(rows[9], "10. ten");
+    let lines = markdown_lines("1. one", 40, false);
+    assert_eq!(style_of(&lines, "1."), Some(accent()));
+}
+
+#[test]
+fn wrapped_list_items_hang_under_their_text() {
+    let rows = frame_rows(&markdown_lines(
+        "1. alpha beta gamma delta epsilon\n\n- alpha beta gamma delta epsilon\n  - zeta eta theta iota kappa",
+        18,
+        false,
+    ));
+    assert_eq!(rows[0], "1. alpha beta");
+    assert_eq!(rows[1], "   gamma delta");
+    assert_eq!(rows[2], "   epsilon");
+    assert_eq!(rows[3], "");
+    assert_eq!(rows[4], "• alpha beta gamma");
+    assert_eq!(rows[5], "  delta epsilon");
+    assert_eq!(rows[6], "  ◦ zeta eta theta");
+    assert_eq!(rows[7], "    iota kappa");
+}
+
+#[test]
+fn task_items_use_box_glyphs_without_a_bullet() {
+    let rows = frame_rows(&markdown_lines("- [ ] open\n- [x] done", 40, false));
+    assert_eq!(rows, ["☐ open", "☑ done"]);
+    let lines = markdown_lines("- [x] done", 40, false);
+    assert_eq!(style_of(&lines, "☑"), Some(accent()));
+}
+
+#[test]
+fn quotes_carry_the_rail_on_every_wrapped_row() {
+    let lines = markdown_lines("> alpha beta gamma delta epsilon zeta", 14, false);
+    let rows = frame_rows(&lines);
+    assert!(rows.len() >= 3, "{rows:?}");
+    for row in &rows {
+        assert!(row.starts_with("▎ "), "{row:?}");
+        assert!(row.chars().count() <= 14, "{row:?}");
+    }
+    assert_eq!(style_of(&lines, "▎"), Some(muted()));
+    assert_eq!(style_of(&lines, "alpha"), Some(muted().italic()));
+}
+
+#[test]
+fn rules_span_the_content_width_in_the_border_style() {
+    let lines = markdown_lines("above\n\n---\n\nbelow", 24, false);
+    let rows = frame_rows(&lines);
+    let rule = "─".repeat(24);
+    assert_eq!(rows, ["above", "", rule.as_str(), "", "below"]);
+    assert_eq!(style_of(&lines, "──"), Some(border()));
+}
+
+#[test]
+fn heading_levels_differ_and_h1_is_underlined() {
+    let lines = markdown_lines("# One\n\n## Two\n\n### Three\n\ntext", 40, false);
+    let rows = frame_rows(&lines);
+    assert_eq!(rows, ["One", "───", "", "Two", "", "Three", "", "text"]);
+    assert_eq!(style_of(&lines, "One"), Some(normal().bold()));
+    assert_eq!(style_of(&lines, "───"), Some(border()));
+    assert_eq!(style_of(&lines, "Two"), Some(accent().bold()));
+    assert_eq!(style_of(&lines, "Three"), Some(normal().bold()));
+}
+
+#[test]
+fn exactly_one_blank_row_separates_every_block_in_the_gallery() {
+    let rows = frame_rows(&markdown_lines(GALLERY, 80, false));
+    assert!(
+        !rows.first().is_some_and(String::is_empty),
+        "no leading gap"
+    );
+    assert!(
+        !rows.last().is_some_and(String::is_empty),
+        "no trailing gap"
+    );
+    for pair in rows.windows(2) {
+        assert!(
+            !(pair[0].is_empty() && pair[1].is_empty()),
+            "two consecutive blank rows in {rows:#?}"
+        );
+    }
+    // Each of these begins a block whose predecessor is a different block,
+    // so the row before it must be blank.
+    for needle in [
+        "Second paragraph",
+        "Level one heading",
+        "Level two heading",
+        "Level three heading",
+        "1. First numbered",
+        "• A bullet item",
+        "▎ A quote",
+        "Some emphasis",
+        "The footnote body",
+        "│ rust",
+        "Role",
+        "Tail paragraph",
+    ] {
+        let at = rows
+            .iter()
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} missing from {rows:#?}"));
+        assert!(
+            at > 0 && rows[at - 1].is_empty(),
+            "{needle:?} has no gap above: {rows:#?}"
+        );
+    }
+    // The horizontal rule spans the width; the H1 underline (title width)
+    // sits directly under its heading and is not a block of its own.
+    let rule = rows
+        .iter()
+        .position(|r| *r == "─".repeat(80))
+        .expect("full-width rule");
+    assert!(
+        rows[rule - 1].is_empty() && rows[rule + 1].is_empty(),
+        "{rows:#?}"
+    );
+    let h1 = rows
+        .iter()
+        .position(|r| r.contains("Level one heading"))
+        .unwrap();
+    assert_eq!(rows[h1 + 1], "─".repeat("Level one heading".len()));
+    // Rows inside one list and one table stay tight. `- Short bullet` and
+    // `- [ ] open task` are one CommonMark list despite the blank line
+    // between them, so the task items follow the bullets directly.
+    let second = rows.iter().position(|r| r.contains("2. Second")).unwrap();
+    assert!(!rows[second - 1].is_empty(), "list items stay tight");
+    let open_task = rows.iter().position(|r| r.contains("☐ open task")).unwrap();
+    assert_eq!(rows[open_task - 1], "• Short bullet");
+    let text_row = rows.iter().position(|r| r.contains("text")).unwrap();
+    assert!(!rows[text_row - 1].is_empty(), "table rows stay tight");
+    // The whole gallery renders identically whether laid out at once or
+    // through the settled prefix used while streaming.
+    let split = settled_prefix_end(GALLERY);
+    let mut streamed = markdown_lines(&GALLERY[..split], 80, false);
+    streamed.extend(markdown_lines(&GALLERY[split..], 80, false));
+    let streamed = frame_rows(&streamed);
+    assert!(
+        rows.starts_with(&streamed[..streamed.len().min(8)]),
+        "streaming prefix layout diverges"
+    );
 }
