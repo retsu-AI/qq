@@ -39,6 +39,9 @@ bench-support = []
 
 [dev-dependencies]
 qq-tui = { path = ".", features = ["bench-support"] }
+# Compiled theme documents for the gallery dump; already in the graph via
+# qq-core, so no new closure.
+qq-config.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [[bench]]

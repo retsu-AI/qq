@@ -3011,6 +3011,7 @@ dependencies = [
  "futures-util",
  "pulldown-cmark",
  "qq-client",
+ "qq-config",
  "qq-core",
  "qq-protocol",
  "qq-tui",

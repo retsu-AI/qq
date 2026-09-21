@@ -53,6 +53,8 @@ may append a **request** row; only root changes a request's status.
 | 0033 | Preserve explicit model choices during optional routing | J6b stacked Jev implementation | Accepted locally; schema 32 |
 | 0034 | Bounded concrete Jev routing and inherited activation | J6b stacked Jev implementation | Accepted locally; descriptor 9 |
 | 0035 | Allow regular-file leaf targets for global configuration sources | GitHub #83 / Home Manager global config | Accepted locally; `docs/adr/0035-global-leaf-config-symlinks.md` |
+| 0036 | Designed truecolor default theme `ink` with `terminal` ANSI fallback | tui-redesign U5 | Reserved 2026-09-20 |
+| 0037 | Responsive TUI layout: width-selected tiers and panes, never features | tui-redesign U8 (L1–L4) | Reserved 2026-09-20 |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -123,7 +125,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0036. Reserve here before opening a PR that adds an ADR.
+Next free number: 0038. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -137,6 +139,8 @@ Next free number: 0036. Reserve here before opening a PR that adds an ADR.
 | 2026-09-11 | tool-layer plan | `docs/plans/README.md`, `docs/README.md` | Plan row, priority entry, catalog link | Done |
 | 2026-09-12 | tool-layer T2 | root `Cargo.toml`, `Cargo.lock` | Add `ignore = "0.4"` and `regex = "1"` to `[workspace.dependencies]` for `qq-core` (no version bumps; `regex` was already locked via tree-sitter) | Done (#32; `Cargo.toml` rows present) |
 | 2026-09-14 | tool-layer T6 (ahead of start) | root `Cargo.toml`, `Cargo.lock` | Promote `tree-sitter` and `tree-sitter-bash` to `[workspace.dependencies]` for the shell classifier (`approval/classify.rs`); `qq-tui` already depends on `tree-sitter = "0.26"` / `tree-sitter-bash = "0.25"` directly; promote those rows to the workspace table and point `qq-tui` at them so `qq-core` shares one version. No lock delta | Done (#40; `Cargo.toml` `[workspace.dependencies]`, both crates `.workspace = true`) |
+| 2026-09-20 | tui-redesign | `AGENTS.md` § Git And Reviews | Linear team is `ENG` (per the 2026-09-19 entry below and the live board), not `DEV`; fix the reference and the branch-name examples | Open |
+| 2026-09-20 | tui-redesign | `docs/plans/README.md`, `docs/README.md` | Plan row and priority entry for `tui-redesign.md`; design index entry for `docs/design/layout.md` when U8 ships | Open |
 
 Shared files: root `Cargo.toml` and `Cargo.lock` version bumps,
 `rust-toolchain.toml`, `flake.nix`, `.github/workflows/*`,
