@@ -56,6 +56,7 @@ may append a **request** row; only root changes a request's status.
 | 0035 | Allow regular-file leaf targets for global configuration sources | GitHub #83 / Home Manager global config | Accepted locally; `docs/adr/0035-global-leaf-config-symlinks.md` |
 | 0036 | Designed truecolor default theme `ink` with `terminal` ANSI fallback | tui-redesign U5 | Reserved 2026-09-20 |
 | 0037 | Responsive TUI layout: width-selected tiers and panes, never features | tui-redesign U8 (L1–L4) | Reserved 2026-09-20 |
+| 0038 | Two-phase retry ownership: provider owns pre-event sends, the run owns post-event turn recovery and `Paused`; supersedes ADR-0005 | run-reliability RR4 | Reserved 2026-09-21 |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
