@@ -10,7 +10,7 @@ Raw frames and bench reports live under `target/qq-perf/tui-<slice>-<date>/`
 | L1 ([ENG-845](https://linear.app/retsu-ai/issue/ENG-845)) | Layout engine, tiers, raised clamps, placed measure | Shipped (`7585711`, [#87](https://github.com/retsu-AI/qq/pull/87)) | | 2026-09-20 |
 | L2 ([ENG-846](https://linear.app/retsu-ai/issue/ENG-846)) | Per-pane transcript state | In review | `feat/eng-846-l2-pane-state` | Rebased onto main after #87; one visible pane until L4 |
 | U1 ([ENG-847](https://linear.app/retsu-ai/issue/ENG-847)) | Block rhythm and lists | In review | `feat/eng-847-u1-markdown-rhythm` | Stacked on L2 |
-| U2 ([ENG-848](https://linear.app/retsu-ai/issue/ENG-848)) | Inline styling, `Style.underline` | Planned | | Needs U0 |
+| U2 ([ENG-848](https://linear.app/retsu-ai/issue/ENG-848)) | Inline styling, `Style.underline` | In review | `feat/eng-848-u2-inline-styling` | Stacked on U1 |
 | U3 ([ENG-849](https://linear.app/retsu-ai/issue/ENG-849)) | Code panel | Planned | | Needs U0 |
 | U4 ([ENG-850](https://linear.app/retsu-ai/issue/ENG-850)) | Syntax palette, theme `syntax` block | Planned | | Needs U0 |
 | U5 ([ENG-851](https://linear.app/retsu-ai/issue/ENG-851)) | `ink` default theme, `terminal` fallback, ADR 0036 | Planned | | Needs U4 |
@@ -156,3 +156,24 @@ Baseline: `cargo bench -p qq-tui --bench render` on `51ccf13` recorded to
 - Docs: `transcript.md` § Spacing amended, new § Markdown Blocks.
 - Two subagent attempts at this slice timed out at the provider before
   writing anything; implemented directly.
+
+### 2026-09-20 — U2 receipt
+
+- Inline code is `text` on `surface` (`render::inline_code`), link text is
+  `accent` underlined (`render::link`) pushed on the markdown style stack for
+  the link's extent, math is `muted`; footnote refs unchanged (`accent`).
+- `Style` gained underline. A fourth `bool` field measured +5 % on
+  `streaming_run_on_32kb` (3 paired A/B runs, pinned core: 452 → 475 µs), so
+  the attributes are a packed `Attributes(u8)` instead; `Style` is 9 bytes
+  (pinned by `style_stays_nine_bytes`) and the same bench lands at 434 µs
+  (−4 % vs base). `write_line` now derives "attribute dropped" and "attribute
+  added" from bit differences.
+- Tests: `underline_is_emitted_once_and_cleared_by_a_reset` (byte-level),
+  `inline_code_is_plain_text_on_the_surface`,
+  `link_text_is_underlined_accent_and_the_url_is_dropped`,
+  `footnote_references_are_accent_and_math_is_muted`. 270 lib + 5 golden.
+  Goldens unchanged (plain-text frames; this slice is color/attribute only).
+- Bench (`target/qq-perf/tui-U2-2026-09-20/after.txt`, pinned core):
+  steady_state 21.5 µs, streaming_focused 33.9, run_on 433.6, keystroke 26.6,
+  golden_path 39.0, resize_horizontal 31.8, compact 19.0.
+- Docs: `transcript.md` inline code bullet amended; new § Inline Styling.

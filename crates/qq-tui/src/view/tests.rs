@@ -2740,7 +2740,7 @@ fn no_role_style_relies_on_dim_and_muted_is_a_color_step_only() {
         info(),
         border(),
     ] {
-        assert!(!style.dim, "{style:?}");
+        assert!(!style.is_dim(), "{style:?}");
     }
     assert_ne!(muted().color, normal().color);
 }

@@ -12,13 +12,34 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{app::terminal_safe_character, theme};
 
+/// Text attributes packed into one byte. `Style` is copied and compared on
+/// every span in the wrap and diff hot paths; adding a fourth `bool` field
+/// measured +5 % on the 32 KiB streaming ceiling, so the flags live here and
+/// `Style` stays at nine bytes (two `Option<Color>` plus this).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Attributes(u8);
+
+impl Attributes {
+    const BOLD: u8 = 1;
+    const DIM: u8 = 1 << 1;
+    const ITALIC: u8 = 1 << 2;
+    const UNDERLINE: u8 = 1 << 3;
+
+    const fn has(self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+
+    /// Flags set in `self` but not in `other`.
+    const fn added_over(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Style {
     pub(crate) color: Option<Color>,
     pub(crate) background: Option<Color>,
-    pub(crate) bold: bool,
-    pub(crate) dim: bool,
-    pub(crate) italic: bool,
+    attributes: Attributes,
 }
 
 impl Style {
@@ -26,9 +47,7 @@ impl Style {
         Self {
             color: Some(color),
             background: None,
-            bold: false,
-            dim: false,
-            italic: false,
+            attributes: Attributes(0),
         }
     }
 
@@ -38,18 +57,43 @@ impl Style {
     }
 
     pub(crate) const fn bold(mut self) -> Self {
-        self.bold = true;
+        self.attributes.0 |= Attributes::BOLD;
         self
     }
 
     pub(crate) const fn dim(mut self) -> Self {
-        self.dim = true;
+        self.attributes.0 |= Attributes::DIM;
         self
     }
 
     pub(crate) const fn italic(mut self) -> Self {
-        self.italic = true;
+        self.attributes.0 |= Attributes::ITALIC;
         self
+    }
+
+    pub(crate) const fn underline(mut self) -> Self {
+        self.attributes.0 |= Attributes::UNDERLINE;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn is_bold(self) -> bool {
+        self.attributes.has(Attributes::BOLD)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn is_dim(self) -> bool {
+        self.attributes.has(Attributes::DIM)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn is_italic(self) -> bool {
+        self.attributes.has(Attributes::ITALIC)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn is_underline(self) -> bool {
+        self.attributes.has(Attributes::UNDERLINE)
     }
 }
 
@@ -166,6 +210,18 @@ pub(crate) fn surface(style: Style) -> Style {
     style.on(surface_color())
 }
 
+/// Inline code: plain text on the panel surface, so a `name` in prose shares
+/// its tint with fenced blocks instead of shouting in the warning color.
+pub(crate) fn inline_code() -> Style {
+    surface(normal())
+}
+
+/// Link text: accent and underlined. The URL is not rendered (no OSC 8), so
+/// the underline is what marks the span as a link.
+pub(crate) fn link() -> Style {
+    accent().underline()
+}
+
 /// Syntax palette for highlighted code panels, derived from theme roles so
 /// every theme colors code in its own voice: keywords in brand, strings in
 /// success, comments in muted, functions in accent, types in warning,
@@ -236,9 +292,9 @@ pub(crate) fn write_line(output: &mut impl Write, line: &Line) -> io::Result<()>
         }
         let next = span.style;
         if next != current {
-            let attribute_dropped = (current.bold && !next.bold)
-                || (current.dim && !next.dim)
-                || (current.italic && !next.italic);
+            // Any attribute that turns off needs SGR 0; bits set in current
+            // and clear in next.
+            let attribute_dropped = current.attributes.added_over(next.attributes).0 != 0;
             if attribute_dropped {
                 // SGR 0 clears colors too; no separate color reset needed.
                 queue!(output, SetAttribute(Attribute::Reset))?;
@@ -258,14 +314,18 @@ pub(crate) fn write_line(output: &mut impl Write, line: &Line) -> io::Result<()>
                 (Some(_), None) => queue!(output, SetBackgroundColor(Color::Reset))?,
                 _ => {}
             }
-            if next.bold && !current.bold {
+            let added = next.attributes.added_over(current.attributes);
+            if added.has(Attributes::BOLD) {
                 queue!(output, SetAttribute(Attribute::Bold))?;
             }
-            if next.dim && !current.dim {
+            if added.has(Attributes::DIM) {
                 queue!(output, SetAttribute(Attribute::Dim))?;
             }
-            if next.italic && !current.italic {
+            if added.has(Attributes::ITALIC) {
                 queue!(output, SetAttribute(Attribute::Italic))?;
+            }
+            if added.has(Attributes::UNDERLINE) {
+                queue!(output, SetAttribute(Attribute::Underlined))?;
             }
             current = next;
         }
@@ -325,6 +385,24 @@ mod tests {
         line.push("b", Style::color(Color::Red));
         let out = bytes(&line);
         assert_eq!(out, "\x1b[38;5;9m\x1b[1ma\x1b[0m\x1b[38;5;9mb", "{out:?}");
+    }
+
+    #[test]
+    fn underline_is_emitted_once_and_cleared_by_a_reset() {
+        let mut line = Line::styled("see ", Style::color(Color::Red));
+        line.push("here", Style::color(Color::Red).underline());
+        line.push(" now", Style::color(Color::Red));
+        let out = bytes(&line);
+        // red, underline on (color kept), reset then red again for the tail.
+        assert_eq!(
+            out, "\x1b[38;5;9msee \x1b[4mhere\x1b[0m\x1b[38;5;9m now",
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn style_stays_nine_bytes() {
+        assert_eq!(std::mem::size_of::<Style>(), 9);
     }
 
     #[test]

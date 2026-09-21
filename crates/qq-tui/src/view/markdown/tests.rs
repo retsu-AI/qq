@@ -1,5 +1,7 @@
 use super::*;
-use crate::render::{border, diff_line_style, surface_color};
+use crate::render::{
+    accent, border, diff_line_style, inline_code, link, muted, normal, surface_color,
+};
 use unicode_width::UnicodeWidthChar;
 
 fn frame_rows(frame: &[Line]) -> Vec<String> {
@@ -31,7 +33,7 @@ fn tables_render_aligned_columns_with_a_header_separator() {
             "2     │ Cached manifest".to_owned(),
         ]
     );
-    assert!(lines[0].spans[0].style.bold, "header row renders bold");
+    assert!(lines[0].spans[0].style.is_bold(), "header row renders bold");
 }
 
 #[test]
@@ -639,4 +641,44 @@ fn exactly_one_blank_row_separates_every_block_in_the_gallery() {
         rows.starts_with(&streamed[..streamed.len().min(8)]),
         "streaming prefix layout diverges"
     );
+}
+
+#[test]
+fn inline_code_is_plain_text_on_the_surface() {
+    let lines = markdown_lines("Call `parse()` then **`Ok`** here.", 60, false);
+    let code = style_of(&lines, "parse()").expect("code span");
+    assert_eq!(code, inline_code());
+    assert_eq!(code.color, normal().color);
+    assert_eq!(code.background, Some(surface_color()));
+    assert!(!code.is_bold(), "inline code is not bold");
+    // Strong around code does not leak into the code span: the tint is the mark.
+    assert_eq!(style_of(&lines, "Ok"), Some(inline_code()));
+    assert_eq!(style_of(&lines, "Call "), Some(normal()));
+}
+
+#[test]
+fn link_text_is_underlined_accent_and_the_url_is_dropped() {
+    let lines = markdown_lines(
+        "Read [the guide](https://example.com/guide) and *[emphasized](https://x.y)*.",
+        60,
+        false,
+    );
+    let rows = frame_rows(&lines);
+    assert_eq!(rows, vec!["Read the guide and emphasized."]);
+    let guide = style_of(&lines, "the guide").expect("link span");
+    assert_eq!(guide, link());
+    assert_eq!(guide.color, accent().color);
+    assert!(guide.is_underline());
+    // Emphasis outside the link is replaced by the link style inside it.
+    let inner = style_of(&lines, "emphasized").expect("link span");
+    assert!(inner.is_underline() && !inner.is_italic());
+    assert_eq!(style_of(&lines, "Read "), Some(normal()));
+    assert_eq!(style_of(&lines, " and "), Some(normal()));
+}
+
+#[test]
+fn footnote_references_are_accent_and_math_is_muted() {
+    let lines = markdown_lines("Fact[^1] with $x^2$ inline.\n\n[^1]: Source.", 60, false);
+    assert_eq!(style_of(&lines, "[1]"), Some(accent()));
+    assert_eq!(style_of(&lines, "$x^2$"), Some(muted()));
 }

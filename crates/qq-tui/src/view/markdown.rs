@@ -8,7 +8,8 @@ use crate::{
     app::terminal_safe_character,
     render::{
         Line, Style, accent, border, code_comment, code_constant, code_function, code_keyword,
-        code_property, code_string, code_type, diff_line_style, muted, normal, surface, warning,
+        code_property, code_string, code_type, diff_line_style, inline_code, link, muted, normal,
+        surface,
     },
     view::wrap::{wrap_line, wrap_line_chars},
 };
@@ -159,14 +160,10 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                     });
                 }
                 Tag::Strong => {
-                    let mut style = *styles.last().expect("base style remains");
-                    style.bold = true;
-                    styles.push(style);
+                    styles.push(styles.last().expect("base style remains").bold());
                 }
                 Tag::Emphasis => {
-                    let mut style = *styles.last().expect("base style remains");
-                    style.italic = true;
-                    styles.push(style);
+                    styles.push(styles.last().expect("base style remains").italic());
                 }
                 Tag::CodeBlock(kind) => {
                     block_gap(&mut lines, &mut literal, &mut hangs);
@@ -227,9 +224,7 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                         buffer.has_header = true;
                         buffer.begin_row();
                     }
-                    let mut style = *styles.last().expect("base style remains");
-                    style.bold = true;
-                    styles.push(style);
+                    styles.push(styles.last().expect("base style remains").bold());
                 }
                 Tag::TableRow => {
                     if let Some(buffer) = table.as_mut() {
@@ -244,8 +239,10 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                 Tag::FootnoteDefinition(_) => {
                     block_gap(&mut lines, &mut literal, &mut hangs);
                 }
-                Tag::Link { .. }
-                | Tag::Image { .. }
+                Tag::Link { .. } => {
+                    styles.push(link());
+                }
+                Tag::Image { .. }
                 | Tag::HtmlBlock
                 | Tag::DefinitionList
                 | Tag::DefinitionListTitle
@@ -299,7 +296,7 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                         hangs.push(None);
                     }
                 }
-                TagEnd::Strong | TagEnd::Emphasis => {
+                TagEnd::Strong | TagEnd::Emphasis | TagEnd::Link => {
                     styles.pop();
                 }
                 TagEnd::List(_) => {
@@ -344,8 +341,7 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                 TagEnd::FootnoteDefinition => {
                     ensure_line(&mut lines, &mut literal, &mut hangs);
                 }
-                TagEnd::Link
-                | TagEnd::Image
+                TagEnd::Image
                 | TagEnd::HtmlBlock
                 | TagEnd::DefinitionList
                 | TagEnd::DefinitionListTitle
@@ -375,7 +371,7 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                 if table.is_none() {
                     begin_inline(&mut lines, &mut hangs, &lists, quote_depth);
                 }
-                push_inline(table.as_mut(), &mut lines, &code, warning().bold());
+                push_inline(table.as_mut(), &mut lines, &code, inline_code());
             }
             // A soft break is a source-formatting line break: render it as a
             // space so paragraphs reflow to the terminal width.
@@ -424,7 +420,7 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                 if table.is_none() {
                     begin_inline(&mut lines, &mut hangs, &lists, quote_depth);
                 }
-                push_inline(table.as_mut(), &mut lines, &format!("${math}$"), warning());
+                push_inline(table.as_mut(), &mut lines, &format!("${math}$"), muted());
             }
         }
         literal.resize(lines.len(), false);
