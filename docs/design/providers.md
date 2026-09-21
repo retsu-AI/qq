@@ -107,6 +107,16 @@ probes use `ProviderCompiler::compile_for_canary`, which disables direct HTTP
 and Mantle adapter retries through the facade. Bedrock's AWS SDK client already
 has SDK retries disabled.
 
+Transport failures render as `provider request failed: <phase>: <causes>`.
+`http.rs` names the phase itself (connection, response headers, response body,
+redirect) and walks the `reqwest::Error` source chain, because reqwest's
+`Display` prints only its kind label and files every body read failure —
+peer reset, truncated framing, idle timeout — under one kind that reads
+"error decoding response body". A timeout names which deadline expired
+(connect, headers, or the body's read/total timeout with the configured
+seconds). The URL is never included; credentials can appear in it and the
+caller already names the provider.
+
 Header consolidation follows the same boundary. `http.rs` defines universal
 request-controlled names and parses names and values, marks sensitive values,
 rejects case-insensitive duplicates and reserved-name overrides, and produces

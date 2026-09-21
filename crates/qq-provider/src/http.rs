@@ -623,10 +623,58 @@ fn client_builder() -> reqwest::ClientBuilder {
 }
 
 pub(crate) fn transport_error(error: reqwest::Error, redactions: &[String]) -> ProviderError {
-    ProviderError::Transport(sanitize_message(
-        &error.without_url().to_string(),
-        redactions,
-    ))
+    ProviderError::Transport(sanitize_message(&describe_transport(&error), redactions))
+}
+
+/// reqwest's `Display` prints only the error kind and drops the cause chain,
+/// and `bytes_stream` files every body read failure — peer reset, truncated
+/// framing, idle timeout — under one kind that renders as "error decoding
+/// response body". Name the phase ourselves and append the causes so the
+/// message says what happened. The URL is left out: it can carry credentials
+/// and the provider is already named by the caller.
+fn describe_transport(error: &reqwest::Error) -> String {
+    let body_phase = error.is_body() || error.is_decode();
+    if error.is_timeout() {
+        // The only cause below a timeout is reqwest's own "operation timed
+        // out"; the phase says more than the chain would.
+        return if body_phase {
+            format!(
+                "timed out waiting for response body (no bytes for {}s, or request past {}s)",
+                READ_TIMEOUT.as_secs(),
+                REQUEST_TIMEOUT.as_secs()
+            )
+        } else if error.is_connect() {
+            format!("timed out connecting after {}s", CONNECT_TIMEOUT.as_secs())
+        } else {
+            "timed out waiting for response headers".to_owned()
+        };
+    }
+
+    let mut message = String::from(if error.is_connect() {
+        "connection failed"
+    } else if body_phase {
+        "response body failed"
+    } else if error.is_redirect() {
+        "redirect failed"
+    } else if error.is_builder() {
+        "request build failed"
+    } else {
+        "request failed"
+    });
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        // Nested reqwest errors (the body wrapper under a `Decode`) would only
+        // add another kind label.
+        if !cause.is::<reqwest::Error>() {
+            let text = cause.to_string();
+            if !text.is_empty() && !message.ends_with(&text) {
+                message.push_str(": ");
+                message.push_str(&text);
+            }
+        }
+        source = cause.source();
+    }
+    message
 }
 
 pub(crate) fn is_event_stream_headers(headers: &HeaderMap) -> bool {
@@ -1206,6 +1254,95 @@ mod tests {
         assert!(!rendered.contains(secret));
         assert!(!rendered.contains("credential="));
         assert!(!rendered.contains('\n'));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_body_transport_error_names_the_timeout() {
+        // Regression: reqwest files a body read timeout under its `Decode`
+        // kind, whose `Display` is the bare "error decoding response body".
+        // A stream that returns headers and then never sends a byte must say
+        // that it timed out waiting for the body.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/stalled", listener.local_addr().unwrap());
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request_head(&mut stream);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+                )
+                .unwrap();
+            // Hold the connection open without sending until the client gave up.
+            released.recv().unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .read_timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let response = client.get(&url).send().await.unwrap();
+        let error = response
+            .bytes_stream()
+            .next()
+            .await
+            .expect("a stalled body must produce an error item")
+            .unwrap_err();
+        assert!(error.is_timeout(), "{error:?}");
+
+        let rendered = transport_error(error, &[]).to_string();
+
+        assert!(
+            rendered.contains("timed out waiting for response body"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("error decoding response body"),
+            "{rendered}"
+        );
+        release.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn truncated_body_transport_error_carries_the_cause() {
+        // Regression: a peer that closes mid-body must render the phase and
+        // the underlying cause, not only reqwest's kind label.
+        let (url, server) = serve_response(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_owned(),
+            b"5\r\nhel".to_vec(),
+        );
+        let response = build_direct_client()
+            .unwrap()
+            .get(&url)
+            .send()
+            .await
+            .unwrap();
+        let mut chunks = response.bytes_stream();
+        let mut error = None;
+        while let Some(item) = chunks.next().await {
+            if let Err(failure) = item {
+                error = Some(failure);
+                break;
+            }
+        }
+        let error = error.expect("a truncated chunked body must fail");
+
+        let rendered = transport_error(error, &[]).to_string();
+
+        assert!(
+            rendered.starts_with("provider request failed: response body failed: "),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("error decoding response body"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.len() > "provider request failed: response body failed: ".len(),
+            "cause chain missing: {rendered}"
+        );
         server.join().unwrap();
     }
 
