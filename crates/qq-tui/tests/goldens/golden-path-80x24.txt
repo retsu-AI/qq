@@ -1,10 +1,11 @@
  qq  Session 0                                           openai/gpt-test  $0.00
+
  ▌ YOU
  ▌ make the sse reconnect test deterministic
 
-   ● Read   crates/qq-client/src/sse.rs                       412 lines  0.0s
-   ● Run    cargo test -p qq-client reconnect                 exit 101  0.0s
-   ◐ Edit   crates/qq-client/src/sse.rs                       running  0.0s
+ ● Read   crates/qq-client/src/sse.rs                            412 lines  0.0s
+ ● Run    cargo test -p qq-client reconnect                       exit 101  0.0s
+ ◐ Edit   crates/qq-client/src/sse.rs                              running  0.0s
 
    QQ  streaming
    The test slept on wall-clock time; pausing the runtime clock removes the
@@ -17,8 +18,7 @@
 
 
 
-
-
  3 agents  ◐ 1
  ◐ working ──────────────────────────────────── F1 help  ^K commands  ^O detail
  › Ask QQ...
+

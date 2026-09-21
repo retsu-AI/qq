@@ -17,6 +17,8 @@ pub(super) const MAX_LIVE_TAIL_ROWS: usize = 6;
 pub(super) const TOOL_SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 /// Files named in a folded read-only group before `+N`.
 const FOLD_NAMED_FILES: usize = 3;
+/// Appended to a summary row's metric when the runtime cut the result short.
+const TRUNCATED_SUFFIX: &str = " · truncated";
 
 /// What the transcript needs to know about a tool call to draw its row,
 /// derived once from the JSON arguments and result and cached by the
@@ -665,8 +667,8 @@ pub(super) fn tool_fold_line(
             }
         }
     }
-    let mut line = Line::styled("   ", muted());
-    line.push("▸ ", accent());
+    // The fold glyph sits in the rail so the text starts at the prose column.
+    let mut line = Line::styled(" ▸ ", accent());
     for (index, (name, count)) in counts.iter().enumerate() {
         if index > 0 {
             line.push("  ", muted());
@@ -689,9 +691,12 @@ pub(super) fn tool_fold_line(
     truncate_line(line, width)
 }
 
-/// One gutter line: state glyph, verb, subject, metric, and duration. The
-/// subject column is fixed so metrics align down a run; paths elide from
-/// the middle so the file name always shows.
+/// One summary row: state glyph in the rail, verb at the prose column,
+/// subject, then metric and duration right-aligned to the content width so
+/// they line up down a run at every width. The subject takes what is left
+/// between verb and metric; paths elide from the middle so the file name
+/// always shows. When even a short subject would not fit, the duration goes
+/// first, then the metric, so the row degrades to verb and subject.
 pub(super) fn tool_summary_line(
     call: &ToolCallSnapshot,
     context: ToolRowContext<'_>,
@@ -700,7 +705,9 @@ pub(super) fn tool_summary_line(
 ) -> Line {
     let row = context.row;
     let (glyph, glyph_style) = tool_state_glyph(call, tick);
-    let mut line = Line::styled(if context.selected { " ▶ " } else { "   " }, accent());
+    // The cursor marker takes the margin cell so the state glyph keeps its
+    // rail cell and the row does not shift when selected.
+    let mut line = Line::styled(if context.selected { "▶" } else { " " }, accent());
     line.push(glyph, glyph_style);
     line.push(" ", muted());
     let label = row.label(call);
@@ -709,19 +716,21 @@ pub(super) fn tool_summary_line(
         format!("{label:<label_width$} "),
         if row.raw_name { muted() } else { normal() },
     );
+    // Rail (3) + padded label + separator; the label is ASCII or `·` (one
+    // cell), so the count is the width.
+    let mut used = 3 + label_width + 1;
     let running = call.state == ToolCallState::Running;
-    let mut right = Line::default();
-    if let Some(metric) = &row.metric {
-        right.push(metric.clone(), muted());
-        if row.truncated {
-            right.push(" · truncated", muted());
-        }
-    }
-    if call.state != ToolCallState::Completed {
-        if !right.is_empty() {
-            right.push(" · ", muted());
-        }
-        right.push(
+    let metric = row.metric.as_deref().filter(|metric| !metric.is_empty());
+    let metric_width = metric.map_or(0, |metric| {
+        text_width(metric)
+            + if row.truncated {
+                text_width(TRUNCATED_SUFFIX)
+            } else {
+                0
+            }
+    });
+    let state = (call.state != ToolCallState::Completed).then(|| {
+        (
             tool_state_label(call.state),
             match call.state {
                 ToolCallState::Failed | ToolCallState::Denied => failure(),
@@ -731,37 +740,73 @@ pub(super) fn tool_summary_line(
                 | ToolCallState::Interrupted
                 | ToolCallState::Completed => muted(),
             },
-        );
-    }
-    if let Some(duration) = context.clock.duration(running) {
-        right.push(
-            format!("  {}", format_duration_ms(duration)),
-            if running { info() } else { muted() },
-        );
-    }
-    // The subject occupies a fixed column so metrics line up down a run;
-    // narrow panes shrink the column, and paths give up their middle first.
-    let right_width = right.width();
-    let available = width
-        .saturating_sub(line.width())
-        .saturating_sub(if right_width > 0 { right_width + 2 } else { 0 });
-    let column = available.clamp(6, TOOL_SUBJECT_WIDTH);
-    if let Some(subject) = &row.subject {
-        let text = if row.subject_is_path {
-            elide_path(subject, column)
-        } else {
-            preview(subject, column)
-        };
-        let shown = text.chars().count();
-        line.push(text, normal());
-        if !right.is_empty() {
-            line.push(" ".repeat(column.saturating_sub(shown) + 2), muted());
+        )
+    });
+    let state_width = state.map_or(0, |(label, _)| label.len());
+    let duration = context.clock.duration(running).map(format_duration_ms);
+    let duration_width = duration.as_deref().map_or(0, |text| text.len() + 2);
+    // Right side: `metric · state  duration`, dropped from the right until
+    // the subject keeps its minimum column.
+    let mut show_duration = duration.is_some();
+    let mut show_metric = metric.is_some();
+    let right_width = |show_metric: bool, show_duration: bool| {
+        let mut total = if show_metric { metric_width } else { 0 };
+        if state.is_some() {
+            total += if show_metric { 3 } else { 0 } + state_width;
         }
-    } else if !right.is_empty() {
-        line.push(" ".repeat(column + 2), muted());
+        if show_duration {
+            total += duration_width;
+        }
+        total
+    };
+    let subject_min = if row.subject.is_some() { 6 } else { 0 };
+    let fits = |show_metric: bool, show_duration: bool| {
+        let right = right_width(show_metric, show_duration);
+        let gap = if right > 0 { 2 } else { 0 };
+        used + subject_min + gap + right <= width
+    };
+    if show_duration && !fits(show_metric, show_duration) {
+        show_duration = false;
     }
-    for span in right.spans {
-        line.push(span.text, span.style);
+    if show_metric && !fits(show_metric, show_duration) {
+        show_metric = false;
+    }
+    let right_width = right_width(show_metric, show_duration);
+    let gap = if right_width > 0 { 2 } else { 0 };
+    if let Some(subject) = &row.subject {
+        let available = width.saturating_sub(used + gap + right_width);
+        let text = if row.subject_is_path {
+            elide_path(subject, available)
+        } else {
+            preview(subject, available)
+        };
+        used += text_width(&text);
+        line.push(text, normal());
+    }
+    if right_width > 0 {
+        // Anchor the right side to the content width; a row that is still
+        // too narrow overflows and is truncated below.
+        line.push(
+            " ".repeat(width.saturating_sub(used + right_width).max(gap)),
+            muted(),
+        );
+        if show_metric && let Some(metric) = metric {
+            line.push(metric, muted());
+            if row.truncated {
+                line.push(TRUNCATED_SUFFIX, muted());
+            }
+        }
+        if let Some((label, style)) = state {
+            if show_metric {
+                line.push(" · ", muted());
+            }
+            line.push(label, style);
+        }
+        if show_duration && let Some(duration) = duration {
+            let style = if running { info() } else { muted() };
+            line.push("  ", style);
+            line.push(duration, style);
+        }
     }
     truncate_line(line, width)
 }

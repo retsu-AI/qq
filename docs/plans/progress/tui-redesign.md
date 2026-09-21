@@ -17,7 +17,7 @@ Raw frames and bench reports live under `target/qq-perf/tui-<slice>-<date>/`
 | U9 ([ENG-852](https://linear.app/retsu-ai/issue/ENG-852)) | Sessions rail, adaptive density | In review | [#101](https://github.com/retsu-AI/qq/pull/101) | Stacked on #100 |
 | L3 ([ENG-853](https://linear.app/retsu-ai/issue/ENG-853)) | Inspector pane | In review | [#104](https://github.com/retsu-AI/qq/pull/104) | Stacked on #103 |
 | L4 ([ENG-854](https://linear.app/retsu-ai/issue/ENG-854)) | Split transcripts | Planned | | Needs L2 |
-| U6 ([ENG-855](https://linear.app/retsu-ai/issue/ENG-855)) | Turn headers, geometry, tool rows | Planned | | Needs U1, L1 |
+| U6 ([ENG-855](https://linear.app/retsu-ai/issue/ENG-855)) | Turn headers, geometry, tool rows | In review | `feat/eng-855-u6-turn-geometry` | Stacked on U5 |
 | U7 ([ENG-856](https://linear.app/retsu-ai/issue/ENG-856)) | Tool detail panels | Planned | | Needs U3, L3 |
 | U8 ([ENG-857](https://linear.app/retsu-ai/issue/ENG-857)) | Chrome, `layout.md`, ADR 0037, receipts | Planned | | Last |
 
@@ -302,3 +302,30 @@ Baseline: `cargo bench -p qq-tui --bench render` on `51ccf13` recorded to
 - Bench (`target/qq-perf/tui-U5-2026-09-21/after.txt`, core 2): steady 22.0,
   golden_path 39.4, keystroke 26.8, run_on_32kb 417.6 µs — neutral; the
   harness still runs on the compiled ANSI palette (now named `terminal`).
+### 2026-09-21 — U6 receipt
+
+- Column model (S1/D9): tool glyph in the rail, verb at column 3 with prose;
+  fold `▸` in the rail; the cursor `▶` takes the margin cell so a selected row
+  no longer shifts. `QQ` header `brand` bold (S2/D2); user rail already on
+  every prompt row, now pinned by test. Metric/state/duration right-aligned
+  to the content width (S7); a row too narrow drops duration, then metric,
+  before eliding the subject below six cells. One blank top padding row is a
+  body row (`VirtualBody::pad_top`), so it scrolls off and never moves the
+  tail anchor. Composer padding row at ≥ 20 rows (`layout::
+  composer_padding_rows`, D8); `fixed_chrome_rows(height)` feeds the
+  composer cap so Compact still gets 4 rows at 80 × 24 (17 body rows left).
+- Tests: 9 new (289 → 298 lib; 6 golden). One golden-test slice moved
+  (`rows[1..len-2]` → `len-3`) for the padding row; no lib expectation changed.
+- Goldens: 40/40 moved. Every family: top padding row, composer padding row.
+  `golden-path`, `approval`, `tools-*`: verb column shift, right-aligned
+  metrics; `tools-expanded-{80,120}` lose one detail row to the padding.
+  `markdown-gallery-*`, `steering-*`, `reasoning-*`, `sessions-*`: padding only.
+- Bench (`target/qq-perf/tui-U6-2026-09-21/{before-2,after}.txt`, core 2,
+  quiet host): steady 21.9 → 21.8 µs; streaming_focused 34.0 → 34.2;
+  run_on_32kb 450.2 → 439.3; golden_path 38.8 → 39.4; keystroke 26.6 → 26.4;
+  tool_calls_32 rows/folded/expanded 23.3/12.6/52.0 → 24.1/12.5/53.2;
+  compact 19.7 → 19.5. `pad_top` inlined into `body` read +7 % on run_on
+  across 3 A/B pairs; `#[inline(never)]` brought it under baseline (same
+  pattern as the U4 highlight loop).
+- Docs: `transcript.md` new § Turn Headers, § Column Model, § Tool Rows,
+  § Spacing amended; `layout.md` § Geometry (padding row, chrome math).

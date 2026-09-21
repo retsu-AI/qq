@@ -6,15 +6,14 @@
      fn main() {}                                                                           │
      fn main() {}                                                                           │
      fn main() {}                                                                           │
-     fn main() {}                                                                           │
      … 8 lines more                                                                         │
-   ● Edit   crates/qq-tui/src/file_1.rs                       6 B                           │
+ ● Edit   crates/qq-tui/src/file_1.rs                                                    6 B│
      → 00:00:00                                                                             │
      edited                                                                                 │
-   ● Run    cargo test -p crate_2                                                           │
+ ● Run    cargo test -p crate_2                                                             │
      → 00:00:00                                                                             │
      test result: ok. 12 passed                                                             │
-   ● Read   crates/qq-tui/src/file_3.rs                       20 lines                      │
+ ● Read   crates/qq-tui/src/file_3.rs                                               20 lines│
      → 00:00:00                                                                             │
      fn main() {}                                                                           │
      fn main() {}                                                                           │
@@ -29,12 +28,13 @@
      fn main() {}                                                                           │
      fn main() {}                                                                           │
      … 8 lines more                                                                         │
-   ● Edit   crates/qq-tui/src/file_4.rs                       6 B                           │
+ ● Edit   crates/qq-tui/src/file_4.rs                                                    6 B│
      → 00:00:00                                                                             │
      edited                                                                                 │
-   ● Run    cargo test -p crate_5                                                           │
+ ● Run    cargo test -p crate_5                                                             │
      → 00:00:00                                                                             │
      test result: ok. 12 passed                                                             │
    ✓ 0.0s · 6 tools · ttft 0.0s                                                             │
 ─────────────────────────────────────────────────────────────────────────────────────── F1 help  ^K commands  ^O detail
  › Ask QQ...
+

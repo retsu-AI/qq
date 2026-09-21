@@ -180,6 +180,28 @@ impl Layout {
 /// out, because it grows with wrapped input.
 pub(crate) const FIXED_CHROME_ROWS: usize = 2;
 
+/// From this many rows the composer gets one blank padding row beneath it;
+/// shorter terminals give that row to the transcript.
+pub(crate) const COMPOSER_PADDING_MIN_HEIGHT: usize = 20;
+
+/// Fixed chrome rows at `height`: [`FIXED_CHROME_ROWS`] plus the composer
+/// padding row when the terminal is tall enough to spare it.
+#[must_use]
+pub(crate) const fn fixed_chrome_rows(height: usize) -> usize {
+    FIXED_CHROME_ROWS + composer_padding_rows(height)
+}
+
+/// Blank rows under the composer at `height`: one at
+/// [`COMPOSER_PADDING_MIN_HEIGHT`] and up, none below.
+#[must_use]
+pub(crate) const fn composer_padding_rows(height: usize) -> usize {
+    if height >= COMPOSER_PADDING_MIN_HEIGHT {
+        1
+    } else {
+        0
+    }
+}
+
 /// Rows the composer may grow to at this size. Known before the layout
 /// because the composer is laid out first: its row count is part of the
 /// chrome the body must leave room for.

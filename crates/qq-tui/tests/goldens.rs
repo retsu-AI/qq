@@ -140,10 +140,11 @@ fn prose_is_placed_at_the_measure_on_wide_terminals() {
 fn expanded_tool_detail_reads_the_same_inline_and_in_the_inspector() {
     let inline = BenchHarness::scene(Scene::ToolsExpanded, (120, 40)).plain_frame();
     let wide = BenchHarness::scene(Scene::ToolsExpanded, (200, 60)).plain_frame();
-    // Body rows between the top row and the composer chrome, split at the
-    // pane borders, whitespace-squashed so widths do not matter.
+    // Body rows between the top row and the composer chrome (rule, composer,
+    // padding row), split at the pane borders, whitespace-squashed so widths
+    // do not matter.
     let column = |rows: &[String], index: usize| -> Vec<String> {
-        rows[1..rows.len() - 2]
+        rows[1..rows.len() - 3]
             .iter()
             .map(|row| {
                 row.split('│')

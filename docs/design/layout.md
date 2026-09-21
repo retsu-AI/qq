@@ -43,9 +43,21 @@ Below 32 × 9 the frame is a "terminal is too small" notice.
 
 Row 0 is the top row (brand, breadcrumb, status items). The last rows are, in
 order: the agent strip when shown, queued drafts, the composer rule (which
-doubles as the status and key-hint line), and the composer. The **body** is
-everything between, and the panes divide it left to right: transcript
-pane(s), inspector, rail.
+doubles as the status and key-hint line), the composer, and — when the
+terminal has at least `COMPOSER_PADDING_MIN_HEIGHT` (20) rows — one blank
+padding row so the caret does not sit on the bottom edge. Shorter terminals
+give that row to the transcript instead. The **body** is everything between,
+and the panes divide it left to right: transcript pane(s), inspector, rail.
+
+The fixed chrome is `layout::fixed_chrome_rows(height)`: the top row and the
+rule (`FIXED_CHROME_ROWS`, 2) plus the padding row when present. The frame
+lays the composer out first against what remains after the fixed chrome, so
+its row cap (`max_composer_rows`: 4 at Compact or under 30 rows, else 8)
+still holds at 80 × 24 with the padding row: a full compact composer leaves
+17 body rows there (24 − top − rule − 4 − padding). The transcript itself
+opens with one blank padding row under the top row
+([`transcript.md`](./transcript.md) § Spacing), so the body reads with
+breathing room at both ends.
 
 The rail takes `width / 4` clamped to 20–28 columns, and gives way to the
 strip when that would leave the transcript narrower than 32 columns. The

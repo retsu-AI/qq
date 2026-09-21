@@ -1,14 +1,14 @@
  qq  Session 0                                                                                   openai/gpt-test  $0.00
- ▌ YOU                                                                                      │ NEEDS YOU  2
- ▌ plan the release                                                                         │ ● Refactor          1 new
-                                                                                            │   ◇ Deploy helper
-   QQ                                                                                       │      ◇ approve run
-   Drafted the checklist.                                                                   │
-   ✓ 0.0s · ttft 0.0s                                                                       │ WORKING  2
-                                                                                            │ ◐ Write tests       1 new
-  related sessions                                                                          │    Adding a regressio...
-  ↳ ◇ Deploy helper                                                                         │ ◐ Survey callers    1 new
-                                                                                            │    Found twelve call ...
+                                                                                            │ NEEDS YOU  2
+ ▌ YOU                                                                                      │ ● Refactor          1 new
+ ▌ plan the release                                                                         │   ◇ Deploy helper
+                                                                                            │      ◇ approve run
+   QQ                                                                                       │
+   Drafted the checklist.                                                                   │ WORKING  2
+   ✓ 0.0s · ttft 0.0s                                                                       │ ◐ Write tests       1 new
+                                                                                            │    Adding a regressio...
+  related sessions                                                                          │ ◐ Survey callers    1 new
+  ↳ ◇ Deploy helper                                                                         │    Found twelve call ...
                                                                                             │
                                                                                             │ IDLE  3
                                                                                             │ ○ Scratch
@@ -35,6 +35,6 @@
                                                                                             │
                                                                                             │
                                                                                             │
-                                                                                            │
  ◇ Deploy helper needs approval  Ctrl-G jump  Alt-A/Alt-D answer ────────────────────── F1 help  ^K commands  ^O detail
  › Ask QQ...
+
