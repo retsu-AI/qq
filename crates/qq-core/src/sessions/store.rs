@@ -1187,11 +1187,19 @@ impl Store {
         claimed: &ClaimedRun,
         message_id: MessageId,
         turn_ordinal: u32,
+        attachments: Vec<crate::input::ResolvedAttachment>,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            apply_steering_message(connection, store_id, identity, message_id, turn_ordinal)
+            apply_steering_message(
+                connection,
+                store_id,
+                identity,
+                message_id,
+                turn_ordinal,
+                &attachments,
+            )
         })
         .await
     }

@@ -733,7 +733,7 @@ impl SessionRuntime {
                 run_id,
                 input,
                 interrupt,
-            } => Some((*run_id, crate::input::render_text(input), *interrupt)),
+            } => Some((*run_id, input.clone(), *interrupt)),
             _ => None,
         };
         let should_schedule = matches!(command, SessionCommand::SubmitPrompt { .. });
@@ -779,7 +779,7 @@ impl SessionRuntime {
         // The row is durable (the receipt names its id). A replayed command
         // returns the same receipt without re-queuing: the first delivery
         // already reached the loop, or the run finished and superseded it.
-        if let (Some((run_id, text, interrupt)), CommandOutcome::SteeringQueued { message_id, .. }) =
+        if let (Some((run_id, input, interrupt)), CommandOutcome::SteeringQueued { message_id, .. }) =
             (steer, &applied.receipt.outcome)
             && !applied.replayed
         {
@@ -787,7 +787,7 @@ impl SessionRuntime {
                 run_id,
                 crate::runtime::SteeringMessage {
                     message_id: *message_id,
-                    text: text.trim().to_owned(),
+                    input,
                 },
                 interrupt,
             );

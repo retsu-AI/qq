@@ -108,9 +108,10 @@ pub(super) fn store_message_attachments(
 }
 
 /// Every stored attachment of the retained prompts (those in the ordinal
-/// window), keyed by message id and in prompt order, with the blob bytes
-/// joined in. Sessions without attachments pay one indexed lookup that
-/// returns nothing; archived prompts behind the cutoff are never read.
+/// window) and of the steering applied to their runs, keyed by message id
+/// and in prompt order, with the blob bytes joined in. Sessions without
+/// attachments pay one indexed lookup that returns nothing; archived prompts
+/// behind the cutoff are never read.
 fn load_retained_attachments(
     transaction: &Connection,
     session: &str,
@@ -120,7 +121,8 @@ fn load_retained_attachments(
     let mut statement = transaction.prepare_cached(
         "SELECT a.message_id, a.path, a.window_start, a.window_end, a.window_total, b.content
          FROM messages m
-         JOIN message_attachments a ON a.message_id = m.id
+         JOIN messages s ON s.run_id = m.run_id AND s.role = 'user'
+         JOIN message_attachments a ON a.message_id = s.id
          JOIN attachment_blobs b ON b.session_id = a.session_id AND b.blob_key = a.blob_key
          WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
            AND m.role = 'user' AND m.steering = 0
@@ -426,7 +428,7 @@ pub(super) fn load_model_context_with_units(
     // the ordinal of the turn whose request first included it.
     let mut steering: HashMap<String, std::collections::VecDeque<(u32, String)>> = HashMap::new();
     let mut statement = transaction.prepare_cached(
-        "SELECT s.run_id, s.turn_ordinal, s.output
+        "SELECT s.run_id, s.turn_ordinal, s.output, s.id, s.input_json
              FROM messages m
              JOIN messages s ON s.run_id = m.run_id
              WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
@@ -440,10 +442,31 @@ pub(super) fn load_model_context_with_units(
             row.get::<_, String>(0)?,
             row.get::<_, u32>(1)?,
             row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
         ))
     })?;
     for row in rows {
-        let (run_id, ordinal, text) = row?;
+        let (run_id, ordinal, text, message_id, input_json) = row?;
+        // Steering that attached files is re-rendered from the stored bytes
+        // like a prompt; text-only steering (and rows without attachments)
+        // keep their rendered text.
+        let text = match attachments.remove(&message_id) {
+            Some(stored) => {
+                let parts = parse_input_parts(input_json.as_deref())?;
+                crate::input::render_resolved_prompt(
+                    &crate::input::render_text_parts(&parts),
+                    stored.iter().map(|attachment| {
+                        (
+                            attachment.path.as_str(),
+                            attachment.window,
+                            attachment.content.as_deref(),
+                        )
+                    }),
+                )
+            }
+            None => text,
+        };
         steering
             .entry(run_id)
             .or_default()

@@ -169,6 +169,9 @@ pub(crate) enum RuntimeEvent {
     SteeringApplied {
         message_id: MessageId,
         turn_ordinal: u32,
+        /// Files the applied message read, for the store to keep as this
+        /// message's attachments. Empty for text-only steering.
+        attachments: Vec<crate::input::ResolvedAttachment>,
     },
     /// An interrupting steer aborted turn `turn_ordinal` in flight. Emitted
     /// after the partial turn (if any text streamed) is committed via
