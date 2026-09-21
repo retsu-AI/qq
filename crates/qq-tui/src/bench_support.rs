@@ -598,10 +598,14 @@ pub enum Scene {
     Reasoning,
     /// Steering rows at every lifecycle state.
     Steering,
+    /// Eight sessions across every rail group: an approval, two streaming,
+    /// an unread finish, a child, and quiet idle and done sessions. The rail
+    /// follows the tier, so the Compact frame shows the strip.
+    Sessions,
 }
 
 impl Scene {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::MarkdownGallery,
         Self::GoldenPath,
         Self::ToolsExpanded,
@@ -609,6 +613,7 @@ impl Scene {
         Self::Approval,
         Self::Reasoning,
         Self::Steering,
+        Self::Sessions,
     ];
 
     /// The file stem goldens and gallery frames use for this scene.
@@ -622,6 +627,7 @@ impl Scene {
             Self::Approval => "approval",
             Self::Reasoning => "reasoning",
             Self::Steering => "steering",
+            Self::Sessions => "sessions",
         }
     }
 }
@@ -676,6 +682,10 @@ impl BenchHarness {
             Scene::Steering => {
                 harness.steering_turn();
             }
+            Scene::Sessions => {
+                harness.completed_turn("plan the release", "Drafted the checklist.");
+                harness.many_agents();
+            }
         }
         harness
     }
@@ -719,6 +729,112 @@ impl BenchHarness {
             }
             None => false,
         }
+    }
+
+    /// Seven more sessions beside the focused one so every rail group has
+    /// members: `Deploy helper` (a child of session 0) holds a `shell`
+    /// approval; `Survey callers` and `Write tests` stream text; `Refactor`
+    /// finished unseen with spend recorded; `Notes` and `Scratch` are idle;
+    /// `Migrate` finished and was seen. Titles and spend are fixed so the
+    /// frame is the same every run.
+    fn many_agents(&mut self) {
+        let parent = session_id(0);
+        let titled = |index: u8, title: &str, status: SessionStatus, parent_id| {
+            let mut summary = summary(session_id(index), status);
+            summary.title = title.to_owned();
+            summary.parent_id = parent_id;
+            summary.updated_at_ms = u64::from(index);
+            summary
+        };
+        let child = titled(1, "Deploy helper", SessionStatus::Running, Some(parent));
+        let survey = titled(2, "Survey callers", SessionStatus::Running, None);
+        let tests = titled(3, "Write tests", SessionStatus::Running, None);
+        let refactor = titled(4, "Refactor", SessionStatus::Running, None);
+        let notes = titled(5, "Notes", SessionStatus::Idle, None);
+        let scratch = titled(6, "Scratch", SessionStatus::Idle, None);
+        let mut migrate = titled(7, "Migrate", SessionStatus::Idle, None);
+        migrate.last_outcome = Some(qq_protocol::RunOutcome::Completed);
+        migrate.estimated_cost_usd_nanos = Some(40_000_000);
+        for session in [
+            &child, &survey, &tests, &refactor, &notes, &scratch, &migrate,
+        ] {
+            let index = session.id.as_bytes()[15];
+            self.apply(
+                index,
+                SessionEvent::SessionCreated {
+                    session: Box::new(session.clone()),
+                },
+            );
+        }
+        // Session 1 waits on a shell approval under its spawn.
+        let mut call_id = [0x50; 16];
+        call_id[15] = 0x61;
+        self.apply(
+            1,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: ToolCallSnapshot {
+                    run_id: run_id(1),
+                    arguments: r#"{"command":"rm -rf build"}"#.to_owned(),
+                    state: qq_protocol::ToolCallState::AwaitingApproval,
+                    ..fixtures::tool_call(ToolCallId::from_bytes(call_id), session_id(1), "shell")
+                },
+                shell: None,
+                edit: None,
+                question: None,
+                fetch: None,
+            },
+        );
+        // Sessions 2 and 3 stream prose; the rail shows the tails.
+        for (session, text) in [
+            (survey, "Found twelve call sites across three crates"),
+            (tests, "Adding a regression test for the reconnect path"),
+        ] {
+            let index = session.id.as_bytes()[15];
+            let message = assistant_message(session.id, 200 + index, "");
+            let message_id = message.id;
+            self.apply(
+                index,
+                SessionEvent::RunStarted {
+                    session: Box::new(session),
+                    run_id: run_id(index),
+                    plan: None,
+                },
+            );
+            self.apply(
+                index,
+                SessionEvent::RunActivityChanged {
+                    run_id: run_id(index),
+                    activity: RunActivity::GeneratingResponse,
+                },
+            );
+            self.apply(index, SessionEvent::AssistantMessageStarted { message });
+            self.append(index, message_id, text);
+        }
+        // Session 4 finished while unfocused: one unread finish, with spend.
+        let mut finished = refactor;
+        finished.status = SessionStatus::Idle;
+        finished.active_run_id = None;
+        finished.last_outcome = Some(qq_protocol::RunOutcome::Completed);
+        finished.estimated_cost_usd_nanos = Some(120_000_000);
+        self.apply(
+            4,
+            SessionEvent::RunStarted {
+                session: Box::new(titled(4, "Refactor", SessionStatus::Running, None)),
+                run_id: run_id(4),
+                plan: None,
+            },
+        );
+        self.apply(
+            4,
+            SessionEvent::RunFinished {
+                session: Box::new(finished),
+                run_id: run_id(4),
+                outcome: qq_protocol::RunOutcome::Completed,
+                usage: None,
+                context_tokens: None,
+                final_output: None,
+            },
+        );
     }
 
     /// One completed exchange in session 0: the user's `prompt`, then a

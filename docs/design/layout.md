@@ -101,6 +101,53 @@ or `Shown` to `Hidden` and `Hidden` to `Shown`, so the first press from the
 default state always hides the pane the user is reaching to dismiss. The
 preferences are runtime state, not configuration; they reset per launch.
 
+## Sessions rail
+
+The rail (`view/sidebar.rs`) lists every session grouped by what the user
+should do about it: **NEEDS YOU** (an approval waiting, a failure, or a
+finish not yet looked at), then **WORKING**, **IDLE**, **DONE**. Within a
+group sessions keep tree order (roots newest first, each followed by its
+children oldest first, indented two columns per level). A group header shows
+its label and count; one blank rail row separates groups; the focused row is
+padded to the rail width on the `selection` background.
+
+The rail and the one-row agent strip are built from one pass,
+`rail_entries`, which walks the sessions once and yields, per session, its
+group, unread count, whether it has a live status row, and its own reported
+spend. The rail plans rows from that list and paints only the rows inside its
+scrolled window (centered on the focused session); the strip counts from the
+same list. Neither surface re-derives grouping, so `8 agents ◐ 2 ◇ 2` on the
+strip and the headers on the rail always agree.
+
+Each row starts with a state glyph in the state's color and the session
+title, truncated to leave room for the badge: `◇` `warning` while an approval
+waits, `✕` `error` after a failure, `●` `accent` for a finish not yet looked
+at, the shared tool spinner in `info` while running, `○` `warning` while
+queued, and `○`, `●`, or `◌` `muted` for idle, seen-complete, and stopped
+early. When a session has unread messages and is not focused, an `N new`
+badge in `accent` sits right-aligned on its row (`N` alone when the rail is
+narrower than 26 columns). The accent is the only attention color on the
+rail besides the group headers; `warning` and `error` appear only for a real
+pending or failed state.
+
+Density follows the tier the rail's width follows; height never changes it:
+
+| Tier | Rail | Rows per session |
+| --- | --- | --- |
+| Compact | Hidden unless pinned; the agent strip lists counts | Glyph, title, badge; a live status row while running or waiting |
+| Regular | 20–28 columns | The same one row, plus the live status row (approval, tool verb, streamed tail, or activity) while the session has one |
+| Wide, Ultra | 28 columns | The same, plus a second muted row for any session with a live status or a reported spend: the tail on the left, `$0.12` right-aligned |
+
+A session with nothing to say (idle, no spend reported) takes one row at
+every density so a quiet list stays dense. The cost is the session's own
+direct spend (`SessionSummary.accounting.direct`, or the compatibility
+alias); a known zero is not shown.
+
+Pinning the rail (`PanePref::Shown`) shows it at any width where a
+20-column rail leaves the transcript at least 32 columns (60 columns and up);
+below that the layout keeps the strip and the pin is remembered. Hiding the
+rail at any width brings the strip back when more than one session exists.
+
 ## Bounds
 
 A frame is laid out for at most 1024 × 512 cells (`view::MAX_RENDER_WIDTH`,
@@ -113,7 +160,8 @@ raise per-frame streaming work.
 ## Evidence
 
 `crates/qq-tui/tests/goldens/` pins every review scene at 80 × 24, 120 × 40,
-200 × 60, 320 × 90, and 480 × 120; `cargo test -p qq-tui --test gallery --
+200 × 60, 320 × 90, and 480 × 120 (the `sessions-*` scene shows the strip
+and every rail density); `cargo test -p qq-tui --test gallery --
 --ignored` writes the same frames as ANSI for a real terminal. The render
 bench (`cargo bench -p qq-tui --bench render`) includes `compact_80x24`,
 `wide_160x48_full`, and `resize_ultra_480x120` alongside the legacy 160 × 48

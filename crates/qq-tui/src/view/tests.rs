@@ -5,6 +5,8 @@ use qq_protocol::{
     WorkspaceSnapshot,
 };
 
+use qq_client::state::Group;
+
 use super::*;
 use crate::{
     ClientRequest, ClientUpdate, ModelOption, TuiOptions,
@@ -3166,6 +3168,315 @@ fn the_sidebar_groups_sessions_by_what_the_user_should_do() {
     assert!(text.contains("DONE  1"), "{text}");
     assert!(text.contains("NEEDS YOU  1"), "{text}");
     let _ = (parent, child_id);
+}
+
+/// A workspace with one session in every rail group, focused on the idle
+/// root: `Deploy helper` (child, awaiting approval) needs the user, `Survey
+/// callers` streams, the focused root is idle, and `Migrate` finished and
+/// was seen. `Refactor` finished unseen with spend, so it also needs the
+/// user and carries an unread badge. Returns the app and the ids in the
+/// order NEEDS YOU, WORKING, IDLE, DONE.
+fn app_with_every_rail_group() -> (App, [SessionId; 5]) {
+    let (mut app, parent, child_id, _, _) = app_with_child_awaiting_approval();
+    // Events must arrive in sequence; the approval fixture ended at 2.
+    let mut sequence = 2;
+    let mut event = |session_id, run_id, event| {
+        sequence += 1;
+        ClientUpdate::Event(SessionEventEnvelope {
+            run_id: Some(run_id),
+            occurred_at_ms: sequence,
+            ..fixtures::envelope(sequence, session_id, event)
+        })
+    };
+    let survey_id = SessionId::from_bytes([0x60; 16]);
+    let survey_run = RunId::from_bytes([0x61; 16]);
+    let survey = SessionSummary {
+        model_is_fallback: false,
+        title: "Survey callers".to_owned(),
+        status: SessionStatus::Running,
+        active_run_id: Some(survey_run),
+        updated_at_ms: 3,
+        ..fixtures::session_summary(survey_id)
+    };
+    app.apply_client_update(event(
+        survey_id,
+        survey_run,
+        SessionEvent::SessionCreated {
+            session: Box::new(survey),
+        },
+    ));
+    let message = MessageSnapshot {
+        run_id: survey_run,
+        state: MessageState::Streaming,
+        ..fixtures::message(MessageId::from_bytes([0x62; 16]), survey_id, "")
+    };
+    app.apply_client_update(event(
+        survey_id,
+        survey_run,
+        SessionEvent::AssistantMessageStarted { message },
+    ));
+    app.apply_client_update(event(
+        survey_id,
+        survey_run,
+        SessionEvent::TextAppended {
+            message_id: MessageId::from_bytes([0x62; 16]),
+            channel: qq_protocol::TextChannel::Output,
+            text: "Found twelve call sites".to_owned(),
+        },
+    ));
+    let finish = |app: &mut App,
+                  event: &mut dyn FnMut(SessionId, RunId, SessionEvent) -> ClientUpdate,
+                  byte: u8,
+                  title: &str,
+                  cost: u64| {
+        let id = SessionId::from_bytes([byte; 16]);
+        let run = RunId::from_bytes([byte + 1; 16]);
+        let mut summary = SessionSummary {
+            model_is_fallback: false,
+            title: title.to_owned(),
+            status: SessionStatus::Running,
+            active_run_id: Some(run),
+            updated_at_ms: u64::from(byte),
+            ..fixtures::session_summary(id)
+        };
+        app.apply_client_update(event(
+            id,
+            run,
+            SessionEvent::SessionCreated {
+                session: Box::new(summary.clone()),
+            },
+        ));
+        summary.status = SessionStatus::Idle;
+        summary.active_run_id = None;
+        summary.last_outcome = Some(qq_protocol::RunOutcome::Completed);
+        summary.estimated_cost_usd_nanos = Some(cost);
+        app.apply_client_update(event(
+            id,
+            run,
+            SessionEvent::RunFinished {
+                session: Box::new(summary),
+                run_id: run,
+                outcome: qq_protocol::RunOutcome::Completed,
+                usage: None,
+                context_tokens: None,
+                final_output: None,
+            },
+        ));
+        id
+    };
+    let refactor_id = finish(&mut app, &mut event, 0x70, "Refactor", 120_000_000);
+    let migrate_id = finish(&mut app, &mut event, 0x80, "Migrate", 40_000_000);
+    // Looking at Migrate and coming back clears its unread state so it
+    // lists under DONE rather than NEEDS YOU.
+    app.focus_session(migrate_id);
+    app.focus_session(parent);
+    app.layout.rail = PanePref::Auto;
+    (app, [refactor_id, child_id, survey_id, parent, migrate_id])
+}
+
+/// The rail's cells of every body row, as text, for a frame at `width`.
+fn rail_rows(app: &mut App, width: usize, height: usize) -> Vec<String> {
+    let frame = FrameRenderer::default().frame_and_commit(app, width, height);
+    frame_rows(&frame)
+        .iter()
+        .filter_map(|row| row.rfind('│').map(|at| row[at..].trim_end().to_owned()))
+        .collect()
+}
+
+#[test]
+fn the_rail_lists_groups_needs_you_working_idle_done_from_one_pass() {
+    let (mut app, [refactor, child, survey, parent, migrate]) = app_with_every_rail_group();
+    let (entries, counts) = rail_entries(&app);
+    assert_eq!(
+        entries.iter().map(|entry| entry.group).collect::<Vec<_>>(),
+        [
+            Group::NeedsYou,
+            Group::NeedsYou,
+            Group::Working,
+            Group::Idle,
+            Group::Done
+        ],
+        "{entries:?}"
+    );
+    assert_eq!(counts, [2, 1, 1, 1]);
+    // Within NEEDS YOU the root `Refactor` precedes the child of the other
+    // root: tree order, roots newest first.
+    assert_eq!(
+        entries.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+        [refactor, child, survey, parent, migrate]
+    );
+    assert_eq!(entries[0].unread, 1, "the unseen finish carries a badge");
+    assert_eq!(entries[0].cost, Some(120_000_000));
+    assert!(
+        entries[1].live && entries[2].live,
+        "approval and streaming rows"
+    );
+    assert!(
+        !entries[3].live && entries[3].cost.is_none(),
+        "the idle root is quiet"
+    );
+    assert_eq!(
+        entries[3].unread, 0,
+        "the focused session has seen everything"
+    );
+
+    let rail = rail_rows(&mut app, 120, 40).join("\n");
+    let position = |label: &str| {
+        rail.find(label)
+            .unwrap_or_else(|| panic!("{label} in {rail}"))
+    };
+    assert!(position("NEEDS YOU  2") < position("WORKING  1"));
+    assert!(position("WORKING  1") < position("IDLE  1"));
+    assert!(position("IDLE  1") < position("DONE  1"));
+    assert!(position("Refactor") < position("Deploy helper"));
+    assert!(position("Deploy helper") < position("Survey callers"));
+    assert!(position("Survey callers") < position("Session"));
+    assert!(position("Migrate") > position("DONE  1"));
+}
+
+#[test]
+fn the_strip_and_the_rail_count_the_same_entries() {
+    let (mut app, ids) = app_with_every_rail_group();
+    app.layout.rail = PanePref::Hidden;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 24));
+    let strip = rows
+        .iter()
+        .find(|row| row.contains("agents"))
+        .unwrap_or_else(|| panic!("strip in {rows:#?}"));
+    let (entries, counts) = rail_entries(&app);
+    assert_eq!(entries.len(), ids.len());
+    assert!(
+        strip.contains(&format!("{} agents", entries.len())),
+        "{strip}"
+    );
+    assert!(
+        strip.contains(&format!("◐ {}", counts[Group::Working as usize])),
+        "{strip}"
+    );
+    assert!(
+        strip.contains(&format!("◇ {}", counts[Group::NeedsYou as usize])),
+        "{strip}"
+    );
+    let unread = entries.iter().filter(|entry| entry.unread > 0).count();
+    assert_eq!(unread, 2, "Refactor's finish and Survey's streamed message");
+    assert!(strip.contains(&format!("● {unread} unread")), "{strip}");
+}
+
+#[test]
+fn unread_badges_are_accent_on_unfocused_rows_only() {
+    let (mut app, [refactor, _, _, parent, _]) = app_with_every_rail_group();
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 120, 40);
+    let rows = frame_rows(&frame);
+    let refactor_row = rows
+        .iter()
+        .find(|row| row.contains("Refactor"))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(
+        refactor_row.trim_end().ends_with("1 new"),
+        "{refactor_row:?}"
+    );
+    assert_eq!(style_of(&frame, "1 new"), Some(accent()));
+    let focused_row = rows
+        .iter()
+        .find(|row| row.contains("○ Session"))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(!focused_row.contains("new"), "{focused_row:?}");
+    // Focusing Refactor clears its badge; the badge does not follow the
+    // selection background onto the focused row.
+    app.focus_session(refactor);
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    let refactor_row = rows
+        .iter()
+        .find(|row| row.contains("Refactor"))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(!refactor_row.contains("new"), "{refactor_row:?}");
+    let _ = parent;
+}
+
+#[test]
+fn the_rail_is_one_row_per_session_at_regular_and_adds_tail_and_cost_at_wide() {
+    let (mut app, _) = app_with_every_rail_group();
+    let regular = rail_rows(&mut app, 120, 40);
+    let refactor = regular
+        .iter()
+        .position(|row| row.contains("Refactor"))
+        .unwrap();
+    assert!(
+        regular[refactor + 1].contains("Deploy helper"),
+        "Regular: a finished session takes one row: {regular:#?}"
+    );
+    let survey = regular
+        .iter()
+        .position(|row| row.contains("Survey callers"))
+        .unwrap();
+    assert!(
+        regular[survey + 1].contains("Found twelve"),
+        "a streaming session keeps its live tail at every density: {regular:#?}"
+    );
+    assert!(
+        !regular.iter().any(|row| row.contains('$')),
+        "no cost below Wide: {regular:#?}"
+    );
+
+    let wide = rail_rows(&mut app, 200, 60);
+    let refactor = wide
+        .iter()
+        .position(|row| row.contains("Refactor"))
+        .unwrap();
+    assert!(
+        wide[refactor + 1].trim_end().ends_with("$0.12"),
+        "Wide: the spend sits right-aligned under the name: {wide:#?}"
+    );
+    let migrate = wide.iter().position(|row| row.contains("Migrate")).unwrap();
+    assert!(wide[migrate + 1].trim_end().ends_with("$0.04"), "{wide:#?}");
+    let survey = wide
+        .iter()
+        .position(|row| row.contains("Survey callers"))
+        .unwrap();
+    assert!(wide[survey + 1].contains("Found twelve"), "{wide:#?}");
+    let focused = wide
+        .iter()
+        .position(|row| row.contains("○ Session"))
+        .unwrap();
+    assert!(
+        wide[focused + 1].trim() == "│",
+        "a session with no tail and no spend still takes one row: {wide:#?}"
+    );
+    assert_eq!(RailDensity::of(layout::Tier::Compact), RailDensity::Compact);
+    assert_eq!(RailDensity::of(layout::Tier::Regular), RailDensity::Compact);
+    assert_eq!(RailDensity::of(layout::Tier::Wide), RailDensity::Detailed);
+    assert_eq!(RailDensity::of(layout::Tier::Ultra), RailDensity::Detailed);
+}
+
+#[test]
+fn a_pinned_rail_shows_at_compact_when_the_transcript_keeps_its_minimum() {
+    let (mut app, _) = app_with_every_rail_group();
+    app.layout.rail = PanePref::Shown;
+    // 80 columns: a 20-column rail leaves 60 for the transcript.
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 80, 24);
+    let rows = frame_rows(&frame);
+    assert!(
+        rows.iter().any(|row| row.contains("NEEDS YOU  2")),
+        "{rows:#?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("agents")),
+        "no strip: {rows:#?}"
+    );
+    // The narrow rail drops `new` from the badge and keeps the count.
+    let refactor = rows
+        .iter()
+        .find(|row| row.contains("Refactor"))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(refactor.trim_end().ends_with(" 1"), "{refactor:?}");
+    assert!(!refactor.contains("new"), "{refactor:?}");
+    // 50 columns: the rail would leave fewer than 32, so the strip stays.
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 50, 24));
+    assert!(
+        !rows.iter().any(|row| row.contains("NEEDS YOU")),
+        "{rows:#?}"
+    );
+    assert!(rows.iter().any(|row| row.contains("5 agents")), "{rows:#?}");
 }
 
 #[test]
