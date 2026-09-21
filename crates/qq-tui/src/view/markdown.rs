@@ -7,12 +7,12 @@ use std::sync::OnceLock;
 use crate::{
     app::terminal_safe_character,
     render::{
-        Line, Style, accent, code_comment, code_constant, code_function, code_keyword,
+        Line, Style, accent, border, code_comment, code_constant, code_function, code_keyword,
         code_property, code_string, code_type, diff_line_style, muted, normal, surface, warning,
     },
     view::wrap::{wrap_line, wrap_line_chars},
 };
-use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use tree_sitter::Language;
 use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
 
@@ -77,27 +77,86 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
     if source.is_empty() {
         return Vec::new();
     }
+    let width = width.max(1);
     let mut lines = vec![Line::default()];
     // Lines marked literal (code blocks, laid-out tables) keep character
     // wrapping so column alignment survives; prose lines wrap at words.
     let mut literal = vec![false];
+    // Per-line hanging prefix: list markers and quote rails. The body wraps
+    // at `width - hang` and the prefix repeats (as blanks for list items, as
+    // the rail for quotes) on every continuation row.
+    let mut hangs: Vec<Option<Hang>> = vec![None];
     let mut styles = vec![normal()];
-    let mut list_depth = 0_usize;
+    // One entry per open list: `Some(next)` for ordered lists with the
+    // marker column width, `None` for bullets. Depth is the length.
+    let mut lists: Vec<Option<(u64, usize)>> = Vec::new();
+    let mut quote_depth = 0_usize;
     let mut table: Option<TableBuffer> = None;
     let mut code_block: Option<CodeBlockBuffer> = None;
+    let mut heading_level: Option<HeadingLevel> = None;
+    let mut heading_start = 0;
+    // True from an item's marker until its first inline content, so a loose
+    // item's opening paragraph joins the marker line.
+    let mut item_marker_open = false;
+    // Direct item counts per list in document order, so ordered markers can
+    // be sized before their items arrive. One cheap pass over the events.
+    let mut list_lengths: Vec<u64> = Vec::new();
+    {
+        let mut open: Vec<(usize, u64)> = Vec::new();
+        for event in Parser::new_ext(source, Options::all()) {
+            match event {
+                Event::Start(Tag::List(_)) => {
+                    open.push((list_lengths.len(), 0));
+                    list_lengths.push(0);
+                }
+                Event::Start(Tag::Item) => {
+                    if let Some((_, count)) = open.last_mut() {
+                        *count += 1;
+                    }
+                }
+                Event::End(TagEnd::List(_)) => {
+                    if let Some((index, count)) = open.pop() {
+                        list_lengths[index] = count;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut list_ordinal = 0;
     let parser = Parser::new_ext(source, Options::all());
     for event in parser {
         match event {
             Event::Start(tag) => match tag {
-                Tag::Paragraph => {}
-                Tag::Heading { .. } => {
-                    ensure_line(&mut lines);
-                    // A blank line above the heading separates it from the
-                    // preceding block; a leading heading stays flush.
-                    if lines.len() > 1 {
-                        lines.push(Line::default());
+                // Block starts: one blank row separates this block from the
+                // previous one. Items inside a list stay tight; the list
+                // itself is one block. Blank rows at the very top are
+                // trimmed with the leading empty line below.
+                Tag::Paragraph => {
+                    if lists.is_empty() {
+                        block_gap(&mut lines, &mut literal, &mut hangs);
+                    } else if !item_marker_open {
+                        // A later paragraph inside a loose item starts its
+                        // own line under the item text; the first one
+                        // continues on the marker line.
+                        ensure_line(&mut lines, &mut literal, &mut hangs);
+                        hangs.truncate(lines.len() - 1);
+                        hangs.push(current_hang(&lists, quote_depth));
                     }
-                    styles.push(accent().bold());
+                    item_marker_open = false;
+                }
+                Tag::Heading { level, .. } => {
+                    block_gap(&mut lines, &mut literal, &mut hangs);
+                    heading_level = Some(level);
+                    heading_start = lines.len() - 1;
+                    styles.push(match level {
+                        HeadingLevel::H1 => normal().bold(),
+                        HeadingLevel::H2 => accent().bold(),
+                        HeadingLevel::H3
+                        | HeadingLevel::H4
+                        | HeadingLevel::H5
+                        | HeadingLevel::H6 => normal().bold(),
+                    });
                 }
                 Tag::Strong => {
                     let mut style = *styles.last().expect("base style remains");
@@ -110,22 +169,59 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                     styles.push(style);
                 }
                 Tag::CodeBlock(kind) => {
-                    ensure_line(&mut lines);
+                    block_gap(&mut lines, &mut literal, &mut hangs);
                     code_block = Some(CodeBlockBuffer::new(&kind));
                 }
-                Tag::List(_) => list_depth += 1,
+                Tag::List(start) => {
+                    if lists.is_empty() {
+                        block_gap(&mut lines, &mut literal, &mut hangs);
+                    }
+                    lists.push(start.map(|first| {
+                        // Numbers right-align to the widest the list reaches;
+                        // pulldown does not expose the count, so the list's
+                        // direct items are counted from the event stream at
+                        // this position. Bounded by the list's own length.
+                        let count = list_lengths.get(list_ordinal).copied().unwrap_or(1).max(1);
+                        let last = first.saturating_add(count - 1);
+                        (first, last.to_string().len())
+                    }));
+                    list_ordinal += 1;
+                }
                 Tag::Item => {
-                    ensure_line(&mut lines);
-                    lines.last_mut().expect("line exists").push(
-                        format!("{}- ", "  ".repeat(list_depth.saturating_sub(1))),
-                        accent(),
-                    );
+                    ensure_line(&mut lines, &mut literal, &mut hangs);
+                    let depth = lists.len();
+                    let indent = "  ".repeat(depth.saturating_sub(1));
+                    let marker = match lists.last_mut() {
+                        Some(Some((next, digits))) => {
+                            let number = *next;
+                            *next += 1;
+                            let digits = (*digits).max(number.to_string().len());
+                            format!("{indent}{number:>digits$}. ")
+                        }
+                        Some(None) if depth > 1 => format!("{indent}◦ "),
+                        Some(None) | None => format!("{indent}• "),
+                    };
+                    let line = lines.last_mut().expect("line exists");
+                    let hang_width = quote_rail_width(quote_depth) + marker.chars().count();
+                    push_quote_rail(line, quote_depth);
+                    line.push(marker, accent());
+                    *hangs.last_mut().expect("hang exists") = Some(Hang {
+                        width: hang_width,
+                        rail: quote_depth,
+                    });
+                    item_marker_open = true;
                 }
                 Tag::BlockQuote(_) => {
-                    ensure_line(&mut lines);
-                    lines.last_mut().expect("line exists").push("> ", muted());
+                    if quote_depth == 0 && lists.is_empty() {
+                        block_gap(&mut lines, &mut literal, &mut hangs);
+                    }
+                    quote_depth += 1;
+                    styles.push(muted().italic());
                 }
-                Tag::Table(_) => table = Some(TableBuffer::default()),
+                Tag::Table(_) => {
+                    block_gap(&mut lines, &mut literal, &mut hangs);
+                    table = Some(TableBuffer::default());
+                }
                 Tag::TableHead => {
                     if let Some(buffer) = table.as_mut() {
                         buffer.has_header = true;
@@ -145,9 +241,11 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                         buffer.begin_cell();
                     }
                 }
+                Tag::FootnoteDefinition(_) => {
+                    block_gap(&mut lines, &mut literal, &mut hangs);
+                }
                 Tag::Link { .. }
                 | Tag::Image { .. }
-                | Tag::FootnoteDefinition(_)
                 | Tag::HtmlBlock
                 | Tag::DefinitionList
                 | Tag::DefinitionListTitle
@@ -158,43 +256,77 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                 | Tag::MetadataBlock(_) => {}
             },
             Event::End(tag) => match tag {
-                TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::BlockQuote(_) => {
-                    ensure_line(&mut lines);
-                    if matches!(tag, TagEnd::Heading(_)) {
-                        styles.pop();
+                TagEnd::Paragraph => {
+                    ensure_line(&mut lines, &mut literal, &mut hangs);
+                }
+                TagEnd::Heading(_) => {
+                    styles.pop();
+                    if heading_level.take() == Some(HeadingLevel::H1) {
+                        // An underline the width of the title, capped at the
+                        // measure, marks the one top-level heading style.
+                        let title_width = lines[heading_start..]
+                            .iter()
+                            .map(Line::width)
+                            .max()
+                            .unwrap_or(0)
+                            .clamp(1, width);
+                        ensure_line(&mut lines, &mut literal, &mut hangs);
+                        *lines.last_mut().expect("line exists") =
+                            Line::styled("─".repeat(title_width), border());
+                        *literal.last_mut().expect("literal exists") = true;
                     }
+                    ensure_line(&mut lines, &mut literal, &mut hangs);
+                }
+                TagEnd::BlockQuote(_) => {
+                    quote_depth = quote_depth.saturating_sub(1);
+                    styles.pop();
+                    ensure_line(&mut lines, &mut literal, &mut hangs);
                 }
                 TagEnd::CodeBlock => {
                     if let Some(buffer) = code_block.take() {
-                        let rendered = layout_code_panel(&buffer, width.max(1), highlight);
+                        let rendered = layout_code_panel(&buffer, width, highlight);
                         if lines.last().is_some_and(Line::is_empty) {
                             lines.pop();
                             literal.pop();
+                            hangs.pop();
                         }
-                        literal.resize(lines.len(), false);
+                        let count = rendered.len();
                         lines.extend(rendered);
-                        literal.resize(lines.len(), true);
+                        literal.extend(std::iter::repeat_n(true, count));
+                        hangs.extend(std::iter::repeat_n(None, count));
                         lines.push(Line::default());
+                        literal.push(false);
+                        hangs.push(None);
                     }
                 }
                 TagEnd::Strong | TagEnd::Emphasis => {
                     styles.pop();
                 }
-                TagEnd::List(_) => list_depth = list_depth.saturating_sub(1),
-                TagEnd::Item => ensure_line(&mut lines),
+                TagEnd::List(_) => {
+                    lists.pop();
+                    ensure_line(&mut lines, &mut literal, &mut hangs);
+                }
+                TagEnd::Item => {
+                    item_marker_open = false;
+                    ensure_line(&mut lines, &mut literal, &mut hangs);
+                }
                 TagEnd::Table => {
                     if let Some(mut buffer) = table.take() {
                         buffer.end_row();
-                        let rendered = layout_table(&buffer.rows, buffer.has_header, width.max(1));
+                        let rendered = layout_table(&buffer.rows, buffer.has_header, width);
                         if !rendered.is_empty() {
                             if lines.last().is_some_and(Line::is_empty) {
                                 lines.pop();
                                 literal.pop();
+                                hangs.pop();
                             }
-                            literal.resize(lines.len(), false);
+                            let count = rendered.len();
                             lines.extend(rendered);
-                            literal.resize(lines.len(), true);
+                            literal.extend(std::iter::repeat_n(true, count));
+                            hangs.extend(std::iter::repeat_n(None, count));
                             lines.push(Line::default());
+                            literal.push(false);
+                            hangs.push(None);
                         }
                     }
                 }
@@ -209,9 +341,11 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                         buffer.end_row();
                     }
                 }
+                TagEnd::FootnoteDefinition => {
+                    ensure_line(&mut lines, &mut literal, &mut hangs);
+                }
                 TagEnd::Link
                 | TagEnd::Image
-                | TagEnd::FootnoteDefinition
                 | TagEnd::HtmlBlock
                 | TagEnd::DefinitionList
                 | TagEnd::DefinitionListTitle
@@ -229,11 +363,18 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                     let style = *styles.last().expect("base style remains");
                     match table.as_mut() {
                         Some(buffer) => buffer.append(&text, style),
-                        None => append_safe_text(&mut lines, &text, style),
+                        None => {
+                            begin_inline(&mut lines, &mut hangs, &lists, quote_depth);
+                            append_safe_text(&mut lines, &text, style);
+                            item_marker_open = false;
+                        }
                     }
                 }
             }
             Event::Code(code) => {
+                if table.is_none() {
+                    begin_inline(&mut lines, &mut hangs, &lists, quote_depth);
+                }
                 push_inline(table.as_mut(), &mut lines, &code, warning().bold());
             }
             // A soft break is a source-formatting line break: render it as a
@@ -248,19 +389,31 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
             }
             Event::HardBreak => match table.as_mut() {
                 Some(buffer) => buffer.append(" ", normal()),
-                None => lines.push(Line::default()),
+                None => {
+                    lines.push(Line::default());
+                    literal.push(false);
+                    hangs.push(current_hang(&lists, quote_depth));
+                }
             },
             Event::Rule => {
-                ensure_line(&mut lines);
-                lines.push(Line::styled("------------", muted()));
+                block_gap(&mut lines, &mut literal, &mut hangs);
+                *lines.last_mut().expect("line exists") = Line::styled("─".repeat(width), border());
+                *literal.last_mut().expect("literal exists") = true;
                 lines.push(Line::default());
+                literal.push(false);
+                hangs.push(None);
             }
-            Event::TaskListMarker(checked) => push_inline(
-                table.as_mut(),
-                &mut lines,
-                if checked { "[x] " } else { "[ ] " },
-                accent(),
-            ),
+            Event::TaskListMarker(checked) => {
+                // Replace the bullet the item pushed: the box is the marker.
+                let line = lines.last_mut().expect("line exists");
+                if let Some(last) = line.spans.last_mut()
+                    && (last.text.ends_with("• ") || last.text.ends_with("◦ "))
+                {
+                    let cut = last.text.len() - "• ".len();
+                    last.text.truncate(cut);
+                }
+                line.push(if checked { "☑ " } else { "☐ " }, accent());
+            }
             Event::FootnoteReference(reference) => push_inline(
                 table.as_mut(),
                 &mut lines,
@@ -268,26 +421,202 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                 accent(),
             ),
             Event::InlineMath(math) | Event::DisplayMath(math) => {
+                if table.is_none() {
+                    begin_inline(&mut lines, &mut hangs, &lists, quote_depth);
+                }
                 push_inline(table.as_mut(), &mut lines, &format!("${math}$"), warning());
             }
         }
         literal.resize(lines.len(), false);
+        hangs.resize(lines.len(), None);
     }
     while lines.last().is_some_and(Line::is_empty) {
         lines.pop();
         literal.pop();
+        hangs.pop();
     }
-    lines
-        .into_iter()
-        .zip(literal)
-        .flat_map(|(line, literal)| {
-            if literal {
-                wrap_line_chars(line, width.max(1))
-            } else {
-                wrap_line(line, width.max(1))
+    // Leading blank rows come from the seed line or a gap before the first
+    // block; the transcript owns spacing above the message.
+    let leading = lines.iter().take_while(|line| line.is_empty()).count();
+    lines.drain(..leading);
+    literal.drain(..leading);
+    hangs.drain(..leading);
+    // A source that ends at a block boundary keeps the gap that follows its
+    // last block, so a settled prefix laid out alone concatenates with the
+    // rest into exactly the whole message's rows (`settled_prefix_end`).
+    if !lines.is_empty() && source.trim_end_matches([' ', '\t']).ends_with("\n\n") {
+        lines.push(Line::default());
+        literal.push(false);
+        hangs.push(None);
+    }
+    let mut output = Vec::with_capacity(lines.len());
+    for ((line, literal), hang) in lines.into_iter().zip(literal).zip(hangs) {
+        match hang {
+            Some(hang) if hang.width > 0 && hang.width < width => {
+                // The first row already carries its rail and marker; wrap the
+                // body alone, then re-attach the prefix as blanks (or the rail
+                // for quotes) so continuation rows hang under the text.
+                let mut prefix = Line::default();
+                let mut body = Line::default();
+                let mut taken = 0;
+                for span in line.spans {
+                    if taken >= hang.width {
+                        body.push(span.text, span.style);
+                        continue;
+                    }
+                    let mut head = String::new();
+                    let mut rest = String::new();
+                    for character in span.text.chars() {
+                        if taken < hang.width {
+                            head.push(character);
+                            taken += unicode_width::UnicodeWidthChar::width(character)
+                                .unwrap_or_default();
+                        } else {
+                            rest.push(character);
+                        }
+                    }
+                    prefix.push(head, span.style);
+                    body.push(rest, span.style);
+                }
+                let body_width = width - hang.width;
+                let wrapped = if literal {
+                    wrap_line_chars(body, body_width)
+                } else {
+                    wrap_line(body, body_width)
+                };
+                for (index, mut row) in wrapped.into_iter().enumerate() {
+                    trim_trailing_whitespace(&mut row);
+                    let mut assembled = if index == 0 {
+                        prefix.clone()
+                    } else {
+                        let mut continuation = Line::default();
+                        push_quote_rail(&mut continuation, hang.rail);
+                        continuation.push(
+                            " ".repeat(hang.width - quote_rail_width(hang.rail)),
+                            normal(),
+                        );
+                        continuation
+                    };
+                    for span in row.spans {
+                        assembled.push(span.text, span.style);
+                    }
+                    output.push(assembled);
+                }
             }
-        })
-        .collect()
+            Some(_) | None => {
+                if literal {
+                    output.extend(wrap_line_chars(line, width));
+                } else {
+                    for mut row in wrap_line(line, width) {
+                        trim_trailing_whitespace(&mut row);
+                        output.push(row);
+                    }
+                }
+            }
+        }
+    }
+    output
+}
+
+/// Drop whitespace a word-wrap left at the end of a prose row. Rows compare
+/// by text in goldens and diffs; a dangling space is invisible and costly.
+fn trim_trailing_whitespace(row: &mut Line) {
+    while let Some(last) = row.spans.last_mut() {
+        let trimmed = last.text.trim_end().len();
+        if trimmed == last.text.len() {
+            break;
+        }
+        last.text.truncate(trimmed);
+        if last.text.is_empty() {
+            row.spans.pop();
+        } else {
+            break;
+        }
+    }
+}
+
+/// Hanging prefix of one laid-out line: how many cells the marker and rail
+/// occupy, and how many quote rails to repeat on continuation rows.
+#[derive(Clone, Copy)]
+struct Hang {
+    width: usize,
+    rail: usize,
+}
+
+/// Cells taken by `depth` nested quote rails.
+const fn quote_rail_width(depth: usize) -> usize {
+    depth * 2
+}
+
+fn push_quote_rail(line: &mut Line, depth: usize) {
+    for _ in 0..depth {
+        line.push("▎ ", muted());
+    }
+}
+
+/// The hang a fresh prose line inside the current lists/quotes should get:
+/// continuation text of a list item indents under the item; quoted prose
+/// repeats the rail.
+fn current_hang(lists: &[Option<(u64, usize)>], quote_depth: usize) -> Option<Hang> {
+    if lists.is_empty() && quote_depth == 0 {
+        return None;
+    }
+    // A paragraph inside an item aligns with the item text: the marker's
+    // width for bullets is 2 cells per depth; ordered markers vary, so use
+    // the depth-based indent plus the widest marker seen so far.
+    let list_indent = lists.iter().enumerate().fold(0, |acc, (index, list)| {
+        let indent = if index + 1 == lists.len() {
+            match list {
+                Some((_, digits)) => *digits + 2,
+                None => 2,
+            }
+        } else {
+            2
+        };
+        acc + indent
+    });
+    Some(Hang {
+        width: quote_rail_width(quote_depth) + list_indent,
+        rail: quote_depth,
+    })
+}
+
+/// Start a fresh prose line, when the current one is empty, with the rail
+/// and indent the enclosing quote and list context call for. Inline events
+/// arriving on an item's marker line leave it alone.
+fn begin_inline(
+    lines: &mut [Line],
+    hangs: &mut Vec<Option<Hang>>,
+    lists: &[Option<(u64, usize)>],
+    quote_depth: usize,
+) {
+    let line = lines.last_mut().expect("line exists");
+    if !line.is_empty() {
+        return;
+    }
+    let Some(hang) = current_hang(lists, quote_depth) else {
+        return;
+    };
+    push_quote_rail(line, quote_depth);
+    let indent = hang.width - quote_rail_width(quote_depth);
+    if indent > 0 {
+        line.push(" ".repeat(indent), normal());
+    }
+    hangs.resize(lines.len(), None);
+    *hangs.last_mut().expect("hang exists") = Some(hang);
+}
+
+/// Ensure the last line is empty and mark one blank separator row before it,
+/// so the next block starts exactly one row below the previous one.
+fn block_gap(lines: &mut Vec<Line>, literal: &mut Vec<bool>, hangs: &mut Vec<Option<Hang>>) {
+    ensure_line(lines, literal, hangs);
+    // `ensure_line` leaves one empty trailing line; a gap needs an empty
+    // separator plus the empty line the block will fill.
+    if lines.len() >= 2 && !lines[lines.len() - 2].is_empty() {
+        lines.push(Line::default());
+        literal.push(false);
+        hangs.push(None);
+    }
 }
 
 /// Routes inline content to the open table cell when one exists, otherwise to
@@ -797,10 +1126,14 @@ pub(crate) fn append_safe_text(lines: &mut Vec<Line>, text: &str, style: Style) 
     }
 }
 
-pub(crate) fn ensure_line(lines: &mut Vec<Line>) {
+fn ensure_line(lines: &mut Vec<Line>, literal: &mut Vec<bool>, hangs: &mut Vec<Option<Hang>>) {
     if !lines.last().is_none_or(Line::is_empty) {
         lines.push(Line::default());
+        literal.push(false);
+        hangs.push(None);
     }
+    literal.resize(lines.len(), false);
+    hangs.resize(lines.len(), None);
 }
 
 /// Whether `source` contains a fenced code block that highlighting could

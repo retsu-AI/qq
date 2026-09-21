@@ -1,9 +1,7 @@
  qq  Session 0                                           openai/gpt-test  $0.00
-   > A quote long enough to wrap onto a second row so we can see whether the
-   rail repeats.
-   Some emphasis, some strong, some inline code, a link, a footnote[1], and math
-   $x^2$.
+
    The footnote body.
+
    │ rust
    │ fn main() {
    │     let x = 1;
@@ -11,12 +9,14 @@
    │         println!("{x}");
    │     }
    │ }
+
    Role  │ Default
    ──────┼──────────
    text  │ white
    muted │ dark grey
 
-   ------------
+   ─────────────────────────────────────────────────────────────────────────────
+
    Tail paragraph.
    ✓ 0.0s · ttft 0.0s
  3 agents
