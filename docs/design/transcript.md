@@ -112,7 +112,34 @@ Rhythm rules, applied in the transcript assembler:
 - Message bodies indent under their role header (a 3-column gutter);
   call groups keep their own gutter glyphs so text and calls are
   distinguishable by silhouette alone.
-- Headings inside markdown get a blank line above; list items stay tight.
+- Inside a message, markdown blocks are separated by exactly one blank
+  row: paragraph, heading, list, quote, code panel, table, rule, and
+  footnote definition each begin one row below the previous block. Items
+  within one list and rows within one table stay tight. No blank row opens
+  or closes a message; the turn spacing above owns that. A streaming
+  message's settled prefix lays out to the same rows as the whole
+  (`markdown::settled_prefix_end`), so the gap that follows a block is part
+  of the prefix that ends with it.
+
+## Markdown Blocks
+
+Block markers, applied in `view/markdown.rs`:
+
+- **Headings** differ by level: H1 is `text` bold with a `─` rule in
+  `border` beneath it the width of the title; H2 is `accent` bold; H3–H6
+  are `text` bold.
+- **Bullets** are `•` in `accent`, nested bullets `◦`, indented two cells
+  per level. **Ordered** items keep their numbers, right-aligned to the
+  widest number the list reaches (` 9.` / `10.`). **Task** items show `☐`
+  or `☑` in `accent` in place of the bullet.
+- Wrapped list rows hang: continuation text aligns under the item's first
+  word, not under the marker. The item body wraps at the width left after
+  the marker, and later paragraphs inside a loose item start at the same
+  column.
+- **Quotes** carry a `▎ ` rail in `muted` on every row, wrapped rows
+  included, and the body is `muted` italic. Nested quotes stack rails.
+- A **rule** is `─` across the full content width in `border`.
+- Rows never end in the whitespace a word wrap broke on.
 
 ## Code Blocks
 

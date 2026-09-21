@@ -6,10 +6,10 @@ Raw frames and bench reports live under `target/qq-perf/tui-<slice>-<date>/`
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| U0 ([ENG-844](https://linear.app/retsu-ai/issue/ENG-844)) | Review harness: goldens at five sizes, gallery dump, QA fixture body | In review | [#86](https://github.com/retsu-AI/qq/pull/86) | Started 2026-09-20 from `51ccf13`; parent [ENG-843](https://linear.app/retsu-ai/issue/ENG-843) |
-| L1 ([ENG-845](https://linear.app/retsu-ai/issue/ENG-845)) | Layout engine, tiers, raised clamps, placed measure | In review | [#87](https://github.com/retsu-AI/qq/pull/87) | Stacked on #86 |
-| L2 ([ENG-846](https://linear.app/retsu-ai/issue/ENG-846)) | Per-pane transcript state | In review | `feat/eng-846-l2-pane-state` | Stacked on #87; one visible pane until L4 |
-| U1 ([ENG-847](https://linear.app/retsu-ai/issue/ENG-847)) | Block rhythm and lists | Planned | | Needs U0 |
+| U0 ([ENG-844](https://linear.app/retsu-ai/issue/ENG-844)) | Review harness: goldens at five sizes, gallery dump, QA fixture body | Shipped (`2cad2de`, [#86](https://github.com/retsu-AI/qq/pull/86)) | | Started 2026-09-20 from `51ccf13`; parent [ENG-843](https://linear.app/retsu-ai/issue/ENG-843) |
+| L1 ([ENG-845](https://linear.app/retsu-ai/issue/ENG-845)) | Layout engine, tiers, raised clamps, placed measure | Shipped (`7585711`, [#87](https://github.com/retsu-AI/qq/pull/87)) | | 2026-09-20 |
+| L2 ([ENG-846](https://linear.app/retsu-ai/issue/ENG-846)) | Per-pane transcript state | In review | `feat/eng-846-l2-pane-state` | Rebased onto main after #87; one visible pane until L4 |
+| U1 ([ENG-847](https://linear.app/retsu-ai/issue/ENG-847)) | Block rhythm and lists | In review | `feat/eng-847-u1-markdown-rhythm` | Stacked on L2 |
 | U2 ([ENG-848](https://linear.app/retsu-ai/issue/ENG-848)) | Inline styling, `Style.underline` | Planned | | Needs U0 |
 | U3 ([ENG-849](https://linear.app/retsu-ai/issue/ENG-849)) | Code panel | Planned | | Needs U0 |
 | U4 ([ENG-850](https://linear.app/retsu-ai/issue/ENG-850)) | Syntax palette, theme `syntax` block | Planned | | Needs U0 |
@@ -133,3 +133,26 @@ Baseline: `cargo bench -p qq-tui --bench render` on `51ccf13` recorded to
   `TranscriptCache` "for the shown session"; it should say layouts are shared
   across panes and per-pane state lives on `App.panes` (`layout.md` § Panes
   and state).
+### 2026-09-20 — U1 receipt
+
+- `markdown_lines` now emits one blank row between blocks via `block_gap`,
+  keeps ordered-list numbers right-aligned (a one-pass item count per list
+  sizes the marker column), uses `•`/`◦`/`☐`/`☑` markers, hangs wrapped
+  list rows under the item text (per-line `Hang { width, rail }`; the body
+  wraps at `width - hang` and the prefix repeats), repeats the `▎ ` quote
+  rail on every row, draws rules as `─` across the content width in
+  `border`, and styles H1 `text` bold + underline / H2 `accent` bold / H3+
+  `text` bold. Trailing wrap whitespace is trimmed from prose rows.
+- A source ending in a blank line keeps its trailing gap so the settled
+  prefix concatenates to the whole; the existing 11-source streaming corpus
+  passes unchanged.
+- Tests: 7 new in `markdown/tests.rs` (numbers, hanging indents, tasks,
+  quote rails, rule, heading levels, gallery rhythm incl. streaming split);
+  2 existing expectations updated (`- ` → `•`, trailing space). 262 lib + 5
+  golden. Goldens moved: the five `markdown-gallery-*` only.
+- Bench (`target/qq-perf/tui-U1-2026-09-20/after.txt` vs L1): steady_state
+  22.2 → 21.9 µs; streaming_focused 36.3 → 35.4; streaming_run_on_32kb 442
+  → 442; golden_path 38.0 → 39.4; resize_horizontal 33.2 → 31.6.
+- Docs: `transcript.md` § Spacing amended, new § Markdown Blocks.
+- Two subagent attempts at this slice timed out at the provider before
+  writing anything; implemented directly.
