@@ -136,7 +136,7 @@ async fn compact_in_run(
     let max_output_tokens = resolved_model
         .max_output_tokens
         .min(super::execution::COMPACTION_OUTPUT_RESERVE_TOKENS);
-    let summarize = plan.runtime.summarize_once(messages, max_output_tokens);
+    let summarize = plan.runtime.summarize(messages, max_output_tokens);
     let reply = tokio::select! {
         biased;
         changed = cancelled.changed() => {

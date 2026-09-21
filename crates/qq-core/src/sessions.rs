@@ -263,7 +263,8 @@ pub mod bench_support {
 use approvals::ConcludedApproval;
 #[cfg(test)]
 use execution::RunAccountingAccumulator;
-use execution::{ModelTurnCommit, RunAccounting, TeardownComplete, add_usage};
+pub(crate) use execution::add_usage;
+use execution::{ModelTurnCommit, RunAccounting, TeardownComplete};
 use store::Store;
 use store::open_database;
 #[cfg(test)]

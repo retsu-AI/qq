@@ -3540,7 +3540,7 @@ const fn turn_context_tokens(usage: TokenUsage) -> u64 {
         .saturating_add(usage.cache_write_input_tokens)
 }
 
-pub(super) fn add_usage(left: TokenUsage, right: TokenUsage) -> Option<TokenUsage> {
+pub(crate) fn add_usage(left: TokenUsage, right: TokenUsage) -> Option<TokenUsage> {
     Some(TokenUsage {
         input_tokens: left.input_tokens.checked_add(right.input_tokens)?,
         cache_read_input_tokens: left

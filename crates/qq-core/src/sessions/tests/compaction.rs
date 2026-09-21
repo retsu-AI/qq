@@ -3262,9 +3262,12 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
                             + tool.input_schema().get().len()) as u64
                     })
                     .sum::<u64>();
+            // Each request is judged with the output reserve it actually
+            // carried: the run's own, or the summarizer's larger one.
+            let reserve = u64::from(request.max_output_tokens());
             assert!(
-                crate::sessions::context::estimate_tokens(bytes) + 1_024 <= 16 * 1024,
-                "request {index} ({bytes} bytes) was sent over the window"
+                crate::sessions::context::estimate_tokens(bytes) + reserve <= 16 * 1024,
+                "request {index} ({bytes} bytes + {reserve} reserve) was sent over the window"
             );
         }
         // The final request carries the prompt, a summary, and only the turns
@@ -3716,4 +3719,90 @@ fn in_run_compaction_boundary_keeps_the_recent_turns_with_their_results() {
     let mut folded = vec![Message::user("summary so far")];
     folded.extend((0..5).flat_map(|_| [assistant(), results()]));
     assert_eq!(boundary(&folded, 4), Some((3, 1)));
+}
+
+#[tokio::test]
+async fn an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verbatim() {
+    // #97 fixed the between-run summarizer joining truncated turns with a
+    // newline through a mid-token cut. The in-run summarizer takes its own
+    // path (`Runtime::summarize`), so it must continue a cut reply the same
+    // way and concatenate the pieces byte-for-byte; a heading split at the
+    // cut still validates and the committed summary is the whole text.
+    let turns = 48;
+    let summary = valid_summary("continued");
+    // Cut inside the word "Decisions" so the seam splits a required heading.
+    let cut = summary.find("Decis").unwrap() + "Decis".len();
+    let mut harness = auto_compact_harness_with_loader_and_mode(
+        AutoCompactLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            scripts: vec![AutoCompactScript::ShellRepeatedlyWithTruncatedSummaries {
+                turns,
+                text: "task complete".to_owned(),
+                summary: summary.clone(),
+                cut,
+            }],
+            loads: StdMutex::new(0),
+            context_window: Some(16 * 1024),
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        },
+        ApprovalMode::Full,
+    )
+    .await;
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "do the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    let outcome = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, outcome, ..
+            } if *run_id == run => Some(outcome.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
+    let compactions = observed
+        .iter()
+        .filter(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+        .count();
+    assert!(compactions >= 1);
+    // Every stored in-run summary is the full text: heading intact, no seam.
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let mut statement = connection
+        .prepare("SELECT summary FROM session_compactions WHERE scope_run_id = ?1")
+        .unwrap();
+    let stored: Vec<String> = statement
+        .query_map([run.to_string()], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(!stored.is_empty());
+    for text in &stored {
+        assert!(text.starts_with(&summary), "{text}");
+        assert!(
+            text.contains("Decisions and constraints: continued"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Decis\n"),
+            "a newline was inserted at the cut: {text}"
+        );
+    }
+    // Each summarizer exchange was two provider requests: the cut reply and
+    // its continuation carrying the truncation notice.
+    let requests = harness.requests.lock().unwrap();
+    let continuations = requests
+        .iter()
+        .filter(|request| {
+            request_texts(request)
+                .last()
+                .is_some_and(|text| text.contains("cut off at the output token limit"))
+        })
+        .count();
+    assert_eq!(continuations, compactions);
 }

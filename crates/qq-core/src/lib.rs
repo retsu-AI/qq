@@ -755,63 +755,102 @@ impl Runtime {
         })
     }
 
-    /// One provider turn with no tools: the summarizer request of an in-run
-    /// compaction. Returns the concatenated text and the reported usage. A
+    /// The summarizer request of an in-run compaction: provider turns with no
+    /// tools, continued up to `MAX_OUTPUT_CONTINUATIONS` times when the reply
+    /// is cut at the output limit, exactly as the run loop and the
+    /// between-run path do. A cut turn resumes mid-token, so its continuation
+    /// is appended verbatim. Returns the joined text and the summed usage. A
     /// tool call, refusal, protocol violation, or transport failure is an
     /// error naming it; the caller settles the compaction run failed. The
     /// provider owns retries exactly as for any other request.
-    pub(crate) async fn summarize_once(
+    pub(crate) async fn summarize(
         &self,
         messages: Vec<Message>,
         max_output_tokens: u32,
     ) -> Result<(String, Option<TokenUsage>), String> {
-        let request = ModelRequest::new(Arc::clone(&self.model), messages, max_output_tokens);
-        let request = match self.reasoning_effort {
-            Some(effort) => request.with_reasoning_effort(effort),
-            None => request,
-        };
-        let mut events = self.provider.stream(request);
-        let mut text = String::new();
-        while let Some(event) = events.next().await {
-            match event {
-                Ok(ProviderEvent::OutputTextDelta { text: delta }) => {
-                    if text.len().saturating_add(delta.len()) > MAX_RUN_MODEL_TEXT_BYTES {
-                        return Err("summarizer output exceeded the run text bound".to_owned());
+        let mut messages = messages;
+        let mut summary = String::new();
+        let mut total_usage: Option<TokenUsage> = None;
+        let mut continuations: u16 = 0;
+        loop {
+            let request =
+                ModelRequest::new(Arc::clone(&self.model), messages.clone(), max_output_tokens);
+            let request = match self.reasoning_effort {
+                Some(effort) => request.with_reasoning_effort(effort),
+                None => request,
+            };
+            let mut events = self.provider.stream(request);
+            let mut text = String::new();
+            let mut truncated = false;
+            let mut usage = None;
+            loop {
+                let Some(event) = events.next().await else {
+                    return Err("summarizer stream ended without completing".to_owned());
+                };
+                match event {
+                    Ok(ProviderEvent::OutputTextDelta { text: delta }) => {
+                        if summary
+                            .len()
+                            .saturating_add(text.len())
+                            .saturating_add(delta.len())
+                            > MAX_RUN_MODEL_TEXT_BYTES
+                        {
+                            return Err("summarizer output exceeded the run text bound".to_owned());
+                        }
+                        text.push_str(&delta);
                     }
-                    text.push_str(&delta);
+                    Ok(
+                        ProviderEvent::ReasoningStarted { .. }
+                        | ProviderEvent::ReasoningDelta { .. }
+                        | ProviderEvent::ReasoningCompleted { .. },
+                    ) => {}
+                    Ok(ProviderEvent::RefusalDelta { .. }) => {
+                        return Err("summarizer refused".to_owned());
+                    }
+                    Ok(
+                        ProviderEvent::ToolCallStarted { .. }
+                        | ProviderEvent::ToolCallArgumentsDelta { .. }
+                        | ProviderEvent::ToolCallCompleted { .. },
+                    ) => {
+                        return Err("summarizer attempted a tool call".to_owned());
+                    }
+                    Ok(ProviderEvent::Completed { usage: reported }) => {
+                        usage = reported.map(provider_usage);
+                        break;
+                    }
+                    Ok(ProviderEvent::Incomplete { .. }) => {
+                        truncated = true;
+                        break;
+                    }
+                    Err(error) => return Err(error.to_string()),
                 }
-                Ok(
-                    ProviderEvent::ReasoningStarted { .. }
-                    | ProviderEvent::ReasoningDelta { .. }
-                    | ProviderEvent::ReasoningCompleted { .. },
-                ) => {}
-                Ok(ProviderEvent::RefusalDelta { .. }) => {
-                    return Err("summarizer refused".to_owned());
-                }
-                Ok(
-                    ProviderEvent::ToolCallStarted { .. }
-                    | ProviderEvent::ToolCallArgumentsDelta { .. }
-                    | ProviderEvent::ToolCallCompleted { .. },
-                ) => {
-                    return Err("summarizer attempted a tool call".to_owned());
-                }
-                Ok(ProviderEvent::Completed { usage }) => {
-                    return Ok((text, usage.map(provider_usage)));
-                }
-                Ok(ProviderEvent::Incomplete { .. }) => {
-                    return Err(format!(
-                        "summarizer output was cut off after {} bytes",
-                        text.len()
-                    ));
-                }
-                Err(error) => return Err(error.to_string()),
             }
+            summary.push_str(&text);
+            // Overflowing the sum is a provider protocol fault; fail the
+            // compaction rather than persist an understated total.
+            total_usage = match (total_usage, usage) {
+                (Some(total), Some(turn)) => match sessions::add_usage(total, turn) {
+                    Some(sum) => Some(sum),
+                    None => return Err("summarizer usage overflowed".to_owned()),
+                },
+                (Some(total), None) | (None, Some(total)) => Some(total),
+                (None, None) => None,
+            };
+            if !truncated {
+                return Ok((summary, total_usage));
+            }
+            if continuations >= MAX_OUTPUT_CONTINUATIONS {
+                return Err(format!(
+                    "summarizer output was cut off at the output token limit ({max_output_tokens} tokens) on {} consecutive turns",
+                    u32::from(MAX_OUTPUT_CONTINUATIONS) + 1
+                ));
+            }
+            continuations += 1;
+            messages.push(Message::assistant(text));
+            messages.push(Message::user(OUTPUT_TRUNCATED_CONTINUE_NOTICE));
         }
-        Err("summarizer stream ended without completing".to_owned())
     }
 
-    /// Carries an optional pre-run router into compiled plans for orchestration.
-    #[must_use]
     pub fn with_task_router(mut self, router: Arc<dyn sessions::TaskRouter>) -> Self {
         self.task_router = Some(router);
         self

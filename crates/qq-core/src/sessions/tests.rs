@@ -2737,6 +2737,15 @@ enum AutoCompactScript {
         text: String,
         summary: String,
     },
+    /// `ShellRepeatedlyWithSummaries` whose summarizer reply is cut at the
+    /// output limit after `cut` bytes on the first request and completed on
+    /// the continuation, so an in-run summary exercises the truncation join.
+    ShellRepeatedlyWithTruncatedSummaries {
+        turns: usize,
+        text: String,
+        summary: String,
+        cut: usize,
+    },
     /// Calls `search_history` with the query on the first turn, then
     /// streams the text.
     SearchHistoryThenText(String, String),
@@ -2936,6 +2945,61 @@ impl Provider for AutoCompactProvider {
                             id: "call_read".to_owned(),
                         }),
                         Ok(qq_provider::ProviderEvent::Completed { usage }),
+                    ]))
+                }
+            }
+            AutoCompactScript::ShellRepeatedlyWithTruncatedSummaries {
+                turns,
+                text,
+                summary,
+                cut,
+            } => {
+                // A continuation request ends with the truncation notice; the
+                // summarizer request proper ends with the instruction.
+                if last_text.contains("cut off at the output token limit") {
+                    let summarized = prior_results.len() + summarized_before;
+                    let full = format!("{summary}\nturns_done={summarized}");
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: full[*cut..].to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                if last_text.contains("Summarize this conversation") {
+                    let summarized = prior_results.len() + summarized_before;
+                    let full = format!("{summary}\nturns_done={summarized}");
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: full[..*cut].to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Incomplete {
+                            usage: None,
+                            reason: qq_provider::IncompleteReason::OutputTokens,
+                        }),
+                    ]));
+                }
+                let done = prior_results.len() + summarized_before;
+                if done >= *turns {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    let id = format!("call_shell_{done}");
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: id.clone(),
+                            name: "shell".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: id.clone(),
+                            json: format!(
+                                r#"{{"command":"echo step {done}; head -c 6000 /dev/zero | tr '\\0' x"}}"#
+                            ),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
                     ]))
                 }
             }
