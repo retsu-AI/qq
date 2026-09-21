@@ -25,6 +25,7 @@ may append a **request** row; only root changes a request's status.
 | F24 | History excerpt offsets survive Unicode lowercasing | In review ([ENG-805](https://linear.app/retsu-ai/issue/ENG-805)) | 2026-09-19. `find_case_insensitive` lowers the haystack char by char and keeps original offsets (ASCII keeps the memchr fast path); `excerpt_around` no longer takes a lowered copy. Regressions with `İ`/`ẞ` prefixes incl. a drift larger than the excerpt half-width; `context_assembly` search timings unchanged within noise |
 | T12-f | Steering `@file` parts resolved at the boundary and persisted as attachments | In review ([ENG-819](https://linear.app/retsu-ai/issue/ENG-819)) | 2026-09-19. `SteeringMessage` carries `InputPart`s; `apply_steering` reads files off-executor when the message is injected and the `SteeringApplied` transaction stores them like a prompt's attachments; assembly re-renders steering from the store. Unreadable file → runtime notice in the message, run continues. Regression: steer with `@notes.txt`, provider sees bytes, replay identical after the file changes; reference oracle extended |
 | F23 | Model-facing tool-result projection persisted for replay | In review (ENG-804) | 2026-09-19. The 96 KiB per-turn budget is now one deterministic projection (`TurnOutputBudget`) that both the live run and `append_run_turns` apply over the stored `tool_calls` rows, so follow-up, reopen, and summarizer requests replay the live bytes; budget cuts of unspilled results name the stored row through `read_tool_result`. |
+| F11 | Snapshot assembly byte-budgeted under the 8 MiB wire cap | In review (ENG-796) | 2026-09-19. Bodies admit rows newest-first under one 6 MiB escaped-text budget (focused first, then included); cuts surface as `has_older_*`. No wire change |
 
 ## ADR number allocation
 
@@ -350,3 +351,19 @@ A cut of an unspilled result now names the stored row by a
 plus a unit test for the stored-row handle. Deferred: JEV checkpoint
 annotations appended to retained results are still live-only (F23 scope was
 the turn budget); `context_assembly` bench unchanged within noise.
+### 2026-09-19 — F11 snapshot byte budget
+
+Reproduced on `main`: `load_snapshot` bounded bodies by row count only, so a
+session with 40 x 300 KiB retained tool results produced a 12.3 MiB body the
+8 MiB wire cap refuses — the TUI could never attach to it. Fix in
+`sessions/snapshots.rs`: one `SnapshotBudget` (6 MiB of escaped text plus a
+512-byte per-row charge) spans the focused and included bodies; messages and
+tool calls are admitted newest-first and a cut sets the existing
+`has_older_messages` / `has_older_tool_calls` flags, so no protocol change and
+no new endpoint. Run rows and summaries are never cut by transcript size. The
+tool-call ordering query also gained `r.rowid DESC` so same-millisecond runs
+keep a deterministic newest tail. Test:
+`snapshots_stay_under_the_wire_cap_for_large_sessions` (assembly ~1 s for the
+12 MiB seed). Deferred: the TUI does not yet page older rows on demand beyond
+its existing cold-body fetch; a clipped focused body simply shows the newest
+tail with the flag set.

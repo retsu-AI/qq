@@ -311,6 +311,14 @@ pub const MAX_REPLAY_EVENTS: u16 = 128;
 const MAX_SNAPSHOT_SESSIONS: u16 = 512;
 const MAX_SNAPSHOT_MESSAGES: u16 = 256;
 const MAX_SNAPSHOT_TOOL_CALLS: usize = 4_096;
+/// Bytes of body text one snapshot may carry across its focused and included
+/// session bodies. Below `qq_protocol::MAX_SNAPSHOT_BYTES` by enough to cover
+/// the fixed per-row envelope and the workspace's session summaries, so a
+/// response assembled under this budget always serializes under the wire cap.
+const SNAPSHOT_BODY_BUDGET_BYTES: usize = 6 * 1024 * 1024;
+/// Serialized overhead charged per snapshot row beyond its text: ids, run and
+/// session references, ordinals, states, and JSON punctuation.
+const SNAPSHOT_ROW_OVERHEAD_BYTES: usize = 512;
 const MAX_TEXT_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_FAILURE_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_WORKSPACES: u32 = 1024;
