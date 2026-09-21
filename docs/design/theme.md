@@ -143,6 +143,58 @@ Markdown and unified diffs reuse these roles in v1:
 - diff removals → `error`
 - diff hunk headers → muted `accent`
 
+### Syntax Block
+
+Highlighted code panels paint with eight syntax roles. Every one has a
+default derived from the required roles, so a theme that says nothing about
+syntax still colors code in its own voice; a theme may override any subset
+with an optional `syntax` block:
+
+```ron
+(
+    version: 1,
+    defs: { /* ... */ },
+    colors: ( /* the eight required roles */ ),
+    syntax: (
+        keyword:     "pine",
+        function:    "rose",
+        type:        "foam",
+        string:      "gold",
+        constant:    "gold",
+        comment:     "subtle",
+        property:    "foam",
+        punctuation: "#908caa",
+    ),
+)
+```
+
+| Role | Highlights | Derived default |
+|------|------------|-----------------|
+| `keyword` | keywords, builtin variables (`self`, `this`) | `brand` |
+| `function` | functions, methods, markup tags | `accent` |
+| `type` | types, constructors | `warning` |
+| `string` | string literals | `success` |
+| `constant` | numbers, constants, escapes, attributes, labels | `brand` blended one third toward `text` |
+| `comment` | comments (rendered italic) | `muted` |
+| `property` | properties, object keys, operators, parameters | `text` |
+| `punctuation` | brackets and delimiters | `muted` |
+
+Rules:
+
+- The block and every field inside it are optional. A missing field keeps
+  the derived default; an empty block is the same as no block.
+- Values follow the same rules as `colors`: a `defs` alias or a `#RRGGBB`
+  literal, cycles rejected.
+- Unknown fields inside `syntax` are rejected, like the rest of the document.
+- No derived default is `error`, so code never reads as broken. The blend
+  for `constant` mixes RGB channels; when `brand` or `text` is a terminal
+  color (only the compiled `qq` theme), `constant` is `brand` unchanged.
+- The italic on comments is a renderer attribute, not a theme value.
+
+Shipped themes declare a `syntax` block where the upstream palette
+documents token colors (see § Shipped Themes); `ember` and `ink` rely on
+the derived defaults.
+
 ## Runtime Model
 
 `qq-tui` owns resolved theme values:
@@ -162,21 +214,28 @@ pub struct Palette {
     pub error: Color,
     pub success: Color,
     pub surface: Color,
+    // Derived: surface_alt, selection_bg, border, diff_add_bg, diff_del_bg,
+    // info, and the eight syn_* roles (keyword, function, type, string,
+    // constant, comment, property, punctuation).
 }
 ```
 
 `Theme::qq()` returns the compiled baseline and is the fallback when no theme
 name is configured. `Theme::from_roles(name, [ThemeColor; 8])` builds a theme
 from the root's resolved role colors without exposing a terminal library type
-across the crate boundary.
+across the crate boundary; `Theme::from_roles_and_syntax(name, roles,
+SyntaxOverrides)` additionally applies a document's `syntax` block after the
+defaults are derived. `Palette::derive` is the single place the derived roles
+come from, and `Palette::with_syntax` the single place overrides land.
 
 Configuration loading:
 
 1. Load layered `tui.ron` documents.
 2. Resolve the effective theme name (default `"qq"`).
 3. Load and validate the theme document for that name.
-4. Expand aliases into concrete colors.
-5. Attach the resolved `Theme` to TUI options alongside layout and bindings.
+4. Expand aliases into concrete colors, for `colors` and any `syntax` field.
+5. Derive the syntax roles, then apply the document's `syntax` overrides.
+6. Attach the resolved `Theme` to TUI options alongside layout and bindings.
 
 The view must not hardcode palette colors. Style helpers (`normal()`,
 `accent()`, `surface()`, and so on in `render.rs`) read the active `Palette`
@@ -197,29 +256,31 @@ The binary also ships these themes as ordinary theme documents
 the same code path as user files, so a broken shipped document is a build
 defect that surfaces as a `ConfigError`):
 
-| Name | Source |
-|------|--------|
-| `ink` | QQ house theme: cool paper text, sky accent, copper brand |
-| `ember` | QQ warm theme: parchment text, teal accent, ember brand |
-| `catppuccin` | Catppuccin Mocha |
-| `dracula` | Dracula |
-| `everforest` | Everforest dark medium |
-| `gruvbox` | Gruvbox dark medium |
-| `kanagawa` | Kanagawa wave |
-| `monokai` | Monokai Pro |
-| `nord` | Nord |
-| `onedark` | One Dark |
-| `rose-pine` | Rosé Pine main |
-| `solarized` | Solarized dark |
-| `tokyonight` | Tokyo Night night |
+| Name | Source | `syntax` block |
+|------|--------|----------------|
+| `ink` | QQ house theme: cool paper text, sky accent, copper brand | derived |
+| `ember` | QQ warm theme: parchment text, teal accent, ember brand | derived |
+| `catppuccin` | Catppuccin Mocha | style guide "Code Editors" table |
+| `dracula` | Dracula | draculatheme.com/spec |
+| `everforest` | Everforest dark medium | `colors/everforest.vim` tree-sitter links |
+| `gruvbox` | Gruvbox dark medium | `colors/gruvbox.vim` (no punctuation tone) |
+| `kanagawa` | Kanagawa wave | `themes.lua` `syn` table |
+| `monokai` | Monokai Pro | monokai-pro.nvim syntax groups |
+| `nord` | Nord | `nord.scss` per-color usage notes |
+| `onedark` | One Dark | onedark.nvim highlights |
+| `rose-pine` | Rosé Pine main | rose-pine/neovim highlight groups |
+| `solarized` | Solarized dark | vim-colors-solarized (no property or punctuation tone) |
+| `tokyonight` | Tokyo Night night | tokyonight.nvim base + tree-sitter groups |
 
 Ports use the upstream palette's canonical hex values and map roles the way
 the upstream theme uses those colors (its primary accent, its comment tone,
 its elevated surface). Where a canonical tone fails contrast as text on the
 theme's own background or surface, the port substitutes the palette's
 nearest legible tone and says so in the file. Every shipped theme keeps all
-eight roles distinct. `qq config explain tui.theme` lists the available names
-and where each comes from.
+eight roles distinct. Syntax fields follow the upstream editor theme's
+token colors and are omitted (not invented) where the upstream declares
+none, so the derived default applies. `qq config explain tui.theme` lists
+the available names and where each comes from.
 
 Users create custom themes by adding files under the global or project `themes`
 directory and selecting the file stem from `tui.ron`:
@@ -252,6 +313,10 @@ Theme failures are configuration errors reported before the TUI starts:
 - unknown `defs` reference
 - malformed color literal
 - alias cycle
+- a `syntax` field that fails to resolve (`ConfigError::InvalidThemeSyntax`
+  names the field as a `SyntaxRole` and carries the `ThemeColorFault`:
+  unresolved alias or literal, or alias cycle)
+- an unknown field inside `syntax`
 
 Provenance should record which source supplied the theme name and, when loaded
 from disk, which path supplied the theme document.
@@ -274,7 +339,6 @@ fast.
 ## Out Of Scope (v1)
 
 - Per-role light/dark dual maps
-- Syntax-highlight token palettes
 - Terminal background clear / full chrome skinning beyond `surface`
 - Hot reload of theme files while the TUI is running
 - Writing the picker's choice back to `tui.ron`
@@ -294,6 +358,8 @@ discovery.
 6. Tests: default resolution, layered name override, `defs` aliases, unknown
    name, incomplete theme, bad hex, and a render smoke path with a non-default
    palette.
+7. Syntax roles on `Palette` with derived defaults, an optional `syntax`
+   block per document, and shipped blocks where the upstream defines them.
 
 ## Design Constraints
 

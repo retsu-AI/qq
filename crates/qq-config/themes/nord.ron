@@ -4,6 +4,11 @@
 // (orange) carries the brand. Muted is Nord's brightened comment tone
 // (nord3_bright), which the spec recommends where plain nord3 falls under
 // 2:1 contrast. nord1 is the elevated UI surface.
+//
+// Syntax follows the Nord spec's per-color usage (src/nord.scss): keywords
+// nord9, functions nord8, types nord7, strings nord14, numbers nord15,
+// comments nord3_bright (the spec's legible comment tone), variables
+// nord4, punctuation nord6.
 (
     version: 1,
     defs: {
@@ -15,6 +20,10 @@
         "nord11": "#bf616a",
         "nord14": "#a3be8c",
         "nord1":  "#3b4252",
+        "nord9":  "#81a1c1",
+        "nord7":  "#8fbcbb",
+        "nord15": "#b48ead",
+        "nord6":  "#eceff4",
     },
     colors: (
         text:    "nord4",
@@ -25,5 +34,15 @@
         error:   "nord11",
         success: "nord14",
         surface: "nord1",
+    ),
+    syntax: (
+        keyword:     "nord9",
+        function:    "nord8",
+        type:        "nord7",
+        string:      "nord14",
+        constant:    "nord15",
+        comment:     "nord3_bright",
+        property:    "nord4",
+        punctuation: "nord6",
     ),
 )

@@ -30,8 +30,8 @@ pub use pack::{
 };
 pub use qq_provider::{SecretLiteral, SecretRef, XAI_CREDENTIAL_ENDPOINT};
 pub use theme::{
-    AnsiColor, COMPILED_THEMES, DEFAULT_THEME, Rgb, ThemeColor, ThemeColors, ThemeDocument,
-    compiled_theme,
+    AnsiColor, COMPILED_THEMES, DEFAULT_THEME, Rgb, SyntaxRole, ThemeColor, ThemeColorFault,
+    ThemeColors, ThemeDocument, ThemeSyntax, compiled_theme,
 };
 pub use tui::{
     TuiAction, TuiConfigDefaults, TuiConfigKey, TuiConfigSettings, TuiConfigSnapshot,
@@ -2228,6 +2228,13 @@ pub enum ConfigError {
         "unknown TUI theme `{name}`; expected a shipped theme (see `qq config explain tui.theme`) or a `themes/{name}.ron` file"
     )]
     UnknownTheme { name: String },
+    #[error("theme {origin} `syntax.{role}` {reason}")]
+    InvalidThemeSyntax {
+        origin: SourceIdentity,
+        role: SyntaxRole,
+        #[source]
+        reason: ThemeColorFault,
+    },
     #[error(
         "the current binary must integrate ConfigSnapshot and resolve its SecretRef externally"
     )]

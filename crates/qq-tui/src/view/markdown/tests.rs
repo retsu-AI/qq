@@ -1,6 +1,7 @@
 use super::*;
-use crate::render::{
-    accent, border, diff_line_style, inline_code, link, muted, normal, surface_color,
+use crate::{
+    render::{accent, border, diff_line_style, inline_code, link, muted, normal, surface_color},
+    theme,
 };
 use unicode_width::UnicodeWidthChar;
 
@@ -417,6 +418,64 @@ fn highlighted_rust_panels_style_keywords_strings_and_comments() {
     );
     assert_eq!(lines[0].spans[0].style, surface(border()));
     assert_eq!(style_of(&lines, " rust "), Some(surface(muted())));
+}
+
+#[test]
+fn punctuation_is_muted_operators_and_parameters_are_text_and_constants_are_not_error() {
+    let source = "```rust\nfn add(a: u8) -> u8 {\n    a + &1;\n    Some(0x1f)\n}\n```";
+    let lines = markdown_lines(source, 48, true);
+
+    // Brackets and delimiters read in the punctuation role, which the
+    // default palette derives from `muted`.
+    let punctuation = surface(code_punctuation());
+    assert_eq!(punctuation.color, Some(theme::active().muted));
+    assert_eq!(style_of(&lines, "("), Some(punctuation));
+    assert_eq!(style_of(&lines, "{"), Some(punctuation));
+    assert_eq!(style_of(&lines, ";"), Some(punctuation));
+    // Operators and parameters share the property (text) tone.
+    let text = surface(code_property());
+    assert_eq!(text.color, Some(theme::active().text));
+    assert_eq!(style_of(&lines, "&"), Some(text));
+    assert_eq!(
+        lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .find(|span| span.text == "a")
+            .map(|span| span.style),
+        Some(text),
+        "parameter identifier"
+    );
+    // Numbers take the constant role, which is never the error color.
+    let constant = style_of(&lines, "0x1f").expect("number span");
+    assert_eq!(constant, surface(code_constant()));
+    assert_ne!(constant.color, Some(theme::active().error));
+    assert!(code_comment().is_italic());
+}
+
+#[test]
+fn every_bundled_grammar_configures_the_extended_capture_list() {
+    // `configure` runs once per grammar; a capture list that trips a query
+    // would leave the cell `None` and the fence plain, so resolving every
+    // tag and highlighting a bracketed snippet under each proves the list.
+    for tag in [
+        "rust",
+        "toml",
+        "json",
+        "yaml",
+        "bash",
+        "python",
+        "javascript",
+        "typescript",
+        "tsx",
+        "jsx",
+        "go",
+        "c",
+        "cpp",
+    ] {
+        let configuration = fence_highlight_configuration(tag).expect(tag);
+        let lines = highlighted_code_lines(configuration, "f(a, {b: [1]});\n").expect(tag);
+        assert!(!lines.is_empty(), "{tag} highlights");
+    }
 }
 
 #[test]

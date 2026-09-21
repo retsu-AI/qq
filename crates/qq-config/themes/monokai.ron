@@ -3,6 +3,11 @@
 // Blue is the accent, orange the brand; the yellow, red, and green are
 // Monokai Pro's own. dimmed3 is its comment tone; dimmed5 is the
 // elevated surface.
+//
+// Syntax follows monokai-pro.nvim's syntax and tree-sitter groups: keywords
+// red, functions green, types blue (Monokai Pro's cyan), strings yellow,
+// constants and numbers purple, comments dimmed3, members foreground,
+// delimiters dimmed2.
 (
     version: 1,
     defs: {
@@ -14,6 +19,8 @@
         "red":        "#ff6188",
         "green":      "#a9dc76",
         "dimmed5":    "#403e41",
+        "purple":     "#ab9df2",
+        "dimmed2":    "#939293",
     },
     colors: (
         text:    "foreground",
@@ -24,5 +31,15 @@
         error:   "red",
         success: "green",
         surface: "dimmed5",
+    ),
+    syntax: (
+        keyword:     "red",
+        function:    "green",
+        type:        "blue",
+        string:      "yellow",
+        constant:    "purple",
+        comment:     "dimmed3",
+        property:    "foreground",
+        punctuation: "dimmed2",
     ),
 )

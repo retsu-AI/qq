@@ -14,7 +14,7 @@ use std::{fs, path::PathBuf};
 
 use qq_config::{ConfigLoader, ConfigPaths};
 use qq_tui::{
-    Theme, ThemeColor, TuiOptions,
+    SyntaxOverrides, Theme, ThemeColor, TuiOptions,
     bench_support::{BenchHarness, GOLDEN_SIZES, Scene},
 };
 
@@ -49,7 +49,8 @@ fn compiled_themes() -> Vec<Theme> {
         .iter()
         .map(|document| {
             let colors = document.colors();
-            Theme::from_roles(
+            let syntax = document.syntax();
+            Theme::from_roles_and_syntax(
                 document.name(),
                 [
                     color(colors.text),
@@ -61,6 +62,16 @@ fn compiled_themes() -> Vec<Theme> {
                     color(colors.success),
                     color(colors.surface),
                 ],
+                SyntaxOverrides {
+                    keyword: syntax.keyword.map(color),
+                    function: syntax.function.map(color),
+                    r#type: syntax.r#type.map(color),
+                    string: syntax.string.map(color),
+                    constant: syntax.constant.map(color),
+                    comment: syntax.comment.map(color),
+                    property: syntax.property.map(color),
+                    punctuation: syntax.punctuation.map(color),
+                },
             )
         })
         .collect();

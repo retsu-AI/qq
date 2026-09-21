@@ -3,6 +3,11 @@
 // The bright orange is the signature, so it carries the brand; aqua is the
 // accent because it is gruvbox's most legible cool color against the warm
 // parchment text. Surface is bg1, one step above the editor background.
+//
+// Syntax follows colors/gruvbox.vim: keywords red, functions green, types
+// yellow, strings green, constants and numbers purple, comments gray,
+// identifiers blue. Gruvbox leaves delimiters at Normal, so punctuation
+// takes the derived muted default.
 (
     version: 1,
     defs: {
@@ -14,6 +19,8 @@
         "bright_red":    "#fb4934",
         "bright_green":  "#b8bb26",
         "bg1":           "#3c3836",
+        "bright_purple": "#d3869b",
+        "bright_blue":   "#83a598",
     },
     colors: (
         text:    "fg1",
@@ -24,5 +31,14 @@
         error:   "bright_red",
         success: "bright_green",
         surface: "bg1",
+    ),
+    syntax: (
+        keyword:  "bright_red",
+        function: "bright_green",
+        type:     "bright_yellow",
+        string:   "bright_green",
+        constant: "bright_purple",
+        comment:  "gray",
+        property: "bright_blue",
     ),
 )

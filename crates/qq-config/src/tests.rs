@@ -2915,6 +2915,41 @@ fn every_shipped_theme_parses_and_is_discoverable_without_any_files() {
             roles.len(),
             "{name} maps two roles to one color"
         );
+        // A shipped `syntax` block, when present, resolved every field it set
+        // to a literal; a role it left out stays `None` for the renderer to
+        // derive. Themes without canonical token colors ship no block.
+        let syntax = theme.syntax();
+        let has_block = !matches!(*name, "ember" | "ink");
+        assert_eq!(
+            !syntax.is_empty(),
+            has_block,
+            "{name}: syntax block presence"
+        );
+        for color in [
+            syntax.keyword,
+            syntax.function,
+            syntax.r#type,
+            syntax.string,
+            syntax.constant,
+            syntax.comment,
+            syntax.property,
+            syntax.punctuation,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(
+                matches!(color, ThemeColor::Rgb(_)),
+                "{name}: syntax colors are literals"
+            );
+        }
+        // Upstream palettes may paint keywords red (Gruvbox, Monokai), but
+        // the constant tone must never read as an error.
+        assert_ne!(
+            syntax.constant,
+            Some(colors.error),
+            "{name}: constants are not the error color"
+        );
     }
     let discovered = loader.discover_themes(&tree.path("work")).unwrap();
     let mut listed: Vec<&str> = discovered.iter().map(ThemeDocument::name).collect();
@@ -2975,6 +3010,117 @@ fn theme_documents_fail_fast_on_every_documented_error() {
     let discovered = loader.discover_themes(&tree.path("work")).unwrap();
     assert_eq!(discovered.len(), COMPILED_THEMES.len() + 1);
     assert!(discovered.iter().all(|theme| theme.name() != "bad"));
+}
+
+#[test]
+fn theme_syntax_blocks_are_optional_partial_and_validated_per_field() {
+    let tree = TempTree::new();
+    let loader = tree.loader();
+    let load = |content: &str| {
+        tree.write("global/themes/syn.ron", content);
+        loader.load_theme(&tree.path("work"), "syn")
+    };
+    let with_block = |block: &str| {
+        ROSE_PINE.replacen(
+            "    colors: (",
+            &format!("    syntax: (\n{block}\n    ),\n    colors: ("),
+            1,
+        )
+    };
+    let rgb = |r, g, b| ThemeColor::Rgb(Rgb { r, g, b });
+
+    // Absent: every override is None and the document is otherwise intact.
+    let absent = load(ROSE_PINE).unwrap();
+    assert_eq!(*absent.syntax(), ThemeSyntax::default());
+    assert!(absent.syntax().is_empty());
+
+    // Every field, mixing aliases and literals.
+    let full = load(&with_block(
+        r##"        keyword: "pine",
+        function: "rose",
+        type: "foam",
+        string: "gold",
+        constant: "#f6c177",
+        comment: "muted",
+        property: "foam",
+        punctuation: "#908caa","##,
+    ))
+    .unwrap();
+    let syntax = full.syntax();
+    assert_eq!(syntax.keyword, Some(rgb(0x31, 0x74, 0x8f)));
+    assert_eq!(syntax.function, Some(rgb(0xeb, 0x6f, 0x92)));
+    assert_eq!(syntax.r#type, Some(rgb(0x9c, 0xcf, 0xd8)));
+    assert_eq!(syntax.string, Some(rgb(0xf6, 0xc1, 0x77)));
+    assert_eq!(syntax.constant, Some(rgb(0xf6, 0xc1, 0x77)));
+    assert_eq!(syntax.comment, Some(rgb(0x6e, 0x6a, 0x86)));
+    assert_eq!(syntax.property, Some(rgb(0x9c, 0xcf, 0xd8)));
+    assert_eq!(syntax.punctuation, Some(rgb(0x90, 0x8c, 0xaa)));
+    assert!(!syntax.is_empty());
+
+    // A subset: the rest stay None for the renderer to derive.
+    let partial = load(&with_block(
+        r##"        keyword: "pine", punctuation: "#908caa","##,
+    ))
+    .unwrap();
+    assert_eq!(
+        *partial.syntax(),
+        ThemeSyntax {
+            keyword: Some(rgb(0x31, 0x74, 0x8f)),
+            punctuation: Some(rgb(0x90, 0x8c, 0xaa)),
+            ..ThemeSyntax::default()
+        }
+    );
+    // An empty block is the same as no block.
+    assert_eq!(
+        *load(&with_block("")).unwrap().syntax(),
+        ThemeSyntax::default()
+    );
+
+    // Malformed literal: the error names the field and the reason.
+    match load(&with_block(r##"        constant: "#f6c17","##)) {
+        Err(ConfigError::InvalidThemeSyntax { role, reason, .. }) => {
+            assert_eq!(role, SyntaxRole::Constant);
+            assert_eq!(reason, ThemeColorFault::Unresolved("#f6c17".to_owned()));
+        }
+        other => panic!("expected a syntax error naming `constant`, got {other:?}"),
+    }
+    // Unknown alias.
+    match load(&with_block(r##"        type: "sea","##)) {
+        Err(ConfigError::InvalidThemeSyntax { role, reason, .. }) => {
+            assert_eq!(role, SyntaxRole::Type);
+            assert_eq!(reason, ThemeColorFault::Unresolved("sea".to_owned()));
+        }
+        other => panic!("expected a syntax error naming `type`, got {other:?}"),
+    }
+    // Alias cycle reached from a syntax role.
+    let cycle = with_block(r##"        comment: "loop","##).replace(
+        "\"foam\": \"#9ccfd8\"",
+        "\"foam\": \"#9ccfd8\", \"loop\": \"loop\"",
+    );
+    match load(&cycle) {
+        Err(ConfigError::InvalidThemeSyntax { role, reason, .. }) => {
+            assert_eq!(role, SyntaxRole::Comment);
+            assert_eq!(reason, ThemeColorFault::AliasCycle("loop".to_owned()));
+        }
+        other => panic!("expected a cycle error naming `comment`, got {other:?}"),
+    }
+    // The rendered message carries the field name for the user.
+    let message = load(&with_block(r##"        string: "#zzzzzz","##))
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("`syntax.string`"), "{message}");
+    assert!(message.contains("#zzzzzz"), "{message}");
+
+    // Unknown fields inside the block are rejected like the top level.
+    assert!(matches!(
+        load(&with_block(r##"        operator: "pine","##)),
+        Err(ConfigError::Parse { .. })
+    ));
+    // A non-block value for `syntax` is a parse error.
+    assert!(matches!(
+        load(&ROSE_PINE.replacen("    colors: (", "    syntax: \"pine\",\n    colors: (", 1)),
+        Err(ConfigError::Parse { .. })
+    ));
 }
 
 #[test]

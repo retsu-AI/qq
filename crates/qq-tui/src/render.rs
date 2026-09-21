@@ -217,37 +217,43 @@ pub(crate) fn link() -> Style {
     accent().underline()
 }
 
-/// Syntax palette for highlighted code panels, derived from theme roles so
-/// every theme colors code in its own voice: keywords in brand, strings in
-/// success, comments in muted, functions in accent, types in warning,
-/// constants in error, properties in text. Anything a grammar leaves
-/// uncaptured keeps the plain panel text style.
+/// Syntax palette for highlighted code panels. The roles live on the
+/// `Palette` (derived from the theme roles unless the theme's `syntax` block
+/// overrides them): keywords in brand, functions in accent, types in
+/// warning, strings in success, constants in a softened brand, comments in
+/// muted italic, properties in text, punctuation in muted. No role reads
+/// `error`, so code never looks broken. Anything a grammar leaves uncaptured
+/// keeps the plain panel text style.
 pub(crate) fn code_keyword() -> Style {
-    Style::color(theme::active().brand)
+    Style::color(theme::active().syn_keyword)
 }
 
 pub(crate) fn code_string() -> Style {
-    Style::color(theme::active().success)
+    Style::color(theme::active().syn_string)
 }
 
 pub(crate) fn code_comment() -> Style {
-    Style::color(theme::active().muted).italic()
+    Style::color(theme::active().syn_comment).italic()
 }
 
 pub(crate) fn code_function() -> Style {
-    Style::color(theme::active().accent)
+    Style::color(theme::active().syn_function)
 }
 
 pub(crate) fn code_type() -> Style {
-    Style::color(theme::active().warning)
+    Style::color(theme::active().syn_type)
 }
 
 pub(crate) fn code_constant() -> Style {
-    Style::color(theme::active().error)
+    Style::color(theme::active().syn_constant)
 }
 
 pub(crate) fn code_property() -> Style {
-    Style::color(theme::active().text)
+    Style::color(theme::active().syn_property)
+}
+
+pub(crate) fn code_punctuation() -> Style {
+    Style::color(theme::active().syn_punctuation)
 }
 
 /// Unified-diff line coloring: additions in success on the add tint,

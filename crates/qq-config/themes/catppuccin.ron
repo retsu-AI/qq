@@ -3,6 +3,11 @@
 // Mauve is Catppuccin's signature accent; peach carries the brand so the
 // two never blur. Overlay0 is the muted tone the palette itself uses for
 // comments. Surface0 is the palette's own first elevated surface.
+//
+// Syntax follows the Catppuccin style guide (docs/style-guide.md, "Code
+// Editors"): keywords mauve, functions and properties blue, types yellow,
+// strings green, constants and numbers peach, comments and delimiters
+// overlay2.
 (
     version: 1,
     defs: {
@@ -14,6 +19,8 @@
         "red":      "#f38ba8",
         "green":    "#a6e3a1",
         "surface0": "#313244",
+        "blue":     "#89b4fa",
+        "overlay2": "#9399b2",
     },
     colors: (
         text:    "text",
@@ -24,5 +31,15 @@
         error:   "red",
         success: "green",
         surface: "surface0",
+    ),
+    syntax: (
+        keyword:     "mauve",
+        function:    "blue",
+        type:        "yellow",
+        string:      "green",
+        constant:    "peach",
+        comment:     "overlay2",
+        property:    "blue",
+        punctuation: "overlay2",
     ),
 )
