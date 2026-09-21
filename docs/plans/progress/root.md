@@ -26,6 +26,8 @@ may append a **request** row; only root changes a request's status.
 | T12-f | Steering `@file` parts resolved at the boundary and persisted as attachments | In review ([ENG-819](https://linear.app/retsu-ai/issue/ENG-819)) | 2026-09-19. `SteeringMessage` carries `InputPart`s; `apply_steering` reads files off-executor when the message is injected and the `SteeringApplied` transaction stores them like a prompt's attachments; assembly re-renders steering from the store. Unreadable file → runtime notice in the message, run continues. Regression: steer with `@notes.txt`, provider sees bytes, replay identical after the file changes; reference oracle extended |
 | F23 | Model-facing tool-result projection persisted for replay | In review (ENG-804) | 2026-09-19. The 96 KiB per-turn budget is now one deterministic projection (`TurnOutputBudget`) that both the live run and `append_run_turns` apply over the stored `tool_calls` rows, so follow-up, reopen, and summarizer requests replay the live bytes; budget cuts of unspilled results name the stored row through `read_tool_result`. |
 | F11 | Snapshot assembly byte-budgeted under the 8 MiB wire cap | In review (ENG-796) | 2026-09-19. Bodies admit rows newest-first under one 6 MiB escaped-text budget (focused first, then included); cuts surface as `has_older_*`. No wire change |
+| F03 | Mid-run compaction at a tool boundary — plan and ADR reservation | Planned ([ENG-793](https://linear.app/retsu-ai/issue/ENG-793); `docs/plans/mid-run-compaction.md`) | 2026-09-20. Safe-boundary definition, what the resumed turn must carry, durable Decide/Mark/Summarize/Resume/Crash/Cancel protocol, slices MRC-0..5, five open questions for ADR-0039. No code |
+| F20 | Retention contract | Proposed ([ENG-803](https://linear.app/retsu-ai/issue/ENG-803); ADR-0038) | 2026-09-20. Archive is a session state, not a location; age-based auto-archive of idle roots with subtree; deletion explicit and cascading incl. events; receipts never trimmed; approaching-limit events at 80/95 %. Awaits acceptance before a plan |
 
 ## ADR number allocation
 
@@ -58,6 +60,8 @@ may append a **request** row; only root changes a request's status.
 | 0035 | Allow regular-file leaf targets for global configuration sources | GitHub #83 / Home Manager global config | Accepted locally; `docs/adr/0035-global-leaf-config-symlinks.md` |
 | 0036 | Designed truecolor default theme `ink` with `terminal` ANSI fallback | tui-redesign U5 | Reserved 2026-09-20 |
 | 0037 | Responsive TUI layout: width-selected tiers and panes, never features | tui-redesign U8 (L1–L4) | Reserved 2026-09-20 |
+| 0038 | Session retention: archive by session, never by row; receipts and cursors outlive their sessions | ENG-803 (F20 + F07 retention remainder) | Proposed: `docs/adr/0038-session-retention.md` |
+| 0039 | Mid-run compaction at a safe turn boundary (MRC-0) | ENG-793 (F03), `docs/plans/mid-run-compaction.md` | Reserved 2026-09-20 |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -128,7 +132,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0038. Reserve here before opening a PR that adds an ADR.
+Next free number: 0040. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -367,3 +371,15 @@ keep a deterministic newest tail. Test:
 12 MiB seed). Deferred: the TUI does not yet page older rows on demand beyond
 its existing cold-body fetch; a clipped focused body simply shows the newest
 tail with the flag set.
+
+### 2026-09-20 — F03 plan and F20 ADR (stacked on F23, F11)
+
+Order 2 of the audit is now: F03 planned, F04/F06/F10 shipped, F11 and F23
+in review (this stack), F20 proposed, F24 in review (ENG-805, other lane),
+F28 filed as a paid eval (ENG-807). F03 was not coded: it needs a decision on
+the boundary and the resume protocol first, so `docs/plans/mid-run-compaction.md`
+states both concretely and reserves ADR-0039 for MRC-0. Two facts checked
+while writing ADR-0038: `commands` already has no reference to `sessions`
+(receipts survive deletion by accident today), and `delete_idle_session`
+removes every session-scoped table except the session's rows in `events` —
+the event log grows regardless of deletion, which the ADR's decision 6 fixes.

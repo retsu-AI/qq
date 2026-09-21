@@ -34,6 +34,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | [`supervised-delegation.md`](./supervised-delegation.md) | Continuation, roster, supervised children, audit; D6b open |
 | [`multi-surface-clients.md`](./multi-surface-clients.md) | Web, desktop, and mobile clients over many headless servers. W1, W2, S1, S3 shipped; open: S2 enrollment, S4 exposure, W3, then U/D/M |
 | [`run-snapshots.md`](./run-snapshots.md) | Proposed: reversible mutating-run state |
+| [`mid-run-compaction.md`](./mid-run-compaction.md) | Proposed: compact and continue one run at a safe turn boundary (audit F03, ENG-793); gated on ADR-0039 |
 | [`lsp-diagnostics.md`](./lsp-diagnostics.md) | Proposed: diagnostics integration |
 | [`templates/`](./templates/) | Slice header, pre-flight, receipt, PR body; review checklist |
 | [`progress/`](./progress/) | One ledger per plan, root ledger, decisions needed, gate evidence |
@@ -52,7 +53,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | 8 | Phase 8 — H11 product adapters; Phase 9 — H12 qualification | `speed-first-…` | H11 needs a real consumer; H12 closes the story |
 | — | Quiet-host recordings: Phase 5a H0 tail comparison; H20 eight-stream p95 then the 50→20 ms budget | `speed-first-…` | Implemented; tails not repeatable on the shared host; retained, not waived |
 | — | Seven H22 deferrals (`StaticHttpAuth`, headless writer, config parse-once, reviewer via `PlanCache`, run-loop enums, args-parse-once, `Arc` calls) | `speed-first-…` § Bundled Fixes | Each is its own slice when that code is next opened |
-| — | Run snapshots, LSP diagnostics | proposed plans | No scheduled slice |
+| — | Run snapshots, mid-run compaction, LSP diagnostics | proposed plans | No scheduled slice; mid-run compaction starts at MRC-0 (ADR-0039) |
 
 ## Ownership
 
@@ -64,6 +65,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | Continuation on truncation, delegation roster, supervised write children, final-answer audit, paired evaluation | `supervised-delegation.md` |
 | Web, desktop, mobile clients; remote server readiness (identity, enrollment, CORS, TLS, workspace catalog) | `multi-surface-clients.md` |
 | Reversible mutating-run state | `run-snapshots.md` |
+| Mid-run compaction and continuation | `mid-run-compaction.md` |
 | Diagnostics integration | `lsp-diagnostics.md` |
 | Reference audit of Codex, OpenCode, Pi, and fx; findings F01–F28 | [`../design/harness-scale-audit-2026-09-16.md`](../design/harness-scale-audit-2026-09-16.md) (research, not a plan; F03–F28 unowned) |
 | Shared files, dependency and toolchain bumps, ADR numbering | [`progress/root.md`](./progress/root.md) |
