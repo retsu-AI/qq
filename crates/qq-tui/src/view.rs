@@ -283,7 +283,8 @@ impl FrameRenderer {
             ));
         }
         if let Some(rail) = layout.rail {
-            columns.push((rail.x, sidebar(app, rail.width, body_height)));
+            let density = RailDensity::of(layout.tier);
+            columns.push((rail.x, sidebar(app, rail.width, body_height, density)));
         }
         for (x, column) in columns {
             for (row, cells) in body.iter_mut().zip(column) {

@@ -1,24 +1,33 @@
 use super::*;
-use qq_client::state::Group;
+use layout::Tier;
+use qq_client::state::{Group, Need};
 
 pub(super) fn session_line(app: &App, session_id: SessionId, width: usize, prefix: &str) -> Line {
-    let session = &app.sessions[&session_id].summary;
+    let view = &app.sessions[&session_id];
+    let session = &view.summary;
     // The same state vocabulary tool rows use: ● done, ✕ failed, ◌ stopped
-    // early, ◇ waiting, the shared spinner while running.
-    let awaiting = !app.sessions[&session_id].live.awaiting_approval.is_empty();
-    let (marker, style) = match session.status {
-        _ if awaiting => ("◇", warning()),
-        SessionStatus::Idle => match session.last_outcome.as_ref() {
-            Some(qq_protocol::RunOutcome::Completed) => ("●", success()),
-            Some(qq_protocol::RunOutcome::Cancelled | qq_protocol::RunOutcome::Interrupted) => {
-                ("◌", warning())
-            }
-            Some(qq_protocol::RunOutcome::BudgetExhausted { .. }) => ("◌", warning()),
-            Some(qq_protocol::RunOutcome::Failed { .. }) => ("✕", failure()),
-            None => ("○", muted()),
+    // early, ◇ waiting, the shared spinner while running. Color follows the
+    // attention rule: `warning` for a pending approval, `error` for a
+    // failure, `accent` for a finish the user has not looked at, muted for
+    // everything settled.
+    let (marker, style) = match view.need() {
+        Some(Need::Approval) => ("◇", warning()),
+        Some(Need::Failed) => ("✕", failure()),
+        Some(Need::FinishedUnread) => ("●", accent()),
+        None => match session.status {
+            SessionStatus::Idle => match session.last_outcome.as_ref() {
+                Some(qq_protocol::RunOutcome::Completed) => ("●", muted()),
+                Some(
+                    qq_protocol::RunOutcome::Cancelled
+                    | qq_protocol::RunOutcome::Interrupted
+                    | qq_protocol::RunOutcome::BudgetExhausted { .. },
+                ) => ("◌", muted()),
+                Some(qq_protocol::RunOutcome::Failed { .. }) => ("✕", failure()),
+                None => ("○", muted()),
+            },
+            SessionStatus::Queued => ("○", warning()),
+            SessionStatus::Running => (spinner(app.animation_tick), info()),
         },
-        SessionStatus::Queued => ("○", warning()),
-        SessionStatus::Running => (spinner(app.animation_tick), info()),
     };
     let mut line = Line::styled(prefix, muted());
     line.push(format!("{marker} "), style);
@@ -36,59 +45,141 @@ pub(super) fn session_line(app: &App, session_id: SessionId, width: usize, prefi
     truncate_line(line, width)
 }
 
+/// One session as the rail and the strip see it: which group it lists
+/// under, the unread count the badge shows, and what its detail row would
+/// carry. Produced by [`rail_entries`], the one pass both surfaces share;
+/// everything the row planner asks is here so planning 200 sessions costs
+/// no further lookups. Tree depth is read only for the rows drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RailEntry {
+    pub id: SessionId,
+    pub group: Group,
+    /// Assistant messages and finishes that arrived while the session was
+    /// not shown; zero for the focused session, which has seen everything.
+    pub unread: u32,
+    /// Whether [`live_status_line`] has a row for it: an approval, a running
+    /// tool or activity, queued prompts, or a live tail while unfocused.
+    pub live: bool,
+    /// The session's own spend when the server has reported one. A known
+    /// zero is not shown: nothing to say about a session that has cost
+    /// nothing yet.
+    pub cost: Option<u64>,
+}
+
+/// Every session grouped NEEDS YOU, WORKING, IDLE, DONE, in tree order
+/// within each group, plus how many entries each group holds (indexed as
+/// [`Group`] is declared). One O(sessions) walk with one lookup per session;
+/// the rail lays out rows from it and the strip counts from it, so the two
+/// never disagree.
+pub(super) fn rail_entries(app: &App) -> (Vec<RailEntry>, [usize; 4]) {
+    let mut buckets: [Vec<RailEntry>; 4] = Default::default();
+    for &id in app.sessions.thread_order() {
+        let session = &app.sessions[&id];
+        let group = session.group();
+        let focused = app.focused() == Some(id);
+        let unread = if focused { 0 } else { session.unread };
+        // Must agree with `live_status_line`; the planner relies on it.
+        let live = !session.live.awaiting_approval.is_empty()
+            || session.summary.status == SessionStatus::Running
+            || session.summary.queued_prompts > 0
+            || (!focused && !session.live.tail.is_empty());
+        let cost = session
+            .summary
+            .accounting
+            .map(|accounting| accounting.direct.estimated_cost_usd_nanos)
+            .unwrap_or(session.summary.estimated_cost_usd_nanos)
+            .filter(|nanos| *nanos > 0);
+        buckets[group as usize].push(RailEntry {
+            id,
+            group,
+            unread,
+            live,
+            cost,
+        });
+    }
+    let counts = [
+        buckets[0].len(),
+        buckets[1].len(),
+        buckets[2].len(),
+        buckets[3].len(),
+    ];
+    let mut entries = Vec::with_capacity(counts.iter().sum());
+    for bucket in buckets {
+        entries.extend(bucket);
+    }
+    (entries, counts)
+}
+
+/// How much each rail row says, chosen by the tier the rail's width follows.
+/// Height never changes the density; a short rail shows fewer rows of the
+/// same shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RailDensity {
+    /// One row per session: state glyph, name, unread badge.
+    Compact,
+    /// A second muted row per session with the live tail and cost.
+    Detailed,
+}
+
+impl RailDensity {
+    /// The rail's width follows the terminal's: a quarter of it clamped to
+    /// 20–28 columns, so the rail is at its full width from 112 columns on
+    /// and the tier, not the rail's own cell count, is what separates a
+    /// Regular rail from a Wide one. Wide and Ultra get the detail row; a
+    /// rail pinned open at Compact is the narrowest and gets the least.
+    pub(super) const fn of(tier: Tier) -> Self {
+        match tier {
+            Tier::Compact | Tier::Regular => Self::Compact,
+            Tier::Wide | Tier::Ultra => Self::Detailed,
+        }
+    }
+}
+
 /// Right-hand session list grouped by what the user should do about each:
 /// NEEDS YOU (approvals, failures, unread finishes), WORKING, IDLE, DONE.
-/// Within a group, sessions keep tree order. Each session takes one row
-/// plus one row of live status when it has anything to say. The focused row
-/// sits on the selection background. Always `height` rows so it zips
-/// against the body.
-pub(super) fn sidebar(app: &App, width: usize, height: usize) -> Vec<Line> {
+/// Within a group, sessions keep tree order. Each session takes one row of
+/// state glyph, name, and unread badge; at [`RailDensity::Detailed`] a
+/// second muted row carries the live tail and the session's cost. The
+/// focused row sits on the selection background. Always `height` rows so it
+/// zips against the body.
+pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensity) -> Vec<Line> {
     let inner = width.saturating_sub(2);
     let mut rows: Vec<Line> = Vec::new();
     let mut focused_row = 0;
-    // One pass buckets sessions by group in tree order; the sidebar is
-    // drawn for every frame with 200 sessions listed.
-    let mut buckets: [Vec<SessionId>; 4] = Default::default();
-    for &id in app.sessions.thread_order() {
-        let bucket = match app.sessions[&id].group() {
-            Group::NeedsYou => 0,
-            Group::Working => 1,
-            Group::Idle => 2,
-            Group::Done => 3,
-        };
-        buckets[bucket].push(id);
-    }
-    // Row plan first: each entry is a header, a session, its status, or a
-    // gap. Only the entries inside the scrolled window are drawn, so the
+    let (entries, counts) = rail_entries(app);
+    // Row plan first: each entry is a header, a session, its detail row, or
+    // a gap. Only the entries inside the scrolled window are drawn, so the
     // cost is per visible row, not per session.
     enum Entry {
         Gap,
         Header(Group, usize),
-        Session(SessionId),
-        Status(SessionId),
+        Session(RailEntry),
+        Detail(RailEntry),
     }
-    let mut plan: Vec<Entry> = Vec::new();
-    for (group, members) in [Group::NeedsYou, Group::Working, Group::Idle, Group::Done]
-        .into_iter()
-        .zip(buckets)
-    {
-        if members.is_empty() {
-            continue;
-        }
-        if !plan.is_empty() {
-            plan.push(Entry::Gap);
-        }
-        plan.push(Entry::Header(group, members.len()));
-        for session_id in members {
-            if app.focused() == Some(session_id) {
-                focused_row = plan.len();
+    let mut plan: Vec<Entry> = Vec::with_capacity(entries.len() * 2 + 8);
+    let mut current: Option<Group> = None;
+    for entry in entries {
+        if current != Some(entry.group) {
+            current = Some(entry.group);
+            if !plan.is_empty() {
+                plan.push(Entry::Gap);
             }
-            plan.push(Entry::Session(session_id));
-            // Planning asks only whether a status row exists; the text is
-            // built for the rows inside the window, not for every session.
-            if has_status_line(app, session_id) {
-                plan.push(Entry::Status(session_id));
-            }
+            plan.push(Entry::Header(entry.group, counts[entry.group as usize]));
+        }
+        if app.focused() == Some(entry.id) {
+            focused_row = plan.len();
+        }
+        plan.push(Entry::Session(entry));
+        // Planning asks only whether a detail row exists; the text is built
+        // for the rows inside the window, not for every session. A session
+        // with nothing to say takes one row at every density so a quiet
+        // list stays dense.
+        let detail = match density {
+            RailDensity::Compact => entry.live,
+            RailDensity::Detailed => entry.live || entry.cost.is_some(),
+        };
+        if detail {
+            plan.push(Entry::Detail(entry));
         }
     }
     if plan.is_empty() {
@@ -113,14 +204,30 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize) -> Vec<Line> {
                 header.push(format!("  {count}"), muted());
                 truncate_line(header, width)
             }
-            Entry::Session(session_id) => {
-                let depth = app.sessions.depth(session_id);
-                let indent = "  ".repeat(depth.min(4));
-                let focused = app.focused() == Some(session_id);
-                let mut line = session_line(app, session_id, width, &format!("│ {indent}"));
-                let unread = app.sessions[&session_id].unread;
-                if unread > 0 && !focused {
-                    line.push(format!("  {unread} new"), accent());
+            Entry::Session(entry) => {
+                let indent = "  ".repeat(app.sessions.depth(entry.id).min(4));
+                let focused = app.focused() == Some(entry.id);
+                // The badge is right-aligned and claims its cells first so a
+                // long title truncates instead of pushing the count off the
+                // rail; `N new` when the rail has room for it, else `N`.
+                let badge = if entry.unread > 0 {
+                    if width >= layout::RAIL_MIN_WIDTH + 6 {
+                        format!("{} new", entry.unread)
+                    } else {
+                        entry.unread.to_string()
+                    }
+                } else {
+                    String::new()
+                };
+                let title_width = width.saturating_sub(if badge.is_empty() {
+                    0
+                } else {
+                    badge.chars().count() + 3
+                });
+                let mut line = session_line(app, entry.id, title_width, &format!("│ {indent}"));
+                if !badge.is_empty() {
+                    pad_line(&mut line, title_width + 2);
+                    line.push(badge, accent());
                 }
                 if focused {
                     pad_line(&mut line, width);
@@ -130,14 +237,34 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize) -> Vec<Line> {
                 }
                 truncate_line(line, width)
             }
-            Entry::Status(session_id) => {
-                let (text, style) =
-                    live_status_line(app, session_id).unwrap_or_else(|| (String::new(), muted()));
-                let depth = app.sessions.depth(session_id);
-                let indent = "  ".repeat(depth.min(4));
+            Entry::Detail(entry) => {
+                let indent = "  ".repeat(app.sessions.depth(entry.id).min(4));
                 let mut line = Line::styled(format!("│ {indent}   "), muted());
                 let used = line.width();
-                line.push(preview(&text, inner.saturating_sub(used)), style);
+                match density {
+                    RailDensity::Compact => {
+                        let (text, style) = live_status_line(app, entry.id)
+                            .unwrap_or_else(|| (String::new(), muted()));
+                        line.push(preview(&text, inner.saturating_sub(used)), style);
+                    }
+                    RailDensity::Detailed => {
+                        // Tail on the left, cost on the right. The tail is
+                        // the live status (approval, tool verb, streamed
+                        // text, or activity) when the session has one; the
+                        // cost is the session's own direct spend and stays
+                        // muted so the accent is only ever the badge.
+                        let cost = entry.cost.map(format_cost);
+                        let cost_width = cost.as_ref().map_or(0, |cost| cost.chars().count() + 3);
+                        let tail_width = inner.saturating_sub(used).saturating_sub(cost_width);
+                        let (text, style) = live_status_line(app, entry.id)
+                            .unwrap_or_else(|| (String::new(), muted()));
+                        line.push(preview(&text, tail_width), style);
+                        if let Some(cost) = cost {
+                            pad_line(&mut line, width.saturating_sub(cost.chars().count() + 1));
+                            line.push(cost, muted());
+                        }
+                    }
+                }
                 truncate_line(line, width)
             }
         });
@@ -150,28 +277,19 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize) -> Vec<Line> {
     lines
 }
 
-/// One row above the composer when the sidebar is hidden and more than one
+/// One row above the composer when the rail is hidden and more than one
 /// session exists: how many agents there are and how many need the user,
-/// are working, or finished unseen, with the chord that jumps to them.
+/// are working, or finished unseen, with the chord that jumps to them. Built
+/// from the same [`rail_entries`] pass as the rail.
 pub(super) fn agent_strip(app: &App, width: usize) -> Option<Line> {
-    let total = app.sessions.values().count();
-    if total < 2 {
+    let (entries, counts) = rail_entries(app);
+    if entries.len() < 2 {
         return None;
     }
-    let mut needs = 0;
-    let mut working = 0;
-    let mut unread = 0;
-    for session in app.sessions.values() {
-        match session.group() {
-            Group::NeedsYou => needs += 1,
-            Group::Working => working += 1,
-            Group::Idle | Group::Done => {}
-        }
-        if session.unread > 0 && app.focused() != Some(session.summary.id) {
-            unread += 1;
-        }
-    }
-    let mut line = Line::styled(format!(" {total} agents"), muted());
+    let needs = counts[Group::NeedsYou as usize];
+    let working = counts[Group::Working as usize];
+    let unread = entries.iter().filter(|entry| entry.unread > 0).count();
+    let mut line = Line::styled(format!(" {} agents", entries.len()), muted());
     if working > 0 {
         line.push("  ", muted());
         line.push(format!("{} {working}", spinner(app.animation_tick)), info());
@@ -237,20 +355,6 @@ pub(super) fn child_rows(app: &App, tool_call_id: ToolCallId, width: usize) -> V
         rows.push(truncate_line(line, width));
     }
     rows
-}
-
-/// One-line live status for a session row, most urgent first.
-/// Whether [`live_status_line`] would return a row, without building it.
-/// The two must agree; the planning pass relies on it.
-fn has_status_line(app: &App, session_id: SessionId) -> bool {
-    let Some(session) = app.sessions.get(&session_id) else {
-        return false;
-    };
-    let live = &session.live;
-    !live.awaiting_approval.is_empty()
-        || session.summary.status == SessionStatus::Running
-        || session.summary.queued_prompts > 0
-        || (app.focused() != Some(session_id) && !live.tail.is_empty())
 }
 
 pub(super) fn live_status_line(app: &App, session_id: SessionId) -> Option<(String, Style)> {

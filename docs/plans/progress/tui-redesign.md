@@ -14,7 +14,7 @@ Raw frames and bench reports live under `target/qq-perf/tui-<slice>-<date>/`
 | U3 ([ENG-849](https://linear.app/retsu-ai/issue/ENG-849)) | Code panel | In review | `feat/eng-849-u3-code-panel` | Stacked on U2 |
 | U4 ([ENG-850](https://linear.app/retsu-ai/issue/ENG-850)) | Syntax palette, theme `syntax` block | Planned | | Needs U0 |
 | U5 ([ENG-851](https://linear.app/retsu-ai/issue/ENG-851)) | `ink` default theme, `terminal` fallback, ADR 0036 | Planned | | Needs U4 |
-| U9 ([ENG-852](https://linear.app/retsu-ai/issue/ENG-852)) | Sessions rail, adaptive density | Planned | | Needs L2 |
+| U9 ([ENG-852](https://linear.app/retsu-ai/issue/ENG-852)) | Sessions rail, adaptive density | In review | `feat/eng-852-u9-sessions-rail` | Stacked on U3 |
 | L3 ([ENG-853](https://linear.app/retsu-ai/issue/ENG-853)) | Inspector pane | Planned | | Needs L2 |
 | L4 ([ENG-854](https://linear.app/retsu-ai/issue/ENG-854)) | Split transcripts | Planned | | Needs L2 |
 | U6 ([ENG-855](https://linear.app/retsu-ai/issue/ENG-855)) | Turn headers, geometry, tool rows | Planned | | Needs U1, L1 |
@@ -200,3 +200,19 @@ Baseline: `cargo bench -p qq-tui --bench render` on `51ccf13` recorded to
   34.2; run_on_32kb 433.6 → 443.4 / 449.7 (+2–4 %, no fence on that path);
   golden_path 39.0 → 39.3 / 39.2; keystroke 26.6 → 26.6 / 26.9.
 - Docs: `transcript.md` § Code Blocks rewritten to the shipped panel.
+### 2026-09-20 — U9 receipt
+
+- `sidebar.rs`: `rail_entries` walks the sessions once (group, unread, live
+  flag, direct spend); `sidebar` and `agent_strip` both consume it.
+  `RailDensity::of(tier)`: one row per session at Compact/Regular, plus a
+  muted tail + right-aligned `$cost` row at Wide/Ultra when a session has a
+  live status or reported spend. Badge `N new` (`N` under 26 cols) is
+  right-aligned `accent`. Glyph colors follow the attention rule (`warning`
+  only for a pending approval/queue, `error` for failure, `accent` for an
+  unseen finish, muted otherwise). `layout.rs` untouched: pinning already
+  works at Compact; now tested.
+- Tests: 5 new; 270 → 275 lib + 5 golden. New `Scene::Sessions` with five
+  `sessions-*` goldens; no existing golden moved.
+- Bench (`target/qq-perf/tui-U9-2026-09-20/{before,after-2}.txt`, core 2):
+  sessions_200 33.6 → 31.5 µs; children_20 56.3 → 57.1; steady 21.1 → 21.3;
+  golden_path 38.4 → 38.7; keystroke 26.6 → 26.3. Docs: `layout.md` § Sessions rail.
