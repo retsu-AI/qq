@@ -565,8 +565,12 @@ impl RowClock {
 pub(crate) struct ToolRowContext<'a> {
     pub row: &'a ToolRow,
     pub clock: RowClock,
-    /// This call's body is shown.
+    /// This call's body is shown (here or in the inspector). An expanded
+    /// call never folds, so its summary row stays wherever the body went.
     pub expanded: bool,
+    /// Expanded bodies render under the summary row. `false` while the
+    /// inspector pane shows them, so the transcript keeps the row alone.
+    pub inline_detail: bool,
     /// The transcript folds quiet finished blocks to one row.
     pub fold: bool,
     /// The transcript cursor rests on this call.
@@ -621,7 +625,7 @@ pub(super) fn render_tool_calls(
                 width,
             ));
         }
-        if context.expanded {
+        if context.expanded && context.inline_detail {
             lines.extend(tool_expanded_lines(call, context, width));
         }
         if call.state == ToolCallState::Running
@@ -1062,6 +1066,7 @@ pub(super) fn render_tool_calls_simple(
             now_ms: 0,
         },
         expanded: detail == SimpleDetail::Expanded,
+        inline_detail: true,
         fold: detail == SimpleDetail::Folded,
         selected: false,
     };

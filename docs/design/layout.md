@@ -28,15 +28,14 @@ each pane is described in [`transcript.md`](./transcript.md) and
 | --- | --- | --- |
 | Compact | < 90 | One transcript column. When more than one session exists, a one-row agent strip above the composer rule. Composer grows to at most 4 rows. |
 | Regular | 90–159 | Transcript plus a sessions rail on the right (a quarter of the width, 20–28 columns) when more than one session exists or the rail is pinned. |
-| Wide | 160–239 | Regular, plus an inspector pane for tool detail between the transcript and the rail. |
+| Wide | 160–239 | Regular, plus an inspector pane between the transcript and the rail: the focused session's expanded tool detail and the workspace views render there so the prose column stays prose. |
 | Ultra | ≥ 240 | Wide, with two or three transcript panes side by side. |
 
 The breakpoints are `view::layout::{REGULAR_MIN_WIDTH, WIDE_MIN_WIDTH,
 ULTRA_MIN_WIDTH}`. Slice L1 shipped the tier function, the rail placement,
-the measure, and the inspector's geometry; the inspector's `Auto` state
-resolves to hidden until slice L3 paints tool detail in it, and the layout
-produces one transcript pane until slice L4 adds the split. Both are toggles
-today (`PanePref::Shown` opens the inspector at any width).
+the measure, and the inspector's geometry; slice L3 fills the inspector and
+its `Auto` state shows it from Wide. The layout produces one transcript pane
+until slice L4 adds the split.
 
 Below 32 × 9 the frame is a "terminal is too small" notice.
 
@@ -96,10 +95,50 @@ focused pane is on screen.
 ## Preferences
 
 `LayoutPrefs { rail, inspector }`, each a `PanePref::{Auto, Shown, Hidden}`.
-`Auto` follows the tier. The rail toggle (`Ctrl-\` by default) moves `Auto`
-or `Shown` to `Hidden` and `Hidden` to `Shown`, so the first press from the
-default state always hides the pane the user is reaching to dismiss. The
-preferences are runtime state, not configuration; they reset per launch.
+`Auto` follows the tier. The rail toggle (`Ctrl-\` by default) and the
+inspector toggle (`Alt-I`) move `Auto` or `Shown` to `Hidden` and `Hidden`
+to `Shown`, so the first press from the default state always hides the pane
+the user is reaching to dismiss. The preferences are runtime state, not
+configuration; they reset per launch.
+
+## Inspector
+
+The inspector (`view/workspace.rs::inspector_pane`) is the focused pane's
+detail column: 40–80 columns carved only from width past one full measure
+plus the rail, so opening it never narrows the transcript below its measure.
+`Auto` shows it at Wide and Ultra; `Shown` pins it at any width that can
+carve one (142 columns and up with no rail); `Hidden` keeps it off.
+
+What it holds, top to bottom under a `│ INSPECTOR` header:
+
+- When the focused pane is on a workspace view (`/attention`, `/changes`),
+  that view's body. The transcript pane beside it keeps showing the session
+  the view replaced, so the list is read in context; Esc still returns to
+  that session. Without an inspector the view takes the pane, as before.
+- Otherwise, every expanded tool call of the pane's session in call order,
+  each as its summary row followed by its expanded body (timing line,
+  result head or tail, diff, arguments for unknown tools), with one blank
+  row between calls. The transcript then shows only the summary rows: the
+  expansion moved, it did not duplicate. Below Wide, or with the inspector
+  hidden, the same body renders inline under the row.
+- When nothing is expanded and no view is up, a muted hint naming the
+  cursor chord (`Nothing expanded — Ctrl-Up selects a tool row, Enter
+  expands it`).
+
+Inline and inspector detail come from one path: `tools::tool_expanded_lines`
+(and `tool_summary_line`, `attention_body`, `changes_body`) take a width and
+return rows; only the caller and the width differ. The transcript decides
+whether to emit a body from `ToolRowContext::inline_detail`, which the frame
+sets from `Layout.inspector`, so toggling the inspector re-lays the tool
+rows on the next frame; completed-message layouts are untouched by the
+toggle. The inspector reads derived tool rows from the transcript cache and
+derives one itself only when the transcript did not lay that call out this
+frame (an overlay is up), so it never repeats JSON parsing.
+
+Rows are bounded by the pane: content past the height is cut with a `… N
+rows more` line and no row is built beyond what fits. The inspector does not
+scroll yet, and it follows the focused pane only; with the split (L4) it
+will follow focus across panes.
 
 ## Sessions rail
 
@@ -161,8 +200,11 @@ raise per-frame streaming work.
 
 `crates/qq-tui/tests/goldens/` pins every review scene at 80 × 24, 120 × 40,
 200 × 60, 320 × 90, and 480 × 120 (the `sessions-*` scene shows the strip
-and every rail density); `cargo test -p qq-tui --test gallery --
---ignored` writes the same frames as ANSI for a real terminal. The render
-bench (`cargo bench -p qq-tui --bench render`) includes `compact_80x24`,
-`wide_160x48_full`, and `resize_ultra_480x120` alongside the legacy 160 × 48
-scenes.
+and every rail density; `tools-expanded-*` shows the same detail inline at
+120 and in the inspector at 200 and up, and a test asserts the rows are the
+same text); `cargo test -p qq-tui --test gallery -- --ignored` writes the
+same frames as ANSI for a real terminal. The render bench (`cargo bench -p
+qq-tui --bench render`) includes `compact_80x24`, `wide_160x48_full`,
+`tool_calls_32_expanded_inspector`, and `resize_ultra_480x120` alongside the
+legacy 160 × 48 scenes, which hold the rail and inspector off so they
+measure one transcript column at a fixed geometry across slices.

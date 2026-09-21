@@ -12,10 +12,10 @@ Raw frames and bench reports live under `target/qq-perf/tui-<slice>-<date>/`
 | U1 ([ENG-847](https://linear.app/retsu-ai/issue/ENG-847)) | Block rhythm and lists | Shipped (`38a47d8`, [#95](https://github.com/retsu-AI/qq/pull/95)) | | 2026-09-20 |
 | U2 ([ENG-848](https://linear.app/retsu-ai/issue/ENG-848)) | Inline styling, `Style.underline` | In review | [#102](https://github.com/retsu-AI/qq/pull/102) | Rebased onto main after #95 |
 | U3 ([ENG-849](https://linear.app/retsu-ai/issue/ENG-849)) | Code panel | In review | [#100](https://github.com/retsu-AI/qq/pull/100) | Stacked on #102 |
-| U4 ([ENG-850](https://linear.app/retsu-ai/issue/ENG-850)) | Syntax palette, theme `syntax` block | In review | `feat/eng-850-u4-syntax-palette` | Stacked on U9 |
+| U4 ([ENG-850](https://linear.app/retsu-ai/issue/ENG-850)) | Syntax palette, theme `syntax` block | In review | [#103](https://github.com/retsu-AI/qq/pull/103) | Stacked on #101 |
 | U5 ([ENG-851](https://linear.app/retsu-ai/issue/ENG-851)) | `ink` default theme, `terminal` fallback, ADR 0036 | Planned | | Needs U4 |
 | U9 ([ENG-852](https://linear.app/retsu-ai/issue/ENG-852)) | Sessions rail, adaptive density | In review | [#101](https://github.com/retsu-AI/qq/pull/101) | Stacked on #100 |
-| L3 ([ENG-853](https://linear.app/retsu-ai/issue/ENG-853)) | Inspector pane | Planned | | Needs L2 |
+| L3 ([ENG-853](https://linear.app/retsu-ai/issue/ENG-853)) | Inspector pane | In review | [#104](https://github.com/retsu-AI/qq/pull/104) | Stacked on #103 |
 | L4 ([ENG-854](https://linear.app/retsu-ai/issue/ENG-854)) | Split transcripts | Planned | | Needs L2 |
 | U6 ([ENG-855](https://linear.app/retsu-ai/issue/ENG-855)) | Turn headers, geometry, tool rows | Planned | | Needs U1, L1 |
 | U7 ([ENG-856](https://linear.app/retsu-ai/issue/ENG-856)) | Tool detail panels | Planned | | Needs U3, L3 |
@@ -246,3 +246,41 @@ Baseline: `cargo bench -p qq-tui --bench render` on `51ccf13` recorded to
   The first cut read run_on at 459–466: the larger capture table let
   `highlighted_code_lines` inline into the panel layout; `#[inline(never)]`
   restored it (`after-3` vs `after-noinline`).
+### 2026-09-20 — L3 receipt
+
+- Inspector `Auto` shows at Wide/Ultra (`layout.rs`); `Command::ToggleInspector`
+  (`Alt-I`, palette) cycles like the rail toggle. `workspace.rs::inspector_pane`
+  fills it: the focused pane's Attention/Changes body when a view is up (the
+  transcript beside it keeps the replaced session, `shown_view`), else every
+  expanded call's summary row + `tool_expanded_lines` body, else a hint naming
+  the cursor chord. Rows are bounded to the pane (`… N rows more`); no scroll.
+- One path: `ToolRowContext::inline_detail` (false while the inspector is on)
+  gates the inline body; inspector and transcript call the same
+  `tool_expanded_lines`/`tool_summary_line`/`attention_body`/`changes_body`.
+  Tool rows are re-laid per frame, so the toggle repaints without a cache key.
+- Tests: `wide_carves_an_inspector_past_the_measure` (Auto at 159 vs 200), 4
+  new view tests (toggle cycle + empty hint, detail moves both ways + collapse,
+  height bound, workspace views inspector vs inline + Esc), golden test
+  `expanded_tool_detail_reads_the_same_inline_and_in_the_inspector`. 280 → 284
+  lib, 5 → 6 golden. Goldens moved: 24 (every 200/320/480 frame: the inspector
+  column appears, transcript pane narrows so its inset shrinks; only
+  `tools-expanded-{200,320,480}` change transcript text — detail rows left for
+  the inspector). 80 × 24 and 120 × 40 unchanged.
+- Bench (`target/qq-perf/tui-L3-2026-09-20/{before,after,ab-run-on}.txt`,
+  core 2). Legacy scenes now hold the inspector off (`hide_inspector`) so they
+  keep their fixed geometry: steady 21.2 → 21.2, keystroke 26.4 → 26.3,
+  golden_path 38.4 → 38.5, tool_calls_32 rows/folded/expanded 23.1/12.5/51.3 →
+  23.4/12.4/51.7; new `tool_calls_32_expanded_inspector` 37.4 (the same bodies
+  in the inspector). Column blit now measures each row once and presizes
+  the merged span vector: with_sidebar 36.1 → 32.4, wide_160x48_full 32.5 →
+  29.3, sessions_200 30.6 → 28.2. `resize_ultra` 111 → 119 (+7 %): Auto now
+  paints the 80-column inspector at 480 wide (parent with it pinned: 146).
+- Review fix: the first cut gave `text_width` a printable-ASCII byte-scan
+  fast path; interleaved A/B on core 2 (3 pairs) put `streaming_run_on_32kb`
+  at 450–461 vs parent 419–427 (+8 %), and removing the fast path alone
+  brought it to 418–429. `wrap_line` measures every span, so the second scan
+  cost more than the width table saved. Shipped without it: run-on 440–442,
+  sidebar/wide gains kept.
+- Docs: `layout.md` § Tiers, § Preferences, new § Inspector, § Evidence.
+- Root request: `architecture.md`'s `qq-tui` bullet should mention the
+  inspector as a per-frame pane fed by the shared tool-row cache.

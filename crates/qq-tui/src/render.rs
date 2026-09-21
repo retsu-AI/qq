@@ -137,14 +137,23 @@ impl Line {
             + self
                 .spans
                 .iter()
-                .flat_map(|span| span.text.chars())
-                .map(|character| UnicodeWidthChar::width(character).unwrap_or_default())
+                .map(|span| text_width(&span.text))
                 .sum::<usize>()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.spans.iter().all(|span| span.text.is_empty())
     }
+}
+
+/// Display columns of `text`. One pass over the characters; a printable-ASCII
+/// byte-scan fast path measured +8 % on the 32 KiB streaming ceiling because
+/// `wrap_line` measures every span and the second scan cost more than the
+/// width table saves.
+pub(crate) fn text_width(text: &str) -> usize {
+    text.chars()
+        .map(|character| UnicodeWidthChar::width(character).unwrap_or_default())
+        .sum()
 }
 
 /// Role styles read the thread's active palette (see `theme.rs`); the

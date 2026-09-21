@@ -3912,3 +3912,216 @@ fn the_completion_line_names_the_plan_and_an_overridden_route() {
         "{line}"
     );
 }
+
+/// One session with a completed read whose body is twenty numbered lines,
+/// for the inspector tests.
+fn app_with_expandable_read() -> (App, ToolCallId) {
+    let mut app = app_with_messages(1);
+    let session_id = app.focused().unwrap();
+    let body = (1..=20)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let call = tool_call_snapshot(
+        7,
+        "read_file",
+        r#"{"path":"note.txt"}"#,
+        ToolCallState::Completed,
+        Some(&body),
+        false,
+    );
+    let id = call.id;
+    app.sessions.get_mut(&session_id).unwrap().tool_calls = Some(vec![call]);
+    (app, id)
+}
+
+/// The body rows of `frame` split at the pane borders: `(transcript,
+/// inspector)` text with runs of spaces squashed. The inspector column is
+/// empty when the layout shows none.
+fn transcript_and_inspector(frame: &[Line]) -> (String, String) {
+    let rows = frame_rows(frame);
+    let mut transcript = Vec::new();
+    let mut inspector = Vec::new();
+    for row in &rows[1..rows.len().saturating_sub(2)] {
+        let mut columns = row.split('│');
+        transcript.push(squash(columns.next().unwrap_or_default()));
+        inspector.push(squash(columns.next().unwrap_or_default()));
+    }
+    (transcript.join("\n"), inspector.join("\n"))
+}
+
+#[test]
+fn the_inspector_shows_at_wide_by_default_and_the_toggle_cycles_it() {
+    let (mut app, _) = app_with_expandable_read();
+    let mut renderer = FrameRenderer::default();
+    let regular = renderer.frame_and_commit(&mut app, 120, 40);
+    assert!(
+        !frame_text(&regular).contains("INSPECTOR"),
+        "Auto hides the inspector below Wide"
+    );
+    let wide = renderer.frame_and_commit(&mut app, 200, 60);
+    let (_, inspector) = transcript_and_inspector(&wide);
+    assert!(inspector.contains("INSPECTOR"), "{inspector}");
+    assert!(
+        inspector.contains("Nothing expanded — Ctrl-Up selects a tool row, Enter expands it"),
+        "empty hint names the real chord: {inspector}"
+    );
+    for row in &wide[1..wide.len() - 3] {
+        assert_eq!(
+            row.width(),
+            200,
+            "{:?}",
+            frame_rows(std::slice::from_ref(row))
+        );
+    }
+
+    // Alt-I: Auto → Hidden even at Wide; again → Shown, which wins over
+    // width; again → Hidden.
+    let toggle = TerminalEvent::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
+    app.handle_terminal_event(toggle.clone());
+    assert_eq!(app.layout.inspector, PanePref::Hidden);
+    assert!(!frame_text(&renderer.frame_and_commit(&mut app, 200, 60)).contains("INSPECTOR"));
+    app.handle_terminal_event(toggle.clone());
+    assert_eq!(app.layout.inspector, PanePref::Shown);
+    assert!(
+        frame_text(&renderer.frame_and_commit(&mut app, 150, 40)).contains("INSPECTOR"),
+        "pinned: shown below Wide when the width can carve one"
+    );
+    app.handle_terminal_event(toggle);
+    assert_eq!(app.layout.inspector, PanePref::Hidden);
+}
+
+#[test]
+fn expanded_detail_moves_between_the_transcript_and_the_inspector_as_it_toggles() {
+    let (mut app, call) = app_with_expandable_read();
+    app.expanded_tool_calls.insert(call);
+    let mut renderer = FrameRenderer::default();
+
+    // Wide: the transcript keeps the summary row; the inspector has the body
+    // under its own copy of the summary row.
+    let wide = renderer.frame_and_commit(&mut app, 200, 60);
+    let (transcript, inspector) = transcript_and_inspector(&wide);
+    assert!(
+        transcript.contains("● Read note.txt 20 lines"),
+        "{transcript}"
+    );
+    assert!(
+        !transcript.contains("line 1\n"),
+        "detail left the prose column: {transcript}"
+    );
+    assert!(
+        inspector.contains("● Read note.txt 20 lines"),
+        "{inspector}"
+    );
+    assert!(inspector.contains("line 1\n"), "{inspector}");
+    assert!(
+        inspector.contains(&format!("line {MAX_TOOL_RESULT_ROWS}"))
+            && inspector.contains("… 8 lines more"),
+        "same row budget as inline: {inspector}"
+    );
+
+    // Hide the inspector: the same renderer (same caches, same width) must
+    // repaint the detail inline on the very next frame.
+    app.execute(Command::ToggleInspector);
+    let hidden = renderer.frame_and_commit(&mut app, 200, 60);
+    let (transcript, inspector) = transcript_and_inspector(&hidden);
+    assert!(inspector.trim().is_empty(), "{inspector}");
+    assert!(
+        transcript.contains("● Read note.txt 20 lines"),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("line 1\n"),
+        "detail back inline: {transcript}"
+    );
+    assert!(transcript.contains("… 8 lines more"), "{transcript}");
+
+    // And back again.
+    app.execute(Command::ToggleInspector);
+    let shown = renderer.frame_and_commit(&mut app, 200, 60);
+    let (transcript, inspector) = transcript_and_inspector(&shown);
+    assert!(!transcript.contains("line 1\n"), "{transcript}");
+    assert!(inspector.contains("line 1\n"), "{inspector}");
+
+    // Collapsing the call empties the inspector to its hint.
+    app.expanded_tool_calls.clear();
+    let collapsed = renderer.frame_and_commit(&mut app, 200, 60);
+    let (_, inspector) = transcript_and_inspector(&collapsed);
+    assert!(inspector.contains("Nothing expanded"), "{inspector}");
+    assert!(!inspector.contains("line 1"), "{inspector}");
+}
+
+#[test]
+fn the_inspector_bounds_its_rows_to_the_pane_height() {
+    let (mut app, call) = app_with_expandable_read();
+    app.expanded_tool_calls.insert(call);
+    // 200 × 12: body is 9 rows; the read wants the header, the summary, and
+    // 13 detail rows, so it overflows.
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 200, 12);
+    let (_, inspector) = transcript_and_inspector(&frame);
+    let rows: Vec<&str> = inspector.lines().collect();
+    assert!(
+        rows.iter().all(|row| !row.contains("… 8 lines more")),
+        "{inspector}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.trim_start().starts_with("… ") && row.ends_with(" rows more")),
+        "overflow is counted, not clipped silently: {inspector}"
+    );
+    assert!(rows.iter().any(|row| row.contains("line 1")), "{inspector}");
+    assert!(
+        !rows.iter().any(|row| row.contains("line 9")),
+        "{inspector}"
+    );
+    for row in &frame[1..frame.len() - 3] {
+        assert_eq!(row.width(), 200);
+    }
+}
+
+#[test]
+fn workspace_views_render_in_the_inspector_when_it_is_shown_and_inline_otherwise() {
+    let (mut app, _) = app_with_expandable_read();
+    let session_id = app.focused().unwrap();
+    let mut renderer = FrameRenderer::default();
+    app.execute(Command::ShowAttention);
+    assert_eq!(app.view(), View::Attention);
+
+    // Wide: the attention list is in the inspector and the transcript keeps
+    // showing the session the view replaced.
+    let wide = renderer.frame_and_commit(&mut app, 200, 60);
+    let (transcript, inspector) = transcript_and_inspector(&wide);
+    assert!(inspector.contains("NEEDS YOU"), "{inspector}");
+    assert!(inspector.contains("Nothing needs you"), "{inspector}");
+    assert!(!transcript.contains("NEEDS YOU"), "{transcript}");
+    assert!(
+        transcript.contains("● Read note.txt 20 lines"),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("row 0"),
+        "the replaced session's prose: {transcript}"
+    );
+
+    // Regular: no inspector, so the view takes the pane as before.
+    let regular = renderer.frame_and_commit(&mut app, 120, 40);
+    let (transcript, inspector) = transcript_and_inspector(&regular);
+    assert!(inspector.trim().is_empty());
+    assert!(transcript.contains("NEEDS YOU"), "{transcript}");
+    assert!(!transcript.contains("row 0"), "{transcript}");
+
+    // Changes behaves the same way, and Esc still returns to the session.
+    app.execute(Command::ShowChanges);
+    let wide = renderer.frame_and_commit(&mut app, 200, 60);
+    let (transcript, inspector) = transcript_and_inspector(&wide);
+    assert!(inspector.contains("CHANGES"), "{inspector}");
+    assert!(transcript.contains("row 0"), "{transcript}");
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    )));
+    assert_eq!(app.focused(), Some(session_id));
+    let back = renderer.frame_and_commit(&mut app, 200, 60);
+    let (_, inspector) = transcript_and_inspector(&back);
+    assert!(inspector.contains("Nothing expanded"), "{inspector}");
+}

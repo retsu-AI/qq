@@ -186,15 +186,96 @@ fn diff_counts(diff: &str) -> (usize, usize) {
     (added, removed)
 }
 
-/// The inspector column at Wide and above. Until slice L3 moves tool detail
-/// here it is a reserved region drawn as a bordered pane so the layout is
-/// visible and cheap: one header row, then bare borders. Always `height`
-/// rows so it zips onto the body.
-pub(super) fn inspector_pane(_app: &App, width: usize, height: usize) -> Vec<Line> {
-    let mut lines = Vec::with_capacity(height);
+/// The inspector column at Wide and above (or wherever it is pinned): the
+/// focused pane's detail, beside the transcript so the prose column stays
+/// prose. It shows the workspace view the pane is on, or else the expanded
+/// body of every expanded tool call in the pane's session, each under its
+/// summary row, through the same `tool_expanded_lines` the inline path uses.
+/// Always `height` rows so it zips onto the body; rows past the height are
+/// dropped behind a count (the inspector does not scroll yet), and no row is
+/// built past what fits.
+pub(super) fn inspector_pane(
+    app: &App,
+    cache: &TranscriptCache,
+    pane: &TranscriptPane,
+    width: usize,
+    height: usize,
+) -> Vec<Line> {
+    let inner = width.saturating_sub(2);
     let mut header = Line::styled("│ ", border());
     header.push("INSPECTOR", muted().bold());
+    let body_height = height.saturating_sub(1);
+    let mut rows: Vec<Line> = Vec::new();
+    match pane.view {
+        View::Attention => rows = attention_body(app, inner),
+        View::Changes => rows = changes_body(app, inner),
+        View::Transcript(session_id) => {
+            let calls = session_id
+                .and_then(|session_id| app.sessions.get(&session_id))
+                .and_then(|session| Some((session, session.tool_calls.as_deref()?)));
+            if let Some((session, calls)) = calls {
+                for call in calls {
+                    if rows.len() >= body_height {
+                        break;
+                    }
+                    if !app.expanded_tool_calls.contains(&call.id) {
+                        continue;
+                    }
+                    // Rows are derived for the transcript this frame; a call
+                    // the focused pane did not lay out (an overlay is up)
+                    // derives once here.
+                    let derived;
+                    let row = match cache.tool_row(call) {
+                        Some(row) => row,
+                        None => {
+                            derived = ToolRow::derive(call);
+                            &derived
+                        }
+                    };
+                    let context = ToolRowContext {
+                        row,
+                        clock: RowClock {
+                            timing: session
+                                .tool_timing
+                                .get(&call.id)
+                                .copied()
+                                .unwrap_or_default(),
+                            now_ms: app.now_ms,
+                        },
+                        expanded: true,
+                        inline_detail: true,
+                        fold: false,
+                        selected: app.transcript_cursor == Some(call.id),
+                    };
+                    if !rows.is_empty() {
+                        rows.push(Line::default());
+                    }
+                    rows.push(tool_summary_line(call, context, app.animation_tick, inner));
+                    rows.extend(tool_expanded_lines(call, context, inner));
+                }
+            }
+            if rows.is_empty() {
+                let chord = app
+                    .chord_label(crate::commands::Command::CursorUp)
+                    .unwrap_or_else(|| "Ctrl-Up".to_owned());
+                rows.push(Line::styled(
+                    format!("Nothing expanded — {chord} selects a tool row, Enter expands it"),
+                    muted().italic(),
+                ));
+            }
+        }
+    }
+    let overflow = rows.len().saturating_sub(body_height);
+    if overflow > 0 {
+        rows.truncate(body_height.saturating_sub(1));
+        rows.push(Line::styled(
+            format!("… {} more", count_noun(overflow + 1, "row", "rows")),
+            muted(),
+        ));
+    }
+    let mut lines = Vec::with_capacity(height);
     lines.push(truncate_line(header, width));
+    lines.extend(indent_lines(rows, "│ ", border(), width));
     let rule = Line::styled("│", border());
     while lines.len() < height {
         lines.push(rule.clone());
