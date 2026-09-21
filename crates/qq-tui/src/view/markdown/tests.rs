@@ -138,10 +138,11 @@ fn code_blocks_keep_character_wrapping() {
     assert_eq!(
         rows,
         [
-            "│           ",
-            "│ let answer",
-            "│ _value = 4",
-            "│ 2;        ",
+            "┃           ",
+            "┃  let answe",
+            "↪  r_value =",
+            "↪   42;     ",
+            "┃           ",
         ]
     );
 }
@@ -155,8 +156,9 @@ fn fenced_code_renders_as_a_tinted_panel_with_a_language_label() {
     assert_eq!(
         rows,
         [
-            format!("│ rust{}", " ".repeat(18)),
-            format!("│ let x = 1;{}", " ".repeat(12)),
+            format!("┃ {} rust ", " ".repeat(16)),
+            format!("┃  let x = 1;{}", " ".repeat(11)),
+            format!("┃ {}", " ".repeat(22)),
         ]
     );
     // Every row is padded to the full width with the surface tint so the
@@ -168,8 +170,124 @@ fn fenced_code_renders_as_a_tinted_panel_with_a_language_label() {
             .flat_map(|line| &line.spans)
             .all(|span| span.style.background == Some(surface_color()))
     );
-    assert_eq!(lines[0].spans[0].style, surface(accent().dim()));
-    assert_eq!(lines[0].spans[1].style, surface(muted()));
+    assert_eq!(lines[0].spans[0].style, surface(border()));
+    assert_eq!(style_of(&lines, " rust "), Some(surface(muted())));
+}
+
+#[test]
+fn code_panels_carry_a_labelled_top_row_and_a_blank_bottom_row() {
+    let width = 30;
+    let lines = markdown_lines("before\n\n```rust\nlet x = 1;\n```\n\nafter", width, false);
+    let rows = frame_rows(&lines);
+    let top = rows.iter().position(|row| row.contains(" rust ")).unwrap();
+    assert_eq!(rows[top - 1], "", "block gap above the panel");
+    assert!(rows[top].starts_with("┃ "), "{:?}", rows[top]);
+    assert_eq!(rows[top].chars().count(), width);
+    // The label is the last non-space run and ends one cell short of the
+    // right edge (the mirror of the padding cell after the gutter).
+    assert_eq!(rows[top].trim_end(), format!("┃ {} rust", " ".repeat(22)));
+    assert_eq!(rows[top + 1], format!("┃  let x = 1;{}", " ".repeat(17)));
+    assert_eq!(rows[top + 2], format!("┃ {}", " ".repeat(28)));
+    assert_eq!(rows[top + 3], "", "block gap below the panel");
+    assert_eq!(rows[top + 4], "after");
+    for row in [&lines[top], &lines[top + 2]] {
+        assert!(
+            row.spans
+                .iter()
+                .all(|span| span.style.background == Some(surface_color())),
+            "{row:?}"
+        );
+        assert_eq!(row.spans[0].text, "┃ ");
+        assert_eq!(row.spans[0].style, surface(border()));
+    }
+    // An untagged fence has a blank top row of the same shape.
+    let plain = frame_rows(&markdown_lines("```\nlet x = 1;\n```", width, false));
+    assert_eq!(plain[0], format!("┃ {}", " ".repeat(28)));
+    assert_eq!(plain[0], plain[2]);
+}
+
+#[test]
+fn wrapped_code_rows_show_the_wrap_mark_in_the_gutter() {
+    let width = 14;
+    let lines = markdown_lines(
+        "```\nshort\nabcdefghijklmnopqrstuvwxyz\nlast\n```",
+        width,
+        false,
+    );
+    let rows = frame_rows(&lines);
+    assert_eq!(
+        rows,
+        [
+            "┃             ",
+            "┃  short      ",
+            "┃  abcdefghijk",
+            "↪  lmnopqrstuv",
+            "↪  wxyz       ",
+            "┃  last       ",
+            "┃             ",
+        ]
+    );
+    assert!(lines.iter().all(|line| line.width() == width));
+    // Both rail glyphs share the border style on the surface.
+    for line in &lines {
+        assert_eq!(line.spans[0].style, surface(border()));
+    }
+}
+
+#[test]
+fn diff_tints_win_over_the_surface_inside_the_panel() {
+    let source = "```diff\n-old line\n+new line\n```";
+    let lines = markdown_lines(source, 30, false);
+    let palette = crate::theme::active();
+
+    let plus = lines
+        .iter()
+        .find(|line| line.spans.iter().any(|span| span.text.contains("+new")))
+        .expect("added line");
+    assert_eq!(plus.spans[0].text, "┃ ");
+    assert_eq!(plus.spans[0].style.background, Some(surface_color()));
+    assert_eq!(
+        style_of(&lines, "+new line").map(|style| style.background),
+        Some(Some(palette.diff_add_bg))
+    );
+    assert_eq!(
+        style_of(&lines, "-old line").map(|style| style.background),
+        Some(Some(palette.diff_del_bg))
+    );
+    // The trailing padding returns to the surface so the slab stays solid.
+    assert_eq!(
+        plus.spans.last().map(|span| span.style.background),
+        Some(Some(surface_color()))
+    );
+}
+
+#[test]
+fn streaming_and_completed_panels_render_the_same_rows() {
+    let completed = "intro\n\n```rust\nfn main() {\n    let x = 1;\n}\n```\n\nafter";
+    let open = "intro\n\n```rust\nfn main() {\n    let x = 1;\n}\n";
+    for width in [12, 24, 60] {
+        let whole = frame_rows(&markdown_lines(completed, width, false));
+        let streaming = frame_rows(&markdown_lines(open, width, false));
+        assert!(
+            whole.starts_with(&streaming),
+            "width={width}\nstreaming={streaming:#?}\nwhole={whole:#?}"
+        );
+        // The bottom padding row is already there while the fence is open.
+        assert_eq!(
+            streaming.last().map(String::as_str),
+            Some(whole[streaming.len() - 1].as_str())
+        );
+        assert!(streaming.last().unwrap().starts_with("┃ "));
+    }
+    // A fence that has only just opened already shows its label row.
+    let just_opened = frame_rows(&markdown_lines("```rust\n", 24, false));
+    assert_eq!(
+        just_opened,
+        [
+            format!("┃ {} rust ", " ".repeat(16)),
+            format!("┃ {}", " ".repeat(22)),
+        ]
+    );
 }
 
 #[test]
@@ -185,8 +303,9 @@ fn diff_fenced_blocks_color_lines_inside_the_panel() {
             .map(|span| span.style)
     };
     assert_eq!(style_of("@@ -1,2 +1,2 @@"), Some(surface(muted())));
-    assert_eq!(style_of("-old line"), Some(surface(diff_line_style("-"))));
-    assert_eq!(style_of("+new line"), Some(surface(diff_line_style("+"))));
+    // Diff tints bring their own background, which wins over the surface.
+    assert_eq!(style_of("-old line"), Some(diff_line_style("-")));
+    assert_eq!(style_of("+new line"), Some(diff_line_style("+")));
     assert_eq!(style_of(" context"), Some(surface(normal())));
     assert!(lines.iter().all(|line| line.width() == 30));
 }
@@ -209,7 +328,7 @@ fn unterminated_fences_render_panels_safely_mid_stream() {
     }
     // A fence still streaming renders as a panel with the text so far.
     let rows = frame_rows(&markdown_lines("```rust\nfn main() {", 24, false));
-    assert!(rows.iter().any(|row| row.starts_with("│ fn main() {")));
+    assert!(rows.iter().any(|row| row.starts_with("┃  fn main() {")));
 }
 
 /// Finds the style of the first span whose text contains `needle`.
@@ -296,8 +415,8 @@ fn highlighted_rust_panels_style_keywords_strings_and_comments() {
         frame_rows(&lines),
         frame_rows(&markdown_lines(source, width, false))
     );
-    assert_eq!(lines[0].spans[0].style, surface(accent().dim()));
-    assert_eq!(lines[0].spans[1].style, surface(muted()));
+    assert_eq!(lines[0].spans[0].style, surface(border()));
+    assert_eq!(style_of(&lines, " rust "), Some(surface(muted())));
 }
 
 #[test]
@@ -342,14 +461,8 @@ fn diff_fences_keep_diff_coloring_when_highlighting_is_enabled() {
     let lines = markdown_lines(source, 30, true);
 
     assert_eq!(style_of(&lines, "@@ -1 +1 @@"), Some(surface(muted())));
-    assert_eq!(
-        style_of(&lines, "-old line"),
-        Some(surface(diff_line_style("-")))
-    );
-    assert_eq!(
-        style_of(&lines, "+new line"),
-        Some(surface(diff_line_style("+")))
-    );
+    assert_eq!(style_of(&lines, "-old line"), Some(diff_line_style("-")));
+    assert_eq!(style_of(&lines, "+new line"), Some(diff_line_style("+")));
 }
 
 #[test]
@@ -594,7 +707,7 @@ fn exactly_one_blank_row_separates_every_block_in_the_gallery() {
         "▎ A quote",
         "Some emphasis",
         "The footnote body",
-        "│ rust",
+        " rust ",
         "Role",
         "Tail paragraph",
     ] {

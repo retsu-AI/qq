@@ -1304,7 +1304,7 @@ fn final_output_sanitizes_every_dynamic_span() {
 
 #[test]
 fn panel_rows_carry_the_surface_background_through_output() {
-    let row = code_panel_row(Line::styled("x", normal()), 8);
+    let row = code_panel_row(Line::styled("x", normal()), 8, false);
     assert!(
         row.spans
             .iter()

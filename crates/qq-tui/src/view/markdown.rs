@@ -812,10 +812,14 @@ fn layout_table_stacked(rows: &[Vec<Line>], has_header: bool, width: usize) -> V
     output
 }
 
-/// The panel's left border glyph plus one cell of padding.
-const CODE_PANEL_GUTTER: &str = "│ ";
-/// Display width of [`CODE_PANEL_GUTTER`].
-const CODE_PANEL_GUTTER_WIDTH: usize = 2;
+/// The panel's left rail: a heavy bar plus one cell, on the first row of
+/// every source line and on both padding rows.
+const CODE_PANEL_GUTTER: &str = "┃ ";
+/// The rail on a continuation row: a source line that wrapped keeps flowing
+/// under the arrow, so a wrapped line never reads as a new one.
+const CODE_PANEL_WRAP_GUTTER: &str = "↪ ";
+/// Display width of the gutter plus the one cell of padding before content.
+const CODE_PANEL_INSET: usize = 3;
 
 /// Bytes past which a code block skips tree-sitter and renders plain;
 /// highlighting must never stall a frame.
@@ -1035,28 +1039,39 @@ impl CodeBlockBuffer {
     }
 }
 
-/// Lays a buffered code block out as a full-width tinted panel: a header row
-/// naming the language at the left where reading starts (blank when the
-/// fence has no tag), then character-wrapped content rows. Every row is
-/// padded to `width` so the tint reads as one solid panel rather than ragged
-/// highlights.
+/// Lays a buffered code block out as a full-width tinted panel: a top padding
+/// row carrying the language label right-aligned (blank when the fence has
+/// no tag), character-wrapped content rows, and a blank bottom padding row.
+/// Every row is padded to `width` so the tint reads as one solid slab. The
+/// rail is `┃` on the first row of each source line and `↪` on the rows a
+/// long line wrapped onto, so a wrapped line never reads as a new one.
+///
+/// An unterminated fence reaches here too (pulldown closes it at end of
+/// input), so a streaming panel has the same rows as the finished one and
+/// does not jump when the closing fence arrives.
 ///
 /// With `highlight` set, a recognized fence tag colors the content through
 /// its tree-sitter grammar; diff fences keep their dedicated coloring, and
 /// oversized blocks or highlighter failures fall back to plain text.
 fn layout_code_panel(block: &CodeBlockBuffer, width: usize, highlight: bool) -> Vec<Line> {
     let diff = block.language.as_deref() == Some("diff");
-    let content_width = width.saturating_sub(CODE_PANEL_GUTTER_WIDTH).max(1);
+    let content_width = width.saturating_sub(CODE_PANEL_INSET).max(1);
     let mut top = Line::default();
     if let Some(language) = block.language.as_deref() {
+        // ` label ` sits flush with the right edge; its trailing cell mirrors
+        // the padding cell after the gutter.
         let label = language
             .chars()
             .filter_map(terminal_safe_character)
-            .take(content_width)
+            .take(content_width.saturating_sub(2))
             .collect::<String>();
-        top.push(label, muted());
+        if !label.is_empty() {
+            let label_width = label.chars().count() + 2;
+            top.push(" ".repeat(content_width - label_width), normal());
+            top.push(format!(" {label} "), muted());
+        }
     }
-    let mut output = vec![code_panel_row(top, width)];
+    let mut output = vec![code_panel_row(top, width, false)];
     let highlighted = if highlight && !diff && block.text.len() <= MAX_HIGHLIGHT_BYTES {
         block
             .language
@@ -1069,8 +1084,9 @@ fn layout_code_panel(block: &CodeBlockBuffer, width: usize, highlight: bool) -> 
     match highlighted {
         Some(content) => {
             for line in content {
-                for wrapped in wrap_line_chars(line, content_width) {
-                    output.push(code_panel_row(wrapped, width));
+                for (index, wrapped) in wrap_line_chars(line, content_width).into_iter().enumerate()
+                {
+                    output.push(code_panel_row(wrapped, width, index > 0));
                 }
             }
         }
@@ -1085,25 +1101,42 @@ fn layout_code_panel(block: &CodeBlockBuffer, width: usize, highlight: bool) -> 
                 } else {
                     normal()
                 };
-                for wrapped in wrap_line_chars(Line::styled(safe, style), content_width) {
-                    output.push(code_panel_row(wrapped, width));
+                for (index, wrapped) in wrap_line_chars(Line::styled(safe, style), content_width)
+                    .into_iter()
+                    .enumerate()
+                {
+                    output.push(code_panel_row(wrapped, width, index > 0));
                 }
             }
         }
     }
+    output.push(code_panel_row(Line::default(), width, false));
     output
 }
 
-/// One physical panel row: the bordered gutter, the content, and enough
-/// trailing padding to carry the background tint to the full width.
-pub(crate) fn code_panel_row(content: Line, width: usize) -> Line {
-    let mut row = Line::styled(CODE_PANEL_GUTTER, surface(accent().dim()));
+/// One physical panel row: the rail (`┃`, or `↪` when `continuation` marks
+/// a wrapped source line) in `border`, one cell of padding, the content, and
+/// enough trailing padding to carry the surface tint to the full width. A
+/// span that brings its own background (diff add/remove tints) keeps it; the
+/// surface only fills spans that have none.
+pub(crate) fn code_panel_row(content: Line, width: usize, continuation: bool) -> Line {
+    let rail = if continuation {
+        CODE_PANEL_WRAP_GUTTER
+    } else {
+        CODE_PANEL_GUTTER
+    };
+    let mut row = Line::styled(rail, surface(border()));
+    row.push(" ", surface(normal()));
     let content_width = content.width();
     for span in content.spans {
-        row.push(span.text, surface(span.style));
+        let style = match span.style.background {
+            None => surface(span.style),
+            Some(_) => span.style,
+        };
+        row.push(span.text, style);
     }
     row.push(
-        " ".repeat(width.saturating_sub(CODE_PANEL_GUTTER_WIDTH + content_width)),
+        " ".repeat(width.saturating_sub(CODE_PANEL_INSET + content_width)),
         surface(normal()),
     );
     row

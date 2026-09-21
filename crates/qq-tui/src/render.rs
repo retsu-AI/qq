@@ -61,11 +61,6 @@ impl Style {
         self
     }
 
-    pub(crate) const fn dim(mut self) -> Self {
-        self.attributes.0 |= Attributes::DIM;
-        self
-    }
-
     pub(crate) const fn italic(mut self) -> Self {
         self.attributes.0 |= Attributes::ITALIC;
         self
