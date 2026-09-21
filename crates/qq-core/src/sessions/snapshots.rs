@@ -2,6 +2,7 @@
 //! accounting folds over persisted runs.
 
 use super::*;
+use crate::tools::output::escaped_len;
 
 pub(super) fn load_snapshot(
     connection: &mut Connection,
@@ -44,13 +45,18 @@ pub(super) fn load_snapshot(
             accounting,
         )?);
     }
+    // One byte budget spans every body in the response, spent by the focused
+    // body first and then by the included bodies in request order, so the
+    // response always fits the wire cap however large the transcripts are
+    // (F11). Each body keeps its newest rows and reports what it dropped.
+    let mut budget = SnapshotBudget::new(SNAPSHOT_BODY_BUDGET_BYTES);
     let focused = request
         .focused_session_id
         .map(|session_id| {
             if session_workspace(&transaction, session_id)? != request.workspace_id {
                 return Err(SessionRuntimeError::SessionNotFound);
             }
-            load_session_snapshot(&transaction, session_id, request.message_limit)
+            load_session_snapshot(&transaction, session_id, request.message_limit, &mut budget)
         })
         .transpose()?;
     // Extra bodies are best-effort: a session that left the workspace or was
@@ -67,6 +73,7 @@ pub(super) fn load_snapshot(
                     &transaction,
                     *session_id,
                     request.message_limit,
+                    &mut budget,
                 )?);
             }
             Ok(_) | Err(SessionRuntimeError::SessionNotFound) => {}
@@ -91,10 +98,37 @@ pub(super) fn load_snapshot(
     })
 }
 
+/// Remaining serialized bytes a snapshot response may still spend on body
+/// rows. Rows are admitted newest-first, so when the budget runs out the
+/// client holds the most recent history and a `has_older_*` flag telling it
+/// the rest is reachable through paging and recall, never a body the wire
+/// layer would refuse.
+pub(super) struct SnapshotBudget {
+    remaining: usize,
+}
+
+impl SnapshotBudget {
+    pub(super) fn new(bytes: usize) -> Self {
+        Self { remaining: bytes }
+    }
+
+    /// Charges one row whose variable text totals `text_bytes` (escaped) and
+    /// says whether it fits. The check never reserves a partial row.
+    fn admit(&mut self, text_bytes: usize) -> bool {
+        let cost = text_bytes.saturating_add(SNAPSHOT_ROW_OVERHEAD_BYTES);
+        if cost > self.remaining {
+            return false;
+        }
+        self.remaining -= cost;
+        true
+    }
+}
+
 pub(super) fn load_session_snapshot(
     transaction: &Connection,
     session_id: SessionId,
     message_limit: u16,
+    budget: &mut SnapshotBudget,
 ) -> Result<SessionSnapshot, SessionRuntimeError> {
     let summary = load_session_summary(transaction, session_id)?;
     // Messages order by run first, then by ordinal within the run, so a
@@ -112,13 +146,21 @@ pub(super) fn load_session_snapshot(
         )?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    let has_older_messages = message_ids.len() > usize::from(message_limit);
+    let mut has_older_messages = message_ids.len() > usize::from(message_limit);
     message_ids.truncate(usize::from(message_limit));
-    message_ids.reverse();
+    // Ids arrive newest-first; rows are admitted in that order so a budget
+    // cut drops the oldest, then the kept rows are put back in reading order.
     let mut messages = Vec::with_capacity(message_ids.len());
     for id in message_ids {
-        messages.push(load_message(transaction, parse_id(&id)?)?);
+        let message = load_message(transaction, parse_id(&id)?)?;
+        if !budget.admit(escaped_len(&message.output).saturating_add(escaped_len(&message.refusal)))
+        {
+            has_older_messages = true;
+            break;
+        }
+        messages.push(message);
     }
+    messages.reverse();
     let mut statement = transaction.prepare(
         "SELECT id FROM runs WHERE session_id = ?1
              ORDER BY created_at_ms DESC, rowid DESC LIMIT ?2",
@@ -129,15 +171,20 @@ pub(super) fn load_session_snapshot(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
+    // Run rows are small and fixed-shape; they are charged at the row
+    // overhead only so a session's run list is never cut by its transcript.
     run_ids.reverse();
     let mut runs = Vec::with_capacity(run_ids.len());
     for id in run_ids {
+        if !budget.admit(0) {
+            break;
+        }
         runs.push(load_run(transaction, parse_id(&id)?)?);
     }
     let mut statement = transaction.prepare(
         "SELECT t.id FROM tool_calls t JOIN runs r ON r.id = t.run_id
              WHERE r.session_id = ?1
-             ORDER BY r.created_at_ms DESC, t.turn_ordinal DESC, t.call_ordinal DESC
+             ORDER BY r.created_at_ms DESC, r.rowid DESC, t.turn_ordinal DESC, t.call_ordinal DESC
              LIMIT ?2",
     )?;
     let mut tool_call_ids = statement
@@ -150,13 +197,27 @@ pub(super) fn load_session_snapshot(
         )?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    let has_older_tool_calls = tool_call_ids.len() > MAX_SNAPSHOT_TOOL_CALLS;
+    let mut has_older_tool_calls = tool_call_ids.len() > MAX_SNAPSHOT_TOOL_CALLS;
     tool_call_ids.truncate(MAX_SNAPSHOT_TOOL_CALLS);
-    tool_call_ids.reverse();
     let mut tool_calls = Vec::with_capacity(tool_call_ids.len());
     for id in tool_call_ids {
-        tool_calls.push(load_tool_call(transaction, parse_id(&id)?)?);
+        let tool_call = load_tool_call(transaction, parse_id(&id)?)?;
+        let display_bytes = match &tool_call.display {
+            Some(ToolCallDisplay::Diff { path, diff }) => {
+                escaped_len(path).saturating_add(escaped_len(diff))
+            }
+            None => 0,
+        };
+        let text_bytes = escaped_len(&tool_call.arguments)
+            .saturating_add(tool_call.result.as_deref().map_or(0, escaped_len))
+            .saturating_add(display_bytes);
+        if !budget.admit(text_bytes) {
+            has_older_tool_calls = true;
+            break;
+        }
+        tool_calls.push(tool_call);
     }
+    tool_calls.reverse();
     Ok(SessionSnapshot {
         summary,
         messages,

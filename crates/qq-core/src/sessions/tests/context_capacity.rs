@@ -304,7 +304,7 @@ fn capacity_accounting_measures_the_pruned_assembly_not_raw_rows() {
     // Two early read_file turns whose results total ~6 MiB of stored
     // rows — well over the 4 MiB budget — followed by four text turns
     // that push them out of the recency window.
-    for (turn, provider_id) in [(1, "c1"), (2, "c2")] {
+    for (turn, provider_id) in [(1_u8, "c1"), (2, "c2")] {
         connection
             .execute(
                 "INSERT INTO model_turns(run_id, turn_ordinal, assistant_content_json)
@@ -327,7 +327,7 @@ fn capacity_accounting_measures_the_pruned_assembly_not_raw_rows() {
                  VALUES (?1, ?2, ?3, 0, ?4, 'read_file', '{\"path\":\"big.txt\"}',
                          'completed', ?5, 0, 1)",
                 params![
-                    format!("call-{provider_id}"),
+                    ToolCallId::from_bytes([turn; 16]).to_string(),
                     run_id.to_string(),
                     turn,
                     provider_id,

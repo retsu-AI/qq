@@ -2642,3 +2642,117 @@ async fn cancellation_during_tool_and_final_checkpoint_records_unknown_spend() {
         ));
     }
 }
+
+/// F11: a session whose retained transcript is far larger than the 8 MiB
+/// snapshot wire cap still snapshots — the body is trimmed newest-first to a
+/// byte budget during assembly and says so, instead of materializing a
+/// response the transport must refuse.
+#[test]
+fn snapshots_stay_under_the_wire_cap_for_large_sessions() {
+    let directory = tempfile::tempdir().unwrap();
+    // 40 runs x 1 turn x 300 KiB tool results = ~12 MiB of tool results
+    // alone, all retained (no compaction), past the 8 MiB cap.
+    let (mut connection, session_id) = bench_support::seed_compacted_session(
+        &directory.path().join("sessions.sqlite3"),
+        0,
+        40,
+        1,
+        300 * 1024,
+    );
+    let workspace_id = WorkspaceId::from_bytes([1; 16]);
+    let started = std::time::Instant::now();
+    let snapshot = load_snapshot(
+        &mut connection,
+        StoreId::from_bytes([7; 16]),
+        SnapshotRequest {
+            workspace_id,
+            focused_session_id: Some(session_id),
+            include_sessions: vec![session_id],
+            session_limit: 512,
+            message_limit: 256,
+        },
+    )
+    .unwrap();
+    let elapsed = started.elapsed();
+    let encoded = serde_json::to_vec(&snapshot).unwrap();
+    assert!(
+        encoded.len() <= qq_protocol::MAX_SNAPSHOT_BYTES,
+        "snapshot is {} bytes, cap {}",
+        encoded.len(),
+        qq_protocol::MAX_SNAPSHOT_BYTES
+    );
+    let focused = snapshot.focused.unwrap();
+    // The focused body spends the budget first: it keeps the newest results
+    // (about 20 of 40 fit in 6 MiB) and says older ones exist so the client
+    // can page or recall them. Messages are small and all fit.
+    assert!(
+        focused.has_older_tool_calls,
+        "trimmed tool calls are reported"
+    );
+    assert!(
+        (15..=25).contains(&focused.tool_calls.len()),
+        "{} newest results kept",
+        focused.tool_calls.len()
+    );
+    assert_eq!(focused.messages.len(), 80);
+    let newest_run = focused.runs.last().unwrap().id;
+    assert_eq!(
+        focused.tool_calls.last().unwrap().run_id,
+        newest_run,
+        "the kept tail ends at the newest run"
+    );
+    // The kept tail is contiguous in transcript order: each run's call
+    // appears once and runs stay in creation order.
+    let kept_runs: Vec<RunId> = focused.tool_calls.iter().map(|call| call.run_id).collect();
+    let run_order: Vec<RunId> = focused.runs.iter().map(|run| run.id).collect();
+    assert_eq!(
+        kept_runs,
+        run_order[run_order.len() - kept_runs.len()..].to_vec()
+    );
+    assert!(
+        snapshot.included.is_empty(),
+        "the focused id is not repeated"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "snapshot assembly took {elapsed:?}"
+    );
+    // A body that is only included, with the focused body already having
+    // spent everything, ships its summary and runs but reports its whole
+    // transcript as older: the client fetches it cold on demand, as it
+    // already does for sessions it never prewarmed.
+    let snapshot = load_snapshot(
+        &mut connection,
+        StoreId::from_bytes([7; 16]),
+        SnapshotRequest {
+            workspace_id,
+            focused_session_id: None,
+            include_sessions: vec![session_id],
+            session_limit: 512,
+            message_limit: 256,
+        },
+    )
+    .unwrap();
+    let included = &snapshot.included[0];
+    assert!(included.has_older_tool_calls);
+    assert!((15..=25).contains(&included.tool_calls.len()));
+    assert!(serde_json::to_vec(&snapshot).unwrap().len() <= qq_protocol::MAX_SNAPSHOT_BYTES);
+    // A user-only body with no large results is unaffected.
+    let (mut small, small_session) =
+        bench_support::seed_compacted_session(&directory.path().join("small.sqlite3"), 0, 3, 1, 64);
+    let snapshot = load_snapshot(
+        &mut small,
+        StoreId::from_bytes([7; 16]),
+        SnapshotRequest {
+            workspace_id,
+            focused_session_id: Some(small_session),
+            include_sessions: Vec::new(),
+            session_limit: 512,
+            message_limit: 256,
+        },
+    )
+    .unwrap();
+    let focused = snapshot.focused.unwrap();
+    assert!(!focused.has_older_tool_calls);
+    assert_eq!(focused.tool_calls.len(), 3);
+}

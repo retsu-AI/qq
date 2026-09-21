@@ -3147,15 +3147,28 @@ impl plan::CompiledAgentPlan {
                 // The per-turn output budget: results enter context in call
                 // order, and a late result that would overshoot is re-bounded
                 // to the remainder. The persisted row keeps the per-call
-                // bounded text; only what the model sees shrinks.
+                // bounded text; context assembly re-applies this same
+                // projection to the stored rows (`append_run_turns`), so a
+                // replayed turn is byte-identical to what the model saw here.
+                // A cut names its recall path: the spill when the call
+                // spilled, else the stored result row itself in a session run.
                 let mut turn_output = tools::TurnOutputBudget::new();
+                let stored = spills.is_some();
                 let result_blocks = calls
                     .iter()
                     .zip(results.into_iter())
                     .map(|(call, result)| {
                         let result = result.expect("every bounded tool execution completed");
                         let mut content = result.model_text;
-                        turn_output.admit(&mut content, result.spill_handle.as_deref());
+                        let recall = match (result.spill_handle.as_deref(), stored) {
+                            (Some(handle), _) => tools::ResultRecall::Spill(handle),
+                            (None, true) => tools::ResultRecall::StoredResult {
+                                tool: &call.name,
+                                call: call.id,
+                            },
+                            (None, false) => tools::ResultRecall::None,
+                        };
+                        turn_output.admit(&mut content, recall);
                         budget.charge_tool_output(content.len());
                         ContentBlock::ToolResult {
                             call_id: call.provider_call_id.clone(),
