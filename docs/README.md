@@ -30,6 +30,11 @@
   findings (F01–F28), comparative capability matrix, core versus adapter
   placement, and acceptance criteria (research; supersedes the August audit
   and September catalog).
+- [`run-reliability-audit-2026-09-21.md`](design/run-reliability-audit-2026-09-21.md)
+  — why sessions do not finish: failure taxonomy from the live session store
+  (27 % of prompt runs failed, 73 % of those by harness policy), how Codex,
+  OpenCode, Pi, and fx keep runs alive, and findings R01–R12 (research; owned
+  by `plans/run-reliability.md`).
 
 ## Decisions — `adr/`
 
