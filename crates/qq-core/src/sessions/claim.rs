@@ -103,6 +103,10 @@ pub(super) struct ClaimedRun {
     /// rejected: that unit cannot be reduced by any cut, and the prompt's
     /// failure names it. Never persisted; a restart re-derives the fold.
     pub(super) context_compaction_oversized_unit_bytes: Option<u64>,
+    /// For an in-run compaction step: the prompt run whose turns the summary
+    /// replaces and the last turn ordinal it covers. `None` for every other
+    /// run, including between-run steps.
+    pub(super) in_run_turn_cutoff: Option<(RunId, u32)>,
     pub(super) context_overflow_basis: Option<ContextOccupancyBasis>,
     pub(super) context_occupancy: Option<ContextOccupancy>,
     /// Caller-imposed budgets persisted with the run row. Compaction runs and
@@ -155,6 +159,7 @@ impl ClaimedRun {
             context_compaction_remaining: self.context_compaction_remaining,
             compaction_cutoff_ordinal: None,
             context_compaction_oversized_unit_bytes: None,
+            in_run_turn_cutoff: None,
             context_overflow_basis: None,
             context_occupancy: None,
             limits: RunLimits::default(),
@@ -728,6 +733,7 @@ pub(super) fn reserve_next_run_recoverable(
         context_compaction_remaining,
         compaction_cutoff_ordinal: None,
         context_compaction_oversized_unit_bytes: None,
+        in_run_turn_cutoff: None,
         context_overflow_basis,
         context_occupancy,
         limits,

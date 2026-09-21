@@ -346,6 +346,7 @@ pub(super) fn load_model_context_with_units(
     drop(statement);
     let mut attachments =
         load_retained_attachments(transaction, &session, through_ordinal, cutoff_ordinal)?;
+    let mut in_run = in_run_compactions(transaction, &session, through_ordinal, cutoff_ordinal)?;
 
     // Every committed turn of a retained run, grouped by run. The retained
     // runs are exactly those whose prompt the query above selected: the
@@ -526,6 +527,7 @@ pub(super) fn load_model_context_with_units(
                     run_turns,
                     results.remove(&prompt.run_id).unwrap_or_default(),
                     steering.remove(&prompt.run_id).unwrap_or_default(),
+                    in_run.remove(&prompt.run_id),
                     &mut context,
                     &mut effects,
                 )?,
@@ -986,9 +988,38 @@ pub(super) fn append_run_turns(
     turns: Vec<(u32, String, bool)>,
     mut recorded: RecordedTurnResults,
     mut steering: std::collections::VecDeque<(u32, String)>,
+    compaction: Option<InRunCompaction>,
     context: &mut Vec<Message>,
     effects: &mut HashMap<(usize, usize), EffectClass>,
 ) -> Result<(), SessionRuntimeError> {
+    // An in-run marker replaces the run's turns through `turn_cutoff` — and
+    // the steering those turns carried — with one summary message where the
+    // first replaced turn stood. The model sees prompt, summary, then the
+    // retained recent turns verbatim, exactly what the live run saw after
+    // it compacted.
+    let mut turns = turns;
+    if let Some(marker) = compaction {
+        let replaced = turns
+            .iter()
+            .take_while(|(ordinal, _, _)| *ordinal <= marker.turn_cutoff)
+            .count();
+        if replaced > 0 {
+            turns.drain(..replaced);
+            for ordinal in 1..=marker.turn_cutoff {
+                recorded.remove(&ordinal);
+            }
+            while steering
+                .front()
+                .is_some_and(|(applied_before, _)| *applied_before <= marker.turn_cutoff)
+            {
+                steering.pop_front();
+            }
+            context.push(Message::user(format!(
+                "{IN_RUN_COMPACTION_PREAMBLE}\n\n{}",
+                marker.summary
+            )));
+        }
+    }
     for (turn_ordinal, content_json, truncated) in turns {
         let mut recorded_turn = recorded.remove(&turn_ordinal).unwrap_or_default();
         while steering

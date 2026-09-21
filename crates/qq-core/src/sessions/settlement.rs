@@ -628,6 +628,7 @@ pub(super) fn settle_panicked_execution(
                 context_compaction_remaining: false,
                 compaction_cutoff_ordinal: None,
                 context_compaction_oversized_unit_bytes: None,
+                in_run_turn_cutoff: None,
                 context_overflow_basis: None,
                 context_occupancy: None,
                 limits: RunLimits::default(),
@@ -903,6 +904,55 @@ pub(super) fn cascade_auto_compaction_cancel(
     Ok(Some((compaction_run, event)))
 }
 
+/// Cancels the in-run compaction a running prompt owns, if one is running.
+/// Unlike `cascade_auto_compaction_cancel` it keys on ownership, not the
+/// session's active slot, because an in-run compaction never holds the slot.
+pub(super) fn cascade_in_run_compaction_cancel(
+    transaction: &Connection,
+    store_id: StoreId,
+    workspace_id: WorkspaceId,
+    session_id: SessionId,
+    prompt_run: RunId,
+    command_id: CommandId,
+    now: u64,
+) -> Result<Option<(RunId, SessionEventEnvelope)>, SessionRuntimeError> {
+    let compaction_run = transaction
+        .query_row(
+            "SELECT id FROM runs
+             WHERE auto_compaction_for_run_id = ?1 AND kind = 'compaction'
+               AND status = 'running' AND outcome_json IS NULL AND cancel_requested = 0
+             ORDER BY rowid DESC LIMIT 1",
+            [prompt_run.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(compaction_run) = compaction_run else {
+        return Ok(None);
+    };
+    let compaction_run: RunId = parse_id(&compaction_run)?;
+    transaction.execute(
+        "UPDATE runs SET cancel_requested = 1 WHERE id = ?1",
+        [compaction_run.to_string()],
+    )?;
+    let summary = load_session_summary(transaction, session_id)?;
+    let event = append_event(
+        transaction,
+        EventContext::for_run_ids(
+            store_id,
+            workspace_id,
+            session_id,
+            compaction_run,
+            Some(command_id),
+            now,
+        ),
+        SessionEvent::CancellationRequested {
+            session: Box::new(summary),
+            run_id: compaction_run,
+        },
+    )?;
+    Ok(Some((compaction_run, event)))
+}
+
 pub(super) fn recover_interrupted_runs(
     connection: &mut Connection,
     store_id: StoreId,
@@ -1027,6 +1077,7 @@ pub(super) fn recover_interrupted_runs(
             context_compaction_remaining: false,
             compaction_cutoff_ordinal: None,
             context_compaction_oversized_unit_bytes: None,
+            in_run_turn_cutoff: None,
             context_overflow_basis: None,
             context_occupancy: None,
             limits: RunLimits::default(),

@@ -73,7 +73,7 @@ impl ToolGate for CompactionRunGate {
 /// structured summary runs well past 2 k tokens; a reserve that small forced
 /// the output-truncation continuation path on every real compaction and
 /// failed any summary longer than the continuation cap allowed.
-const COMPACTION_OUTPUT_RESERVE_TOKENS: u32 = 8_192;
+pub(super) const COMPACTION_OUTPUT_RESERVE_TOKENS: u32 = 8_192;
 
 struct PreparedExecution {
     events: crate::RuntimeStream,
@@ -396,7 +396,14 @@ async fn prepare_execution(
                 Arc::clone(inner),
                 claimed.identity.session_id,
             )))
-            .with_steering(receiver);
+            .with_steering(receiver)
+            .with_compactor(Arc::new(
+                super::in_run_compaction::SessionInRunCompactor::new(
+                    Arc::clone(inner),
+                    claimed,
+                    loaded,
+                ),
+            ));
         // Only user-initiated roots are audited: children answer to their
         // parent, internal runs to the runtime, and an audit child auditing
         // itself would recurse.
@@ -1447,7 +1454,7 @@ async fn run_auto_compaction(
     }
 }
 
-async fn cancellation_requested(
+pub(super) async fn cancellation_requested(
     inner: &SessionRuntimeInner,
     run_id: RunId,
 ) -> Result<bool, SessionRuntimeError> {
@@ -2092,11 +2099,13 @@ async fn execute_started_run(
                     reducible_message_bytes: weight.reducible_message_bytes,
                     irreducible_message_bytes: weight.irreducible_message_bytes,
                     compatible_input_tokens: weight.compatible_input_tokens,
-                    // Compaction is only legal between runs. The second slice
-                    // will turn the first-turn Compact result into a reserved
-                    // auto-compaction; later turns must fail closed without
-                    // polling the provider. The summarizer's own request is
-                    // planned against storage only.
+                    // A later turn that still overflows here already tried
+                    // stubbing and in-run compaction inside the loop (the
+                    // loop fails itself when the compactor cannot help), so
+                    // reaching this point over the window means the run has
+                    // no more to give: fail closed without polling the
+                    // provider. The summarizer's own request is planned
+                    // against storage only.
                     compaction: if internal {
                         context::CompactionDisposition::Summarizing
                     } else {
@@ -2787,6 +2796,12 @@ async fn execute_started_run(
                     }
                     flush_at = None;
                 }
+            }
+            RunInput::Event(Some(RuntimeEvent::InRunCompacted { .. })) => {
+                // The compactor committed the marker and settled its own run
+                // before the loop resumed; the run's measured occupancy is
+                // re-seeded by the next turn's usage.
+                current_occupancy_basis = None;
             }
             RunInput::Event(Some(RuntimeEvent::SteeringApplied {
                 message_id,

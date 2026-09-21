@@ -499,6 +499,10 @@ pub(crate) struct RunCapabilities {
     spills: Option<Arc<dyn runtime::SpillReader>>,
     /// Steering input from the session layer. Direct runs have none.
     steering: Option<runtime::SteeringReceiver>,
+    /// Summarizes this run's own earlier turns when a later turn would not
+    /// fit the window even after stubbing. Session prompt runs install one;
+    /// direct runs, children of the summarizer, and internal runs have none.
+    compactor: Option<Arc<dyn runtime::InRunCompactor>>,
     /// Audits the candidate final answer of a root run. Session roots install
     /// one; children, internal runs, and direct runs have none.
     audit_hook: Option<Arc<dyn runtime::AuditHook>>,
@@ -525,6 +529,7 @@ impl RunCapabilities {
             history: None,
             spills: None,
             steering: None,
+            compactor: None,
             audit_hook: None,
             tool_tasks: None,
             output: None,
@@ -581,6 +586,11 @@ impl RunCapabilities {
         self
     }
 
+    pub(crate) fn with_compactor(mut self, compactor: Arc<dyn runtime::InRunCompactor>) -> Self {
+        self.compactor = Some(compactor);
+        self
+    }
+
     pub(crate) fn with_tool_tasks(mut self, tasks: tools::ToolTasks) -> Self {
         self.tool_tasks = Some(tasks);
         self
@@ -629,6 +639,7 @@ impl RunCapabilities {
             history: None,
             spills: None,
             steering: None,
+            compactor: None,
             audit_hook: None,
             tool_tasks: None,
             output: None,
@@ -742,6 +753,61 @@ impl Runtime {
             shell: Arc::new(runtime::ShellPolicy::default()),
             network: Arc::new(tools::network::NetworkPolicy::default()),
         })
+    }
+
+    /// One provider turn with no tools: the summarizer request of an in-run
+    /// compaction. Returns the concatenated text and the reported usage. A
+    /// tool call, refusal, protocol violation, or transport failure is an
+    /// error naming it; the caller settles the compaction run failed. The
+    /// provider owns retries exactly as for any other request.
+    pub(crate) async fn summarize_once(
+        &self,
+        messages: Vec<Message>,
+        max_output_tokens: u32,
+    ) -> Result<(String, Option<TokenUsage>), String> {
+        let request = ModelRequest::new(Arc::clone(&self.model), messages, max_output_tokens);
+        let request = match self.reasoning_effort {
+            Some(effort) => request.with_reasoning_effort(effort),
+            None => request,
+        };
+        let mut events = self.provider.stream(request);
+        let mut text = String::new();
+        while let Some(event) = events.next().await {
+            match event {
+                Ok(ProviderEvent::OutputTextDelta { text: delta }) => {
+                    if text.len().saturating_add(delta.len()) > MAX_RUN_MODEL_TEXT_BYTES {
+                        return Err("summarizer output exceeded the run text bound".to_owned());
+                    }
+                    text.push_str(&delta);
+                }
+                Ok(
+                    ProviderEvent::ReasoningStarted { .. }
+                    | ProviderEvent::ReasoningDelta { .. }
+                    | ProviderEvent::ReasoningCompleted { .. },
+                ) => {}
+                Ok(ProviderEvent::RefusalDelta { .. }) => {
+                    return Err("summarizer refused".to_owned());
+                }
+                Ok(
+                    ProviderEvent::ToolCallStarted { .. }
+                    | ProviderEvent::ToolCallArgumentsDelta { .. }
+                    | ProviderEvent::ToolCallCompleted { .. },
+                ) => {
+                    return Err("summarizer attempted a tool call".to_owned());
+                }
+                Ok(ProviderEvent::Completed { usage }) => {
+                    return Ok((text, usage.map(provider_usage)));
+                }
+                Ok(ProviderEvent::Incomplete { .. }) => {
+                    return Err(format!(
+                        "summarizer output was cut off after {} bytes",
+                        text.len()
+                    ));
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Err("summarizer stream ended without completing".to_owned())
     }
 
     /// Carries an optional pre-run router into compiled plans for orchestration.
@@ -1153,6 +1219,7 @@ impl plan::CompiledAgentPlan {
                 history,
                 spills,
                 steering,
+                compactor,
                 audit_hook,
                 tool_tasks,
                 output,
@@ -1399,6 +1466,10 @@ impl plan::CompiledAgentPlan {
                 .unwrap_or_default();
             let mut model_text_bytes = 0_usize;
             let mut continuing_slice = false;
+            // Durable turns already replaced by in-run compaction: the live
+            // transcript's assistant messages after the summary are turns
+            // `compacted_turns + 1..`, and the next cutoff is durable too.
+            let mut compacted_turns: u32 = 0;
             for turn_ordinal in 1..=u32::MAX {
                 // Caller budgets are decided at the turn boundary, before any
                 // provider request. A spent work budget grants one tool-free
@@ -1498,6 +1569,64 @@ impl plan::CompiledAgentPlan {
                         .saturating_add(tool_schema_bytes)
                         .saturating_add(reducible_message_bytes)
                         .saturating_add(irreducible_message_bytes);
+                }
+                // Still over the window after stubbing: summarize this run's
+                // own earlier turns and continue. This is a safe boundary —
+                // every tool result of the previous turn is durable and in
+                // context, nothing is in flight, and steering was applied.
+                // Everything but the last `CONTEXT_PRUNE_KEEP_TURNS` turns
+                // (and their results) is replaced by one summary message;
+                // the prompt and the session context before it stay. A
+                // failure here is the same context failure the session layer
+                // would have raised, with the compactor's reason attached.
+                let still_overflows = turn_ordinal > 1
+                    && plan.runtime.context_window.is_some_and(|window| {
+                        sessions::context::estimate_tokens(input_bytes)
+                            .saturating_add(u64::from(max_output_tokens))
+                            > u64::from(window)
+                    });
+                if still_overflows && let Some(compactor) = compactor.as_ref() {
+                    let run_start = reducible_messages.saturating_add(1);
+                    let boundary = sessions::in_run_compaction_boundary(
+                        &messages[run_start..],
+                        sessions::CONTEXT_PRUNE_KEEP_TURNS,
+                    );
+                    if let Some((replace_through, replaced_turns)) = boundary {
+                        let turn_cutoff = compacted_turns.saturating_add(replaced_turns);
+                        let transcript = messages[reducible_messages..run_start + replace_through].to_vec();
+                        match compactor
+                            .compact(runtime::InRunCompactionRequest { transcript, turn_cutoff })
+                            .await
+                        {
+                            Ok(summary) => {
+                                let summary = Message::user(format!(
+                                    "{}\n\n{}",
+                                    sessions::IN_RUN_COMPACTION_PREAMBLE, summary.summary
+                                ));
+                                let live = Arc::make_mut(&mut messages);
+                                live.splice(run_start..run_start + replace_through, [summary]);
+                                compacted_turns = turn_cutoff;
+                                // The measured chain covered the replaced
+                                // turns; the next provider usage re-seeds it.
+                                compatible_request = None;
+                                irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
+                                input_bytes = system_bytes
+                                    .saturating_add(tool_schema_bytes)
+                                    .saturating_add(reducible_message_bytes)
+                                    .saturating_add(irreducible_message_bytes);
+                                yield RuntimeEvent::InRunCompacted { turn_ordinal, turn_cutoff };
+                            }
+                            Err(error) => {
+                                yield RuntimeEvent::Failed {
+                                    kind: RunFailureKind::Policy,
+                                    message: format!(
+                                        "the context grew past the model window during this run and in-run compaction did not produce a usable smaller context: {error}; run /compact or start a new session, then retry"
+                                    ),
+                                };
+                                return;
+                            }
+                        }
+                    }
                 }
                 let message_bytes = reducible_message_bytes.saturating_add(irreducible_message_bytes);
                 let compatible_input_tokens = compatible_request.map(
@@ -3282,6 +3411,8 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                     yield RunEvent::Usage { usage };
                 }
                 RuntimeEvent::AssistantTurnCompleted { usage: None, .. }
+                // Direct runs have no compactor, so this never fires.
+                | RuntimeEvent::InRunCompacted { .. }
                 | RuntimeEvent::ToolCallStarted { .. }
                 | RuntimeEvent::ToolCallDenied { .. }
                 | RuntimeEvent::ToolCallAnswered { .. }

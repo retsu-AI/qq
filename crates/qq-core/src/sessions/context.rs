@@ -330,7 +330,7 @@ pub(crate) fn rejection_message(plan: ContextPlan) -> Option<String> {
                 ),
                 ContextRejectReason::BetweenRunsOnly(constraint) => (
                     constraint,
-                    "the context grew past the limit during this run and compaction runs only between prompts; run /compact or start a new session, then retry".to_owned(),
+                    "the context grew past the limit during this run and neither stubbing stale results nor compacting the run's own turns brought it back under; run /compact or start a new session, then retry".to_owned(),
                 ),
                 ContextRejectReason::Unsupported(constraint) => (
                     constraint,
