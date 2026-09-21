@@ -8,8 +8,8 @@ use crate::{
     app::terminal_safe_character,
     render::{
         Line, Style, accent, border, code_comment, code_constant, code_function, code_keyword,
-        code_property, code_string, code_type, diff_line_style, inline_code, link, muted, normal,
-        surface,
+        code_property, code_punctuation, code_string, code_type, diff_line_style, inline_code,
+        link, muted, normal, surface,
     },
     view::wrap::{wrap_line, wrap_line_chars},
 };
@@ -842,12 +842,16 @@ const HIGHLIGHT_CAPTURES: &[HighlightCapture] = &[
     ("keyword", code_keyword),
     ("label", code_constant),
     ("number", code_constant),
+    ("operator", code_property),
     ("property", code_property),
+    ("punctuation.bracket", code_punctuation),
+    ("punctuation.delimiter", code_punctuation),
     ("string", code_string),
     ("string.special.key", code_property),
     ("tag", code_function),
     ("type", code_type),
     ("variable.builtin", code_keyword),
+    ("variable.parameter", code_property),
 ];
 
 /// Builds one grammar's highlight configuration on first use. Compiling the
@@ -972,6 +976,11 @@ pub(crate) fn fence_highlight_configuration(tag: &str) -> Option<&'static Highli
 /// line per source line. Tree-sitter is error-tolerant, so partial or invalid
 /// code still highlights; any highlighter failure returns `None` and the
 /// caller falls back to plain panel text.
+///
+/// Kept out of line: this is the cold, expensive path, and letting it inline
+/// into the panel layout measured +7 % on the fence-free 32 KiB streaming
+/// ceiling when the capture table grew (U4), through code layout alone.
+#[inline(never)]
 fn highlighted_code_lines(configuration: &HighlightConfiguration, text: &str) -> Option<Vec<Line>> {
     let mut highlighter = Highlighter::new();
     let events = highlighter

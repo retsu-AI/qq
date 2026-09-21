@@ -11,7 +11,7 @@
 use qq_protocol::MessageId;
 use tokio::sync::mpsc;
 
-use crate::render::Line;
+use crate::{render::Line, theme};
 
 /// Concurrent highlight jobs. Beyond this, requests are skipped and retried on
 /// a later frame; the plain layout stays visible in the meantime.
@@ -69,7 +69,12 @@ impl Highlighter {
         };
         let results = self.results.clone();
         self.in_flight += 1;
+        // Style helpers read a thread-local palette; the blocking thread has
+        // never had one installed, so without this the layout comes back in
+        // the compiled `qq` colors under every other theme.
+        let palette = theme::active();
         handle.spawn_blocking(move || {
+            theme::activate(palette);
             let lines = layout();
             // A full inbox means the loop is gone or hopelessly behind; the
             // plain layout remains correct, so dropping is the right outcome.
@@ -158,5 +163,22 @@ mod tests {
         let mut highlighter = Highlighter::default();
         assert!(!highlighter.request(key(1), Vec::new));
         assert_eq!(highlighter.in_flight(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn jobs_lay_out_under_the_requesting_threads_palette() {
+        use crate::{render::code_keyword, theme::Palette};
+        use crossterm::style::Color;
+
+        let themed = Palette {
+            syn_keyword: Color::Magenta,
+            ..Palette::QQ
+        };
+        theme::activate(themed);
+        let mut highlighter = Highlighter::default();
+        assert!(highlighter.request(key(1), || vec![Line::styled("kw", code_keyword())]));
+        let result = highlighter.next().await;
+        assert_eq!(result.lines[0].spans[0].style.color, Some(Color::Magenta));
+        theme::activate(Palette::QQ);
     }
 }

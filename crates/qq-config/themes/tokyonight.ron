@@ -3,6 +3,10 @@
 // Blue is the accent, as in the editor theme's functions and headings;
 // the brand takes the orange so the mark stays warm against the indigo
 // text. Surface is bg_highlight.
+//
+// Syntax follows tokyonight.nvim's base and tree-sitter groups: keywords
+// purple, functions blue, types blue1, strings green, constants orange,
+// comments the comment tone, properties green1, brackets fg_dark.
 (
     version: 1,
     defs: {
@@ -14,6 +18,10 @@
         "red":          "#f7768e",
         "green":        "#9ece6a",
         "bg_highlight": "#292e42",
+        "purple":       "#9d7cd8",
+        "blue1":        "#2ac3de",
+        "green1":       "#73daca",
+        "fg_dark":      "#a9b1d6",
     },
     colors: (
         text:    "fg",
@@ -24,5 +32,15 @@
         error:   "red",
         success: "green",
         surface: "bg_highlight",
+    ),
+    syntax: (
+        keyword:     "purple",
+        function:    "blue",
+        type:        "blue1",
+        string:      "green",
+        constant:    "orange",
+        comment:     "comment",
+        property:    "green1",
+        punctuation: "fg_dark",
     ),
 )

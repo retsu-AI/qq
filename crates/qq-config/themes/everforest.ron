@@ -2,6 +2,10 @@
 //
 // Aqua is the accent, orange the brand. grey1 is the palette's comment
 // tone and bg2 the elevated surface.
+//
+// Syntax follows colors/everforest.vim's tree-sitter links: keywords red,
+// functions green, types yellow, strings aqua, numbers purple, comments
+// grey1, properties blue, brackets fg.
 (
     version: 1,
     defs: {
@@ -13,6 +17,8 @@
         "red":    "#e67e80",
         "green":  "#a7c080",
         "bg2":    "#3d484d",
+        "purple": "#d699b6",
+        "blue":   "#7fbbb3",
     },
     colors: (
         text:    "fg",
@@ -23,5 +29,15 @@
         error:   "red",
         success: "green",
         surface: "bg2",
+    ),
+    syntax: (
+        keyword:     "red",
+        function:    "green",
+        type:        "yellow",
+        string:      "aqua",
+        constant:    "purple",
+        comment:     "grey1",
+        property:    "blue",
+        punctuation: "fg",
     ),
 )

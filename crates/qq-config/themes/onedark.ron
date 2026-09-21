@@ -2,6 +2,10 @@
 //
 // Blue is the accent, as in Atom's function color; the orange (joshdick's
 // dark_yellow) carries the brand. bg1 is the elevated surface.
+//
+// Syntax follows onedark.nvim's highlights (dark style): keywords purple,
+// functions blue, types yellow, strings green, constants and numbers
+// orange, comments grey, properties cyan, brackets light_grey.
 (
     version: 1,
     defs: {
@@ -13,6 +17,9 @@
         "red":    "#e86671",
         "green":  "#98c379",
         "bg1":    "#31353f",
+        "purple":     "#c678dd",
+        "cyan":       "#56b6c2",
+        "light_grey": "#848b98",
     },
     colors: (
         text:    "fg",
@@ -23,5 +30,15 @@
         error:   "red",
         success: "green",
         surface: "bg1",
+    ),
+    syntax: (
+        keyword:     "purple",
+        function:    "blue",
+        type:        "yellow",
+        string:      "green",
+        constant:    "orange",
+        comment:     "grey",
+        property:    "cyan",
+        punctuation: "light_grey",
     ),
 )

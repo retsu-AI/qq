@@ -1150,7 +1150,8 @@ fn tui_theme(document: &config::ThemeDocument) -> qq_tui::Theme {
         },
     };
     let colors = document.colors();
-    qq_tui::Theme::from_roles(
+    let syntax = document.syntax();
+    qq_tui::Theme::from_roles_and_syntax(
         document.name(),
         [
             color(colors.text),
@@ -1162,6 +1163,16 @@ fn tui_theme(document: &config::ThemeDocument) -> qq_tui::Theme {
             color(colors.success),
             color(colors.surface),
         ],
+        qq_tui::SyntaxOverrides {
+            keyword: syntax.keyword.map(color),
+            function: syntax.function.map(color),
+            r#type: syntax.r#type.map(color),
+            string: syntax.string.map(color),
+            constant: syntax.constant.map(color),
+            comment: syntax.comment.map(color),
+            property: syntax.property.map(color),
+            punctuation: syntax.punctuation.map(color),
+        },
     )
 }
 
@@ -2103,5 +2114,69 @@ mod tests {
             load_tui_config(&loader, &workspace),
             Err(config::ConfigError::Parse { .. })
         ));
+    }
+
+    #[test]
+    fn root_theme_adapter_applies_syntax_overrides_after_deriving_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let global = directory.path().join("global");
+        let data = directory.path().join("data");
+        let managed = directory.path().join("managed");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(global.join("themes")).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            global.join("themes/custom.ron"),
+            r##"(
+                version: 1,
+                colors: (
+                    text: "#e0def4", muted: "#6e6a86", accent: "#c4a7e7", brand: "#ebbcba",
+                    warning: "#f6c177", error: "#eb6f92", success: "#9ccfd8", surface: "#403d52",
+                ),
+                syntax: ( keyword: "#31748f", punctuation: "#908caa" ),
+            )"##,
+        )
+        .unwrap();
+        let loader = config::ConfigLoader::new(config::ConfigPaths::new(global, data, managed));
+
+        let themes = load_tui_themes(&loader, &workspace, "custom").unwrap();
+        let custom = &themes[0];
+        assert_eq!(custom.name, "custom");
+        let derived = qq_tui::Theme::from_roles(
+            "custom",
+            [
+                qq_tui::ThemeColor::Rgb(0xe0, 0xde, 0xf4),
+                qq_tui::ThemeColor::Rgb(0x6e, 0x6a, 0x86),
+                qq_tui::ThemeColor::Rgb(0xc4, 0xa7, 0xe7),
+                qq_tui::ThemeColor::Rgb(0xeb, 0xbc, 0xba),
+                qq_tui::ThemeColor::Rgb(0xf6, 0xc1, 0x77),
+                qq_tui::ThemeColor::Rgb(0xeb, 0x6f, 0x92),
+                qq_tui::ThemeColor::Rgb(0x9c, 0xcf, 0xd8),
+                qq_tui::ThemeColor::Rgb(0x40, 0x3d, 0x52),
+            ],
+        );
+        // The two overridden roles differ from derivation; nothing else does.
+        assert_ne!(custom.palette.syn_keyword, derived.palette.syn_keyword);
+        assert_ne!(
+            custom.palette.syn_punctuation,
+            derived.palette.syn_punctuation
+        );
+        assert_eq!(
+            qq_tui::Palette {
+                syn_keyword: derived.palette.syn_keyword,
+                syn_punctuation: derived.palette.syn_punctuation,
+                ..custom.palette
+            },
+            derived.palette
+        );
+        // Shipped themes with a `syntax` block and the compiled `qq` theme
+        // ride the same adapter; the picker list carries them all.
+        assert!(themes.iter().any(|theme| theme.name == "qq"));
+        let shipped = themes
+            .iter()
+            .find(|theme| theme.name == "dracula")
+            .expect("dracula ships");
+        assert_ne!(shipped.palette.syn_keyword, shipped.palette.brand);
+        assert_ne!(shipped.palette.syn_constant, shipped.palette.error);
     }
 }

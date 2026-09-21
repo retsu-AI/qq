@@ -3,17 +3,26 @@
 // crystalBlue is the accent, surimiOrange the brand, carpYellow the
 // warning, peachRed the error, springGreen the success. fujiGray is the
 // palette's comment tone; sumiInk4 is the elevated surface.
+//
+// Syntax follows the wave theme's `syn` table (lua/kanagawa/themes.lua):
+// keywords oniViolet, functions crystalBlue, types waveAqua2, strings
+// springGreen, numbers sakuraPink, comments fujiGray, identifiers
+// carpYellow, punctuation springViolet2.
 (
     version: 1,
     defs: {
-        "fujiWhite":    "#dcd7ba",
-        "fujiGray":     "#727169",
-        "crystalBlue":  "#7e9cd8",
-        "surimiOrange": "#ffa066",
-        "carpYellow":   "#e6c384",
-        "peachRed":     "#ff5d62",
-        "springGreen":  "#98bb6c",
-        "sumiInk4":     "#2a2a37",
+        "fujiWhite":     "#dcd7ba",
+        "fujiGray":      "#727169",
+        "crystalBlue":   "#7e9cd8",
+        "surimiOrange":  "#ffa066",
+        "carpYellow":    "#e6c384",
+        "peachRed":      "#ff5d62",
+        "springGreen":   "#98bb6c",
+        "sumiInk4":      "#2a2a37",
+        "oniViolet":     "#957fb8",
+        "waveAqua2":     "#7aa89f",
+        "sakuraPink":    "#d27e99",
+        "springViolet2": "#9cabca",
     },
     colors: (
         text:    "fujiWhite",
@@ -24,5 +33,15 @@
         error:   "peachRed",
         success: "springGreen",
         surface: "sumiInk4",
+    ),
+    syntax: (
+        keyword:     "oniViolet",
+        function:    "crystalBlue",
+        type:        "waveAqua2",
+        string:      "springGreen",
+        constant:    "sakuraPink",
+        comment:     "fujiGray",
+        property:    "carpYellow",
+        punctuation: "springViolet2",
     ),
 )

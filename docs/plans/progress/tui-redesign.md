@@ -12,7 +12,7 @@ Raw frames and bench reports live under `target/qq-perf/tui-<slice>-<date>/`
 | U1 ([ENG-847](https://linear.app/retsu-ai/issue/ENG-847)) | Block rhythm and lists | Shipped (`38a47d8`, [#95](https://github.com/retsu-AI/qq/pull/95)) | | 2026-09-20 |
 | U2 ([ENG-848](https://linear.app/retsu-ai/issue/ENG-848)) | Inline styling, `Style.underline` | In review | [#102](https://github.com/retsu-AI/qq/pull/102) | Rebased onto main after #95 |
 | U3 ([ENG-849](https://linear.app/retsu-ai/issue/ENG-849)) | Code panel | In review | [#100](https://github.com/retsu-AI/qq/pull/100) | Stacked on #102 |
-| U4 ([ENG-850](https://linear.app/retsu-ai/issue/ENG-850)) | Syntax palette, theme `syntax` block | Planned | | Needs U0 |
+| U4 ([ENG-850](https://linear.app/retsu-ai/issue/ENG-850)) | Syntax palette, theme `syntax` block | In review | `feat/eng-850-u4-syntax-palette` | Stacked on U9 |
 | U5 ([ENG-851](https://linear.app/retsu-ai/issue/ENG-851)) | `ink` default theme, `terminal` fallback, ADR 0036 | Planned | | Needs U4 |
 | U9 ([ENG-852](https://linear.app/retsu-ai/issue/ENG-852)) | Sessions rail, adaptive density | In review | [#101](https://github.com/retsu-AI/qq/pull/101) | Stacked on #100 |
 | L3 ([ENG-853](https://linear.app/retsu-ai/issue/ENG-853)) | Inspector pane | Planned | | Needs L2 |
@@ -216,3 +216,33 @@ Baseline: `cargo bench -p qq-tui --bench render` on `51ccf13` recorded to
 - Bench (`target/qq-perf/tui-U9-2026-09-20/{before,after-2}.txt`, core 2):
   sessions_200 33.6 → 31.5 µs; children_20 56.3 → 57.1; steady 21.1 → 21.3;
   golden_path 38.4 → 38.7; keystroke 26.6 → 26.3. Docs: `layout.md` § Sessions rail.
+
+### 2026-09-20 — U4 receipt
+
+- `Palette` gains `syn_{keyword,function,type,string,constant,comment,
+  property,punctuation}`, derived in `Palette::derive` (keyword brand,
+  function accent, type warning, string success, constant brand blended a
+  third toward text, comment/punctuation muted, property text; never
+  `error`); `Palette::with_syntax(SyntaxOverrides)` applies a document's
+  block. `code_*` read the roles; `code_punctuation` added.
+  `HIGHLIGHT_CAPTURES` + `punctuation.bracket`/`.delimiter` → punctuation,
+  `operator`/`variable.parameter` → text.
+- `qq-config`: optional `syntax: (...)` block, every field optional, aliases
+  and literals as `colors`, `deny_unknown_fields`; failures are
+  `ConfigError::InvalidThemeSyntax { role: SyntaxRole, reason: ThemeColorFault }`.
+  Blocks shipped for catppuccin, dracula, everforest, gruvbox, kanagawa,
+  monokai, nord, onedark, rose-pine, solarized, tokyonight (source named in
+  each file); `ember`/`ink` derive. Root `tui_theme` and the gallery apply them.
+- Found via the gallery: off-tick highlight jobs ran on a blocking thread
+  with no palette installed, so highlighted panels came back in `qq` colors
+  under every theme. `Highlighter::request` now captures the active palette
+  and activates it on the worker (regression test in `highlight.rs`).
+- Tests: qq-tui 280 → 285, qq-config 88 → 89, root 169 → 170; goldens unchanged.
+- Bench (`target/qq-perf/tui-U4-2026-09-20/`, core 2, before/-2 vs final/-2):
+  steady 21.0/21.1 → 21.6/21.4 µs; streaming_focused 33.8/33.7 → 33.6/33.6;
+  golden_path 38.3/38.3 → 39.4/39.4; expanded 51.4/52.0 → 53.5/53.3;
+  run_on_32kb 431.6/429.5 → 417.3/439.7; ultra 109.8/109.2 → 117.6/119.9
+  (a parent padded by 32 bytes alone reads 113.0; the rest is layout).
+  The first cut read run_on at 459–466: the larger capture table let
+  `highlighted_code_lines` inline into the panel layout; `#[inline(never)]`
+  restored it (`after-3` vs `after-noinline`).

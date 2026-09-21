@@ -101,11 +101,78 @@ pub struct ThemeColors {
     pub surface: ThemeColor,
 }
 
+/// A syntax role a theme's optional `syntax` block may set. The renderer
+/// derives a default for any role the document leaves out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SyntaxRole {
+    Keyword,
+    Function,
+    Type,
+    String,
+    Constant,
+    Comment,
+    Property,
+    Punctuation,
+}
+
+impl SyntaxRole {
+    /// The field name inside the `syntax` block.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Keyword => "keyword",
+            Self::Function => "function",
+            Self::Type => "type",
+            Self::String => "string",
+            Self::Constant => "constant",
+            Self::Comment => "comment",
+            Self::Property => "property",
+            Self::Punctuation => "punctuation",
+        }
+    }
+}
+
+impl fmt::Display for SyntaxRole {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
+
+/// Syntax overrides a theme document declared: every field optional, resolved
+/// through the same aliases and literal rules as the required roles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ThemeSyntax {
+    pub keyword: Option<ThemeColor>,
+    pub function: Option<ThemeColor>,
+    pub r#type: Option<ThemeColor>,
+    pub string: Option<ThemeColor>,
+    pub constant: Option<ThemeColor>,
+    pub comment: Option<ThemeColor>,
+    pub property: Option<ThemeColor>,
+    pub punctuation: Option<ThemeColor>,
+}
+
+impl ThemeSyntax {
+    /// Whether the document set any syntax role.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.keyword.is_none()
+            && self.function.is_none()
+            && self.r#type.is_none()
+            && self.string.is_none()
+            && self.constant.is_none()
+            && self.comment.is_none()
+            && self.property.is_none()
+            && self.punctuation.is_none()
+    }
+}
+
 /// A resolved theme with where it came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThemeDocument {
     name: String,
     colors: ThemeColors,
+    syntax: ThemeSyntax,
     source: SourceIdentity,
 }
 
@@ -118,6 +185,13 @@ impl ThemeDocument {
     #[must_use]
     pub const fn colors(&self) -> &ThemeColors {
         &self.colors
+    }
+
+    /// The document's `syntax` overrides; all `None` when the block is
+    /// absent.
+    #[must_use]
+    pub const fn syntax(&self) -> &ThemeSyntax {
+        &self.syntax
     }
 
     #[must_use]
@@ -145,6 +219,7 @@ pub fn compiled_theme() -> ThemeDocument {
             success: ThemeColor::Ansi(AnsiColor::Green),
             surface: rgb(0x26, 0x28, 0x30),
         },
+        syntax: ThemeSyntax::default(),
         source: SourceIdentity::virtual_source(SourceKind::Compiled, "compiled theme qq"),
     }
 }
@@ -154,10 +229,11 @@ pub fn compiled_theme() -> ThemeDocument {
 fn compiled_document(name: &str, content: &str) -> Result<ThemeDocument, ConfigError> {
     let source =
         SourceIdentity::virtual_source(SourceKind::Compiled, format!("compiled theme {name}"));
-    let colors = Document::parse(content, &source)?;
+    let ParsedTheme { colors, syntax } = Document::parse(content, &source)?;
     Ok(ThemeDocument {
         name: name.to_owned(),
         colors,
+        syntax,
         source,
     })
 }
@@ -175,6 +251,21 @@ struct RolesDocument {
     surface: String,
 }
 
+/// The optional `syntax` block. Every field is optional; unknown fields are
+/// rejected like the rest of the document.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SyntaxDocument {
+    keyword: Option<String>,
+    function: Option<String>,
+    r#type: Option<String>,
+    string: Option<String>,
+    constant: Option<String>,
+    comment: Option<String>,
+    property: Option<String>,
+    punctuation: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document {
@@ -182,10 +273,21 @@ struct Document {
     #[serde(default)]
     defs: BTreeMap<String, String>,
     colors: RolesDocument,
+    #[serde(default)]
+    syntax: SyntaxDocument,
+}
+
+/// Why a role value failed to resolve to a color.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ThemeColorFault {
+    #[error("refers to `{0}`, which is neither a `defs` alias nor a `#RRGGBB` literal")]
+    Unresolved(String),
+    #[error("has an alias cycle through `{0}`")]
+    AliasCycle(String),
 }
 
 impl Document {
-    fn parse(content: &str, source: &SourceIdentity) -> Result<ThemeColors, ConfigError> {
+    fn parse(content: &str, source: &SourceIdentity) -> Result<ParsedTheme, ConfigError> {
         let options = Options::default().with_default_extension(Extensions::IMPLICIT_SOME);
         let document: Self = options
             .from_str(content)
@@ -199,7 +301,7 @@ impl Document {
                 version: document.version,
             });
         }
-        let resolve = |role: &str, value: &str| -> Result<ThemeColor, ConfigError> {
+        let resolve = |value: &str| -> Result<ThemeColor, ThemeColorFault> {
             // Follow aliases until a literal, refusing to revisit a name so
             // a cycle is an error rather than a hang.
             let mut seen = BTreeSet::new();
@@ -209,39 +311,65 @@ impl Document {
                     return Ok(ThemeColor::Rgb(rgb));
                 }
                 if !seen.insert(current.to_owned()) {
-                    return Err(ConfigError::Parse {
-                        origin: source.clone(),
-                        message: format!(
-                            "theme role `{role}` has an alias cycle through `{current}`"
-                        ),
-                    });
+                    return Err(ThemeColorFault::AliasCycle(current.to_owned()));
                 }
                 match document.defs.get(current) {
                     Some(next) => current = next,
-                    None => {
-                        return Err(ConfigError::Parse {
-                            origin: source.clone(),
-                            message: format!(
-                                "theme role `{role}` refers to `{current}`, which is neither a \
-                                 `defs` alias nor a `#RRGGBB` literal"
-                            ),
-                        });
-                    }
+                    None => return Err(ThemeColorFault::Unresolved(current.to_owned())),
                 }
             }
         };
+        let role = |role: &str, value: &str| -> Result<ThemeColor, ConfigError> {
+            resolve(value).map_err(|fault| ConfigError::Parse {
+                origin: source.clone(),
+                message: format!("theme role `{role}` {fault}"),
+            })
+        };
         let roles = &document.colors;
-        Ok(ThemeColors {
-            text: resolve("text", &roles.text)?,
-            muted: resolve("muted", &roles.muted)?,
-            accent: resolve("accent", &roles.accent)?,
-            brand: resolve("brand", &roles.brand)?,
-            warning: resolve("warning", &roles.warning)?,
-            error: resolve("error", &roles.error)?,
-            success: resolve("success", &roles.success)?,
-            surface: resolve("surface", &roles.surface)?,
-        })
+        let colors = ThemeColors {
+            text: role("text", &roles.text)?,
+            muted: role("muted", &roles.muted)?,
+            accent: role("accent", &roles.accent)?,
+            brand: role("brand", &roles.brand)?,
+            warning: role("warning", &roles.warning)?,
+            error: role("error", &roles.error)?,
+            success: role("success", &roles.success)?,
+            surface: role("surface", &roles.surface)?,
+        };
+        let syntax_role =
+            |role: SyntaxRole, value: &Option<String>| -> Result<Option<ThemeColor>, ConfigError> {
+                match value {
+                    None => Ok(None),
+                    Some(value) => {
+                        resolve(value)
+                            .map(Some)
+                            .map_err(|reason| ConfigError::InvalidThemeSyntax {
+                                origin: source.clone(),
+                                role,
+                                reason,
+                            })
+                    }
+                }
+            };
+        let block = &document.syntax;
+        let syntax = ThemeSyntax {
+            keyword: syntax_role(SyntaxRole::Keyword, &block.keyword)?,
+            function: syntax_role(SyntaxRole::Function, &block.function)?,
+            r#type: syntax_role(SyntaxRole::Type, &block.r#type)?,
+            string: syntax_role(SyntaxRole::String, &block.string)?,
+            constant: syntax_role(SyntaxRole::Constant, &block.constant)?,
+            comment: syntax_role(SyntaxRole::Comment, &block.comment)?,
+            property: syntax_role(SyntaxRole::Property, &block.property)?,
+            punctuation: syntax_role(SyntaxRole::Punctuation, &block.punctuation)?,
+        };
+        Ok(ParsedTheme { colors, syntax })
     }
+}
+
+/// A validated document body before it is paired with a name and source.
+struct ParsedTheme {
+    colors: ThemeColors,
+    syntax: ThemeSyntax,
 }
 
 /// Where a theme file may live, in resolution order after the compiled set.
@@ -294,10 +422,11 @@ pub(super) fn load(
         };
     };
     let (source, content) = read_candidate(&candidate)?;
-    let colors = Document::parse(&content, &source)?;
+    let ParsedTheme { colors, syntax } = Document::parse(&content, &source)?;
     Ok(ThemeDocument {
         name: name.to_owned(),
         colors,
+        syntax,
         source,
     })
 }
@@ -350,12 +479,13 @@ pub(super) fn discover(
             let Ok((source, content)) = read_candidate(&candidate) else {
                 continue;
             };
-            if let Ok(colors) = Document::parse(&content, &source) {
+            if let Ok(ParsedTheme { colors, syntax }) = Document::parse(&content, &source) {
                 themes.insert(
                     name.clone(),
                     ThemeDocument {
                         name,
                         colors,
+                        syntax,
                         source,
                     },
                 );

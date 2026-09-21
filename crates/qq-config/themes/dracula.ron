@@ -2,6 +2,11 @@
 //
 // Purple is the accent, orange the brand, and the spec's opaque selection
 // tone is the code surface so it sits one step above the background.
+//
+// Syntax follows the Dracula specification (draculatheme.com/spec):
+// keywords pink, functions green, types and object keys cyan, strings
+// yellow, constants purple, comments the comment tone, variables and
+// brackets foreground.
 (
     version: 1,
     defs: {
@@ -13,6 +18,8 @@
         "red":        "#ff5555",
         "green":      "#50fa7b",
         "selection":  "#44475a",
+        "pink":       "#ff79c6",
+        "cyan":       "#8be9fd",
     },
     colors: (
         text:    "foreground",
@@ -23,5 +30,15 @@
         error:   "red",
         success: "green",
         surface: "selection",
+    ),
+    syntax: (
+        keyword:     "pink",
+        function:    "green",
+        type:        "cyan",
+        string:      "yellow",
+        constant:    "purple",
+        comment:     "comment",
+        property:    "cyan",
+        punctuation: "foreground",
     ),
 )

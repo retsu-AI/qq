@@ -24,4 +24,4 @@ pub use app::{ModelOption, TuiError, TuiOptions, run};
 pub use lazy_port::LazyPort;
 pub use qq_client::{ClientFailure, ClientPort, ClientRequest, ClientUpdate, ConnectionState};
 pub use settings::{Action, KeyChord, Settings, SettingsBuilder, SettingsError, StatusItem};
-pub use theme::{Palette, Theme, ThemeColor, ThemeRoles};
+pub use theme::{Palette, SyntaxOverrides, Theme, ThemeColor, ThemeRoles};

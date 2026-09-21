@@ -4,6 +4,10 @@
 // warning, love the error. Rosé Pine has no green and its pine is a
 // background tone that fails contrast as text, so foam carries success.
 // highlight_med is the palette's own elevated selection background.
+//
+// Syntax follows rose-pine/neovim (lua/rose-pine.lua): keywords pine,
+// functions rose, types and properties foam, strings and constants gold,
+// comments subtle, punctuation subtle.
 (
     version: 1,
     defs: {
@@ -15,6 +19,8 @@
         "gold":          "#f6c177",
         "love":          "#eb6f92",
         "highlight_med": "#403d52",
+        "pine":          "#31748f",
+        "subtle":        "#908caa",
     },
     colors: (
         text:    "text",
@@ -25,5 +31,15 @@
         error:   "love",
         success: "foam",
         surface: "highlight_med",
+    ),
+    syntax: (
+        keyword:     "pine",
+        function:    "rose",
+        type:        "foam",
+        string:      "gold",
+        constant:    "gold",
+        comment:     "subtle",
+        property:    "foam",
+        punctuation: "subtle",
     ),
 )

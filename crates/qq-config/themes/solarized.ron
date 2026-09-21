@@ -3,6 +3,11 @@
 // Solarized's contrast is deliberately low: base0 text on base03, base01
 // for secondary content, blue as the primary accent, orange for the
 // brand, and base02 as the highlighted background surface.
+//
+// Syntax follows vim-colors-solarized: statements green, identifiers and
+// functions blue, types yellow, constants and strings cyan, comments
+// base01. Solarized declares no punctuation or property tone, so those
+// take the derived defaults.
 (
     version: 1,
     defs: {
@@ -14,6 +19,7 @@
         "red":    "#dc322f",
         "green":  "#859900",
         "base02": "#073642",
+        "cyan":   "#2aa198",
     },
     colors: (
         text:    "base0",
@@ -24,5 +30,13 @@
         error:   "red",
         success: "green",
         surface: "base02",
+    ),
+    syntax: (
+        keyword:  "green",
+        function: "blue",
+        type:     "yellow",
+        string:   "cyan",
+        constant: "cyan",
+        comment:  "base01",
     ),
 )
