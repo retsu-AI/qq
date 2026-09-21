@@ -58,8 +58,10 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// The compiled `qq` palette: the look the renderer shipped with.
-    pub const QQ: Self = Self {
+    /// The compiled `terminal` palette: the terminal's own ANSI colors for
+    /// every role but `brand` and `surface`. The fallback when the terminal
+    /// does not advertise truecolor, and selectable by name anywhere.
+    pub const TERMINAL: Self = Self {
         text: Color::White,
         muted: Color::DarkGrey,
         accent: Color::Cyan,
@@ -242,7 +244,7 @@ const fn soften(color: Color, toward: Color) -> Color {
 
 impl Default for Palette {
     fn default() -> Self {
-        Self::QQ
+        Self::TERMINAL
     }
 }
 
@@ -294,11 +296,13 @@ pub struct SyntaxOverrides {
 }
 
 impl Theme {
+    /// The compiled ANSI fallback. The designed default (`ink`) is a theme
+    /// document the composition root loads and passes in like any other.
     #[must_use]
-    pub fn qq() -> Self {
+    pub fn terminal() -> Self {
         Self {
-            name: "qq".to_owned(),
-            palette: Palette::QQ,
+            name: "terminal".to_owned(),
+            palette: Palette::TERMINAL,
         }
     }
 
@@ -336,12 +340,12 @@ impl Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::qq()
+        Self::terminal()
     }
 }
 
 thread_local! {
-    static ACTIVE: Cell<Palette> = const { Cell::new(Palette::QQ) };
+    static ACTIVE: Cell<Palette> = const { Cell::new(Palette::TERMINAL) };
 }
 
 /// Install `palette` for style helpers on this thread. The renderer calls
@@ -360,25 +364,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_palette_is_the_compiled_qq_look() {
-        assert_eq!(Theme::default().name, "qq");
-        assert_eq!(Palette::default(), Palette::QQ);
-        assert_eq!(active(), Palette::QQ);
+    fn the_default_palette_is_the_compiled_terminal_look() {
+        assert_eq!(Theme::default().name, "terminal");
+        assert_eq!(Palette::default(), Palette::TERMINAL);
+        assert_eq!(active(), Palette::TERMINAL);
+        assert_eq!(
+            Palette::TERMINAL.text,
+            Color::White,
+            "an ANSI palette entry"
+        );
     }
 
     #[test]
     fn activation_is_per_thread_and_repeatable() {
         let custom = Palette {
             accent: Color::Magenta,
-            ..Palette::QQ
+            ..Palette::TERMINAL
         };
         activate(custom);
         assert_eq!(active().accent, Color::Magenta);
-        std::thread::spawn(|| assert_eq!(active(), Palette::QQ))
+        std::thread::spawn(|| assert_eq!(active(), Palette::TERMINAL))
             .join()
             .unwrap();
-        activate(Palette::QQ);
-        assert_eq!(active(), Palette::QQ);
+        activate(Palette::TERMINAL);
+        assert_eq!(active(), Palette::TERMINAL);
     }
 
     fn syntax_roles(palette: Palette) -> [Color; 8] {
@@ -424,24 +433,24 @@ mod tests {
             assert_ne!(role, error, "no syntax role maps to error");
         }
 
-        // The compiled palette mixes terminal colors, which have no channels
-        // to blend: constant stays brand, and nothing is red.
-        for role in syntax_roles(Palette::QQ) {
-            assert_ne!(role, Palette::QQ.error);
+        // The compiled `terminal` palette mixes ANSI colors, which have no
+        // channels to blend: constant stays brand, and nothing is red.
+        for role in syntax_roles(Palette::TERMINAL) {
+            assert_ne!(role, Palette::TERMINAL.error);
         }
-        assert_eq!(Palette::QQ.syn_constant, Palette::QQ.brand);
+        assert_eq!(Palette::TERMINAL.syn_constant, Palette::TERMINAL.brand);
         assert_eq!(
             syntax_roles(Palette::derive([
-                Palette::QQ.text,
-                Palette::QQ.muted,
-                Palette::QQ.accent,
-                Palette::QQ.brand,
-                Palette::QQ.warning,
-                Palette::QQ.error,
-                Palette::QQ.success,
-                Palette::QQ.surface,
+                Palette::TERMINAL.text,
+                Palette::TERMINAL.muted,
+                Palette::TERMINAL.accent,
+                Palette::TERMINAL.brand,
+                Palette::TERMINAL.warning,
+                Palette::TERMINAL.error,
+                Palette::TERMINAL.success,
+                Palette::TERMINAL.surface,
             ])),
-            syntax_roles(Palette::QQ),
+            syntax_roles(Palette::TERMINAL),
             "the compiled constant's syntax roles match derivation"
         );
 

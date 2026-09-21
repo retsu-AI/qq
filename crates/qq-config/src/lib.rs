@@ -30,8 +30,9 @@ pub use pack::{
 };
 pub use qq_provider::{SecretLiteral, SecretRef, XAI_CREDENTIAL_ENDPOINT};
 pub use theme::{
-    AnsiColor, COMPILED_THEMES, DEFAULT_THEME, Rgb, SyntaxRole, ThemeColor, ThemeColorFault,
-    ThemeColors, ThemeDocument, ThemeSyntax, compiled_theme,
+    AnsiColor, COMPILED_THEMES, DEFAULT_THEME, Rgb, SyntaxRole, TERMINAL_THEME,
+    TRUECOLOR_DEFAULT_THEME, ThemeColor, ThemeColorFault, ThemeColors, ThemeDocument, ThemeSyntax,
+    TruecolorSupport, compiled_theme, default_theme_name,
 };
 pub use tui::{
     TuiAction, TuiConfigDefaults, TuiConfigKey, TuiConfigSettings, TuiConfigSnapshot,
@@ -402,9 +403,16 @@ impl ConfigLoader {
     }
 
     /// Resolve one TUI theme by name from the compiled set, the global
-    /// `themes/` directory, and project `.qq/themes/` directories.
-    pub fn load_theme(&self, cwd: &Path, name: &str) -> Result<ThemeDocument, ConfigError> {
-        theme::load(self, cwd, name)
+    /// `themes/` directory, and project `.qq/themes/` directories. The
+    /// default alias `qq` resolves to `ink` when `truecolor` is advertised
+    /// and to `terminal` otherwise; any other name is taken literally.
+    pub fn load_theme(
+        &self,
+        cwd: &Path,
+        name: &str,
+        truecolor: TruecolorSupport,
+    ) -> Result<ThemeDocument, ConfigError> {
+        theme::load(self, cwd, name, truecolor)
     }
 
     /// Every theme selectable from `cwd`, compiled first then by name.

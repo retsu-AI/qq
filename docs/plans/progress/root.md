@@ -58,7 +58,7 @@ may append a **request** row; only root changes a request's status.
 | 0033 | Preserve explicit model choices during optional routing | J6b stacked Jev implementation | Accepted locally; schema 32 |
 | 0034 | Bounded concrete Jev routing and inherited activation | J6b stacked Jev implementation | Accepted locally; descriptor 9 |
 | 0035 | Allow regular-file leaf targets for global configuration sources | GitHub #83 / Home Manager global config | Accepted locally; `docs/adr/0035-global-leaf-config-symlinks.md` |
-| 0036 | Designed truecolor default theme `ink` with `terminal` ANSI fallback | tui-redesign U5 | Reserved 2026-09-20 |
+| 0036 | Designed truecolor default theme `ink` with `terminal` ANSI fallback | tui-redesign U5 | Accepted 2026-09-21: `docs/adr/0036-truecolor-default-theme.md` |
 | 0037 | Responsive TUI layout: width-selected tiers and panes, never features | tui-redesign U8 (L1–L4) | Reserved 2026-09-20 |
 | 0038 | Session retention: archive by session, never by row; receipts and cursors outlive their sessions | ENG-803 (F20 + F07 retention remainder) | Proposed: `docs/adr/0038-session-retention.md` |
 | 0039 | In-run compaction: run-scoped marker, owned summarizer run, no session slot | ENG-793 (F03), #92 | Accepted 2026-09-20: `docs/adr/0039-in-run-compaction.md`; supersedes the plan's Durable Protocol |

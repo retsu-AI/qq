@@ -2888,7 +2888,7 @@ fn themed_app() -> App {
         model: ModelSelection::default(),
         models: Vec::new(),
         themes: vec![
-            crate::Theme::qq(),
+            crate::Theme::terminal(),
             crate::Theme::from_roles("rose-pine", [crate::ThemeColor::Rgb(0xe0, 0xde, 0xf4); 8]),
             crate::Theme::from_roles("mono", [crate::ThemeColor::White; 8]),
         ],
@@ -2901,7 +2901,7 @@ fn themed_app() -> App {
 #[test]
 fn the_theme_picker_previews_live_and_esc_restores() {
     let mut app = themed_app();
-    assert_eq!(app.theme().name, "qq");
+    assert_eq!(app.theme().name, "terminal");
     app.composer.text = "/theme".to_owned();
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.mode(), Mode::Themes);
@@ -2913,12 +2913,13 @@ fn the_theme_picker_previews_live_and_esc_restores() {
     assert_eq!(app.theme_generation, generation + 1);
     // Typing filters and the highlighted theme follows the filter.
     app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
     assert_eq!(app.filtered_themes().len(), 1);
     assert_eq!(app.theme().name, "mono");
     // Esc puts the original back.
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.mode(), Mode::Compose);
-    assert_eq!(app.theme().name, "qq");
+    assert_eq!(app.theme().name, "terminal");
 
     // Enter keeps the preview and tells the user how to persist it.
     app.execute(Command::OpenThemes);

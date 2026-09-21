@@ -41,7 +41,8 @@ impl TuiConfigSettings {
         &self.bindings
     }
 
-    /// The selected theme name; `qq` when no layer set one.
+    /// The selected theme name; the `qq` default alias when no layer set one
+    /// (see `theme::default_theme_name` for what it resolves to).
     #[must_use]
     pub fn theme(&self) -> &str {
         &self.theme

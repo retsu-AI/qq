@@ -2591,7 +2591,7 @@ fn switching_theme_repaints_every_row_in_the_new_palette() {
     let mut renderer = FrameRenderer::default();
     renderer.draw(&mut app, (80, 24)).unwrap();
     let brand_before = renderer.previous[0].spans[0].style.color;
-    assert_eq!(brand_before, Some(Palette::QQ.brand));
+    assert_eq!(brand_before, Some(Palette::TERMINAL.brand));
     // A settled frame with nothing changed writes nothing.
     let idle = renderer.draw(&mut app, (80, 24)).unwrap();
     let idle_rows = String::from_utf8_lossy(&idle).matches("\x1b[2K").count();
@@ -2626,7 +2626,81 @@ fn switching_theme_repaints_every_row_in_the_new_palette() {
     );
     // Style helpers on this thread keep the last activated palette;
     // restore the default so later tests see the compiled look.
-    theme::activate(Palette::QQ);
+    theme::activate(Palette::TERMINAL);
+}
+
+#[test]
+fn the_theme_picker_lists_ink_and_terminal_and_marks_the_default_rule_pick_active() {
+    // The composition root resolves the default rule (`ink` on truecolor)
+    // and passes that theme first; the picker must mark it, not `terminal`,
+    // and `qq` is an alias that never appears as a row.
+    let ink = crate::Theme::from_roles(
+        "ink",
+        [
+            crate::ThemeColor::Rgb(0xd8, 0xde, 0xe9),
+            crate::ThemeColor::Rgb(0x7b, 0x84, 0x97),
+            crate::ThemeColor::Rgb(0x8f, 0xb8, 0xe8),
+            crate::ThemeColor::Rgb(0xe0, 0xa0, 0x71),
+            crate::ThemeColor::Rgb(0xe6, 0xc0, 0x7b),
+            crate::ThemeColor::Rgb(0xec, 0x7b, 0x8d),
+            crate::ThemeColor::Rgb(0x8f, 0xd3, 0xa6),
+            crate::ThemeColor::Rgb(0x20, 0x24, 0x2c),
+        ],
+    );
+    let mut app = App::new(TuiOptions {
+        themes: vec![ink, crate::Theme::terminal()],
+        ..TuiOptions::default()
+    });
+    app.apply_client_update(ClientUpdate::Snapshot(fixtures::workspace_snapshot()));
+    assert_eq!(app.theme().name, "ink");
+    app.execute(Command::OpenThemes);
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 100, 30);
+    let rows = squashed_rows(&frame);
+    let row_for = |name: &str| {
+        rows.iter()
+            .find(|row| row.contains(&format!(" {name} ")))
+            .unwrap_or_else(|| panic!("{name} row in {rows:#?}"))
+            .clone()
+    };
+    assert!(row_for("ink").ends_with("active"), "{}", row_for("ink"));
+    assert!(
+        !row_for("terminal").contains("active"),
+        "{}",
+        row_for("terminal")
+    );
+    // Every row with a swatch is a theme; none is the alias (the top row's
+    // `qq` is the brand mark, not a theme).
+    let listed: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.contains("██"))
+        .map(|row| {
+            row.trim_start_matches([' ', '>'])
+                .split(' ')
+                .next()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(listed, ["ink", "terminal"], "{rows:#?}");
+
+    // Explicit `terminal` first (the user asked, or truecolor is absent):
+    // the marker follows.
+    let mut app = App::new(TuiOptions {
+        themes: vec![
+            crate::Theme::terminal(),
+            crate::Theme::from_roles("ink", [crate::ThemeColor::Rgb(1, 1, 1); 8]),
+        ],
+        ..TuiOptions::default()
+    });
+    app.apply_client_update(ClientUpdate::Snapshot(fixtures::workspace_snapshot()));
+    app.execute(Command::OpenThemes);
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 100, 30);
+    let rows = squashed_rows(&frame);
+    let terminal = rows
+        .iter()
+        .find(|row| row.contains(" terminal "))
+        .expect("terminal row");
+    assert!(terminal.ends_with("active"), "{terminal}");
+    theme::activate(Palette::TERMINAL);
 }
 
 /// An app whose focused session has an active run, plus the ids to drive it.

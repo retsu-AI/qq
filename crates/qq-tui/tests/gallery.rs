@@ -22,7 +22,7 @@ fn gallery_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/qq-tui-gallery")
 }
 
-/// The compiled themes as the TUI sees them, `qq` first.
+/// The compiled themes as the TUI sees them, the `ink` default first.
 fn compiled_themes() -> Vec<Theme> {
     let scratch = tempfile::tempdir().expect("scratch directory for theme discovery");
     let paths = ConfigPaths::new(
@@ -76,8 +76,8 @@ fn compiled_themes() -> Vec<Theme> {
         })
         .collect();
     themes.sort_by(|a, b| {
-        (a.name != "qq")
-            .cmp(&(b.name != "qq"))
+        (a.name != "ink")
+            .cmp(&(b.name != "ink"))
             .then_with(|| a.name.cmp(&b.name))
     });
     themes
