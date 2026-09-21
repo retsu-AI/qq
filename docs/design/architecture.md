@@ -888,12 +888,15 @@ lowered but never raised by a client command.
 A run may cross multiple bounded internal execution slices. The strict
 256-tool-call ceiling is a runaway-loop backstop for one slice, not a
 task-completion signal. Before a bounded provider turn could push a slice past
-that ceiling, the runtime requests a tool-free checkpoint, requires and
+that ceiling, the runtime asks the model for a checkpoint reply, requires and
 persists that assistant turn, resets the slice counter, and continues the same
-run with tools restored. Clients observe no terminal run event at the slice
-seam. Genuine completion, explicit caller budgets, cancellation, and failures
-remain the only user-level terminal conditions; provider adapters do not
-participate in slice rollover.
+run. Tools stay declared on the checkpoint turn: the persisted turn is the
+boundary, not the model's obedience, so a call the model makes anyway is
+admitted with a not-executed result (the same path as calls past the per-turn
+cap) and the run continues into the next slice, where the model re-issues it.
+Clients observe no terminal run event at the slice seam. Genuine completion,
+explicit caller budgets, cancellation, and failures remain the only user-level
+terminal conditions; provider adapters do not participate in slice rollover.
 
 Once prompt submission commits, the runtime owns that accepted run until it
 persists exactly one terminal `RunFinished` event. Before settling started
