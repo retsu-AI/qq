@@ -2440,38 +2440,64 @@ mod reference_assembly {
                     .collect();
 
             let mut statement = transaction.prepare(
-                "SELECT provider_call_id, result, is_error FROM tool_calls
-                     WHERE run_id = ?1 AND turn_ordinal = ?2 AND result IS NOT NULL
-                     ORDER BY call_ordinal",
+                "SELECT c.provider_call_id, c.result, c.is_error, c.id, s.digest
+                     FROM tool_calls c LEFT JOIN tool_spills s ON s.tool_call_id = c.id
+                     WHERE c.run_id = ?1 AND c.turn_ordinal = ?2 AND c.result IS NOT NULL
+                     ORDER BY c.call_ordinal",
             )?;
             let mut recorded = statement
                 .query_map(params![run_id.to_string(), turn_ordinal], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        (row.get::<_, String>(1)?, row.get::<_, bool>(2)?),
+                        (
+                            row.get::<_, String>(1)?,
+                            row.get::<_, bool>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        ),
                     ))
                 })?
-                .collect::<Result<HashMap<String, (String, bool)>, _>>()?;
+                .collect::<Result<HashMap<String, (String, bool, String, Option<String>)>, _>>()?;
             drop(statement);
-            // Emit exactly one result per ToolCall block, in block order.
+            // Emit exactly one result per ToolCall block, in block order,
+            // through the same per-turn output budget the live run applied.
             // A block without a recorded result (a crash between the
             // turn commit and its tool_calls rows in an older store)
             // gets an explicit interrupted result so replayed context
             // stays provider-valid instead of poisoning the session.
+            let mut turn_output = crate::tools::TurnOutputBudget::new();
             let results = content
                 .iter()
                 .filter_map(|block| match block {
-                    ContentBlock::ToolCall { id, .. } => Some(match recorded.remove(id) {
-                        Some((content, is_error)) => ContentBlock::ToolResult {
-                            call_id: id.clone(),
-                            content,
-                            is_error,
-                        },
-                        None => ContentBlock::ToolResult {
-                            call_id: id.clone(),
-                            content: INTERRUPTED_TOOL_RESULT.to_owned(),
-                            is_error: true,
-                        },
+                    ContentBlock::ToolCall { id, name, .. } => Some(match recorded.remove(id) {
+                        Some((mut content, is_error, tool_call_id, spill_digest)) => {
+                            let tool_call_id = parse_id::<ToolCallId>(&tool_call_id).unwrap();
+                            let spill_handle = spill_digest.as_deref().map(|digest| {
+                                crate::tools::output::result_handle(name, tool_call_id, digest)
+                            });
+                            let recall = match &spill_handle {
+                                Some(handle) => crate::tools::ResultRecall::Spill(handle),
+                                None => crate::tools::ResultRecall::StoredResult {
+                                    tool: name,
+                                    call: tool_call_id,
+                                },
+                            };
+                            turn_output.admit(&mut content, recall);
+                            ContentBlock::ToolResult {
+                                call_id: id.clone(),
+                                content,
+                                is_error,
+                            }
+                        }
+                        None => {
+                            let mut content = INTERRUPTED_TOOL_RESULT.to_owned();
+                            turn_output.admit(&mut content, crate::tools::ResultRecall::None);
+                            ContentBlock::ToolResult {
+                                call_id: id.clone(),
+                                content,
+                                is_error: true,
+                            }
+                        }
                     }),
                     ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,
                 })

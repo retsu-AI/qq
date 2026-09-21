@@ -76,7 +76,7 @@ pub(crate) use dispatch::{
 pub(crate) use edit::hold_tool_apply;
 #[cfg(test)]
 pub(crate) use output::MAX_MODEL_TEXT_BYTES;
-pub(crate) use output::{TurnOutputBudget, finalize_spill_marker, header_line};
+pub(crate) use output::{ResultRecall, TurnOutputBudget, finalize_spill_marker, header_line};
 pub(crate) use specs::{
     MAX_SPAWN_AGENT_SCHEMA_BYTES, SPAWN_AGENT_TOOL, SpawnAgentArgs, spawn_agent_spec, static_tools,
 };

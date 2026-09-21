@@ -53,6 +53,13 @@ without stored effect metadata use the legacy built-in-name fallback.
 These are assembly rules: persisted history is unchanged, including when
 it is retrieved through history search or supplied to a compaction request.
 
+Each turn's results also pass through the per-turn output budget
+(`TurnOutputBudget`, `tools.md` § Per-turn budget) in block order — the
+same function the live run applied before the results entered context — so
+the assembled turn carries exactly the bytes the model saw, not the larger
+stored rows. The projection is deterministic over the stored `result`,
+call id, and spill digest; it is reconstructed, never persisted.
+
 ### Client Assembly
 
 The TUI orders a run's items by `turn_ordinal`, rendering each turn's
