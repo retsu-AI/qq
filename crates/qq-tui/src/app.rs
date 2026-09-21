@@ -1228,6 +1228,13 @@ impl App {
         self.pane().view
     }
 
+    /// The session a workspace view replaced in the focused pane, if one is
+    /// up. The renderer keeps that transcript on screen while the inspector
+    /// holds the view.
+    pub(crate) fn view_return(&self) -> Option<SessionId> {
+        self.view_return
+    }
+
     /// Point the focused pane at `view`. Its viewport returns to the tail on
     /// the next frame, as `Viewport::update` does for any view change.
     pub(crate) fn set_view(&mut self, view: View) {
@@ -1360,6 +1367,10 @@ impl App {
             }
             Command::ToggleSidebar => {
                 self.layout.rail = self.layout.rail.toggled();
+                Effects::redraw(Redraw::Immediate)
+            }
+            Command::ToggleInspector => {
+                self.layout.inspector = self.layout.inspector.toggled();
                 Effects::redraw(Redraw::Immediate)
             }
             Command::FocusParent => match self

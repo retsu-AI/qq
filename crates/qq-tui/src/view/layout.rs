@@ -231,11 +231,11 @@ pub(crate) fn compute_layout(
         .saturating_sub(usize::from(strip));
     let body = Rect::new(0, 1, width, body_height);
 
-    // `Auto` shows the inspector from Wide once slice L3 paints tool detail
-    // in it; until then an empty pane would cost a column of diff per frame
-    // for nothing, so `Auto` resolves to hidden and only `Shown` opens it.
+    // `Auto` shows the inspector from Wide: it holds the focused session's
+    // expanded tool detail and the workspace views so the prose column
+    // stays prose. `Shown` opens it at any width that can carve one.
     let inspector_wanted = match prefs.inspector {
-        PanePref::Auto => false,
+        PanePref::Auto => tier >= Tier::Wide,
         PanePref::Shown => true,
         PanePref::Hidden => false,
     };
@@ -368,14 +368,14 @@ mod tests {
     }
 
     #[test]
-    fn wide_carves_an_inspector_past_the_measure_when_shown() {
+    fn wide_carves_an_inspector_past_the_measure() {
+        let regular = layout(159, 60, 3);
+        assert_eq!(regular.tier, Tier::Regular);
+        assert!(regular.inspector.is_none(), "Auto hides below Wide");
+
         let auto = layout(200, 60, 3);
         assert_eq!(auto.tier, Tier::Wide);
-        assert!(
-            auto.inspector.is_none(),
-            "Auto stays hidden until L3 paints the pane"
-        );
-        assert_eq!(auto.transcripts[0].area.width, 172);
+        assert!(auto.inspector.is_some(), "Auto shows at Wide");
 
         let wide = compute_layout(
             200,
@@ -387,6 +387,7 @@ mod tests {
             },
             3,
         );
+        assert_eq!(auto, wide, "Auto and Shown agree at Wide");
         let rail = wide.rail.expect("rail");
         let inspector = wide.inspector.expect("inspector");
         let transcript = wide.transcripts[0];

@@ -155,6 +155,11 @@ impl BenchHarness {
         self.app.layout.inspector = crate::view::PanePref::Shown;
     }
 
+    /// Force the inspector pane off regardless of width.
+    pub fn hide_inspector(&mut self) {
+        self.app.layout.inspector = crate::view::PanePref::Hidden;
+    }
+
     /// Load `messages` completed assistant messages into session `index`
     /// through an included body, as the client's pre-warm does.
     pub fn warm_session(&mut self, index: u8, messages: u8) {

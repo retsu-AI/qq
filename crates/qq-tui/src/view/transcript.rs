@@ -503,6 +503,11 @@ impl TranscriptCache {
     ///
     /// A pane following a session that no longer exists shows the empty
     /// prompt: the id is stale navigation state, not a body to wait for.
+    ///
+    /// `inline_detail` is false while the inspector pane is on screen: the
+    /// inspector then holds expanded tool bodies and the workspace views, so
+    /// the transcript keeps its summary rows and a pane on a workspace view
+    /// shows the session that view replaced.
     pub(super) fn body(
         &mut self,
         highlighter: &mut Highlighter,
@@ -510,13 +515,9 @@ impl TranscriptCache {
         pane: &TranscriptPane,
         width: usize,
         height: usize,
+        inline_detail: bool,
     ) -> (Vec<Line>, PaneUpdate) {
-        let view = match pane.view {
-            View::Transcript(Some(session_id)) if !app.sessions.contains_key(&session_id) => {
-                View::Transcript(None)
-            }
-            view => view,
-        };
+        let view = shown_view(app, pane, inline_detail);
         let session_id = view.session();
         let mut viewport = pane.viewport.clone();
         // Workspace-wide views are cheap lists; they draw without the
@@ -543,7 +544,14 @@ impl TranscriptCache {
         // the measure and centers it, so the width-keyed caches see one width
         // across every pane at least that wide.
         let content_width = width;
-        let body = self.threadline(highlighter, app, session_id, pane, content_width);
+        let body = self.threadline(
+            highlighter,
+            app,
+            session_id,
+            pane,
+            content_width,
+            inline_detail,
+        );
         viewport.update(view, body.rows, height, body.preserve_tail_anchor);
         let offset = viewport.offset();
         let live_message_ranges = body.live_message_ranges.iter().cloned().collect();
@@ -574,6 +582,18 @@ impl TranscriptCache {
                 live_message_ranges,
             },
         )
+    }
+
+    /// The derived row for `call`, when the cache holds a current one. The
+    /// inspector reads rows through this so it never re-parses JSON the
+    /// transcript already parsed; a row cached for an earlier state of the
+    /// call (an overlay kept the transcript from laying out this frame) is
+    /// not returned.
+    pub(super) fn tool_row(&self, call: &ToolCallSnapshot) -> Option<&ToolRow> {
+        self.tool_rows
+            .get(&call.id)
+            .filter(|(key, _)| *key == ToolRowKey::of(call))
+            .map(|(_, row)| row)
     }
 
     /// Drop every cached layout. Live-row anchors live on the panes, so an
@@ -862,8 +882,9 @@ impl TranscriptCache {
         session_id: Option<SessionId>,
         pane: &TranscriptPane,
         width: usize,
+        inline_detail: bool,
     ) -> VirtualBody<'a> {
-        let transcript = self.transcript(highlighter, app, session_id, pane, width);
+        let transcript = self.transcript(highlighter, app, session_id, pane, width, inline_detail);
         let mut body = VirtualBody::default();
         body.extend_virtual(transcript);
         if let Some(focused) = session_id {
@@ -899,6 +920,7 @@ impl TranscriptCache {
         session_id: Option<SessionId>,
         pane: &TranscriptPane,
         width: usize,
+        inline_detail: bool,
     ) -> VirtualBody<'a> {
         let preserve_tail_anchor = self.prepare_markdown(highlighter, app, session_id, pane, width);
         let mut body = VirtualBody {
@@ -937,14 +959,7 @@ impl TranscriptCache {
                 muted(),
             ));
         }
-        self.append_message_indices(
-            &mut body,
-            app,
-            session,
-            messages,
-            hidden..messages.len(),
-            width,
-        );
+        self.append_messages(&mut body, app, session, messages, width, inline_detail);
         for prompt in app.pending_prompts(session_id) {
             // A pending prompt is a YOU boundary: the same two blank lines
             // that precede any user turn.
@@ -971,15 +986,18 @@ impl TranscriptCache {
         body
     }
 
-    fn append_message_indices<'a>(
+    /// Append the visible window of `messages` (the last
+    /// `MAX_VISIBLE_MESSAGES`) with their runs' tool calls.
+    fn append_messages<'a>(
         &'a self,
         body: &mut VirtualBody<'a>,
         app: &App,
         session: &SessionView,
         messages: &[MessageSnapshot],
-        indices: impl IntoIterator<Item = usize>,
         width: usize,
+        inline_detail: bool,
     ) {
+        let indices = messages.len().saturating_sub(MAX_VISIBLE_MESSAGES)..messages.len();
         let tool_calls = session.tool_calls.as_deref().unwrap_or_default();
         let fallback_rows: HashMap<ToolCallId, ToolRow> = tool_calls
             .iter()
@@ -1004,6 +1022,7 @@ impl TranscriptCache {
                     now_ms: app.now_ms,
                 },
                 expanded: app.expanded_tool_calls.contains(&call.id),
+                inline_detail,
                 fold: app.tool_detail == ToolDetail::Folded,
                 selected: app.transcript_cursor == Some(call.id),
             }
@@ -1248,6 +1267,25 @@ impl TranscriptCache {
         lines
     }
 }
+/// What `pane` paints this frame. A session that no longer exists reads as
+/// the empty prompt: the id is stale navigation state, not a body to wait
+/// for. While the inspector is on screen (`inline_detail` false) it holds the
+/// workspace views, so a pane on one keeps showing the session the view
+/// replaced; the frame and the cache's retention both resolve through here
+/// so the layouts of that session stay warm.
+pub(super) fn shown_view(app: &App, pane: &TranscriptPane, inline_detail: bool) -> View {
+    match pane.view {
+        View::Transcript(Some(session_id)) if !app.sessions.contains_key(&session_id) => {
+            View::Transcript(None)
+        }
+        View::Attention | View::Changes if !inline_detail => View::Transcript(
+            app.view_return()
+                .filter(|session_id| app.sessions.contains_key(session_id)),
+        ),
+        view => view,
+    }
+}
+
 pub(super) fn find_message(app: &App, message_id: MessageId) -> Option<&MessageSnapshot> {
     app.sessions
         .values()

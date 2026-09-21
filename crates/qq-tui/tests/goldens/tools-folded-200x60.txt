@@ -1,60 +1,60 @@
  qq  Session 0                                                                                                                                                                   openai/gpt-test  $0.00
-                         ▌ YOU                                                                                                                                              │ IDLE  3
-                         ▌ clean up the renderer                                                                                                                            │ ○ Session 0
-                                                                                                                                                                            │ ○ Session 1
-                           QQ                                                                                                                                               │ ○ Session 2
-                           Done. Every file compiles.                                                                                                                       │
-                                                                                                                                                                            │
-                           ▸ Read ×2  Edit ×2  Run ×2  file_0.rs, file_1.rs, file_3.rs, +1                                                                                  │
-                           ✓ 0.0s · 6 tools · ttft 0.0s                                                                                                                     │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
-                                                                                                                                                                            │
+ ▌ YOU                                                                                                │ INSPECTOR                                                           │ IDLE  3
+ ▌ clean up the renderer                                                                              │ Nothing expanded — Ctrl-Up selects a tool row, Enter expands it     │ ○ Session 0
+                                                                                                      │                                                                     │ ○ Session 1
+   QQ                                                                                                 │                                                                     │ ○ Session 2
+   Done. Every file compiles.                                                                         │                                                                     │
+                                                                                                      │                                                                     │
+   ▸ Read ×2  Edit ×2  Run ×2  file_0.rs, file_1.rs, file_3.rs, +1                                    │                                                                     │
+   ✓ 0.0s · 6 tools · ttft 0.0s                                                                       │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
+                                                                                                      │                                                                     │
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── F1 help  ^K commands  ^O detail
  › Ask QQ...

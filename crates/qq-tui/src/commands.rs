@@ -45,6 +45,9 @@ pub(crate) enum Command {
     CursorDown,
     ToggleReasoning,
     ToggleSidebar,
+    /// Show or hide the inspector pane that holds expanded tool detail and
+    /// the workspace views beside the transcript.
+    ToggleInspector,
     ToggleMouse,
     /// Show the workspace attention list or the cross-agent change board in
     /// the focused pane.
@@ -139,7 +142,7 @@ macro_rules! spec {
 
 /// Presentation order is invocation frequency within a category, and the
 /// palette shows categories in this order too.
-pub(crate) const COMMANDS: [CommandSpec; 38] = [
+pub(crate) const COMMANDS: [CommandSpec; 39] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -337,6 +340,13 @@ pub(crate) const COMMANDS: [CommandSpec; 38] = [
         View,
         [],
         ["Ctrl-\\"]
+    ),
+    spec!(
+        ToggleInspector,
+        "toggle the inspector pane",
+        View,
+        [],
+        ["Alt-I"]
     ),
     spec!(ToggleMouse, "toggle mouse capture", View, ["/mouse"], []),
     spec!(

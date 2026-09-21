@@ -32,7 +32,7 @@ use crate::{
     input::{Mode, SessionConfirm, approval_mode_label},
     render::{
         Line, Style, accent, border, brand, diff_line_style, failure, info, muted, normal,
-        selection, success, warning, write_line,
+        selection, success, text_width, warning, write_line,
     },
     theme,
     viewport::{MAX_PANES, TranscriptPane, View, Viewport},
@@ -216,6 +216,9 @@ impl FrameRenderer {
         let layout = compute_layout(width, height, chrome_rows, app.layout, app.sessions.len());
         let body_height = layout.body.height;
         let mode = app.mode();
+        // With the inspector on screen, expanded tool bodies and the
+        // workspace views render there and the transcript keeps its rows.
+        let inline_detail = layout.inspector.is_none();
         // The slots show a window of the panes that always contains the
         // focused one: with one slot that is the focused pane itself; with
         // more, focus past the right edge slides the window.
@@ -227,8 +230,9 @@ impl FrameRenderer {
         let shown_panes = || app.panes.iter().enumerate().skip(first_shown).take(slots);
         // The cache keeps layouts for every shown session at once, so panes
         // on different sessions never evict each other mid-frame.
-        let shown: Vec<Option<SessionId>> =
-            shown_panes().map(|(_, pane)| pane.view.session()).collect();
+        let shown: Vec<Option<SessionId>> = shown_panes()
+            .map(|(_, pane)| shown_view(app, pane, inline_detail).session())
+            .collect();
         self.cache.retain_visible(app, &shown);
         // Transcript panes fill their slots left to right. Overlays take the
         // focused pane's cells; the rail stays so the picker is read in
@@ -251,9 +255,12 @@ impl FrameRenderer {
                     // An approval keeps the transcript on screen and adds its
                     // block under the awaiting call, so the decision is made
                     // in context.
-                    Mode::Approval => self.body(app, index, pane, *slot, body_height),
+                    Mode::Approval => {
+                        self.body(app, index, pane, *slot, body_height, inline_detail)
+                    }
                     Mode::Compose => {
-                        let mut rows = self.body(app, index, pane, *slot, body_height);
+                        let mut rows =
+                            self.body(app, index, pane, *slot, body_height, inline_detail);
                         let menu = mention_autocomplete(app, slot_width, body_height);
                         let menu = if menu.is_empty() {
                             slash_autocomplete(app, slot_width, body_height)
@@ -265,7 +272,7 @@ impl FrameRenderer {
                     }
                 }
             } else {
-                self.body(app, index, pane, *slot, body_height)
+                self.body(app, index, pane, *slot, body_height, inline_detail)
             };
             if slot.area.x == 0 {
                 body = fit_height(rows, body_height);
@@ -279,29 +286,54 @@ impl FrameRenderer {
         if let Some(inspector) = layout.inspector {
             columns.push((
                 inspector.x,
-                inspector_pane(app, inspector.width, body_height),
+                inspector_pane(app, &self.cache, app.pane(), inspector.width, body_height),
             ));
         }
         if let Some(rail) = layout.rail {
             let density = RailDensity::of(layout.tier);
             columns.push((rail.x, sidebar(app, rail.width, body_height, density)));
         }
-        for (x, column) in columns {
-            for (row, cells) in body.iter_mut().zip(column) {
-                // A blitted transcript row carries its measure inset as a
-                // count; it becomes padding here since only the first pane's
-                // rows keep the count for the renderer's cursor move.
-                pad_line(row, x + cells.indent);
-                for span in cells.spans {
-                    row.push(span.text, span.style);
+        // Each row is measured once and the running width carried through
+        // the columns: measuring the row again per column would scan the
+        // transcript text once per pane on every frame.
+        if !columns.is_empty() {
+            for (index, slot) in body.iter_mut().enumerate() {
+                let extra: usize = columns
+                    .iter()
+                    .map(|(_, column)| column.get(index).map_or(0, |cells| cells.spans.len() + 1))
+                    .sum();
+                let mut used = slot.width();
+                let first = std::mem::take(slot);
+                let mut row = Line {
+                    indent: first.indent,
+                    spans: Vec::with_capacity(first.spans.len() + extra + 1),
+                };
+                row.spans.extend(first.spans);
+                for (x, column) in &mut columns {
+                    let Some(cells) = column.get_mut(index).map(std::mem::take) else {
+                        continue;
+                    };
+                    // A blitted transcript row carries its measure inset as
+                    // a count; it becomes padding here since only the first
+                    // pane's rows keep the count for the renderer's cursor
+                    // move.
+                    let start = *x + cells.indent;
+                    if used < start {
+                        row.push(" ".repeat(start - used), normal());
+                        used = start;
+                    }
+                    for span in cells.spans {
+                        used += text_width(&span.text);
+                        row.push(span.text, span.style);
+                    }
                 }
-            }
-        }
-        // With side panes glued on, every body row is exactly the terminal
-        // width so the border columns line up and nothing overflows.
-        if layout.rail.is_some() || layout.inspector.is_some() || slots > 1 {
-            for row in &mut body {
-                pad_line(row, width);
+                // With side panes glued on, every body row is exactly the
+                // terminal width so the border columns line up and nothing
+                // overflows.
+                if used < width {
+                    row.push(" ".repeat(width - used), normal());
+                }
+                *slot = row;
             }
         }
         lines.extend(body);
@@ -336,10 +368,16 @@ impl FrameRenderer {
         pane: &TranscriptPane,
         slot: TranscriptSlot,
         height: usize,
+        inline_detail: bool,
     ) -> Vec<Line> {
-        let (mut lines, update) =
-            self.cache
-                .body(&mut self.highlighter, app, pane, slot.content_width, height);
+        let (mut lines, update) = self.cache.body(
+            &mut self.highlighter,
+            app,
+            pane,
+            slot.content_width,
+            height,
+            inline_detail,
+        );
         self.pane_updates.push((index, update));
         if slot.inset > 0 {
             // Cached rows are shared with later frames; the margin lives on
@@ -374,8 +412,14 @@ impl FrameRenderer {
     fn transcript<'a>(&'a mut self, app: &App, width: usize) -> VirtualBody<'a> {
         let pane = app.pane();
         self.cache.retain_visible(app, &[pane.view.session()]);
-        self.cache
-            .transcript(&mut self.highlighter, app, pane.view.session(), pane, width)
+        self.cache.transcript(
+            &mut self.highlighter,
+            app,
+            pane.view.session(),
+            pane,
+            width,
+            true,
+        )
     }
 }
 

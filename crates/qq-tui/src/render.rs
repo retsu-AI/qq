@@ -137,13 +137,26 @@ impl Line {
             + self
                 .spans
                 .iter()
-                .flat_map(|span| span.text.chars())
-                .map(|character| UnicodeWidthChar::width(character).unwrap_or_default())
+                .map(|span| text_width(&span.text))
                 .sum::<usize>()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.spans.iter().all(|span| span.text.is_empty())
+    }
+}
+
+/// Display columns of `text`. Printable ASCII is one cell per byte and is
+/// most of what a frame holds, so it skips the per-character width table;
+/// control characters never reach a `Line` (`terminal_safe_character`), so
+/// the fast path only has to exclude them.
+pub(crate) fn text_width(text: &str) -> usize {
+    if text.bytes().all(|byte| (0x20..0x7f).contains(&byte)) {
+        text.len()
+    } else {
+        text.chars()
+            .map(|character| UnicodeWidthChar::width(character).unwrap_or_default())
+            .sum()
     }
 }
 

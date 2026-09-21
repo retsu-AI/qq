@@ -125,9 +125,67 @@ fn prose_is_placed_at_the_measure_on_wide_terminals() {
         .find(|row| row.contains("First paragraph of prose."))
         .expect("gallery paragraph");
     let indent = first_paragraph.len() - first_paragraph.trim_start().len();
-    // 320 - 28 rail = 292 pane; (292 - 100) / 3 = 64 inset, plus the
-    // transcript's own 3-column prose rail.
-    assert_eq!(indent, 64 + 3, "{first_paragraph:?}");
+    // 320 - 28 rail - 80 inspector = 212 pane; (212 - 100) / 3 = 37 inset,
+    // plus the transcript's own 3-column prose rail.
+    assert_eq!(indent, 37 + 3, "{first_paragraph:?}");
+}
+
+/// Expanded tool detail is the same text whether it renders inline (Regular,
+/// 120 columns) or in the inspector (Wide, 200 columns): one code path lays
+/// it out and only the column it lands in changes. The 120 × 40 frame is
+/// scrolled to the tail of the turn, so its rows are the tail of what the
+/// inspector shows in full; the transcript beside the inspector keeps the
+/// summary rows and nothing else.
+#[test]
+fn expanded_tool_detail_reads_the_same_inline_and_in_the_inspector() {
+    let inline = BenchHarness::scene(Scene::ToolsExpanded, (120, 40)).plain_frame();
+    let wide = BenchHarness::scene(Scene::ToolsExpanded, (200, 60)).plain_frame();
+    // Body rows between the top row and the composer chrome, split at the
+    // pane borders, whitespace-squashed so widths do not matter.
+    let column = |rows: &[String], index: usize| -> Vec<String> {
+        rows[1..rows.len() - 2]
+            .iter()
+            .map(|row| {
+                row.split('│')
+                    .nth(index)
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|row| !row.is_empty())
+            .collect()
+    };
+    let mut inline_rows = column(&inline, 0);
+    let inspector = column(&wide, 1);
+    let transcript = column(&wide, 0);
+    assert_eq!(inspector[0], "INSPECTOR");
+    let inspector = &inspector[1..];
+    // The run's completion line follows the calls inline; the inspector
+    // shows calls only.
+    assert!(inline_rows.pop().is_some_and(|row| row.starts_with("✓ ")));
+    assert!(
+        inline_rows.len() > 20 && inspector.ends_with(&inline_rows),
+        "inline rows are not the tail of the inspector\ninline: {inline_rows:#?}\ninspector: {inspector:#?}"
+    );
+    assert!(
+        inspector.iter().filter(|row| row.starts_with("● ")).count() == 6,
+        "every expanded call heads its detail: {inspector:#?}"
+    );
+    for row in &transcript {
+        assert!(
+            !row.starts_with("fn main") && !row.starts_with("→ "),
+            "detail leaked inline at 200: {row:?}"
+        );
+    }
+    assert_eq!(
+        transcript
+            .iter()
+            .filter(|row| row.starts_with("● "))
+            .count(),
+        6,
+        "summary rows stay in the transcript: {transcript:#?}"
+    );
 }
 
 /// The QA runbook embeds the gallery in its fake endpoint so a real terminal
