@@ -539,10 +539,10 @@ fn notices_only_render_for_the_session_that_owns_them() {
         Some(("model request failed", NoticeLevel::Error))
     );
 
-    app.view = View::Transcript(Some(other));
+    app.set_view(View::Transcript(Some(other)));
     assert_eq!(app.visible_status(), None);
 
-    app.view = View::Transcript(Some(owner));
+    app.set_view(View::Transcript(Some(owner)));
     assert_eq!(
         app.visible_status(),
         Some(("model request failed", NoticeLevel::Error))
@@ -2110,14 +2110,14 @@ fn streamed_rows_do_not_move_a_scrolled_transcript() {
 #[test]
 fn session_and_view_changes_return_the_transcript_to_the_live_tail() {
     let mut app = App::new(TuiOptions::default());
-    app.view = View::Transcript(Some(SessionId::from_bytes([1; 16])));
+    app.set_view(View::Transcript(Some(SessionId::from_bytes([1; 16]))));
     app.update_transcript_viewport(100, 10, false);
     app.handle_terminal_event(Event::Key(KeyEvent::new(
         KeyCode::PageUp,
         KeyModifiers::NONE,
     )));
 
-    app.view = View::Transcript(Some(SessionId::from_bytes([2; 16])));
+    app.set_view(View::Transcript(Some(SessionId::from_bytes([2; 16]))));
     app.update_transcript_viewport(100, 10, false);
 
     assert_eq!(app.transcript_scroll_offset(), 0);
@@ -3316,14 +3316,14 @@ fn workspace_views_toggle_and_esc_returns_to_the_session_they_replaced() {
     let (mut app, _, other) = two_session_app();
     app.focus_session(other);
     app.execute(Command::ShowAttention);
-    assert_eq!(app.view, View::Attention);
+    assert_eq!(app.view(), View::Attention);
     assert_eq!(app.focused(), None, "no session while a view is up");
     // Esc goes back to where the user was, not to the first session.
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.focused(), Some(other));
     // The same command twice toggles.
     app.execute(Command::ShowChanges);
-    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.view(), View::Changes);
     app.execute(Command::ShowChanges);
     assert_eq!(app.focused(), Some(other));
     // Switching between views keeps the original return point.

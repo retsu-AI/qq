@@ -8,7 +8,7 @@ Raw frames and bench reports live under `target/qq-perf/tui-<slice>-<date>/`
 | --- | --- | --- | --- | --- |
 | U0 ([ENG-844](https://linear.app/retsu-ai/issue/ENG-844)) | Review harness: goldens at five sizes, gallery dump, QA fixture body | In review | [#86](https://github.com/retsu-AI/qq/pull/86) | Started 2026-09-20 from `51ccf13`; parent [ENG-843](https://linear.app/retsu-ai/issue/ENG-843) |
 | L1 ([ENG-845](https://linear.app/retsu-ai/issue/ENG-845)) | Layout engine, tiers, raised clamps, placed measure | In review | [#87](https://github.com/retsu-AI/qq/pull/87) | Stacked on #86 |
-| L2 ([ENG-846](https://linear.app/retsu-ai/issue/ENG-846)) | Per-pane transcript state | Planned | | Needs L1 |
+| L2 ([ENG-846](https://linear.app/retsu-ai/issue/ENG-846)) | Per-pane transcript state | In review | `feat/eng-846-l2-pane-state` | Stacked on #87; one visible pane until L4 |
 | U1 ([ENG-847](https://linear.app/retsu-ai/issue/ENG-847)) | Block rhythm and lists | Planned | | Needs U0 |
 | U2 ([ENG-848](https://linear.app/retsu-ai/issue/ENG-848)) | Inline styling, `Style.underline` | Planned | | Needs U0 |
 | U3 ([ENG-849](https://linear.app/retsu-ai/issue/ENG-849)) | Code panel | Planned | | Needs U0 |
@@ -103,3 +103,33 @@ Baseline: `cargo bench -p qq-tui --bench render` on `51ccf13` recorded to
 - Gates: fmt, clippy `-D warnings`, 255 lib + 5 golden tests.
 - Deviation: the plan said "centered"; shipped a one-third placement and
   recorded why in `layout.md`. Decision D5 amended to match.
+
+### 2026-09-20 — L2 receipt
+
+- `viewport::TranscriptPane { view, viewport, live_message_ranges }`,
+  `MAX_PANES = 3`; `App.panes` + `focused_pane` replace `view`/`viewport`,
+  reached through `view()`, `set_view()`, `viewport()`, `pane()`. The
+  layout's geometry struct is renamed `TranscriptSlot`.
+- `TranscriptCache` keeps only shared state (completed layouts, tool rows,
+  live settled prefixes); `body(pane, …)` returns a `PaneUpdate` per pane and
+  `retain_visible` prunes once per frame across every shown session. Layout
+  bound raised to `MAX_VISIBLE_MESSAGES × MAX_PANES` so panes never evict
+  each other. `frame` zips slots with the pane window around the focus and
+  `commit` writes every reconciled pane back; overlays paint into the focused
+  slot. A pane on a deleted session renders the empty prompt.
+- Deviation: no `preserve_tail_anchor` field on the pane; it is derived each
+  frame from the pane's ranges and viewport, so it never goes stale.
+- Tests: `panes_on_different_sessions_scroll_independently`,
+  `a_non_zero_pane_keeps_its_tail_anchor_when_its_live_message_settles`,
+  `a_pane_following_a_deleted_session_shows_the_empty_prompt`. 258 lib + 5
+  golden; goldens unchanged. fmt, clippy `-D warnings` clean.
+- Bench (`target/qq-perf/tui-L2-2026-09-20/{baseline,after-3}.txt`, same
+  session): `steady_state_frame` 23.5 → 22.0 µs; `streaming_focused` 37.8 →
+  36.5; `streaming_run_on_32kb` 472.6 → 428.0; `golden_path` 40.0 → 38.5;
+  `keystroke` 29.2 → 26.9; `wheel_scroll` 34.2 → 32.6; `resize_horizontal`
+  34.7 → 32.9; `tool_calls_32_folded` 13.6 → 13.1 (a first cut building a
+  per-frame call set read 14.5; replaced by a scan). All within noise of L1.
+- Root request: `architecture.md`'s `qq-tui` bullet still says one
+  `TranscriptCache` "for the shown session"; it should say layouts are shared
+  across panes and per-pane state lives on `App.panes` (`layout.md` § Panes
+  and state).

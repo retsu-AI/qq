@@ -1332,10 +1332,12 @@ fn completed_markdown_cache_is_bounded_and_keeps_one_width() {
     assert_eq!(renderer.markdown().len(), 1);
     assert_eq!(renderer.markdown()[&message.id].width, 80);
 
-    for byte in 2..=u8::try_from(MAX_VISIBLE_MESSAGES + 8).unwrap() {
+    // The bound covers every pane's visible window at once, so panes on
+    // different sessions never evict each other's layouts.
+    for byte in 2..=u8::try_from(MAX_CACHED_MESSAGES + 8).unwrap() {
         renderer.render_message(&completed_message(byte, byte.to_string()), 80);
     }
-    assert!(renderer.markdown().len() <= MAX_VISIBLE_MESSAGES);
+    assert!(renderer.markdown().len() <= MAX_CACHED_MESSAGES);
 }
 
 #[test]
@@ -1950,7 +1952,7 @@ fn model_picker_hint_reflects_apply_versus_create() {
     let text = frame_text(&frame);
     assert!(text.contains("Enter sets the session model, Ctrl-N creates a session"));
 
-    app.view = View::Transcript(None);
+    app.set_view(View::Transcript(None));
     let frame = FrameRenderer::default().frame_and_commit(&mut app, 100, 12);
     let text = frame_text(&frame);
     assert!(text.contains("Enter creates session"));
@@ -2464,6 +2466,117 @@ fn a_height_only_resize_keeps_the_transcript_cache() {
             .values()
             .all(|cached| cached.width == width)
     );
+}
+
+/// Two panes following the two warm sessions of `app_with_two_sessions`,
+/// each with `rows` lines of transcript so both can scroll.
+fn app_with_two_panes(rows: u8) -> (App, SessionId, SessionId) {
+    let (mut app, first, other) = app_with_two_sessions(rows);
+    app.layout.rail = crate::view::PanePref::Hidden;
+    app.panes.push(TranscriptPane {
+        view: View::Transcript(Some(other)),
+        ..TranscriptPane::default()
+    });
+    assert_eq!(app.focused(), Some(first));
+    (app, first, other)
+}
+
+fn scroll_up(app: &mut App) {
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::PageUp,
+        KeyModifiers::NONE,
+    )));
+}
+
+#[test]
+fn panes_on_different_sessions_scroll_independently() {
+    let (mut app, first, other) = app_with_two_panes(40);
+    let mut renderer = FrameRenderer::default();
+    renderer.frame_and_commit(&mut app, 80, 12);
+    // The layout offers one slot until L4, so only pane 0 was reconciled;
+    // the second pane keeps its untouched default state.
+    assert!(app.panes[0].viewport.height() > 0);
+    assert_eq!(app.panes[1].viewport, Viewport::default());
+
+    scroll_up(&mut app);
+    let scrolled = app.panes[0].viewport.offset();
+    assert!(scrolled > 0, "the focused pane scrolls");
+    assert_eq!(app.panes[1].viewport.offset(), 0, "the other pane stays");
+
+    // Focus the second pane: the composer now acts on the other session and
+    // scrolling moves only that pane, after a frame has measured it.
+    app.focused_pane = 1;
+    assert_eq!(app.focused(), Some(other));
+    let frame = frame_text(&renderer.frame_and_commit(&mut app, 80, 12));
+    assert!(
+        frame.contains("other 39"),
+        "the focused pane paints: {frame}"
+    );
+    assert!(!frame.contains("row 39"));
+    scroll_up(&mut app);
+    assert!(app.panes[1].viewport.offset() > 0);
+    assert_eq!(app.panes[0].viewport.offset(), scrolled);
+
+    // Back to the first pane: its offset survived the detour.
+    app.focused_pane = 0;
+    assert_eq!(app.focused(), Some(first));
+    renderer.frame_and_commit(&mut app, 80, 12);
+    assert_eq!(app.panes[0].viewport.offset(), scrolled);
+}
+
+#[test]
+fn a_non_zero_pane_keeps_its_tail_anchor_when_its_live_message_settles() {
+    let (mut app, _, other) = app_with_two_panes(1);
+    let session = app.sessions.get_mut(&other).unwrap();
+    let message = &mut session.messages.as_mut().unwrap()[0];
+    message.state = MessageState::Streaming;
+    message.output = (0..2_000)
+        .map(|row| format!("LIVE-ROW-{row:04}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.focused_pane = 1;
+
+    let mut renderer = FrameRenderer::default();
+    renderer.frame_and_commit(&mut app, 80, 24);
+    assert!(
+        !app.panes[1].live_message_ranges.is_empty(),
+        "the pane records where its streaming message sat"
+    );
+    assert!(app.panes[0].live_message_ranges.is_empty());
+    scroll_up(&mut app);
+    let live_offset = app.panes[1].viewport.offset();
+    assert!(live_offset > 0);
+
+    let session = app.sessions.get_mut(&other).unwrap();
+    session.messages.as_mut().unwrap()[0].state = MessageState::Complete;
+    session.loaded_through += 1;
+    renderer.frame_and_commit(&mut app, 80, 24);
+
+    assert_eq!(app.panes[1].viewport.offset(), live_offset);
+    assert!(app.panes[1].live_message_ranges.is_empty());
+    assert_eq!(app.panes[0].viewport.offset(), 0);
+}
+
+#[test]
+fn a_pane_following_a_deleted_session_shows_the_empty_prompt() {
+    let (mut app, _, other) = app_with_two_sessions(2);
+    app.layout.rail = crate::view::PanePref::Hidden;
+    app.focus_session(other);
+    let mut renderer = FrameRenderer::default();
+    assert!(frame_text(&renderer.frame_and_commit(&mut app, 80, 12)).contains("other 1"));
+
+    // The session vanishes from the store without a refocus effect reaching
+    // this pane, as a second pane's session could after L4.
+    app.sessions.remove(&other);
+    assert_eq!(app.view(), View::Transcript(Some(other)));
+
+    let frame = frame_text(&renderer.frame_and_commit(&mut app, 80, 12));
+    assert!(
+        frame.contains("creates the first session"),
+        "stale pane falls back to the empty prompt: {frame}"
+    );
+    assert!(!frame.contains("Loading session history"));
+    assert_eq!(app.panes[0].viewport.offset(), 0);
 }
 
 #[test]
@@ -3080,7 +3193,7 @@ fn the_attention_pane_lists_needs_most_urgent_first_and_the_changes_pane_flags_o
 
     // Focusing a session returns to its transcript.
     app.focus_session(parent);
-    assert_eq!(app.view, View::Transcript(Some(parent)));
+    assert_eq!(app.view(), View::Transcript(Some(parent)));
 }
 
 #[test]

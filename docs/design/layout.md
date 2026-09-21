@@ -69,6 +69,30 @@ caches key on the pane's content width, so a resize that leaves the content
 width unchanged (any two widths at or above the measure in the same rail
 state) costs no relayout.
 
+## Panes and state
+
+`App.panes` holds one `viewport::TranscriptPane` per transcript pane, left to
+right, at most `MAX_PANES` (3); `App.focused_pane` names the one the
+composer, approvals, scrolling, and navigation act on (`App::focused()` is
+that pane's session). A pane owns what two panes could disagree about: the
+`View` it follows, its `Viewport` (offset, last body height), and the row
+ranges its streaming messages occupied on its last frame, which let a message
+that settles in place keep that pane's tail anchor. Everything else is shared
+through the renderer's one `TranscriptCache`: completed-message layouts keyed
+by message id and width, derived tool rows, and the settled prefix of
+streaming messages. The cache admits `MAX_VISIBLE_MESSAGES × MAX_PANES`
+layouts and, once per frame, retains only what some shown pane can display,
+so panes on different sessions never evict each other.
+
+Each frame the renderer zips the layout's transcript slots with the shown
+panes (the window of `panes` that contains the focused one), renders each
+pane's body into its slot, and collects one reconciled state per pane;
+`commit` writes them back after composition so building a frame never
+mutates the model. Overlays paint into the focused pane's slot only. A pane
+whose session no longer exists renders the empty prompt rather than a
+loading notice. Until slice L4 the layout produces one slot, so exactly the
+focused pane is on screen.
+
 ## Preferences
 
 `LayoutPrefs { rail, inspector }`, each a `PanePref::{Auto, Shown, Hidden}`.
