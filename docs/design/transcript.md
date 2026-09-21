@@ -153,8 +153,23 @@ Fenced code is a visually distinct panel instead of tinted prose:
   the wrap pass).
 - The fence's language tag renders as a small right-aligned label on the
   panel's first row (` rust `, muted).
-- Inline code keeps the tinted-text treatment; only fenced blocks get
-  panels.
+- Inline code is `text` on the same `surface` tint as the panel, not bold
+  and not colored: a `name` in prose shares the panel's voice instead of
+  borrowing `warning`. Only fenced blocks get panels.
+
+## Inline Styling
+
+- Emphasis is italic and strong is bold, layered on whatever style the
+  enclosing block set (a bold word in a quote stays `muted`).
+- Link text is `accent` underlined; the URL is not rendered and no OSC 8
+  hyperlink is emitted, so the underline is the only mark. A link replaces
+  the enclosing emphasis rather than combining with it.
+- Footnote references (`[1]`) are `accent`; inline and display math are
+  `muted` so an unrendered formula does not read as an alert.
+- `Style` carries its attributes (bold, dim, italic, underline) as one
+  packed byte; `write_line` emits an attribute only when a span turns it on
+  and resets when any attribute turns off, so the attribute set never
+  drifts across a row.
 
 Rendering note: the TUI paints with its own `Style`/`Span`/`Line` primitives
 and a whole-row diff (`crates/qq-tui/src/render.rs`), not Ratatui. Background
