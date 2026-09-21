@@ -271,13 +271,16 @@ Baseline: `cargo bench -p qq-tui --bench render` on `51ccf13` recorded to
   keep their fixed geometry: steady 21.2 → 21.2, keystroke 26.4 → 26.3,
   golden_path 38.4 → 38.5, tool_calls_32 rows/folded/expanded 23.1/12.5/51.3 →
   23.4/12.4/51.7; new `tool_calls_32_expanded_inspector` 37.4 (the same bodies
-  in the inspector). Column blit now measures each row once (`text_width`
-  ASCII fast path): with_sidebar 36.1 → 32.4, wide_160x48_full 32.5 → 28.5,
-  sessions_200 30.6 → 27.7. `resize_ultra` 111 → 119 (+7 %): Auto now paints
-  the 80-column inspector at 480 wide (parent with it pinned: 146). Run-on
-  32 KB streaming reads 424–438 vs parent 382–427 in paired A/B; the parent
-  with only the Auto flip reads 392–409, so it is inspector-column diff cost
-  plus host spread, not the tool path.
+  in the inspector). Column blit now measures each row once and presizes
+  the merged span vector: with_sidebar 36.1 → 32.4, wide_160x48_full 32.5 →
+  29.3, sessions_200 30.6 → 28.2. `resize_ultra` 111 → 119 (+7 %): Auto now
+  paints the 80-column inspector at 480 wide (parent with it pinned: 146).
+- Review fix: the first cut gave `text_width` a printable-ASCII byte-scan
+  fast path; interleaved A/B on core 2 (3 pairs) put `streaming_run_on_32kb`
+  at 450–461 vs parent 419–427 (+8 %), and removing the fast path alone
+  brought it to 418–429. `wrap_line` measures every span, so the second scan
+  cost more than the width table saved. Shipped without it: run-on 440–442,
+  sidebar/wide gains kept.
 - Docs: `layout.md` § Tiers, § Preferences, new § Inspector, § Evidence.
 - Root request: `architecture.md`'s `qq-tui` bullet should mention the
   inspector as a per-frame pane fed by the shared tool-row cache.

@@ -146,18 +146,14 @@ impl Line {
     }
 }
 
-/// Display columns of `text`. Printable ASCII is one cell per byte and is
-/// most of what a frame holds, so it skips the per-character width table;
-/// control characters never reach a `Line` (`terminal_safe_character`), so
-/// the fast path only has to exclude them.
+/// Display columns of `text`. One pass over the characters; a printable-ASCII
+/// byte-scan fast path measured +8 % on the 32 KiB streaming ceiling because
+/// `wrap_line` measures every span and the second scan cost more than the
+/// width table saves.
 pub(crate) fn text_width(text: &str) -> usize {
-    if text.bytes().all(|byte| (0x20..0x7f).contains(&byte)) {
-        text.len()
-    } else {
-        text.chars()
-            .map(|character| UnicodeWidthChar::width(character).unwrap_or_default())
-            .sum()
-    }
+    text.chars()
+        .map(|character| UnicodeWidthChar::width(character).unwrap_or_default())
+        .sum()
 }
 
 /// Role styles read the thread's active palette (see `theme.rs`); the
