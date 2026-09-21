@@ -35,13 +35,13 @@ use crate::{
         selection, success, warning, write_line,
     },
     theme,
-    viewport::{View, Viewport},
+    viewport::{MAX_PANES, TranscriptPane, View, Viewport},
 };
 use chrome::*;
 pub(crate) use chrome::{ComposerMode, CursorPosition};
 use highlight::HighlightKey;
 pub(crate) use highlight::{Highlighted, Highlighter};
-use layout::{FIXED_CHROME_ROWS, TranscriptPane, compute_layout};
+use layout::{FIXED_CHROME_ROWS, TranscriptSlot, compute_layout};
 pub(crate) use layout::{LayoutPrefs, PanePref};
 use markdown::{has_fenced_code, markdown_lines, settled_prefix_end};
 use overlay::*;
@@ -93,8 +93,9 @@ pub(crate) fn rail_visible(width: usize, prefs: LayoutPrefs, sessions: usize) ->
 }
 
 /// Frame assembly and the row diff against the previous frame. Retained
-/// transcript state lives in one [`TranscriptCache`]; the highlighter is
-/// separate because its results are keyed by message and width.
+/// transcript layouts live in one [`TranscriptCache`] shared by every pane;
+/// the highlighter is separate because its results are keyed by message and
+/// width.
 #[derive(Default)]
 pub(crate) struct FrameRenderer {
     previous: Vec<Line>,
@@ -106,20 +107,23 @@ pub(crate) struct FrameRenderer {
     /// bake in colors, so a theme change discards every layout and forces
     /// a full repaint.
     theme_generation: u64,
-    /// The viewport reconciled while building the last frame. `draw` hands it
-    /// back to the app after the frame is composed; `frame` itself never
-    /// mutates the model.
-    viewport_update: Option<Viewport>,
+    /// Per-pane state reconciled while building the last frame, by pane
+    /// index. `draw` hands it back to the app after the frame is composed;
+    /// `frame` itself never mutates the model. Bounded by `MAX_PANES`.
+    pane_updates: Vec<(usize, PaneUpdate)>,
     /// Where the terminal cursor belongs after the last frame, or hidden.
     cursor: Option<CursorPosition>,
 }
 
 impl FrameRenderer {
-    /// Hand the viewport reconciled while building the last frame back to
+    /// Hand the pane state reconciled while building the last frame back to
     /// the model.
     pub(crate) fn commit(&mut self, app: &mut App) {
-        if let Some(viewport) = self.viewport_update.take() {
-            app.viewport = viewport;
+        for (index, update) in self.pane_updates.drain(..) {
+            if let Some(pane) = app.panes.get_mut(index) {
+                pane.viewport = update.viewport;
+                pane.live_message_ranges = update.live_message_ranges;
+            }
         }
     }
 
@@ -174,11 +178,11 @@ impl FrameRenderer {
         Ok(output)
     }
 
-    /// Build one frame from the model without changing it. The viewport clamp
-    /// computed along the way is kept in `viewport_update` for `draw`.
+    /// Build one frame from the model without changing it. The pane state
+    /// reconciled along the way is kept in `pane_updates` for `draw`.
     fn frame(&mut self, app: &App, width: usize, height: usize) -> Vec<Line> {
         theme::activate(app.theme().palette);
-        self.viewport_update = None;
+        self.pane_updates.clear();
         if self.theme_generation != app.theme_generation {
             self.theme_generation = app.theme_generation;
             self.cache = TranscriptCache::default();
@@ -212,40 +216,66 @@ impl FrameRenderer {
         let layout = compute_layout(width, height, chrome_rows, app.layout, app.sessions.len());
         let body_height = layout.body.height;
         let mode = app.mode();
-        let pane = layout.transcripts[0];
-        // Overlays take the transcript pane's cells; the rail stays so the
-        // picker is read in context. The transcript caches stay warm behind
-        // an overlay so closing one costs no relayout or highlight storm.
-        let pane_width = pane.area.width;
-        let mut body = match mode {
-            Mode::Models => model_picker(app, pane_width, body_height),
-            Mode::Profiles => profile_picker(app, pane_width, body_height),
-            Mode::ApprovalModes => approval_mode_picker(app, pane_width, body_height),
-            Mode::Skills => skill_picker(app, pane_width, body_height),
-            Mode::Themes => theme_picker(app, pane_width, body_height),
-            Mode::Sessions => session_picker(app, pane_width, body_height),
-            Mode::Commands => command_picker(app, pane_width, body_height),
-            Mode::History => history_picker(app, pane_width, body_height),
-            // An approval keeps the transcript on screen and adds its block
-            // under the awaiting call, so the decision is made in context.
-            Mode::Approval => self.body(app, pane, body_height),
-            Mode::Compose => {
-                let mut body = self.body(app, pane, body_height);
-                let menu = mention_autocomplete(app, pane_width, body_height);
-                let menu = if menu.is_empty() {
-                    slash_autocomplete(app, pane_width, body_height)
-                } else {
-                    menu
-                };
-                overlay_slash_autocomplete(&mut body, menu);
-                body
+        // The slots show a window of the panes that always contains the
+        // focused one: with one slot that is the focused pane itself; with
+        // more, focus past the right edge slides the window.
+        let slots = layout.transcripts.len();
+        let first_shown = app
+            .focused_pane
+            .saturating_sub(slots.saturating_sub(1))
+            .min(app.panes.len().saturating_sub(slots));
+        let shown_panes = || app.panes.iter().enumerate().skip(first_shown).take(slots);
+        // The cache keeps layouts for every shown session at once, so panes
+        // on different sessions never evict each other mid-frame.
+        let shown: Vec<Option<SessionId>> =
+            shown_panes().map(|(_, pane)| pane.view.session()).collect();
+        self.cache.retain_visible(app, &shown);
+        // Transcript panes fill their slots left to right. Overlays take the
+        // focused pane's cells; the rail stays so the picker is read in
+        // context. The transcript caches stay warm behind an overlay so
+        // closing one costs no relayout or highlight storm.
+        let mut body: Vec<Line> = Vec::new();
+        let mut columns: Vec<(usize, Vec<Line>)> = Vec::with_capacity(slots + 1);
+        for ((index, pane), slot) in shown_panes().zip(&layout.transcripts) {
+            let slot_width = slot.area.width;
+            let rows = if index == app.focused_pane {
+                match mode {
+                    Mode::Models => model_picker(app, slot_width, body_height),
+                    Mode::Profiles => profile_picker(app, slot_width, body_height),
+                    Mode::ApprovalModes => approval_mode_picker(app, slot_width, body_height),
+                    Mode::Skills => skill_picker(app, slot_width, body_height),
+                    Mode::Themes => theme_picker(app, slot_width, body_height),
+                    Mode::Sessions => session_picker(app, slot_width, body_height),
+                    Mode::Commands => command_picker(app, slot_width, body_height),
+                    Mode::History => history_picker(app, slot_width, body_height),
+                    // An approval keeps the transcript on screen and adds its
+                    // block under the awaiting call, so the decision is made
+                    // in context.
+                    Mode::Approval => self.body(app, index, pane, *slot, body_height),
+                    Mode::Compose => {
+                        let mut rows = self.body(app, index, pane, *slot, body_height);
+                        let menu = mention_autocomplete(app, slot_width, body_height);
+                        let menu = if menu.is_empty() {
+                            slash_autocomplete(app, slot_width, body_height)
+                        } else {
+                            menu
+                        };
+                        overlay_slash_autocomplete(&mut rows, menu);
+                        rows
+                    }
+                }
+            } else {
+                self.body(app, index, pane, *slot, body_height)
+            };
+            if slot.area.x == 0 {
+                body = fit_height(rows, body_height);
+            } else {
+                columns.push((slot.area.x, fit_height(rows, body_height)));
             }
-        };
-        body = fit_height(body, body_height);
+        }
         // Side panes are blitted column-wise onto the body rows: each row is
         // padded to the pane's `x`, then the pane's cells appended. Columns
         // are built at pane width so a blit never re-measures the row.
-        let mut columns: Vec<(usize, Vec<Line>)> = Vec::with_capacity(2);
         if let Some(inspector) = layout.inspector {
             columns.push((
                 inspector.x,
@@ -257,7 +287,10 @@ impl FrameRenderer {
         }
         for (x, column) in columns {
             for (row, cells) in body.iter_mut().zip(column) {
-                pad_line(row, x);
+                // A blitted transcript row carries its measure inset as a
+                // count; it becomes padding here since only the first pane's
+                // rows keep the count for the renderer's cursor move.
+                pad_line(row, x + cells.indent);
                 for span in cells.spans {
                     row.push(span.text, span.style);
                 }
@@ -265,7 +298,7 @@ impl FrameRenderer {
         }
         // With side panes glued on, every body row is exactly the terminal
         // width so the border columns line up and nothing overflows.
-        if layout.rail.is_some() || layout.inspector.is_some() {
+        if layout.rail.is_some() || layout.inspector.is_some() || slots > 1 {
             for row in &mut body {
                 pad_line(row, width);
             }
@@ -292,19 +325,26 @@ impl FrameRenderer {
         fit_height(lines, height)
     }
 
-    /// Render the main area through the transcript cache into `pane` and
-    /// remember the reconciled viewport for `commit`. Rows come back at the
-    /// pane's full width with the content column centered.
-    fn body(&mut self, app: &App, pane: TranscriptPane, height: usize) -> Vec<Line> {
-        let (mut lines, viewport) =
+    /// Render one pane's main area through the transcript cache into `slot`
+    /// and remember the pane's reconciled state for `commit`. Rows come back
+    /// at the slot's full width with the content column placed.
+    fn body(
+        &mut self,
+        app: &App,
+        index: usize,
+        pane: &TranscriptPane,
+        slot: TranscriptSlot,
+        height: usize,
+    ) -> Vec<Line> {
+        let (mut lines, update) =
             self.cache
-                .body(&mut self.highlighter, app, pane.content_width, height);
-        self.viewport_update = Some(viewport);
-        if pane.inset > 0 {
+                .body(&mut self.highlighter, app, pane, slot.content_width, height);
+        self.pane_updates.push((index, update));
+        if slot.inset > 0 {
             // Cached rows are shared with later frames; the margin lives on
             // the frame's copy as a count, so centering costs no allocation.
             for line in &mut lines {
-                line.indent = pane.inset;
+                line.indent = slot.inset;
             }
         }
         lines
@@ -331,13 +371,10 @@ impl FrameRenderer {
 
     #[cfg(test)]
     fn transcript<'a>(&'a mut self, app: &App, width: usize) -> VirtualBody<'a> {
-        self.cache.transcript(
-            &mut self.highlighter,
-            app,
-            app.focused(),
-            &app.viewport,
-            width,
-        )
+        let pane = app.pane();
+        self.cache.retain_visible(app, &[pane.view.session()]);
+        self.cache
+            .transcript(&mut self.highlighter, app, pane.view.session(), pane, width)
     }
 }
 

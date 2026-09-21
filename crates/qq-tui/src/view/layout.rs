@@ -129,10 +129,12 @@ impl Rect {
     }
 }
 
-/// One transcript pane: its cells, and the narrower centered column the
-/// prose lays out in when the pane is wider than the measure.
+/// Where one transcript pane paints: its cells, and the narrower column the
+/// prose lays out in when the slot is wider than the measure. The pane's
+/// state (what it follows, scroll) is `viewport::TranscriptPane`; this is
+/// only geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TranscriptPane {
+pub(crate) struct TranscriptSlot {
     pub area: Rect,
     /// Columns from the pane's left edge to where content starts.
     pub inset: usize,
@@ -155,8 +157,9 @@ pub(crate) struct Layout {
     pub rail: Option<Rect>,
     /// The inspector between the transcript and the rail, when shown.
     pub inspector: Option<Rect>,
-    /// Transcript panes left to right; one until slice L4.
-    pub transcripts: Vec<TranscriptPane>,
+    /// Transcript slots left to right; one until slice L4, never more than
+    /// `viewport::MAX_PANES`.
+    pub transcripts: Vec<TranscriptSlot>,
     /// Whether the one-row agent strip replaces the rail (Compact with more
     /// than one session and no rail pinned).
     pub strip: bool,
@@ -269,7 +272,7 @@ pub(crate) fn compute_layout(
         body,
         rail,
         inspector,
-        transcripts: vec![transcript_pane(transcript_area)],
+        transcripts: vec![transcript_slot(transcript_area)],
         strip,
         max_composer_rows: max_composer_rows(width, height),
     }
@@ -281,10 +284,10 @@ pub(crate) fn compute_layout(
 /// lone pane on an ultra-wide display should read as anchored, not adrift.
 /// Until slice L4 fills the remaining width with more panes this keeps the
 /// single-transcript frame legible.
-fn transcript_pane(area: Rect) -> TranscriptPane {
+fn transcript_slot(area: Rect) -> TranscriptSlot {
     let content_width = area.width.min(TRANSCRIPT_MEASURE);
     let inset = (area.width - content_width) / 3;
-    TranscriptPane {
+    TranscriptSlot {
         area,
         inset,
         content_width,
