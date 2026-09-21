@@ -2924,6 +2924,26 @@ fn paths_elide_from_the_middle_and_keep_the_file_name() {
     assert_eq!(elide_path("crates/qq-tui/src/view/tools.rs", 8), "…ools.rs");
 }
 
+/// Regression: a width equal to `…/` plus the file name used to underflow
+/// the skip count and panic in debug builds.
+#[test]
+fn paths_elide_at_exact_tail_boundary_without_panicking() {
+    assert_eq!(
+        elide_path("crates/qq-tui/src/view/tools.rs", 10),
+        "…/tools.rs"
+    );
+    assert_eq!(
+        elide_path("crates/qq-tui/src/view/tools.rs", 9),
+        "…tools.rs"
+    );
+    for width in 0..=40 {
+        let out = elide_path("crates/qq-tui/src/view/tools.rs", width);
+        if width >= 6 {
+            assert!(out.chars().count() <= width, "{width}: {out:?}");
+        }
+    }
+}
+
 /// A parent with a child session that is running and waiting on a `shell`
 /// approval; the child's body is warm so the call is known client-side.
 fn app_with_child_awaiting_approval() -> (App, SessionId, SessionId, RunId, ToolCallId) {
