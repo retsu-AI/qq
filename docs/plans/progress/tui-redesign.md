@@ -8,13 +8,13 @@ Raw frames and bench reports live under `target/qq-perf/tui-<slice>-<date>/`
 | --- | --- | --- | --- | --- |
 | U0 ([ENG-844](https://linear.app/retsu-ai/issue/ENG-844)) | Review harness: goldens at five sizes, gallery dump, QA fixture body | Shipped (`2cad2de`, [#86](https://github.com/retsu-AI/qq/pull/86)) | | Started 2026-09-20 from `51ccf13`; parent [ENG-843](https://linear.app/retsu-ai/issue/ENG-843) |
 | L1 ([ENG-845](https://linear.app/retsu-ai/issue/ENG-845)) | Layout engine, tiers, raised clamps, placed measure | Shipped (`7585711`, [#87](https://github.com/retsu-AI/qq/pull/87)) | | 2026-09-20 |
-| L2 ([ENG-846](https://linear.app/retsu-ai/issue/ENG-846)) | Per-pane transcript state | In review | `feat/eng-846-l2-pane-state` | Rebased onto main after #87; one visible pane until L4 |
-| U1 ([ENG-847](https://linear.app/retsu-ai/issue/ENG-847)) | Block rhythm and lists | In review | `feat/eng-847-u1-markdown-rhythm` | Stacked on L2 |
-| U2 ([ENG-848](https://linear.app/retsu-ai/issue/ENG-848)) | Inline styling, `Style.underline` | In review | `feat/eng-848-u2-inline-styling` | Stacked on U1 |
-| U3 ([ENG-849](https://linear.app/retsu-ai/issue/ENG-849)) | Code panel | In review | `feat/eng-849-u3-code-panel` | Stacked on U2 |
+| L2 ([ENG-846](https://linear.app/retsu-ai/issue/ENG-846)) | Per-pane transcript state | Shipped (`e511ce4`, [#94](https://github.com/retsu-AI/qq/pull/94)) | | One visible pane until L4 |
+| U1 ([ENG-847](https://linear.app/retsu-ai/issue/ENG-847)) | Block rhythm and lists | Shipped (`38a47d8`, [#95](https://github.com/retsu-AI/qq/pull/95)) | | 2026-09-20 |
+| U2 ([ENG-848](https://linear.app/retsu-ai/issue/ENG-848)) | Inline styling, `Style.underline` | In review | [#102](https://github.com/retsu-AI/qq/pull/102) | Rebased onto main after #95 |
+| U3 ([ENG-849](https://linear.app/retsu-ai/issue/ENG-849)) | Code panel | In review | [#100](https://github.com/retsu-AI/qq/pull/100) | Stacked on #102 |
 | U4 ([ENG-850](https://linear.app/retsu-ai/issue/ENG-850)) | Syntax palette, theme `syntax` block | Planned | | Needs U0 |
 | U5 ([ENG-851](https://linear.app/retsu-ai/issue/ENG-851)) | `ink` default theme, `terminal` fallback, ADR 0036 | Planned | | Needs U4 |
-| U9 ([ENG-852](https://linear.app/retsu-ai/issue/ENG-852)) | Sessions rail, adaptive density | In review | `feat/eng-852-u9-sessions-rail` | Stacked on U3 |
+| U9 ([ENG-852](https://linear.app/retsu-ai/issue/ENG-852)) | Sessions rail, adaptive density | In review | [#101](https://github.com/retsu-AI/qq/pull/101) | Stacked on #100 |
 | L3 ([ENG-853](https://linear.app/retsu-ai/issue/ENG-853)) | Inspector pane | Planned | | Needs L2 |
 | L4 ([ENG-854](https://linear.app/retsu-ai/issue/ENG-854)) | Split transcripts | Planned | | Needs L2 |
 | U6 ([ENG-855](https://linear.app/retsu-ai/issue/ENG-855)) | Turn headers, geometry, tool rows | Planned | | Needs U1, L1 |
