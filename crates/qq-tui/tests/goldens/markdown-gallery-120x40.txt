@@ -1,9 +1,8 @@
  qq  Session 0                                                                                   openai/gpt-test  $0.00
-   Level three heading                                                                      │ IDLE  3
-                                                                                            │ ○ Session 0
-   1. First numbered item                                                                   │ ○ Session 1
-   2. Second numbered item that is deliberately long enough to wrap onto a second row at    │ ○ Session 2
-      this width                                                                            │
+                                                                                            │ IDLE  3
+   1. First numbered item                                                                   │ ○ Session 0
+   2. Second numbered item that is deliberately long enough to wrap onto a second row at    │ ○ Session 1
+      this width                                                                            │ ○ Session 2
    3. Third numbered item                                                                   │
      ◦ nested bullet under three                                                            │
                                                                                             │
@@ -19,13 +18,14 @@
                                                                                             │
    The footnote body.                                                                       │
                                                                                             │
-   │ rust                                                                                   │
-   │ fn main() {                                                                            │
-   │     let x = 1;                                                                         │
-   │     if x > 0 {                                                                         │
-   │         println!("{x}");                                                               │
-   │     }                                                                                  │
-   │ }                                                                                      │
+   ┃                                                                                   rust │
+   ┃  fn main() {                                                                           │
+   ┃      let x = 1;                                                                        │
+   ┃      if x > 0 {                                                                        │
+   ┃          println!("{x}");                                                              │
+   ┃      }                                                                                 │
+   ┃  }                                                                                     │
+   ┃                                                                                        │
                                                                                             │
    Role  │ Default                                                                          │
    ──────┼──────────                                                                        │

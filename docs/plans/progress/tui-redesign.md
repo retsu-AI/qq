@@ -11,7 +11,7 @@ Raw frames and bench reports live under `target/qq-perf/tui-<slice>-<date>/`
 | L2 ([ENG-846](https://linear.app/retsu-ai/issue/ENG-846)) | Per-pane transcript state | In review | `feat/eng-846-l2-pane-state` | Rebased onto main after #87; one visible pane until L4 |
 | U1 ([ENG-847](https://linear.app/retsu-ai/issue/ENG-847)) | Block rhythm and lists | In review | `feat/eng-847-u1-markdown-rhythm` | Stacked on L2 |
 | U2 ([ENG-848](https://linear.app/retsu-ai/issue/ENG-848)) | Inline styling, `Style.underline` | In review | `feat/eng-848-u2-inline-styling` | Stacked on U1 |
-| U3 ([ENG-849](https://linear.app/retsu-ai/issue/ENG-849)) | Code panel | Planned | | Needs U0 |
+| U3 ([ENG-849](https://linear.app/retsu-ai/issue/ENG-849)) | Code panel | In review | `feat/eng-849-u3-code-panel` | Stacked on U2 |
 | U4 ([ENG-850](https://linear.app/retsu-ai/issue/ENG-850)) | Syntax palette, theme `syntax` block | Planned | | Needs U0 |
 | U5 ([ENG-851](https://linear.app/retsu-ai/issue/ENG-851)) | `ink` default theme, `terminal` fallback, ADR 0036 | Planned | | Needs U4 |
 | U9 ([ENG-852](https://linear.app/retsu-ai/issue/ENG-852)) | Sessions rail, adaptive density | Planned | | Needs L2 |
@@ -177,3 +177,26 @@ Baseline: `cargo bench -p qq-tui --bench render` on `51ccf13` recorded to
   steady_state 21.5 µs, streaming_focused 33.9, run_on 433.6, keystroke 26.6,
   golden_path 39.0, resize_horizontal 31.8, compact 19.0.
 - Docs: `transcript.md` inline code bullet amended; new § Inline Styling.
+
+### 2026-09-20 — U3 receipt
+
+- `layout_code_panel` / `code_panel_row`: rail `┃ ` in `border` on `surface`
+  (was `│ ` in `accent` dim), one padding cell, content, surface padding to
+  the width; `↪` replaces `┃` on the rows a source line wrapped onto; the
+  top row right-aligns ` label ` in `muted` (blank for untagged fences); a
+  blank bottom row is always emitted. Spans with their own background (diff
+  tints) keep it, so `+`/`-` rows read through the surface. Streaming and
+  completed panels are row-identical for the same prefix (pulldown closes
+  an open fence at end of input, and both padding rows are unconditional).
+  `Style::dim` removed: the gutter was its only caller.
+- Tests: 5 new in `markdown/tests.rs` (padding rows and label, wrap mark,
+  diff tint over surface, streaming vs completed, untagged top row); 4
+  expectations updated; highlight loop test matches the new byte prefix.
+  274 lib + 5 golden. Goldens moved: the five `markdown-gallery-*` only
+  (gutter glyph, one padding cell, right-aligned label, bottom row; the 80
+  and 120 frames scroll one row for the added bottom row).
+- Bench (`target/qq-perf/tui-U3-2026-09-20/after{,-2}.txt`, pinned core, vs
+  U2): steady_state 21.5 → 21.8 / 21.5 µs; streaming_focused 33.9 → 34.4 /
+  34.2; run_on_32kb 433.6 → 443.4 / 449.7 (+2–4 %, no fence on that path);
+  golden_path 39.0 → 39.3 / 39.2; keystroke 26.6 → 26.6 / 26.9.
+- Docs: `transcript.md` § Code Blocks rewritten to the shipped panel.

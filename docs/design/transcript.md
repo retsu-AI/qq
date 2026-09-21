@@ -143,16 +143,29 @@ Block markers, applied in `view/markdown.rs`:
 
 ## Code Blocks
 
-Fenced code is a visually distinct panel instead of tinted prose:
+Fenced code is a visually distinct panel instead of tinted prose
+(`markdown::layout_code_panel`):
 
-- Full-width background tint (dark surface color distinct from the
-  terminal background) spanning the block, one padding row above and
-  below inside the tint.
-- A left border glyph (`│` in the accent-muted color) plus one cell of
-  padding; content keeps character-exact wrapping (literal-flagged in
-  the wrap pass).
-- The fence's language tag renders as a small right-aligned label on the
-  panel's first row (` rust `, muted).
+- Every panel row is padded to the full content width on the `surface`
+  tint, so the block reads as one solid slab. The transcript's block gap
+  supplies the blank row above and below; the panel adds none of its own.
+- The rail is `┃ ` in `border` on the surface, then one cell of padding,
+  then the content. A source line that wraps (character-exact, literal
+  wrap) shows `↪` in place of `┃` on its continuation rows, so a wrapped
+  line is distinguishable from a new one. Leading indentation is kept
+  exactly; the gallery goldens pin it.
+- The top padding row carries the rail and the fence's language label
+  right-aligned in `muted` (` rust `, one space each side, ending at the
+  content width); it is a blank surface row when the fence has no tag. The
+  bottom padding row is always present and blank, so the rail is continuous.
+- `diff` fences keep add/remove tints inside the panel: a span that brings
+  its own background (`diff_add_bg` / `diff_del_bg`) keeps it, and only
+  spans with no background take the surface. The rail and the trailing
+  padding stay on the surface.
+- A fence that is still streaming lays out the same rows as the finished
+  block would: the label row appears as soon as the fence opens and the
+  bottom padding row is present while the block is open, so the panel does
+  not jump when the closing fence arrives.
 - Inline code is `text` on the same `surface` tint as the panel, not bold
   and not colored: a `name` in prose shares the panel's voice instead of
   borrowing `warning`. Only fenced blocks get panels.
