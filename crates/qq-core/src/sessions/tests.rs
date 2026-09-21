@@ -2667,6 +2667,9 @@ fn assert_tool_results_are_exact(messages: &[Message]) {
 enum AutoCompactScript {
     /// Streams the text and completes.
     Text(String),
+    /// Streams the text and stops at the output token limit, so the runtime
+    /// continues the turn with the next scripted request.
+    Truncated(String),
     /// Reads `note.txt` on the first turn, then streams the text: seeds a
     /// prunable read-only result into the transcript.
     ReadNoteThenText(String),
@@ -2803,6 +2806,13 @@ impl Provider for AutoCompactProvider {
             AutoCompactScript::Text(text) => Box::pin(stream::iter([
                 Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
                 Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+            ])),
+            AutoCompactScript::Truncated(text) => Box::pin(stream::iter([
+                Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                Ok(qq_provider::ProviderEvent::Incomplete {
+                    usage: None,
+                    reason: qq_provider::IncompleteReason::OutputTokens,
+                }),
             ])),
             AutoCompactScript::ReadNoteThenText(text) => {
                 if already_read {

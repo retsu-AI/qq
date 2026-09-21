@@ -18,8 +18,10 @@ pub(super) fn validate_compaction_summary(summary: &str) -> Result<(), String> {
         return Err("compaction summary exceeds the 4 MiB session context limit".to_owned());
     }
     // A heading is a line that starts with the section name (optionally
-    // numbered or marked up) followed by a colon. Matching is per line so
-    // body text mentioning "errors:" cannot satisfy the requirement.
+    // numbered or marked up) and then either a colon or nothing else: both
+    // `1. Intent: ...` and a markdown `## 1. Intent` line with the body
+    // below it count. Matching is per line so body text mentioning
+    // "errors:" cannot satisfy the requirement.
     let missing = COMPACTION_REQUIRED_SECTIONS
         .iter()
         .filter(|section| {
@@ -32,10 +34,11 @@ pub(super) fn validate_compaction_summary(summary: &str) -> Result<(), String> {
                     .trim_start_matches(['*', '_']);
                 line.get(..section.len())
                     .is_some_and(|head| head.eq_ignore_ascii_case(section))
-                    && line[section.len()..]
-                        .trim_start_matches(['*', '_'])
-                        .trim_start()
-                        .starts_with(':')
+                    && {
+                        let rest = line[section.len()..]
+                            .trim_matches(|c: char| matches!(c, '*' | '_' | '#' | ' ' | '\t'));
+                        rest.is_empty() || rest.starts_with(':')
+                    }
             })
         })
         .copied()

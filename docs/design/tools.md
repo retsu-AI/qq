@@ -348,7 +348,14 @@ Compaction is the second. A summary must be non-empty, fit the 4 MiB context
 limit, carry the six required section headings (Intent, Decisions and
 constraints, Work state, Files touched, Errors, User messages), and shrink the
 measured assembly above a 16 KiB floor; any failure settles the internal run
-as a `policy` failure and the prior compaction stays in force. Three
+as a `policy` failure and the prior compaction stays in force. A heading is a
+line that is the section name, optionally numbered or marked up, followed by a
+colon or by nothing else — `1. Intent: …` and a markdown `## 1. Intent` line
+with its body beneath both count; a line that continues into prose does not.
+The summarizer reserves 8 192 output tokens (bounded by the model's cap); a
+reply the provider still cuts at that limit is continued like any turn, and
+its pieces are concatenated verbatim so a heading split at the cut survives.
+Three
 compactions are retained per session and `rollback_compaction` steps back
 through them. `search_history` makes aggressive compaction safe: it walks the
 full persisted transcript including replaced spans, excludes the calling run,

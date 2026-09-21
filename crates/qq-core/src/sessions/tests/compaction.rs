@@ -547,10 +547,15 @@ async fn storage_overflow_compacts_before_the_queued_prompt() {
 
 #[tokio::test]
 async fn compaction_sends_and_persists_the_effective_output_cap() {
-    for (configured, expected) in [(1_024, 1_024), (4_096, 2_048)] {
+    for (configured, expected) in [(1_024, 1_024), (16_384, 8_192)] {
+        // The prior answer leaves the prompt run over the storage backstop
+        // (its reserve is the configured cap at 32 B/token plus the
+        // compaction envelope) while the summarizer request, which reserves
+        // the effective cap, still fits.
+        let prior = MAX_CONTEXT_BYTES - 100 * 1024 - usize::try_from(configured).unwrap() * 32;
         let mut harness = auto_compact_harness_with_limits(
             vec![
-                AutoCompactScript::Text(over_threshold_output()),
+                AutoCompactScript::Text("x".repeat(prior)),
                 AutoCompactScript::Text(valid_summary("the summary")),
                 AutoCompactScript::Text("done".to_owned()),
             ],
@@ -1659,6 +1664,39 @@ fn compaction_summary_validation_requires_every_section_heading() {
         prose,
         "compaction summary is missing required sections: Errors"
     );
+    // Regression: a markdown heading on its own line with the body beneath
+    // it is how models answer the numbered instruction; every section was
+    // present in the live store yet all six were reported missing.
+    assert!(
+        validate_compaction_summary(
+            "## 1. Intent\n\nThe user wants QQ to be reliable.\n\n\
+             ## 2. Decisions and constraints\n\n- Use the live store.\n\n\
+             ## 3. Work state\n\n**Done:**\n- read docs\n\n\
+             ## 4. Files touched\n\n- `docs/plans/run-reliability.md`\n\n\
+             ## 5. Errors\n\n- none\n\n\
+             ## 6. User messages\n\n1. go find why failure is so high"
+        )
+        .is_ok(),
+        "bare markdown headings without a colon are accepted"
+    );
+    assert!(
+        validate_compaction_summary(
+            "**Intent**\nx\n### Decisions and constraints ###\ny\nWork state\nz\n\
+             Files touched\na\nErrors\nb\nUser messages\nc"
+        )
+        .is_ok(),
+        "bold, closed atx, and plain headings are accepted"
+    );
+    // A heading word followed by other prose is still body text.
+    let prose_heading = validate_compaction_summary(
+        "Intent was unclear\n2. Decisions and constraints: none\n3. Work state: done\n\
+         4. Files touched: none\n5. Errors: none\n6. User messages: hi",
+    )
+    .unwrap_err();
+    assert_eq!(
+        prose_heading,
+        "compaction summary is missing required sections: Intent"
+    );
     assert!(
         validate_compaction_summary(&format!(
             "{}\n{}",
@@ -1668,6 +1706,58 @@ fn compaction_summary_validation_requires_every_section_heading() {
         .unwrap_err()
         .contains("4 MiB")
     );
+}
+
+#[tokio::test]
+async fn a_summary_split_across_truncated_turns_is_joined_without_a_seam() {
+    // Regression: the summarizer's turns were joined with a newline even
+    // when the provider cut the previous turn mid-token, so a heading split
+    // across the cut (`Decis` + `ions and constraints:`) never matched and
+    // the compaction failed as a policy error.
+    let summary = valid_summary("joined");
+    let cut = summary.find("Decis").unwrap() + "Decis".len();
+    let second_cut = summary.find("Files").unwrap() + "Fil".len();
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("first answer".to_owned()),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::Truncated(summary[..cut].to_owned()),
+            AutoCompactScript::Truncated(summary[cut..second_cut].to_owned()),
+            AutoCompactScript::Text(summary[second_cut..].to_owned()),
+        ]),
+        AutoCompactScript::Text("after".to_owned()),
+    ])
+    .await;
+    let first = queue_prompt(&harness.runtime, harness.session_id, "one".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(first)).await;
+
+    let compaction = compact_session(&harness.runtime, harness.session_id).await;
+    let observed = collect_through_compacted(&mut harness.events).await;
+    let outcome = finished_outcome(&observed, compaction);
+    assert!(
+        matches!(outcome, Some(RunOutcome::Completed)),
+        "{outcome:?}"
+    );
+    // The prompt plus three summarizer requests: two continuations.
+    assert_eq!(harness.requests.lock().unwrap().len(), 4);
+
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let stored: String = connection
+        .query_row(
+            "SELECT summary FROM session_compactions WHERE run_id = ?1",
+            [compaction.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, summary, "truncated turns are concatenated verbatim");
+
+    // The joined summary is what the next prompt sees.
+    let next = queue_prompt(&harness.runtime, harness.session_id, "two".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(next)).await;
+    let requests = harness.requests.lock().unwrap();
+    let texts = request_texts(requests.last().unwrap());
+    assert!(texts[0].starts_with(COMPACTION_SUMMARY_PREAMBLE));
+    assert!(texts[0].contains("Decisions and constraints: joined"));
+    assert!(texts[0].contains("Files touched: joined"));
 }
 
 #[tokio::test]
