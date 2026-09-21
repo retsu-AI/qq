@@ -3166,3 +3166,643 @@ async fn a_committed_step_survives_shutdown_and_the_next_prompt_folds_from_its_m
     );
     runtime.close().await.unwrap();
 }
+
+/// A harness whose one loaded provider answers the run's turns with shell
+/// calls (mutating, so never stubbed) and every summarizer request with a
+/// valid summary, under `full` approval so no gate waits.
+async fn in_run_compaction_harness(turns: usize, window: u32, summary: &str) -> AutoCompactHarness {
+    auto_compact_harness_with_loader_and_mode(
+        AutoCompactLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            scripts: vec![AutoCompactScript::ShellRepeatedlyWithSummaries {
+                turns,
+                text: "task complete".to_owned(),
+                summary: valid_summary(summary),
+            }],
+            loads: StdMutex::new(0),
+            context_window: Some(window),
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        },
+        ApprovalMode::Full,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes() {
+    // F03: a run whose transcript outgrows the window at a later turn used to
+    // fail with "compaction runs only between prompts". Its mutating results
+    // cannot be stubbed, so stubbing does not save it. Now the loop
+    // summarizes its own earlier turns at the boundary and continues in the
+    // same run; each in-run compaction is a durable internal run with a
+    // marker scoped to the prompt run.
+    let turns = 48;
+    // Each shell turn adds ~2.2 KiB of bounded result (~550 tokens); 48 of
+    // them are ~26k tokens of transcript, past a 16k window twice over once
+    // the system prompt and tool schemas are counted.
+    let mut harness = in_run_compaction_harness(turns, 16 * 1024, "work so far").await;
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "do the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    let outcome = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, outcome, ..
+            } if *run_id == run => Some(outcome.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
+    // Exactly one user-visible run: every other RunStarted is an internal
+    // compaction, and each of those settled Completed with a SessionCompacted.
+    let started: Vec<RunId> = observed
+        .iter()
+        .filter_map(|event| match &event.event {
+            SessionEvent::RunStarted { run_id, .. } => Some(*run_id),
+            _ => None,
+        })
+        .collect();
+    let compactions: Vec<RunId> = started.iter().copied().filter(|id| *id != run).collect();
+    assert!(
+        compactions.len() >= 2,
+        "a 36k-token run in a 16k window needs more than one in-run compaction: {}",
+        compactions.len()
+    );
+    let compacted_events = observed
+        .iter()
+        .filter(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+        .count();
+    assert_eq!(compacted_events, compactions.len());
+    for compaction in &compactions {
+        assert!(observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. }
+                if run_id == compaction
+        )));
+    }
+    // Every request the model saw fit the window by the estimate (system
+    // prompt and tool schemas included, as the loop counts them).
+    let results = {
+        let requests = harness.requests.lock().unwrap();
+        for (index, request) in requests.iter().enumerate() {
+            let bytes = crate::measure_messages(request.messages())
+                + request.system().map_or(0, |system| system.len() as u64)
+                + request
+                    .tools()
+                    .iter()
+                    .map(|tool| {
+                        (tool.name().len()
+                            + tool.description().len()
+                            + tool.input_schema().get().len()) as u64
+                    })
+                    .sum::<u64>();
+            // Each request is judged with the output reserve it actually
+            // carried: the run's own, or the summarizer's larger one.
+            let reserve = u64::from(request.max_output_tokens());
+            assert!(
+                crate::sessions::context::estimate_tokens(bytes) + reserve <= 16 * 1024,
+                "request {index} ({bytes} bytes + {reserve} reserve) was sent over the window"
+            );
+        }
+        // The final request carries the prompt, a summary, and only the turns
+        // since the last compaction verbatim — not all 48 shell results.
+        let last = requests.last().unwrap();
+        let texts = request_texts(last);
+        assert_eq!(texts.first().map(String::as_str), Some("do the task"));
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.starts_with(crate::sessions::IN_RUN_COMPACTION_PREAMBLE)),
+            "{texts:?}"
+        );
+        let results = last
+            .messages()
+            .iter()
+            .flat_map(Message::content)
+            .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+            .count();
+        assert!(
+            results >= CONTEXT_PRUNE_KEEP_TURNS && results < turns / 2,
+            "{results} results in the last request"
+        );
+        results
+    };
+
+    // All 24 shell calls ran exactly once and are durable.
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let calls: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1 AND state = 'completed'",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(calls, turns as u64);
+    // The markers are scoped to the prompt run; no between-run marker exists.
+    let (scoped, unscoped): (u64, u64) = connection
+        .query_row(
+            "SELECT SUM(scope_run_id = ?1), SUM(scope_run_id IS NULL) FROM session_compactions",
+            [run.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, Option<u64>>(0)?.unwrap_or(0),
+                    row.get::<_, Option<u64>>(1)?.unwrap_or(0),
+                ))
+            },
+        )
+        .unwrap();
+    assert!((1..=3).contains(&scoped), "{scoped}");
+    assert_eq!(unscoped, 0);
+    drop(connection);
+
+    // Replay renders the same shape the live run saw: prompt, summary, then
+    // the retained turns; the reference oracle agrees.
+    let store = harness.runtime.inner.store.clone();
+    let session_id = harness.session_id;
+    let context = store
+        .call(Priority::Control, move |connection| {
+            let transaction = connection.transaction().unwrap();
+            load_model_context(&transaction, session_id, u64::MAX)
+        })
+        .await
+        .unwrap();
+    let replayed_results = context
+        .iter()
+        .flat_map(Message::content)
+        .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        .count();
+    assert_eq!(
+        replayed_results, results,
+        "replay renders what the live run last saw"
+    );
+    assert!(context.iter().any(|message| {
+        message.content().iter().any(|block| matches!(
+            block,
+            ContentBlock::Text { text } if text.starts_with(crate::sessions::IN_RUN_COMPACTION_PREAMBLE)
+        ))
+    }));
+    harness.runtime.shutdown().await.unwrap();
+    drop(store);
+    assert_assembly_matches_reference(
+        &harness.workspace_path.join("sessions.sqlite3"),
+        harness.session_id,
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_in_run_summary_fails_the_run_closed_without_resending_the_overflow() {
+    // The summarizer returns garbage (no required sections). The compaction
+    // run settles failed, no marker is written, and the prompt run fails with
+    // the context diagnosis naming the summarizer — it does not poll the
+    // provider with the overflowing request.
+    let turns = 48;
+    let mut harness = auto_compact_harness_with_loader_and_mode(
+        AutoCompactLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            scripts: vec![AutoCompactScript::ShellRepeatedlyWithSummaries {
+                turns,
+                text: "task complete".to_owned(),
+                summary: "not a summary".to_owned(),
+            }],
+            loads: StdMutex::new(0),
+            context_window: Some(16 * 1024),
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        },
+        ApprovalMode::Full,
+    )
+    .await;
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "do the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    let outcome = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, outcome, ..
+            } if *run_id == run => Some(outcome.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            &outcome,
+            RunOutcome::Failed { failure: RunFailure { kind: RunFailureKind::Policy, message } }
+                if message.contains("in-run compaction did not produce") && message.contains("summarizer failed")
+        ),
+        "{outcome:?}"
+    );
+    // One compaction run started and settled failed; nothing compacted.
+    let compaction = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunStarted { run_id, .. } if *run_id != run => Some(*run_id),
+            _ => None,
+        })
+        .expect("the in-run compaction must start");
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Failed { .. }, .. }
+            if *run_id == compaction
+    )));
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+    );
+    // The last provider request was the summarizer's, not a retry of the
+    // overflowing turn.
+    let requests = harness.requests.lock().unwrap();
+    let last = request_texts(requests.last().unwrap());
+    assert!(
+        last.last().unwrap().contains("Summarize this conversation"),
+        "{:?}",
+        last.last()
+    );
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let markers: u64 = connection
+        .query_row("SELECT COUNT(*) FROM session_compactions", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(markers, 0);
+    // The session is idle and usable afterwards.
+    let session = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, session, ..
+            } if *run_id == run => Some(session.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(session.status, SessionStatus::Idle);
+    assert_eq!(session.active_run_id, None);
+}
+
+#[tokio::test]
+async fn cancelling_during_in_run_compaction_settles_both_runs_once() {
+    // The summarizer stalls; the user cancels the prompt run. The cascade
+    // cancels the compaction (it is owned by the prompt run), both settle
+    // Cancelled exactly once, no marker is written, and the session is idle.
+    let turns = 48;
+    let mut harness = auto_compact_harness_with_loader_and_mode(
+        AutoCompactLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            scripts: vec![AutoCompactScript::ShellRepeatedlyWithSummaries {
+                turns,
+                text: "task complete".to_owned(),
+                summary: STALL_SUMMARY.to_owned(),
+            }],
+            loads: StdMutex::new(0),
+            context_window: Some(16 * 1024),
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        },
+        ApprovalMode::Full,
+    )
+    .await;
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "do the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(
+        &mut harness.events,
+        |event| matches!(event, SessionEvent::RunStarted { run_id, .. } if *run_id != run),
+    )
+    .await;
+    let SessionEvent::RunStarted {
+        run_id: compaction, ..
+    } = observed.last().unwrap().event
+    else {
+        panic!("expected the in-run compaction to start")
+    };
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelRun { run_id: run },
+        )
+        .await
+        .unwrap();
+    // Both terminals arrive; their order depends on which task settles first.
+    let mut observed = collect_until(&mut harness.events, finished_for(run)).await;
+    if !observed.iter().any(|event| {
+        matches!(
+            &event.event,
+            SessionEvent::RunFinished { run_id, .. } if *run_id == compaction
+        )
+    }) {
+        observed.extend(collect_until(&mut harness.events, finished_for(compaction)).await);
+    }
+    let finished: Vec<(RunId, RunOutcome)> = observed
+        .iter()
+        .filter_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, outcome, ..
+            } => Some((*run_id, outcome.clone())),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        finished
+            .iter()
+            .any(|(id, outcome)| *id == run && matches!(outcome, RunOutcome::Cancelled)),
+        "{finished:?}"
+    );
+    assert!(
+        finished
+            .iter()
+            .any(|(id, outcome)| *id == compaction && matches!(outcome, RunOutcome::Cancelled)),
+        "{finished:?}"
+    );
+    assert_eq!(finished.iter().filter(|(id, _)| *id == run).count(), 1);
+    assert_eq!(
+        finished.iter().filter(|(id, _)| *id == compaction).count(),
+        1
+    );
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+    );
+    assert!(
+        harness
+            .runtime
+            .inner
+            .store
+            .unfinished_run_ids()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    harness.runtime.shutdown().await.unwrap();
+}
+
+/// Marker text the scripted summarizer treats as "never reply".
+const STALL_SUMMARY: &str = "__STALL__";
+
+#[tokio::test]
+async fn an_in_run_marker_survives_restart_and_folds_into_a_later_between_run_compaction() {
+    // Run one compacts itself mid-run and completes. After a restart, a new
+    // prompt's context renders run one as prompt + in-run summary + retained
+    // turns (not all 48 results). When that session later compacts between
+    // runs, the between-run summarizer reads the already-summarized shape,
+    // and its marker supersedes the in-run one in assembly.
+    let turns = 48;
+    let mut harness = in_run_compaction_harness(turns, 16 * 1024, "work so far").await;
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "do the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if *run_id == run
+    )));
+    let after = observed.last().unwrap().cursor;
+    let workspace_id = harness.workspace_id;
+    let session_id = harness.session_id;
+    let database_path = harness.workspace_path.join("sessions.sqlite3");
+    harness.runtime.close().await.unwrap();
+    drop(harness.runtime);
+
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(database_path.clone()),
+        Arc::new(AutoCompactLoader {
+            requests: Arc::clone(&requests),
+            scripts: vec![
+                AutoCompactScript::Text("follow-up answer".to_owned()),
+                AutoCompactScript::Text(valid_summary("between-run summary")),
+                AutoCompactScript::Text("after compaction".to_owned()),
+            ],
+            loads: StdMutex::new(0),
+            context_window: Some(16 * 1024),
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        }),
+    )
+    .await
+    .unwrap();
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after,
+        })
+        .unwrap();
+    let follow_up = queue_prompt(&runtime, session_id, "and then?".to_owned()).await;
+    collect_until(&mut events, finished_for(follow_up)).await;
+    {
+        let requests = requests.lock().unwrap();
+        let first = &requests[0];
+        let texts = request_texts(first);
+        assert_eq!(texts.first().map(String::as_str), Some("do the task"));
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.starts_with(crate::sessions::IN_RUN_COMPACTION_PREAMBLE)),
+            "the reopened session renders run one's in-run summary: {texts:?}"
+        );
+        let results = first
+            .messages()
+            .iter()
+            .flat_map(Message::content)
+            .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+            .count();
+        assert!(results < turns / 2, "{results}");
+        assert_eq!(texts.last().map(String::as_str), Some("and then?"));
+    }
+
+    // Manual between-run compaction folds everything, in-run summary included.
+    let compaction = compact_session(&runtime, session_id).await;
+    let observed = collect_until(&mut events, finished_for(compaction)).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. }
+            if *run_id == compaction
+    )));
+    {
+        let requests = requests.lock().unwrap();
+        let summarizer = request_texts(&requests[1]);
+        assert!(
+            summarizer
+                .iter()
+                .any(|text| text.starts_with(crate::sessions::IN_RUN_COMPACTION_PREAMBLE)),
+            "the between-run summarizer reads the in-run summary, not 48 raw turns"
+        );
+    }
+    let next = queue_prompt(&runtime, session_id, "continue".to_owned()).await;
+    collect_until(&mut events, finished_for(next)).await;
+    {
+        let requests = requests.lock().unwrap();
+        let texts = request_texts(requests.last().unwrap());
+        assert!(
+            texts
+                .first()
+                .is_some_and(|text| text.starts_with(COMPACTION_SUMMARY_PREAMBLE)),
+            "{texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.starts_with(crate::sessions::IN_RUN_COMPACTION_PREAMBLE)),
+            "the between-run marker supersedes run one entirely: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("between-run summary"))
+        );
+    }
+    // Rollback pops the between-run marker; the in-run marker applies again.
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::RollbackCompaction { session_id },
+        )
+        .await
+        .unwrap();
+    let store = runtime.inner.store.clone();
+    let context = store
+        .call(Priority::Control, move |connection| {
+            let transaction = connection.transaction().unwrap();
+            load_model_context(&transaction, session_id, u64::MAX)
+        })
+        .await
+        .unwrap();
+    assert!(context.iter().any(|message| {
+        message.content().iter().any(|block| matches!(
+            block,
+            ContentBlock::Text { text } if text.starts_with(crate::sessions::IN_RUN_COMPACTION_PREAMBLE)
+        ))
+    }));
+    runtime.close().await.unwrap();
+    drop(store);
+    assert_assembly_matches_reference(&database_path, session_id);
+}
+
+#[test]
+fn in_run_compaction_boundary_keeps_the_recent_turns_with_their_results() {
+    use crate::sessions::in_run_compaction_boundary as boundary;
+    let assistant = || Message::assistant("t");
+    let results = || Message::tool_results(vec![]);
+    // Six turns, each assistant + results. Keeping four replaces the first
+    // two turns (four messages) and reports cutoff 2.
+    let run: Vec<Message> = (0..6).flat_map(|_| [assistant(), results()]).collect();
+    assert_eq!(boundary(&run, 4), Some((4, 2)));
+    // Steering applied before the first kept turn was part of the replaced
+    // span's request and is summarized with it — the same rule assembly
+    // uses (`applied_before <= turn_cutoff`).
+    let mut with_steer = run.clone();
+    with_steer.insert(4, Message::user("steer"));
+    assert_eq!(boundary(&with_steer, 4), Some((5, 2)));
+    // Exactly the keep count: nothing to replace.
+    let short: Vec<Message> = (0..4).flat_map(|_| [assistant(), results()]).collect();
+    assert_eq!(boundary(&short, 4), None);
+    assert_eq!(boundary(&[], 4), None);
+    // A prior in-run summary at the head is replaced along with the turns.
+    let mut folded = vec![Message::user("summary so far")];
+    folded.extend((0..5).flat_map(|_| [assistant(), results()]));
+    assert_eq!(boundary(&folded, 4), Some((3, 1)));
+}
+
+#[tokio::test]
+async fn an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verbatim() {
+    // #97 fixed the between-run summarizer joining truncated turns with a
+    // newline through a mid-token cut. The in-run summarizer takes its own
+    // path (`Runtime::summarize`), so it must continue a cut reply the same
+    // way and concatenate the pieces byte-for-byte; a heading split at the
+    // cut still validates and the committed summary is the whole text.
+    let turns = 48;
+    let summary = valid_summary("continued");
+    // Cut inside the word "Decisions" so the seam splits a required heading.
+    let cut = summary.find("Decis").unwrap() + "Decis".len();
+    let mut harness = auto_compact_harness_with_loader_and_mode(
+        AutoCompactLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            scripts: vec![AutoCompactScript::ShellRepeatedlyWithTruncatedSummaries {
+                turns,
+                text: "task complete".to_owned(),
+                summary: summary.clone(),
+                cut,
+            }],
+            loads: StdMutex::new(0),
+            context_window: Some(16 * 1024),
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        },
+        ApprovalMode::Full,
+    )
+    .await;
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "do the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    let outcome = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, outcome, ..
+            } if *run_id == run => Some(outcome.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
+    let compactions = observed
+        .iter()
+        .filter(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+        .count();
+    assert!(compactions >= 1);
+    // Every stored in-run summary is the full text: heading intact, no seam.
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let mut statement = connection
+        .prepare("SELECT summary FROM session_compactions WHERE scope_run_id = ?1")
+        .unwrap();
+    let stored: Vec<String> = statement
+        .query_map([run.to_string()], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(!stored.is_empty());
+    for text in &stored {
+        assert!(text.starts_with(&summary), "{text}");
+        assert!(
+            text.contains("Decisions and constraints: continued"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Decis\n"),
+            "a newline was inserted at the cut: {text}"
+        );
+    }
+    // Each summarizer exchange was two provider requests: the cut reply and
+    // its continuation carrying the truncation notice.
+    let requests = harness.requests.lock().unwrap();
+    let continuations = requests
+        .iter()
+        .filter(|request| {
+            request_texts(request)
+                .last()
+                .is_some_and(|text| text.contains("cut off at the output token limit"))
+        })
+        .count();
+    assert_eq!(continuations, compactions);
+}

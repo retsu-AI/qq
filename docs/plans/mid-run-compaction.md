@@ -1,7 +1,20 @@
 # Mid-Run Compaction At A Tool Boundary
 
-Status: proposed. Linear: [ENG-793](https://linear.app/retsu-ai/issue/ENG-793)
+Status: **superseded in part by [ADR-0039](../adr/0039-in-run-compaction.md)
+and #92** (2026-09-20). Linear: [ENG-793](https://linear.app/retsu-ai/issue/ENG-793)
 (audit F03; also the ROOT-5 "true mid-run summarization" deferral).
+
+This plan was written in parallel with the implementation. What shipped keeps
+§ The Boundary and § What Compaction Must Preserve (with keep-turns fixed at
+`CONTEXT_PRUNE_KEEP_TURNS` and steering folded into the summary input) and
+replaces § Durable Protocol: there is no resume marker, no `RunCompacting`
+event, and no `cutoff_turn_ordinal` on the between-run marker. Instead an
+in-run compaction is an internal run *owned by* the prompt run (no session
+slot), committing a `session_compactions` row with `scope_run_id` +
+`turn_cutoff` atomically with its own settlement. MRC-0 (ADR) is done as
+ADR-0039; MRC-1..3 are done by #92; **MRC-4 (surfaces) and MRC-5 (live
+evidence) remain open** and are the reason this file stays. The open
+questions below are answered in ADR-0039 § Consequences.
 
 A task that legitimately spans several context windows cannot complete in one
 run today. `sessions/execution.rs` plans every later turn of a prompt run with

@@ -2085,6 +2085,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
         context_compaction_remaining: false,
         compaction_cutoff_ordinal: None,
         context_compaction_oversized_unit_bytes: None,
+        in_run_turn_cutoff: None,
         context_overflow_basis: None,
         context_occupancy: None,
         limits: RunLimits::default(),

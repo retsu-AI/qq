@@ -1906,6 +1906,7 @@ fn denial_capacity_fixture(
         context_compaction_remaining: false,
         compaction_cutoff_ordinal: None,
         context_compaction_oversized_unit_bytes: None,
+        in_run_turn_cutoff: None,
         context_overflow_basis: None,
         context_occupancy: None,
         limits: RunLimits::default(),
@@ -2425,6 +2426,35 @@ mod reference_assembly {
             .into_iter()
             .map(|(turn, output, id)| Ok((turn, render_message(transaction, &id, output)?)))
             .collect::<Result<std::collections::VecDeque<_>, SessionRuntimeError>>()?;
+        // The newest in-run marker scoped to this run replaces its turns
+        // through `turn_cutoff`, plus the steering applied before them.
+        let marker: Option<(String, u32)> = transaction
+            .query_row(
+                "SELECT summary, turn_cutoff FROM session_compactions
+                     WHERE scope_run_id = ?1 ORDER BY rowid DESC LIMIT 1",
+                [run_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let mut turns = turns;
+        if let Some((summary, turn_cutoff)) = marker {
+            let replaced = turns
+                .iter()
+                .take_while(|(ordinal, _, _)| *ordinal <= turn_cutoff)
+                .count();
+            if replaced > 0 {
+                turns.drain(..replaced);
+                while steering
+                    .front()
+                    .is_some_and(|(applied_before, _)| *applied_before <= turn_cutoff)
+                {
+                    steering.pop_front();
+                }
+                context.push(Message::user(format!(
+                    "{IN_RUN_COMPACTION_PREAMBLE}\n\n{summary}"
+                )));
+            }
+        }
         for (turn_ordinal, content_json, truncated) in turns {
             while steering
                 .front()
@@ -2587,6 +2617,26 @@ async fn collect_through_compacted(events: &mut SessionEventStream) -> Vec<Sessi
 
 /// A structurally valid summarizer reply carrying `body` under every
 /// required section, so validation passes and tests can still grep for it.
+/// Turns a prior in-run summary in `request` says were already done, read
+/// back from the `turns_done=N` line the scripted summarizer wrote.
+fn summarized_turns(request: &ModelRequest) -> usize {
+    request
+        .messages()
+        .iter()
+        .flat_map(Message::content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => text.lines().find_map(|line| {
+                line.strip_prefix("turns_done=")?
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+            }),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 fn valid_summary(body: &str) -> String {
     format!(
         "1. Intent: {body}\n2. Decisions and constraints: {body}\n3. Work state: {body}\n\
@@ -2676,6 +2726,26 @@ enum AutoCompactScript {
     /// Reads `note.txt` once per turn for `turns` turns, then streams the
     /// text: grows one run's own transcript with prunable results.
     ReadNoteRepeatedly { turns: usize, text: String },
+    /// Runs `shell` (a mutating effect, so never stubbed) once per turn for
+    /// `turns` turns, then streams the text. Any request ending with the
+    /// summarizer instruction is answered with `summary` instead, so one
+    /// loaded provider serves both the run and its in-run compactions. The
+    /// turn count is taken from the request's own tool results plus the
+    /// turns a summary in context says were already done.
+    ShellRepeatedlyWithSummaries {
+        turns: usize,
+        text: String,
+        summary: String,
+    },
+    /// `ShellRepeatedlyWithSummaries` whose summarizer reply is cut at the
+    /// output limit after `cut` bytes on the first request and completed on
+    /// the continuation, so an in-run summary exercises the truncation join.
+    ShellRepeatedlyWithTruncatedSummaries {
+        turns: usize,
+        text: String,
+        summary: String,
+        cut: usize,
+    },
     /// Calls `search_history` with the query on the first turn, then
     /// streams the text.
     SearchHistoryThenText(String, String),
@@ -2801,6 +2871,17 @@ impl Provider for AutoCompactProvider {
                 _ => None,
             })
             .collect();
+        let summarized_before = summarized_turns(&request);
+        let last_text = request
+            .messages()
+            .last()
+            .and_then(|message| {
+                message.content().iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+            })
+            .unwrap_or_default();
         self.requests.lock().unwrap().push(request);
         match &self.script {
             AutoCompactScript::Text(text) => Box::pin(stream::iter([
@@ -2864,6 +2945,104 @@ impl Provider for AutoCompactProvider {
                             id: "call_read".to_owned(),
                         }),
                         Ok(qq_provider::ProviderEvent::Completed { usage }),
+                    ]))
+                }
+            }
+            AutoCompactScript::ShellRepeatedlyWithTruncatedSummaries {
+                turns,
+                text,
+                summary,
+                cut,
+            } => {
+                // A continuation request ends with the truncation notice; the
+                // summarizer request proper ends with the instruction.
+                if last_text.contains("cut off at the output token limit") {
+                    let summarized = prior_results.len() + summarized_before;
+                    let full = format!("{summary}\nturns_done={summarized}");
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: full[*cut..].to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                if last_text.contains("Summarize this conversation") {
+                    let summarized = prior_results.len() + summarized_before;
+                    let full = format!("{summary}\nturns_done={summarized}");
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: full[..*cut].to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Incomplete {
+                            usage: None,
+                            reason: qq_provider::IncompleteReason::OutputTokens,
+                        }),
+                    ]));
+                }
+                let done = prior_results.len() + summarized_before;
+                if done >= *turns {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    let id = format!("call_shell_{done}");
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: id.clone(),
+                            name: "shell".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: id.clone(),
+                            json: format!(
+                                r#"{{"command":"echo step {done}; head -c 6000 /dev/zero | tr '\\0' x"}}"#
+                            ),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
+            }
+            AutoCompactScript::ShellRepeatedlyWithSummaries {
+                turns,
+                text,
+                summary,
+            } => {
+                if last_text.contains("Summarize this conversation") {
+                    if summary == "__STALL__" {
+                        return Box::pin(stream::pending());
+                    }
+                    // Fold the count of turns already summarized into the
+                    // summary so the next request can resume the count.
+                    let summarized = prior_results.len() + summarized_before;
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: format!("{summary}\nturns_done={summarized}"),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let done = prior_results.len() + summarized_before;
+                if done >= *turns {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    let id = format!("call_shell_{done}");
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: id.clone(),
+                            name: "shell".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: id.clone(),
+                            json: format!(
+                                r#"{{"command":"echo step {done}; head -c 6000 /dev/zero | tr '\\0' x"}}"#
+                            ),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
                     ]))
                 }
             }

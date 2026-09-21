@@ -735,11 +735,25 @@ One durable run follows a guarded loop:
    sent (the estimate is conservative); if the provider rejects it the
    prompt fails naming that unit and its size, distinct from a spent step
    count. Manual `/compact` on an oversized transcript takes one bounded
-   step per command. Within a run the
-   transcript cannot be compacted, but before a later turn is refused for
-   the window the run stubs its own read-only results older than the
+   step per command. Within a run, before a later turn is refused for the
+   window, the loop first stubs its own read-only results older than the
    recency window in memory (the same rewrite assembly applies between
-   runs) and re-plans; only when that does not fit does the turn fail.
+   runs) and re-plans. If that still does not fit, the run compacts
+   *itself* at the boundary — every tool result durable, nothing in flight,
+   steering applied: it hands its prompt and every turn but the last
+   `CONTEXT_PRUNE_KEEP_TURNS` to an in-run compactor
+   (`runtime::InRunCompactor`, installed only on session prompt runs), which
+   runs the summarizer as an internal `compaction` run owned by the prompt
+   run (no session slot taken, own usage/cost/events) and commits a marker
+   scoped to that run (`session_compactions.scope_run_id`, `turn_cutoff`).
+   The loop splices the summary in where the replaced turns stood and
+   continues in the same run; a later overflow folds the previous summary
+   with the next turns. Each in-run step counts against the same
+   `MAX_COMPACTION_STEPS` as between-run steps. A rejected or stalled
+   summarizer settles its run failed/cancelled, writes no marker, and the
+   prompt run fails closed with the reason — the overflowing request is
+   never sent. Cancelling the prompt run cascades to its in-run compaction.
+   Direct `qq ask` runs have no compactor and fail as before.
 4. In one guarded transaction, persist the resolved model, prompt identity,
    exact request measurement, running/session/message state, and `RunStarted`.
 5. Re-read cancellation, then poll the provider only after that transaction
@@ -1004,8 +1018,11 @@ contract pay nothing: no allocation, no event, no prompt change.
 Compaction is a property of that projection, not an edit to the transcript: a
 validated summary row and cutoff marker commit atomically with the internal
 summarization run (a bounded step carries its own cutoff, the unit boundary it
-read to; an unbounded one covers everything settled), three compactions are
-retained per session for
+read to; an unbounded one covers everything settled; an in-run marker names
+the run and the turn ordinal it covers, and assembly renders that run as
+prompt, summary, then its later turns verbatim). A between-run marker
+supersedes any in-run markers behind its cutoff; rollback pops the newest
+marker of either kind. Three compactions are retained per session for
 `RollbackCompaction`, and a summary that is empty, missing a required section,
 or fails to shrink the measured assembly settles as a policy failure while the
 prior compaction stays in force. `search_history` is the recall path that makes

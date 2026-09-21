@@ -166,6 +166,13 @@ pub(crate) enum RuntimeEvent {
     /// Queued steering entered model context: the message will be part of
     /// the request for `turn_ordinal`. Emitted at the boundary, before that
     /// turn is prepared.
+    /// The run summarized its own turns through `turn_cutoff` before
+    /// preparing `turn_ordinal`; the compactor already committed the marker.
+    /// Informational for the session layer (occupancy is unknown again).
+    InRunCompacted {
+        turn_ordinal: u32,
+        turn_cutoff: u32,
+    },
     SteeringApplied {
         message_id: MessageId,
         turn_ordinal: u32,

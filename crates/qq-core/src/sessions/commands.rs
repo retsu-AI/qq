@@ -862,7 +862,25 @@ pub(super) fn execute_command(
                         None => finished.cursor,
                     }
                 } else {
-                    requested.cursor
+                    // A running prompt may own an in-run compaction that is
+                    // summarizing on its behalf right now; cancelling the
+                    // prompt cancels that too, so neither waits on a stalled
+                    // summarizer.
+                    match cascade_in_run_compaction_cancel(
+                        &transaction,
+                        store_id,
+                        workspace_id,
+                        session_id,
+                        run_id,
+                        command_id,
+                        now,
+                    )? {
+                        Some((compaction_run, event)) => {
+                            cascade_cancels.push(compaction_run);
+                            event.cursor
+                        }
+                        None => requested.cursor,
+                    }
                 };
                 let owned =
                     cancel_owned_child_runs(&transaction, store_id, run_id, command_id, now)?;
