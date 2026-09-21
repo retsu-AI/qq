@@ -69,7 +69,11 @@ impl ToolGate for CompactionRunGate {
     }
 }
 
-const COMPACTION_OUTPUT_RESERVE_TOKENS: u32 = 2_048;
+/// Output tokens reserved for the summarizer's reply. A long session's
+/// structured summary runs well past 2 k tokens; a reserve that small forced
+/// the output-truncation continuation path on every real compaction and
+/// failed any summary longer than the continuation cap allowed.
+const COMPACTION_OUTPUT_RESERVE_TOKENS: u32 = 8_192;
 
 struct PreparedExecution {
     events: crate::RuntimeStream,
@@ -1584,8 +1588,11 @@ async fn execute_started_run(
     let mut checkpoint_in_flight = None;
     let mut tools_awaiting_checkpoint = std::collections::HashSet::<ToolCallId>::new();
     // An internal run's streamed output never joins the transcript; the
-    // summary accumulates here and persists as a compaction row instead.
+    // summary accumulates here and persists as a compaction row instead. A
+    // turn cut at the output limit is continued mid-token, so its successor
+    // is appended verbatim; completed turns are separated by a newline.
     let mut summary_text = String::new();
+    let mut summary_continues_truncated_turn = false;
     loop {
         let input = if let Some(deadline) = flush_at {
             tokio::select! {
@@ -2281,12 +2288,14 @@ async fn execute_started_run(
                     accounting.record_turn(usage);
                     for block in message.content() {
                         if let ContentBlock::Text { text } = block {
-                            if !summary_text.is_empty() {
+                            if !summary_text.is_empty() && !summary_continues_truncated_turn {
                                 summary_text.push('\n');
                             }
                             summary_text.push_str(text);
+                            summary_continues_truncated_turn = false;
                         }
                     }
+                    summary_continues_truncated_turn = truncated;
                     current_turn = turn_ordinal.saturating_add(1);
                     match inner
                         .store
