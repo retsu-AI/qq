@@ -45,6 +45,7 @@ written.
 - [ADR-0033: model-choice provenance](0033-model-choice-provenance.md) — Accepted.
 - [ADR-0034: concrete Jev routing](0034-concrete-jev-routing.md) — Accepted.
 - [ADR-0035: global configuration leaf symlinks](0035-global-leaf-config-symlinks.md) — Accepted.
+- [ADR-0038: session retention — archive by session, never by row; receipts and cursors outlive their sessions](0038-session-retention.md) — Proposed (ENG-803).
 
 ## When to write one
 
