@@ -4,20 +4,20 @@ Plan: [`../run-reliability.md`](../run-reliability.md). Only the agent
 working this plan edits this file. Current state on top; dated entries
 appended below, newest last.
 
-| Slice | Goal | Status | Branch / PR | Notes |
-| --- | --- | --- | --- | --- |
-| RR1 | Checkpoint turn tolerates a tool call | Shipped (#108) | `feat/rr1-checkpoint-tolerance` | 5 runs / 120 min in the audit |
-| RR2 | Slash/empty-prompt validation at admission | Shipped (#116) | `fix/rr2-slash-admission` | 3 slash runs; the 5 "messages must not be empty" runs predate #27 |
-| RR3 | Jev exhaustion is an outcome, not a failure | Shipped (#117) | `fix/rr3-jev-verdict-outcome` | 9 runs |
-| RR4 | Turn-level recovery; `Paused`; `TurnRetry`; ADR-0040 superseding 0005 | In review | `feat/rr4-turn-recovery` (stacked on RR5) | 12 runs / 4.5 h; independent review requested |
-| RR5 | `Retry-After` ≤ 60 s; 529 retryable; HTTP-date | In review | `fix/rr5-retry-after` | provider crate; minimal profile green |
-| RR6 | Reactive overflow; un-wedge admission (mid-run compaction shipped in #92) | Planned | | 9 runs / 3 sessions; independent review |
-| RR7 | Estimate calibration from reported usage | Planned | | deferred from F04 |
-| RR8 | Output-token handling and persisted `max_output_tokens` floor | Planned | | 5 runs |
-| RR9 | Approval deadline policy | Planned | | 4 timeouts |
-| RR10 | Lenient tool-argument decode | Planned | | ~11 wasted turns |
-| RR11 | Read-hash ledger persisted | Planned | | 14 refusals |
-| RR12 | Stream leniency, loop result, latency stats | Planned | | latent |
+| Slice | Goal | Status | Linear | Branch / PR | Notes |
+| --- | --- | --- | --- | --- | --- |
+| RR1 | Checkpoint turn tolerates a tool call | Shipped (#108) | [ENG-863](https://linear.app/retsu-ai/issue/ENG-863) | `feat/rr1-checkpoint-tolerance` | 5 runs / 120 min in the audit |
+| RR2 | Slash/empty-prompt validation at admission | Shipped (#116) | [ENG-864](https://linear.app/retsu-ai/issue/ENG-864) | `fix/rr2-slash-admission` | 3 slash runs; the 5 "messages must not be empty" runs predate #27 |
+| RR3 | Jev exhaustion is an outcome, not a failure | Shipped (#117) | [ENG-865](https://linear.app/retsu-ai/issue/ENG-865) | `fix/rr3-jev-verdict-outcome` | 9 runs |
+| RR4 | Turn-level recovery; `Paused`; `TurnRetry`; ADR-0040 superseding 0005 | Shipped (#120) | [ENG-867](https://linear.app/retsu-ai/issue/ENG-867) | `feat/rr4-turn-recovery` | 12 runs / 4.5 h; protocol 25 → 26 |
+| RR5 | `Retry-After` ≤ 60 s; 529 retryable; HTTP-date | Shipped (#118) | [ENG-866](https://linear.app/retsu-ai/issue/ENG-866) | `fix/rr5-retry-after` | provider crate; minimal profile green |
+| RR6 | Reactive overflow; un-wedge admission (mid-run compaction shipped in #92) | Planned | [ENG-868](https://linear.app/retsu-ai/issue/ENG-868) | | 9 runs / 3 sessions; independent review |
+| RR7 | Estimate calibration from reported usage | Planned | [ENG-869](https://linear.app/retsu-ai/issue/ENG-869) | | deferred from F04 |
+| RR8 | Output-token handling and persisted `max_output_tokens` floor | Planned | [ENG-870](https://linear.app/retsu-ai/issue/ENG-870) | | 5 runs |
+| RR9 | Approval deadline policy | Planned | [ENG-871](https://linear.app/retsu-ai/issue/ENG-871) | | 4 timeouts |
+| RR10 | Lenient tool-argument decode | Planned | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872) | | ~11 wasted turns |
+| RR11 | Read-hash ledger persisted | Planned | [ENG-873](https://linear.app/retsu-ai/issue/ENG-873) | | 14 refusals |
+| RR12 | Stream leniency, loop result, latency stats | Planned | [ENG-874](https://linear.app/retsu-ai/issue/ENG-874) | | latent |
 
 ## Entries
 
