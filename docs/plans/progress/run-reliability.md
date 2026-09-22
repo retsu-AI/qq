@@ -11,7 +11,7 @@ appended below, newest last.
 | RR3 | Jev exhaustion is an outcome, not a failure | Shipped (#117) | [ENG-865](https://linear.app/retsu-ai/issue/ENG-865) | `fix/rr3-jev-verdict-outcome` | 9 runs |
 | RR4 | Turn-level recovery; `Paused`; `TurnRetry`; ADR-0040 superseding 0005 | Shipped (#120) | [ENG-867](https://linear.app/retsu-ai/issue/ENG-867) | `feat/rr4-turn-recovery` | 12 runs / 4.5 h; protocol 25 → 26 |
 | RR5 | `Retry-After` ≤ 60 s; 529 retryable; HTTP-date | Shipped (#118) | [ENG-866](https://linear.app/retsu-ai/issue/ENG-866) | `fix/rr5-retry-after` | provider crate; minimal profile green |
-| RR6 | Reactive overflow; un-wedge admission (mid-run compaction shipped in #92) | Planned | [ENG-868](https://linear.app/retsu-ai/issue/ENG-868) | | 9 runs / 3 sessions; independent review |
+| RR6 | Reactive overflow; un-wedge admission (mid-run compaction shipped in #92) | In review | [ENG-868](https://linear.app/retsu-ai/issue/ENG-868) | `feat/eng-868-rr6-reactive-overflow` | 9 runs / 3 sessions; independent review |
 | RR7 | Estimate calibration from reported usage | Planned | [ENG-869](https://linear.app/retsu-ai/issue/ENG-869) | | deferred from F04 |
 | RR8 | Output-token handling and persisted `max_output_tokens` floor | Planned | [ENG-870](https://linear.app/retsu-ai/issue/ENG-870) | | 5 runs |
 | RR9 | Approval deadline policy | Planned | [ENG-871](https://linear.app/retsu-ai/issue/ENG-871) | | 4 timeouts |
@@ -140,3 +140,31 @@ that asserted `Failed` for an offline provider now assert `Paused` and
 suite stays at ~15 s. Replaces `the_run_loop_never_resends_a_turn`.
 Workspace green incl. minimal provider profile. Independent review
 requested per `workflow.md` § 4 (touches `sessions/`, protocol bump).
+
+### 2026-09-22 — RR6 reactive overflow and un-wedged admission (ENG-868)
+
+(b) In the run loop, a `ProviderContextExceeded` stream error before any
+block streamed, on a run with a compactor and a compaction boundary, sets
+`provider_overflowed` and `continue 'turns`: the next pass forces the stub
+and in-run compaction paths regardless of the estimate, then re-issues the
+turn. Granted once per turn ordinal (`reactive_compaction_turn`); a second
+rejection fails as before. New informational `RuntimeEvent::ProviderOverflow`
+clears the session's measured occupancy basis. (c) At admission, a
+`Reject(Exhausted(Attempted))` plan — or a known-overflow repeat whose fold
+is exhausted — no longer fails the prompt: `admit_with_summary_only_history`
+reloads the reserved prompt, prepends `SUMMARY_ONLY_NOTICE` + the latest
+between-run summary (from the new `Store::latest_compaction_summary`), and
+loops once (`summary_only_admission`); the smaller request is judged on its
+own. The known-overflow basis check is skipped for the downgraded shape
+since the shape-level basis is byte-independent. No store schema change,
+no protocol change. Tests:
+`a_provider_window_rejection_compacts_the_run_and_continues` (scripted 413
+at 7 results with a 200k window → one in-run compaction, 12 calls once,
+next prompt normal) and
+`an_exhausted_fold_admits_the_prompt_with_summary_only_history` (step one
+commits, prompt rejected, step two rejected → retry runs from the summary,
+four prompts still in the store). Five fixtures that asserted the old
+"exhausted → refuse" policy now assert summary-only admission; the
+`Sequence` scripts account for the summarizer's turn retries. New harness
+script `ShellRepeatedlyWithProviderOverflow`. Independent review requested
+(touches `sessions/`).

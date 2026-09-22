@@ -2751,6 +2751,18 @@ enum AutoCompactScript {
         text: String,
         summary: String,
     },
+    /// `ShellRepeatedlyWithSummaries` whose provider rejects the request as
+    /// exceeding its window once the transcript holds `overflow_at` results,
+    /// unless the request carries an in-run summary: a provider whose
+    /// tokenizer disagrees with the estimate. Summarizer requests still
+    /// answer with the summary.
+    ShellRepeatedlyWithProviderOverflow {
+        turns: usize,
+        overflow_at: usize,
+        text: String,
+        summary: String,
+        overflows: Arc<AtomicUsize>,
+    },
     /// `ShellRepeatedlyWithSummaries` whose summarizer reply is cut at the
     /// output limit after `cut` bytes on the first request and completed on
     /// the continuation, so an in-run summary exercises the truncation join.
@@ -3054,6 +3066,56 @@ impl Provider for AutoCompactProvider {
                             json: format!(
                                 r#"{{"command":"echo step {done}; head -c 6000 /dev/zero | tr '\\0' x"}}"#
                             ),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
+            }
+            AutoCompactScript::ShellRepeatedlyWithProviderOverflow {
+                turns,
+                overflow_at,
+                text,
+                summary,
+                overflows,
+            } => {
+                if last_text.contains("Summarize this conversation") {
+                    let summarized = prior_results.len() + summarized_before;
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: format!("{summary}\nturns_done={summarized}"),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                // The provider's own tokenizer says the window is full once
+                // the verbatim results reach `overflow_at`; a compacted
+                // request (summary in context, fewer results) fits again.
+                if prior_results.len() >= *overflow_at && summarized_before == 0 {
+                    overflows.fetch_add(1, Ordering::SeqCst);
+                    return Box::pin(stream::iter([Err(
+                        qq_provider::ProviderError::ResponseFailed {
+                            kind: qq_provider::ProviderErrorKind::ContextExceeded,
+                            message: "scripted context overflow".to_owned(),
+                        },
+                    )]));
+                }
+                let done = prior_results.len() + summarized_before;
+                if done >= *turns {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    let id = format!("call_shell_{done}");
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: id.clone(),
+                            name: "shell".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: id.clone(),
+                            json: format!(r#"{{"command":"echo step {done}"}}"#),
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
                         Ok(qq_provider::ProviderEvent::Completed { usage: None }),
