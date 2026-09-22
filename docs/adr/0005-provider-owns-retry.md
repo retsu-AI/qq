@@ -1,6 +1,6 @@
 # ADR-0005 — The provider is the single retry owner
 
-**Status:** Accepted
+**Status:** Accepted; superseded in part by [ADR-0040](0040-two-phase-retry-ownership.md) (the run owns *turn* recovery after a transient fault; the provider still owns every resend of one request)
 **Date:** 2026-09-04
 **Deciders:** speed-first plan D3 / H14
 **Implements:** [`architecture.md` § Provider Compilation](../design/architecture.md#provider-compilation)

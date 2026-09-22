@@ -1580,10 +1580,10 @@ async fn a_failed_child_returns_a_tool_error_and_the_parent_continues() {
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
 
-    // The child run failed, visibly, on its own session.
+    // The child run paused on its own session after retrying the fault.
     assert!(observed.iter().any(|event| matches!(
         &event.event,
-        SessionEvent::RunFinished { run_id: done, outcome: RunOutcome::Failed { .. }, .. }
+        SessionEvent::RunFinished { run_id: done, outcome: RunOutcome::Paused { .. }, .. }
             if *done != run_id
     )));
     // The parent saw a tool error and still completed.
@@ -1591,7 +1591,7 @@ async fn a_failed_child_returns_a_tool_error_and_the_parent_continues() {
     assert!(matches!(
         parent_reqs[1].messages()[2].content(),
         [ContentBlock::ToolResult { content, is_error: true, .. }]
-            if content.contains("the sub-agent run failed") && content.contains("offline")
+            if content.contains("the sub-agent run paused") && content.contains("offline")
     ));
     drop(parent_reqs);
     assert!(matches!(

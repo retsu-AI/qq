@@ -941,11 +941,14 @@ async fn failed_manual_compaction_does_not_mask_provider_overflow_evidence() {
 
     let failed_compaction = compact_session(&harness.runtime, harness.session_id).await;
     let failed = collect_until(&mut harness.events, finished_for(failed_compaction)).await;
+    // A transport fault before any summary text streamed: the run's own
+    // recovery re-issues the turn until its allowance is spent, then the
+    // compaction settles paused (no marker committed).
     assert!(failed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::RunFinished {
             run_id,
-            outcome: RunOutcome::Failed { .. },
+            outcome: RunOutcome::Paused { .. },
             ..
         } if *run_id == failed_compaction
     )));
@@ -962,7 +965,7 @@ async fn failed_manual_compaction_does_not_mask_provider_overflow_evidence() {
     assert!(compacted < prompt_started);
     assert_eq!(
         harness.requests.lock().unwrap().len(),
-        4,
+        4 + usize::from(crate::MAX_TURN_RETRIES),
         "the retry must compact instead of repeating the known overflow"
     );
 }
@@ -1123,9 +1126,11 @@ async fn failed_overflow_recovery_never_resends_the_known_overflowing_prompt() {
             ..
         } if *run_id == second && message.contains("provider previously rejected")
     )));
+    // One overflow, then the failed summarizer's attempt plus its turn
+    // retries; the second prompt itself never reaches the provider.
     assert_eq!(
         harness.requests.lock().unwrap().len(),
-        2,
+        2 + usize::from(crate::MAX_TURN_RETRIES),
         "the second prompt must not repeat a provider-known overflow"
     );
 }
@@ -1358,7 +1363,8 @@ async fn a_failed_auto_compaction_does_not_strand_the_queued_prompt() {
     )
     .await;
     let observed = collect_until(&mut harness.events, finished_for(second)).await;
-    // The summarizer failed and committed nothing...
+    // The summarizer's transport fault was retried and then paused: nothing
+    // committed...
     let compaction = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -1368,7 +1374,7 @@ async fn a_failed_auto_compaction_does_not_strand_the_queued_prompt() {
         .unwrap();
     assert!(observed.iter().any(|event| matches!(
         &event.event,
-        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Failed { .. }, .. }
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Paused { .. }, .. }
             if *run_id == compaction
     )));
     assert!(
@@ -1391,7 +1397,10 @@ async fn a_failed_auto_compaction_does_not_strand_the_queued_prompt() {
             ..
         } if *run_id == second
     )));
-    assert_eq!(harness.requests.lock().unwrap().len(), 2);
+    assert_eq!(
+        harness.requests.lock().unwrap().len(),
+        2 + usize::from(crate::MAX_TURN_RETRIES)
+    );
 }
 
 #[tokio::test]

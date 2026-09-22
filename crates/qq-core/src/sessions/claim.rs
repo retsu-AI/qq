@@ -446,7 +446,7 @@ pub(super) fn reserve_next_run_recoverable(
                     s.purpose, r.output_contract_json,
                     EXISTS(SELECT 1 FROM runs step
                            WHERE step.auto_compaction_for_run_id = r.id
-                             AND step.status = 'failed'),
+                             AND step.status IN ('failed', 'paused')),
                     COALESCE((SELECT cutoff_ordinal FROM session_compactions
                               WHERE session_id = s.id ORDER BY rowid DESC LIMIT 1), 0)
                       < COALESCE((SELECT MAX(ordinal) FROM messages
@@ -875,7 +875,7 @@ pub(super) fn reload_reserved_messages(
                     r.user_message_id, s.preparing_run_id, s.active_run_id,
                     EXISTS(SELECT 1 FROM runs step
                            WHERE step.auto_compaction_for_run_id = r.id
-                             AND step.status = 'failed'),
+                             AND step.status IN ('failed', 'paused')),
                     COALESCE((SELECT cutoff_ordinal FROM session_compactions
                               WHERE session_id = s.id ORDER BY rowid DESC LIMIT 1), 0)
                       < COALESCE((SELECT MAX(ordinal) FROM messages

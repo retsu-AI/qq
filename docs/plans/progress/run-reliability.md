@@ -9,7 +9,7 @@ appended below, newest last.
 | RR1 | Checkpoint turn tolerates a tool call | Shipped (#108) | `feat/rr1-checkpoint-tolerance` | 5 runs / 120 min in the audit |
 | RR2 | Slash/empty-prompt validation at admission | Shipped (#116) | `fix/rr2-slash-admission` | 3 slash runs; the 5 "messages must not be empty" runs predate #27 |
 | RR3 | Jev exhaustion is an outcome, not a failure | Shipped (#117) | `fix/rr3-jev-verdict-outcome` | 9 runs |
-| RR4 | Turn-level recovery; `Paused`; `TurnRetry`; ADR-0040 superseding 0005 | Planned | | 12 runs / 4.5 h; independent review |
+| RR4 | Turn-level recovery; `Paused`; `TurnRetry`; ADR-0040 superseding 0005 | In review | `feat/rr4-turn-recovery` (stacked on RR5) | 12 runs / 4.5 h; independent review requested |
 | RR5 | `Retry-After` ≤ 60 s; 529 retryable; HTTP-date | In review | `fix/rr5-retry-after` | provider crate; minimal profile green |
 | RR6 | Reactive overflow; un-wedge admission (mid-run compaction shipped in #92) | Planned | | 9 runs / 3 sessions; independent review |
 | RR7 | Estimate calibration from reported usage | Planned | | deferred from F04 |
@@ -100,3 +100,43 @@ exponential rate so honouring the server cannot by itself exhaust the 30 s
 budget. #114 (retry attempts that outlive the budget) landed first from
 another lane and is compatible. Tests: HTTP-date past/future, 529, cap,
 ledger charge; both provider profiles green.
+
+### 2026-09-21 — RR4 turn recovery (ADR-0040)
+
+The run loop owns recovery of a turn once the provider's own ledger is
+spent. A stream `Err` of kind `ProviderUnavailable` / `ProviderRateLimited`
+/ `ProviderTransport`, or a stream that ends after events without a
+terminal event, now commits the partial assistant turn through the existing
+`AssistantTurnCompleted` path, emits `RuntimeEvent::TurnRetrying`, sleeps
+under `TurnRecoveryPolicy` (default 2 s → 60 s; `Runtime::with_turn_recovery`
+and `AgentProfile::with_turn_recovery` for embedders and tests) in a
+`select!` with cancellation and the run deadline, and re-issues the turn with
+`TURN_RETRY_CONTINUE_NOTICE` after any partial text. `turn_retries` resets on
+a completed turn. Exhaustion at `MAX_TURN_RETRIES` (5, in `qq-protocol` so
+clients render against the same bound) settles `RunOutcome::Paused { pause }`
+with run status `paused`. Non-transient kinds still `Failed` at once. The
+decision to also retry pre-event faults (rather than pause immediately) is
+deliberate: the provider's ledger is sub-minute; the run's is minute-scale.
+
+Protocol 25 → 26: `SessionEvent::RunTurnRetrying`, `RunOutcome::Paused`,
+`RunStatus::Paused`, `RunPause`; `v26/` goldens (`event_run_turn_retrying`,
+`event_run_finished_paused`), harbor traces bumped. No schema change;
+`'paused'` added to every terminal-status list (claim fold-stop, child
+owner queries, snapshot accounting, transcript notice, abandoned-child
+recovery) — two of those lists had also omitted `'budget_exhausted'`, now
+included. Client reducer shows a warning notice per retry and on pause; TUI
+sidebar/transcript render `paused` like `budget_exhausted`; headless maps
+`paused` → `task_failed` (exit 1) with the pause named. Sub-agent `paused`
+returns a tool error to the parent; a paused compaction step stops the fold.
+
+Tests: `transient_faults_retry_the_turn_and_exhaustion_pauses` (three
+transient kinds × 6 sends → paused; auth fails once; mid-stream 529×2 then
+completion yields `part0 part1 done` with the continue notice),
+`the_turn_retry_allowance_resets_on_a_completed_turn` (9 faults across 9
+turns, never a second attempt, completes),
+`a_retry_sleep_yields_to_cancellation_and_the_deadline`. Session fixtures
+that asserted `Failed` for an offline provider now assert `Paused` and
+`n + MAX_TURN_RETRIES` sends; `loaded_runtime` uses a 1 ms policy so the
+suite stays at ~15 s. Replaces `the_run_loop_never_resends_a_turn`.
+Workspace green incl. minimal provider profile. Independent review
+requested per `workflow.md` § 4 (touches `sessions/`, protocol bump).

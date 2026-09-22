@@ -2883,6 +2883,104 @@ async fn execute_started_run(
                     }
                 }
             }
+            // The partial turn is already committed via AssistantTurnCompleted;
+            // the retry notice is display and replay evidence. An internal
+            // (compaction) run has no transcript of its own to annotate.
+            RunInput::Event(Some(RuntimeEvent::TurnRetrying {
+                turn_ordinal,
+                attempt,
+                delay,
+                kind,
+                message,
+            })) => {
+                if internal {
+                    continue;
+                }
+                match inner
+                    .store
+                    .record_turn_retrying(&claimed, turn_ordinal, attempt, delay, kind, message)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(error) => {
+                        let Ok(teardown) = resources.stop(&mut events).await else {
+                            inner.failed.send_replace(true);
+                            return;
+                        };
+                        finish_run(
+                            &inner,
+                            &claimed,
+                            persistence_failure("failed to persist the turn retry", &error),
+                            teardown,
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
+            // Every completed turn is durable; the session accepts the next
+            // prompt as a continuation. Settles like an exhausted budget: the
+            // reviewer's pending checkpoints are recorded as unreviewed.
+            RunInput::Event(Some(RuntimeEvent::Paused { pause })) => {
+                if let Err(error) = flush_pending_text(
+                    &inner,
+                    &claimed,
+                    current_turn,
+                    &mut current_message,
+                    &mut pending_channel,
+                    &mut pending_text,
+                )
+                .await
+                {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure("failed to persist model output", &error),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
+                let Ok(teardown) = resources.stop(&mut events).await else {
+                    inner.failed.send_replace(true);
+                    return;
+                };
+                if let Err(error) = record_unreviewed_checkpoints(
+                    &inner,
+                    &claimed,
+                    &mut tools_awaiting_checkpoint,
+                    &mut checkpoint_in_flight,
+                    &mut accounting,
+                    "paused on a provider fault",
+                )
+                .await
+                {
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure(
+                            "failed to persist terminal JEV checkpoint status",
+                            &error,
+                        ),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
+                finish_run_accounted(
+                    &inner,
+                    &claimed,
+                    RunOutcome::Paused { pause },
+                    Some(accounting.snapshot()),
+                    teardown,
+                )
+                .await;
+                return;
+            }
             // The failing turn is already committed via AssistantTurnCompleted;
             // the repair notice is a runtime message this run alone sees, so
             // nothing further is persisted or published here.

@@ -50,7 +50,7 @@ migration; historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 25
+PROTOCOL_VERSION = 26
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -161,6 +161,13 @@ the pinned JEV outcome to a tool result or final candidate and carries bounded
 feedback plus basis-point confidence. Headless JSONL emits the event and text
 mode renders an explicit GREEN/RED notice; v22 fixtures remain historical wire
 evidence.
+
+Version 26 adds turn recovery (ADR-0040): the `run_turn_retrying` event
+(`run_id`, `turn_ordinal`, `attempt`, `delay_ms`, `kind`, `message`) after a
+transient provider fault commits a partial turn, and the `paused` run outcome
+and status when the per-turn allowance (`MAX_TURN_RETRIES` = 5) is spent.
+Older clients reject the new event tag and outcome tag. Golden fixtures live
+under `v26/`; `v23`–`v25` are retained decode-only.
 
 Clients and servers must agree on this value.
 
@@ -1328,6 +1335,7 @@ Every streamed payload is a `SessionEventEnvelope`:
 | `steering_superseded` | `run_id`, `message_id` | Run finished before the steering applied |
 | `run_interrupted` | `run_id`, `turn_ordinal` | An interrupting steer aborted the turn in flight |
 | `run_output_truncated` | `run_id`, `turn_ordinal`, `continuation` | The provider cut the turn at its output token limit; the partial turn is committed and the run resumes on the next turn |
+| `run_turn_retrying` | `run_id`, `turn_ordinal`, `attempt`, `delay_ms`, `kind`, `message` | A transient provider fault ended the turn; the partial turn is committed and the run re-issues it after `delay_ms`. `attempt` is 1-based per turn and resets when a turn completes |
 | `run_audit_started` | `run_id`, `audit_session_id` | A read-only audit child is checking the run's candidate final answer |
 | `run_audit_completed` | `run_id`, `audit` | The audit settled (`pass`, `revised`, or `unavailable`); on `revised` the run continues once with the findings |
 | `assistant_message_started` | `message` | A model turn's message begins streaming |
@@ -1455,7 +1463,7 @@ it from cumulative run billing.
 ```
 
 Run status: `queued`, `running`, `completed`, `cancelled`, `failed`,
-`interrupted`, `budget_exhausted`.
+`interrupted`, `budget_exhausted`, `paused`.
 
 `limits` echoes the caller-imposed budgets the run was admitted under and is
 omitted for runs submitted without any.
@@ -1652,6 +1660,15 @@ server's network policy judged and `method` only when it is `HEAD`.
     "message": "the run exhausted its 40 model turn budget"
   }
 }
+{
+  "type": "paused",
+  "pause": {
+    "kind": "provider_unavailable",
+    "message": "provider returned HTTP 529: overloaded_error",
+    "turn_ordinal": 7,
+    "attempts": 5
+  }
+}
 ```
 
 `budget_exhausted` settles a run whose caller-imposed `limits` ran out. It is
@@ -1660,6 +1677,13 @@ status is also `budget_exhausted`. `final_response` reports whether the
 reserved tool-free status turn was granted; it is `false` when the wall clock
 elapsed, when cost became unmeasurable, or when the model requested a tool on
 the final turn.
+
+`paused` settles a run whose turn recovery (ADR-0040) spent its allowance on
+a transient provider fault. It is not `failed` either: every completed turn
+is durable, nothing QQ or the model did was wrong, and the next prompt
+continues the session with a notice naming the pause. `kind` is always one
+of `provider_unavailable`, `provider_rate_limited`, `provider_transport`.
+The run status is also `paused`.
 
 `BudgetLimitKind` values:
 

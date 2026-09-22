@@ -520,7 +520,13 @@ pub(super) fn load_model_context_with_units(
         // belongs before the follow-up in model context.
         if matches!(
             prompt.status.as_str(),
-            "completed" | "cancelled" | "failed" | "interrupted" | "running"
+            "completed"
+                | "cancelled"
+                | "failed"
+                | "interrupted"
+                | "budget_exhausted"
+                | "paused"
+                | "running"
         ) {
             match turns.remove(&prompt.run_id) {
                 Some(run_turns) => append_run_turns(
@@ -540,7 +546,7 @@ pub(super) fn load_model_context_with_units(
         }
         if matches!(
             prompt.status.as_str(),
-            "cancelled" | "failed" | "interrupted"
+            "cancelled" | "failed" | "interrupted" | "budget_exhausted" | "paused"
         ) {
             let outcome_json = prompt.outcome_json.ok_or(SessionRuntimeError::CODEC)?;
             let outcome: RunOutcome = serde_json::from_str(&outcome_json)?;
@@ -625,6 +631,11 @@ pub(super) fn runtime_notice(outcome: &RunOutcome) -> Option<String> {
         RunOutcome::BudgetExhausted { exhaustion } => format!(
             "The previous run stopped when its budget ran out: {}",
             exhaustion.message
+        ),
+        RunOutcome::Paused { pause } => format!(
+            "The previous run paused after {} retries of turn {} on a provider fault ({}); its \
+             completed turns stand. Continue from where it stopped.",
+            pause.attempts, pause.turn_ordinal, pause.message
         ),
         RunOutcome::Failed { failure } => format!("The previous run failed: {}", failure.message),
     };

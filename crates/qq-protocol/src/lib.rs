@@ -59,7 +59,7 @@ pub use sessions::{
     ModelCatalogRequest, ModelDescriptor, ModelPricing, ModelPricingTier, ModelSelection,
     OutputContract, PromptCacheCapabilities, PromptVersion, ProviderRequestShapeIdentity,
     ProviderRequestShapeVersion, Question, QuestionPreview, ResolvedModel, ResolvedModelVersion,
-    RoutingDecision, RoutingOutcome, RunActivity, RunFailure, RunLimits, RunOutcome,
+    RoutingDecision, RoutingOutcome, RunActivity, RunFailure, RunLimits, RunOutcome, RunPause,
     RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting, SessionCommand,
     SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionPurpose, SessionSnapshot,
     SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict, SnapshotRequest, SpawnOrigin,
@@ -67,7 +67,13 @@ pub use sessions::{
     ToolExposure, WorkspaceGrantOutcome, WorkspaceSnapshot, WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 25;
+pub const PROTOCOL_VERSION: u16 = 26;
+
+/// Most retries one turn may spend on a transient provider fault after the
+/// stream has started; a completed turn resets the count. Exhaustion settles
+/// the run `paused`. Declared here so clients can render `run_turn_retrying`
+/// against the same bound the runtime enforces.
+pub const MAX_TURN_RETRIES: u16 = 5;
 
 /// Slash commands owned by interactive clients rather than the shared
 /// runtime. Keeping this vocabulary in the transport-neutral protocol avoids
