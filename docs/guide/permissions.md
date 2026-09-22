@@ -91,8 +91,8 @@ y once   a session   w workspace   n deny
 | Key | Effect | Lifetime |
 | --- | --- | --- |
 | `y` | run this call | once |
-| `a` | run this and every later call of the same shape in this session | until the session ends |
-| `w` | write the grant into `.qq/config.ron` and run | every session in this workspace |
+| `a` | run this and every later call of the same shape in this session, when the grant fits | until the session ends |
+| `w` | write the grant into `.qq/config.ron` and run, when the grant fits | every session in this workspace |
 | `n` | deny; the model receives the denial as a tool error and continues | — |
 | `Shift-Y` / `Shift-N` | decide and then steer the run with a note | — |
 | `Esc` | leave the prompt open; `Ctrl-G` jumps back to it | — |
@@ -103,6 +103,12 @@ y once   a session   w workspace   n deny
 approving `cargo test` covers `cargo test -p anything` but never
 `cargo test | sh` — a command containing `|`, `;`, `&`, redirection, or
 substitution matches only a grant that quotes it exactly.
+
+A session grant is at most 256 bytes, and a session holds at most 256 of
+them. When the command is longer than that, or the session is already at the
+cap, `a` and `w` are not offered: the call is approved once, nothing is
+recorded, and the status says why. A grant that cannot be stored never fails
+the approval. Neither key lifts a `forbidden` verdict.
 
 Edits show a diff; `fetch` shows the URL and whether a grant covers the
 host; MCP calls show the server, tool, and arguments.
