@@ -384,7 +384,7 @@ impl ConfigLoader {
     pub fn check(&self, request: &LoadRequest) -> Result<Option<ConfigSnapshot>, ConfigError> {
         match loader::load(self, request) {
             Ok(snapshot) => Ok(Some(snapshot)),
-            Err(ConfigError::ModelRequired) => Ok(None),
+            Err(ConfigError::ModelRequired { .. }) => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -2200,8 +2200,16 @@ pub enum ConfigError {
     DuplicateTrustRecord { path: PathBuf, digest: String },
     #[error("trust state contains an invalid SHA-256 digest: {digest}")]
     InvalidTrustDigest { digest: String },
-    #[error("model must be configured")]
-    ModelRequired,
+    /// No layer selected a model. Carries the global configuration file so
+    /// the message names the exact path for this machine.
+    #[error(
+        "no model is configured. Choose one with any of:\n  \
+         --model PROVIDER/MODEL on the command line\n  \
+         QQ_MODEL=PROVIDER/MODEL in the environment\n  \
+         model: \"PROVIDER/MODEL\" in {global_config} (every project) or .qq/config.ron (this project)\n\
+         For example openai/gpt-5.6; then authenticate with `qq auth login openai` or set OPENAI_API_KEY."
+    )]
+    ModelRequired { global_config: PathBuf },
     #[error(
         "agent profile name {0:?} is invalid; use 1-64 lowercase letters, digits, or hyphens, \
          and never `default`"
