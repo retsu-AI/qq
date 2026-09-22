@@ -93,11 +93,16 @@ adapters.
 
 The provider is the single retry owner. Each compiled HTTP provider carries one
 public `AttemptPolicy` (default four attempts, 500 ms base, 8 s cap, 30 s
-backoff budget, full jitter, `Retry-After` delta-seconds honored) set through
+backoff budget, full jitter) set through
 `ProviderCompiler::with_attempt_policy`. Every send a logical request costs
 draws from one shared ledger: a transport error or retryable status (`408` /
-`429` / `500` / `502` / `503` / `504`) before the body, and an SSE body that
-fails or ends before it has decoded a single event. The budget bounds the sum
+`429` / `500` / `502` / `503` / `504` / `529`) before the body, and an SSE body
+that fails or ends before it has decoded a single event. `Retry-After` is
+honoured as a floor in both delta-seconds and HTTP-date form: the server's
+figure is never jittered down and is slept in full above the 8 s exponential
+cap, up to 60 s. Only the exponential part of a wait is charged to the 30 s
+budget; the excess is time the provider asked for, and refusing it would only
+earn the same rejection sooner. The budget bounds the sum
 of backoff sleeps the ledger grants, not wall time since the first send: each
 attempt is already bounded by the client's connect (30 s), header (300 s), and
 read (300 s) deadlines, and an attempt that stalls for its whole header

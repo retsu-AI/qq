@@ -6,11 +6,11 @@ appended below, newest last.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| RR1 | Checkpoint turn tolerates a tool call | In review | `feat/rr1-checkpoint-tolerance` | 5 runs / 120 min in the audit |
-| RR2 | Slash/empty-prompt validation at admission | In review | `fix/rr2-slash-admission` | 3 slash runs; the 5 "messages must not be empty" runs predate #27 |
-| RR3 | Jev exhaustion is an outcome, not a failure | In review | `fix/rr3-jev-outcome` | 9 runs |
+| RR1 | Checkpoint turn tolerates a tool call | Shipped (#108) | `feat/rr1-checkpoint-tolerance` | 5 runs / 120 min in the audit |
+| RR2 | Slash/empty-prompt validation at admission | Shipped (#116) | `fix/rr2-slash-admission` | 3 slash runs; the 5 "messages must not be empty" runs predate #27 |
+| RR3 | Jev exhaustion is an outcome, not a failure | Shipped (#117) | `fix/rr3-jev-verdict-outcome` | 9 runs |
 | RR4 | Turn-level recovery; `Paused`; `TurnRetry`; ADR-0040 superseding 0005 | Planned | | 12 runs / 4.5 h; independent review |
-| RR5 | `Retry-After` ≤ 60 s; 529 retryable; HTTP-date | Planned | | provider crate; minimal profile |
+| RR5 | `Retry-After` ≤ 60 s; 529 retryable; HTTP-date | In review | `fix/rr5-retry-after` | provider crate; minimal profile green |
 | RR6 | Reactive overflow; un-wedge admission (mid-run compaction shipped in #92) | Planned | | 9 runs / 3 sessions; independent review |
 | RR7 | Estimate calibration from reported usage | Planned | | deferred from F04 |
 | RR8 | Output-token handling and persisted `max_output_tokens` floor | Planned | | 5 runs |
@@ -86,3 +86,17 @@ Contradicted verdicts and no "correction attempts" failure, and
 `a_final_candidate_rejected_twice_completes_with_the_verdicts_on_record`
 is the regression for the 9 audited runs. The operator can re-enable
 `jev_review` without a disagreement costing the run.
+
+### 2026-09-21 — RR5 Retry-After and 529
+
+`http.rs`: 529 joins `is_retryable_status` (five audited runs "gave up after
+8 attempts" on Anthropic `overloaded_error`, which the provider-agnostic
+status check never retried before the stream layer saw it). `Retry-After`
+is now a floor rather than a value clamped to `max_delay`: honoured in full
+above 8 s up to `RETRY_AFTER_CAP` (60 s), never jittered down, and parsed in
+HTTP-date form via `httpdate` (already in the lock through hyper; zero
+transitive additions). The ledger charges a server-directed wait at the
+exponential rate so honouring the server cannot by itself exhaust the 30 s
+budget. #114 (retry attempts that outlive the budget) landed first from
+another lane and is compatible. Tests: HTTP-date past/future, 529, cap,
+ledger charge; both provider profiles green.
