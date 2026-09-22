@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     marker::PhantomData,
+    path::Path,
 };
 
 use ron::{Options, extensions::Extensions};
@@ -1952,6 +1953,7 @@ impl MergeState {
         mut self,
         reports: Vec<SourceReport>,
         sources: ConfigSources,
+        global_config: &Path,
     ) -> Result<ConfigSnapshot, ConfigError> {
         // Packs contribute beneath the configuration: their MCP servers join
         // where the configuration declared none of that name, and their
@@ -2188,7 +2190,9 @@ impl MergeState {
         // Every other rule has passed by this point, so `ModelRequired` is the
         // only error a model-less but otherwise valid document can produce.
         let Some(model) = model else {
-            return Err(ConfigError::ModelRequired);
+            return Err(ConfigError::ModelRequired {
+                global_config: global_config.to_path_buf(),
+            });
         };
         Ok(ConfigSnapshot {
             organization: self.organization,

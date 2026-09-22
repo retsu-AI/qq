@@ -254,7 +254,11 @@ pub(super) fn load(
             reports: report.sources,
         });
     }
-    merged.finish(report.sources, std::mem::take(probes).into_sources())
+    merged.finish(
+        report.sources,
+        std::mem::take(probes).into_sources(),
+        &loader.paths.global_dir.join("config.ron"),
+    )
 }
 
 fn selected_organization(

@@ -22,11 +22,18 @@ instead, use `cargo build --release` with the pinned toolchain.
 
 ## Quick Start
 
-Set `OPENAI_API_KEY` and `QQ_MODEL`, then stream one response:
+QQ needs exactly two things before its first run: a model route and a
+credential for that model's provider. Set `OPENAI_API_KEY` and `QQ_MODEL`,
+then stream one response:
 
 ```sh
-cargo run -- ask "Reply with pong"
+QQ_MODEL=openai/gpt-5.6 cargo run -- ask "Reply with pong"
 ```
+
+To make the choice permanent, put `model: "openai/gpt-5.6"` in the global
+configuration file (`qq config paths` prints its location) or in
+`.qq/config.ron` at a project root. Without a model, `qq` exits with a message
+listing these options. Set `QQ_MODEL` or `--model` to override for one run.
 
 To use a ChatGPT Codex subscription instead of an API key, sign in through the
 browser and select an `openai-codex` model:
