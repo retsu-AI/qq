@@ -35,17 +35,8 @@
             )
         ),
     },
-    mcp: {
-        "executor": Http(
-            url: "https://executor.sh/lg2m/mcp",
-            // Executor Cloud accepts user-level API keys as bearer tokens.
-            bearer: Stored("executor/lg2m"),
-            allow: [
-                "execute",
-                "skills",
-                "resume",
-            ],
-            eager: true,
-        ),
-    },
+    // MCP servers whose bearer is a `Stored(...)` credential are personal:
+    // the name resolves against each developer's own credential store, so a
+    // clone without that entry fails with "credential ... is not registered".
+    // Declare them in a gitignored `.qq/config.d/*-local.ron` fragment.
 )
