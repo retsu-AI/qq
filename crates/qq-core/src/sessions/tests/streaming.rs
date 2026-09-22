@@ -517,6 +517,7 @@ async fn overflowing_text_append_persists_no_counter_chunk_or_event() {
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )

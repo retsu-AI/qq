@@ -257,6 +257,7 @@ async fn ask_mode_gates_mcp_calls_and_an_exact_name_grant_auto_approves() {
                 },
                 approval_mode: ApprovalMode::Ask,
                 profile: qq_protocol::AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: qq_protocol::Correlation::default(),
             },
         )

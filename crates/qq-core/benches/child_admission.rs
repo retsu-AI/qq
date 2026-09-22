@@ -363,6 +363,7 @@ async fn run_sample(case: Case) -> Sample {
                 },
                 approval_mode: ApprovalMode::ReadOnly,
                 profile: Default::default(),
+                reasoning_effort: None,
                 correlation: Default::default(),
             },
         )

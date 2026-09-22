@@ -1452,6 +1452,7 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
                     },
                     approval_mode: ApprovalMode::default(),
                     profile: AgentProfileId::default(),
+                    reasoning_effort: None,
                     correlation: Correlation::default(),
                 },
             )
@@ -1698,6 +1699,7 @@ async fn cancelled_unclaimed_prompt_remains_explicit_in_follow_up_context() {
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -1971,6 +1973,7 @@ async fn interrupted_uncommitted_assistant_text_stays_out_of_model_context() {
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -2103,6 +2106,7 @@ async fn historical_flat_assistant_output_precedes_the_terminal_notice() {
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -2246,6 +2250,7 @@ async fn manual_and_auto_compaction_share_the_terminal_run_projection() {
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )

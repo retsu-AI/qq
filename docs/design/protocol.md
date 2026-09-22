@@ -50,7 +50,7 @@ migration; historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 25
+PROTOCOL_VERSION = 26
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -161,6 +161,13 @@ the pinned JEV outcome to a tool result or final candidate and carries bounded
 feedback plus basis-point confidence. Headless JSONL emits the event and text
 mode renders an explicit GREEN/RED notice; v22 fixtures remain historical wire
 evidence.
+
+Version 26 adds a per-session reasoning-effort pin: optional
+`create_session.reasoning_effort`, `set_session_effort`, `SessionSummary.reasoning_effort`,
+and `session_effort_set`. Omission keeps the compiled plan's configured or profile
+choice; an explicit value is applied at the next claim. Older clients reject the
+new command, outcome, and summary field. Golden fixtures live under
+`crates/qq-protocol/tests/fixtures/v26/`; `v25` remains decode-only.
 
 Clients and servers must agree on this value.
 

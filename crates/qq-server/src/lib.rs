@@ -802,6 +802,7 @@ async fn session_command(
         | SessionCommand::SetApprovalMode { .. }
         | SessionCommand::SetSessionModel { .. }
         | SessionCommand::SetSessionProfile { .. }
+        | SessionCommand::SetSessionEffort { .. }
         | SessionCommand::DeleteSession { .. }
         | SessionCommand::PruneSessions { .. }
         | SessionCommand::CompactSession { .. }
@@ -2102,6 +2103,12 @@ mod tests {
                     session_id: *session_id,
                     profile: profile.clone(),
                 },
+                SessionCommand::SetSessionEffort { session_id, effort } => {
+                    CommandOutcome::SessionEffortSet {
+                        session_id: *session_id,
+                        effort: *effort,
+                    }
+                }
                 _ => {
                     return Box::pin(async {
                         Err(ServerHandlerError::InvalidRequest(
@@ -2205,6 +2212,7 @@ mod tests {
                 model: qq_protocol::ModelSelection::default(),
                 approval_mode: ApprovalMode::Ask,
                 profile: qq_protocol::AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: qq_protocol::Correlation::default(),
             },
             SessionCommandKind::SubmitPrompt => SessionCommand::SubmitPrompt {
@@ -2236,6 +2244,10 @@ mod tests {
             SessionCommandKind::SetSessionProfile => SessionCommand::SetSessionProfile {
                 session_id,
                 profile: qq_protocol::AgentProfileId::default(),
+            },
+            SessionCommandKind::SetSessionEffort => SessionCommand::SetSessionEffort {
+                session_id,
+                effort: Some(qq_protocol::ReasoningEffort::High),
             },
             SessionCommandKind::DeleteSession => SessionCommand::DeleteSession { session_id },
             SessionCommandKind::PruneSessions => SessionCommand::PruneSessions { workspace_id },

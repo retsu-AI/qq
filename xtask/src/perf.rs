@@ -2279,6 +2279,7 @@ impl RuntimeFixture {
                 model: benchmark_model(),
                 approval_mode,
                 profile: qq_protocol::AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: qq_protocol::Correlation::default(),
             },
         )
@@ -3269,6 +3270,7 @@ async fn http_pipeline_workloads(
                 model: benchmark_model(),
                 approval_mode: ApprovalMode::ReadOnly,
                 profile: qq_protocol::AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: qq_protocol::Correlation::default(),
             },
         )
@@ -3376,6 +3378,7 @@ async fn http_reconnect_workload(
             model: benchmark_model(),
             approval_mode: ApprovalMode::ReadOnly,
             profile: qq_protocol::AgentProfileId::default(),
+            reasoning_effort: None,
             correlation: qq_protocol::Correlation::default(),
         },
     )

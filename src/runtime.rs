@@ -3405,6 +3405,7 @@ mod tests {
                         },
                         approval_mode: qq_protocol::ApprovalMode::Ask,
                         profile: qq_protocol::AgentProfileId::default(),
+                        reasoning_effort: None,
                         correlation: qq_protocol::Correlation::default(),
                     },
                 )
@@ -3635,6 +3636,7 @@ mod tests {
                         },
                         approval_mode: qq_protocol::ApprovalMode::ReadOnly,
                         profile: AgentProfileId::default(),
+                        reasoning_effort: None,
                         correlation: qq_protocol::Correlation::default(),
                     },
                 )
@@ -3809,6 +3811,7 @@ mod tests {
                     },
                     approval_mode: qq_protocol::ApprovalMode::Ask,
                     profile: qq_protocol::AgentProfileId::default(),
+                    reasoning_effort: None,
                     correlation: qq_protocol::Correlation::default(),
                 },
             )

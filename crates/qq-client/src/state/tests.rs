@@ -70,6 +70,7 @@ fn summary(id: SessionId) -> SessionSummary {
         queued_prompts: 0,
         model: Some("openai/gpt-test".to_owned()),
         profile: qq_protocol::AgentProfileId::default(),
+        reasoning_effort: None,
         approval_mode: qq_protocol::ApprovalMode::default(),
         correlation: qq_protocol::Correlation::default(),
         last_outcome: None,

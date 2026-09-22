@@ -2,7 +2,8 @@ use super::*;
 use crate::{
     commands::Category,
     input::{
-        ApprovalModeRow, CommandRow, ModelRow, Overlay, ProfileRow, SessionRow, SkillRow, ThemeRow,
+        ApprovalModeRow, CommandRow, EffortRow, ModelRow, Overlay, ProfileRow, SessionRow,
+        SkillRow, ThemeRow,
     },
     picker::{Picker, PickerItem},
 };
@@ -279,6 +280,43 @@ pub(super) fn approval_mode_picker(app: &App, width: usize, height: usize) -> Ve
             );
             line.push(row.summary, muted());
             if row.mode == current {
+                line.push("  active", accent());
+            }
+            out.push(finish_row(line, selected, width));
+        },
+    )
+}
+
+/// Effort picker: every pin plus `default` (restore config/profile). The pin
+/// in effect is marked.
+pub(super) fn effort_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
+    let Some(Overlay::Effort(picker)) = &app.overlay else {
+        return fit_height(Vec::new(), height);
+    };
+    let current = app.effective_effort();
+    picker_frame(
+        picker,
+        PickerChrome {
+            title: "EFFORT",
+            hint: if app.focused().is_some() {
+                "type to search, Enter sets the session's effort, Esc closes"
+            } else {
+                "type to search, Enter sets the effort for new sessions, Esc closes"
+            },
+            placeholder: "all effort levels",
+            question: None,
+            empty: "  No matching effort levels.",
+        },
+        width,
+        height,
+        |row: &EffortRow, selected, out| {
+            let mut line = cursor_prefix(selected);
+            line.push(
+                format!("{:<10}", row.label),
+                if selected { normal().bold() } else { normal() },
+            );
+            line.push(row.summary, muted());
+            if row.effort == current {
                 line.push("  active", accent());
             }
             out.push(finish_row(line, selected, width));

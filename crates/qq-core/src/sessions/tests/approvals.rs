@@ -1974,6 +1974,7 @@ async fn recovery_marks_awaiting_approval_calls_interrupted() {
                 },
                 approval_mode: ApprovalMode::Ask,
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )

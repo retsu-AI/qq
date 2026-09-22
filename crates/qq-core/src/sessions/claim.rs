@@ -126,6 +126,9 @@ pub(super) struct ClaimedRun {
     pub(super) resolved_input: Option<Arc<crate::input::ResolvedInput>>,
     /// Agent profile the session selected at claim time.
     pub(super) profile: AgentProfileId,
+    /// Explicit reasoning effort pin at claim time. `None` leaves the compiled
+    /// plan's configured or profile choice.
+    pub(super) reasoning_effort: Option<qq_provider::ReasoningEffort>,
     pub(super) checkpoint: Option<CheckpointSelection>,
     pub(super) routing: Option<RoutingSelection>,
     /// State the executor needs before its first provider request, read in
@@ -166,6 +169,7 @@ impl ClaimedRun {
             input: Vec::new(),
             resolved_input: None,
             profile: self.profile.clone(),
+            reasoning_effort: self.reasoning_effort,
             checkpoint: self.checkpoint.clone(),
             routing: self.routing.clone(),
             cancel_requested: false,
@@ -443,7 +447,7 @@ pub(super) fn reserve_next_run_recoverable(
                     s.pending_context_overflow_basis_json,
                     s.context_tokens, s.context_occupancy_json, r.limits_json,
                     r.input_json, s.profile, s.approval_mode, s.depth, s.root_run_id,
-                    s.purpose, r.output_contract_json,
+                    s.purpose, r.output_contract_json, s.reasoning_effort,
                     EXISTS(SELECT 1 FROM runs step
                            WHERE step.auto_compaction_for_run_id = r.id
                              AND step.status = 'failed'),
@@ -494,11 +498,12 @@ pub(super) fn reserve_next_run_recoverable(
                     row.get::<_, Option<String>>(20)?,
                     row.get::<_, String>(21)?,
                     row.get::<_, Option<String>>(22)?,
-                    row.get::<_, bool>(23)?,
+                    row.get::<_, Option<String>>(23)?,
                     row.get::<_, bool>(24)?,
-                    row.get::<_, Option<String>>(25)?,
-                    row.get::<_, bool>(26)?,
+                    row.get::<_, bool>(25)?,
+                    row.get::<_, Option<String>>(26)?,
                     row.get::<_, bool>(27)?,
+                    row.get::<_, bool>(28)?,
                 ))
             },
         )
@@ -527,6 +532,7 @@ pub(super) fn reserve_next_run_recoverable(
         root_run,
         purpose,
         output_contract_json,
+        reasoning_effort,
         context_compaction_failed,
         context_compaction_remaining,
         parent_descriptor,
@@ -557,6 +563,7 @@ pub(super) fn reserve_next_run_recoverable(
     let limits = parse_run_limits(limits_json.as_deref())?;
     let input = parse_input_parts(input_json.as_deref())?;
     let profile = parse_profile(profile.as_deref())?;
+    let reasoning_effort = parse_reasoning_effort(reasoning_effort.as_deref())?;
     let approval_mode = parse_approval_mode(&approval_mode)?;
     let run_id: RunId = parse_id(&run)?;
     let root_run_id = match root_run {
@@ -740,6 +747,7 @@ pub(super) fn reserve_next_run_recoverable(
         input,
         resolved_input: None,
         profile,
+        reasoning_effort,
         checkpoint,
         routing,
         approval_mode,

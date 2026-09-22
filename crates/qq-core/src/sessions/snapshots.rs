@@ -463,7 +463,8 @@ pub(super) fn load_session_summary_with_accounting(
                       ORDER BY finished_at_ms DESC, rowid DESC LIMIT 1),
                      s.owner_run_id, s.spawned_by_tool_call_id, s.profile, s.correlation_json,
                      s.approval_mode, s.depth, s.purpose,
-                     (SELECT activity FROM runs WHERE id = s.active_run_id), s.model_is_fallback
+                     (SELECT activity FROM runs WHERE id = s.active_run_id), s.model_is_fallback,
+                     s.reasoning_effort
               FROM sessions s WHERE s.id = ?1",
             [session_id.to_string()],
             |row| {
@@ -487,6 +488,7 @@ pub(super) fn load_session_summary_with_accounting(
                     row.get::<_, String>(16)?,
                     row.get::<_, Option<String>>(17)?,
                     row.get::<_, bool>(18)?,
+                    row.get::<_, Option<String>>(19)?,
                 ))
             },
         )
@@ -513,6 +515,7 @@ pub(super) fn load_session_summary_with_accounting(
                 purpose,
                 activity,
                 model_is_fallback,
+                reasoning_effort,
             )| {
                 let direct_cost = accounting.direct.estimated_cost_usd_nanos;
                 let active_run_id: Option<RunId> = active.as_deref().map(parse_id).transpose()?;
@@ -547,6 +550,7 @@ pub(super) fn load_session_summary_with_accounting(
                     model,
                     profile: parse_profile(profile.as_deref())?,
                     approval_mode: parse_approval_mode(&approval_mode)?,
+                    reasoning_effort: parse_reasoning_effort(reasoning_effort.as_deref())?,
                     correlation: parse_correlation(correlation.as_deref())?,
                     context_tokens,
                     accounting: Some(accounting),

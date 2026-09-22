@@ -435,10 +435,11 @@ values, secret hashes, live handles, and the credential epoch never enter the
 descriptor or its digest.
 
 Explicit `reasoning_effort` is resolved from trusted configuration and profiles,
-with runtime overrides first. Descriptor version 9 records the choice and its
-cache key distinguishes overrides. Every model turn uses the compiled choice;
-omission uses provider defaults, while explicit `none` requests disabled
-reasoning. This does not enable Jev. HTTP OpenAI Responses/Chat adapters carry
+with runtime overrides first. A session pin (`/effort`, `set_session_effort`)
+takes precedence for that session's next run. Descriptor version 9 records the
+choice and its cache key distinguishes overrides. Every model turn uses the
+compiled choice; omission uses provider defaults, while explicit `none` requests
+disabled reasoning. This does not enable Jev. HTTP OpenAI Responses/Chat adapters carry
 effort; other adapter families reject it before credential lookup. Capability
 means transport support, not that every remote model accepts every effort value.
 

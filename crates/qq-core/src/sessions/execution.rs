@@ -761,7 +761,7 @@ pub(super) async fn execute_run(
     let load_progress = RuntimeLoadProgress::default();
     let mut load = inner.loader.load_with_progress(
         RuntimeLoadRequest {
-            reasoning_effort: None,
+            reasoning_effort: claimed.reasoning_effort,
             checkpoint: claimed.checkpoint.clone(),
             routing: claimed.routing.clone(),
             workspace: claimed.workspace.clone(),

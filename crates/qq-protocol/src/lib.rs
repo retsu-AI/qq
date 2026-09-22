@@ -45,7 +45,7 @@ pub use plan::{
     AgentPlanDigest, AgentProfileId, AgentProfileIdError, CredentialEpoch, MAX_PROFILE_ID_BYTES,
     RunPlanIdentity,
 };
-pub use qq_reasoning::{ReasoningEvent, ReasoningKind};
+pub use qq_reasoning::{ReasoningEffort, ReasoningEvent, ReasoningKind};
 pub use sessions::{
     AccountingTotal, ApprovalDecision, ApprovalGrant, ApprovalMode, ApprovalResolution,
     AuditOutcome, AuditRecord, BudgetExhaustion, BudgetLimitKind, COMMAND_ROUTES,
@@ -67,17 +67,18 @@ pub use sessions::{
     ToolExposure, WorkspaceGrantOutcome, WorkspaceSnapshot, WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 25;
+pub const PROTOCOL_VERSION: u16 = 26;
 
 /// Slash commands owned by interactive clients rather than the shared
 /// runtime. Keeping this vocabulary in the transport-neutral protocol avoids
 /// a client/runtime drift where one side forwards a name the other reserves.
-pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 21] = [
+pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 22] = [
     "/help",
     "/commands",
     "/models",
     "/profile",
     "/approval",
+    "/effort",
     "/skills",
     "/sessions",
     "/resume",

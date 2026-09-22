@@ -164,6 +164,8 @@ pub enum StatusItem {
     Profile,
     /// The approval mode in effect, shown only when it is not `auto`.
     ApprovalMode,
+    /// The reasoning effort pin in effect, shown only when one is set.
+    Effort,
     Context,
     Cost,
     Workspace,
@@ -173,10 +175,11 @@ pub enum StatusItem {
 impl StatusItem {
     /// The default status line: model, profile, approval mode, context
     /// occupancy, cost.
-    pub const DEFAULT: [Self; 5] = [
+    pub const DEFAULT: [Self; 6] = [
         Self::Model,
         Self::Profile,
         Self::ApprovalMode,
+        Self::Effort,
         Self::Context,
         Self::Cost,
     ];

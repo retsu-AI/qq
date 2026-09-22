@@ -790,6 +790,7 @@ async fn plan_identity_correlation_and_profile_persist_and_survive_refresh() {
                 },
                 approval_mode: ApprovalMode::Auto,
                 profile: AgentProfileId::new("review").unwrap(),
+                reasoning_effort: None,
                 correlation: correlation.clone(),
             },
         )
@@ -2513,6 +2514,68 @@ async fn active_run_cannot_restore_occupancy_after_same_route_shape_change() {
         )
         .unwrap();
     assert_eq!(stored_basis, None);
+}
+
+#[tokio::test]
+async fn set_session_effort_pins_and_clears_on_the_published_summary() {
+    let mut harness = session_management_harness().await;
+    let receipt = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetSessionEffort {
+                session_id: harness.session_id,
+                effort: Some(qq_provider::ReasoningEffort::Xhigh),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        receipt.outcome,
+        CommandOutcome::SessionEffortSet {
+            session_id,
+            effort: Some(qq_provider::ReasoningEffort::Xhigh),
+        } if session_id == harness.session_id
+    ));
+    let updated = harness.events.next().await.unwrap().unwrap();
+    assert!(matches!(
+        &updated.event,
+        SessionEvent::SessionUpdated { session }
+            if session.id == harness.session_id
+                && session.reasoning_effort == Some(qq_provider::ReasoningEffort::Xhigh)
+    ));
+    let snapshot = harness
+        .runtime
+        .snapshot(SnapshotRequest {
+            workspace_id: harness.workspace_id,
+            focused_session_id: Some(harness.session_id),
+            include_sessions: Vec::new(),
+            session_limit: 1,
+            message_limit: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.focused.unwrap().summary.reasoning_effort,
+        Some(qq_provider::ReasoningEffort::Xhigh)
+    );
+
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetSessionEffort {
+                session_id: harness.session_id,
+                effort: None,
+            },
+        )
+        .await
+        .unwrap();
+    let cleared = harness.events.next().await.unwrap().unwrap();
+    assert!(matches!(
+        &cleared.event,
+        SessionEvent::SessionUpdated { session } if session.reasoning_effort.is_none()
+    ));
 }
 
 #[tokio::test]
