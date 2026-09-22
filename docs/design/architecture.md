@@ -354,9 +354,13 @@ measured prompt turn, it persists that versioned basis, request byte count, and
 run's existing reservation query loads the basis without another store call.
 Only an exact shape/prefix match may seed the next estimate; the seed then
 follows the byte delta since the measured request in both directions at the
-estimate ratio (`context::adjust_measured_tokens`), so growth from the new
-prompt is charged and shrinkage from assembly-time pruning is credited rather
-than discarding the measurement. Within a run the same rule is applied per
+ratio the measurement itself established (`context::calibrated_bytes_per_token`:
+measured bytes over measured tokens, rounded to nearest, clamped to 2–6 and
+falling back to the default four below 2 000 measured tokens), so growth from
+the new prompt is charged and shrinkage from assembly-time pruning is credited
+rather than discarding the measurement, and a code-heavy transcript that
+tokenizes near three bytes per token is no longer under-charged by a quarter
+on every turn. Within a run the same rule is applied per
 request component (system text, tool schemas, messages), so the slice
 checkpoint and continuation turns, which change the system text and drop the
 schemas, keep a measurement-derived estimate. Pricing-only refreshes are

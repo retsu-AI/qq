@@ -1751,20 +1751,31 @@ impl plan::CompiledAgentPlan {
                 let message_bytes = reducible_message_bytes.saturating_add(irreducible_message_bytes);
                 let compatible_input_tokens = compatible_request.map(
                     |(previous_system, previous_tools, previous_messages, measured)| {
-                        let tokens = sessions::context::adjust_measured_tokens(
+                        // Calibrate against the whole measured request, then
+                        // apply each component's delta at that ratio.
+                        let ratio = sessions::context::calibrated_bytes_per_token(
+                            measured,
+                            previous_system
+                                .saturating_add(previous_tools)
+                                .saturating_add(previous_messages),
+                        );
+                        let tokens = sessions::context::adjust_measured_tokens_at(
                             measured,
                             previous_system,
                             system_bytes,
+                            ratio,
                         );
-                        let tokens = sessions::context::adjust_measured_tokens(
+                        let tokens = sessions::context::adjust_measured_tokens_at(
                             tokens,
                             previous_tools,
                             tool_schema_bytes,
+                            ratio,
                         );
-                        sessions::context::adjust_measured_tokens(
+                        sessions::context::adjust_measured_tokens_at(
                             tokens,
                             previous_messages,
                             message_bytes,
+                            ratio,
                         )
                     },
                 );
