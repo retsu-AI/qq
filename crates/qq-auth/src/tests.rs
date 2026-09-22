@@ -408,6 +408,42 @@ fn environment_errors_are_distinct_and_values_are_not_trimmed() {
 }
 
 #[test]
+fn a_built_in_provider_without_any_credential_names_both_remedies() {
+    let (store, _keyring, _directory) = test_store();
+
+    let error = resolve_provider_credential(
+        &store,
+        None,
+        "openai/default",
+        "QQ_TEST_OPENAI_KEY_THAT_DOES_NOT_EXIST_3F2A",
+        Some("https://api.openai.com"),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        AuthError::ProviderCredentialMissing { provider, environment_variable }
+            if provider == "openai"
+                && environment_variable == "QQ_TEST_OPENAI_KEY_THAT_DOES_NOT_EXIST_3F2A"
+    ));
+    let message = error.to_string();
+    assert!(message.contains("`qq auth login openai`"), "{message}");
+    assert!(
+        message.contains("QQ_TEST_OPENAI_KEY_THAT_DOES_NOT_EXIST_3F2A"),
+        "{message}"
+    );
+
+    // An explicit Env(...) reference is the user's own choice of variable;
+    // it keeps the plain environment error.
+    let explicit = store
+        .resolve(&SecretRef::Env(
+            "QQ_TEST_OPENAI_KEY_THAT_DOES_NOT_EXIST_3F2A".to_owned(),
+        ))
+        .unwrap_err();
+    assert!(matches!(explicit, AuthError::EnvironmentMissing { .. }));
+}
+
+#[test]
 fn public_environment_resolution_reports_a_missing_value() {
     let (store, _keyring, _directory) = test_store();
     let reference = SecretRef::Env("QQ_TEST_ENV_THAT_DOES_NOT_EXIST_90D1".to_owned());
