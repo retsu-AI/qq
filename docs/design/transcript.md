@@ -273,9 +273,41 @@ the call's cached `ToolRow` (verb, subject, metric) plus the live clock:
   row, `▸ Read ×4  Search ×2  a.rs, b.rs, c.rs, +1`, with the `▸` in the
   rail and the text at the content column.
 
-Expanded detail, error tails, and live output render under the summary row
-(see § Streamed Tool Output and § Diffs); their panel treatment is slice
-U7 of the redesign plan.
+### Tool Detail
+
+Everything a call shows beneath its summary row renders in the code panel
+(§ Code Blocks): the same `┃` rail in `border` on the `surface` tint, one
+padding cell, character-wrapped content with `↪` on continuation rows, and
+a blank surface row above and below. Output is visibly output, and it
+shares one implementation with fenced code (`markdown::panel_rows`); tool
+panels sit at the content column, the margin before the rail on the
+terminal background.
+
+```
+ ● Run    cargo test -p qq-client reconnect                     exit 101  3.2s
+   → 12:04:11 → 12:04:14
+   ┃
+   ┃  test result: FAILED. 1 passed; 1 failed
+   ┃
+```
+
+- The **timing line** (`started 12:04:11 → 12:04:14`, or the live elapsed
+  clock) stays `muted` above the panel, outside it.
+- **Expanded results** (read heads, command tails, MCP `key: value`
+  argument rows, then the result) fill one panel per call; argument rows
+  and result are separated by one blank surface row when both exist.
+- **Error tails** keep the `error` foreground on the surface.
+- **Diffs** keep their line numbers; `+`/`-` rows keep the add/remove
+  background inside the panel (a span's own background wins over the
+  surface, the U3 rule), and the gutter stays surface.
+- **Live output** of a running command renders in the same panel from the
+  first frame, so the panel does not jump when the call completes.
+- Panels carry no label: the summary row above already names the tool and
+  subject, and a language tag would need a grammar lookup per frame.
+- **Row budgets are unchanged**: each detail kind shows the same number of
+  content rows as before; the panel adds exactly its two padding rows
+  (`tools::TOOL_PANEL_PADDING_ROWS`) per expanded call. The approval block
+  is not a tool panel and renders as before.
 
 ## Diffs
 
@@ -296,8 +328,9 @@ Two sources render as unified diffs with per-line coloring:
 
 Coloring: `+` lines green, `-` lines red, `@@` hunk headers in the muted
 accent, context lines normal. Diff lines are literal (character wrap, no
-reflow). Fenced blocks tagged ` ```diff ` in model output get the same
-treatment inside the code-block panel.
+reflow). Expanded tool diffs and fenced blocks tagged ` ```diff ` render
+inside the code panel with the same coloring; the add/remove backgrounds
+win over the panel surface on those rows.
 
 ## Streamed Tool Output
 
@@ -309,7 +342,8 @@ call completes.
 Live output is a tail, not a record: the client buffers at most 4 KiB
 per running call, dropping the head on a character boundary, and shows
 the last few complete lines (up to six rows, muted, character-wrapped,
-control characters stripped) at every detail level — a running command's
+control characters stripped, inside the tool detail panel) at every
+detail level — a running command's
 output is the thing the user is waiting for. A trailing partial line
 waits for its newline. The buffer is discarded when the call reaches a
 terminal state or a snapshot reloads; the bounded result persisted on

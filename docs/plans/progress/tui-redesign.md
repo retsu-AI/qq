@@ -18,7 +18,7 @@ Raw frames and bench reports live under `target/qq-perf/tui-<slice>-<date>/`
 | L3 ([ENG-853](https://linear.app/retsu-ai/issue/ENG-853)) | Inspector pane | Shipped (`bb2c2e4`, [#104](https://github.com/retsu-AI/qq/pull/104)) | | 2026-09-21 |
 | L4 ([ENG-854](https://linear.app/retsu-ai/issue/ENG-854)) | Split transcripts | Planned | | Needs L2 |
 | U6 ([ENG-855](https://linear.app/retsu-ai/issue/ENG-855)) | Turn headers, geometry, tool rows | In review | [#111](https://github.com/retsu-AI/qq/pull/111) | Stacked on #110 |
-| U7 ([ENG-856](https://linear.app/retsu-ai/issue/ENG-856)) | Tool detail panels | Planned | | Needs U3, L3 |
+| U7 ([ENG-856](https://linear.app/retsu-ai/issue/ENG-856)) | Tool detail panels | In review | [#115](https://github.com/retsu-AI/qq/pull/115) | Stacked on #111 |
 | U8 ([ENG-857](https://linear.app/retsu-ai/issue/ENG-857)) | Chrome, `layout.md`, ADR 0037, receipts | Planned | | Last |
 
 ## Entries
@@ -329,3 +329,30 @@ Baseline: `cargo bench -p qq-tui --bench render` on `51ccf13` recorded to
   pattern as the U4 highlight loop).
 - Docs: `transcript.md` new § Turn Headers, § Column Model, § Tool Rows,
   § Spacing amended; `layout.md` § Geometry (padding row, chrome math).
+
+### 2026-09-21 — U7 receipt
+
+- Every expanded-detail body, error tail, live tail, diff, and MCP argument
+  block renders in the shared code panel (`markdown::panel_rows` /
+  `panel_rows_at`, one implementation with fenced code). Timing line stays
+  `muted` above. Diff tints win over the surface; error text keeps `error`;
+  `↪` on wrapped rows; no label. Content budgets unchanged; each expanded
+  call gains exactly `TOOL_PANEL_PADDING_ROWS` (2). Approval block untouched.
+- Review fixes on the subagent's cut: panel styles read from the theme once
+  per panel not per row; the tool-panel margin rides in `Line::indent`
+  instead of a span inserted into every row; `wrap::indent_lines` now keeps
+  a row's own `indent` (latent bug surfaced by the inspector), regression
+  test added.
+- Tests: 6 new (timing/panel shape, live tail padding rows persist, error
+  color on surface, diff tints + line numbers, `↪`, budget = N + 2); 306 lib +
+  6 golden. Goldens moved: `tools-expanded-*` only (gutter/tint columns, +2
+  rows per call; 80/120 tail-scroll). `approval-*` unchanged.
+- Bench (core 5, host shared with another lane's training job, load 4–10;
+  best-of-3 for the gate): `tool_calls_32_expanded` parent 53.9 → panels
+  uncached 77.6 (+44 %) → **cached 54.3** (+1 %). A panel row costs ~2× a
+  plain row and 32 panels re-laid-out every frame; the fix caches the
+  laid-out panel per `ToolRow` (`RefCell<Option<(width, Vec<Line>)>>`),
+  invalidated with the row's `ToolRowKey` or a width change, pinned by
+  `a_tool_row_reuses_its_panel_across_frames_and_relays_out_on_a_new_width`.
+  Other gates (`after-cached.txt`): steady 21.9, keystroke 27.0, golden_path
+  40.9, rows 24.8, folded 12.6, inspector 39.0; streaming_focused 35.1.

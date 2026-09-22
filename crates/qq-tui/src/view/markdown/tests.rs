@@ -1,6 +1,8 @@
 use super::*;
 use crate::{
-    render::{accent, border, diff_line_style, inline_code, link, muted, normal, surface_color},
+    render::{
+        accent, border, diff_line_style, inline_code, link, muted, normal, surface, surface_color,
+    },
     theme,
 };
 use unicode_width::UnicodeWidthChar;
@@ -198,7 +200,7 @@ fn code_panels_carry_a_labelled_top_row_and_a_blank_bottom_row() {
                 .all(|span| span.style.background == Some(surface_color())),
             "{row:?}"
         );
-        assert_eq!(row.spans[0].text, "┃ ");
+        assert_eq!(row.spans[0].text, "┃  ");
         assert_eq!(row.spans[0].style, surface(border()));
     }
     // An untagged fence has a blank top row of the same shape.
@@ -245,7 +247,7 @@ fn diff_tints_win_over_the_surface_inside_the_panel() {
         .iter()
         .find(|line| line.spans.iter().any(|span| span.text.contains("+new")))
         .expect("added line");
-    assert_eq!(plus.spans[0].text, "┃ ");
+    assert_eq!(plus.spans[0].text, "┃  ");
     assert_eq!(plus.spans[0].style.background, Some(surface_color()));
     assert_eq!(
         style_of(&lines, "+new line").map(|style| style.background),
