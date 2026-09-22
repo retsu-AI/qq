@@ -159,6 +159,7 @@ async fn run_batch() -> Duration {
                     },
                     approval_mode: ApprovalMode::ReadOnly,
                     profile: Default::default(),
+                    reasoning_effort: None,
                     correlation: Default::default(),
                 },
             )

@@ -29,7 +29,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::{
     StatusItem,
     app::{App, SessionView, ToolDetail, terminal_safe_character},
-    input::{Mode, SessionConfirm, approval_mode_label},
+    input::{Mode, SessionConfirm, approval_mode_label, effort_label},
     render::{
         Line, Style, accent, border, brand, diff_line_style, failure, info, muted, normal,
         selection, success, text_width, warning, write_line,
@@ -252,6 +252,7 @@ impl FrameRenderer {
                     Mode::Models => model_picker(app, slot_width, body_height),
                     Mode::Profiles => profile_picker(app, slot_width, body_height),
                     Mode::ApprovalModes => approval_mode_picker(app, slot_width, body_height),
+                    Mode::Effort => effort_picker(app, slot_width, body_height),
                     Mode::Skills => skill_picker(app, slot_width, body_height),
                     Mode::Themes => theme_picker(app, slot_width, body_height),
                     Mode::Sessions => session_picker(app, slot_width, body_height),

@@ -1115,6 +1115,7 @@ async fn scripted_runs_harness_with_authority(
                 },
                 approval_mode: mode,
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -1244,6 +1245,7 @@ async fn approval_harness_with_reviewer(
                 },
                 approval_mode: mode,
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -1474,6 +1476,7 @@ async fn store_with_one_spill(
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -1927,6 +1930,7 @@ fn denial_capacity_fixture(
         input: Vec::new(),
         resolved_input: None,
         profile: AgentProfileId::default(),
+        reasoning_effort: None,
         approval_mode: ApprovalMode::default(),
         depth: 0,
         root_run_id: run_id,
@@ -2042,6 +2046,7 @@ async fn claimed_store_fixture() -> (TempDir, Store, ClaimedRun) {
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -2210,6 +2215,7 @@ async fn create_session_with_mode(
                 },
                 approval_mode,
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -3404,6 +3410,7 @@ async fn project_terminal_run_with_tool_boundaries(
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -4421,6 +4428,7 @@ async fn create_claimed_parent(
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -4669,6 +4677,7 @@ async fn output_contract_harness(answers: &[&'static str]) -> OutputContractHarn
                 },
                 approval_mode: ApprovalMode::ReadOnly,
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )

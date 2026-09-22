@@ -18,9 +18,9 @@ use qq_protocol::{
     AgentProfileId, ApprovalDecision, CapabilitiesRequest, CommandId, CommandReceipt,
     CommandRequest, Correlation, EventCursor, InputPart, MAX_CAPABILITIES_BYTES,
     MAX_ERROR_BODY_BYTES, MAX_EVENT_BYTES, MAX_MODEL_CATALOG_BYTES, MAX_REQUEST_BYTES,
-    MAX_SNAPSHOT_BYTES, MAX_SSE_WIRE_EVENT_BYTES, ModelCatalogRequest, ModelDescriptor, RunId,
-    RunLimits, ServerCapabilities, SessionCommand, SessionEventEnvelope, SessionId,
-    SnapshotRequest, ToolCallId, WorkspaceId, WorkspaceSnapshot,
+    MAX_SNAPSHOT_BYTES, MAX_SSE_WIRE_EVENT_BYTES, ModelCatalogRequest, ModelDescriptor,
+    ReasoningEffort, RunId, RunLimits, ServerCapabilities, SessionCommand, SessionEventEnvelope,
+    SessionId, SnapshotRequest, ToolCallId, WorkspaceId, WorkspaceSnapshot,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -215,6 +215,18 @@ impl SessionClient {
                 session_id,
                 profile,
             },
+        )
+        .await
+    }
+
+    pub async fn set_effort(
+        &self,
+        session_id: SessionId,
+        effort: Option<ReasoningEffort>,
+    ) -> Result<CommandReceipt, ClientError> {
+        self.command(
+            fresh_command_id()?,
+            SessionCommand::SetSessionEffort { session_id, effort },
         )
         .await
     }

@@ -835,11 +835,11 @@ fn slash_autocomplete_filters_selects_and_executes_commands() {
         assert_eq!(here, reserved);
     }
     let last = qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS.len() - 1;
-    for _ in 0..20 {
+    for _ in 0..last {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
     assert_eq!(app.slash_selected(usize::MAX), last);
-    for _ in 0..20 {
+    for _ in 0..last {
         app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
     }
     assert_eq!(app.slash_selected(usize::MAX), 0);
@@ -3516,6 +3516,113 @@ fn profile_chosen_without_a_focused_session_applies_to_the_next_create() {
     assert!(matches!(
         &request.command,
         SessionCommand::CreateSession { profile, .. } if profile.as_str() == "reviewer"
+    ));
+}
+
+#[test]
+fn effort_picker_sets_the_focused_idle_session_effort_and_refuses_running_ones() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let focused = app.focused().unwrap();
+    app.execute(Command::OpenEffort);
+    // Rows: default, none, minimal, low, medium, high, xhigh. Jump to xhigh.
+    for _ in 0..6 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    let [ClientRequest::Command(request)] = requests.as_slice() else {
+        panic!("expected one set-session-effort command")
+    };
+    assert!(matches!(
+        &request.command,
+        SessionCommand::SetSessionEffort {
+            session_id,
+            effort: Some(qq_protocol::ReasoningEffort::Xhigh),
+        } if *session_id == focused
+    ));
+    assert!(app.overlay.is_none());
+    assert_eq!(
+        app.reasoning_effort,
+        Some(qq_protocol::ReasoningEffort::Xhigh)
+    );
+
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Ok(qq_protocol::CommandReceipt {
+            command_id: request.command_id,
+            outcome: CommandOutcome::SessionEffortSet {
+                session_id: focused,
+                effort: Some(qq_protocol::ReasoningEffort::Xhigh),
+            },
+            committed_through: fixtures::cursor(2),
+        }),
+    });
+    assert_eq!(app.status.as_deref(), Some("session effort set to xhigh"));
+
+    let (mut running, _, _, _) = running_app();
+    running.execute(Command::OpenEffort);
+    running.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let (_, requests) = running
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    assert!(requests.is_empty());
+    assert!(
+        running
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("wait for the run to finish")
+    );
+}
+
+#[test]
+fn effort_chosen_without_a_focused_session_applies_to_the_next_create() {
+    let selection = ModelSelection {
+        model_is_fallback: false,
+        model: Some("openai/gpt-test".to_owned()),
+        max_output_tokens: Some(4_096),
+        organization: None,
+    };
+    let mut app = App::new(TuiOptions {
+        settings: Settings::default(),
+        model: selection.clone(),
+        models: Vec::new(),
+        themes: Vec::new(),
+        workspace_root: None,
+    });
+    let mut empty = snapshot();
+    empty.sessions.clear();
+    empty.focused = None;
+    app.apply_snapshot(empty);
+    app.execute(Command::OpenEffort);
+    for _ in 0..6 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    assert!(requests.is_empty());
+    assert_eq!(
+        app.reasoning_effort,
+        Some(qq_protocol::ReasoningEffort::Xhigh)
+    );
+    assert_eq!(
+        app.status.as_deref(),
+        Some("new sessions will use effort xhigh")
+    );
+
+    let (_, requests) = app.execute(Command::NewRootSession).split();
+    let [ClientRequest::Command(request)] = requests.as_slice() else {
+        panic!("expected one create-session command")
+    };
+    assert!(matches!(
+        &request.command,
+        SessionCommand::CreateSession {
+            reasoning_effort: Some(qq_protocol::ReasoningEffort::Xhigh),
+            ..
+        }
     ));
 }
 

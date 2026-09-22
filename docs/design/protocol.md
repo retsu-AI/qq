@@ -166,8 +166,15 @@ Version 26 adds turn recovery (ADR-0040): the `run_turn_retrying` event
 (`run_id`, `turn_ordinal`, `attempt`, `delay_ms`, `kind`, `message`) after a
 transient provider fault commits a partial turn, and the `paused` run outcome
 and status when the per-turn allowance (`MAX_TURN_RETRIES` = 5) is spent.
-Older clients reject the new event tag and outcome tag. Golden fixtures live
-under `v26/`; `v23`–`v25` are retained decode-only.
+Older clients reject the new event tag and outcome tag.
+
+Version 27 adds a per-session reasoning-effort pin: optional
+`create_session.reasoning_effort`, `set_session_effort`,
+`SessionSummary.reasoning_effort`, and `session_effort_set`. Omission keeps the
+compiled plan's configured or profile choice; an explicit value is applied at
+the next claim. Older clients reject the new command, outcome, and summary
+field. Golden fixtures live under `crates/qq-protocol/tests/fixtures/v27/`;
+`v23`–`v26` are retained decode-only.
 
 Clients and servers must agree on this value.
 

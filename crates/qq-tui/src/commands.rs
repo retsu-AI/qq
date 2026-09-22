@@ -26,6 +26,9 @@ pub(crate) enum Command {
     /// Choose the approval mode for the focused session, or the default for
     /// new sessions. Lists what the server advertises.
     OpenApprovalModes,
+    /// Choose reasoning effort for the focused session, or the default for
+    /// new sessions. Pins the next run; `default` restores config/profile.
+    OpenEffort,
     /// List the workspace's commands and skills as the server indexes them.
     OpenSkills,
     OpenThemes,
@@ -142,7 +145,7 @@ macro_rules! spec {
 
 /// Presentation order is invocation frequency within a category, and the
 /// palette shows categories in this order too.
-pub(crate) const COMMANDS: [CommandSpec; 39] = [
+pub(crate) const COMMANDS: [CommandSpec; 40] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -296,6 +299,13 @@ pub(crate) const COMMANDS: [CommandSpec; 39] = [
         "choose an approval mode",
         Model,
         ["/approval"],
+        []
+    ),
+    spec!(
+        OpenEffort,
+        "choose reasoning effort",
+        Model,
+        ["/effort"],
         []
     ),
     spec!(
