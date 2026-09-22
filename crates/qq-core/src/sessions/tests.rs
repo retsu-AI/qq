@@ -741,7 +741,14 @@ impl Provider for RenewableSliceProvider {
         drop(requests);
 
         let tool_turns = crate::MAX_TOOL_CALLS_PER_SLICE / crate::MAX_TOOL_CALLS_PER_TURN;
-        if request.tools().is_empty() {
+        let checkpoint_request = request
+            .system()
+            .is_some_and(|system| system.contains(crate::SLICE_CHECKPOINT_NOTICE));
+        if checkpoint_request {
+            assert!(
+                !request.tools().is_empty(),
+                "tools stay declared on the checkpoint turn"
+            );
             if let Some(checkpoint_wait) = &self.checkpoint_wait {
                 checkpoint_wait.notify_one();
                 return Box::pin(stream::pending());

@@ -97,14 +97,19 @@ const MAX_TOOL_CALLS_PER_TURN: usize = 16;
 /// is treated as a protocol violation.
 const MAX_ADMITTED_TOOL_CALLS_PER_TURN: usize = 4 * MAX_TOOL_CALLS_PER_TURN;
 // A runaway-loop backstop for one internal execution slice, not a task
-// completion limit. Before a new model turn can exceed this ceiling, QQ
-// records a tool-free checkpoint, resets the counter, and continues the same
-// run with tools restored.
+// completion limit. Before a new model turn can exceed this ceiling, QQ asks
+// for a checkpoint reply, persists it, resets the counter, and continues the
+// same run. Tools stay declared on that turn: a call the model makes anyway is
+// admitted with a not-executed result instead of failing the run, because the
+// persisted turn is the boundary, not the model's obedience.
 const MAX_TOOL_CALLS_PER_SLICE: usize = 256;
-const SLICE_CHECKPOINT_NOTICE: &str = "This execution slice is at its safe tool-call boundary, so no tools \
-are available for this reply. Record a concise checkpoint of what was accomplished, what \
-remains, and the exact next step. QQ will persist this checkpoint and continue the same run \
-with tools restored.";
+const SLICE_CHECKPOINT_NOTICE: &str = "This execution slice is at its safe tool-call boundary. Do not \
+call tools in this reply: record a concise checkpoint of what was accomplished, what remains, \
+and the exact next step. QQ will persist this checkpoint and continue the same run with tools \
+available again.";
+const SLICE_CHECKPOINT_REJECTION: &str = "not executed: this reply was the slice checkpoint, \
+which records progress without running tools; the run continues and tools are available on \
+the next turn, so re-issue this call then";
 const SLICE_CONTINUATION_NOTICE: &str = "Continue the task from the preceding persisted \
 checkpoint. Tools are available again. Do not stop at a progress summary: complete the user's \
 request unless an explicit overall budget, cancellation, or genuine failure prevents it.";
@@ -1529,8 +1534,10 @@ impl plan::CompiledAgentPlan {
                 // turn. Without this reservation, a slice at (for example)
                 // 255 calls could accept a 16-call turn and overshoot its
                 // strict ceiling before reaching the next turn boundary.
-                // The tool-free checkpoint is persisted but is not the run's
-                // terminal outcome; the next turn starts a new slice.
+                // The checkpoint turn is persisted but is not the run's
+                // terminal outcome; the next turn starts a new slice. Tools
+                // stay declared so a model that calls one anyway gets a
+                // rejection result rather than a protocol failure.
                 let checkpoint_turn = !budget_final_turn
                     && slice_tool_calls
                         .saturating_add(MAX_TOOL_CALLS_PER_TURN)
@@ -1545,7 +1552,7 @@ impl plan::CompiledAgentPlan {
                 } else {
                     Arc::clone(&system)
                 };
-                let request_has_tools = allow_tools && !checkpoint_turn && !budget_final_turn;
+                let request_has_tools = allow_tools && !budget_final_turn;
                 let request_system_hash = if budget_final_turn || checkpoint_turn || continuation_turn {
                     ContentHash::from_bytes(Sha256::digest(request_system.as_bytes()).into())
                 } else {
@@ -1863,11 +1870,7 @@ impl plan::CompiledAgentPlan {
                             if !request_has_tools {
                                 yield RuntimeEvent::Failed {
                                     kind: RunFailureKind::ProviderProtocol,
-                                    message: if checkpoint_turn {
-                                        "provider requested a tool on the tool-free checkpoint turn, which declares none".to_owned()
-                                    } else {
-                                        "provider requested a tool after the request declared no tools".to_owned()
-                                    },
+                                    message: "provider requested a tool after the request declared no tools".to_owned(),
                                 };
                                 return;
                             }
@@ -1896,13 +1899,25 @@ impl plan::CompiledAgentPlan {
                                 };
                                 return;
                             }
-                            // Past the executable cap a call is still admitted
-                            // so the transcript keeps one result per call, but
-                            // it settles as a tool error the model can act on
-                            // instead of failing the whole run. Over-cap calls
-                            // never execute, so they do not count against the
-                            // slice or the run's tool-call budget.
+                            // Past the executable cap, or on the checkpoint
+                            // turn, a call is still admitted so the transcript
+                            // keeps one result per call, but it settles as a
+                            // tool error the model can act on instead of
+                            // failing the whole run. Such calls never execute,
+                            // so they do not count against the slice or the
+                            // run's tool-call budget.
                             let over_cap = pending_calls.len() >= MAX_TOOL_CALLS_PER_TURN;
+                            let rejection = if checkpoint_turn {
+                                Some(SLICE_CHECKPOINT_REJECTION.to_owned())
+                            } else if over_cap {
+                                Some(format!(
+                                    "not executed: this turn requested more than \
+                                     {MAX_TOOL_CALLS_PER_TURN} tool calls and only the first \
+                                     {MAX_TOOL_CALLS_PER_TURN} ran; call this again next turn"
+                                ))
+                            } else {
+                                None
+                            };
                             if calls_by_provider_id.contains_key(&id) {
                                 yield RuntimeEvent::Failed {
                                     kind: RunFailureKind::ProviderProtocol,
@@ -1916,16 +1931,10 @@ impl plan::CompiledAgentPlan {
                                 provider_call_id: id,
                                 name,
                                 arguments: String::new(),
-                                rejection: over_cap.then(|| {
-                                    format!(
-                                        "not executed: this turn requested more than \
-                                         {MAX_TOOL_CALLS_PER_TURN} tool calls and only the first \
-                                         {MAX_TOOL_CALLS_PER_TURN} ran; call this again next turn"
-                                    )
-                                }),
                                 completed: false,
+                                rejection,
                             });
-                            if !over_cap {
+                            if !over_cap && !checkpoint_turn {
                                 slice_tool_calls += 1;
                             }
                             blocks.push(TurnBlock::ToolCall(index));
@@ -2277,13 +2286,20 @@ impl plan::CompiledAgentPlan {
                     };
                     return;
                 }
-                if calls.is_empty() && checkpoint_turn {
-                    irreducible_message_bytes = irreducible_message_bytes
-                        .saturating_add(measure_message(&assistant));
-                    Arc::make_mut(&mut messages).push(assistant);
+                if checkpoint_turn {
+                    // The persisted turn is the slice boundary whether or not
+                    // the model obeyed the notice. Calls it made anyway were
+                    // admitted with a rejection result above and settle
+                    // through the ordinary result path below, so the next
+                    // turn sees one result per call and can re-issue them.
                     slice_tool_calls = 0;
                     continuing_slice = true;
-                    continue;
+                    if calls.is_empty() {
+                        irreducible_message_bytes = irreducible_message_bytes
+                            .saturating_add(measure_message(&assistant));
+                        Arc::make_mut(&mut messages).push(assistant);
+                        continue;
+                    }
                 }
                 if calls.is_empty() {
                     // Steering that arrived during the final turn is not
@@ -7302,13 +7318,21 @@ mod tests {
         ));
     }
 
+    /// Whether a recorded request is the slice-checkpoint turn: tools stay
+    /// declared there, so the notice in the system prompt is the marker.
+    fn is_checkpoint_request(request: &ModelRequest) -> bool {
+        request
+            .system()
+            .is_some_and(|system| system.contains(SLICE_CHECKPOINT_NOTICE))
+    }
+
     #[tokio::test]
     async fn the_measured_token_chain_survives_the_slice_checkpoint_and_continuation() {
         // Every turn reports usage. The checkpoint turn changes the system
-        // prompt and drops the tool schemas, the continuation turn changes it
-        // again, and the turn after that restores it: three requests that
-        // used to fall back to the raw byte estimate. Each must still carry
-        // a measurement-derived estimate, adjusted by the byte deltas.
+        // prompt, the continuation turn changes it again, and the turn after
+        // that restores it: three requests that used to fall back to the raw
+        // byte estimate. Each must still carry a measurement-derived
+        // estimate, adjusted by the byte deltas.
         struct MeasuredCheckpoint {
             emitted: Mutex<usize>,
         }
@@ -7322,7 +7346,11 @@ mod tests {
                     output_tokens: 1,
                     reasoning_tokens: None,
                 });
-                if request.tools().is_empty() {
+                if is_checkpoint_request(&request) {
+                    assert!(
+                        !request.tools().is_empty(),
+                        "tools stay declared on the checkpoint turn"
+                    );
                     return Box::pin(stream::iter([
                         Ok(ProviderEvent::OutputTextDelta {
                             text: "slice checkpoint".to_owned(),
@@ -7416,28 +7444,21 @@ mod tests {
             unmeasured.is_empty(),
             "turns without a measured chain: {unmeasured:?}"
         );
-        // Every measured turn reports 1,000 tokens, so each ordinary request
-        // estimates 1,000 plus the byte delta of one turn's calls and results
-        // (~300 tokens here), never the raw byte count of the whole
-        // transcript. The checkpoint request is credited the schema bytes it
-        // dropped; the continuation charges them back plus its notice; the
-        // turn after converges on the measurement again.
-        let by_turn: HashMap<u32, u64> = prepared[1..]
-            .iter()
-            .filter_map(|(turn, tokens)| tokens.map(|tokens| (*turn, tokens)))
-            .collect();
-        let checkpoint_turn = *by_turn.iter().min_by_key(|(_, tokens)| **tokens).unwrap().0;
-        assert!(by_turn[&checkpoint_turn] < 1_000, "{prepared:?}");
-        assert!(by_turn[&(checkpoint_turn + 1)] > 1_000, "{prepared:?}");
-        let after = by_turn[&(checkpoint_turn + 2)];
-        assert!((900..=1_400).contains(&after), "{after} {prepared:?}");
-        for turn in 2..checkpoint_turn {
-            let tokens = by_turn[&turn];
-            assert!((1_000..=1_400).contains(&tokens), "turn {turn}: {tokens}");
+        // Every measured turn reports 1,000 tokens, so each request after the
+        // first estimates 1,000 plus the byte delta of one turn's calls and
+        // results (~300 tokens here), never the raw byte count of the whole
+        // transcript. The checkpoint request keeps its schemas and is charged
+        // only its notice; the continuation swaps notices; the turn after is
+        // credited the notice back and converges on the measurement again.
+        for (turn, tokens) in &prepared[1..] {
+            let tokens = tokens.expect("measured");
+            assert!((900..=1_400).contains(&tokens), "turn {turn}: {tokens}");
         }
         let raw_bytes = sessions::context::estimate_tokens(MAX_TOOL_CALLS_PER_SLICE as u64 * 64);
         assert!(
-            by_turn.values().all(|tokens| *tokens < raw_bytes),
+            prepared[1..]
+                .iter()
+                .all(|(_, tokens)| tokens.is_some_and(|tokens| tokens < raw_bytes)),
             "{prepared:?}"
         );
     }
@@ -7453,7 +7474,7 @@ mod tests {
         impl Provider for CompletesAfterCheckpoint {
             fn stream(&self, request: ModelRequest) -> ProviderStream {
                 self.requests.lock().unwrap().push(request.clone());
-                if request.tools().is_empty() {
+                if is_checkpoint_request(&request) {
                     let emitted = *self.emitted.lock().unwrap();
                     *self.checkpoint_at.lock().unwrap() = Some(emitted);
                     return Box::pin(stream::iter([
@@ -7538,11 +7559,155 @@ mod tests {
             1
         );
         let requests = requests.lock().unwrap();
-        let checkpoint_index = requests
-            .iter()
-            .position(|request| request.tools().is_empty())
-            .unwrap();
+        let checkpoint_index = requests.iter().position(is_checkpoint_request).unwrap();
+        assert!(!requests[checkpoint_index].tools().is_empty());
         assert!(!requests[checkpoint_index + 1].tools().is_empty());
+        assert!(!is_checkpoint_request(&requests[checkpoint_index + 1]));
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_on_the_checkpoint_turn_settles_as_a_rejection_and_the_run_continues() {
+        // Regression: models over OpenAI-compatible routes keep emitting
+        // tool calls on the checkpoint turn when the transcript is dense with
+        // them. That used to be a `ProviderProtocol` failure that discarded
+        // the whole run (5 runs, 120 minutes in the 2026-09-21 audit). The
+        // checkpoint keeps tools declared; a call there is admitted with a
+        // not-executed result and the run continues into the next slice.
+        struct AllowAllGate;
+
+        impl ToolGate for AllowAllGate {
+            fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
+                Box::pin(std::future::ready(GateDecision::Execute))
+            }
+        }
+
+        struct CallsOnCheckpoint {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+            emitted: Mutex<usize>,
+            checkpoint_seen: AtomicBool,
+        }
+
+        impl Provider for CallsOnCheckpoint {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.requests.lock().unwrap().push(request.clone());
+                let read = |id: String| {
+                    [
+                        Ok(ProviderEvent::ToolCallStarted {
+                            id: id.clone(),
+                            name: "read_file".to_owned(),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: id.clone(),
+                            json: r#"{"path":"note.txt"}"#.to_owned(),
+                        }),
+                        Ok(ProviderEvent::ToolCallCompleted { id }),
+                    ]
+                };
+                if is_checkpoint_request(&request) {
+                    self.checkpoint_seen.store(true, Ordering::SeqCst);
+                    let mut events = Vec::from(read("checkpoint-call".to_owned()));
+                    events.push(Ok(ProviderEvent::Completed { usage: None }));
+                    return Box::pin(stream::iter(events));
+                }
+                if self.checkpoint_seen.load(Ordering::SeqCst) {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "task complete".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                // Fifteen per turn parks the first slice at 255 so the next
+                // turn is the checkpoint.
+                let mut emitted = self.emitted.lock().unwrap();
+                let first = *emitted;
+                let count = (MAX_TOOL_CALLS_PER_SLICE - 1 - first).min(MAX_TOOL_CALLS_PER_TURN - 1);
+                *emitted += count;
+                drop(emitted);
+                let mut events = Vec::with_capacity(count * 3 + 1);
+                for index in first..first + count {
+                    events.extend(read(format!("call-{index}")));
+                }
+                events.push(Ok(ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            CallsOnCheckpoint {
+                requests: Arc::clone(&requests),
+                emitted: Mutex::new(0),
+                checkpoint_seen: AtomicBool::new(false),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_loop(
+                vec![Message::user("finish a long task")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(AllowAllGate),
+                Arc::new(workspace::FileState::default()),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{:?}",
+            events.last()
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::Failed { .. })),
+        );
+        let executed = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    RuntimeEvent::ToolCallFinished { is_error: false, result, .. } if result.contains("hello")
+                )
+            })
+            .count();
+        assert_eq!(executed, MAX_TOOL_CALLS_PER_SLICE - 1);
+        let rejected: Vec<&String> = events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::ToolCallFinished {
+                    is_error: true,
+                    result,
+                    ..
+                } => Some(result),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
+        assert_eq!(rejected[0], SLICE_CHECKPOINT_REJECTION);
+
+        let requests = requests.lock().unwrap();
+        let checkpoint_index = requests.iter().position(is_checkpoint_request).unwrap();
+        assert!(!requests[checkpoint_index].tools().is_empty());
+        let continuation = &requests[checkpoint_index + 1];
+        assert!(!continuation.tools().is_empty());
+        assert!(
+            continuation
+                .system()
+                .is_some_and(|system| system.contains(SLICE_CONTINUATION_NOTICE))
+        );
+        // The rejected call has exactly one result, in the transcript the
+        // continuation turn sees, so the model can re-issue it.
+        assert!(matches!(
+            continuation.messages().last().unwrap().content(),
+            [ContentBlock::ToolResult { call_id, content, is_error: true }]
+                if call_id == "checkpoint-call" && content == SLICE_CHECKPOINT_REJECTION
+        ));
+        assert_eq!(requests.len(), checkpoint_index + 2);
     }
 
     #[tokio::test]
@@ -7790,60 +7955,13 @@ mod tests {
             })
         ));
 
-        struct EndlessToolTurns {
-            turn: Mutex<usize>,
-        }
-
-        impl Provider for EndlessToolTurns {
-            fn stream(&self, _: ModelRequest) -> ProviderStream {
-                let mut turn = self.turn.lock().unwrap();
-                let id = format!("call-{}", *turn);
-                *turn += 1;
-                drop(turn);
-                Box::pin(stream::iter([
-                    Ok(ProviderEvent::ToolCallStarted {
-                        id: id.clone(),
-                        name: "unknown".to_owned(),
-                    }),
-                    Ok(ProviderEvent::ToolCallArgumentsDelta {
-                        id: id.clone(),
-                        json: "{}".to_owned(),
-                    }),
-                    Ok(ProviderEvent::ToolCallCompleted { id }),
-                    Ok(ProviderEvent::Completed { usage: None }),
-                ]))
-            }
-        }
-
-        let runtime = Runtime::new(
-            EndlessToolTurns {
-                turn: Mutex::new(0),
-            },
-            "gpt-test",
-            256,
-        )
-        .unwrap();
-        let events = runtime
-            .run(RunCommand::new("hello"))
-            .collect::<Vec<_>>()
-            .await;
-        // A provider that emits a tool call on the tool-free checkpoint turn
-        // is violating the request, not the run policy.
-        assert!(matches!(
-            events.last(),
-            Some(RunEvent::Failed {
-                kind: RunFailureKind::ProviderProtocol,
-                message,
-            }) if message.contains("checkpoint turn")
-        ));
-
         struct EmptyCheckpoint {
             turn: Mutex<usize>,
         }
 
         impl Provider for EmptyCheckpoint {
             fn stream(&self, request: ModelRequest) -> ProviderStream {
-                if request.tools().is_empty() {
+                if is_checkpoint_request(&request) {
                     return Box::pin(stream::iter([Ok(ProviderEvent::Completed {
                         usage: Some(qq_provider::ProviderUsage {
                             input_tokens: 3,

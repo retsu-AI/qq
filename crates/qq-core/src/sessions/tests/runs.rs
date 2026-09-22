@@ -1009,7 +1009,12 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
         let recorded_requests = requests.lock().unwrap();
         let checkpoint = &recorded_requests[recorded_requests.len() - 2];
         let continuation = recorded_requests.last().unwrap();
-        assert!(checkpoint.tools().is_empty());
+        assert!(
+            checkpoint
+                .system()
+                .is_some_and(|system| system.contains(crate::SLICE_CHECKPOINT_NOTICE))
+        );
+        assert!(!checkpoint.tools().is_empty());
         assert!(!continuation.tools().is_empty());
         assert!(
             continuation
@@ -1151,7 +1156,13 @@ async fn cancellation_at_the_slice_checkpoint_has_one_cancelled_terminal() {
         "seedx"
     );
     let requests = requests.lock().unwrap();
-    assert!(requests.last().unwrap().tools().is_empty());
+    assert!(
+        requests
+            .last()
+            .unwrap()
+            .system()
+            .is_some_and(|system| system.contains(crate::SLICE_CHECKPOINT_NOTICE))
+    );
     assert!(!requests.iter().any(|request| {
         request
             .system()

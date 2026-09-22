@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | Plan opened 2026-09-21 from [`../design/run-reliability-audit-2026-09-21.md`](../design/run-reliability-audit-2026-09-21.md). No slice in progress |
+| Now | RR1 in review on `feat/rr1-checkpoint-tolerance` (stacked on the plan PR). Next: RR2 |
 | Shipped | — |
 | Open | RR1–RR12 |
 | Ledger | [`progress/run-reliability.md`](./progress/run-reliability.md) |
