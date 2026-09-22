@@ -7,7 +7,7 @@ appended below, newest last.
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | RR1 | Checkpoint turn tolerates a tool call | In review | `feat/rr1-checkpoint-tolerance` | 5 runs / 120 min in the audit |
-| RR2 | Slash/empty-prompt validation at admission | Planned | | 8 runs |
+| RR2 | Slash/empty-prompt validation at admission | In review | `fix/rr2-slash-admission` | 3 slash runs; the 5 "messages must not be empty" runs predate #27 |
 | RR3 | Jev exhaustion is an outcome, not a failure | Planned | | 9 runs |
 | RR4 | Turn-level recovery; `Paused`; `TurnRetry`; ADR-0040 superseding 0005 | Planned | | 12 runs / 4.5 h; independent review |
 | RR5 | `Retry-After` ≤ 60 s; 529 retryable; HTTP-date | Planned | | provider crate; minimal profile |
@@ -49,3 +49,24 @@ notice bytes across the seam. `tool_choice: none` was not added: no adapter
 carries a tool-choice field today and the rejection result makes it
 unnecessary for correctness. Consider deleting the checkpoint once RR12's
 loop result lands (in-run compaction is already the durable boundary).
+
+### 2026-09-21 — RR2 slash admission
+
+The `invalid_command` bucket split on inspection: 3 runs were slash names
+(`/clear`, `/agents`, one malformed) and 5 were "conversation messages must
+not be empty" on ordinary prompts in two sessions whose prior runs had only
+reasoning/tool-only assistant turns. Those 5 are dated 2026-09-11 05:42Z and
+18:21Z; #27 (`1747435`, 2026-09-12 03:52Z, `usable_conversation`) fixed
+exactly that and they have not recurred, so RR2 does not touch it. For the
+slash cases: `SessionCommand::SubmitPrompt` now validates the rendered
+prompt's leading name against the grammar and the reserved vocabulary
+(`validate_slash_prompt`, no I/O) and refuses with the new
+`SessionRuntimeError::InvalidSlashCommand(SlashCommandError)`; no run row,
+no failure notice on the next prompt. Server maps it to `InvalidRequest`,
+headless to `InvalidConfiguration`. `/clear` joins the client vocabulary as
+an alias of `/new` (protocol constant 20 → 21 entries; additive, no
+`PROTOCOL_VERSION` bump). Unknown-but-well-formed names still fail the run:
+only the workspace index can decide them, and the TUI already completes
+from that index. Regression:
+`unresolvable_slash_prompts_are_refused_at_admission_without_a_run_row`,
+`slash_clear_is_a_client_alias_for_a_new_session`.

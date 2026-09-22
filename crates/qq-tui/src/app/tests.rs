@@ -784,6 +784,40 @@ fn new_slash_command_creates_a_root_session_with_the_selected_model() {
 }
 
 #[test]
+fn slash_clear_is_a_client_alias_for_a_new_session() {
+    let model = ModelSelection {
+        model_is_fallback: false,
+        model: Some("openai/gpt-test".to_owned()),
+        max_output_tokens: Some(4_096),
+        organization: None,
+    };
+    let mut app = App::new(TuiOptions {
+        settings: Settings::default(),
+        model,
+        models: Vec::new(),
+        themes: Vec::new(),
+        workspace_root: None,
+    });
+    app.apply_snapshot(snapshot());
+    app.composer.text = "/clear".to_owned();
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    // Handled client-side: never forwarded as a prompt.
+    assert!(matches!(
+        &requests[0],
+        ClientRequest::Command(CommandRequest {
+            command: SessionCommand::CreateSession {
+                parent_id: None,
+                ..
+            },
+            ..
+        })
+    ));
+    assert!(app.composer.text.is_empty());
+}
+
+#[test]
 fn slash_autocomplete_filters_selects_and_executes_commands() {
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());

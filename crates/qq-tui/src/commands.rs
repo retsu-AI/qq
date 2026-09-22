@@ -180,7 +180,7 @@ pub(crate) const COMMANDS: [CommandSpec; 38] = [
         NewRootSession,
         "create a session",
         Session,
-        ["/new"],
+        ["/new", "/clear"],
         [],
         CreateRootSession
     ),

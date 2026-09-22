@@ -118,8 +118,13 @@ in the same tier do not silently shadow each other. Names are 1--64 bytes,
 start with a lowercase ASCII letter, and otherwise contain lowercase ASCII
 letters, digits, `-`, or `_`. Client control names (every entry of
 `qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS`, such as `models`, `profile`,
-`approval`, `skills`, `sessions`, `new`, `compact`, and `quit`) are reserved
-and cannot name runtime guidance.
+`approval`, `skills`, `sessions`, `new`, `clear`, `compact`, and `quit`) are
+reserved and cannot name runtime guidance. A session prompt whose leading
+slash names a malformed or reserved name is refused at admission
+(`SessionRuntimeError::InvalidSlashCommand`) and creates no run, so the next
+prompt does not open with a failure notice; `//` still escapes to literal text.
+An unknown but well-formed name still fails the run, because only the
+workspace index can decide it.
 
 Authority follows command provenance rather than session ancestry. The
 model-authored task that creates a child session cannot select guidance, while

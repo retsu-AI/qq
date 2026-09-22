@@ -541,6 +541,11 @@ pub(super) fn execute_command(
             // verbatim, attachments as `@path` placeholders. Slash escaping
             // applies to the rendered text exactly as it did to the string.
             let prompt = crate::input::render_text(&input).trim().to_owned();
+            // Slash names the runtime can never resolve fail the command, not
+            // the run: a run row would only add a "previous run failed"
+            // notice to the next prompt.
+            runtime::validate_slash_prompt(&prompt)
+                .map_err(SessionRuntimeError::InvalidSlashCommand)?;
             let prompt = prompt
                 .strip_prefix("//")
                 .map_or(prompt.clone(), |literal| format!("/{literal}"));

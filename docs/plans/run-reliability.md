@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | RR1 in review on `feat/rr1-checkpoint-tolerance` (stacked on the plan PR). Next: RR2 |
+| Now | RR1, RR2 in review (stacked on the plan PR). Next: RR3 |
 | Shipped | — |
 | Open | RR1–RR12 |
 | Ledger | [`progress/run-reliability.md`](./progress/run-reliability.md) |
