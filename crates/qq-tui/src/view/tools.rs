@@ -1,6 +1,5 @@
 use super::*;
-use crate::render::Span;
-use markdown::{CODE_PANEL_INSET, panel_content_width, panel_rows};
+use markdown::{CODE_PANEL_INSET, panel_content_width, panel_rows, panel_rows_at};
 use qq_client::state::ToolCallTiming;
 
 /// Runs with more than this many quiet tool calls fold into one summary row.
@@ -867,26 +866,13 @@ fn tool_panel_rows(
     label: Option<&str>,
     width: usize,
 ) -> Vec<Line> {
-    let mut rows = panel_rows(body, label, width.saturating_sub(TOOL_PANEL_INDENT.len()));
-    for row in &mut rows {
-        row.spans.insert(
-            0,
-            Span {
-                text: TOOL_PANEL_INDENT.to_owned(),
-                style: normal(),
-            },
-        );
+    let indent = TOOL_PANEL_INDENT.len();
+    if width <= indent + CODE_PANEL_INSET {
+        return panel_rows(body, label, width);
     }
-    if width <= TOOL_PANEL_INDENT.len() + CODE_PANEL_INSET {
-        rows = rows
-            .into_iter()
-            .map(|row| truncate_line(row, width))
-            .collect();
-    }
-    rows
+    panel_rows_at(body, label, width - indent, indent)
 }
 
-/// Columns a tool detail panel at `width` leaves for content.
 fn tool_panel_content_width(width: usize) -> usize {
     panel_content_width(width.saturating_sub(TOOL_PANEL_INDENT.len()))
 }

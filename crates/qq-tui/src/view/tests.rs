@@ -3302,12 +3302,11 @@ fn expanded_call_rows(call: &ToolCallSnapshot, width: usize) -> Vec<Line> {
 /// every span after it carries a background (the surface, or a diff tint
 /// that wins over it).
 fn is_panel_row(line: &Line) -> bool {
+    // The margin before the rail rides in `indent` (terminal background).
     let mut spans = line.spans.iter();
-    spans
-        .next()
-        .is_some_and(|margin| margin.text == "   " && margin.style.background.is_none())
+    line.indent == 3
         && spans.next().is_some_and(|rail| {
-            (rail.text == "┃ " || rail.text == "↪ ") && rail.style == surface(border())
+            (rail.text == "┃  " || rail.text == "↪  ") && rail.style == surface(border())
         })
         && spans.all(|span| span.style.background.is_some())
 }
@@ -3344,8 +3343,8 @@ fn expanded_read_detail_is_a_timing_line_above_a_surface_panel() {
     for line in panel {
         assert!(is_panel_row(line), "{line:?}");
         assert_eq!(line.width(), width);
-        assert_eq!(line.spans[1].text, "┃ ");
-        assert_eq!(line.spans[1].style, surface(border()));
+        assert_eq!(line.spans[0].text, "┃  ");
+        assert_eq!(line.spans[0].style, surface(border()));
     }
     assert_eq!(rows[1].trim_end(), "   ┃");
     assert_eq!(rows[2].trim_end(), "   ┃  line 1");
@@ -3502,7 +3501,7 @@ fn edit_diffs_keep_line_numbers_and_tints_inside_the_panel() {
     );
     assert!(lines[1..].iter().all(is_panel_row), "{lines:?}");
     let plus = &lines[4];
-    assert_eq!(plus.spans[1].style, surface(border()), "gutter on surface");
+    assert_eq!(plus.spans[0].style, surface(border()), "gutter on surface");
     assert_eq!(
         style_of(&lines, "+new").map(|style| style.background),
         Some(Some(palette.diff_add_bg))
@@ -3553,7 +3552,7 @@ fn wrapped_detail_rows_carry_the_wrap_mark_in_the_gutter() {
     );
     for line in &lines[1..] {
         assert!(is_panel_row(line), "{line:?}");
-        assert_eq!(line.spans[1].style, surface(border()));
+        assert_eq!(line.spans[0].style, surface(border()));
         assert_eq!(line.width(), 20);
     }
 }

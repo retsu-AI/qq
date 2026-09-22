@@ -158,6 +158,11 @@ pub(crate) fn indent_lines(
         .into_iter()
         .map(|line| {
             let mut indented = Line::styled(prefix, prefix_style);
+            // A row's own margin (`Line::indent`) sits after the prefix, so
+            // it becomes cells here rather than being dropped.
+            if line.indent > 0 {
+                indented.push(" ".repeat(line.indent), prefix_style);
+            }
             for span in line.spans {
                 indented.push(span.text, span.style);
             }
@@ -251,13 +256,29 @@ pub(crate) fn bounded_tail(text: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::normal;
+    use crate::render::{Span, normal};
 
     fn frame_rows(frame: &[Line]) -> Vec<String> {
         frame
             .iter()
             .map(|line| line.spans.iter().map(|span| span.text.as_str()).collect())
             .collect()
+    }
+
+    #[test]
+    fn indent_lines_keeps_a_rows_own_margin_after_the_prefix() {
+        let row = Line {
+            indent: 3,
+            spans: vec![Span {
+                text: "┃ body".to_owned(),
+                style: normal(),
+            }],
+        };
+        let [out] = <[Line; 1]>::try_from(indent_lines(vec![row], "│ ", muted(), 40))
+            .expect("one row in, one out");
+        let text: String = out.spans.iter().map(|span| span.text.as_str()).collect();
+        assert_eq!(text, "│    ┃ body");
+        assert_eq!(out.indent, 0);
     }
 
     #[test]
