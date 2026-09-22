@@ -1521,7 +1521,8 @@ impl Store {
         .await
     }
 
-    /// Settles a held `Supervised` call as denied by the reviewer.
+    /// Settles a held call as denied by the reviewer. Final under `auto` and
+    /// `supervised`; a client resolution that already committed wins.
     pub(super) async fn deny_approval_by_reviewer(
         &self,
         claimed: &ClaimedRun,

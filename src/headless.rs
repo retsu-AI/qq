@@ -34,8 +34,9 @@ use tokio::time::Instant;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 /// How long an `auto` headless run holds an escalated approval open for the
 /// configured reviewer before denying it. Covers the reviewer's own 10s
-/// request timeout with margin; without a verdict by then the deny proceeds
-/// so the run never stalls.
+/// request timeout with margin. The reviewer's `approve` and `deny` both
+/// settle the call themselves; this deny is the unattended answer to an
+/// `escalate`, a reviewer timeout, or an outage, so the run never stalls.
 const REVIEWER_DENY_GRACE: Duration = Duration::from_secs(20);
 /// Steering lines buffered between stdin and the run. Beyond this the reader
 /// waits; the runtime's own per-run pending bound refuses the rest anyway.
@@ -894,8 +895,11 @@ async fn stream_run(
                         // shell) so the run never stalls waiting for a human —
                         // but when a reviewer model is configured the deny is
                         // deferred briefly, giving the reviewer its window.
-                        // A late deny is harmless: resolution is idempotent,
-                        // so a reviewer approval that landed first stands.
+                        // The reviewer settles the call itself on approve or
+                        // deny; the deferred deny is the unattended answer to
+                        // an escalation. A late deny is harmless: resolution is
+                        // idempotent, so a reviewer resolution that landed
+                        // first stands.
                         // A child session's held calls belong to a supervised
                         // write child: the reviewer adjudicates them, and the
                         // headless root only supplies the unattended fallback

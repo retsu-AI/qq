@@ -164,8 +164,10 @@ impl ToolGate for SessionToolGate {
                     // "dangerous-shaped but possibly fine") and under
                     // Supervised (every action of a write child). Ask means
                     // the human asked to decide everything; ReadOnly never
-                    // reaches here. Under Auto only a clear Approve changes
-                    // anything; under Supervised a Deny is final too.
+                    // reaches here. Under both modes the reviewer settles the
+                    // call: Approve executes, Deny is final, and only Escalate
+                    // (or a reviewer failure, which the reviewer must report as
+                    // Escalate) reaches the human.
                     let mut review: Option<ReviewFuture> = match (&inner.approval_reviewer, mode) {
                         (Some(reviewer), ApprovalMode::Auto | ApprovalMode::Supervised) => {
                             // Context is advisory: a missing brief must not
@@ -204,9 +206,12 @@ impl ToolGate for SessionToolGate {
                     // `Some` once a reviewer verdict arrived; its spend is
                     // charged to this run whatever the outcome.
                     let mut review_spend: Option<ReviewSpend> = None;
-                    // One deadline for the whole wait: a reviewer escalation
-                    // must not restart the human approval timeout.
-                    let deadline = tokio::time::Instant::now() + inner.approval_timeout;
+                    // The human's deadline. While a reviewer is deciding the
+                    // human is not being asked, so the wait starts when the
+                    // reviewer escalates, not when it was consulted: a slow
+                    // reviewer must not eat into the human's time. Without a
+                    // reviewer the deadline starts now.
+                    let mut deadline = tokio::time::Instant::now() + inner.approval_timeout;
                     let timed_out = loop {
                         if let Some(pending_review) = review.as_mut() {
                             tokio::select! {
@@ -241,12 +246,14 @@ impl ToolGate for SessionToolGate {
                                                 Ok(None) | Err(_) => break false,
                                             }
                                         }
-                                        ReviewDecision::Deny { reason }
-                                            if mode == ApprovalMode::Supervised =>
-                                        {
+                                        // Final under Auto and Supervised alike:
+                                        // the reviewer is the configured delegate
+                                        // for the calls those modes hold. The
+                                        // client-wins race is unchanged.
+                                        ReviewDecision::Deny { reason } => {
                                             let message = format!(
                                                 "{} {}",
-                                                approval::REVIEWER_DENIED_RESULT,
+                                                approval::reviewer_denied_result(mode),
                                                 truncate_utf8(reason, MAX_REVIEW_REASON_BYTES)
                                             );
                                             match inner
@@ -264,13 +271,17 @@ impl ToolGate for SessionToolGate {
                                                 Ok(None) | Err(_) => break false,
                                             }
                                         }
-                                        // Escalate, or Deny under Auto: keep
-                                        // waiting for the human on the
-                                        // remaining select arms.
-                                        ReviewDecision::Escalate { .. }
-                                        | ReviewDecision::Deny { .. } => {}
+                                        // Escalate: the human's wait starts
+                                        // here, on the remaining select arms.
+                                        ReviewDecision::Escalate { .. } => {
+                                            deadline = tokio::time::Instant::now()
+                                                + inner.approval_timeout;
+                                        }
                                     }
                                 }
+                                // Bounds the reviewer as well as the human: a
+                                // reviewer that never answers cannot hold the
+                                // run past the configured wait.
                                 () = tokio::time::sleep_until(deadline) => break true,
                             }
                         } else {

@@ -1352,10 +1352,15 @@ async fn reviewer_escalation_leaves_the_call_waiting_for_a_client() {
 }
 
 #[tokio::test]
-async fn reviewer_denial_still_lets_the_client_decide() {
-    let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Deny {
-        reason: "dangerous".to_owned(),
-    }));
+async fn a_reviewer_denial_is_final_under_auto_and_no_human_is_asked() {
+    // DA1: the reviewer is the configured delegate for the calls `auto`
+    // holds. Its Deny settles the call as a tool error that names the
+    // reviewer and its reason; the run continues; nothing executes. Before
+    // this slice the denial only escalated and the human was asked anyway.
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Deny {
+            reason: "pushes to a shared branch".to_owned(),
+        }));
     let mut harness = approval_harness_with_reviewer(
         ApprovalMode::Auto,
         "__test_shell",
@@ -1366,28 +1371,159 @@ async fn reviewer_denial_still_lets_the_client_decide() {
         Some(reviewer),
     )
     .await;
-    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    respond_approval(
-        &harness.runtime,
-        harness.run_id,
-        tool_call.id,
-        ApprovalDecision::Deny,
-    )
-    .await
-    .unwrap();
     let observed = collect_through_finished(&mut harness.events).await;
-    assert!(observed.iter().any(|event| matches!(
-        &event.event,
-        SessionEvent::ToolApprovalResolved {
-            resolution: ApprovalResolution::Denied,
-            ..
-        }
-    )));
+    // The hold is published before the reviewer is consulted (a client may
+    // still answer first), and the denial settles it.
+    let denied = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::ToolApprovalResolved {
+                tool_call,
+                resolution: ApprovalResolution::DeniedByReviewer,
+            } => Some(tool_call.clone()),
+            _ => None,
+        })
+        .expect("the reviewer denial is published");
+    assert_eq!(denied.state, ToolCallState::Denied);
+    let result = denied.result.as_deref().unwrap();
+    assert!(result.starts_with(approval::reviewer_denied_result(ApprovalMode::Auto)));
+    assert!(result.contains("pushes to a shared branch"));
+    assert!(
+        !result.contains("supervised"),
+        "a root denial must not claim a supervised sub-agent: {result}"
+    );
     assert!(
         !observed
             .iter()
             .any(|event| matches!(event.event, SessionEvent::ToolCallStarted { .. }))
     );
+    assert!(matches!(
+        &observed.last().unwrap().event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::Completed,
+            ..
+        }
+    ));
+    assert_eq!(consulted.lock().unwrap().len(), 1);
+    // The model saw the denial as a tool error and the run went on.
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert!(matches!(
+            requests[1].messages()[2].content(),
+            [ContentBlock::ToolResult { content, is_error: true, .. }]
+                if content.starts_with(approval::reviewer_denied_result(ApprovalMode::Auto))
+        ));
+    }
+    // A late client answer finds the call already settled.
+    let receipt = respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        denied.id,
+        ApprovalDecision::ApproveOnce,
+    )
+    .await;
+    assert!(
+        matches!(
+            receipt,
+            Ok(CommandReceipt {
+                outcome: CommandOutcome::ToolApprovalResolved {
+                    resolution: ApprovalResolution::DeniedByReviewer,
+                    ..
+                },
+                ..
+            }) | Err(SessionRuntimeError::ApprovalNotPending)
+        ),
+        "a settled denial is not reopened by a late approval"
+    );
+}
+
+#[tokio::test]
+async fn a_reviewer_escalation_starts_the_human_wait_at_the_escalation() {
+    // DA1: the reviewer's own deliberation does not consume the human's
+    // approval wait. The reviewer takes half the wait to escalate; the human
+    // then answers past where a single deadline started at reviewer-start
+    // would have expired, but inside a wait that started at the escalation.
+    // Margins are wide (hundreds of ms) so scheduler jitter cannot flip the
+    // result. A reviewer slower than the whole wait is DA2's two-clock case;
+    // here the wait still bounds it (see the test below).
+    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Escalate {
+        reason: "unsure".to_owned(),
+    }));
+    let wait = Duration::from_millis(1_000);
+    let mut harness = approval_harness_with_reviewer(
+        ApprovalMode::Auto,
+        "__test_shell",
+        r#"{"command":"git push origin main"}"#,
+        1,
+        wait,
+        None,
+        Some(reviewer),
+    )
+    .await;
+    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    let held_at = tokio::time::Instant::now();
+    tokio::time::sleep(wait / 2).await;
+    let _ = release.send(());
+    // 1.2 x wait after the hold: past the old shared deadline (1.0 x wait),
+    // 0.3 x wait short of the restarted one (1.5 x wait).
+    tokio::time::sleep_until(held_at + wait + wait / 5).await;
+    respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        tool_call.id,
+        ApprovalDecision::ApproveOnce,
+    )
+    .await
+    .unwrap();
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(
+        observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::ToolApprovalResolved {
+                resolution: ApprovalResolution::ApprovedOnce,
+                ..
+            }
+        )),
+        "the human's answer inside the restarted wait must stand"
+    );
+    assert!(
+        !observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::ToolApprovalResolved {
+                resolution: ApprovalResolution::DeniedTimeout,
+                ..
+            }
+        )),
+        "the reviewer's deliberation must not have consumed the human wait"
+    );
+}
+
+#[tokio::test]
+async fn a_reviewer_that_never_answers_is_bounded_by_the_approval_wait() {
+    // The reviewer contract says failures escalate, never hang. The gate
+    // still bounds a reviewer that breaks that contract: without a verdict
+    // or a client answer the call is denied by timeout, so a run cannot be
+    // held open forever by a stuck delegate.
+    let (reviewer, _release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
+    let mut harness = approval_harness_with_reviewer(
+        ApprovalMode::Auto,
+        "__test_shell",
+        r#"{"command":"git push origin main"}"#,
+        1,
+        Duration::from_millis(50),
+        None,
+        Some(reviewer),
+    )
+    .await;
+    let (_, _) = collect_until_approval_requested(&mut harness.events).await;
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolApprovalResolved {
+            resolution: ApprovalResolution::DeniedTimeout,
+            ..
+        }
+    )));
 }
 
 #[tokio::test]
