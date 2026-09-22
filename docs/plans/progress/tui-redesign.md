@@ -18,7 +18,7 @@ Raw frames and bench reports live under `target/qq-perf/tui-<slice>-<date>/`
 | L3 ([ENG-853](https://linear.app/retsu-ai/issue/ENG-853)) | Inspector pane | Shipped (`bb2c2e4`, [#104](https://github.com/retsu-AI/qq/pull/104)) | | 2026-09-21 |
 | L4 ([ENG-854](https://linear.app/retsu-ai/issue/ENG-854)) | Split transcripts | Planned | | Needs L2 |
 | U6 ([ENG-855](https://linear.app/retsu-ai/issue/ENG-855)) | Turn headers, geometry, tool rows | In review | [#111](https://github.com/retsu-AI/qq/pull/111) | Stacked on #110 |
-| U7 ([ENG-856](https://linear.app/retsu-ai/issue/ENG-856)) | Tool detail panels | In review | `feat/eng-856-u7-tool-panels` | Stacked on U6 |
+| U7 ([ENG-856](https://linear.app/retsu-ai/issue/ENG-856)) | Tool detail panels | In review (draft) | [#115](https://github.com/retsu-AI/qq/pull/115) | Stacked on #111; perf gate open |
 | U8 ([ENG-857](https://linear.app/retsu-ai/issue/ENG-857)) | Chrome, `layout.md`, ADR 0037, receipts | Planned | | Last |
 
 ## Entries
