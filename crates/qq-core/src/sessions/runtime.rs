@@ -1248,8 +1248,6 @@ pub enum SessionRuntimeError {
     ToolCallNotFound,
     #[error("tool call is not awaiting approval")]
     ApprovalNotPending,
-    #[error("approval grant is empty or exceeds the session limit")]
-    InvalidApprovalGrant,
     #[error("a spawned child session cannot be raised above the authority its parent granted")]
     ChildAuthorityEscalation,
     #[error("sub-agent nesting would exceed the runtime depth ceiling")]

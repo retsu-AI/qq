@@ -298,6 +298,157 @@ async fn approve_for_session_grants_cover_later_calls_without_prompting() {
 }
 
 #[tokio::test]
+async fn an_oversized_session_grant_approves_the_call_once_instead_of_failing() {
+    // A session choice used to fail the whole command with "approval grant is
+    // empty or exceeds the session limit" when the value was empty or past
+    // MAX_GRANT_BYTES, leaving the call awaiting after the user had approved
+    // it. The call must run, and nothing must be recorded.
+    let command = format!("echo {}", "x".repeat(MAX_GRANT_BYTES));
+    let arguments = serde_json::json!({"command": command}).to_string();
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::Ask,
+        vec![vec![("__test_shell", arguments.clone())]],
+    )
+    .await;
+    let run_id = submit_prompt(&harness, "run the long command").await;
+    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+
+    let receipt = respond_approval(
+        &harness.runtime,
+        run_id,
+        tool_call.id,
+        ApprovalDecision::ApproveForSession {
+            grant: ApprovalGrant::ShellPrefix { prefix: command },
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::ToolApprovalResolved {
+            tool_call_id: tool_call.id,
+            resolution: ApprovalResolution::ApprovedOnce,
+        }
+    );
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolApprovalResolved {
+            resolution: ApprovalResolution::ApprovedOnce,
+            ..
+        }
+    )));
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolCallFinished { tool_call }
+            if tool_call.state == ToolCallState::Completed
+    )));
+    let (_, grants) = harness
+        .runtime
+        .inner
+        .store
+        .approval_policy(harness.session_id)
+        .await
+        .unwrap();
+    assert!(
+        grants.shell_prefixes.is_empty(),
+        "a grant past the byte cap must not be stored"
+    );
+
+    // A session already at the grant cap is the other half of the old error.
+    // The call is approved once; the table does not grow.
+    let mut full = scripted_runs_harness(
+        ApprovalMode::Ask,
+        vec![vec![("__test_mutate", "{}".to_owned())]],
+    )
+    .await;
+    let full_session = full.session_id;
+    full.runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            for index in 0..MAX_SESSION_GRANTS {
+                connection.execute(
+                    "INSERT INTO session_grants(session_id, kind, value, created_at_ms)
+                     VALUES (?1, 'tool', ?2, 0)",
+                    params![full_session.to_string(), format!("tool-{index}")],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let run_id = submit_prompt(&full, "mutate").await;
+    let (_, tool_call) = collect_until_approval_requested(&mut full.events).await;
+    let receipt = respond_approval(
+        &full.runtime,
+        run_id,
+        tool_call.id,
+        ApprovalDecision::ApproveForSession {
+            grant: ApprovalGrant::Tool {
+                name: "__test_mutate".to_owned(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        receipt.outcome,
+        CommandOutcome::ToolApprovalResolved {
+            resolution: ApprovalResolution::ApprovedOnce,
+            ..
+        }
+    ));
+    let (_, grants) = full
+        .runtime
+        .inner
+        .store
+        .approval_policy(full.session_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        u32::try_from(grants.tools.len()).unwrap(),
+        MAX_SESSION_GRANTS
+    );
+    collect_through_finished(&mut full.events).await;
+
+    // An empty grant is the same class of request: approve once, record nothing.
+    let mut empty = scripted_runs_harness(
+        ApprovalMode::Ask,
+        vec![vec![("__test_mutate", "{}".to_owned())]],
+    )
+    .await;
+    let run_id = submit_prompt(&empty, "mutate").await;
+    let (_, tool_call) = collect_until_approval_requested(&mut empty.events).await;
+    let receipt = respond_approval(
+        &empty.runtime,
+        run_id,
+        tool_call.id,
+        ApprovalDecision::ApproveForWorkspace {
+            grant: ApprovalGrant::Tool {
+                name: "   ".to_owned(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        receipt.outcome,
+        CommandOutcome::ToolApprovalResolved {
+            resolution: ApprovalResolution::ApprovedOnce,
+            ..
+        }
+    ));
+    let observed = collect_through_finished(&mut empty.events).await;
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::WorkspaceGrantPromoted { .. })),
+        "a grant that was not recorded must not be promoted"
+    );
+}
+
+#[tokio::test]
 async fn config_grants_seed_new_sessions_and_cover_calls_without_prompting() {
     let authority = ScriptedGrantAuthority::new(
         WorkspaceGrantSeed {

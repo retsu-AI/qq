@@ -2444,7 +2444,6 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::RunNotFound
         | SessionRuntimeError::ToolCallNotFound
         | SessionRuntimeError::ApprovalNotPending
-        | SessionRuntimeError::InvalidApprovalGrant
         | SessionRuntimeError::ChildAuthorityEscalation
         | SessionRuntimeError::ChildDepthExceeded
         | SessionRuntimeError::DescendantLimitReached

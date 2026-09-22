@@ -28,7 +28,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     StatusItem,
-    app::{App, SessionView, ToolDetail, terminal_safe_character},
+    app::{App, SessionView, ToolDetail, approval_grant_recordable, terminal_safe_character},
     input::{Mode, SessionConfirm, approval_mode_label},
     render::{
         Line, Style, accent, border, brand, diff_line_style, failure, info, muted, normal,

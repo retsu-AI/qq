@@ -971,8 +971,21 @@ pub(super) fn execute_command(
                 if state != "awaiting_approval" {
                     return Err(SessionRuntimeError::ApprovalNotPending);
                 }
+                // A session or workspace choice whose grant cannot be stored
+                // still approves this call. Refusing the whole command is what
+                // produced "approval grant is empty or exceeds the session
+                // limit" and left the call waiting after the user had already
+                // approved it. The grant is dropped; the call runs once.
+                let mut grant_not_recorded = false;
                 let resolution = match &decision {
                     ApprovalDecision::ApproveOnce => ApprovalResolution::ApprovedOnce,
+                    ApprovalDecision::ApproveForSession { grant }
+                    | ApprovalDecision::ApproveForWorkspace { grant }
+                        if !session_grant_recordable(&transaction, session_id, grant)? =>
+                    {
+                        grant_not_recorded = true;
+                        ApprovalResolution::ApprovedOnce
+                    }
                     ApprovalDecision::ApproveForSession { .. } => {
                         ApprovalResolution::ApprovedForSession
                     }
@@ -1057,26 +1070,13 @@ pub(super) fn execute_command(
                 // Approve-for-workspace records the same session grant as
                 // approve-for-session — the running session must proceed on
                 // it immediately — and additionally schedules the promotion
-                // below, outside this transaction.
-                if let ApprovalDecision::ApproveForSession { grant }
-                | ApprovalDecision::ApproveForWorkspace { grant } = &decision
+                // below, outside this transaction. A grant that cannot be
+                // stored was already folded into an once-approval above.
+                if !grant_not_recorded
+                    && let ApprovalDecision::ApproveForSession { grant }
+                    | ApprovalDecision::ApproveForWorkspace { grant } = &decision
                 {
-                    let (kind, value) = match grant {
-                        ApprovalGrant::Tool { name } => ("tool", name.trim()),
-                        ApprovalGrant::ShellPrefix { prefix } => ("shell_prefix", prefix.trim()),
-                        ApprovalGrant::Host { host } => ("host", host.trim()),
-                    };
-                    if value.is_empty() || value.len() > MAX_GRANT_BYTES {
-                        return Err(SessionRuntimeError::InvalidApprovalGrant);
-                    }
-                    let grant_count: u32 = transaction.query_row(
-                        "SELECT COUNT(*) FROM session_grants WHERE session_id = ?1",
-                        [session_id.to_string()],
-                        |row| row.get(0),
-                    )?;
-                    if grant_count >= MAX_SESSION_GRANTS {
-                        return Err(SessionRuntimeError::InvalidApprovalGrant);
-                    }
+                    let (kind, value) = session_grant_parts(grant);
                     transaction.execute(
                         "INSERT OR IGNORE INTO session_grants(
                                  session_id, kind, value, created_at_ms
@@ -1084,7 +1084,9 @@ pub(super) fn execute_command(
                         params![session_id.to_string(), kind, value, now],
                     )?;
                 }
-                if let ApprovalDecision::ApproveForWorkspace { grant } = &decision {
+                if !grant_not_recorded
+                    && let ApprovalDecision::ApproveForWorkspace { grant } = &decision
+                {
                     let workspace_path: String = transaction.query_row(
                         "SELECT path FROM workspaces WHERE id = ?1",
                         [workspace_id.to_string()],
@@ -1868,4 +1870,46 @@ pub(super) fn prompt_title(prompt: &str) -> String {
     } else {
         title
     }
+}
+
+/// The `(kind, value)` pair a session grant stores. The value is trimmed;
+/// emptiness and the byte cap are [`session_grant_recordable`]'s concern.
+fn session_grant_parts(grant: &ApprovalGrant) -> (&'static str, &str) {
+    match grant {
+        ApprovalGrant::Tool { name } => ("tool", name.trim()),
+        ApprovalGrant::ShellPrefix { prefix } => ("shell_prefix", prefix.trim()),
+        ApprovalGrant::Host { host } => ("host", host.trim()),
+    }
+}
+
+/// Whether this grant can be inserted into `session_grants` for the session:
+/// non-empty, within [`MAX_GRANT_BYTES`], and the session is under
+/// [`MAX_SESSION_GRANTS`]. A grant that is already stored counts as
+/// recordable, so re-approving it does not trip the cap.
+fn session_grant_recordable(
+    transaction: &rusqlite::Connection,
+    session_id: SessionId,
+    grant: &ApprovalGrant,
+) -> Result<bool, SessionRuntimeError> {
+    let (kind, value) = session_grant_parts(grant);
+    if value.is_empty() || value.len() > MAX_GRANT_BYTES {
+        return Ok(false);
+    }
+    let already_stored: bool = transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM session_grants
+             WHERE session_id = ?1 AND kind = ?2 AND value = ?3
+         )",
+        params![session_id.to_string(), kind, value],
+        |row| row.get(0),
+    )?;
+    if already_stored {
+        return Ok(true);
+    }
+    let grant_count: u32 = transaction.query_row(
+        "SELECT COUNT(*) FROM session_grants WHERE session_id = ?1",
+        [session_id.to_string()],
+        |row| row.get(0),
+    )?;
+    Ok(grant_count < MAX_SESSION_GRANTS)
 }

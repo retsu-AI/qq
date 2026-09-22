@@ -2184,17 +2184,42 @@ impl App {
         let tool_call_id = tool_call.id;
         let run_id = tool_call.run_id;
         let preview = self.pending_approval_preview();
-        let decision = match choice {
-            ApprovalChoice::Once => ApprovalDecision::ApproveOnce,
-            ApprovalChoice::Session => ApprovalDecision::ApproveForSession {
-                grant: approval_grant(tool_call, preview),
-            },
-            ApprovalChoice::Workspace => ApprovalDecision::ApproveForWorkspace {
-                grant: approval_grant(tool_call, preview),
-            },
-            ApprovalChoice::Deny => ApprovalDecision::Deny,
-            ApprovalChoice::Answer(answers) => ApprovalDecision::Answer { answers },
+        // A session or workspace choice whose grant cannot be stored must not
+        // be sent as one: the server would reject the whole approval. Approve
+        // this call once and say why, so the key never produces a 400.
+        let (decision, notice) = match choice {
+            ApprovalChoice::Once => (ApprovalDecision::ApproveOnce, None),
+            ApprovalChoice::Session | ApprovalChoice::Workspace => {
+                let grant = approval_grant(tool_call, preview);
+                let workspace = matches!(choice, ApprovalChoice::Workspace);
+                match grant_recording(&grant) {
+                    GrantRecording::Recorded => (
+                        if workspace {
+                            ApprovalDecision::ApproveForWorkspace { grant }
+                        } else {
+                            ApprovalDecision::ApproveForSession { grant }
+                        },
+                        None,
+                    ),
+                    GrantRecording::TooLong { bytes } => (
+                        ApprovalDecision::ApproveOnce,
+                        Some(format!(
+                            "approved once; a session grant may be at most {} bytes and this command is {bytes}",
+                            qq_core::MAX_GRANT_BYTES
+                        )),
+                    ),
+                    GrantRecording::Empty => (
+                        ApprovalDecision::ApproveOnce,
+                        Some("approved once; there is no command or tool name to grant".to_owned()),
+                    ),
+                }
+            }
+            ApprovalChoice::Deny => (ApprovalDecision::Deny, None),
+            ApprovalChoice::Answer(answers) => (ApprovalDecision::Answer { answers }, None),
         };
+        if let Some(notice) = notice {
+            self.set_warning(notice);
+        }
         self.answered_approvals.insert(tool_call_id);
         self.send(
             PendingIntent::Approval { tool_call_id },
@@ -2551,6 +2576,44 @@ fn approval_grant(
     ApprovalGrant::Tool {
         name: tool_call.name.clone(),
     }
+}
+
+/// Why a derived grant cannot be recorded, or that it can. The byte cap is the
+/// server's `MAX_GRANT_BYTES`; a value past it used to fail the whole approval
+/// with "approval grant is empty or exceeds the session limit".
+enum GrantRecording {
+    Recorded,
+    Empty,
+    TooLong { bytes: usize },
+}
+
+fn grant_recording(grant: &ApprovalGrant) -> GrantRecording {
+    let value = match grant {
+        ApprovalGrant::Tool { name } => name,
+        ApprovalGrant::ShellPrefix { prefix } => prefix,
+        ApprovalGrant::Host { host } => host,
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        GrantRecording::Empty
+    } else if value.len() > qq_core::MAX_GRANT_BYTES {
+        GrantRecording::TooLong { bytes: value.len() }
+    } else {
+        GrantRecording::Recorded
+    }
+}
+
+/// Whether the approval prompt may offer a session or workspace grant for this
+/// call. The server's per-session count is not known here; a grant that is
+/// empty or over the byte cap is the case the prompt can prevent.
+pub(crate) fn approval_grant_recordable(
+    tool_call: &ToolCallSnapshot,
+    preview: Option<&ApprovalPreview>,
+) -> bool {
+    matches!(
+        grant_recording(&approval_grant(tool_call, preview)),
+        GrantRecording::Recorded
+    )
 }
 
 fn valid_model_route(route: &str) -> bool {

@@ -201,6 +201,72 @@ fn approve_for_session_grants_shell_commands_as_prefixes() {
 }
 
 #[test]
+fn a_command_past_the_grant_cap_approves_once_and_says_why() {
+    // Approving a command longer than the session grant cap for the session
+    // used to send a grant the server rejected with "approval grant is empty
+    // or exceeds the session limit", which re-opened the prompt. The key now
+    // approves this call once and explains why no grant was recorded.
+    let mut app = App::new(TuiOptions::default());
+    let initial = snapshot();
+    let session_id = initial.focused.as_ref().unwrap().summary.id;
+    app.apply_snapshot(initial);
+    let command = format!("echo {}", "x".repeat(qq_core::MAX_GRANT_BYTES));
+    let run_id = id(4, RunId::from_bytes);
+    let tool_call = ToolCallSnapshot {
+        run_id,
+        call_ordinal: 1,
+        provider_call_id: "call_0".to_owned(),
+        arguments: serde_json::json!({"command": command}).to_string(),
+        state: ToolCallState::AwaitingApproval,
+        ..fixtures::tool_call(id(8, ToolCallId::from_bytes), session_id, "shell")
+    };
+    app.apply_live_event(SessionEventEnvelope {
+        run_id: Some(run_id),
+        occurred_at_ms: 2,
+        ..fixtures::envelope(
+            2,
+            session_id,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: tool_call.clone(),
+                shell: Some(Box::new(qq_protocol::ShellCommandPreview {
+                    command,
+                    cwd: None,
+                    verdict: None,
+                    reasons: Vec::new(),
+                })),
+                edit: None,
+                question: None,
+                fetch: None,
+            },
+        )
+    });
+    assert!(
+        !approval_grant_recordable(&tool_call, app.pending_approval_preview()),
+        "the prompt must not offer a grant the server cannot store"
+    );
+
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+        .split();
+    let ClientRequest::Command(request) = requests.into_iter().next().unwrap() else {
+        panic!("expected a command")
+    };
+    assert_eq!(
+        request.command,
+        SessionCommand::RespondToolApproval {
+            run_id,
+            tool_call_id: tool_call.id,
+            decision: ApprovalDecision::ApproveOnce,
+        }
+    );
+    assert!(
+        app.visible_status()
+            .is_some_and(|(text, _)| text.contains("approved once")),
+        "the status must say why the session grant was not recorded"
+    );
+}
+
+#[test]
 fn approve_for_workspace_sends_the_decision_and_surfaces_the_promotion() {
     let mut app = App::new(TuiOptions::default());
     let initial = snapshot();
