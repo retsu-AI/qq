@@ -252,6 +252,11 @@ run inside the run loop. 8 runs; each pollutes the next prompt with
 "The previous run failed". The TUI forwards any `/name` it does not own
 (`qq-tui/src/app.rs:1521-1553`).
 
+*Correction 2026-09-21 (RR2):* only 3 of the 8 are slash names. The other 5
+are "conversation messages must not be empty" on ordinary prompts, both
+sessions on 2026-09-11 after runs whose assistant turns were all
+reasoning/tool-only; #27 (`1747435`) fixed that the next day.
+
 **Fix.** Validate at admission (`sessions/commands.rs` SubmitPrompt): unknown
 slash names and empty usable text return a typed `SessionRuntimeError` and no
 run row; the TUI shows a notice with suggestions and restores the composer.

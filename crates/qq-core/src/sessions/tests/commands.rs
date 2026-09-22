@@ -1,6 +1,89 @@
 use super::*;
 
 #[tokio::test]
+async fn unresolvable_slash_prompts_are_refused_at_admission_without_a_run_row() {
+    // Regression: `/clear`, `/agents`, and a malformed name each used to
+    // create a run that failed inside the loop with `InvalidCommand`, and the
+    // next real prompt then opened with "The previous run failed".
+    let (_directory, runtime) = test_runtime().await;
+    let (workspace_id, _) = resolve_workspace(&runtime, _directory.path()).await;
+    let created = create_session(&runtime, workspace_id, None).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("unexpected receipt")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    let submit = |text: &str| {
+        let input = vec![InputPart::text(text)];
+        let runtime = &runtime;
+        async move {
+            runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::SubmitPrompt {
+                        session_id,
+                        input,
+                        limits: RunLimits::default(),
+                        correlation: Correlation::default(),
+                        output: None,
+                    },
+                )
+                .await
+        }
+    };
+    assert_eq!(
+        submit("/clear").await,
+        Err(SessionRuntimeError::InvalidSlashCommand(
+            SlashCommandError::Reserved {
+                name: "clear".to_owned()
+            }
+        ))
+    );
+    assert_eq!(
+        submit("/agents please").await,
+        Err(SessionRuntimeError::InvalidSlashCommand(
+            SlashCommandError::Reserved {
+                name: "agents".to_owned()
+            }
+        ))
+    );
+    assert_eq!(
+        submit("/Bad Name").await,
+        Err(SessionRuntimeError::InvalidSlashCommand(
+            SlashCommandError::InvalidName {
+                name: "Bad".to_owned()
+            }
+        ))
+    );
+    // Not a slash prompt, so nothing to validate; the escape reaches the run.
+    let literal = submit("//clear the table").await.unwrap();
+    assert!(matches!(
+        literal.outcome,
+        CommandOutcome::PromptQueued { .. }
+    ));
+    let observed = collect_through_finished(&mut events).await;
+    runtime.shutdown().await.unwrap();
+    // Exactly one run exists, and it saw no failure notice from the refused
+    // prompts because none of them left a row.
+    let started: Vec<_> = observed
+        .iter()
+        .filter(|event| matches!(event.event, SessionEvent::RunStarted { .. }))
+        .collect();
+    assert_eq!(started.len(), 1, "{observed:?}");
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::Completed,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
 async fn empty_attachment_range_fails_as_invalid_input_and_session_remains_usable() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("empty.txt"), "").unwrap();

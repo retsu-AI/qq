@@ -2430,6 +2430,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::InvalidWorkspace
         | SessionRuntimeError::EmptyPrompt
         | SessionRuntimeError::PromptTooLarge
+        | SessionRuntimeError::InvalidSlashCommand(_)
         | SessionRuntimeError::InvalidRunLimits
         | SessionRuntimeError::InvalidOutputContract(_)
         | SessionRuntimeError::InvalidInput(_)

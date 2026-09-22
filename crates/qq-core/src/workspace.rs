@@ -14,6 +14,7 @@ pub(crate) use file_state::{FileState, FileStateUpdate, content_hash};
 pub(crate) use guidance::load_entry;
 pub(crate) use guidance::{
     GuidanceError, GuidanceRequest, ParsedInvocation, SelectedGuidance, parse_invocation,
+    valid_name as valid_slash_name,
 };
 pub use instructions::WorkspaceInstructionError;
 pub(crate) use instructions::{

@@ -1153,6 +1153,51 @@ impl SessionRuntimeInner {
     }
 }
 
+/// Why a leading-slash prompt was refused at admission. Syntactic only: the
+/// name is checked against the grammar and the client-reserved vocabulary,
+/// never against the workspace index, so admission performs no I/O.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum SlashCommandError {
+    #[error(
+        "/{name} is not a valid command name: names start with a lowercase ASCII letter, contain only lowercase ASCII letters, digits, '-' or '_', and are at most 64 bytes; prefix with // to send it as text"
+    )]
+    InvalidName { name: String },
+    #[error(
+        "/{name} is a client command, not a prompt; run it from the client or prefix with // to send it as text"
+    )]
+    Reserved { name: String },
+}
+
+/// Rejects a prompt whose rendered text names a slash command the runtime can
+/// never resolve. Everything else, including `//` escapes and names the
+/// workspace may or may not index, is admitted.
+pub(super) fn validate_slash_prompt(prompt: &str) -> Result<(), SlashCommandError> {
+    if prompt.starts_with("//") {
+        return Ok(());
+    }
+    let Some(invocation) = prompt.strip_prefix('/') else {
+        return Ok(());
+    };
+    let name = invocation
+        .split_once(char::is_whitespace)
+        .map_or(invocation, |(name, _)| name);
+    let bounded = |name: &str| -> String { name.chars().take(64).collect() };
+    if !crate::workspace::valid_slash_name(name) {
+        return Err(SlashCommandError::InvalidName {
+            name: bounded(name),
+        });
+    }
+    if qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS
+        .iter()
+        .any(|reserved| reserved.strip_prefix('/') == Some(name))
+    {
+        return Err(SlashCommandError::Reserved {
+            name: name.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SessionRuntimeError {
     #[error("maximum active runs must be greater than zero")]
@@ -1167,6 +1212,8 @@ pub enum SessionRuntimeError {
     EmptyPrompt,
     #[error("prompt exceeds the session limit")]
     PromptTooLarge,
+    #[error("{0}")]
+    InvalidSlashCommand(SlashCommandError),
     #[error("run limits must be greater than zero and within the runtime ceilings")]
     InvalidRunLimits,
     #[error("invalid output contract: {0}")]

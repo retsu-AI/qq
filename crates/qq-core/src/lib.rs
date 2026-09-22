@@ -79,9 +79,9 @@ pub use sessions::{
     RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend,
     ReviewVerdict, RoutingSelection, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
     RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream,
-    SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture,
-    TaskRouter, TaskRoutingFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority,
-    WorkspaceGrantSeed, run_cost,
+    SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SlashCommandError,
+    SpawnModelValidationFuture, TaskRouter, TaskRoutingFuture, WorkerRuntimeLoadFuture,
+    WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 pub use workspace::skills::{MAX_INDEXED_SKILLS, MAX_SKILL_DESCRIPTION_BYTES};
 pub use workspace::{SkillEntry, SkillIndex, SkillKind};
