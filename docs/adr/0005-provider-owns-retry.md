@@ -45,4 +45,6 @@ yielded, where duplication is impossible. The core `TurnRetryPolicy` and
 - Commit `d02a619`.
 - Tests `restarts_a_stream_that_fails_before_its_first_event`,
   `never_restarts_after_an_event_has_been_yielded` (`exchange.rs`).
-- Metric `provider_retry_amplification_milli` = 1000 (budgeted).
+- Metric `provider_retry_amplification_milli` = 1000 (budgeted) while this
+  ADR stood alone; under ADR-0040 the same metric measures the run's own
+  turn retries and is budgeted at `(MAX_TURN_RETRIES + 1) × 1000`.
