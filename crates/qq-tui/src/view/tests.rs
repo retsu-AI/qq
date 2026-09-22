@@ -4855,3 +4855,58 @@ fn workspace_views_render_in_the_inspector_when_it_is_shown_and_inline_otherwise
     let (_, inspector) = transcript_and_inspector(&back);
     assert!(inspector.contains("Nothing expanded"), "{inspector}");
 }
+
+#[test]
+fn a_tool_row_reuses_its_panel_across_frames_and_relays_out_on_a_new_width() {
+    let body = (1..=6)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let call = tool_call_snapshot(
+        1,
+        "read_file",
+        r#"{"path":"a.rs"}"#,
+        ToolCallState::Completed,
+        Some(&body),
+        false,
+    );
+    let row = ToolRow::derive(&call);
+    let context = |now_ms: u64| ToolRowContext {
+        row: &row,
+        clock: RowClock {
+            timing: ToolCallTiming {
+                started_at_ms: Some(43_451_000),
+                finished_at_ms: Some(43_454_000),
+                last_output_at_ms: None,
+            },
+            now_ms,
+        },
+        expanded: true,
+        inline_detail: true,
+        fold: false,
+        selected: false,
+    };
+    // Two frames at one width: identical rows, and the panel rows are the
+    // cached ones (the timing line is rebuilt every frame; the panel is not).
+    let first = tool_expanded_lines(&call, context(43_454_000), 80);
+    let second = tool_expanded_lines(&call, context(43_455_000), 80);
+    assert_eq!(first, second);
+    assert!(first[1..].iter().all(is_panel_row), "{first:?}");
+    // A narrower width lays out again: rows fit the new width, the panel is
+    // the same text, and going back to the first width is still correct.
+    let narrow = tool_expanded_lines(&call, context(43_455_000), 40);
+    assert!(
+        narrow[1..].iter().all(|line| line.width() == 40),
+        "{narrow:?}"
+    );
+    assert_eq!(
+        frame_text(&narrow[1..])
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        frame_text(&first[1..])
+            .split_whitespace()
+            .collect::<Vec<_>>()
+    );
+    let back = tool_expanded_lines(&call, context(43_456_000), 80);
+    assert_eq!(back, first);
+}

@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use super::*;
 use markdown::{CODE_PANEL_INSET, panel_content_width, panel_rows, panel_rows_at};
 use qq_client::state::ToolCallTiming;
@@ -50,6 +52,13 @@ pub(crate) struct ToolRow {
     pub body: ResultBody,
     /// Diff text for the expanded view and approvals, when the call has one.
     pub diff: Option<String>,
+    /// The expanded detail panel laid out at one width, filled the first
+    /// frame the call is expanded and reused until the width changes. Every
+    /// other input (arguments, result, diff) is fixed by [`ToolRowKey`], so
+    /// the cached rows go away with the row. Interior mutability because the
+    /// transcript cache hands out `&ToolRow` while laying out; a frame with
+    /// 32 expanded calls rebuilt every panel before this.
+    panel: RefCell<Option<(usize, Vec<Line>)>>,
 }
 
 /// Which end of a result reads best: the head for content the model asked
@@ -286,6 +295,7 @@ impl ToolRow {
             arguments: argument_rows,
             body,
             diff,
+            panel: RefCell::new(None),
         }
     }
 
@@ -929,6 +939,23 @@ pub(super) fn tool_expanded_lines(
         when.push(fields.join(" · "), muted());
         lines.push(truncate_line(when, width));
     }
+    let mut cached = row.panel.borrow_mut();
+    if !cached
+        .as_ref()
+        .is_some_and(|(cached_width, _)| *cached_width == width)
+    {
+        *cached = Some((width, tool_panel(call, row, width)));
+    }
+    if let Some((_, panel)) = cached.as_ref() {
+        lines.extend_from_slice(panel);
+    }
+    lines
+}
+
+/// The detail panel body for `call`: arguments, diff or result, wrapped in
+/// the shared code panel. Empty when there is nothing to show. Depends on
+/// nothing that changes between frames, so [`ToolRow::panel`] caches it.
+fn tool_panel(call: &ToolCallSnapshot, row: &ToolRow, width: usize) -> Vec<Line> {
     let content_width = tool_panel_content_width(width);
     let mut body: Vec<Line> = Vec::new();
     if row.raw_name {
@@ -995,12 +1022,11 @@ pub(super) fn tool_expanded_lines(
         }
     }
     if body.is_empty() {
-        return lines;
+        return Vec::new();
     }
     // No label: the summary row above already names the tool and subject,
     // and a language tag would need a grammar lookup per frame.
-    lines.extend(tool_panel_rows(body, None, width));
-    lines
+    tool_panel_rows(body, None, width)
 }
 
 /// A unified diff, head-first, with new-file line numbers in the gutter and
