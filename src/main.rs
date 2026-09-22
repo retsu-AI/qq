@@ -11,7 +11,7 @@ use std::{
 use qq_auth as auth;
 use qq_client as client;
 use qq_config as config;
-use qq_protocol::{RunCommand, RunEvent};
+use qq_protocol::{ModelSelection, RunCommand, RunEvent};
 use qq_server as server;
 
 mod advisory;
@@ -510,8 +510,10 @@ async fn interactive(
     // Read once, here: neither `qq-config` nor `qq-tui` consults the
     // environment, they take the answer as a value.
     let truecolor = truecolor_support(std::env::var_os("COLORTERM").as_deref());
-    let (snapshot, tui, themes, models) = tokio::task::spawn_blocking(move || {
-        let snapshot = config_factory.load(&request)?;
+    let (snapshot, tui, themes, models, unauthenticated) = tokio::task::spawn_blocking(move || {
+        // The client load tolerates a missing model: the TUI opens and
+        // routes to `/models`. Headless paths keep `load`.
+        let snapshot = config_factory.load_for_client(&request)?;
         let (tui_snapshot, tui) = load_tui_config(&loader, request.cwd())?;
         let themes = load_tui_themes(
             &loader,
@@ -519,25 +521,56 @@ async fn interactive(
             tui_snapshot.settings().theme(),
             truecolor,
         )?;
-        let models = config_factory.configured_model_options(&snapshot);
-        Ok::<_, runtime::RuntimeBuildError>((snapshot, tui, themes, models))
+        let models = config_factory.client_model_options(&snapshot);
+        let unauthenticated = config_factory.unauthenticated_providers(&snapshot);
+        Ok::<_, runtime::RuntimeBuildError>((snapshot, tui, themes, models, unauthenticated))
     })
     .await??;
     let models = models
         .into_iter()
         .map(Into::into)
         .collect::<Vec<qq_tui::ModelOption>>();
+    let unauthenticated_providers: Vec<qq_tui::ProviderRemedy> = unauthenticated
+        .into_iter()
+        .map(|remedy| qq_tui::ProviderRemedy {
+            provider: remedy.provider,
+            remedy: remedy.remedy,
+        })
+        .collect();
     let workspace_root = workspace.clone();
-    let configured_model = qq_protocol::ModelSelection {
-        model_is_fallback,
-        model: Some(snapshot.model().as_str().to_owned()),
-        max_output_tokens: Some(snapshot.max_output_tokens()),
-        organization: snapshot.organization().map(str::to_owned),
+    // Without a configured model there is no client default: the TUI shows
+    // `no model`, the composer notice points at `/models`, and the first
+    // session is created from the picker.
+    let configured_model = snapshot
+        .model()
+        .map_or_else(ModelSelection::default, |route| ModelSelection {
+            model_is_fallback,
+            model: Some(route.as_str().to_owned()),
+            max_output_tokens: Some(snapshot.max_output_tokens()),
+            organization: snapshot.organization().map(str::to_owned),
+        });
+    let model = (configured_model.model.is_some()
+        && models
+            .iter()
+            .any(|option| option.selection.model == configured_model.model))
+    .then_some(configured_model.clone());
+    // The TUI's client default. An unusable route is normally withheld so
+    // Alt-N asks for a model; a route whose provider merely lacks a credential
+    // is kept so the empty state and Alt-N can name that credential.
+    let configured_provider_unauthenticated = configured_model
+        .model
+        .as_deref()
+        .and_then(|route| route.split_once('/'))
+        .is_some_and(|(provider, _)| {
+            unauthenticated_providers
+                .iter()
+                .any(|remedy| remedy.provider == provider)
+        });
+    let tui_model = match &model {
+        Some(model) => model.clone(),
+        None if configured_provider_unauthenticated => configured_model.clone(),
+        None => ModelSelection::default(),
     };
-    let model = models
-        .iter()
-        .any(|option| option.selection.model == configured_model.model)
-        .then_some(configured_model.clone());
 
     // The TUI paints its first frame before the server is reserved or the
     // embedded runtime opened; the port connects on the loop's first recv
@@ -611,8 +644,9 @@ async fn interactive(
         qq_tui::LazyPort::new(connect),
         qq_tui::TuiOptions {
             settings: tui,
-            model: model.unwrap_or_default(),
+            model: tui_model,
             models,
+            unauthenticated_providers,
             themes,
             workspace_root: Some(workspace_root),
         },
