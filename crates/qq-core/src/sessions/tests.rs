@@ -77,6 +77,13 @@ fn loaded_runtime_with_model(
     workspace: &str,
     resolved: ResolvedModel,
 ) -> LoadedRuntime {
+    // Session tests exercise recovery through outcomes, not wall time: the
+    // real minute-scale backoff would turn every transient-fault fixture
+    // into a multi-minute test.
+    let runtime = runtime.with_turn_recovery(crate::TurnRecoveryPolicy::new(
+        Duration::from_millis(1),
+        Duration::from_millis(1),
+    ));
     LoadedRuntime::compile_blocking(&runtime, resolved, PathBuf::from(workspace))
         .expect("test plan compiles")
 }

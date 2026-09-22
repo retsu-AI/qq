@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::{collections::HashMap, path::PathBuf, pin::Pin, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
 use async_stream::stream;
 use futures_core::Stream;
@@ -138,6 +138,56 @@ pub const MAX_OUTPUT_CONTINUATIONS: u16 = 3;
 pub(crate) const OUTPUT_TRUNCATED_CONTINUE_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe \
 previous response was cut off at the output token limit. Continue exactly from where it \
 stopped; do not repeat what was already written.";
+/// Most retries one turn may spend on a transient provider fault after the
+/// stream has started (the provider owns retries before that, ADR-0005). The
+/// count resets when a turn completes, so a long run survives many isolated
+/// blips while a provider that is down settles the run `paused` in minutes.
+pub use qq_protocol::MAX_TURN_RETRIES;
+
+/// Backoff between turn retries. The defaults are minute-scale because the
+/// provider's own sub-minute ledger has already been spent on anything that
+/// reaches the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnRecoveryPolicy {
+    base_delay: Duration,
+    max_delay: Duration,
+}
+
+impl Default for TurnRecoveryPolicy {
+    fn default() -> Self {
+        Self {
+            base_delay: Duration::from_secs(2),
+            max_delay: Duration::from_secs(60),
+        }
+    }
+}
+
+impl TurnRecoveryPolicy {
+    /// Exponential backoff from `base_delay`, doubling per retry, capped at
+    /// `max_delay` (clamped to at least the base).
+    #[must_use]
+    pub fn new(base_delay: Duration, max_delay: Duration) -> Self {
+        Self {
+            base_delay,
+            max_delay: max_delay.max(base_delay),
+        }
+    }
+
+    /// The sleep before retry `attempt` (1-based).
+    #[must_use]
+    pub fn delay(self, attempt: u16) -> Duration {
+        let doublings = u32::from(attempt.saturating_sub(1)).min(31);
+        self.base_delay
+            .saturating_mul(1_u32 << doublings)
+            .min(self.max_delay)
+    }
+}
+/// Sent after a partial turn is committed when the provider fault cut the
+/// model off mid-reply. Alternation holds because the partial assistant
+/// message precedes it.
+const TURN_RETRY_CONTINUE_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe \
+previous response was cut off by a transient provider error and QQ is retrying. Continue \
+exactly from where it stopped; do not repeat what was already written.";
 /// Fills a skipped empty assistant turn so the follow-up user message does
 /// not sit next to the previous user message. Providers require alternation.
 pub(crate) const EMPTY_TURN_PLACEHOLDER: &str = "[QQ runtime notice; not a user instruction]\nThe previous \
@@ -708,6 +758,7 @@ pub struct Runtime {
     /// Environment allowlist and built-in preference for `shell` calls.
     pub(crate) shell: Arc<runtime::ShellPolicy>,
     pub(crate) network: Arc<tools::network::NetworkPolicy>,
+    pub(crate) turn_recovery: TurnRecoveryPolicy,
 }
 
 impl Runtime {
@@ -757,7 +808,16 @@ impl Runtime {
             reasoning_effort: None,
             shell: Arc::new(runtime::ShellPolicy::default()),
             network: Arc::new(tools::network::NetworkPolicy::default()),
+            turn_recovery: TurnRecoveryPolicy::default(),
         })
+    }
+
+    /// Sets the backoff between turn retries after a transient provider
+    /// fault. The retry count itself is fixed at [`MAX_TURN_RETRIES`].
+    #[must_use]
+    pub const fn with_turn_recovery(mut self, policy: TurnRecoveryPolicy) -> Self {
+        self.turn_recovery = policy;
+        self
     }
 
     /// The summarizer request of an in-run compaction: provider turns with no
@@ -1248,6 +1308,7 @@ impl plan::CompiledAgentPlan {
         let network_policy = Arc::clone(&plan.runtime.network);
         let checkpoint = plan.runtime.checkpoint.clone();
         let reasoning_effort = plan.runtime.reasoning_effort;
+        let turn_recovery = plan.runtime.turn_recovery;
         let events: RuntimeStream = Box::pin(stream! {
             let RunCapabilities {
                 spawner,
@@ -1488,6 +1549,9 @@ impl plan::CompiledAgentPlan {
 
             let mut slice_tool_calls = 0_usize;
             let mut output_continuations = 0_u16;
+            // Retries spent on the current turn's transient provider faults;
+            // a completed turn resets it.
+            let mut turn_retries = 0_u16;
             // What this run did, for the heuristic audit trigger and the
             // auditor's action summary. Only roots with a hook keep actions.
             let mut audit_triggers = runtime::AuditTriggers::default();
@@ -1741,6 +1805,13 @@ impl plan::CompiledAgentPlan {
                 let mut open_reasoning = None;
                 let mut interrupted_turn = false;
                 let mut truncated_turn = false;
+                // A transient provider fault. The provider's own ledger
+                // (ADR-0005) already resent while nothing had streamed, at
+                // sub-minute backoff; a fault that reaches here has outlasted
+                // it or arrived mid-stream. The run owns recovery from here
+                // (ADR-0040): commit what streamed, re-issue the turn at
+                // minute-scale backoff, pause when the allowance is spent.
+                let mut turn_fault: Option<(RunFailureKind, String)> = None;
                 loop {
                     // An interrupting steer ends the stream here. Text that
                     // already streamed is kept as the partial turn; tool
@@ -2043,11 +2114,20 @@ impl plan::CompiledAgentPlan {
                             break;
                         }
                         Err(error) => {
-                            yield RuntimeEvent::Failed {
-                                kind: run_failure_kind(error.kind()),
-                                message: error.to_string(),
-                            };
-                            return;
+                            let kind = run_failure_kind(error.kind());
+                            if !recoverable_turn_fault(kind) {
+                                yield RuntimeEvent::Failed {
+                                    kind,
+                                    message: error.to_string(),
+                                };
+                                return;
+                            }
+                            if let Some(kind) = open_reasoning.take() {
+                                yield RuntimeEvent::ReasoningCompleted { kind };
+                            }
+                            turn_fault = Some((kind, error.to_string()));
+                            completed = true;
+                            break;
                         }
                     }
                 }
@@ -2058,16 +2138,20 @@ impl plan::CompiledAgentPlan {
 
                 if !completed {
                     // The provider restarts a stream that ends before its
-                    // first event; one that ends after events is its
-                    // protocol violation, and nothing above it may resend.
-                    yield RuntimeEvent::Failed {
-                        kind: RunFailureKind::ProviderProtocol,
-                        message: "provider stream ended without a terminal event".to_owned(),
-                    };
-                    return;
+                    // first event; one that ends after events is a transport
+                    // fault from the run's point of view: the reply is
+                    // incomplete and nothing above the provider may resend
+                    // the same stream, but the run may re-issue the turn.
+                    if let Some(kind) = open_reasoning.take() {
+                        yield RuntimeEvent::ReasoningCompleted { kind };
+                    }
+                    turn_fault = Some((
+                        RunFailureKind::ProviderTransport,
+                        "provider stream ended without a terminal event".to_owned(),
+                    ));
                 }
 
-                if interrupted_turn || truncated_turn {
+                if interrupted_turn || truncated_turn || turn_fault.is_some() {
                     if interrupted_turn {
                         handled_interrupt = steering
                             .as_ref()
@@ -2184,6 +2268,57 @@ impl plan::CompiledAgentPlan {
                 budget.charge_turn(terminal_usage);
                 budget.charge_tool_calls(calls.iter().filter(|call| call.rejection.is_none()).count());
 
+                if let Some((kind, message)) = turn_fault {
+                    // The partial turn is durable. Re-issue the turn after a
+                    // bounded backoff, or pause the run once the allowance
+                    // for this turn is spent. Cancellation and the run
+                    // deadline both cut the sleep short.
+                    if turn_retries >= MAX_TURN_RETRIES {
+                        yield RuntimeEvent::Paused {
+                            pause: Box::new(qq_protocol::RunPause {
+                                kind,
+                                message,
+                                turn_ordinal,
+                                attempts: turn_retries,
+                            }),
+                        };
+                        return;
+                    }
+                    turn_retries += 1;
+                    let delay = turn_recovery.delay(turn_retries);
+                    yield RuntimeEvent::TurnRetrying {
+                        turn_ordinal,
+                        attempt: turn_retries,
+                        delay,
+                        kind,
+                        message,
+                    };
+                    if assistant.has_content() {
+                        irreducible_message_bytes = irreducible_message_bytes
+                            .saturating_add(measure_message(&assistant));
+                        Arc::make_mut(&mut messages).push(assistant);
+                    }
+                    if messages.last().is_some_and(|message| message.role() == Role::Assistant) {
+                        Arc::make_mut(&mut messages).push(Message::user(TURN_RETRY_CONTINUE_NOTICE));
+                        irreducible_message_bytes = irreducible_message_bytes
+                            .saturating_add(measure_message(messages.last().expect("just pushed")));
+                    }
+                    let sleep = tokio::time::sleep(delay);
+                    tokio::pin!(sleep);
+                    tokio::select! {
+                        biased;
+                        () = cancelled.cancelled() => return,
+                        () = runtime::RunDeadline::wait(deadline) => {
+                            yield RuntimeEvent::BudgetExhausted {
+                                exhaustion: deadline.expect("only a finite deadline wakes").exhaustion(),
+                            };
+                            return;
+                        }
+                        () = &mut sleep => {}
+                    }
+                    continue;
+                }
+                turn_retries = 0;
                 if truncated_turn {
                     // A reserved final response that ran out of room cannot be
                     // continued: the budget already settles the run below.
@@ -3468,6 +3603,9 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 // Continuation is transparent to the direct stream: the text
                 // keeps flowing and the typed failure names exhaustion.
                 | RuntimeEvent::OutputTruncated { .. }
+                // Turn recovery is transparent too; `Paused` below names
+                // exhaustion.
+                | RuntimeEvent::TurnRetrying { .. }
                 // Direct runs carry no output contract.
                 | RuntimeEvent::OutputRepairRequested { .. } => {}
                 RuntimeEvent::CheckpointStarted { correlation, phase, tool_call_id } => {
@@ -3500,6 +3638,19 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 }
                 RuntimeEvent::Failed { kind, message } => {
                     yield RunEvent::Failed { kind, message };
+                    return;
+                }
+                // The direct stream has no session to resume from, so the
+                // pause surfaces as the last attempt's failure with the
+                // retries it spent.
+                RuntimeEvent::Paused { pause } => {
+                    yield RunEvent::Failed {
+                        kind: pause.kind,
+                        message: format!(
+                            "{} (paused after {} turn retries)",
+                            pause.message, pause.attempts
+                        ),
+                    };
                     return;
                 }
                 // The direct compatibility path imposes no caller limits, so
@@ -3638,6 +3789,19 @@ const fn run_failure_kind(kind: ProviderErrorKind) -> RunFailureKind {
         ProviderErrorKind::Response => RunFailureKind::ProviderResponse,
         ProviderErrorKind::Protocol => RunFailureKind::ProviderProtocol,
     }
+}
+
+/// Whether a provider fault that ended a started stream is worth re-issuing
+/// the turn for. Overload, rate limiting, and transport loss are the
+/// provider's moment, not the request's; everything else (auth, invalid
+/// request, malformed stream) would fail the same way again.
+const fn recoverable_turn_fault(kind: RunFailureKind) -> bool {
+    matches!(
+        kind,
+        RunFailureKind::ProviderUnavailable
+            | RunFailureKind::ProviderRateLimited
+            | RunFailureKind::ProviderTransport
+    )
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -8182,15 +8346,17 @@ mod tests {
         }
     }
 
-    /// The provider is the single retry owner. Whatever the failure — a
-    /// transient error before any output, a stream that ends without a
-    /// terminal event, or a failure after output has streamed — the run loop
-    /// issues exactly one request per logical turn and reports the provider's
-    /// error as-is. Amplification is therefore exactly 1.0 above the provider.
+    /// Two-phase retry ownership (ADR-0040). The provider owns resends while
+    /// nothing has streamed; the run owns recovery of the *turn*: a transient
+    /// fault commits whatever arrived, re-issues the turn up to
+    /// `MAX_TURN_RETRIES` times, and then settles `paused` rather than failed.
+    /// Faults that would recur (auth, invalid request, malformed stream) still
+    /// fail at once with no resend.
     #[tokio::test(start_paused = true)]
-    async fn the_run_loop_never_resends_a_turn() {
+    async fn transient_faults_retry_the_turn_and_exhaustion_pauses() {
+        let fast = TurnRecoveryPolicy::new(Duration::from_millis(1), Duration::from_millis(1));
         type Case = (fn() -> Option<ProviderError>, RunFailureKind, &'static str);
-        let cases: [Case; 3] = [
+        let transient: [Case; 3] = [
             (
                 || Some(overloaded()),
                 RunFailureKind::ProviderUnavailable,
@@ -8203,11 +8369,11 @@ mod tests {
             ),
             (
                 || None,
-                RunFailureKind::ProviderProtocol,
+                RunFailureKind::ProviderTransport,
                 "ended without a terminal event",
             ),
         ];
-        for (failure, kind, needle) in cases {
+        for (failure, kind, needle) in transient {
             let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
             let runtime = Runtime::new(
                 FailingProvider {
@@ -8217,68 +8383,319 @@ mod tests {
                 "gpt-test",
                 256,
             )
-            .unwrap();
+            .unwrap()
+            .with_turn_recovery(fast);
             let events = runtime
                 .run(RunCommand::new("hello"))
                 .collect::<Vec<_>>()
                 .await;
             assert_eq!(
                 calls.load(std::sync::atomic::Ordering::SeqCst),
-                1,
-                "{kind:?}: core must issue one request per turn"
+                u32::from(MAX_TURN_RETRIES) + 1,
+                "{kind:?}: one send plus every retry"
             );
+            // The direct path has no session to resume from, so the pause
+            // surfaces as the last fault with the retries it spent.
             assert!(
                 matches!(
                     events.last(),
                     Some(RunEvent::Failed { kind: got, message })
-                        if *got == kind && message.contains(needle)
+                        if *got == kind
+                            && message.contains(needle)
+                            && message.contains("paused after 5 turn retries")
                 ),
                 "{kind:?}: {events:?}"
             );
         }
 
-        // After visible output, a failure ends the run with the partial turn
-        // intact and still no resend.
-        struct MidStreamFailureProvider {
-            calls: Arc<std::sync::atomic::AtomicU32>,
-        }
-
-        impl Provider for MidStreamFailureProvider {
-            fn stream(&self, _: ModelRequest) -> ProviderStream {
-                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Box::pin(stream::iter([
-                    Ok(ProviderEvent::OutputTextDelta {
-                        text: "partial".to_owned(),
-                    }),
-                    Err(overloaded()),
-                ]))
-            }
-        }
-
+        // A fault the retry cannot fix fails at once with no resend.
         let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let runtime = Runtime::new(
-            MidStreamFailureProvider {
+            FailingProvider {
                 calls: Arc::clone(&calls),
+                failure: || {
+                    Some(ProviderError::Api {
+                        status: 401,
+                        message: "bad key".to_owned(),
+                    })
+                },
             },
             "gpt-test",
             256,
         )
-        .unwrap();
+        .unwrap()
+        .with_turn_recovery(fast);
         let events = runtime
             .run(RunCommand::new("hello"))
             .collect::<Vec<_>>()
             .await;
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(events.contains(&RunEvent::OutputTextDelta {
-            text: "partial".to_owned()
-        }));
         assert!(matches!(
             events.last(),
             Some(RunEvent::Failed {
-                kind: RunFailureKind::ProviderUnavailable,
+                kind: RunFailureKind::ProviderAuthentication,
                 ..
             })
         ));
+
+        // After visible output a fault commits the partial turn and the
+        // retry continues it: the answer is the two halves.
+        struct RecoversMidStream {
+            calls: Arc<std::sync::atomic::AtomicU32>,
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for RecoversMidStream {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.requests.lock().unwrap().push(request);
+                match call {
+                    // 529 twice mid-stream, then a clean finish.
+                    0 | 1 => Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: format!("part{call} "),
+                        }),
+                        Err(ProviderError::Api {
+                            status: 529,
+                            message: "overloaded_error".to_owned(),
+                        }),
+                    ])),
+                    _ => Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ])),
+                }
+            }
+        }
+
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            RecoversMidStream {
+                calls: Arc::clone(&calls),
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap()
+        .with_turn_recovery(fast);
+        let events = runtime
+            .run(RunCommand::new("hello"))
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let text: String = events
+            .iter()
+            .filter_map(|event| match event {
+                RunEvent::OutputTextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "part0 part1 done");
+        assert!(matches!(events.last(), Some(RunEvent::Completed)));
+        // Each retry carried the partial turn and the continue notice, so
+        // the model resumes rather than restarts.
+        let requests = requests.lock().unwrap();
+        let third = requests[2].messages();
+        assert!(matches!(
+            third[third.len() - 1].content(),
+            [ContentBlock::Text { text }] if text == TURN_RETRY_CONTINUE_NOTICE
+        ));
+        assert!(matches!(
+            third[third.len() - 2].content(),
+            [ContentBlock::Text { text }] if text == "part1 "
+        ));
+    }
+
+    /// The retry count is per turn: a run that completes a turn between
+    /// faults never pauses, however many isolated blips it meets.
+    #[tokio::test(start_paused = true)]
+    async fn the_turn_retry_allowance_resets_on_a_completed_turn() {
+        struct BlipEveryTurn {
+            calls: Arc<std::sync::atomic::AtomicU32>,
+        }
+
+        impl Provider for BlipEveryTurn {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let tool_results = request
+                    .messages()
+                    .iter()
+                    .flat_map(|message| message.content())
+                    .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+                    .count();
+                // Odd calls fault mid-stream; even calls complete. Eight
+                // completed tool turns, each preceded by one fault, is more
+                // faults than one turn may spend.
+                if call.is_multiple_of(2) {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "thinking".to_owned(),
+                        }),
+                        Err(ProviderError::Transport("blip".to_owned())),
+                    ]));
+                }
+                if tool_results >= 8 {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "finished".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let id = format!("call-{tool_results}");
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "read_file".to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: r#"{"path":"note.txt"}"#.to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallCompleted { id }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let runtime = Runtime::new(
+            BlipEveryTurn {
+                calls: Arc::clone(&calls),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap()
+        .with_turn_recovery(TurnRecoveryPolicy::new(
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        ));
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("read a lot")], directory.path().into())
+            .collect::<Vec<_>>()
+            .await;
+        // 9 faults (one per turn) + 9 completions; well past MAX_TURN_RETRIES
+        // in total, never more than one per turn.
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 18);
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{:?}",
+            events.last()
+        );
+        let retries = events
+            .iter()
+            .filter(|event| matches!(event, RuntimeEvent::TurnRetrying { attempt: 1, .. }))
+            .count();
+        assert_eq!(retries, 9);
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::TurnRetrying { attempt: 2.., .. } | RuntimeEvent::Paused { .. }
+        )));
+    }
+
+    /// Cancellation and the run deadline both cut a retry sleep short.
+    #[tokio::test(start_paused = true)]
+    async fn a_retry_sleep_yields_to_cancellation_and_the_deadline() {
+        struct AlwaysBlips;
+        impl Provider for AlwaysBlips {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "x".to_owned(),
+                    }),
+                    Err(ProviderError::Transport("blip".to_owned())),
+                ]))
+            }
+        }
+        struct AllowAllGate;
+        impl ToolGate for AllowAllGate {
+            fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
+                Box::pin(std::future::ready(GateDecision::Execute))
+            }
+        }
+        let slow = TurnRecoveryPolicy::new(Duration::from_secs(60), Duration::from_secs(60));
+        let directory = tempfile::tempdir().unwrap();
+
+        // Cancel during the first backoff: the stream ends without a
+        // terminal event of its own (the session layer settles Cancelled).
+        let runtime = Runtime::new(AlwaysBlips, "gpt-test", 256)
+            .unwrap()
+            .with_turn_recovery(slow);
+        let cancellation = RunCancellation::new();
+        let canceller = cancellation.clone();
+        let cancel = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            canceller.cancel();
+        });
+        let events = runtime
+            .run_loop(
+                vec![Message::user("go")],
+                directory.path().to_owned(),
+                cancellation,
+                Arc::new(AllowAllGate),
+                Arc::new(workspace::FileState::default()),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        cancel.await.unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::TurnRetrying { attempt: 1, .. }))
+        );
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::TurnRetrying { .. })),
+            "{:?}",
+            events.last()
+        );
+
+        // A run deadline inside the backoff settles as that budget, not as a
+        // pause and not after the full sleep.
+        let runtime = Runtime::new(AlwaysBlips, "gpt-test", 256)
+            .unwrap()
+            .with_turn_recovery(slow);
+        let plan = Arc::new(
+            LoadedRuntime::compile_blocking(
+                &runtime,
+                runtime.embedded_resolved_model(),
+                directory.path().to_owned(),
+            )
+            .unwrap()
+            .plan,
+        );
+        let mut capabilities = RunCapabilities::user(None);
+        capabilities.limits = RunLimits {
+            max_duration_ms: Some(10_000),
+            ..RunLimits::default()
+        };
+        let started = tokio::time::Instant::now();
+        let events = plan
+            .execute(
+                vec![Message::user("go")],
+                RunCancellation::new(),
+                Arc::new(AllowAllGate),
+                Arc::new(workspace::FileState::default()),
+                capabilities,
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(started.elapsed() < Duration::from_secs(60));
+        assert!(
+            matches!(
+                events.last(),
+                Some(RuntimeEvent::BudgetExhausted { exhaustion })
+                    if exhaustion.limit == BudgetLimitKind::Duration
+            ),
+            "{:?}",
+            events.last()
+        );
     }
 
     pub(crate) struct MockMcpRegistry {

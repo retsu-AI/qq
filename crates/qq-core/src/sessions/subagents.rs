@@ -632,6 +632,13 @@ async fn run_owned_child(
             ),
             spend,
         ),
+        RunOutcome::Paused { pause } => spawn_error_with_spend(
+            format!(
+                "the sub-agent run paused on a provider fault after {} retries: {}",
+                pause.attempts, pause.message
+            ),
+            spend,
+        ),
         RunOutcome::Failed { failure } => spawn_error_with_spend(
             format!("the sub-agent run failed: {}", failure.message),
             spend,

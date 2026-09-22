@@ -190,7 +190,7 @@ unknown `status` fails; a supervisor should do the same.
 | `status` | exit | Meaning |
 | --- | ---: | --- |
 | `completed` | 0 | Run finished; the model produced a final answer |
-| `task_failed` | 1 | Run finished with a failure the agent reported, a non-server run failure, or a completed answer that never satisfied `--output-schema` (`final_output.status == "invalid"`) |
+| `task_failed` | 1 | Run finished with a failure the agent reported, a non-server run failure, a completed answer that never satisfied `--output-schema` (`final_output.status == "invalid"`), or a run that `paused` after exhausting turn recovery on a transient provider fault (the message names the pause; the transcript is durable) |
 | `invalid_configuration` | 2 | QQ refused to start: config, model, pricing, or flag error |
 | `timed_out` | 3 | `max_duration_ms` limit reached |
 | `budget_exhausted` | 3 | Any other run limit reached (turns, cost, tokens, tool calls) |

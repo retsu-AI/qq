@@ -1233,6 +1233,34 @@ impl Store {
         .await
     }
 
+    /// Publishes that the runtime is re-issuing a turn after a transient
+    /// provider fault cut it short.
+    pub(super) async fn record_turn_retrying(
+        &self,
+        claimed: &ClaimedRun,
+        turn_ordinal: u32,
+        attempt: u16,
+        delay: std::time::Duration,
+        kind: RunFailureKind,
+        message: String,
+    ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            record_run_turn_retrying(
+                connection,
+                store_id,
+                identity,
+                turn_ordinal,
+                attempt,
+                delay,
+                kind,
+                message,
+            )
+        })
+        .await
+    }
+
     /// The steering messages of a run that are recorded but not yet applied,
     /// with their provider-visible text, in order. Used once when the run
     /// loop starts so steering that arrived between claim and start is not
@@ -1699,7 +1727,7 @@ impl Store {
                      )
                      SELECT r.id,
                             r.outcome_json IS NOT NULL AND r.status IN
-                                ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted'),
+                                ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted', 'paused'),
                             r.usage_json, r.estimated_cost_usd_nanos,
                             r.status = 'cancelled' AND r.started_at_ms IS NULL AND r.routing_json IS NULL
                                 AND NOT EXISTS(SELECT 1 FROM model_turns t WHERE t.run_id = r.id),
