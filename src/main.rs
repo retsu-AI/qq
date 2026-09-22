@@ -494,7 +494,10 @@ async fn interactive(
     tui_qa_root: Option<PathBuf>,
 ) -> Result<(), Box<dyn Error>> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        return Err(io::Error::other("interactive mode requires a terminal").into());
+        return Err(io::Error::other(
+            "interactive mode requires a terminal; use `qq ask \"<prompt>\"` or `qq run \"<prompt>\"` in a pipe",
+        )
+        .into());
     }
     let environment = InteractiveEnvironment::open(overrides, tui_qa_root)?;
     let factory = environment.factory;
@@ -1263,14 +1266,32 @@ fn trust_command(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
     if pending.is_empty() {
         println!("no project configuration requires trust");
     } else {
+        // Show what each file admits: trust is a decision about content, and
+        // the user should see the sections that content declares.
         for item in pending {
             println!("trusted {}", item.source());
+            println!("  declares: {}", item.sections().join(", "));
         }
     }
     Ok(())
 }
 
 fn auth_command(command: cli::AuthCommand) -> Result<(), Box<dyn Error>> {
+    // `auth login` stores under `PROVIDER/PROFILE` and binds the built-in
+    // endpoint; a name outside the built-in set would store a credential
+    // nothing can resolve. Arbitrary names go through `auth set`. Checked
+    // before the store opens so a typo never touches the keyring.
+    if let cli::AuthCommand::Login(arguments) = &command
+        && built_in_endpoint(&arguments.provider).is_none()
+    {
+        return Err(format!(
+            "{:?} is not a built-in provider; `qq auth login` accepts {}. \
+             For a gateway or MCP bearer use `qq auth set NAME` and reference Stored(\"NAME\")",
+            arguments.provider,
+            LOGIN_PROVIDERS.join(", ")
+        )
+        .into());
+    }
     let store = auth::CredentialStore::system()?;
     match command {
         cli::AuthCommand::Login(arguments) => {
@@ -1460,6 +1481,9 @@ fn read_secret(prompt: &str) -> Result<auth::Secret, Box<dyn Error>> {
     Ok(auth::Secret::from_secret_bytes(value.into_bytes()))
 }
 
+/// Providers `qq auth login` accepts, in the order the error lists them.
+const LOGIN_PROVIDERS: [&str; 5] = ["openai", "anthropic", "google", "xai", "openai-codex"];
+
 fn built_in_endpoint(provider: &str) -> Option<&'static str> {
     match provider {
         "openai" => Some("https://api.openai.com"),
@@ -1544,6 +1568,33 @@ mod tests {
 
         fn remove(&self, name: &str) -> Result<(), auth::KeyringError> {
             panic!("isolated TUI QA attempted to remove Keychain entry {name:?}")
+        }
+    }
+
+    #[test]
+    fn auth_login_rejects_a_provider_it_cannot_bind_and_lists_the_accepted_ones() {
+        let error = auth_command(cli::AuthCommand::Login(cli::LoginArgs {
+            provider: "opnai".to_owned(),
+            profile: "default".to_owned(),
+            oauth: false,
+            allow_file: false,
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("\"opnai\" is not a built-in provider"),
+            "{error}"
+        );
+        for provider in LOGIN_PROVIDERS {
+            assert!(error.contains(provider), "{error}");
+        }
+        assert!(error.contains("qq auth set NAME"), "{error}");
+    }
+
+    #[test]
+    fn every_login_provider_has_a_built_in_endpoint() {
+        for provider in LOGIN_PROVIDERS {
+            assert!(built_in_endpoint(provider).is_some(), "{provider}");
         }
     }
 

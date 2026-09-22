@@ -1550,11 +1550,16 @@ impl ConfigProvenance {
 pub struct PendingTrust {
     source: SourceIdentity,
     digest: String,
+    sections: Vec<&'static str>,
 }
 
 impl PendingTrust {
-    fn new(source: SourceIdentity, digest: String) -> Self {
-        Self { source, digest }
+    fn new(source: SourceIdentity, digest: String, sections: Vec<&'static str>) -> Self {
+        Self {
+            source,
+            digest,
+            sections,
+        }
     }
 
     #[must_use]
@@ -1565,6 +1570,14 @@ impl PendingTrust {
     #[must_use]
     pub fn digest(&self) -> &str {
         &self.digest
+    }
+
+    /// The sensitive configuration keys the file declares (`model`,
+    /// `providers`, `mcp`, `policy.allow_shell_prefixes`, …), so a user can
+    /// see what trusting it admits.
+    #[must_use]
+    pub fn sections(&self) -> &[&'static str] {
+        &self.sections
     }
 }
 
@@ -2086,6 +2099,19 @@ impl ConfigSnapshot {
     }
 }
 
+fn trust_required_message(pending: &[PendingTrust]) -> String {
+    let mut message = String::from("project configuration needs your trust before it is used:");
+    for item in pending {
+        message.push_str("\n  ");
+        message.push_str(item.source().label());
+    }
+    message.push_str(
+        "\nReview the file, then run `qq trust` in this directory to accept it. \
+         Sensitive sections (providers, MCP servers, grants, model) load only after that.",
+    );
+    message
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("the platform configuration directories are unavailable")]
@@ -2187,7 +2213,10 @@ pub enum ConfigError {
     RemoteCredentialReferenceForbidden { origin: SourceIdentity },
     #[error("remote configuration cannot declare MCP servers: {origin}")]
     RemoteMcpForbidden { origin: SourceIdentity },
-    #[error("project configuration trust is required")]
+    /// Project configuration declares sensitive sections that no trust
+    /// record covers. The message names every file so the user knows what
+    /// to review before running `qq trust`.
+    #[error("{}", trust_required_message(pending))]
     TrustRequired {
         pending: Vec<PendingTrust>,
         reports: Vec<SourceReport>,

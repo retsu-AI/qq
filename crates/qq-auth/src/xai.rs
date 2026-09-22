@@ -518,6 +518,7 @@ impl RequestCredentialProvider for XaiRequestCredentials {
 fn map_request_credential_error(error: AuthError) -> RequestCredentialError {
     match error {
         AuthError::EnvironmentMissing { .. }
+        | AuthError::ProviderCredentialMissing { .. }
         | AuthError::StoredCredentialNotRegistered { .. }
         | AuthError::StoredCredentialMissing { .. } => RequestCredentialError::Missing,
         AuthError::XAi(XaiAuthError::RefreshRejected | XaiAuthError::AuthorizationDenied) => {

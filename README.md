@@ -1,287 +1,105 @@
 # qq
-A composable toolkit for building, running, and orchestrating AI agents.
 
-Running `qq` with no subcommand opens the interactive TUI against a
-user-scoped background server (`qq serve` runs one in the foreground).
-Agents read, search, and edit workspace files, run shell commands (each
-classified by a real parser into allow / prompt / forbidden), call MCP and
-embedded tools, page through their own oversized outputs, and ask the user a
-question — every mutating action gated by an approval policy. `@path:10-20`
-in a prompt attaches those lines.
-Documentation lives in `docs/` (`design/` for the system as built, `adr/`
-for decisions, `plans/` for what is next; see `docs/README.md`).
+AI coding agents in one binary: a terminal UI, a headless runner for scripts
+and CI, and a local server that several clients can share. Agents read,
+search, and edit your files, run commands, call MCP tools, and spawn
+sub-agents. Every mutating action passes an explicit approval policy — a
+real bash parser grades each command — and every event is stored in SQLite,
+so sessions survive restarts and many agents can run at once.
 
 ## Install
 
-Prebuilt binaries for Linux (x86_64, aarch64; static musl), macOS (Apple
-silicon, Intel), and Windows (x86_64) are attached to each
-[GitHub release](https://github.com/retsu-AI/qq/releases) with a `SHA256SUMS`
-file. Unpack the archive and put `qq` on your `PATH`; `qq --version` prints the
-version with the source revision it was built from. To build from source
-instead, use `cargo build --release` with the pinned toolchain.
-
-## Quick Start
-
-QQ needs exactly two things before its first run: a model route and a
-credential for that model's provider. Set `OPENAI_API_KEY` and `QQ_MODEL`,
-then stream one response:
+Download the archive for your platform from the
+[latest release](https://github.com/retsu-AI/qq/releases/latest), verify it
+against `SHA256SUMS`, and put `qq` on your `PATH`:
 
 ```sh
-QQ_MODEL=openai/gpt-5.6 cargo run -- ask "Reply with pong"
+V=0.1.2 T=x86_64-unknown-linux-musl   # or aarch64-unknown-linux-musl, aarch64-apple-darwin, x86_64-apple-darwin
+curl -fsSLO "https://github.com/retsu-AI/qq/releases/download/v$V/qq-v$V-$T.tar.gz"
+tar -xzf "qq-v$V-$T.tar.gz" && install -m 755 qq ~/.local/bin/qq
+qq --version
 ```
 
-To make the choice permanent, put `model: "openai/gpt-5.6"` in the global
-configuration file (`qq config paths` prints its location) or in
-`.qq/config.ron` at a project root. Without a model, `qq` exits with a message
-listing these options. Set `QQ_MODEL` or `--model` to override for one run.
+Windows: the `x86_64-pc-windows-msvc.zip`. From source:
+`cargo install --git https://github.com/retsu-AI/qq --locked qq`. Details and
+checksums: [Install](docs/guide/install.md).
 
-To use a ChatGPT Codex subscription instead of an API key, sign in through the
-browser and select an `openai-codex` model:
+## First run
 
 ```sh
-cargo run -- auth login openai-codex
-QQ_MODEL=openai-codex/MODEL cargo run -- ask "Reply with pong"
+qq auth login anthropic                 # or openai, google, xai, openai-codex; or export ANTHROPIC_API_KEY
+QQ_MODEL=anthropic/claude-sonnet-5 qq ask "Reply with pong"
 ```
 
-On Windows, credentials that exceed Credential Manager's per-entry limit are
-stored in a DPAPI-encrypted file bound to the current Windows user and machine.
-Moving that file to another account or computer requires signing in again.
-
-To use xAI, set `XAI_API_KEY` or sign in with OAuth. OAuth credentials are
-refreshed and stored under the selected profile:
-
-```sh
-QQ_MODEL=xai/grok-4.3 cargo run -- ask "Reply with pong"
-cargo run -- auth login xai --oauth
-```
-
-## Build Profiles
-
-The default build is the full profile: every supported provider family,
-including Amazon Bedrock and Bedrock Mantle. Embedders that only need the HTTP
-provider families (OpenAI, Anthropic, Google, and compatible endpoints) can
-build the minimal profile, which drops the AWS SDK dependency closure:
-
-```sh
-cargo build --release --no-default-features
-```
-
-A minimal build still accepts Bedrock configuration but refuses to compile a
-Bedrock provider with a configuration error naming the missing
-`provider-bedrock` feature. Library embedders select the same feature on
-`qq-provider` directly.
-
-## Amazon Bedrock Mantle
-
-Mantle reuses the OpenAI Responses, OpenAI Chat Completions, and Anthropic
-Messages wire protocols. Configure a regional deployment with the standard AWS
-credential chain:
+Make the model permanent in `~/.config/qq/config.ron` (`qq config paths`
+shows the path on your OS):
 
 ```ron
 (
     version: 1,
-    model: "bedrock-mantle/MODEL",
-    providers: {
-        "bedrock-mantle": AmazonBedrockMantle(
-            region: "us-east-1",
-            api: OpenAiResponses,
-            auth: Aws(DefaultChain),
-        ),
-    },
+    model: "anthropic/claude-sonnet-5",
 )
 ```
 
-`api` also accepts `OpenAiChatCompletions` and `AnthropicMessages`. Authentication
-may use `Aws(Profile("PROFILE"))` or a region-bound API key such as
-`ApiKey(Env("BEDROCK_MANTLE_API_KEY"))`.
-
-Profiles that use `credential_process` are currently unsupported and rejected.
-QQ disables that aws-config provider because it cannot guarantee termination of
-the subprocess when credential loading times out.
-
-## Google Gemini
-
-Set `GEMINI_API_KEY` and select a model under the built-in `google` provider:
+Then, in any repository:
 
 ```sh
-QQ_MODEL=google/gemini-2.5-flash cargo run -- ask "Reply with pong"
+qq                                       # interactive
+qq run --approval auto "Add a --dry-run flag and a test for it"   # unattended
 ```
 
-Google API keys are sent only in the sensitive `x-goog-api-key` header, never in
-the request URL.
+The [Quickstart](docs/guide/quickstart.md) walks through approvals,
+resuming sessions, and cloned projects that ship their own `.qq/config.ron`.
 
-## Tools And Approvals
+## Documentation
 
-Sessions run under an approval mode: `read-only` (only read-only tools
-execute), `ask` (edits, writes, shell, and MCP calls each request
-approval), `auto` (workspace-contained edits, allowlisted shell prefixes,
-and shell commands the classifier rates `allow` run unprompted; `prompt`-tier
-commands still ask), `supervised` (a configured reviewer model adjudicates
-each held call), or `full` (everything runs except `forbidden` shell shapes,
-which no mode executes). Approval prompts show the exact command, the
-classifier's verdict and the rules behind it, or an edit diff; "approve for
-session" records a grant — shell grants are command prefixes matched at word
-granularity. Nonzero exits and denials
-return to the model as tool errors, not run failures. See
-`docs/design/tools.md` for the full policy design.
+**Using QQ** — [`docs/guide/`](docs/guide/README.md)
 
-Headless runs answer approvals themselves: `qq run --approval read-only`
-denies every held call, `auto` denies what the classifier rated `prompt`,
-and `full` approves everything but `forbidden` shapes. Between `auto` and `full`,
-`--allow-tool <name>` and `--allow-shell "<prefix>"` (both repeatable) approve
-a held call for the session with the same word-boundary prefix rule the
-interactive "approve for session" uses, so `--allow-shell "cargo test"` covers
-`cargo test -p qq-core` and never `cargo test | sh`. `--steer-stdin` reads one
-steering message per stdin line and injects each at the run's next model/tool
-boundary; without it stdin is left alone.
+| | |
+| --- | --- |
+| [Install](docs/guide/install.md) · [Quickstart](docs/guide/quickstart.md) | get running |
+| [Providers and credentials](docs/guide/providers.md) | OpenAI, Anthropic, Google, xAI, Codex, Bedrock, gateways, local models |
+| [Permissions and trust](docs/guide/permissions.md) | approval modes, the shell classifier, grants, project trust |
+| [The TUI](docs/guide/tui.md) · [Headless](docs/guide/headless.md) · [MCP servers](docs/guide/mcp.md) | the three surfaces and extra tools |
+| [Configuration reference](docs/guide/configuration.md) · [CLI reference](docs/guide/cli.md) | every key, flag, and environment variable |
+| [Troubleshooting](docs/guide/troubleshooting.md) · [FAQ](docs/guide/faq.md) | every message and its fix |
 
-Use `qq run --profile <name>` to select a profile's tool catalog. Optional
-`policy.exposed_tools: ["read_file", "search"]` narrows it by intersection
-across configuration layers; an empty list exposes no tools. `--allow-tool`
-and `--allow-shell` grant held calls and cannot restore tools excluded from
-the catalog. See the [headless contract](docs/design/headless-contract.md).
+**Building QQ** — [`docs/README.md`](docs/README.md): design of the system as
+built, architecture decisions, plans, runbooks. [`AGENTS.md`](AGENTS.md) is
+the contributor contract; [`CONTRIBUTING.md`](CONTRIBUTING.md) the short
+version.
 
-## MCP Servers
+## What it does
 
-MCP servers are declared in configuration and their tools join the same
-approval and event flow as built-ins, namespaced `mcp__<server>__<tool>`:
+- **Three surfaces, one runtime.** `qq` (TUI), `qq run` (JSONL or text,
+  exit codes for CI), `qq serve` (HTTP/SSE with resumable cursors). Same
+  tools, policy, and store everywhere.
+- **Approval you can read.** `read_only`, `ask`, `auto`, `full`; a bash
+  parser grades every command `allow` / `prompt` / `forbidden`; `forbidden`
+  never runs, under any mode. Approve once, for the session, or write the
+  grant into `.qq/config.ron` from the prompt.
+- **Durable sessions.** Everything is in SQLite before it is shown. Quit,
+  reboot, `qq --session ID`. Long sessions compact themselves.
+- **Many agents.** Sub-agents with a delegation roster and depth bound; a
+  sidebar grouped by what needs you; `Alt-A`/`Alt-D` to answer another
+  session's approval without leaving yours.
+- **Layered configuration.** Global, per-project (trusted before it is
+  loaded), fragments, environment, managed and MDM layers; `qq config
+  explain FIELD` tells you which one won.
+- **Providers.** OpenAI, Anthropic, Google, xAI, ChatGPT Codex, Amazon
+  Bedrock and Bedrock Mantle built in; any OpenAI-, Anthropic-, or
+  Google-compatible endpoint by declaration. Credentials live in the OS
+  keyring.
+- **MCP.** Stdio and streamable-HTTP servers join the same approval flow as
+  built-ins.
 
-```ron
-mcp: {
-    "executor": Stdio(command: "executor", args: ["mcp"], eager: true,
-                      allow: ["execute", "skills", "resume"]),
-}
-```
+## Contributing and support
 
-This local example uses Executor's official CLI. Stdio and streamable-HTTP
-transports are supported; declarations are trust-gated in workspace
-configuration, and authenticated HTTP endpoints use `Env(...)` or `Stored(...)`
-bearer references rather than literal secrets.
+Issues and PRs are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Questions go to [Discussions](https://github.com/retsu-AI/qq/discussions);
+security reports follow [`SECURITY.md`](SECURITY.md). Development is tracked
+in [`docs/plans/`](docs/plans/README.md).
 
-## TUI Configuration
+## License
 
-TUI preferences use a separate `tui.ron` document. QQ loads compiled defaults,
-then the global configuration directory's `tui.ron`, then `.qq/tui.ron` files
-from the repository root to the current directory.
-
-```ron
-(
-    version: 1,
-    theme: "ink",
-    bindings: (
-        toggle_navigator: ["Ctrl-T"],
-        create_root_session: ["Alt-N"],
-        create_child_session: ["Alt-C"],
-        cancel_run: ["Ctrl-X"],
-        interrupt_run: ["Alt-S"],
-    ),
-)
-```
-
-An omitted action inherits the previous layer. An empty list disables that
-action. Invalid chords and collisions are rejected before the TUI starts. An
-omitted `theme` picks `ink` when the terminal advertises truecolor
-(`COLORTERM=truecolor` or `24bit`) and the ANSI `terminal` theme otherwise;
-`/theme` lists every shipped and user theme (`docs/design/theme.md`).
-
-Every other key lives in one command table. `?` on an empty composer, `F1`, or
-`/help` lists every command with its chord and slash name grouped by area;
-`Ctrl-K` or `/commands` opens the same list as a searchable palette that runs
-the highlighted command on Enter. Rebinding an action updates every hint that
-mentions it. The mouse wheel scrolls the transcript; `PageUp`/`PageDown` and
-`Shift-Up`/`Shift-Down` scroll from the keyboard and `Ctrl-Home`/`Ctrl-End`
-jump to the top and the live tail. Hold Shift to select text with the mouse, or
-`/mouse` to hand the mouse back to the terminal. `Ctrl-R` searches the session's
-prompt history.
-
-Each tool call is one row: `● Edit  src/sse.rs  +12 −3  1.2s`, with a spinner
-and live elapsed time while it runs. `Ctrl-Up`/`Ctrl-Down` select a call and
-Enter expands it alone: a read or search shows the head of its result, an edit
-its diff with line numbers, a command the tail of its output; MCP tools list
-their arguments. Expanded rows also show when the call started, finished or how
-long it has run, and when it last produced output. Enter on a `spawn_agent` row
-opens the child instead. `Ctrl-O` folds quiet finished blocks to one summary
-row for reading back a long transcript, and `Alt-R` toggles reasoning. The
-rule above the composer shows the running activity, elapsed time, and time to
-first token, or the latest notice; the key hints for the current state sit at
-its right.
-
-With several agents, a sidebar groups sessions by what you should do about
-them (NEEDS YOU, WORKING, IDLE, DONE) with unread counts. It appears on its
-own at 100 columns or more and takes a quarter of the width up to 28 columns;
-`Ctrl-\` toggles it, and below that width a one-row agent strip above the
-composer carries the same counts. `Ctrl-G` jumps
-to the next session that needs you; `Alt-A`/`Alt-D` approve or deny a call
-waiting in another session without leaving the current one. In an approval,
-`Shift-Y`/`Shift-N` decide and then steer the run with a note. `/attention`
-lists everything that needs you across the workspace and `/changes` shows every
-file agents edited, flagging files touched by more than one. Esc returns
-from either to the transcript.
-
-`theme` names a color theme. QQ ships `qq` (follows your terminal palette),
-`ink` and `ember` (its own), and ports of gruvbox, tokyonight, catppuccin,
-dracula, nord, solarized, onedark, rose-pine, kanagawa, everforest, and
-monokai; `qq config explain tui.theme` lists them. A `<name>.ron` file under
-the global configuration directory's `themes/` or a project's `.qq/themes/`
-adds a theme or shadows a shipped one. `/theme` opens a picker that previews each theme live (Enter
-keeps it for the session, Esc restores); the notice it leaves shows the line to
-add to `tui.ron`. See `docs/design/theme.md` for the document shape.
-
-One session is on screen at a time; the composer, approvals, and footer follow
-it. To watch two sessions side by side, run two `qq` clients in your terminal
-multiplexer against the same workspace. When the terminal is unfocused, an approval request or a finished run rings
-the terminal bell and posts an OSC 9 desktop notification where supported.
-
-While a run is executing, Enter steers it: the draft joins the run at its
-next model/tool boundary and appears in the transcript as a `steering` row
-until it is applied. `Alt-S` interrupts first (the in-flight model turn or
-tool is aborted, partial text stands) and then steers, for when the run is
-heading the wrong way right now. `Ctrl-Enter` instead holds the draft locally
-until the run finishes and sends it as the next prompt; `Alt-Up` pulls the
-newest held draft back for editing. `Esc Esc` cancels the run. Steering is
-offered only when the server advertises it; otherwise Enter holds the draft.
-
-The interactive composer recognizes `/help`, `/commands`, `/models`, `/profile`,
-`/approval`, `/skills`, `/theme`, `/new`, `/sessions` (also `/resume`), `/agents`, `/prune`, `/mouse`,
-`/attention`, `/changes`, `/editor`, `/compact`, `/rollback`, and `/quit` (also `/exit`). Typing after the slash filters by subsequence, so `/mdl` finds
-`/models`. `/compact`
-summarizes an idle session's history into a compact context so long
-sessions keep going, and the notice quotes the start of the summary the model
-wrote; `/rollback` discards the newest compaction of an idle session and
-restores the history beneath it. Stale read-only tool results are also pruned
-from model context automatically. `/models` applies the choice to the
-focused session (or creates one when none is focused); Ctrl-N always creates a
-new session with the selected model. The pick also becomes the client default
-for later `/new` creates until you choose another model. The picker only lists
-built-in providers with an available credential, and the footer shows context
-usage, the selected model, working directory, and focused session cost. Slash
-command suggestions run immediately when selected with Enter or Tab. QQ names a
-session from its first prompt; `/sessions` supports typing to search those names
-before selecting one with Enter. In the session picker, Ctrl-D deletes the
-highlighted session (with confirmation; a session with an active run must be
-cancelled first). `/prune` asks before deleting every empty session in the
-workspace.
-
-`/profile` lists the agent profiles the server advertises for the workspace:
-those under `profiles` in `.qq/config.ron` and those declared by trusted agent
-packs under `.qq/packs/`, each with its approval mode, model override, and
-declaring pack. Enter applies the profile to the focused idle session (a running
-session must finish first) or, with nothing focused, makes it the default for
-sessions created next. The top row shows `as <profile>` whenever the profile in
-effect is not `default`. `qq run --profile <name>` selects a profile for a
-headless run and fails before the run starts if the name is unknown.
-
-`/approval` lists the approval modes the server accepts (`read_only`, `ask`,
-`auto`, `full`) with what each holds for approval. Enter applies the mode to the
-focused session — it takes effect at the next held tool call, so a running
-session may change too — or, with nothing focused, sets the mode new sessions
-are created with. The top row names the mode in effect whenever it is not
-`auto`.
-
-Slash completion also lists the workspace's own commands (`.qq/commands/*.md`)
-and skills (`.qq/skills/<name>/SKILL.md`, plus those from trusted packs) after
-the client commands, with their descriptions. Accepting a command leaves
-`/name ` in the composer for its arguments; accepting a skill submits `/name`
-so the runtime loads it into the run. `/skills` opens the same index as a
-picker grouped by kind with each document's source, marking documents the
-model may not load on its own as `explicit only`.
+[MIT](LICENSE).

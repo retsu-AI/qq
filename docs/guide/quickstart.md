@@ -1,0 +1,120 @@
+# Quickstart
+
+From an installed `qq` to a working agent. Five minutes if you read; one if
+you paste.
+
+## 1. Pick a provider and store its credential
+
+Choose one row. The credential goes into your OS keyring; nothing is written
+to disk in plain text unless you pass `--allow-file`.
+
+| Provider | Store the credential | Or set an environment variable | Example route |
+| --- | --- | --- | --- |
+| OpenAI | `qq auth login openai` | `OPENAI_API_KEY` | `openai/gpt-5.6` |
+| Anthropic | `qq auth login anthropic` | `ANTHROPIC_API_KEY` | `anthropic/claude-sonnet-5` |
+| Google Gemini | `qq auth login google` | `GEMINI_API_KEY` | `google/gemini-2.5-flash` |
+| xAI | `qq auth login xai` (API key) or `qq auth login xai --oauth` | `XAI_API_KEY` | `xai/grok-4.6` |
+| ChatGPT / Codex subscription | `qq auth login openai-codex` (opens a browser) | — | `openai-codex/gpt-5.6-luna` |
+| Amazon Bedrock | AWS credential chain | `AWS_PROFILE` or `AWS_ACCESS_KEY_ID`+`AWS_SECRET_ACCESS_KEY` | see [Providers](providers.md#amazon-bedrock) |
+
+`qq auth login <provider>` prompts for the key without echoing it. In a
+script, pipe it: `printenv OPENAI_API_KEY | qq auth login openai`.
+
+## 2. Tell QQ which model to use
+
+Once, for every project:
+
+```sh
+mkdir -p "$(qq config paths | awk '/^global:/ {print $2}')"
+cat > "$(qq config paths | awk '/^global:/ {print $2}')/config.ron" <<'EOF'
+(
+    version: 1,
+    model: "openai/gpt-5.6",
+)
+EOF
+qq config check     # configuration is valid (model: openai/gpt-5.6)
+```
+
+Or for one project, in `<repo>/.qq/config.ron` with the same content, or for
+one command with `--model openai/gpt-5.6` or `QQ_MODEL=openai/gpt-5.6`.
+
+Do not know which model to pick? `qq ask --model PROVIDER/MODEL "hi"` with
+any route from [Providers](providers.md#built-in-models); the TUI's `/models`
+lists every model your credentials unlock.
+
+## 3. First answer
+
+```sh
+qq ask "Reply with pong"
+```
+
+One streamed response, no session, no tools. If this works, everything
+below works.
+
+## 4. First agent session
+
+```sh
+cd your-project
+qq
+```
+
+The TUI opens on a new session in this directory. Type a request and press
+Enter. The agent can read and search files immediately. When it wants to
+edit a file, run a command, or reach the network, it asks:
+
+```
+◇ approval needed
+$ cargo test  (in ~/your-project)
+asks because: command is not on the allow list
+y once   a session   w workspace   n deny
+```
+
+`y` runs it once, `a` allows that shape for the rest of the session, `w`
+writes the grant into the project's `.qq/config.ron` so it never asks
+again, `n` denies and tells the model why. See
+[Permissions and trust](permissions.md) for the full model.
+
+Useful keys while it works: `Esc Esc` cancels, `Enter` steers the running
+agent with a new instruction, `Ctrl-K` opens the command palette, `?` on an
+empty prompt or `F1` lists every key. `Ctrl-C` or `/quit` exits and prints
+how to resume:
+
+```
+To continue this session:
+  qq --session 01J…
+  qq run --session 01J… "<prompt>"
+```
+
+## 5. A project you cloned
+
+If a repository ships its own `.qq/config.ron` (like this one does), the first
+`qq` there stops with:
+
+```
+error: project configuration needs your trust before it is used:
+  /path/to/repo/.qq/config.ron
+Review the file, then run `qq trust` in this directory to accept it. Sensitive
+sections (providers, MCP servers, grants, model) load only after that.
+```
+
+That file may declare providers, MCP servers that run commands, and
+approval grants, so QQ never loads it silently. Read it, run `qq trust`, and
+QQ prints what it accepted. Edit the file later and QQ asks again.
+
+## 6. Automate it
+
+```sh
+qq run --approval auto "Add a unit test for parse_duration and make it pass"
+```
+
+`qq run` is the agent without a UI: readable progress on stderr, the final
+answer on stdout, exit code `0` on success. `--approval read-only` (the
+default) lets it look but not touch; `auto` allows workspace edits and safe
+commands; `--format jsonl` gives you every event as a JSON line. Details in
+[Headless](headless.md).
+
+## Where next
+
+- [The TUI](tui.md) — sessions, sub-agents, `@file` mentions, themes.
+- [Configuration reference](configuration.md) — every key.
+- [Troubleshooting](troubleshooting.md) — every error you might see now.

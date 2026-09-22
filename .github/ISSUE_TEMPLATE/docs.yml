@@ -1,0 +1,22 @@
+name: Documentation
+description: Something in the guide is missing, wrong, or unclear.
+labels: [documentation]
+body:
+  - type: input
+    id: page
+    attributes:
+      label: Page
+      placeholder: docs/guide/configuration.md § policy
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is wrong or missing
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: Suggested text (optional)
+      description: PRs to docs/guide/ are welcome without an issue.
