@@ -1,0 +1,149 @@
+# Delegated approval
+
+A session's approval mode is the ceiling on what may run. A delegate decides
+the calls that ceiling still holds, so an operator who opted in is not asked
+for every ordinary side effect. This document is the contract
+[`../plans/delegated-approval.md`](../plans/delegated-approval.md) builds.
+Until a slice ships, the as-built behavior is
+[`tools.md`](tools.md) § Approval Policy; that section absorbs this text as
+the slices land, and this file is then deleted.
+
+## Ceiling and delegate
+
+The five modes are unchanged ([`tools.md`](tools.md) § Approval Policy,
+ADR-0007, ADR-0021):
+
+| Mode | Ceiling | Delegate |
+| --- | --- | --- |
+| `read-only` | deny mutations | none; nothing is delegated |
+| `ask` | hold every ungranted mutation | the human, unless `approval.delegate: on` |
+| `auto` | edits and allow-listed shell execute; `Prompt` shell and ungranted hosts hold | the configured delegate when one exists |
+| `supervised` | every non-read call of a write child is held | the configured delegate; a denial is final |
+| `full` | execute, except shell `Forbidden` | none |
+
+`approval.delegate` defaults off for `ask`. The default `auto` profile turns
+it on only when a delegate is configured. With neither `jev_approval` nor
+`reviewer_model` set, `auto` behaves exactly as it does today.
+
+`Forbidden` shell shapes (ADR-0020), blocked hosts, and managed `deny_tools`,
+`deny_shell_prefixes`, and `deny_hosts` are settled by the classifier before
+the mode and before the delegate. No delegate call is made, and no delegate
+configuration can move a rule out of that tier.
+
+## Who is asked
+
+A hold resolves through one chain. The first configured delegate answers; the
+human is the residue.
+
+```text
+classify
+  ├─ Forbidden, blocked host, managed deny → refuse; no delegate
+  ├─ mode and grants say Execute → execute
+  └─ hold
+       ├─ jev_approval on and a key stored → Jev
+       ├─ else reviewer_model set → that model
+       ├─ else → the human
+       ├─ Approve → execute, within the mode ceiling
+       ├─ Deny → final under auto and supervised; elsewhere escalate
+       └─ Escalate, timeout, outage, abstain
+            ├─ a client is attached → the human
+            └─ headless, no client → tool error, immediately
+```
+
+Both delegates speak `ReviewDecision::{Approve, Deny, Escalate}`. The
+composition root selects the implementation; `qq-core` does not learn what
+Jev or a provider is. A stored TypeSafe key enables nothing by itself
+(ADR-0030). `jev_approval` is a third explicit capability beside
+`jev_review` and `jev_routing`, default off, and it does not change what
+those two do.
+
+`ask_user` stays a hold for a human under every mode, including `full`. A
+delegate is not asked. A question is not a permission (ADR-0021).
+
+## What a delegate may decide
+
+A delegate sees the approval preview: the command or the edit diff, the host
+for a fetch, the task brief, and the names of recent actions. It does not see
+the transcript. The preview is bounded the way a checkpoint payload is
+bounded, and an over-bound preview escalates rather than being truncated into
+a confident answer.
+
+A delegate `Approve` executes the call and may record a session grant for the
+exact command string or the exact host. It may not record a prefix grant, and
+it may not promote a grant into `.qq/config.ron`. A human approval keeps the
+once, session, and workspace choices, including prefix grants and workspace
+promotion. Delegate-recorded grants are capped per run.
+
+A delegate `Deny` is final under `auto` and `supervised`: the call settles
+`denied`, no human prompt is published, and the tool result names the
+delegate. Under `ask` with delegation on, a `Deny` escalates, because the
+operator chose the mode that asks. `Escalate`, a timeout, an outage, an
+abstain, and a low-confidence Jev verdict all escalate. Escalation starts the
+human wait; it does not inherit time the delegate already spent.
+
+## Two clocks
+
+The delegate has its own deadline: 10 s for `reviewer_model`, 5 s for Jev.
+That deadline does not consume the human wait.
+
+An interactive session with a client attached has no server approval
+deadline. The run deadline still cancels the run. A headless run with no
+client attached is denied immediately with a tool result that names the
+policy, the same way an unanswered `ask_user` exits `needs_input`. A
+supervisor that wants a bound sets `approval_timeout`; absent means this
+policy, not a hidden 300 s.
+
+This split is owned by run-reliability RR9. Delegated approval consumes it
+and adds only the delegate's clock.
+
+## Jev as a delegate
+
+`jev_approval: on` asks Jev for a typed yes, no, or abstain over the preview.
+The call is bounded at 5 s, its spend counts against the run's reviewer
+budget, and a missing key, an over-budget run, a malformed reply, or a
+transport failure falls through to `reviewer_model` and then the human. Jev
+is never failed open to approve.
+
+This lane is the one exception to ADR-0030's "Jev never authorizes side
+effects," and only for calls the mode would already hold. ADR-0041 records
+it. Review still judges evidence after a tool ran; routing still selects a
+model. Neither gains the ability to approve a side effect.
+
+`qq --tui-qa-root` rejects `jev_approval: on` with the other Jev
+capabilities. The fixture stays credential-free.
+
+## What is recorded
+
+A delegated decision is persisted before the tool starts and before any
+client is told it executed. The record carries the verdict, the delegate
+(`jev` or `reviewer`), and the preview digest. A human decision is unchanged.
+A failed write is not an approval and does not dispatch.
+
+The resolution vocabulary stays `approved`, `approved_for_session`,
+`approved_for_workspace`, `approved_by_reviewer`, `denied`,
+`denied_timeout`. `approved_by_reviewer` gains a delegate identity so an
+audit can tell Jev from `reviewer_model`. Adding that field is a protocol
+change only if a supervisor must reconstruct the decision from the stream; the
+slice that adds it says which and updates the headless goldens.
+
+## What the operator sees
+
+The TUI shows who settled a call and the preview digest, and an escalation
+says why the delegate abstained. One session command disables the delegate
+for the rest of that session without rewriting configuration and without
+restarting the server. Headless output names the delegate on the approval
+event.
+
+## Presets
+
+Stricter and looser operation are profiles, not new modes.
+
+| Profile | Mode | Delegate | Who is asked |
+| --- | --- | --- | --- |
+| strict | `ask` | off | the human, for every ungranted mutation |
+| default | `auto` | on, if one is configured | the delegate; the human on abstain |
+| unattended | `auto` | on | the delegate; headless abstain is an immediate tool error |
+| open | `full` | off | nobody, except the `Forbidden` floor |
+
+`supervised` is not a profile. It remains the mode a spawned write child runs
+under, and it uses the same delegate selection as `auto`.

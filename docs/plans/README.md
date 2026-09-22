@@ -37,6 +37,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | [`run-snapshots.md`](./run-snapshots.md) | Proposed: reversible mutating-run state |
 | [`mid-run-compaction.md`](./mid-run-compaction.md) | Compact and continue one run at a safe turn boundary (audit F03, ENG-793). MRC-0..3 shipped (#92, ADR-0039); open: MRC-4 surfaces, MRC-5 live evidence |
 | [`lsp-diagnostics.md`](./lsp-diagnostics.md) | Proposed: diagnostics integration |
+| [`delegated-approval.md`](./delegated-approval.md) | Proposed: an opt-in delegate settles held approvals — Jev when `jev_approval: on`, otherwise `reviewer_model`, otherwise the human. DA1–DA6; ADR-0041 reserved for DA5 |
 | [`templates/`](./templates/) | Slice header, pre-flight, receipt, PR body; review checklist |
 | [`progress/`](./progress/) | One ledger per plan, root ledger, decisions needed, gate evidence |
 
@@ -55,7 +56,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | 8 | Phase 8 — H11 product adapters; Phase 9 — H12 qualification | `speed-first-…` | H11 needs a real consumer; H12 closes the story |
 | — | Quiet-host recordings: Phase 5a H0 tail comparison; H20 eight-stream p95 then the 50→20 ms budget | `speed-first-…` | Implemented; tails not repeatable on the shared host; retained, not waived |
 | — | Seven H22 deferrals (`StaticHttpAuth`, headless writer, config parse-once, reviewer via `PlanCache`, run-loop enums, args-parse-once, `Arc` calls) | `speed-first-…` § Bundled Fixes | Each is its own slice when that code is next opened |
-| — | Run snapshots, LSP diagnostics | proposed plans | No scheduled slice |
+| — | Run snapshots, LSP diagnostics, delegated approval | proposed plans | No scheduled slice. Delegated approval DA1 is the first slice when an operator wants fewer approval prompts; DA2 waits on RR9 |
 
 ## Ownership
 
@@ -70,6 +71,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | Mid-run compaction and continuation | `mid-run-compaction.md` |
 | Diagnostics integration | `lsp-diagnostics.md` |
 | Run outcome policy: turn recovery, `Paused`, mid-run compaction, checkpoint, admission validation, tool-argument leniency, approval deadline | `run-reliability.md` |
+| Who settles a held approval: Jev, `reviewer_model`, or the human; delegate grants and the delegate clock | `delegated-approval.md` |
 | Reference audit of Codex, OpenCode, Pi, and fx; findings F01–F28 | [`../design/harness-scale-audit-2026-09-16.md`](../design/harness-scale-audit-2026-09-16.md) (research, not a plan; F03–F28 unowned) |
 | Shared files, dependency and toolchain bumps, ADR numbering | [`progress/root.md`](./progress/root.md) |
 

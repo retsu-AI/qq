@@ -35,6 +35,10 @@
   (27 % of prompt runs failed, 73 % of those by harness policy), how Codex,
   OpenCode, Pi, and fx keep runs alive, and findings R01–R12 (research; owned
   by `plans/run-reliability.md`).
+- [`delegated-approval.md`](design/delegated-approval.md) — target contract for
+  an opt-in delegate that settles held approvals. Absorbed into `tools.md` as
+  [`plans/delegated-approval.md`](plans/delegated-approval.md) ships; not yet
+  as-built.
 
 ## Decisions — `adr/`
 
@@ -82,3 +86,6 @@ evidence.
 
 Jev: [review and direction](design/jev-runtime-review-2026-09-18.md),
 [opt-in runbook](runbooks/jev.md), [implementation plan](plans/jev-opt-in.md).
+Delegated approval, including Jev as an approval delegate:
+[target contract](design/delegated-approval.md),
+[plan](plans/delegated-approval.md).

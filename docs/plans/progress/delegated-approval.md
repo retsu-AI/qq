@@ -1,0 +1,44 @@
+# Ledger — delegated approval
+
+Plan: [`../delegated-approval.md`](../delegated-approval.md).
+Only the agent working this plan edits this file. Current state on top;
+dated entries appended below, newest last.
+
+| Slice | Goal | Status | Branch / PR | Notes |
+| --- | --- | --- | --- | --- |
+| DA1 | Reviewer `Deny` is final under `auto`; escalation restarts the human wait | Planned | | No dependency. Independent review (touches `sessions/`) |
+| DA2 | Delegate clock separate from the human wait; no server deadline while a client is attached | Planned | | Input: RR9, or include its minimum and say so. Do not start while RR9 is `In progress` on `sessions/approvals.rs` |
+| DA3 | `approval.delegate` opt-in; default `auto` enables it only when a delegate is configured | Planned | | Input: DA1. No protocol bump |
+| DA4 | Delegate grants are exact-command or exact-host, session-scoped, never written to config | Planned | | Input: DA1. Independent of DA2 |
+| DA5 | `jev_approval` typed yes/no/abstain; ADR-0041 | Planned | | Inputs: DA1, DA3. Reserve ADR-0041 in `root.md` before the PR |
+| DA6 | TUI delegate rendering, session off switch, headless delegate identity, runbook | Planned | | Inputs: DA3, DA5 |
+
+## Entries
+
+### 2026-09-21 — plan opened
+
+Tracked by [ENG-862](https://linear.app/retsu-ai/issue/ENG-862/docsplans-delegated-approval-jev-then-a-reviewer-then-the-human).
+No code. The operator asked for an opt-in where Jev decides held approvals and
+a model decides them when Jev is not configured, with stricter modes for
+operators who want to be asked. Research recorded in the plan and in
+[`../../design/delegated-approval.md`](../../design/delegated-approval.md).
+
+Facts checked against the tree before writing:
+
+- `ModelApprovalReviewer` already exists (`src/runtime.rs`) and is invoked from
+  `sessions/approvals.rs`, but only under `auto` (held shell, ungranted fetch)
+  and `supervised`. Under `auto` its `Deny` escalates to the human; under
+  `supervised` a `Deny` is final. The reviewer and the human share one 300 s
+  deadline (`DEFAULT_APPROVAL_TIMEOUT`), which is not plumbed from config.
+- ADR-0030: Jev review and routing are explicit, default off, and a stored key
+  enables nothing. "Jev never authorizes side effects." DA5 is the slice that
+  supersedes that sentence, for the approval lane only, via ADR-0041.
+- Run-reliability RR9 already owns the interactive-deadline half (audit R07).
+  DA2 consumes it and adds the delegate clock. It must not race RR9 on
+  `sessions/approvals.rs`.
+- ADR-0020's configurable rule table stays deferred. Exact session grants
+  cover the repeated-prompt case without a DSL.
+- ADR-0004 stands: Jev is a second `ApprovalReviewer`, selected at the
+  composition root, not a new trait and not a plugin lane.
+
+Shipped: none. In progress: none. Blocked: none.
