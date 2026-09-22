@@ -760,6 +760,7 @@ fn new_slash_command_creates_a_root_session_with_the_selected_model() {
         settings: Settings::default(),
         model: model.clone(),
         models: Vec::new(),
+        unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
     });
@@ -795,6 +796,7 @@ fn slash_clear_is_a_client_alias_for_a_new_session() {
         settings: Settings::default(),
         model,
         models: Vec::new(),
+        unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
     });
@@ -1134,6 +1136,7 @@ fn context_meter_app() -> App {
             reasoning_efforts: Vec::new(),
             selection,
         }],
+        unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
     })
@@ -1451,6 +1454,7 @@ fn model_refresh_preserves_the_open_picker_selection_by_identity() {
             reasoning_efforts: Vec::new(),
             selection: selection.clone(),
         }],
+        unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
     });
@@ -1532,6 +1536,7 @@ fn model_picker_applies_to_the_focused_session_and_ctrl_n_creates() {
             reasoning_efforts: Vec::new(),
             selection: selection.clone(),
         }],
+        unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
     });
@@ -1602,6 +1607,7 @@ fn model_picker_enter_without_a_focused_session_creates_one() {
             reasoning_efforts: Vec::new(),
             selection: selection.clone(),
         }],
+        unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
     });
@@ -1656,6 +1662,7 @@ fn model_picker_selection_becomes_the_default_for_new_sessions() {
             reasoning_efforts: Vec::new(),
             selection: switched.clone(),
         }],
+        unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
     });
@@ -1719,6 +1726,131 @@ fn create_without_a_default_or_focused_session_still_requires_a_model() {
         app.status.as_deref(),
         Some("choose a model with /models before creating a session")
     );
+}
+
+/// OB2 fixture: `openai/gpt-5.6` configured, no credential for any built-in,
+/// so the catalog is empty and every built-in carries a remedy.
+fn unauthenticated_app() -> App {
+    let mut initial = snapshot();
+    initial.sessions.clear();
+    initial.focused = None;
+    let mut app = App::new(TuiOptions {
+        model: ModelSelection {
+            model_is_fallback: true,
+            model: Some("openai/gpt-5.6".to_owned()),
+            max_output_tokens: Some(8_192),
+            organization: None,
+        },
+        unauthenticated_providers: vec![
+            ProviderRemedy {
+                provider: "anthropic".to_owned(),
+                remedy: "run qq auth login anthropic or set ANTHROPIC_API_KEY".to_owned(),
+            },
+            ProviderRemedy {
+                provider: "openai".to_owned(),
+                remedy: "run qq auth login openai or set OPENAI_API_KEY".to_owned(),
+            },
+        ],
+        ..TuiOptions::default()
+    });
+    app.apply_snapshot(initial);
+    app
+}
+
+#[test]
+fn create_with_an_unauthenticated_configured_model_warns_with_the_remedy() {
+    let mut app = unauthenticated_app();
+
+    let (_, requests) = app.execute(Command::NewRootSession).split();
+
+    assert!(requests.is_empty());
+    assert_eq!(
+        app.status.as_deref(),
+        Some("openai needs a credential: run qq auth login openai or set OPENAI_API_KEY")
+    );
+    assert_eq!(app.status_level, NoticeLevel::Warning);
+    assert_eq!(
+        app.startup_guidance().as_deref(),
+        Some("openai needs a credential: run qq auth login openai or set OPENAI_API_KEY")
+    );
+}
+
+#[test]
+fn models_picker_lists_unauthenticated_builtins_and_never_creates_a_session() {
+    let mut app = unauthenticated_app();
+
+    app.open_models();
+    let Some(Overlay::Models(picker)) = &app.overlay else {
+        panic!("picker did not open: {:?}", app.status);
+    };
+    let rows: Vec<(&str, Option<usize>)> = picker
+        .items()
+        .iter()
+        .map(|row| (row.provider.as_str(), row.index))
+        .collect();
+    assert_eq!(rows, [("anthropic", None), ("openai", None)]);
+
+    // Enter and Ctrl-N on a `needs credential` row repeat the remedy and
+    // send nothing; the picker stays open so the user can read the list.
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    assert!(requests.is_empty());
+    assert_eq!(
+        app.status.as_deref(),
+        Some("anthropic needs a credential: run qq auth login anthropic or set ANTHROPIC_API_KEY")
+    );
+    assert!(matches!(app.overlay, Some(Overlay::Models(_))));
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+        .split();
+    assert!(requests.is_empty());
+    assert!(app.filtered_models().is_empty());
+}
+
+#[test]
+fn a_client_without_a_model_points_at_the_picker_until_one_is_chosen() {
+    // OB1: `(version: 1)` opens the TUI with no client default. The standing
+    // guidance says what to do; choosing a model from `/models` clears it.
+    let selection = ModelSelection {
+        model_is_fallback: false,
+        model: Some("anthropic/claude-sonnet-5".to_owned()),
+        max_output_tokens: Some(8_192),
+        organization: None,
+    };
+    let mut initial = snapshot();
+    initial.sessions.clear();
+    initial.focused = None;
+    let mut app = App::new(TuiOptions {
+        models: vec![ModelOption {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-5".to_owned(),
+            name: Some("Claude Sonnet 5".to_owned()),
+            context_window: Some(200_000),
+            reasoning_efforts: Vec::new(),
+            selection: selection.clone(),
+        }],
+        ..TuiOptions::default()
+    });
+    app.apply_snapshot(initial);
+    assert_eq!(
+        app.startup_guidance().as_deref(),
+        Some("choose a model with /models")
+    );
+
+    app.open_models();
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    assert!(matches!(
+        &requests[0],
+        ClientRequest::Command(CommandRequest {
+            command: SessionCommand::CreateSession { model, .. },
+            ..
+        }) if model == &selection
+    ));
+    assert_eq!(app.model, selection);
+    assert!(app.startup_guidance().is_none());
 }
 
 #[test]
@@ -2929,6 +3061,7 @@ fn themed_app() -> App {
         settings: Settings::default(),
         model: ModelSelection::default(),
         models: Vec::new(),
+        unauthenticated_providers: Vec::new(),
         themes: vec![
             crate::Theme::terminal(),
             crate::Theme::from_roles("rose-pine", [crate::ThemeColor::Rgb(0xe0, 0xde, 0xf4); 8]),
@@ -3497,6 +3630,7 @@ fn profile_chosen_without_a_focused_session_applies_to_the_next_create() {
         settings: Settings::default(),
         model: selection.clone(),
         models: Vec::new(),
+        unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
     });
@@ -3597,6 +3731,7 @@ fn effort_chosen_without_a_focused_session_applies_to_the_next_create() {
         settings: Settings::default(),
         model: selection.clone(),
         models: Vec::new(),
+        unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
     });
@@ -3666,6 +3801,7 @@ fn effort_picker_is_shaped_by_the_focused_models_advertised_ladder() {
             settings: Settings::default(),
             model: selection.clone(),
             models,
+            unauthenticated_providers: Vec::new(),
             themes: Vec::new(),
             workspace_root: None,
         });
@@ -3814,6 +3950,7 @@ fn approval_mode_chosen_without_a_focused_session_applies_to_the_next_create() {
             organization: None,
         },
         models: Vec::new(),
+        unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
     });

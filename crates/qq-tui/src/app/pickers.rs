@@ -10,7 +10,7 @@ use qq_protocol::{
     ServerCapabilities, SessionCommand, SessionId, SessionStatus,
 };
 
-use super::{App, PendingIntent};
+use super::{App, PendingIntent, ProviderRemedy};
 use crate::{
     commands::{Command, SlashAction},
     effect::{Effects, Redraw},
@@ -56,10 +56,10 @@ impl App {
                 Effects::redraw(Redraw::Immediate)
             }
             (PickerOutcome::Accept, Overlay::Models(picker)) => {
-                let Some(model) = picker.current().map(|row| row.index) else {
+                let Some(row) = picker.current().cloned() else {
                     return Effects::none();
                 };
-                self.accept_model(model, false)
+                self.accept_model(&row, false)
             }
             (PickerOutcome::Accept, Overlay::Profiles(picker)) => {
                 let Some(profile) = picker.current().map(|row| row.id.clone()) else {
@@ -126,10 +126,10 @@ impl App {
             // Ctrl-N in the model picker always creates a session with the
             // highlighted model, even when a session is focused.
             (PickerOutcome::Chord(KeyCode::Char('n' | 'N')), Overlay::Models(picker)) => {
-                let Some(model) = picker.current().map(|row| row.index) else {
+                let Some(row) = picker.current().cloned() else {
                     return Effects::none();
                 };
-                self.accept_model(model, true)
+                self.accept_model(&row, true)
             }
             (
                 PickerOutcome::Chord(KeyCode::Delete | KeyCode::Char('d' | 'D')),
@@ -145,7 +145,7 @@ impl App {
     // --- models ---
 
     pub(super) fn open_models(&mut self) -> Effects {
-        if self.models.is_empty() {
+        if self.models.is_empty() && self.unauthenticated_providers.is_empty() {
             self.set_warning("no authenticated providers have selectable models".to_owned());
             return Effects::redraw(Redraw::Immediate);
         }
@@ -153,12 +153,27 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
+    /// Selectable rows for every authenticated model. When there are none,
+    /// the admitted built-ins that lack a credential are listed instead so
+    /// the picker names the fix rather than showing an empty list.
     fn model_rows(&self) -> Vec<ModelRow> {
+        if self.models.is_empty() {
+            return self
+                .unauthenticated_providers
+                .iter()
+                .map(|remedy| ModelRow {
+                    index: None,
+                    provider: remedy.provider.clone(),
+                    model: remedy.remedy.clone(),
+                    name: None,
+                })
+                .collect();
+        }
         self.models
             .iter()
             .enumerate()
             .map(|(index, option)| ModelRow {
-                index,
+                index: Some(index),
                 provider: option.provider.clone(),
                 model: option.model.clone(),
                 name: option.name.clone(),
@@ -167,8 +182,20 @@ impl App {
     }
 
     /// Apply the model at `index`: to the focused session, or by creating a
-    /// session when `create` is set or nothing is focused.
-    fn accept_model(&mut self, index: usize, create: bool) -> Effects {
+    /// session when `create` is set or nothing is focused. A `needs
+    /// credential` row has no index; choosing it repeats the remedy.
+    fn accept_model(&mut self, row: &ModelRow, create: bool) -> Effects {
+        let Some(index) = row.index else {
+            let remedy = self
+                .unauthenticated_providers
+                .iter()
+                .find(|remedy| remedy.provider == row.provider)
+                .map(ProviderRemedy::message);
+            if let Some(message) = remedy {
+                self.set_warning(message);
+            }
+            return Effects::redraw(Redraw::Immediate);
+        };
         let Some(model) = self
             .models
             .get(index)
@@ -793,7 +820,9 @@ impl App {
     /// Indexes into `models` visible in the open model picker.
     pub(crate) fn filtered_models(&self) -> Vec<usize> {
         match &self.overlay {
-            Some(Overlay::Models(picker)) => picker.filtered().map(|(_, row)| row.index).collect(),
+            Some(Overlay::Models(picker)) => {
+                picker.filtered().filter_map(|(_, row)| row.index).collect()
+            }
             _ => Vec::new(),
         }
     }

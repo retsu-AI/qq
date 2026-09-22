@@ -27,7 +27,9 @@ pub(crate) enum SessionConfirm {
 /// the query matches so the picker does not need the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModelRow {
-    pub index: usize,
+    /// Index into the authenticated catalog, or `None` for a provider row
+    /// that only names a missing credential and cannot be selected.
+    pub index: Option<usize>,
     pub provider: String,
     pub model: String,
     pub name: Option<String>,
