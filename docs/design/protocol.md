@@ -176,6 +176,12 @@ the next claim. Older clients reject the new command, outcome, and summary
 field. Golden fixtures live under `crates/qq-protocol/tests/fixtures/v27/`;
 `v23`–`v26` are retained decode-only.
 
+Also in 27, additively: `ModelDescriptor.reasoning_efforts` lists the effort
+values a catalog route advertises, lowest to highest, and is omitted when empty.
+Clients shape an effort picker from it; the runtime rejects a pin outside a
+non-empty ladder at plan time. Empty means "not advertised", not "unsupported".
+No fixture changes: every current golden has an empty ladder.
+
 Clients and servers must agree on this value.
 
 - `GET /v1/health` returns `ServerInfo.protocol_version`.

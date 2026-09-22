@@ -820,6 +820,16 @@ impl ModelMetadata {
             pricing,
         }
     }
+
+    /// The effort ladder the provider documents for this model.
+    #[must_use]
+    pub(crate) fn with_reasoning_efforts(
+        mut self,
+        reasoning_efforts: &[qq_provider::ReasoningEffort],
+    ) -> Self {
+        self.reasoning_efforts = reasoning_efforts.to_vec();
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

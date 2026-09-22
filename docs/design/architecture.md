@@ -446,6 +446,13 @@ compiled choice; omission uses provider defaults, while explicit `none` requests
 disabled reasoning. This does not enable Jev. HTTP OpenAI Responses/Chat adapters carry
 effort; other adapter families reject it before credential lookup. Capability
 means transport support, not that every remote model accepts every effort value.
+The bundled catalog records the ladder each OpenAI-shaped route documents
+(`ModelMetadata::reasoning_efforts`, surfaced as `ModelDescriptor.reasoning_efforts`);
+Anthropic-shaped routes advertise none because their adapters never transmit
+effort. A pin outside a non-empty ladder is a plan-time `ReasoningEffortNotAdvertised`
+error naming the accepted values, so the operator sees it before the provider
+would fail the turn. An empty ladder is unknown, not unsupported, and is not
+checked.
 
 Credential rotation is tracked separately by an opaque `CredentialEpoch` owned
 by `qq-auth`: every durable credential write advances the store's index

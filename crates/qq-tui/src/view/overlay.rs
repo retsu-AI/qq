@@ -287,23 +287,38 @@ pub(super) fn approval_mode_picker(app: &App, width: usize, height: usize) -> Ve
     )
 }
 
-/// Effort picker: every pin plus `default` (restore config/profile). The pin
-/// in effect is marked.
+/// Effort picker: `default` (restore config/profile) plus the levels the
+/// focused model advertises, or every level when the catalog is silent. The
+/// pin in effect is marked.
 pub(super) fn effort_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(Overlay::Effort(picker)) = &app.overlay else {
         return fit_height(Vec::new(), height);
     };
     let current = app.effective_effort();
+    let advertised = !app.focused_model_efforts().is_empty();
     picker_frame(
         picker,
         PickerChrome {
             title: "EFFORT",
-            hint: if app.focused().is_some() {
-                "type to search, Enter sets the session's effort, Esc closes"
-            } else {
-                "type to search, Enter sets the effort for new sessions, Esc closes"
+            hint: match (app.focused().is_some(), advertised) {
+                (true, true) => {
+                    "levels this model advertises; Enter sets the session's effort, Esc closes"
+                }
+                (true, false) => {
+                    "model advertises no ladder, showing every level; Enter sets the session's effort, Esc closes"
+                }
+                (false, true) => {
+                    "levels the default model advertises; Enter sets the effort for new sessions, Esc closes"
+                }
+                (false, false) => {
+                    "type to search, Enter sets the effort for new sessions, Esc closes"
+                }
             },
-            placeholder: "all effort levels",
+            placeholder: if advertised {
+                "advertised effort levels"
+            } else {
+                "all effort levels"
+            },
             question: None,
             empty: "  No matching effort levels.",
         },

@@ -10,6 +10,7 @@ pub(crate) use qq_client::state::{
 };
 use qq_client::state::{
     MAX_QUEUED_DRAFTS, ReduceContext, StateEffect, body_request, model_context_window,
+    model_reasoning_efforts,
 };
 use qq_protocol::{
     AgentProfileId, ApprovalDecision, ApprovalGrant, ApprovalMode, ApprovalResolution, CommandId,
