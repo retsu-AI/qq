@@ -382,6 +382,24 @@ impl<'a> VirtualBody<'a> {
         self.segments.append(&mut other.segments);
     }
 
+    /// One blank row ahead of everything, so the transcript breathes under
+    /// the top row. As a body row it is on screen exactly when the viewport
+    /// reaches the first row and scrolls away like any other; offsets count
+    /// from the tail, so the anchor is untouched.
+    ///
+    /// Kept out of line: inlined into `body` it perturbed the streaming
+    /// layout path enough to read +7 % on `streaming_run_on_32kb`.
+    #[inline(never)]
+    fn pad_top(&mut self) {
+        for (_, range) in &mut self.live_message_ranges {
+            range.start += 1;
+            range.end += 1;
+        }
+        self.rows += 1;
+        self.segments
+            .insert(0, BodySegment::Owned(vec![Line::default()]));
+    }
+
     pub(super) fn viewport(&self, app: &App, height: usize, offset: usize) -> Vec<Line> {
         let offset = offset.min(self.rows.saturating_sub(height));
         let end = self.rows.saturating_sub(offset);
@@ -544,7 +562,7 @@ impl TranscriptCache {
         // the measure and centers it, so the width-keyed caches see one width
         // across every pane at least that wide.
         let content_width = width;
-        let body = self.threadline(
+        let mut body = self.threadline(
             highlighter,
             app,
             session_id,
@@ -552,6 +570,7 @@ impl TranscriptCache {
             content_width,
             inline_detail,
         );
+        body.pad_top();
         viewport.update(view, body.rows, height, body.preserve_tail_anchor);
         let offset = viewport.offset();
         let live_message_ranges = body.live_message_ranges.iter().cloned().collect();
@@ -1304,12 +1323,15 @@ pub(super) const fn message_is_terminal(message: &MessageSnapshot) -> bool {
     )
 }
 
+/// Rail, rail style, role label, and label style for a message's rows. The
+/// user rail is the transcript's structural accent; `QQ` in `brand` is the
+/// one warm mark per turn.
 pub(super) fn message_presentation(
     role: MessageRole,
 ) -> (&'static str, Style, &'static str, Style) {
     match role {
         MessageRole::User => (" ▌ ", accent(), "YOU", accent().bold()),
-        MessageRole::Assistant => ("   ", muted(), "QQ", normal().bold()),
+        MessageRole::Assistant => ("   ", muted(), "QQ", brand().bold()),
     }
 }
 

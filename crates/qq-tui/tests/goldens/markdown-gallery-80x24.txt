@@ -1,5 +1,4 @@
  qq  Session 0                                           openai/gpt-test  $0.00
-   The footnote body.
 
    ┃                                                                       rust
    ┃  fn main() {
@@ -22,3 +21,4 @@
  3 agents
 ─────────────────────────────────────────────── F1 help  ^K commands  ^O detail
  › Ask QQ...
+

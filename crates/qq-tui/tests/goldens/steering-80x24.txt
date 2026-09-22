@@ -1,4 +1,5 @@
  qq  Session 0                                           openai/gpt-test  $0.00
+
    QQ
    the model turn
 
@@ -17,8 +18,7 @@
 
 
 
-
-
  3 agents  ◐ 1
  ◐ working ──────────────────────────────────── F1 help  ^K commands  ^O detail
  › Ask QQ...
+

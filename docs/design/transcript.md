@@ -66,12 +66,19 @@ The TUI orders a run's items by `turn_ordinal`, rendering each turn's
 message followed by that turn's calls (`call_ordinal` order):
 
 ```
-   QQ  Sure, I'll look into that...
-   ● read_file crates/qq-core/src/lib.rs
-   ● search "ToolGate"
-   QQ  The gate resolves after the turn yields. Checking the store side...
-   ● read_file crates/qq-core/src/sessions.rs
-   QQ  Here's what happens: ...
+   QQ
+   Sure, I'll look into that...
+
+ ● Read   crates/qq-core/src/lib.rs                                 212 lines
+ ● Search "ToolGate"                                        14 hits · 3 files
+
+   QQ
+   The gate resolves after the turn yields. Checking the store side...
+
+ ● Read   crates/qq-core/src/sessions.rs                            488 lines
+
+   QQ
+   Here's what happens: ...
 ```
 
 The per-turn `QQ` header repeats only when a turn has text; consecutive
@@ -102,10 +109,56 @@ terminal viewport is reconstructed, checkpoints are bounded, and the
 authoritative string remains the source. This trades rich markdown styling on
 exceptionally large output for complete access and predictable frame work.
 
+## Turn Headers
+
+Every turn opens with a role header row, and the rows below it share the
+header's rail (`transcript::message_presentation`):
+
+- A user turn is `▌ YOU` in `accent` bold on an `accent` rail, and **every
+  row of the prompt keeps the `▌` rail**: wrapped rows, later paragraphs,
+  list items. The rail is the transcript's structural accent, so a prompt
+  reads as one bar down the left edge however long it is.
+- An assistant turn is `QQ` in `brand` bold — the one warm mark per turn —
+  over a three-cell blank rail. A message that is not complete carries its
+  state to the right of the label in the state's status color (`streaming`
+  in `accent`, `failed` in `error`, `queued`/`cancelled`/`interrupted` in
+  `warning`); `complete` is never written.
+- Steering rows keep the user rail and say what they are (`steering
+  waiting for the next turn`, `steered`, `steering  run finished first`);
+  a pending prompt is `▌ YOU  pending` in `warning` with a `warning` rail.
+  Reasoning rows open with `∴` and expand under a `┆` rail. None of these
+  differ from a turn header in geometry, only in wording and color.
+- The run's completion line (`✓ 42s · 3 tools · 12.3k tok · $0.04`) sits
+  under the run's last message at the prose column.
+
+## Column Model
+
+The transcript has two columns: a **rail** in cells 1–2 and **content**
+from cell 3. Everything that is not prose lives in the rail; everything
+that is prose, or reads like it, starts at the content column:
+
+| Row | Rail | Content column |
+| --- | --- | --- |
+| User prompt | `▌ ` accent | `YOU`, then the prompt text |
+| Assistant | two blanks | `QQ`, then the message body |
+| Tool summary | state glyph (`●`, `◐`, `✕`, `◇`, `○`, `◌`) | verb, subject, metric |
+| Folded call group | `▸` accent | `Read ×4  a.rs, b.rs` |
+| Selected tool row | `▶` in cell 0, glyph in cell 1 | unchanged |
+
+Because tool verbs, prose, and role labels share one column, the eye moves
+straight down the transcript; the rail glyphs alone say what kind of row
+each is (design principle 4). The transcript cursor marks the selected call
+with `▶` in the margin cell rather than shifting the row.
+
 ## Spacing
 
 Rhythm rules, applied in the transcript assembler:
 
+- One blank row of top padding ahead of the first transcript row, so the
+  body breathes under the top row. It is a body row like any other: it is
+  on screen exactly when the viewport reaches the top (short transcripts,
+  or scrolled all the way up) and is above the window otherwise. Scroll
+  offsets count from the tail, so it never moves the tail anchor.
 - One blank line between every block (message body ↔ call group ↔ next
   turn's text). Two blank lines before each `YOU` prompt — the
   prompt/response boundary is the strongest seam in the transcript.
@@ -190,6 +243,39 @@ tint means setting the surface background on every span of the block's lines
 and padding each line to full width so the tint reads as a panel, not ragged
 highlights. The surface color, like every other color in the transcript, is a
 role from the active theme (`docs/design/theme.md`).
+
+## Tool Rows
+
+Each tool call is one summary row (`tools::tool_summary_line`), built from
+the call's cached `ToolRow` (verb, subject, metric) plus the live clock:
+
+```
+ ● Read   crates/qq-client/src/sse.rs                          412 lines  0.4s
+ ● Run    cargo test -p qq-client reconnect                     exit 101  3.2s
+ ◐ Edit   crates/qq-client/src/sse.rs                            running  1.1s
+```
+
+- The state glyph is in the rail; the verb starts at the content column,
+  padded to six cells so subjects align down a run.
+- **The metric and duration are right-aligned to the content width**, at
+  every width and in every pane, so the numbers form a column down the
+  right edge the way the verbs do down the left. The right side is `metric
+  [· truncated] [· state]  duration`; the state label appears for any call
+  that is not complete, in its status color.
+- The subject takes whatever is left between the verb and the right side.
+  Paths elide from the middle so the file name always survives; other
+  subjects truncate with `...`.
+- When the row cannot hold a six-cell subject plus the right side, the
+  duration is dropped first, then the metric, so the row degrades to verb
+  and subject before anything is cut. A row narrower than that is
+  truncated like any other line.
+- In folded detail a block of more than three quiet completed calls is one
+  row, `▸ Read ×4  Search ×2  a.rs, b.rs, c.rs, +1`, with the `▸` in the
+  rail and the text at the content column.
+
+Expanded detail, error tails, and live output render under the summary row
+(see § Streamed Tool Output and § Diffs); their panel treatment is slice
+U7 of the redesign plan.
 
 ## Diffs
 

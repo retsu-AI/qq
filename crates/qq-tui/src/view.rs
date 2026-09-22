@@ -41,8 +41,10 @@ use chrome::*;
 pub(crate) use chrome::{ComposerMode, CursorPosition};
 use highlight::HighlightKey;
 pub(crate) use highlight::{Highlighted, Highlighter};
-use layout::{FIXED_CHROME_ROWS, TranscriptSlot, compute_layout};
-pub(crate) use layout::{LayoutPrefs, PanePref};
+pub(crate) use layout::LayoutPrefs;
+#[cfg(any(test, feature = "bench-support"))]
+pub(crate) use layout::PanePref;
+use layout::{TranscriptSlot, compute_layout};
 use markdown::{has_fenced_code, markdown_lines, settled_prefix_end};
 use overlay::*;
 use sidebar::*;
@@ -203,16 +205,19 @@ impl FrameRenderer {
         self.cursor = None;
         let mut lines = vec![top_row(app, width)];
         // The top row and the composer rule are fixed; the rule doubles as
-        // the status and hint line so no row is spent on either. The composer
+        // the status and hint line so no row is spent on either. A terminal
+        // tall enough spares one blank row under the composer. The composer
         // can grow with wrapped multi-line input, so it is laid out first and
         // the body takes what remains.
+        let padding_rows = layout::composer_padding_rows(height);
+        let fixed_rows = layout::fixed_chrome_rows(height);
         let max_composer_rows = height
-            .saturating_sub(FIXED_CHROME_ROWS)
+            .saturating_sub(fixed_rows)
             .saturating_sub(1)
             .clamp(1, layout::max_composer_rows(width, height));
         let draft_lines = queued_drafts(app, width);
         let (composer_lines, caret) = composer(app, width, max_composer_rows);
-        let chrome_rows = FIXED_CHROME_ROWS - 1 + draft_lines.len() + composer_lines.len();
+        let chrome_rows = fixed_rows - 1 + draft_lines.len() + composer_lines.len();
         let layout = compute_layout(width, height, chrome_rows, app.layout, app.sessions.len());
         let body_height = layout.body.height;
         let mode = app.mode();
@@ -346,6 +351,7 @@ impl FrameRenderer {
         lines.push(composer_rule(app, width));
         let composer_top = lines.len();
         lines.extend(composer_lines);
+        lines.extend(std::iter::repeat_n(Line::default(), padding_rows));
         if (mode == Mode::Compose || app.approval_amendment.is_some())
             && let Some((column, row)) = caret
             && let (Ok(column), Ok(row)) = (

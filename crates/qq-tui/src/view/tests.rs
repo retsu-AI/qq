@@ -1292,6 +1292,276 @@ fn user_prompts_carry_an_accent_bar() {
 }
 
 #[test]
+fn every_row_of_a_multi_line_prompt_keeps_the_accent_rail() {
+    let mut renderer = FrameRenderer::default();
+    let mut message = completed_message(
+        1,
+        "first line of the prompt\n\nsecond paragraph that is long enough to wrap onto another row at this width\n\n- a list item".to_owned(),
+    );
+    message.role = MessageRole::User;
+
+    let lines = renderer.render_message(&message, 40);
+    assert!(lines.len() > 4, "{:?}", frame_rows(&lines));
+    for line in &lines {
+        // A list marker shares the rail's accent, so the two merge into one
+        // span; the rail is still the first three cells.
+        assert!(
+            line.spans[0].text.starts_with(" ▌ "),
+            "{:?}",
+            frame_rows(&lines)
+        );
+        assert_eq!(line.spans[0].style.color, accent().color);
+    }
+    assert_eq!(lines[0].spans[1].text, "YOU");
+    assert_eq!(lines[0].spans[1].style, accent().bold());
+}
+
+#[test]
+fn the_qq_header_is_brand_bold_and_never_says_complete() {
+    let mut renderer = FrameRenderer::default();
+    let message = completed_message(1, "the answer".to_owned());
+    let header = &renderer.render_message(&message, 80)[0];
+    assert_eq!(header.spans[0].text, "   ");
+    assert_eq!(header.spans[1].text, "QQ");
+    assert_eq!(header.spans[1].style, brand().bold());
+    let text: String = header.spans.iter().map(|span| span.text.as_str()).collect();
+    assert_eq!(
+        text.trim_end(),
+        "   QQ",
+        "a complete message shows no state"
+    );
+
+    let mut streaming = message.clone();
+    streaming.state = MessageState::Streaming;
+    let header = &renderer.render_message(&streaming, 80)[0];
+    assert_eq!(header.spans[1].style, brand().bold());
+    let state = header.spans.last().unwrap();
+    assert_eq!(state.text, "  streaming");
+    assert_eq!(state.style, accent());
+}
+
+#[test]
+fn tool_verbs_start_at_the_prose_column_with_the_glyph_in_the_rail() {
+    let mut app = app_with_messages(1);
+    let session_id = app.focused().unwrap();
+    app.sessions.get_mut(&session_id).unwrap().tool_calls = Some(vec![tool_call_snapshot(
+        7,
+        "read_file",
+        r#"{"path":"note.txt"}"#,
+        ToolCallState::Completed,
+        Some("contents\n"),
+        false,
+    )]);
+    let rows = frame_rows(&transcript_lines(&app, 80));
+    let prose = rows.iter().find(|row| row.contains("row 0")).unwrap();
+    let tool = rows.iter().find(|row| row.contains("Read")).unwrap();
+    let column = |row: &str, needle: &str| row[..row.find(needle).unwrap()].chars().count();
+    let prose_column = column(prose, "row 0");
+    assert_eq!(prose_column, 3, "{prose:?}");
+    assert_eq!(column(tool, "Read"), prose_column, "{tool:?}");
+    assert_eq!(column(tool, "●"), 1, "glyph in the rail: {tool:?}");
+}
+
+#[test]
+fn tool_metrics_are_right_aligned_to_the_content_width() {
+    let call = tool_call_snapshot(
+        1,
+        "read_file",
+        r#"{"path":"crates/qq-client/src/sse.rs"}"#,
+        ToolCallState::Completed,
+        Some("a\nb\nc\n"),
+        false,
+    );
+    for width in [60_usize, 100] {
+        let lines = render_tool_calls_simple(
+            &[&call],
+            &HashMap::new(),
+            SimpleDetail::Rows,
+            0,
+            width,
+            &|_, _| Vec::new(),
+        );
+        let row = frame_rows(&lines).remove(0);
+        assert_eq!(row.chars().count(), width, "{row:?}");
+        assert!(row.ends_with("3 lines"), "{row:?}");
+        assert!(squash(&row).ends_with("Read crates/qq-client/src/sse.rs 3 lines"));
+    }
+    // A running call with a duration: the duration is the rightmost field.
+    let mut running = call.clone();
+    running.state = ToolCallState::Running;
+    running.result = None;
+    let rows: HashMap<ToolCallId, ToolRow> = [(running.id, ToolRow::derive(&running))].into();
+    let lookup = |call: &ToolCallSnapshot| ToolRowContext {
+        row: &rows[&call.id],
+        clock: RowClock {
+            timing: qq_client::state::ToolCallTiming {
+                started_at_ms: Some(1_000),
+                last_output_at_ms: None,
+                finished_at_ms: None,
+            },
+            now_ms: 3_400,
+        },
+        expanded: false,
+        inline_detail: true,
+        fold: false,
+        selected: false,
+    };
+    let row = frame_rows(&[tool_summary_line(&running, lookup(&running), 0, 72)]).remove(0);
+    assert_eq!(row.chars().count(), 72, "{row:?}");
+    assert!(row.ends_with("running  2.4s"), "{row:?}");
+}
+
+#[test]
+fn narrow_tool_rows_drop_the_duration_then_the_metric_before_the_verb() {
+    let call = tool_call_snapshot(
+        1,
+        "read_file",
+        r#"{"path":"crates/qq-client/src/sse.rs"}"#,
+        ToolCallState::Completed,
+        Some("a\nb\nc\n"),
+        false,
+    );
+    let rows: HashMap<ToolCallId, ToolRow> = [(call.id, ToolRow::derive(&call))].into();
+    let lookup = |call: &ToolCallSnapshot| ToolRowContext {
+        row: &rows[&call.id],
+        clock: RowClock {
+            timing: qq_client::state::ToolCallTiming {
+                started_at_ms: Some(1_000),
+                last_output_at_ms: None,
+                finished_at_ms: Some(1_400),
+            },
+            now_ms: 3_400,
+        },
+        expanded: false,
+        inline_detail: true,
+        fold: false,
+        selected: false,
+    };
+    let at = |width| squash(&frame_rows(&[tool_summary_line(&call, lookup(&call), 0, width)])[0]);
+    // Everything fits: the path gives up its middle, the right side is whole.
+    assert_eq!(at(40), " ● Read crates/…/sse.rs 3 lines 0.4s");
+    assert_eq!(
+        tool_summary_line(&call, lookup(&call), 0, 40).width(),
+        40,
+        "the duration ends at the content width"
+    );
+    // Too narrow for the duration: the metric stays, right-aligned.
+    assert_eq!(at(28), " ● Read …/sse.rs 3 lines");
+    // Too narrow for the metric too: verb and elided subject alone.
+    assert_eq!(at(20), " ● Read …/sse.rs");
+    assert!(
+        (0..40).all(|width| tool_summary_line(&call, lookup(&call), 0, width).width() <= width)
+    );
+}
+
+#[test]
+fn the_selected_tool_row_keeps_its_glyph_and_verb_columns() {
+    let (mut app, _) = app_with_expandable_read();
+    let before = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 24));
+    let row = before.iter().find(|row| row.contains("Read")).unwrap();
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Up,
+        KeyModifiers::CONTROL,
+    )));
+    let after = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 24));
+    let selected = after.iter().find(|row| row.contains("Read")).unwrap();
+    let column = |row: &str| row[..row.find("● Read").unwrap()].chars().count();
+    assert_eq!(column(selected), column(row), "{selected:?}");
+    assert!(selected.starts_with("▶● Read"), "{selected:?}");
+    assert_eq!(selected.chars().count(), row.chars().count());
+}
+
+#[test]
+fn the_transcript_starts_with_one_padding_row_that_scrolls_away() {
+    let mut app = app_with_messages(2);
+    app.layout.rail = crate::view::PanePref::Hidden;
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 80, 24));
+    assert!(rows[0].starts_with(" qq"), "{rows:#?}");
+    assert_eq!(rows[1].trim_end(), "", "padding row under the top row");
+    assert_eq!(rows[2].trim_end(), "   QQ", "{rows:#?}");
+
+    // A transcript taller than the viewport is tail-anchored, so the
+    // padding row is above the window until the user scrolls to the top.
+    let mut app = app_with_messages(40);
+    app.layout.rail = crate::view::PanePref::Hidden;
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 80, 24));
+    assert_ne!(rows[1].trim_end(), "", "{rows:#?}");
+    assert!(frame_text(&renderer.frame_and_commit(&mut app, 80, 24)).contains("row 39"));
+    for _ in 0..100 {
+        scroll_up(&mut app);
+    }
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 80, 24));
+    assert_eq!(rows[1].trim_end(), "", "{rows:#?}");
+    assert_eq!(rows[2].trim_end(), "   QQ", "{rows:#?}");
+}
+
+#[test]
+fn the_padding_row_leaves_a_short_streaming_transcript_tail_anchored() {
+    let mut app = app_with_messages(1);
+    app.layout.rail = crate::view::PanePref::Hidden;
+    let session_id = app.focused().unwrap();
+    let mut renderer = FrameRenderer::default();
+    renderer.frame_and_commit(&mut app, 80, 12);
+    let message = &mut app
+        .sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .messages
+        .as_mut()
+        .unwrap()[0];
+    message.state = MessageState::Streaming;
+    // Grow the body past the visible rows one paragraph at a time; the tail
+    // must stay on screen with the padding row scrolling off first.
+    for row in 0..30 {
+        let message = &mut app
+            .sessions
+            .get_mut(&session_id)
+            .unwrap()
+            .messages
+            .as_mut()
+            .unwrap()[0];
+        message.output.push_str(&format!("\n\nappended {row}"));
+        let rows = frame_rows(&renderer.frame_and_commit(&mut app, 80, 12));
+        assert!(
+            rows.iter()
+                .any(|line| line.contains(&format!("appended {row}"))),
+            "row {row} not visible: {rows:#?}"
+        );
+        assert_eq!(app.transcript_scroll_offset(), 0);
+    }
+}
+
+#[test]
+fn the_composer_gets_a_padding_row_only_at_twenty_rows_or_more() {
+    let mut app = app_with_messages(1);
+    app.composer.text = "hi".to_owned();
+    let tall = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 24));
+    assert_eq!(tall.len(), 24);
+    assert!(tall[22].starts_with(" › hi"), "{tall:#?}");
+    assert_eq!(tall[23].trim_end(), "", "padding row under the composer");
+    assert!(
+        tall[21].starts_with('─'),
+        "the rule keeps its place: {tall:#?}"
+    );
+
+    let short = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 19));
+    assert_eq!(short.len(), 19);
+    assert!(short[18].starts_with(" › hi"), "{short:#?}");
+    assert!(short[17].starts_with('─'), "{short:#?}");
+
+    // The compact composer still grows to its four rows at 80 × 24 and the
+    // body keeps what is left: 24 - top - rule - 4 - padding = 17 rows.
+    app.composer.text = "one\ntwo\nthree\nfour\nfive".to_owned();
+    let frame = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 24));
+    let rule = frame.iter().position(|row| row.starts_with('─')).unwrap();
+    assert_eq!(rule, 18, "{frame:#?}");
+    assert_eq!(frame[19].trim_end(), " … two");
+    assert_eq!(frame[22].trim_end(), "   five");
+    assert_eq!(frame[23].trim_end(), "");
+}
+
+#[test]
 fn final_output_sanitizes_every_dynamic_span() {
     let line = Line::styled("title\u{1b}]52;c;Y2xpcGJvYXJk\u{7}\u{202e}", normal());
     let mut rendered = Vec::new();

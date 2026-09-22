@@ -1,11 +1,12 @@
  qq  Session 0                                                                                                                                                                   openai/gpt-test  $0.00
-   QQ                                                                                                 │ INSPECTOR                                                           │ WORKING  1
-   the model turn                                                                                     │ Nothing expanded — Ctrl-Up selects a tool row, Enter expands it     │ ◐ Session 0
-                                                                                                      │                                                                     │    the model turn
+                                                                                                      │ INSPECTOR                                                           │ WORKING  1
+   QQ                                                                                                 │ Nothing expanded — Ctrl-Up selects a tool row, Enter expands it     │ ◐ Session 0
+   the model turn                                                                                     │                                                                     │    the model turn
                                                                                                       │                                                                     │
- ▌ YOU  steering  waiting for the next turn                                                           │                                                                     │ IDLE  2
- ▌ pending steer: also check the tests                                                                │                                                                     │ ○ Session 1
-                                                                                                      │                                                                     │ ○ Session 2
+                                                                                                      │                                                                     │ IDLE  2
+ ▌ YOU  steering  waiting for the next turn                                                           │                                                                     │ ○ Session 1
+ ▌ pending steer: also check the tests                                                                │                                                                     │ ○ Session 2
+                                                                                                      │                                                                     │
                                                                                                       │                                                                     │
  ▌ YOU  steered                                                                                       │                                                                     │
  ▌ applied steer: prefer edit_file                                                                    │                                                                     │
@@ -54,7 +55,6 @@
                                                                                                       │                                                                     │
                                                                                                       │                                                                     │
                                                                                                       │                                                                     │
-                                                                                                      │                                                                     │
-                                                                                                      │                                                                     │
  ◐ working ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── F1 help  ^K commands  ^O detail
  › Ask QQ...
+
