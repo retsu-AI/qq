@@ -1842,7 +1842,13 @@ mod tests {
     impl Provider for CompletesAfterInternalSlice {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
             let mut state = self.state.lock().unwrap();
-            if request.tools().is_empty() {
+            // The slice checkpoint keeps tools declared (RR1); the system-prompt
+            // notice is the observable marker of that turn.
+            let checkpoint = request
+                .system()
+                .is_some_and(|system| system.contains("safe tool-call boundary"));
+            if checkpoint {
+                assert!(!request.tools().is_empty());
                 state.1 = true;
                 return Box::pin(stream::iter([
                     Ok(ProviderEvent::OutputTextDelta {
