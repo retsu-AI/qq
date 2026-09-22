@@ -93,11 +93,17 @@ adapters.
 
 The provider is the single retry owner. Each compiled HTTP provider carries one
 public `AttemptPolicy` (default four attempts, 500 ms base, 8 s cap, 30 s
-budget, full jitter, `Retry-After` delta-seconds honored) set through
+backoff budget, full jitter, `Retry-After` delta-seconds honored) set through
 `ProviderCompiler::with_attempt_policy`. Every send a logical request costs
 draws from one shared ledger: a transport error or retryable status (`408` /
 `429` / `500` / `502` / `503` / `504`) before the body, and an SSE body that
-fails or ends before it has decoded a single event. Once one `ProviderEvent`
+fails or ends before it has decoded a single event. The budget bounds the sum
+of backoff sleeps the ledger grants, not wall time since the first send: each
+attempt is already bounded by the client's connect (30 s), header (300 s), and
+read (300 s) deadlines, and an attempt that stalls for its whole header
+deadline is exactly the one worth resending. Charging attempt time to the
+budget would make any failure slower than 30 s unretryable, which is what a
+gateway that loses a request looks like. Once one `ProviderEvent`
 has been yielded the request is never resent, so a retry can never duplicate
 output; a body that ends after events is the adapter's protocol error. Auth
 and other client errors are never retried. When the policy is exhausted the
@@ -106,6 +112,12 @@ not the core run loop, not the session layer — retries a turn. Operational
 probes use `ProviderCompiler::compile_for_canary`, which disables direct HTTP
 and Mantle adapter retries through the facade. Bedrock's AWS SDK client already
 has SDK retries disabled.
+
+The header deadline is not a separate setting. reqwest arms its `read_timeout`
+when the request is sent and resets it only on a body read, so `READ_TIMEOUT`
+also bounds the wait for response headers; a provider that accepts a request
+and never answers fails after 300 s with
+`timed out waiting for response headers (none within 300s)` and is retried.
 
 Transport failures render as `provider request failed: <phase>: <causes>`.
 `http.rs` names the phase itself (connection, response headers, response body,
