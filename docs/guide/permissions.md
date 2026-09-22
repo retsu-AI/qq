@@ -108,7 +108,12 @@ A session grant is at most 256 bytes, and a session holds at most 256 of
 them. When the command is longer than that, or the session is already at the
 cap, `a` and `w` are not offered: the call is approved once, nothing is
 recorded, and the status says why. A grant that cannot be stored never fails
-the approval. Neither key lifts a `forbidden` verdict.
+the approval.
+
+A `forbidden` verdict is the exception to "same shape". A prefix grant never
+lifts it. A grant that quotes the exact command string does, which is why the
+byte cap matters: a command longer than 256 bytes cannot be blessed, under
+any mode, including `full`.
 
 Edits show a diff; `fetch` shows the URL and whether a grant covers the
 host; MCP calls show the server, tool, and arguments.

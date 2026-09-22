@@ -41,8 +41,11 @@ falls below the share a delegate settles. No regression in `Forbidden` refusals.
 
 - No new approval mode, and no widening of `full`. Modes stay the ceiling.
 - No change to `Forbidden`, path containment, blocked hosts, or managed
-  `deny_*` (ADR-0020, ADR-0021). A delegate cannot quote an exact forbidden
-  command, and cannot be configured to.
+  `deny_*` (ADR-0020, ADR-0021). A human grant that quotes the exact command
+  string lifts `Forbidden` today (`SessionGrants::quotes_exactly`); a
+  delegate-recorded grant must not. DA4 records a delegate grant so the
+  evaluator can tell it from a human one, and a `Forbidden` call never reaches
+  the delegate.
 - No delegate answers to `ask_user`. A question is a hold for a human, not a
   permission (ADR-0021).
 - No folding of this into `jev_review`. Review judges evidence after a tool
@@ -199,6 +202,9 @@ enum on the wire does not grow.
   broader; a prefix grant is not recorded from a delegate verdict;
 - the workspace-lifetime promotion path refuses a delegate verdict and does
   not write `.qq/config.ron`;
+- a delegate-recorded grant does not lift `Forbidden`. The exact-string
+  escape hatch (`SessionGrants::quotes_exactly`) stays a human grant; the
+  recorded row must be distinguishable so the evaluator can refuse it;
 - a human approval keeps today's once/session/workspace choices, including
   prefix grants, under the same storage rule.
 **Docs:** `docs/design/tools.md` § Grant Lifetimes.
