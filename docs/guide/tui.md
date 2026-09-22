@@ -97,9 +97,28 @@ press `Enter`, press a number to pick an option, or `Esc` to decline.
 | reasoning effort | `/effort` | the focused idle session's next run, or the default for new sessions; rows are the levels the model's catalog entry advertises (plus `default` and `none`), or every level when it advertises none; a pin outside an advertised ladder fails the run at plan time naming the accepted levels |
 | theme | `/theme` | live preview; `Enter` keeps it for the session, `Esc` restores; the notice shows the `tui.ron` line to make it permanent |
 
-`/models` lists only models your credentials unlock. Nothing listed means no
-stored credential or environment variable matched a built-in provider — see
+`/models` lists only models your credentials unlock. When no built-in
+provider has a credential, the picker instead lists each one greyed as
+`needs credential` with the fix (`run qq auth login openai or set
+OPENAI_API_KEY`); `Enter` on such a row repeats the fix and creates nothing.
+Custom providers appear once their `auth` reference resolves — see
 [Providers](providers.md).
+
+## Starting without a model or credential
+
+`qq` opens even when the configuration is incomplete; only `qq ask` and `qq
+run` refuse to start.
+
+- **No `model` configured**: the top row reads `no model` and the composer
+  rule reads `choose a model with /models` until you pick one. `Enter` in
+  the picker creates the first session with the highlighted model, which
+  also becomes the default for `Alt-N`.
+- **Model configured, provider has no credential**: the empty transcript
+  reads `openai needs a credential: run qq auth login openai or set
+  OPENAI_API_KEY` (naming your provider) above `Alt-N creates the first
+  session.`; `Alt-N` repeats the same line as a warning. Add the credential
+  in another terminal and start `qq` again — the credential check runs at
+  startup.
 
 ## Prompts
 

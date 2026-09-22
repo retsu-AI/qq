@@ -14,7 +14,8 @@ QQ found no `model:` in any configuration layer and no `--model` /
 `QQ_MODEL`. The message lists every way to set one and names your global
 config path. Pick a route from [Providers](providers.md#built-in-models);
 [Quickstart § 2](quickstart.md#2-tell-qq-which-model-to-use) shows the
-one-time setup.
+one-time setup. Only `qq ask` and `qq run` stop here; bare `qq` opens the
+TUI and asks with `/models` instead.
 
 ### `project configuration needs your trust before it is used: …`
 
@@ -136,11 +137,13 @@ provider with no credential. Store one or remove the route.
 those ids (check the spelling). For a gateway or MCP bearer use `qq auth set
 NAME` and reference `Stored("NAME")`.
 
-### Nothing in `/models`
+### Nothing in `/models`, or every row says `needs credential`
 
-No built-in provider has a resolvable credential. `qq auth list` shows what
-is stored; the environment variables count too. Custom providers appear once
-their `auth` reference resolves.
+No built-in provider has a resolvable credential. Each `needs credential`
+row names the fix: `qq auth login PROVIDER` or the environment variable.
+`qq auth list` shows what is stored. Custom providers appear once their
+`auth` reference resolves. Credentials are checked when `qq` starts, so
+start it again after adding one.
 
 ## Running
 
@@ -183,16 +186,27 @@ JSONL stream (`tool_approval_requested`); answer it interactively with
 
 ## TUI
 
-### It opened but shows only `Alt-N creates the first session.`
+### `openai needs a credential: run qq auth login openai or set OPENAI_API_KEY`
 
-The configured model's provider has no credential yet, so QQ did not create
-a session (a session needs a usable model). `qq auth login PROVIDER`, then
-`Alt-N`. Guidance inside the TUI for this state is planned (OB2).
+The configured model's provider has no credential, so QQ did not create a
+session (a session needs a usable model). Do what the line says in another
+terminal, then start `qq` again; `Alt-N` before that repeats the same line.
+The provider and variable name follow your configuration (`anthropic` /
+`ANTHROPIC_API_KEY`, `google` / `GEMINI_API_KEY`, `xai` / `XAI_API_KEY`;
+`openai-codex` has only `qq auth login openai-codex`).
+
+### Top row says `no model`; the rule says `choose a model with /models`
+
+No `model` is configured anywhere and none was given with `--model` or
+`QQ_MODEL`. Open `/models`, pick one, `Enter` creates the session. To make it
+permanent, put `model: "PROVIDER/MODEL"` in your global or project
+`config.ron` ([Quickstart § 2](quickstart.md#2-tell-qq-which-model-to-use)).
 
 ### `choose a model with /models before creating a session`
 
-Same as above, or the session default has no model. `/models`, pick one,
-`Ctrl-N` to create a session with it.
+You pressed `Alt-N` (or `/new`) with no model chosen and no session focused
+to inherit one from. `/models`, pick one, `Ctrl-N` to create a session with
+it.
 
 ### Keys do nothing / wrong characters appear
 

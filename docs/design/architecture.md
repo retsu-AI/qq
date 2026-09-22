@@ -183,6 +183,11 @@ xtask/
   settings. A user-global file (`config.ron`, `config.d/*.ron`, `tui.ron`,
   `themes/*.ron`) may be a leaf symlink to a regular file; project, explicit,
   managed, pack, and trust sources still reject symbolic links (ADR-0035).
+  Two loads share one merge: `load` yields a `ConfigSnapshot` and is what
+  every headless path and plan compilation use, failing fast with
+  `ModelRequired`; `load_for_client` yields a `ClientSnapshot` whose model is
+  optional, used only by TUI startup and the served model catalog so an
+  interactive client can open and ask for a model instead of exiting.
 - `qq-core` contains the agent loop, session behavior, tool integration, and
   persistence behavior. It consumes the command and event vocabulary from
   `qq-protocol` and exposes a small interface that hides orchestration details

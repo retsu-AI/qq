@@ -74,6 +74,14 @@ writes the grant into the project's `.qq/config.ron` so it never asks
 again, `n` denies and tells the model why. See
 [Permissions and trust](permissions.md) for the full model.
 
+Skipped step 1 or 2? `qq` still opens. Without a model the top row reads
+`no model` and the composer rule says `choose a model with /models`; pick
+one there and `Enter` creates the session. With a model whose provider has
+no credential, the transcript reads `openai needs a credential: run qq auth
+login openai or set OPENAI_API_KEY` (for whichever provider you named); add
+the credential and start `qq` again. Only `qq ask` and `qq run` insist on
+both before they start.
+
 Useful keys while it works: `Esc Esc` cancels, `Enter` steers the running
 agent with a new instruction, `Ctrl-K` opens the command palette, `?` on an
 empty prompt or `F1` lists every key. `Ctrl-C` or `/quit` exits and prints
