@@ -393,6 +393,13 @@ const PRUNABLE_READ_ONLY_TOOLS: [&str; 6] = [
 const COMPACTION_SUMMARY_PREAMBLE: &str = "The earlier part of this conversation was compacted \
 into the summary below. Treat it as authoritative context; the verbatim conversation resumes \
 after it.";
+/// Opens a run whose prompt could not be admitted even after the fold was
+/// exhausted: the retained transcript is dropped from this request and only
+/// the latest summary stands in for it. The session keeps every row.
+pub(crate) const SUMMARY_ONLY_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe retained \
+conversation did not fit the model window even after automatic compaction, so this request \
+carries only the latest summary below in place of the earlier messages. Nothing was deleted \
+from the session; use search_history for verbatim detail.";
 /// Preamble for a summary that replaced earlier turns of the *current* run:
 /// the task prompt stands verbatim above it; the model's own work so far is
 /// what was summarized.

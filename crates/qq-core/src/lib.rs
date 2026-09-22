@@ -1578,7 +1578,14 @@ impl plan::CompiledAgentPlan {
             // transcript's assistant messages after the summary are turns
             // `compacted_turns + 1..`, and the next cutoff is durable too.
             let mut compacted_turns: u32 = 0;
-            for turn_ordinal in 1..=u32::MAX {
+            // The provider rejected the previous request for its window even
+            // though the estimate said it fit. The provider's verdict is
+            // authoritative: the next attempt compacts before sending
+            // regardless of the estimate. Granted once per turn ordinal; a
+            // second rejection of the same turn fails the run as before.
+            let mut provider_overflowed = false;
+            let mut reactive_compaction_turn: Option<u32> = None;
+            'turns: for turn_ordinal in 1..=u32::MAX {
                 // Caller budgets are decided at the turn boundary, before any
                 // provider request. A spent work budget grants one tool-free
                 // final response; a second spent check, an elapsed wall
@@ -1641,12 +1648,13 @@ impl plan::CompiledAgentPlan {
                 // between runs, applied to the live messages. The measured
                 // chain credits the removed bytes; it runs only when the
                 // estimate says the request would not fit.
-                let would_overflow = turn_ordinal > 1
-                    && plan.runtime.context_window.is_some_and(|window| {
-                        sessions::context::estimate_tokens(input_bytes)
-                            .saturating_add(u64::from(max_output_tokens))
-                            > u64::from(window)
-                    });
+                let would_overflow = provider_overflowed
+                    || (turn_ordinal > 1
+                        && plan.runtime.context_window.is_some_and(|window| {
+                            sessions::context::estimate_tokens(input_bytes)
+                                .saturating_add(u64::from(max_output_tokens))
+                                > u64::from(window)
+                        }));
                 if would_overflow && {
                     // Results loaded from the store carry no effect here and
                     // fall back to the built-in read-only names, exactly as
@@ -1680,8 +1688,9 @@ impl plan::CompiledAgentPlan {
                         .saturating_add(reducible_message_bytes)
                         .saturating_add(irreducible_message_bytes);
                 }
-                // Still over the window after stubbing: summarize this run's
-                // own earlier turns and continue. This is a safe boundary —
+                // Still over the window after stubbing, or the provider said
+                // so itself: summarize this run's own earlier turns and
+                // continue. This is a safe boundary —
                 // every tool result of the previous turn is durable and in
                 // context, nothing is in flight, and steering was applied.
                 // Everything but the last `CONTEXT_PRUNE_KEEP_TURNS` turns
@@ -1689,12 +1698,13 @@ impl plan::CompiledAgentPlan {
                 // the prompt and the session context before it stay. A
                 // failure here is the same context failure the session layer
                 // would have raised, with the compactor's reason attached.
-                let still_overflows = turn_ordinal > 1
-                    && plan.runtime.context_window.is_some_and(|window| {
-                        sessions::context::estimate_tokens(input_bytes)
-                            .saturating_add(u64::from(max_output_tokens))
-                            > u64::from(window)
-                    });
+                let still_overflows = std::mem::take(&mut provider_overflowed)
+                    || (turn_ordinal > 1
+                        && plan.runtime.context_window.is_some_and(|window| {
+                            sessions::context::estimate_tokens(input_bytes)
+                                .saturating_add(u64::from(max_output_tokens))
+                                > u64::from(window)
+                        }));
                 if still_overflows && let Some(compactor) = compactor.as_ref() {
                     let run_start = reducible_messages.saturating_add(1);
                     let boundary = sessions::in_run_compaction_boundary(
@@ -2115,6 +2125,30 @@ impl plan::CompiledAgentPlan {
                         }
                         Err(error) => {
                             let kind = run_failure_kind(error.kind());
+                            // The provider's window verdict overrides the
+                            // estimate. With turns to compact and a compactor
+                            // to do it, re-plan this turn once with compaction
+                            // forced; nothing streamed, so nothing is lost.
+                            let reactive_compaction = kind
+                                == RunFailureKind::ProviderContextExceeded
+                                && compactor.is_some()
+                                && reactive_compaction_turn != Some(turn_ordinal)
+                                && blocks.is_empty()
+                                && pending_calls.is_empty()
+                                && sessions::in_run_compaction_boundary(
+                                    &messages[reducible_messages.saturating_add(1)..],
+                                    sessions::CONTEXT_PRUNE_KEEP_TURNS,
+                                )
+                                .is_some();
+                            if reactive_compaction {
+                                reactive_compaction_turn = Some(turn_ordinal);
+                                provider_overflowed = true;
+                                yield RuntimeEvent::ProviderOverflow {
+                                    turn_ordinal,
+                                    message: error.to_string(),
+                                };
+                                continue 'turns;
+                            }
                             if !recoverable_turn_fault(kind) {
                                 yield RuntimeEvent::Failed {
                                     kind,
@@ -3587,8 +3621,9 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                     yield RunEvent::Usage { usage };
                 }
                 RuntimeEvent::AssistantTurnCompleted { usage: None, .. }
-                // Direct runs have no compactor, so this never fires.
+                // Direct runs have no compactor, so these never fire.
                 | RuntimeEvent::InRunCompacted { .. }
+                | RuntimeEvent::ProviderOverflow { .. }
                 | RuntimeEvent::ToolCallStarted { .. }
                 | RuntimeEvent::ToolCallDenied { .. }
                 | RuntimeEvent::ToolCallAnswered { .. }
