@@ -268,6 +268,14 @@ pub struct ModelDescriptor {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    /// Effort values this route is known to accept, lowest to highest. Empty
+    /// when the catalog does not advertise a set: the adapter never transmits
+    /// effort, or the provider has not published one. Clients use this to
+    /// shape an effort picker; the runtime rejects a pin outside a non-empty
+    /// set at claim rather than letting the provider fail the turn. Additive
+    /// in protocol 27; absent on older servers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<qq_reasoning::ReasoningEffort>,
     pub selection: ModelSelection,
 }
 

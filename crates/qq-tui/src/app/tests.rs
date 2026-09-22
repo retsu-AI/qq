@@ -1131,6 +1131,7 @@ fn context_meter_app() -> App {
             model: "gpt-test".to_owned(),
             name: Some("GPT Test".to_owned()),
             context_window: Some(128_000),
+            reasoning_efforts: Vec::new(),
             selection,
         }],
         themes: Vec::new(),
@@ -1415,6 +1416,7 @@ fn discovered_models_refresh_existing_session_metadata() {
             model: "gpt-test".to_owned(),
             name: Some("GPT Test".to_owned()),
             context_window: Some(128_000),
+            reasoning_efforts: Vec::new(),
             selection: ModelSelection {
                 model_is_fallback: false,
                 model: Some("openai/gpt-test".to_owned()),
@@ -1446,6 +1448,7 @@ fn model_refresh_preserves_the_open_picker_selection_by_identity() {
             model: "model-z".to_owned(),
             name: Some("Zeta".to_owned()),
             context_window: None,
+            reasoning_efforts: Vec::new(),
             selection: selection.clone(),
         }],
         themes: Vec::new(),
@@ -1461,6 +1464,7 @@ fn model_refresh_preserves_the_open_picker_selection_by_identity() {
                 model: "model-a".to_owned(),
                 name: Some("Alpha".to_owned()),
                 context_window: Some(64_000),
+                reasoning_efforts: Vec::new(),
                 selection: ModelSelection {
                     model_is_fallback: false,
                     model: Some("alpha/model-a".to_owned()),
@@ -1473,6 +1477,7 @@ fn model_refresh_preserves_the_open_picker_selection_by_identity() {
                 model: "model-z".to_owned(),
                 name: Some("Zeta".to_owned()),
                 context_window: Some(128_000),
+                reasoning_efforts: Vec::new(),
                 selection: selection.clone(),
             },
         ],
@@ -1524,6 +1529,7 @@ fn model_picker_applies_to_the_focused_session_and_ctrl_n_creates() {
             model: "claude-sonnet-5".to_owned(),
             name: Some("Claude Sonnet 5".to_owned()),
             context_window: Some(200_000),
+            reasoning_efforts: Vec::new(),
             selection: selection.clone(),
         }],
         themes: Vec::new(),
@@ -1593,6 +1599,7 @@ fn model_picker_enter_without_a_focused_session_creates_one() {
             model: "claude-sonnet-5".to_owned(),
             name: Some("Claude Sonnet 5".to_owned()),
             context_window: Some(200_000),
+            reasoning_efforts: Vec::new(),
             selection: selection.clone(),
         }],
         themes: Vec::new(),
@@ -1646,6 +1653,7 @@ fn model_picker_selection_becomes_the_default_for_new_sessions() {
             model: "claude-sonnet-5".to_owned(),
             name: Some("Claude Sonnet 5".to_owned()),
             context_window: Some(200_000),
+            reasoning_efforts: Vec::new(),
             selection: switched.clone(),
         }],
         themes: Vec::new(),
@@ -3624,6 +3632,74 @@ fn effort_chosen_without_a_focused_session_applies_to_the_next_create() {
             ..
         }
     ));
+}
+
+/// When the catalog advertises a ladder for the focused model, `/effort`
+/// offers exactly `default`, `none`, and that ladder — not every level. A
+/// model with no advertised ladder still gets the full set.
+#[test]
+fn effort_picker_is_shaped_by_the_focused_models_advertised_ladder() {
+    use qq_protocol::ReasoningEffort as E;
+    let mut snap = snapshot();
+    let focused_model = snap
+        .focused
+        .as_ref()
+        .and_then(|focused| focused.summary.model.clone())
+        .expect("fixture's focused session names a model");
+    let selection = ModelSelection {
+        model_is_fallback: false,
+        model: Some(focused_model.clone()),
+        max_output_tokens: Some(4_096),
+        organization: None,
+    };
+    let ladder = |efforts: Vec<E>| ModelOption {
+        provider: "openai".to_owned(),
+        model: focused_model.clone(),
+        name: None,
+        context_window: None,
+        reasoning_efforts: efforts,
+        selection: selection.clone(),
+    };
+
+    let rows_for = |models: Vec<ModelOption>, snap: &WorkspaceSnapshot| {
+        let mut app = App::new(TuiOptions {
+            settings: Settings::default(),
+            model: selection.clone(),
+            models,
+            themes: Vec::new(),
+            workspace_root: None,
+        });
+        app.apply_snapshot(snap.clone());
+        app.execute(Command::OpenEffort);
+        let Some(Overlay::Effort(picker)) = &app.overlay else {
+            panic!("effort picker should be open")
+        };
+        picker
+            .items()
+            .iter()
+            .map(|row| row.effort)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        rows_for(vec![ladder(vec![E::Low, E::High])], &snap),
+        vec![None, Some(E::None), Some(E::Low), Some(E::High)],
+        "advertised ladder: default, none, then exactly the ladder"
+    );
+    assert_eq!(
+        rows_for(vec![ladder(Vec::new())], &snap),
+        std::iter::once(None)
+            .chain(E::ALL.into_iter().map(Some))
+            .collect::<Vec<_>>(),
+        "no advertised ladder: every level"
+    );
+    snap.focused = None;
+    snap.sessions.clear();
+    assert_eq!(
+        rows_for(vec![ladder(vec![E::Medium])], &snap),
+        vec![None, Some(E::None), Some(E::Medium)],
+        "nothing focused: the default model's ladder"
+    );
 }
 
 #[test]

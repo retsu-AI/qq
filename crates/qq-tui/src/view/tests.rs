@@ -1901,6 +1901,7 @@ fn refreshed_chrome_shows_identity_status_and_session_metrics() {
         model: "gpt-test".to_owned(),
         name: Some("GPT Test".to_owned()),
         context_window: Some(128_000),
+        reasoning_efforts: Vec::new(),
         selection: ModelSelection {
             model_is_fallback: false,
             model: Some("openai/gpt-test".to_owned()),
@@ -2233,6 +2234,7 @@ fn model_picker_hint_reflects_apply_versus_create() {
         model: "gpt-test".to_owned(),
         name: Some("GPT Test".to_owned()),
         context_window: None,
+        reasoning_efforts: Vec::new(),
         selection: ModelSelection {
             model_is_fallback: false,
             model: Some("openai/gpt-test".to_owned()),

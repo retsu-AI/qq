@@ -94,6 +94,7 @@ press `Enter`, press a number to pick an option, or `Esc` to decline.
 | model | `/models` | the focused session, or the default for the next `/new`; `Ctrl-N` inside the picker creates a session with the highlighted model |
 | agent profile | `/profile` | the focused idle session, or the default for new sessions; top row shows `as NAME` |
 | approval mode | `/approval` | the focused session from its next held call, or the default for new sessions |
+| reasoning effort | `/effort` | the focused idle session's next run, or the default for new sessions; rows are the levels the model's catalog entry advertises (plus `default` and `none`), or every level when it advertises none; a pin outside an advertised ladder fails the run at plan time naming the accepted levels |
 | theme | `/theme` | live preview; `Enter` keeps it for the session, `Esc` restores; the notice shows the `tui.ron` line to make it permanent |
 
 `/models` lists only models your credentials unlock. Nothing listed means no

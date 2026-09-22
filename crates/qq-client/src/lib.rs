@@ -748,6 +748,7 @@ mod tests {
                     model: "gpt-test".to_owned(),
                     name: Some("GPT Test".to_owned()),
                     context_window: Some(128_000),
+                    reasoning_efforts: Vec::new(),
                     selection: request.selection,
                 }])
             })

@@ -209,6 +209,7 @@ fn replaying_the_wire_fixtures_matches_the_golden_projection() {
         model: "gpt-5.6".to_owned(),
         name: None,
         context_window: Some(400_000),
+        reasoning_efforts: Vec::new(),
         selection: qq_protocol::ModelSelection {
             model_is_fallback: false,
             model: Some("openai/gpt-5.6".to_owned()),
