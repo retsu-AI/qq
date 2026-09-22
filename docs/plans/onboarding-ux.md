@@ -3,8 +3,10 @@
 **Status:** Active from 2026-09-22. Ledger:
 [`progress/onboarding-ux.md`](progress/onboarding-ux.md). Research:
 [`../design/onboarding-audit-2026-09-22.md`](../design/onboarding-audit-2026-09-22.md).
-**Linear:** project `qq`, milestone `Onboarding UX`; ENG-859 (shipped #119),
-ENG-860, ENG-861, plus the issues each slice below names.
+**Linear:** [ENG-875](https://linear.app/retsu-ai/issue/ENG-875) (parent);
+per slice: OB0 ENG-859 (#119) + this PR, OB1 ENG-860, OB2 ENG-876, OB3
+ENG-877, OB4 ENG-878, OB5 ENG-879, OB6 ENG-880, OB7 ENG-881, OB8 ENG-882,
+OB9 ENG-861, OB10 ENG-883, OB11 ENG-884.
 
 ## Goal
 

@@ -6,18 +6,18 @@ below, newest last.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| OB0 | Audit, plan, user guide, community files, P0 error text | In review | `feat/onboarding-ux` | ENG-859 shipped separately as #119 |
+| OB0 | Audit, plan, user guide, community files, P0 error text | In review | `feat/eng-875-onboarding-ux` | ENG-875; ENG-859 shipped separately as #119 |
 | OB1 | TUI opens without a model | Planned | | ENG-860 |
-| OB2 | TUI opens without a credential; empty state names the remedy | Planned | | |
-| OB3 | Request-time credential errors name provider and remedy; `GOOGLE_API_KEY` alias | Planned | | |
-| OB4 | `qq doctor` | Planned | | |
-| OB5 | `qq init`; `config paths` marks existing files | Planned | | |
-| OB6 | `install.sh`, Homebrew tap, Nix package, binstall | Planned | | |
-| OB7 | In-TUI trust prompt | Planned | | needs ADR + protocol row in root |
-| OB8 | First-session guidance; `qq run` denial hint | Planned | | |
+| OB2 | TUI opens without a credential; empty state names the remedy | Planned | | ENG-876 |
+| OB3 | Request-time credential errors name provider and remedy; `GOOGLE_API_KEY` alias | Planned | | ENG-877 |
+| OB4 | `qq doctor` | Planned | | ENG-878 |
+| OB5 | `qq init`; `config paths` marks existing files | Planned | | ENG-879 |
+| OB6 | `install.sh`, Homebrew tap, Nix package, binstall | Planned | | ENG-880 |
+| OB7 | In-TUI trust prompt | Planned | | ENG-881; needs ADR + protocol row in root |
+| OB8 | First-session guidance; `qq run` denial hint | Planned | | ENG-882 |
 | OB9 | Missing MCP credential degrades the server | Planned | | ENG-861 |
-| OB10 | Docs-truth test; CHANGELOG at release | Planned | | |
-| OB11 | Wiki mirror workflow | Planned | | |
+| OB10 | Docs-truth test; CHANGELOG at release | Planned | | ENG-883 |
+| OB11 | Wiki mirror workflow | Planned | | ENG-884 |
 
 ## Entries
 
