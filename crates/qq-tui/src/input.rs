@@ -9,7 +9,7 @@
 //! overlay-specific chords come back as a [`PickerOutcome`] for `App`.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use qq_protocol::{AgentProfileId, ApprovalMode, GuidanceKind, SessionId};
+use qq_protocol::{AgentProfileId, ApprovalMode, GuidanceKind, ReasoningEffort, SessionId};
 
 use crate::{
     commands::{Command, CommandSpec},
@@ -75,6 +75,21 @@ pub(crate) struct ApprovalModeRow {
 }
 
 impl PickerItem for ApprovalModeRow {
+    fn search_text<'a>(&'a self, out: &mut Vec<&'a str>) {
+        out.push(self.label);
+        out.push(self.summary);
+    }
+}
+
+/// A row in the effort picker: one pin, or `None` to restore config/profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EffortRow {
+    pub effort: Option<ReasoningEffort>,
+    pub label: &'static str,
+    pub summary: &'static str,
+}
+
+impl PickerItem for EffortRow {
     fn search_text<'a>(&'a self, out: &mut Vec<&'a str>) {
         out.push(self.label);
         out.push(self.summary);
@@ -156,6 +171,7 @@ pub(crate) enum Overlay {
     Models(Picker<ModelRow>),
     Profiles(Picker<ProfileRow>),
     ApprovalModes(Picker<ApprovalModeRow>),
+    Effort(Picker<EffortRow>),
     /// The workspace's indexed commands and skills. Enter puts a command in
     /// the composer for its arguments or submits a skill.
     Skills(Picker<SkillRow>),
@@ -189,6 +205,7 @@ pub(crate) enum Mode {
     Models,
     Profiles,
     ApprovalModes,
+    Effort,
     Skills,
     Themes,
     Sessions,
@@ -255,6 +272,7 @@ impl Overlay {
             Self::Models(_) => Mode::Models,
             Self::Profiles(_) => Mode::Profiles,
             Self::ApprovalModes(_) => Mode::ApprovalModes,
+            Self::Effort(_) => Mode::Effort,
             Self::Skills(_) => Mode::Skills,
             Self::Themes { .. } => Mode::Themes,
             Self::Sessions { .. } => Mode::Sessions,
@@ -299,6 +317,7 @@ impl Overlay {
             Self::Models(picker) => dispatch(picker, key),
             Self::Profiles(picker) => dispatch(picker, key),
             Self::ApprovalModes(picker) => dispatch(picker, key),
+            Self::Effort(picker) => dispatch(picker, key),
             Self::Skills(picker) => dispatch(picker, key),
             Self::Themes { picker, .. } => dispatch(picker, key),
             Self::Sessions { picker, .. } => dispatch(picker, key),
@@ -313,6 +332,7 @@ impl Overlay {
             Self::Models(picker) => picker.push_query(text),
             Self::Profiles(picker) => picker.push_query(text),
             Self::ApprovalModes(picker) => picker.push_query(text),
+            Self::Effort(picker) => picker.push_query(text),
             Self::Skills(picker) => picker.push_query(text),
             Self::Themes { picker, .. } => picker.push_query(text),
             Self::Sessions { picker, .. } => picker.push_query(text),
@@ -367,6 +387,34 @@ pub(crate) const fn approval_mode_row(mode: ApprovalMode) -> ApprovalModeRow {
     ApprovalModeRow {
         mode,
         label,
+        summary,
+    }
+}
+
+/// The wire spelling of an effort pin, which is also what `/effort` and the
+/// status row show. `None` is the unremarkable configured default.
+pub(crate) const fn effort_label(effort: Option<ReasoningEffort>) -> &'static str {
+    match effort {
+        None => "default",
+        Some(effort) => effort.as_str(),
+    }
+}
+
+/// One effort picker row. `None` restores the compiled plan's configured or
+/// profile choice.
+pub(crate) const fn effort_row(effort: Option<ReasoningEffort>) -> EffortRow {
+    let summary = match effort {
+        None => "use the configured or profile effort; omit the field",
+        Some(ReasoningEffort::None) => "disable reasoning; distinct from omission",
+        Some(ReasoningEffort::Minimal) => "lowest reasoning spend the model accepts",
+        Some(ReasoningEffort::Low) => "light reasoning",
+        Some(ReasoningEffort::Medium) => "balanced reasoning",
+        Some(ReasoningEffort::High) => "heavier reasoning",
+        Some(ReasoningEffort::Xhigh) => "highest reasoning spend",
+    };
+    EffortRow {
+        effort,
+        label: effort_label(effort),
         summary,
     }
 }

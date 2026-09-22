@@ -268,6 +268,14 @@ pub struct ModelDescriptor {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    /// Effort values this route is known to accept, lowest to highest. Empty
+    /// when the catalog does not advertise a set: the adapter never transmits
+    /// effort, or the provider has not published one. Clients use this to
+    /// shape an effort picker; the runtime rejects a pin outside a non-empty
+    /// set at claim rather than letting the provider fail the turn. Additive
+    /// in protocol 27; absent on older servers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<qq_reasoning::ReasoningEffort>,
     pub selection: ModelSelection,
 }
 
@@ -477,6 +485,11 @@ pub enum SessionCommand {
         /// the profile.
         #[serde(default, skip_serializing_if = "AgentProfileId::is_default")]
         profile: AgentProfileId,
+        /// Explicit reasoning effort for the session's next run. Absent means
+        /// the compiled plan's configured or profile choice; present pins the
+        /// next claim. Added in protocol 26.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<qq_reasoning::ReasoningEffort>,
         #[serde(default, skip_serializing_if = "Correlation::is_empty")]
         correlation: Correlation,
     },
@@ -536,6 +549,14 @@ pub enum SessionCommand {
         session_id: SessionId,
         profile: AgentProfileId,
     },
+    /// Pins or clears the session's reasoning effort. Takes effect when the
+    /// next run is claimed; a run already executing keeps the effort it started
+    /// with. `None` restores configured/profile defaults.
+    SetSessionEffort {
+        session_id: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<qq_reasoning::ReasoningEffort>,
+    },
     /// Deletes an idle session and every row it owns. Refused while the
     /// session has an active run; the client cancels first.
     DeleteSession {
@@ -575,6 +596,7 @@ impl SessionCommand {
             Self::SetApprovalMode { .. } => SessionCommandKind::SetApprovalMode,
             Self::SetSessionModel { .. } => SessionCommandKind::SetSessionModel,
             Self::SetSessionProfile { .. } => SessionCommandKind::SetSessionProfile,
+            Self::SetSessionEffort { .. } => SessionCommandKind::SetSessionEffort,
             Self::DeleteSession { .. } => SessionCommandKind::DeleteSession,
             Self::PruneSessions { .. } => SessionCommandKind::PruneSessions,
             Self::CompactSession { .. } => SessionCommandKind::CompactSession,
@@ -597,6 +619,7 @@ pub enum SessionCommandKind {
     SetApprovalMode,
     SetSessionModel,
     SetSessionProfile,
+    SetSessionEffort,
     DeleteSession,
     PruneSessions,
     CompactSession,
@@ -605,7 +628,7 @@ pub enum SessionCommandKind {
 
 impl SessionCommandKind {
     /// Every command this protocol revision routes, in declaration order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::ResolveWorkspace,
         Self::CreateSession,
         Self::SubmitPrompt,
@@ -615,6 +638,7 @@ impl SessionCommandKind {
         Self::SetApprovalMode,
         Self::SetSessionModel,
         Self::SetSessionProfile,
+        Self::SetSessionEffort,
         Self::DeleteSession,
         Self::PruneSessions,
         Self::CompactSession,
@@ -636,6 +660,7 @@ impl SessionCommandKind {
             | Self::SetApprovalMode
             | Self::SetSessionModel
             | Self::SetSessionProfile
+            | Self::SetSessionEffort
             | Self::CompactSession => true,
             Self::CancelRun
             | Self::RespondToolApproval
@@ -660,6 +685,7 @@ impl SessionCommandKind {
             Self::SetApprovalMode => "/v1/sessions/approval-mode",
             Self::SetSessionModel => "/v1/sessions/model",
             Self::SetSessionProfile => "/v1/sessions/profile",
+            Self::SetSessionEffort => "/v1/sessions/effort",
             Self::DeleteSession => "/v1/sessions/delete",
             Self::PruneSessions => "/v1/sessions/prune",
             Self::CompactSession => "/v1/sessions/compact",
@@ -670,8 +696,8 @@ impl SessionCommandKind {
 
 /// Every command route this protocol revision serves, in [`SessionCommandKind::ALL`]
 /// order. Routes are wire data: changing one is a protocol change.
-pub const COMMAND_ROUTES: [(SessionCommandKind, &str); 13] = {
-    let mut routes = [(SessionCommandKind::ResolveWorkspace, ""); 13];
+pub const COMMAND_ROUTES: [(SessionCommandKind, &str); 14] = {
+    let mut routes = [(SessionCommandKind::ResolveWorkspace, ""); 14];
     let mut index = 0;
     while index < SessionCommandKind::ALL.len() {
         let kind = SessionCommandKind::ALL[index];
@@ -738,6 +764,11 @@ pub enum CommandOutcome {
     SessionProfileSet {
         session_id: SessionId,
         profile: AgentProfileId,
+    },
+    SessionEffortSet {
+        session_id: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<qq_reasoning::ReasoningEffort>,
     },
     SessionDeleted {
         session_id: SessionId,
@@ -1135,6 +1166,11 @@ pub struct SessionSummary {
     /// created with by the shipped clients.
     #[serde(default)]
     pub approval_mode: ApprovalMode,
+    /// Explicit reasoning effort for the session's next run. Absent means the
+    /// compiled plan's configured or profile choice. Added in protocol 26;
+    /// omitted on historical summaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<qq_reasoning::ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Correlation::is_empty")]
     pub correlation: Correlation,
     /// Input-token total of the latest measured prompt turn for this
@@ -1989,6 +2025,7 @@ mod tests {
                 SessionCommandKind::SetApprovalMode,
                 SessionCommandKind::SetSessionModel,
                 SessionCommandKind::SetSessionProfile,
+                SessionCommandKind::SetSessionEffort,
                 SessionCommandKind::CompactSession,
             ]
         );
@@ -2550,6 +2587,28 @@ mod tests {
         let session_id = id::<SessionId>(3);
         let workspace_id = id::<WorkspaceId>(2);
 
+        let set_effort = SessionCommand::SetSessionEffort {
+            session_id,
+            effort: Some(qq_reasoning::ReasoningEffort::Xhigh),
+        };
+        let encoded = serde_json::to_value(&set_effort).unwrap();
+        assert_eq!(encoded["type"], "set_session_effort");
+        assert_eq!(encoded["effort"], "xhigh");
+        assert_eq!(
+            serde_json::from_value::<SessionCommand>(encoded).unwrap(),
+            set_effort
+        );
+        let clear = SessionCommand::SetSessionEffort {
+            session_id,
+            effort: None,
+        };
+        assert!(
+            serde_json::to_value(&clear)
+                .unwrap()
+                .get("effort")
+                .is_none()
+        );
+
         let set_model = SessionCommand::SetSessionModel {
             session_id,
             model: ModelSelection {
@@ -2661,6 +2720,7 @@ mod tests {
                 model: Some("test/model".to_owned()),
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
+                reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: None,
                 accounting: None,
@@ -2720,6 +2780,7 @@ mod tests {
                 model: Some("test/model-b".to_owned()),
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
+                reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: Some(12_500),
                 accounting: None,
@@ -2778,6 +2839,7 @@ mod tests {
                 model: Some("test/model".to_owned()),
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
+                reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: None,
                 accounting: None,
@@ -3010,6 +3072,7 @@ mod tests {
                 model: Some("test/model".to_owned()),
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
+                reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: Some(16),
                 accounting: None,
@@ -3225,7 +3288,9 @@ mod tests {
         // Version 24 adds review start markers and typed spend receipts.
         // Version 26 adds turn recovery: the `run_turn_retrying` event and
         // the `paused` run outcome and status.
-        assert_eq!(crate::PROTOCOL_VERSION, 26);
+        // Version 27 adds optional session reasoning_effort, set_session_effort,
+        // and session_effort_set.
+        assert_eq!(crate::PROTOCOL_VERSION, 27);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
@@ -3333,7 +3398,7 @@ mod tests {
             serde_json::to_value(SessionCommandKind::SetSessionProfile).unwrap(),
             "set_session_profile"
         );
-        assert_eq!(SessionCommandKind::ALL.len(), 13);
+        assert_eq!(SessionCommandKind::ALL.len(), 14);
 
         let create = SessionCommand::CreateSession {
             workspace_id: id(2),
@@ -3341,6 +3406,7 @@ mod tests {
             model: ModelSelection::default(),
             approval_mode: ApprovalMode::Ask,
             profile: AgentProfileId::new("review").unwrap(),
+            reasoning_effort: None,
             correlation: Correlation::new(std::collections::BTreeMap::from([(
                 "thread".to_owned(),
                 "t1".to_owned(),
@@ -3384,6 +3450,13 @@ mod tests {
                     profile: AgentProfileId::default(),
                 },
                 "session_profile_set",
+            ),
+            (
+                CommandOutcome::SessionEffortSet {
+                    session_id: id(3),
+                    effort: Some(qq_reasoning::ReasoningEffort::Xhigh),
+                },
+                "session_effort_set",
             ),
         ];
         for (outcome, tag) in outcomes {
@@ -3452,6 +3525,7 @@ mod tests {
                 model: None,
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
+                reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: None,
                 accounting: None,

@@ -462,7 +462,7 @@ async fn run_owned_child(
         if let Err(error) = inner
             .loader
             .load(RuntimeLoadRequest {
-                reasoning_effort: None,
+                reasoning_effort: parent.reasoning_effort,
                 checkpoint: parent.checkpoint.clone(),
                 routing: parent.routing.clone(),
                 workspace: parent.workspace.clone(),

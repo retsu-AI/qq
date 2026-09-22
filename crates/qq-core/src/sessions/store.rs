@@ -993,6 +993,18 @@ impl Store {
         .await
     }
 
+    /// The newest between-run summary, for a prompt whose fold is exhausted
+    /// yet still over the window: the run starts from the summary alone.
+    pub(super) async fn latest_compaction_summary(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<String>, SessionRuntimeError> {
+        self.call(Priority::AwaitControl, move |connection| {
+            Ok(latest_compaction(connection, session_id)?.map(|row| row.summary))
+        })
+        .await
+    }
+
     /// Full-transcript recall for `search_history`, on the control lane so a
     /// saturated output queue cannot starve a running tool call.
     pub(super) async fn search_history(

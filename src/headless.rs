@@ -501,6 +501,7 @@ async fn submit(
                     model: options.model.clone(),
                     approval_mode: approval_mode(options.approval),
                     profile: options.profile.clone(),
+                    reasoning_effort: None,
                     correlation: options.correlation.clone(),
                 },
             )
@@ -2824,6 +2825,7 @@ mod tests {
                 model: options(&fixture.workspace).model,
                 approval_mode: ApprovalMode::ReadOnly,
                 profile: qq_protocol::AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: qq_protocol::Correlation::default(),
             },
         )
@@ -2840,6 +2842,7 @@ mod tests {
                 model: options(&fixture.workspace).model,
                 approval_mode: ApprovalMode::ReadOnly,
                 profile: qq_protocol::AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: qq_protocol::Correlation::default(),
             },
         )
@@ -3342,6 +3345,9 @@ mod tests {
             "{stderr}"
         );
         assert!(stderr.contains(&format!("qq run --session {session_id}")));
+        // Both continuations are shown: the interactive one comes first
+        // because it is the one a person at a terminal wants.
+        assert!(stderr.contains(&format!("\n  qq --session {session_id}\n")));
     }
 
     #[tokio::test]

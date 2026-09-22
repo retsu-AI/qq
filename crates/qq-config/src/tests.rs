@@ -1250,6 +1250,47 @@ fn rejects_duplicate_struct_fields_and_map_keys() {
 }
 
 #[test]
+fn trust_required_names_every_pending_file_and_the_command_that_accepts_it() {
+    let tree = TempTree::new();
+    let root_config = tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6", policy: (allow_shell_prefixes: ["cargo test"]))"#,
+    );
+    let nested_config = tree.write(
+        "work/sub/.qq/config.ron",
+        r#"(version: 1, mcp: {"tool": Stdio(command: "tool")})"#,
+    );
+    let request = LoadRequest::new(tree.path("work/sub"));
+
+    let error = tree.loader().load(&request).unwrap_err();
+    let message = error.to_string();
+    for expected in [
+        "project configuration needs your trust before it is used:",
+        root_config.to_string_lossy().as_ref(),
+        nested_config.to_string_lossy().as_ref(),
+        "`qq trust`",
+    ] {
+        assert!(
+            message.contains(expected),
+            "missing {expected:?} in:\n{message}"
+        );
+    }
+
+    // The pending entries carry the sensitive sections each file declares,
+    // root first, so `qq trust` can show them before granting.
+    let ConfigError::TrustRequired { pending, .. } = error else {
+        panic!("expected TrustRequired, got {error}");
+    };
+    let sections: Vec<&[&str]> = pending.iter().map(PendingTrust::sections).collect();
+    assert_eq!(
+        sections,
+        [&["model", "policy.allow_shell_prefixes"][..], &["mcp"][..]]
+    );
+    let granted = tree.loader().grant_pending_trust(&request).unwrap();
+    assert_eq!(granted, pending);
+}
+
+#[test]
 fn project_trust_gates_sensitive_changes_and_ignores_safe_edits() {
     let tree = TempTree::new();
     tree.write(

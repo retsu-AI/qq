@@ -35,6 +35,30 @@ pub enum ReasoningEffort {
     Xhigh,
 }
 
+impl ReasoningEffort {
+    /// Every effort value, lowest to highest.
+    pub const ALL: [Self; 6] = [
+        Self::None,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::Xhigh,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+        }
+    }
+}
+
 /// One lifecycle event for a displayable reasoning block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReasoningEvent {

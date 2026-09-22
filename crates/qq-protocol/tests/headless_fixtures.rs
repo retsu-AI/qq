@@ -78,6 +78,7 @@ fn summary(status: SessionStatus, active: bool) -> SessionSummary {
         model: Some("anthropic/claude-sonnet-4-5".to_owned()),
         profile: AgentProfileId::new("default").unwrap(),
         approval_mode: ApprovalMode::Auto,
+        reasoning_effort: None,
         correlation: Correlation::default(),
         context_tokens: None,
         accounting: None,
@@ -325,7 +326,7 @@ fn assert_well_formed<'a>(
 
 #[test]
 fn current_version_streams_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 26);
+    assert_eq!(PROTOCOL_VERSION, 27);
 
     let stream = |trial: HeadlessTrial, events: Vec<HeadlessRecord>, outcome: HeadlessOutcome| {
         let mut stream = Vec::with_capacity(events.len() + 2);

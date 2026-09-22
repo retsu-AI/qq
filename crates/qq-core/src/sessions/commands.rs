@@ -164,8 +164,10 @@ pub(super) fn create_child_run(
             "INSERT INTO sessions(
                 id, workspace_id, parent_id, owner_run_id, spawned_by_tool_call_id, title,
                 status, queued_prompts, model, max_output_tokens, organization, approval_mode,
-                created_at_ms, updated_at_ms, depth, root_run_id, purpose, profile, model_is_fallback
-             ) VALUES (?1, ?2, ?3, ?4, ?10, ?5, 'queued', 1, ?6, ?7, ?8, ?11, ?9, ?9, ?12, ?13, ?14, ?15, ?16)",
+                created_at_ms, updated_at_ms, depth, root_run_id, purpose, profile, model_is_fallback,
+                reasoning_effort
+             ) VALUES (?1, ?2, ?3, ?4, ?10, ?5, 'queued', 1, ?6, ?7, ?8, ?11, ?9, ?9, ?12, ?13, ?14, ?15, ?16,
+                (SELECT reasoning_effort FROM sessions WHERE id = ?3))",
             params![
                 session_id.to_string(),
                 workspace_id.to_string(),
@@ -410,6 +412,7 @@ pub(super) fn execute_command(
             model,
             approval_mode,
             profile,
+            reasoning_effort,
             correlation,
         } => {
             validate_model_selection(&model)?;
@@ -459,8 +462,8 @@ pub(super) fn execute_command(
                         id, workspace_id, parent_id, title, status, model,
                         max_output_tokens, organization, approval_mode,
                         created_at_ms, updated_at_ms, profile, correlation_json, depth,
-                        root_run_id, model_is_fallback
-                     ) VALUES (?1, ?2, ?3, 'New session', 'idle', ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13)",
+                        root_run_id, model_is_fallback, reasoning_effort
+                     ) VALUES (?1, ?2, ?3, 'New session', 'idle', ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                     params![
                         session_id.to_string(),
                         workspace_id.to_string(),
@@ -475,6 +478,7 @@ pub(super) fn execute_command(
                         depth,
                         root_run_id,
                         model.model_is_fallback,
+                        reasoning_effort_column(reasoning_effort),
                     ],
                 )
                 ?;
@@ -1275,6 +1279,35 @@ pub(super) fn execute_command(
                         session_id,
                         profile,
                     },
+                },
+                false,
+            )
+        }
+        SessionCommand::SetSessionEffort { session_id, effort } => {
+            let workspace_id = session_workspace(&transaction, session_id)?;
+            transaction.execute(
+                "UPDATE sessions SET reasoning_effort = ?2, updated_at_ms = ?3 WHERE id = ?1",
+                params![session_id.to_string(), reasoning_effort_column(effort), now,],
+            )?;
+            let summary = load_session_summary(&transaction, session_id)?;
+            let event = append_event(
+                &transaction,
+                EventContext::for_session(
+                    store_id,
+                    workspace_id,
+                    session_id,
+                    Some(command_id),
+                    now,
+                ),
+                SessionEvent::SessionUpdated {
+                    session: Box::new(summary),
+                },
+            )?;
+            (
+                CommandReceipt {
+                    command_id,
+                    committed_through: event.cursor,
+                    outcome: CommandOutcome::SessionEffortSet { session_id, effort },
                 },
                 false,
             )

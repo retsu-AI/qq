@@ -112,6 +112,7 @@ async fn child_checkpoint_inheritance_preserves_profile_but_not_user_followups()
                 model: parent.model.clone(),
                 approval_mode: ApprovalMode::ReadOnly,
                 profile: profile.clone(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -2092,6 +2093,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
         input: Vec::new(),
         resolved_input: None,
         profile: AgentProfileId::default(),
+        reasoning_effort: None,
         approval_mode: ApprovalMode::default(),
         depth: 0,
         root_run_id: parent_run,
@@ -3973,6 +3975,7 @@ async fn depth_one_keeps_children_from_spawning_and_the_ceiling_is_enforced() {
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )

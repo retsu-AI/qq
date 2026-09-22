@@ -761,7 +761,7 @@ pub(super) async fn execute_run(
     let load_progress = RuntimeLoadProgress::default();
     let mut load = inner.loader.load_with_progress(
         RuntimeLoadRequest {
-            reasoning_effort: None,
+            reasoning_effort: claimed.reasoning_effort,
             checkpoint: claimed.checkpoint.clone(),
             routing: claimed.routing.clone(),
             workspace: claimed.workspace.clone(),
@@ -846,6 +846,10 @@ pub(super) async fn execute_run(
         return;
     }
     let mut bounded_manual_compaction = false;
+    // Admission may downgrade a prompt's context once; it may not refuse the
+    // prompt because earlier runs overflowed. After the fold is exhausted the
+    // run starts from the latest summary alone (RR6).
+    let mut summary_only_admission = false;
     loop {
         let mut prepared = match prepare_execution(
             &inner,
@@ -884,7 +888,11 @@ pub(super) async fn execute_run(
                 compaction_disposition(&claimed)
             },
         });
+        // A summary-only downgrade is a strictly smaller request than the one
+        // the provider rejected, so the shape-level basis (deliberately
+        // independent of request bytes) no longer proves a repeat.
         let repeats_known_overflow = matches!(plan, context::ContextPlan::Send { .. })
+            && !summary_only_admission
             && claimed.context_overflow_basis.is_some_and(|basis| {
                 repeats_context_basis(
                     basis,
@@ -896,6 +904,18 @@ pub(super) async fn execute_run(
         if repeats_known_overflow {
             let disposition = compaction_disposition(&claimed);
             if let context::CompactionDisposition::Exhausted(exhaustion) = disposition {
+                // The fold cannot help and the provider already said this
+                // shape overflows. Downgrade to summary-only history once;
+                // the downgraded shape differs from the recorded basis, so
+                // the next pass judges it on its own.
+                if !summary_only_admission {
+                    summary_only_admission = true;
+                    drop(prepared);
+                    if !admit_with_summary_only_history(&inner, &mut claimed).await {
+                        return;
+                    }
+                    continue;
+                }
                 let context::ContextPlan::Send { estimate } = plan else {
                     unreachable!("known overflow override only applies to a send plan")
                 };
@@ -1121,6 +1141,25 @@ pub(super) async fn execute_run(
                     return;
                 }
             }
+            // The fold ran and the retained transcript still does not fit.
+            // Rather than wedge the session, start this prompt from the latest
+            // summary alone with a notice; every row stays in the store. The
+            // downgraded request is judged by the planner again on the next
+            // pass and, if it too overflows, fails with its own reason.
+            context::ContextPlan::Reject {
+                reason:
+                    context::ContextRejectReason::Exhausted(
+                        _,
+                        context::CompactionExhaustion::Attempted { .. },
+                    ),
+                ..
+            } if claimed.identity.kind == RunKind::Prompt && !summary_only_admission => {
+                summary_only_admission = true;
+                drop(prepared);
+                if !admit_with_summary_only_history(&inner, &mut claimed).await {
+                    return;
+                }
+            }
             plan => {
                 finish_prepared_run(
                     &inner,
@@ -1133,6 +1172,59 @@ pub(super) async fn execute_run(
             }
         }
     }
+}
+
+/// Replaces the reserved prompt's assembled context with the latest
+/// between-run summary and a notice, keeping the prompt itself. Settles the
+/// run and returns `false` when the store cannot supply either. Nothing is
+/// deleted: the session's rows are untouched and a later prompt reassembles
+/// from them as usual.
+async fn admit_with_summary_only_history(
+    inner: &Arc<SessionRuntimeInner>,
+    claimed: &mut ClaimedRun,
+) -> bool {
+    let summary = match inner
+        .store
+        .latest_compaction_summary(claimed.identity.session_id)
+        .await
+    {
+        Ok(summary) => summary,
+        Err(error) => {
+            finish_reserved_run(
+                inner,
+                claimed,
+                persistence_failure("failed to load the latest compaction", &error),
+            )
+            .await;
+            return false;
+        }
+    };
+    let Ok(Some((messages, _))) = inner.store.reload_reserved_messages(claimed).await else {
+        finish_reserved_run(
+            inner,
+            claimed,
+            internal_failure("failed to reload the reserved prompt"),
+        )
+        .await;
+        return false;
+    };
+    let Some(prompt) = messages.last().cloned() else {
+        finish_reserved_run(
+            inner,
+            claimed,
+            internal_failure("reloaded context did not end with the run's prompt"),
+        )
+        .await;
+        return false;
+    };
+    let opening = match summary {
+        Some(summary) => {
+            format!("{SUMMARY_ONLY_NOTICE}\n\n{COMPACTION_SUMMARY_PREAMBLE}\n\n{summary}")
+        }
+        None => SUMMARY_ONLY_NOTICE.to_owned(),
+    };
+    claimed.messages = vec![Message::user(opening), prompt];
+    true
 }
 
 /// Whether the prompt may spend another summarizer step. Each step reads a
@@ -2801,6 +2893,12 @@ async fn execute_started_run(
                 // The compactor committed the marker and settled its own run
                 // before the loop resumed; the run's measured occupancy is
                 // re-seeded by the next turn's usage.
+                current_occupancy_basis = None;
+            }
+            // The provider's verdict on the window: the measured chain that
+            // said the request fit is wrong for this transcript, and the loop
+            // is about to compact. The run continues; nothing to persist.
+            RunInput::Event(Some(RuntimeEvent::ProviderOverflow { .. })) => {
                 current_occupancy_basis = None;
             }
             RunInput::Event(Some(RuntimeEvent::SteeringApplied {

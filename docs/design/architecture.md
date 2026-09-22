@@ -354,9 +354,13 @@ measured prompt turn, it persists that versioned basis, request byte count, and
 run's existing reservation query loads the basis without another store call.
 Only an exact shape/prefix match may seed the next estimate; the seed then
 follows the byte delta since the measured request in both directions at the
-estimate ratio (`context::adjust_measured_tokens`), so growth from the new
-prompt is charged and shrinkage from assembly-time pruning is credited rather
-than discarding the measurement. Within a run the same rule is applied per
+ratio the measurement itself established (`context::calibrated_bytes_per_token`:
+measured bytes over measured tokens, rounded to nearest, clamped to 2–6 and
+falling back to the default four below 2 000 measured tokens), so growth from
+the new prompt is charged and shrinkage from assembly-time pruning is credited
+rather than discarding the measurement, and a code-heavy transcript that
+tokenizes near three bytes per token is no longer under-charged by a quarter
+on every turn. Within a run the same rule is applied per
 request component (system text, tool schemas, messages), so the slice
 checkpoint and continuation turns, which change the system text and drop the
 schemas, keep a measurement-derived estimate. Pricing-only refreshes are
@@ -435,12 +439,20 @@ values, secret hashes, live handles, and the credential epoch never enter the
 descriptor or its digest.
 
 Explicit `reasoning_effort` is resolved from trusted configuration and profiles,
-with runtime overrides first. Descriptor version 9 records the choice and its
-cache key distinguishes overrides. Every model turn uses the compiled choice;
-omission uses provider defaults, while explicit `none` requests disabled
-reasoning. This does not enable Jev. HTTP OpenAI Responses/Chat adapters carry
+with runtime overrides first. A session pin (`/effort`, `set_session_effort`)
+takes precedence for that session's next run. Descriptor version 9 records the
+choice and its cache key distinguishes overrides. Every model turn uses the
+compiled choice; omission uses provider defaults, while explicit `none` requests
+disabled reasoning. This does not enable Jev. HTTP OpenAI Responses/Chat adapters carry
 effort; other adapter families reject it before credential lookup. Capability
 means transport support, not that every remote model accepts every effort value.
+The bundled catalog records the ladder each OpenAI-shaped route documents
+(`ModelMetadata::reasoning_efforts`, surfaced as `ModelDescriptor.reasoning_efforts`);
+Anthropic-shaped routes advertise none because their adapters never transmit
+effort. A pin outside a non-empty ladder is a plan-time `ReasoningEffortNotAdvertised`
+error naming the accepted values, so the operator sees it before the provider
+would fail the turn. An empty ladder is unknown, not unsupported, and is not
+checked.
 
 Credential rotation is tracked separately by an opaque `CredentialEpoch` owned
 by `qq-auth`: every durable credential write advances the store's index

@@ -12,12 +12,9 @@
     ),
     version: 1,
     model: "xai/grok-4.6",
-    // Providers, reviewer/worker models, and MCP servers that reference a
-    // `Stored(...)` credential are personal: the name resolves against each
-    // developer's own credential store, so a clone without that entry fails
-    // with "credential ... is not registered". Declare them in a gitignored
-    // `.qq/config.d/*-local.ron` fragment. Built-in providers (openai,
-    // anthropic, google, xai, openai-codex, bedrock) need no declaration here;
-    // authenticate with `qq auth login PROVIDER` or the provider's API-key
-    // environment variable.
+    // Anything referencing a `Stored(...)` credential (providers, MCP
+    // servers, reviewer/worker models) is personal to one machine and belongs
+    // in a gitignored `.qq/config.d/*-local.ron` fragment, not here. Built-in
+    // providers need no declaration: `qq auth login PROVIDER` or the
+    // provider's API-key variable is enough. See docs/guide/configuration.md.
 )

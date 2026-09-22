@@ -7,7 +7,7 @@ use crate::sessions::{PersistenceFault, SessionRuntimeError};
 
 /// Current session store schema, stored as `metadata.schema_version`. Bump it
 /// with every migration step appended to `open_database`.
-pub const STORE_SCHEMA_VERSION: u16 = 33;
+pub const STORE_SCHEMA_VERSION: u16 = 34;
 
 /// Suffix of the sibling file whose advisory lock marks the store's owner.
 pub const OWNER_LOCK_SUFFIX: &str = ".lock";
@@ -381,7 +381,8 @@ pub(in crate::sessions) fn open_database(
         }
         Some(
             "10" | "11" | "12" | "13" | "14" | "15" | "16" | "17" | "18" | "19" | "20" | "21"
-            | "22" | "23" | "24" | "25" | "26" | "27" | "28" | "29" | "30" | "31" | "32" | "33",
+            | "22" | "23" | "24" | "25" | "26" | "27" | "28" | "29" | "30" | "31" | "32" | "33"
+            | "34",
         ) => {}
         Some(_) => return Err(SessionRuntimeError::CONSTRAINT),
     }
@@ -410,6 +411,7 @@ pub(in crate::sessions) fn open_database(
                 | "31"
                 | "32"
                 | "33"
+                | "34"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -444,6 +446,7 @@ pub(in crate::sessions) fn open_database(
                 | "31"
                 | "32"
                 | "33"
+                | "34"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -477,6 +480,7 @@ pub(in crate::sessions) fn open_database(
                 | "31"
                 | "32"
                 | "33"
+                | "34"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -509,6 +513,7 @@ pub(in crate::sessions) fn open_database(
                 | "31"
                 | "32"
                 | "33"
+                | "34"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -541,6 +546,7 @@ pub(in crate::sessions) fn open_database(
                 | "31"
                 | "32"
                 | "33"
+                | "34"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -582,6 +588,7 @@ pub(in crate::sessions) fn open_database(
                 | "31"
                 | "32"
                 | "33"
+                | "34"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -614,6 +621,7 @@ pub(in crate::sessions) fn open_database(
                 | "31"
                 | "32"
                 | "33"
+                | "34"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -644,6 +652,7 @@ pub(in crate::sessions) fn open_database(
                 | "31"
                 | "32"
                 | "33"
+                | "34"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -673,6 +682,7 @@ pub(in crate::sessions) fn open_database(
                 | "31"
                 | "32"
                 | "33"
+                | "34"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -701,6 +711,7 @@ pub(in crate::sessions) fn open_database(
                 | "31"
                 | "32"
                 | "33"
+                | "34"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -726,6 +737,7 @@ pub(in crate::sessions) fn open_database(
                 | "31"
                 | "32"
                 | "33"
+                | "34"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -738,7 +750,20 @@ pub(in crate::sessions) fn open_database(
     }
     if !matches!(
         schema_version.as_deref(),
-        Some("22" | "23" | "24" | "25" | "26" | "27" | "28" | "29" | "30" | "31" | "32" | "33")
+        Some(
+            "22" | "23"
+                | "24"
+                | "25"
+                | "26"
+                | "27"
+                | "28"
+                | "29"
+                | "30"
+                | "31"
+                | "32"
+                | "33"
+                | "34"
+        )
     ) {
         let transaction = connection.transaction()?;
         add_output_truncation_columns(&transaction)?;
@@ -751,7 +776,7 @@ pub(in crate::sessions) fn open_database(
     validate_output_truncation_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("23" | "24" | "25" | "26" | "27" | "28" | "29" | "30" | "31" | "32" | "33")
+        Some("23" | "24" | "25" | "26" | "27" | "28" | "29" | "30" | "31" | "32" | "33" | "34")
     ) {
         let transaction = connection.transaction()?;
         add_session_depth_columns(&transaction)?;
@@ -764,7 +789,7 @@ pub(in crate::sessions) fn open_database(
     validate_session_depth_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("24" | "25" | "26" | "27" | "28" | "29" | "30" | "31" | "32" | "33")
+        Some("24" | "25" | "26" | "27" | "28" | "29" | "30" | "31" | "32" | "33" | "34")
     ) {
         let transaction = connection.transaction()?;
         add_audit_columns(&transaction)?;
@@ -777,7 +802,7 @@ pub(in crate::sessions) fn open_database(
     validate_audit_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("25" | "26" | "27" | "28" | "29" | "30" | "31" | "32" | "33")
+        Some("25" | "26" | "27" | "28" | "29" | "30" | "31" | "32" | "33" | "34")
     ) {
         let transaction = connection.transaction()?;
         add_fast_path_columns(&transaction)?;
@@ -790,7 +815,7 @@ pub(in crate::sessions) fn open_database(
     validate_fast_path_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("26" | "27" | "28" | "29" | "30" | "31" | "32" | "33")
+        Some("26" | "27" | "28" | "29" | "30" | "31" | "32" | "33" | "34")
     ) {
         let transaction = connection.transaction()?;
         add_tool_call_effect_column(&transaction)?;
@@ -803,7 +828,7 @@ pub(in crate::sessions) fn open_database(
     validate_tool_call_effect_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("27" | "28" | "29" | "30" | "31" | "32" | "33")
+        Some("27" | "28" | "29" | "30" | "31" | "32" | "33" | "34")
     ) {
         let transaction = connection.transaction()?;
         add_output_contract_columns(&transaction)?;
@@ -816,7 +841,7 @@ pub(in crate::sessions) fn open_database(
     validate_output_contract_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("28" | "29" | "30" | "31" | "32" | "33")
+        Some("28" | "29" | "30" | "31" | "32" | "33" | "34")
     ) {
         let transaction = connection.transaction()?;
         create_tool_spills_table(&transaction)?;
@@ -829,7 +854,7 @@ pub(in crate::sessions) fn open_database(
     validate_tool_spills_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("29" | "30" | "31" | "32" | "33")
+        Some("29" | "30" | "31" | "32" | "33" | "34")
     ) {
         let transaction = connection.transaction()?;
         create_attachment_tables(&transaction)?;
@@ -840,7 +865,10 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_attachment_schema(&connection)?;
-    if !matches!(schema_version.as_deref(), Some("30" | "31" | "32" | "33")) {
+    if !matches!(
+        schema_version.as_deref(),
+        Some("30" | "31" | "32" | "33" | "34")
+    ) {
         let transaction = connection.transaction()?;
         create_messages_run_index(&transaction)?;
         transaction.execute(
@@ -850,7 +878,7 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_messages_run_index(&connection)?;
-    if !matches!(schema_version.as_deref(), Some("31" | "32" | "33")) {
+    if !matches!(schema_version.as_deref(), Some("31" | "32" | "33" | "34")) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "runs", "routing_json")? {
             transaction.execute("ALTER TABLE runs ADD COLUMN routing_json TEXT", [])?;
@@ -869,7 +897,7 @@ pub(in crate::sessions) fn open_database(
         return Err(SessionRuntimeError::CONSTRAINT);
     }
 
-    if !matches!(schema_version.as_deref(), Some("32" | "33")) {
+    if !matches!(schema_version.as_deref(), Some("32" | "33" | "34")) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "sessions", "model_is_fallback")? {
             transaction.execute(
@@ -894,7 +922,7 @@ pub(in crate::sessions) fn open_database(
     // 33: an in-run compaction marker names the run whose earlier turns its
     // summary replaces and the last turn ordinal it covers. Between-run
     // markers leave both NULL and keep their prompt-ordinal semantics.
-    if schema_version.as_deref() != Some("33") {
+    if !matches!(schema_version.as_deref(), Some("33" | "34")) {
         let transaction = connection.transaction()?;
         // Test fixtures for very old versions never created the table; the
         // ≥10 branch above is a no-op for them. Create before altering.
@@ -925,6 +953,24 @@ pub(in crate::sessions) fn open_database(
         {
             return Err(SessionRuntimeError::CONSTRAINT);
         }
+    }
+    // 34: optional per-session reasoning effort pin. NULL means the compiled
+    // plan's configured or profile choice; a stored value is applied at claim.
+    if schema_version.as_deref() != Some("34") {
+        let transaction = connection.transaction()?;
+        if !has_column(&transaction, "sessions", "reasoning_effort")? {
+            transaction.execute("ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT", [])?;
+        }
+        transaction.execute(
+            "UPDATE metadata SET value = '34' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
+    }
+    if column_shape(&connection, "sessions", "reasoning_effort")?
+        != ("TEXT".to_owned(), false, None, 0)
+    {
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
     debug_assert_eq!(
         connection

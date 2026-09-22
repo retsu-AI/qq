@@ -163,9 +163,6 @@ pub(crate) enum RuntimeEvent {
         usage: Option<TokenUsage>,
         cost_usd_nanos: Option<u64>,
     },
-    /// Queued steering entered model context: the message will be part of
-    /// the request for `turn_ordinal`. Emitted at the boundary, before that
-    /// turn is prepared.
     /// The run summarized its own turns through `turn_cutoff` before
     /// preparing `turn_ordinal`; the compactor already committed the marker.
     /// Informational for the session layer (occupancy is unknown again).
@@ -173,6 +170,16 @@ pub(crate) enum RuntimeEvent {
         turn_ordinal: u32,
         turn_cutoff: u32,
     },
+    /// The provider rejected turn `turn_ordinal` for its context window even
+    /// though the estimate said it fit. Nothing streamed; the loop re-plans
+    /// the turn with in-run compaction forced. Informational.
+    ProviderOverflow {
+        turn_ordinal: u32,
+        message: String,
+    },
+    /// Queued steering entered model context: the message will be part of
+    /// the request for `turn_ordinal`. Emitted at the boundary, before that
+    /// turn is prepared.
     SteeringApplied {
         message_id: MessageId,
         turn_ordinal: u32,

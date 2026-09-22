@@ -901,11 +901,11 @@ fn slash_autocomplete_filters_selects_and_executes_commands() {
         assert_eq!(here, reserved);
     }
     let last = qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS.len() - 1;
-    for _ in 0..20 {
+    for _ in 0..last {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
     assert_eq!(app.slash_selected(usize::MAX), last);
-    for _ in 0..20 {
+    for _ in 0..last {
         app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
     }
     assert_eq!(app.slash_selected(usize::MAX), 0);
@@ -1197,6 +1197,7 @@ fn context_meter_app() -> App {
             model: "gpt-test".to_owned(),
             name: Some("GPT Test".to_owned()),
             context_window: Some(128_000),
+            reasoning_efforts: Vec::new(),
             selection,
         }],
         themes: Vec::new(),
@@ -1481,6 +1482,7 @@ fn discovered_models_refresh_existing_session_metadata() {
             model: "gpt-test".to_owned(),
             name: Some("GPT Test".to_owned()),
             context_window: Some(128_000),
+            reasoning_efforts: Vec::new(),
             selection: ModelSelection {
                 model_is_fallback: false,
                 model: Some("openai/gpt-test".to_owned()),
@@ -1512,6 +1514,7 @@ fn model_refresh_preserves_the_open_picker_selection_by_identity() {
             model: "model-z".to_owned(),
             name: Some("Zeta".to_owned()),
             context_window: None,
+            reasoning_efforts: Vec::new(),
             selection: selection.clone(),
         }],
         themes: Vec::new(),
@@ -1527,6 +1530,7 @@ fn model_refresh_preserves_the_open_picker_selection_by_identity() {
                 model: "model-a".to_owned(),
                 name: Some("Alpha".to_owned()),
                 context_window: Some(64_000),
+                reasoning_efforts: Vec::new(),
                 selection: ModelSelection {
                     model_is_fallback: false,
                     model: Some("alpha/model-a".to_owned()),
@@ -1539,6 +1543,7 @@ fn model_refresh_preserves_the_open_picker_selection_by_identity() {
                 model: "model-z".to_owned(),
                 name: Some("Zeta".to_owned()),
                 context_window: Some(128_000),
+                reasoning_efforts: Vec::new(),
                 selection: selection.clone(),
             },
         ],
@@ -1590,6 +1595,7 @@ fn model_picker_applies_to_the_focused_session_and_ctrl_n_creates() {
             model: "claude-sonnet-5".to_owned(),
             name: Some("Claude Sonnet 5".to_owned()),
             context_window: Some(200_000),
+            reasoning_efforts: Vec::new(),
             selection: selection.clone(),
         }],
         themes: Vec::new(),
@@ -1659,6 +1665,7 @@ fn model_picker_enter_without_a_focused_session_creates_one() {
             model: "claude-sonnet-5".to_owned(),
             name: Some("Claude Sonnet 5".to_owned()),
             context_window: Some(200_000),
+            reasoning_efforts: Vec::new(),
             selection: selection.clone(),
         }],
         themes: Vec::new(),
@@ -1712,6 +1719,7 @@ fn model_picker_selection_becomes_the_default_for_new_sessions() {
             model: "claude-sonnet-5".to_owned(),
             name: Some("Claude Sonnet 5".to_owned()),
             context_window: Some(200_000),
+            reasoning_efforts: Vec::new(),
             selection: switched.clone(),
         }],
         themes: Vec::new(),
@@ -3583,6 +3591,181 @@ fn profile_chosen_without_a_focused_session_applies_to_the_next_create() {
         &request.command,
         SessionCommand::CreateSession { profile, .. } if profile.as_str() == "reviewer"
     ));
+}
+
+#[test]
+fn effort_picker_sets_the_focused_idle_session_effort_and_refuses_running_ones() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let focused = app.focused().unwrap();
+    app.execute(Command::OpenEffort);
+    // Rows: default, none, minimal, low, medium, high, xhigh. Jump to xhigh.
+    for _ in 0..6 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    let [ClientRequest::Command(request)] = requests.as_slice() else {
+        panic!("expected one set-session-effort command")
+    };
+    assert!(matches!(
+        &request.command,
+        SessionCommand::SetSessionEffort {
+            session_id,
+            effort: Some(qq_protocol::ReasoningEffort::Xhigh),
+        } if *session_id == focused
+    ));
+    assert!(app.overlay.is_none());
+    assert_eq!(
+        app.reasoning_effort,
+        Some(qq_protocol::ReasoningEffort::Xhigh)
+    );
+
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Ok(qq_protocol::CommandReceipt {
+            command_id: request.command_id,
+            outcome: CommandOutcome::SessionEffortSet {
+                session_id: focused,
+                effort: Some(qq_protocol::ReasoningEffort::Xhigh),
+            },
+            committed_through: fixtures::cursor(2),
+        }),
+    });
+    assert_eq!(app.status.as_deref(), Some("session effort set to xhigh"));
+
+    let (mut running, _, _, _) = running_app();
+    running.execute(Command::OpenEffort);
+    running.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let (_, requests) = running
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    assert!(requests.is_empty());
+    assert!(
+        running
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("wait for the run to finish")
+    );
+}
+
+#[test]
+fn effort_chosen_without_a_focused_session_applies_to_the_next_create() {
+    let selection = ModelSelection {
+        model_is_fallback: false,
+        model: Some("openai/gpt-test".to_owned()),
+        max_output_tokens: Some(4_096),
+        organization: None,
+    };
+    let mut app = App::new(TuiOptions {
+        settings: Settings::default(),
+        model: selection.clone(),
+        models: Vec::new(),
+        themes: Vec::new(),
+        workspace_root: None,
+    });
+    let mut empty = snapshot();
+    empty.sessions.clear();
+    empty.focused = None;
+    app.apply_snapshot(empty);
+    app.execute(Command::OpenEffort);
+    for _ in 0..6 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    assert!(requests.is_empty());
+    assert_eq!(
+        app.reasoning_effort,
+        Some(qq_protocol::ReasoningEffort::Xhigh)
+    );
+    assert_eq!(
+        app.status.as_deref(),
+        Some("new sessions will use effort xhigh")
+    );
+
+    let (_, requests) = app.execute(Command::NewRootSession).split();
+    let [ClientRequest::Command(request)] = requests.as_slice() else {
+        panic!("expected one create-session command")
+    };
+    assert!(matches!(
+        &request.command,
+        SessionCommand::CreateSession {
+            reasoning_effort: Some(qq_protocol::ReasoningEffort::Xhigh),
+            ..
+        }
+    ));
+}
+
+/// When the catalog advertises a ladder for the focused model, `/effort`
+/// offers exactly `default`, `none`, and that ladder — not every level. A
+/// model with no advertised ladder still gets the full set.
+#[test]
+fn effort_picker_is_shaped_by_the_focused_models_advertised_ladder() {
+    use qq_protocol::ReasoningEffort as E;
+    let mut snap = snapshot();
+    let focused_model = snap
+        .focused
+        .as_ref()
+        .and_then(|focused| focused.summary.model.clone())
+        .expect("fixture's focused session names a model");
+    let selection = ModelSelection {
+        model_is_fallback: false,
+        model: Some(focused_model.clone()),
+        max_output_tokens: Some(4_096),
+        organization: None,
+    };
+    let ladder = |efforts: Vec<E>| ModelOption {
+        provider: "openai".to_owned(),
+        model: focused_model.clone(),
+        name: None,
+        context_window: None,
+        reasoning_efforts: efforts,
+        selection: selection.clone(),
+    };
+
+    let rows_for = |models: Vec<ModelOption>, snap: &WorkspaceSnapshot| {
+        let mut app = App::new(TuiOptions {
+            settings: Settings::default(),
+            model: selection.clone(),
+            models,
+            themes: Vec::new(),
+            workspace_root: None,
+        });
+        app.apply_snapshot(snap.clone());
+        app.execute(Command::OpenEffort);
+        let Some(Overlay::Effort(picker)) = &app.overlay else {
+            panic!("effort picker should be open")
+        };
+        picker
+            .items()
+            .iter()
+            .map(|row| row.effort)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        rows_for(vec![ladder(vec![E::Low, E::High])], &snap),
+        vec![None, Some(E::None), Some(E::Low), Some(E::High)],
+        "advertised ladder: default, none, then exactly the ladder"
+    );
+    assert_eq!(
+        rows_for(vec![ladder(Vec::new())], &snap),
+        std::iter::once(None)
+            .chain(E::ALL.into_iter().map(Some))
+            .collect::<Vec<_>>(),
+        "no advertised ladder: every level"
+    );
+    snap.focused = None;
+    snap.sessions.clear();
+    assert_eq!(
+        rows_for(vec![ladder(vec![E::Medium])], &snap),
+        vec![None, Some(E::None), Some(E::Medium)],
+        "nothing focused: the default model's ladder"
+    );
 }
 
 #[test]

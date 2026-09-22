@@ -69,6 +69,7 @@ fn summary() -> SessionSummary {
         model: Some("openai/gpt-5.6".to_owned()),
         profile: AgentProfileId::new("review").unwrap(),
         approval_mode: ApprovalMode::ReadOnly,
+        reasoning_effort: None,
         correlation: correlation(&[("thread", "t-1")]),
         context_tokens: Some(1200),
         accounting: None,
@@ -206,7 +207,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 26);
+    assert_eq!(PROTOCOL_VERSION, 27);
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
@@ -229,6 +230,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 },
                 approval_mode: ApprovalMode::Ask,
                 profile: AgentProfileId::new("review").unwrap(),
+                reasoning_effort: None,
                 correlation: correlation(&[("channel", "c-9"), ("thread", "t-1")]),
             },
         ),
@@ -243,6 +245,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 model: ModelSelection::default(),
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         ),
@@ -383,6 +386,16 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             },
         ),
     );
+    check(
+        "command_set_session_effort",
+        &command(
+            0x27,
+            SessionCommand::SetSessionEffort {
+                session_id,
+                effort: Some(qq_reasoning::ReasoningEffort::Xhigh),
+            },
+        ),
+    );
 
     let receipt = |byte: u8, sequence: u64, outcome: CommandOutcome| CommandReceipt {
         command_id: CommandId::from_bytes([byte; 16]),
@@ -437,6 +450,17 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             CommandOutcome::SessionProfileSet {
                 session_id,
                 profile: AgentProfileId::new("fast").unwrap(),
+            },
+        ),
+    );
+    check(
+        "receipt_session_effort_set",
+        &receipt(
+            0x27,
+            14,
+            CommandOutcome::SessionEffortSet {
+                session_id,
+                effort: Some(qq_reasoning::ReasoningEffort::Xhigh),
             },
         ),
     );

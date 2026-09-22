@@ -1115,6 +1115,7 @@ async fn scripted_runs_harness_with_authority(
                 },
                 approval_mode: mode,
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -1244,6 +1245,7 @@ async fn approval_harness_with_reviewer(
                 },
                 approval_mode: mode,
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -1474,6 +1476,7 @@ async fn store_with_one_spill(
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -1927,6 +1930,7 @@ fn denial_capacity_fixture(
         input: Vec::new(),
         resolved_input: None,
         profile: AgentProfileId::default(),
+        reasoning_effort: None,
         approval_mode: ApprovalMode::default(),
         depth: 0,
         root_run_id: run_id,
@@ -2042,6 +2046,7 @@ async fn claimed_store_fixture() -> (TempDir, Store, ClaimedRun) {
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -2210,6 +2215,7 @@ async fn create_session_with_mode(
                 },
                 approval_mode,
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -2751,6 +2757,18 @@ enum AutoCompactScript {
         text: String,
         summary: String,
     },
+    /// `ShellRepeatedlyWithSummaries` whose provider rejects the request as
+    /// exceeding its window once the transcript holds `overflow_at` results,
+    /// unless the request carries an in-run summary: a provider whose
+    /// tokenizer disagrees with the estimate. Summarizer requests still
+    /// answer with the summary.
+    ShellRepeatedlyWithProviderOverflow {
+        turns: usize,
+        overflow_at: usize,
+        text: String,
+        summary: String,
+        overflows: Arc<AtomicUsize>,
+    },
     /// `ShellRepeatedlyWithSummaries` whose summarizer reply is cut at the
     /// output limit after `cut` bytes on the first request and completed on
     /// the continuation, so an in-run summary exercises the truncation join.
@@ -3060,6 +3078,56 @@ impl Provider for AutoCompactProvider {
                     ]))
                 }
             }
+            AutoCompactScript::ShellRepeatedlyWithProviderOverflow {
+                turns,
+                overflow_at,
+                text,
+                summary,
+                overflows,
+            } => {
+                if last_text.contains("Summarize this conversation") {
+                    let summarized = prior_results.len() + summarized_before;
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: format!("{summary}\nturns_done={summarized}"),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                // The provider's own tokenizer says the window is full once
+                // the verbatim results reach `overflow_at`; a compacted
+                // request (summary in context, fewer results) fits again.
+                if prior_results.len() >= *overflow_at && summarized_before == 0 {
+                    overflows.fetch_add(1, Ordering::SeqCst);
+                    return Box::pin(stream::iter([Err(
+                        qq_provider::ProviderError::ResponseFailed {
+                            kind: qq_provider::ProviderErrorKind::ContextExceeded,
+                            message: "scripted context overflow".to_owned(),
+                        },
+                    )]));
+                }
+                let done = prior_results.len() + summarized_before;
+                if done >= *turns {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    let id = format!("call_shell_{done}");
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: id.clone(),
+                            name: "shell".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: id.clone(),
+                            json: format!(r#"{{"command":"echo step {done}"}}"#),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
+            }
             AutoCompactScript::ReadNoteRepeatedly { turns, text } => {
                 if prior_results.len() >= *turns {
                     Box::pin(stream::iter([
@@ -3342,6 +3410,7 @@ async fn project_terminal_run_with_tool_boundaries(
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -4359,6 +4428,7 @@ async fn create_claimed_parent(
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -4607,6 +4677,7 @@ async fn output_contract_harness(answers: &[&'static str]) -> OutputContractHarn
                 },
                 approval_mode: ApprovalMode::ReadOnly,
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )

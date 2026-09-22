@@ -1,5 +1,9 @@
 # QQ documentation
 
+**Using QQ?** Start with the [user guide](guide/README.md): install,
+quickstart, configuration and CLI references, troubleshooting. Everything
+below is for people changing QQ.
+
 | If you want to know… | Read |
 | --- | --- |
 | how the system works today | [`design/architecture.md`](design/architecture.md), then the topic docs below |
@@ -30,6 +34,10 @@
   findings (F01–F28), comparative capability matrix, core versus adapter
   placement, and acceptance criteria (research; supersedes the August audit
   and September catalog).
+- [`onboarding-audit-2026-09-22.md`](design/onboarding-audit-2026-09-22.md)
+  — first-run and configuration UX of Codex, OpenCode, Pi, and fx against
+  QQ; findings O01–O20 and the positions the onboarding plan builds on
+  (research; owned by `plans/onboarding-ux.md`).
 - [`run-reliability-audit-2026-09-21.md`](design/run-reliability-audit-2026-09-21.md)
   — why sessions do not finish: failure taxonomy from the live session store
   (27 % of prompt runs failed, 73 % of those by harness policy), how Codex,
@@ -68,6 +76,12 @@ evidence.
   to extend it.
 - [`release.md`](runbooks/release.md) — `cargo xtask release`, the tag-driven
   release workflow, targets, and `qq --version`.
+
+## User guide — `guide/`
+
+Task-oriented pages for people using QQ, amended in the same PR as the
+behavior they describe: [`guide/README.md`](guide/README.md). Plain
+Markdown so the same files can be mirrored to the GitHub wiki or a docs site.
 
 ## Conventions
 

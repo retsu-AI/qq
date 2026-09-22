@@ -73,6 +73,12 @@ pub(super) fn top_row(app: &App, width: usize) -> Line {
                     (approval_mode_label(mode).to_owned(), style)
                 })
             }
+            // Omission is the unremarkable case; the badge names an explicit pin.
+            StatusItem::Effort => {
+                let effort =
+                    focused.map_or(app.reasoning_effort, |session| session.reasoning_effort);
+                effort.map(|effort| (format!("effort {}", effort_label(Some(effort))), accent()))
+            }
             StatusItem::Context => match app.focused_context_usage() {
                 Some((tokens, limit)) if limit > 0 => {
                     let percent = u128::from(tokens) * 100 / u128::from(limit);
@@ -288,6 +294,7 @@ fn hints_for(app: &App) -> Vec<(crate::commands::Command, &'static str)> {
         Mode::Models
         | Mode::Profiles
         | Mode::ApprovalModes
+        | Mode::Effort
         | Mode::Skills
         | Mode::Themes
         | Mode::Sessions
