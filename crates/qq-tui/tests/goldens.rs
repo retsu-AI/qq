@@ -135,11 +135,13 @@ fn prose_is_placed_at_the_measure_on_wide_terminals() {
 /// it out and only the column it lands in changes. The 120 × 40 frame is
 /// scrolled to the tail of the turn, so its rows are the tail of what the
 /// inspector shows in full; the transcript beside the inspector keeps the
-/// summary rows and nothing else.
+/// summary rows and nothing else. The inspector frame is 80 rows tall: six
+/// expanded panels (two padding rows each, U7) run to 59 rows, four past
+/// what the 60-row golden's inspector holds before it cuts to a count.
 #[test]
 fn expanded_tool_detail_reads_the_same_inline_and_in_the_inspector() {
     let inline = BenchHarness::scene(Scene::ToolsExpanded, (120, 40)).plain_frame();
-    let wide = BenchHarness::scene(Scene::ToolsExpanded, (200, 60)).plain_frame();
+    let wide = BenchHarness::scene(Scene::ToolsExpanded, (200, 80)).plain_frame();
     // Body rows between the top row and the composer chrome (rule, composer,
     // padding row), split at the pane borders, whitespace-squashed so widths
     // do not matter.
@@ -175,8 +177,16 @@ fn expanded_tool_detail_reads_the_same_inline_and_in_the_inspector() {
     );
     for row in &transcript {
         assert!(
-            !row.starts_with("fn main") && !row.starts_with("→ "),
+            !row.starts_with("fn main") && !row.starts_with("→ ") && !row.starts_with('┃'),
             "detail leaked inline at 200: {row:?}"
+        );
+    }
+    // Every detail row in the inspector is a panel row: the timing line is
+    // the only body text outside the rail.
+    for row in inspector {
+        assert!(
+            row.starts_with("● ") || row.starts_with("→ ") || row.starts_with('┃'),
+            "inspector row outside the panel: {row:?}"
         );
     }
     assert_eq!(

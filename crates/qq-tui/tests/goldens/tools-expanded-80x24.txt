@@ -1,22 +1,22 @@
  qq  Session 0                                           openai/gpt-test  $0.00
-     fn main() {}
-     fn main() {}
-     fn main() {}
-     fn main() {}
-     fn main() {}
-     fn main() {}
-     fn main() {}
-     fn main() {}
-     fn main() {}
-     fn main() {}
-     fn main() {}
-     … 8 lines more
+   ┃  fn main() {}
+   ┃  fn main() {}
+   ┃  fn main() {}
+   ┃  fn main() {}
+   ┃  fn main() {}
+   ┃  fn main() {}
+   ┃  … 8 lines more
+   ┃
  ● Edit   crates/qq-tui/src/file_4.rs                                        6 B
      → 00:00:00
-     edited
+   ┃
+   ┃  edited
+   ┃
  ● Run    cargo test -p crate_5
      → 00:00:00
-     test result: ok. 12 passed
+   ┃
+   ┃  test result: ok. 12 passed
+   ┃
    ✓ 0.0s · 6 tools · ttft 0.0s
  3 agents
 ─────────────────────────────────────────────── F1 help  ^K commands  ^O detail

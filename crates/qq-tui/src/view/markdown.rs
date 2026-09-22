@@ -11,7 +11,7 @@ use crate::{
         code_property, code_punctuation, code_string, code_type, diff_line_style, inline_code,
         link, muted, normal, surface,
     },
-    view::wrap::{wrap_line, wrap_line_chars},
+    view::wrap::{truncate_line, wrap_line, wrap_line_chars},
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use tree_sitter::Language;
@@ -819,7 +819,7 @@ const CODE_PANEL_GUTTER: &str = "┃ ";
 /// under the arrow, so a wrapped line never reads as a new one.
 const CODE_PANEL_WRAP_GUTTER: &str = "↪ ";
 /// Display width of the gutter plus the one cell of padding before content.
-const CODE_PANEL_INSET: usize = 3;
+pub(super) const CODE_PANEL_INSET: usize = 3;
 
 /// Bytes past which a code block skips tree-sitter and renders plain;
 /// highlighting must never stall a frame.
@@ -1048,12 +1048,8 @@ impl CodeBlockBuffer {
     }
 }
 
-/// Lays a buffered code block out as a full-width tinted panel: a top padding
-/// row carrying the language label right-aligned (blank when the fence has
-/// no tag), character-wrapped content rows, and a blank bottom padding row.
-/// Every row is padded to `width` so the tint reads as one solid slab. The
-/// rail is `┃` on the first row of each source line and `↪` on the rows a
-/// long line wrapped onto, so a wrapped line never reads as a new one.
+/// Lays a buffered code block out as a panel (see [`panel_rows`]) labelled
+/// with the fence's language tag.
 ///
 /// An unterminated fence reaches here too (pulldown closes it at end of
 /// input), so a streaming panel has the same rows as the finished one and
@@ -1064,12 +1060,60 @@ impl CodeBlockBuffer {
 /// oversized blocks or highlighter failures fall back to plain text.
 fn layout_code_panel(block: &CodeBlockBuffer, width: usize, highlight: bool) -> Vec<Line> {
     let diff = block.language.as_deref() == Some("diff");
-    let content_width = width.saturating_sub(CODE_PANEL_INSET).max(1);
+    let label = block.language.as_deref();
+    let highlighted = if highlight && !diff && block.text.len() <= MAX_HIGHLIGHT_BYTES {
+        label
+            .and_then(fence_highlight_configuration)
+            .and_then(|configuration| highlighted_code_lines(configuration, &block.text))
+    } else {
+        None
+    };
+    match highlighted {
+        Some(content) => panel_rows(content, label, width),
+        None => panel_rows(
+            block.text.lines().map(|source_line| {
+                let safe = source_line
+                    .chars()
+                    .filter_map(terminal_safe_character)
+                    .collect::<String>();
+                let style = if diff {
+                    diff_line_style(&safe)
+                } else {
+                    normal()
+                };
+                Line::styled(safe, style)
+            }),
+            label,
+            width,
+        ),
+    }
+}
+
+/// Columns a panel at `width` leaves for content: the rail, its padding
+/// cell, and never less than one cell.
+pub(crate) fn panel_content_width(width: usize) -> usize {
+    width.saturating_sub(CODE_PANEL_INSET).max(1)
+}
+
+/// The one panel implementation, shared by fenced code and tool detail: a
+/// top padding row carrying `label` right-aligned in `muted` (blank without
+/// one), the body lines character-wrapped to the content width, and a blank
+/// bottom padding row. Every row is padded to `width` so the tint reads as
+/// one solid slab. The rail is `┃` on the first row of each body line and
+/// `↪` on the rows a long line wrapped onto, so a wrapped line never reads
+/// as a new one. A line that already fits is not wrapped: `wrap_line_chars`
+/// copies its text, and most panel rows (every pre-truncated tool row) fit.
+pub(crate) fn panel_rows(
+    body: impl IntoIterator<Item = Line>,
+    label: Option<&str>,
+    width: usize,
+) -> Vec<Line> {
+    let content_width = panel_content_width(width);
     let mut top = Line::default();
-    if let Some(language) = block.language.as_deref() {
+    if let Some(label) = label {
         // ` label ` sits flush with the right edge; its trailing cell mirrors
         // the padding cell after the gutter.
-        let label = language
+        let label = label
             .chars()
             .filter_map(terminal_safe_character)
             .take(content_width.saturating_sub(2))
@@ -1081,42 +1125,13 @@ fn layout_code_panel(block: &CodeBlockBuffer, width: usize, highlight: bool) -> 
         }
     }
     let mut output = vec![code_panel_row(top, width, false)];
-    let highlighted = if highlight && !diff && block.text.len() <= MAX_HIGHLIGHT_BYTES {
-        block
-            .language
-            .as_deref()
-            .and_then(fence_highlight_configuration)
-            .and_then(|configuration| highlighted_code_lines(configuration, &block.text))
-    } else {
-        None
-    };
-    match highlighted {
-        Some(content) => {
-            for line in content {
-                for (index, wrapped) in wrap_line_chars(line, content_width).into_iter().enumerate()
-                {
-                    output.push(code_panel_row(wrapped, width, index > 0));
-                }
-            }
+    for line in body {
+        if line.width() <= content_width {
+            output.push(code_panel_row(line, width, false));
+            continue;
         }
-        None => {
-            for source_line in block.text.lines() {
-                let safe = source_line
-                    .chars()
-                    .filter_map(terminal_safe_character)
-                    .collect::<String>();
-                let style = if diff {
-                    diff_line_style(&safe)
-                } else {
-                    normal()
-                };
-                for (index, wrapped) in wrap_line_chars(Line::styled(safe, style), content_width)
-                    .into_iter()
-                    .enumerate()
-                {
-                    output.push(code_panel_row(wrapped, width, index > 0));
-                }
-            }
+        for (index, wrapped) in wrap_line_chars(line, content_width).into_iter().enumerate() {
+            output.push(code_panel_row(wrapped, width, index > 0));
         }
     }
     output.push(code_panel_row(Line::default(), width, false));
@@ -1127,7 +1142,8 @@ fn layout_code_panel(block: &CodeBlockBuffer, width: usize, highlight: bool) -> 
 /// a wrapped source line) in `border`, one cell of padding, the content, and
 /// enough trailing padding to carry the surface tint to the full width. A
 /// span that brings its own background (diff add/remove tints) keeps it; the
-/// surface only fills spans that have none.
+/// surface only fills spans that have none. A width too narrow for the rail
+/// itself truncates like any other row rather than overflowing.
 pub(crate) fn code_panel_row(content: Line, width: usize, continuation: bool) -> Line {
     let rail = if continuation {
         CODE_PANEL_WRAP_GUTTER
@@ -1148,6 +1164,9 @@ pub(crate) fn code_panel_row(content: Line, width: usize, continuation: bool) ->
         " ".repeat(width.saturating_sub(CODE_PANEL_INSET + content_width)),
         surface(normal()),
     );
+    if width <= CODE_PANEL_INSET {
+        return truncate_line(row, width);
+    }
     row
 }
 

@@ -1,4 +1,6 @@
 use super::*;
+use crate::render::Span;
+use markdown::{CODE_PANEL_INSET, panel_content_width, panel_rows};
 use qq_client::state::ToolCallTiming;
 
 /// Runs with more than this many quiet tool calls fold into one summary row.
@@ -19,6 +21,13 @@ pub(super) const TOOL_SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const FOLD_NAMED_FILES: usize = 3;
 /// Appended to a summary row's metric when the runtime cut the result short.
 const TRUNCATED_SUFFIX: &str = " · truncated";
+/// Detail panels sit at the content column, under the verb, so their rail
+/// lines up with fenced code in prose (which follows the same three-cell
+/// message prefix).
+const TOOL_PANEL_INDENT: &str = "   ";
+/// Rows the panel adds around a call's detail: the top and bottom padding
+/// rows. Content budgets are counted without them.
+pub(super) const TOOL_PANEL_PADDING_ROWS: usize = 2;
 
 /// What the transcript needs to know about a tool call to draw its row,
 /// derived once from the JSON arguments and result and cached by the
@@ -829,21 +838,57 @@ pub(super) fn tool_state_glyph(call: &ToolCallSnapshot, tick: usize) -> (&'stati
 }
 
 /// Errors are the one case where content matters by default: show a bounded
-/// tail of the error text under the gutter line.
+/// tail of the error text in a detail panel under the summary row, in the
+/// `error` color on the panel surface. Empty when the error has no text.
 pub(super) fn tool_error_lines(result: &str, width: usize) -> Vec<Line> {
     let text = bounded_tail(result, MAX_TOOL_ERROR_BYTES);
     let total = text.lines().count();
-    let mut lines = Vec::new();
+    let content_width = tool_panel_content_width(width);
+    let mut body = Vec::with_capacity(MAX_TOOL_ERROR_ROWS + 1);
     if total > MAX_TOOL_ERROR_ROWS || text.len() < result.len() {
-        lines.push(Line::styled("     …", muted()));
+        body.push(Line::styled("…", muted()));
     }
     for line in text.lines().skip(total.saturating_sub(MAX_TOOL_ERROR_ROWS)) {
-        lines.push(truncate_line(
-            Line::styled(format!("     {line}"), failure()),
-            width,
-        ));
+        body.push(truncate_line(Line::styled(line, failure()), content_width));
     }
-    lines
+    if body.is_empty() {
+        return body;
+    }
+    tool_panel_rows(body, None, width)
+}
+
+/// A tool detail panel: the shared code panel (`markdown::panel_rows`) at the
+/// content column, so its rail lines up with fenced code in prose. The
+/// margin before the rail stays on the terminal background; only the panel
+/// itself is tinted. Widths too narrow for margin plus rail truncate every
+/// row rather than overflowing.
+fn tool_panel_rows(
+    body: impl IntoIterator<Item = Line>,
+    label: Option<&str>,
+    width: usize,
+) -> Vec<Line> {
+    let mut rows = panel_rows(body, label, width.saturating_sub(TOOL_PANEL_INDENT.len()));
+    for row in &mut rows {
+        row.spans.insert(
+            0,
+            Span {
+                text: TOOL_PANEL_INDENT.to_owned(),
+                style: normal(),
+            },
+        );
+    }
+    if width <= TOOL_PANEL_INDENT.len() + CODE_PANEL_INSET {
+        rows = rows
+            .into_iter()
+            .map(|row| truncate_line(row, width))
+            .collect();
+    }
+    rows
+}
+
+/// Columns a tool detail panel at `width` leaves for content.
+fn tool_panel_content_width(width: usize) -> usize {
+    panel_content_width(width.saturating_sub(TOOL_PANEL_INDENT.len()))
 }
 
 /// `HH:MM:SS` in UTC from server milliseconds. Local-time rendering waits on
@@ -858,11 +903,13 @@ pub(crate) fn format_clock(ms: u64) -> String {
     )
 }
 
-/// Expanded detail: the timing line, then what the call produced. Known
-/// tools never show their JSON: reads and searches show the head of the
-/// result, edits show the diff head-first with line numbers, and commands
-/// show the tail of their output. Unknown and MCP tools list arguments as
-/// `key: value` rows before the result tail.
+/// Expanded detail: the timing line, then what the call produced inside a
+/// detail panel. Known tools never show their JSON: reads and searches show
+/// the head of the result, edits show the diff head-first with line numbers,
+/// and commands show the tail of their output. Unknown and MCP tools list
+/// arguments as `key: value` rows before the result tail, one blank panel
+/// row between the two. The panel adds [`TOOL_PANEL_PADDING_ROWS`] around a
+/// body and is absent when there is nothing to show.
 pub(super) fn tool_expanded_lines(
     call: &ToolCallSnapshot,
     context: ToolRowContext<'_>,
@@ -874,7 +921,7 @@ pub(super) fn tool_expanded_lines(
     let running = call.state == ToolCallState::Running;
     // The timing line answers "is this new, or am I still waiting on the
     // same thing?": wall-clock start, then finish or a live elapsed clock,
-    // then when output last arrived.
+    // then when output last arrived. It stays outside the panel.
     let mut when = Line::styled("     ", muted());
     let mut fields = Vec::new();
     if let Some(started) = timing.started_at_ms {
@@ -896,65 +943,77 @@ pub(super) fn tool_expanded_lines(
         when.push(fields.join(" · "), muted());
         lines.push(truncate_line(when, width));
     }
+    let content_width = tool_panel_content_width(width);
+    let mut body: Vec<Line> = Vec::new();
     if row.raw_name {
         for (shown, (key, value)) in row.arguments.iter().enumerate() {
             if shown == MAX_TOOL_ARGUMENT_ROWS {
-                lines.push(Line::styled("     …", muted()));
+                body.push(Line::styled("…", muted()));
                 break;
             }
-            let mut line = Line::styled(format!("     {key}: "), muted());
-            line.push(preview(value, width.saturating_sub(line.width())), normal());
-            lines.push(truncate_line(line, width));
+            let mut line = Line::styled(format!("{key}: "), muted());
+            line.push(
+                preview(value, content_width.saturating_sub(line.width())),
+                normal(),
+            );
+            body.push(truncate_line(line, content_width));
         }
     }
-    if let Some(diff) = &row.diff {
-        lines.extend(diff_lines(diff, MAX_TOOL_RESULT_ROWS, width));
-        return lines;
-    }
-    let Some(result) = call.result.as_deref().filter(|_| !call.is_error) else {
-        return lines;
+    let result = if let Some(diff) = &row.diff {
+        if !body.is_empty() {
+            body.push(Line::default());
+        }
+        body.extend(diff_lines(diff, MAX_TOOL_RESULT_ROWS, content_width));
+        None
+    } else {
+        call.result.as_deref().filter(|_| !call.is_error)
     };
-    let result = strip_header(result, header_word(&call.name));
-    match row.body {
-        ResultBody::Head => {
-            let total = result.lines().count();
-            for line in result
-                .lines()
-                .filter(|line| !is_marker_line(line))
-                .take(MAX_TOOL_RESULT_ROWS)
-            {
-                lines.push(truncate_line(
-                    Line::styled(format!("     {}", preview(line, width)), muted()),
-                    width,
-                ));
-            }
-            if total > MAX_TOOL_RESULT_ROWS {
-                lines.push(Line::styled(
-                    format!(
-                        "     … {} more",
-                        count_noun(total - MAX_TOOL_RESULT_ROWS, "line", "lines")
-                    ),
-                    muted(),
-                ));
-            }
+    if let Some(result) = result {
+        let result = strip_header(result, header_word(&call.name));
+        if !body.is_empty() && !result.is_empty() {
+            body.push(Line::default());
         }
-        ResultBody::Tail => {
-            let text = bounded_tail(result, MAX_TOOL_DETAIL_BYTES);
-            let total = text.lines().count();
-            if total > MAX_TOOL_RESULT_ROWS || text.len() < result.len() {
-                lines.push(Line::styled("     …", muted()));
+        match row.body {
+            ResultBody::Head => {
+                let total = result.lines().count();
+                for line in result
+                    .lines()
+                    .filter(|line| !is_marker_line(line))
+                    .take(MAX_TOOL_RESULT_ROWS)
+                {
+                    body.push(Line::styled(preview(line, content_width), muted()));
+                }
+                if total > MAX_TOOL_RESULT_ROWS {
+                    body.push(Line::styled(
+                        format!(
+                            "… {} more",
+                            count_noun(total - MAX_TOOL_RESULT_ROWS, "line", "lines")
+                        ),
+                        muted(),
+                    ));
+                }
             }
-            for line in text
-                .lines()
-                .skip(total.saturating_sub(MAX_TOOL_RESULT_ROWS))
-            {
-                lines.push(truncate_line(
-                    Line::styled(format!("     {}", preview(line, width)), muted()),
-                    width,
-                ));
+            ResultBody::Tail => {
+                let text = bounded_tail(result, MAX_TOOL_DETAIL_BYTES);
+                let total = text.lines().count();
+                if total > MAX_TOOL_RESULT_ROWS || text.len() < result.len() {
+                    body.push(Line::styled("…", muted()));
+                }
+                for line in text
+                    .lines()
+                    .skip(total.saturating_sub(MAX_TOOL_RESULT_ROWS))
+                {
+                    body.push(Line::styled(preview(line, content_width), muted()));
+                }
             }
         }
     }
+    if body.is_empty() {
+        return lines;
+    }
+    // No label: the summary row above already names the tool and subject,
+    // and a language tag would need a grammar lookup per frame.
+    lines.extend(tool_panel_rows(body, None, width));
     lines
 }
 
@@ -1011,30 +1070,38 @@ pub(crate) fn diff_lines(diff: &str, max_rows: usize, width: usize) -> Vec<Line>
 }
 
 /// The last few complete lines of a running call's streamed output, muted
-/// and literal (character wrap, never reflowed) under the call's one-liner.
-/// Only whole lines render: a chunk may end mid-line, and a partial line
-/// reads as garbage until its newline arrives.
+/// and literal (character wrap, never reflowed) in a detail panel under the
+/// call's one-liner. Only whole lines render: a chunk may end mid-line, and
+/// a partial line reads as garbage until its newline arrives. The panel's
+/// padding rows are present from the first chunk, so a frame only grows by
+/// the rows the tail itself adds.
 pub(super) fn tool_live_output_lines(output: &str, width: usize) -> Vec<Line> {
     let complete = &output[..output.rfind('\n').map_or(0, |index| index + 1)];
-    let content_width = width.saturating_sub(5).max(1);
+    if complete.is_empty() {
+        return Vec::new();
+    }
     let total = complete.lines().count();
-    let mut rows = Vec::new();
-    for line in complete
-        .lines()
-        .skip(total.saturating_sub(MAX_LIVE_TAIL_ROWS))
-    {
-        let safe = line
-            .chars()
-            .filter_map(terminal_safe_character)
-            .collect::<String>();
-        rows.extend(wrap_line_chars(Line::styled(safe, muted()), content_width));
-    }
-    // Long lines wrap into extra rows; keep the tail bounded regardless.
-    let excess = rows.len().saturating_sub(MAX_LIVE_TAIL_ROWS);
+    let mut rows = tool_panel_rows(
+        complete
+            .lines()
+            .skip(total.saturating_sub(MAX_LIVE_TAIL_ROWS))
+            .map(|line| {
+                let safe = line
+                    .chars()
+                    .filter_map(terminal_safe_character)
+                    .collect::<String>();
+                Line::styled(safe, muted())
+            }),
+        None,
+        width,
+    );
+    // Long lines wrap into extra rows; keep the tail bounded regardless. The
+    // oldest content rows go, right after the top padding row.
+    let excess = (rows.len() - TOOL_PANEL_PADDING_ROWS).saturating_sub(MAX_LIVE_TAIL_ROWS);
     if excess > 0 {
-        rows.drain(..excess);
+        rows.drain(1..1 + excess);
     }
-    indent_lines(rows, "     ", muted(), width)
+    rows
 }
 
 /// Whether text is unified-diff-shaped: a hunk header, or both added and

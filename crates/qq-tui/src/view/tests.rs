@@ -5,7 +5,7 @@ use qq_protocol::{
     WorkspaceSnapshot,
 };
 
-use qq_client::state::Group;
+use qq_client::state::{Group, ToolCallTiming};
 
 use super::*;
 use crate::{
@@ -15,6 +15,7 @@ use crate::{
     render::{code_keyword, success, surface, surface_color},
     theme::Palette,
     view::markdown::{code_panel_row, tests::style_of},
+    view::tools::TOOL_PANEL_PADDING_ROWS,
 };
 
 fn completed_message(byte: u8, output: String) -> MessageSnapshot {
@@ -466,10 +467,12 @@ fn completed_edit_results_color_diff_shaped_content_at_expanded_detail() {
             .find(|span| span.text.contains(needle))
             .map(|span| span.style)
     };
-    assert_eq!(style_of(&lines, "@@ -1 +1 @@"), Some(muted()));
+    // Inside the detail panel: the diff tints win over the surface, and
+    // spans without their own background take it.
+    assert_eq!(style_of(&lines, "@@ -1 +1 @@"), Some(surface(muted())));
     assert_eq!(style_of(&lines, "-old"), Some(diff_line_style("-")));
     assert_eq!(style_of(&lines, "+new"), Some(diff_line_style("+")));
-    assert_eq!(style_of(&lines, " context"), Some(normal()));
+    assert_eq!(style_of(&lines, " context"), Some(surface(normal())));
 
     // Today's summary results are not diff-shaped and keep the raw style.
     let summary_call = tool_call_snapshot(
@@ -488,7 +491,10 @@ fn completed_edit_results_color_diff_shaped_content_at_expanded_detail() {
         80,
         &|_, _| Vec::new(),
     );
-    assert_eq!(style_of(&lines, "Edited src/lib.rs"), Some(muted()));
+    assert_eq!(
+        style_of(&lines, "Edited src/lib.rs"),
+        Some(surface(muted()))
+    );
 }
 
 #[test]
@@ -564,25 +570,33 @@ fn running_calls_show_a_live_output_tail_of_complete_lines() {
             &|_, _| Vec::new(),
         ));
         assert!(rows[0].contains("Run"), "the spinner one-liner stays");
-        let tail_start = rows.len() - MAX_LIVE_TAIL_ROWS;
+        // The tail sits in a detail panel: a blank surface row above and
+        // below the content rows (U7).
+        let tail_start = rows.len() - MAX_LIVE_TAIL_ROWS - TOOL_PANEL_PADDING_ROWS;
+        let tail: Vec<String> = rows[tail_start..]
+            .iter()
+            .map(|row| row.trim_end().to_owned())
+            .collect();
         assert_eq!(
-            &rows[tail_start..],
+            tail,
             [
-                "     two",
-                "     three",
-                "     four",
-                "     five",
-                "     six",
+                "   ┃",
+                "   ┃  two",
+                "   ┃  three",
+                "   ┃  four",
+                "   ┃  five",
+                "   ┃  six",
                 // Control characters are stripped; the mid-line chunk
                 // tail stays hidden until its newline arrives.
-                "     seven bell",
+                "   ┃  seven bell",
+                "   ┃",
             ]
         );
         assert!(!rows.iter().any(|row| row.contains("partial")));
     }
 
-    // Overlong lines wrap literally at the character level and the tail
-    // stays bounded in rows.
+    // Overlong lines wrap literally at the character level (the wrap mark
+    // in the gutter) and the tail stays bounded in rows.
     let mut live = HashMap::new();
     live.insert(call.id, format!("{}\n", "x".repeat(40)));
     let rows = frame_rows(&render_tool_calls_simple(
@@ -593,9 +607,9 @@ fn running_calls_show_a_live_output_tail_of_complete_lines() {
         20,
         &|_, _| Vec::new(),
     ));
-    assert_eq!(rows[1], format!("     {}", "x".repeat(15)));
-    assert_eq!(rows[2], format!("     {}", "x".repeat(15)));
-    assert!(rows.len() <= 1 + MAX_LIVE_TAIL_ROWS);
+    assert_eq!(rows[2], format!("   ┃  {}", "x".repeat(14)));
+    assert_eq!(rows[3], format!("   ↪  {}", "x".repeat(14)));
+    assert!(rows.len() <= 1 + MAX_LIVE_TAIL_ROWS + TOOL_PANEL_PADDING_ROWS);
 
     // Calls that are no longer running render no tail even if a stale
     // buffer lingers.
@@ -995,7 +1009,11 @@ fn error_results_expand_under_the_summary_by_default() {
     ));
 
     assert_eq!(squash(&rows[0]), " ✕ Read gone.txt");
-    assert_eq!(rows[1], "     path is not a file");
+    // The error tail is a detail panel: padding row, content, padding row.
+    assert_eq!(rows.len(), 1 + 1 + TOOL_PANEL_PADDING_ROWS);
+    assert_eq!(rows[1].trim_end(), "   ┃");
+    assert_eq!(rows[2].trim_end(), "   ┃  path is not a file");
+    assert_eq!(rows[3].trim_end(), "   ┃");
 }
 
 #[test]
@@ -1218,7 +1236,11 @@ fn expanding_a_read_shows_the_head_of_the_file_and_never_its_json() {
         KeyModifiers::NONE,
     )));
     let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
-    let text = rows.join("\n");
+    let text = rows
+        .iter()
+        .map(|row| row.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(text.contains("line 1\n"), "head first: {text}");
     assert!(
         text.contains(&format!("line {MAX_TOOL_RESULT_ROWS}")),
@@ -3251,6 +3273,371 @@ fn diffs_render_head_first_with_new_file_line_numbers() {
     assert_eq!(rows.len(), 6);
     assert!(rows[1].contains("+line 0"));
     assert!(rows[5].contains("… 26 lines more"), "{:?}", rows[5]);
+}
+
+/// The rows of one expanded call rendered alone at `width` with a finished
+/// clock, so the timing line is present.
+fn expanded_call_rows(call: &ToolCallSnapshot, width: usize) -> Vec<Line> {
+    let row = ToolRow::derive(call);
+    let context = ToolRowContext {
+        row: &row,
+        clock: RowClock {
+            timing: ToolCallTiming {
+                started_at_ms: Some(43_451_000),
+                finished_at_ms: Some(43_454_000),
+                last_output_at_ms: None,
+            },
+            now_ms: 43_454_000,
+        },
+        expanded: true,
+        inline_detail: true,
+        fold: false,
+        selected: false,
+    };
+    tool_expanded_lines(call, context, width)
+}
+
+/// `line` is a tool detail panel row: the three-cell margin before the rail
+/// is on the terminal background, the rail is `border` on the surface, and
+/// every span after it carries a background (the surface, or a diff tint
+/// that wins over it).
+fn is_panel_row(line: &Line) -> bool {
+    let mut spans = line.spans.iter();
+    spans
+        .next()
+        .is_some_and(|margin| margin.text == "   " && margin.style.background.is_none())
+        && spans.next().is_some_and(|rail| {
+            (rail.text == "┃ " || rail.text == "↪ ") && rail.style == surface(border())
+        })
+        && spans.all(|span| span.style.background.is_some())
+}
+
+#[test]
+fn expanded_read_detail_is_a_timing_line_above_a_surface_panel() {
+    let body = (1..=5)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let call = tool_call_snapshot(
+        1,
+        "read_file",
+        r#"{"path":"note.txt"}"#,
+        ToolCallState::Completed,
+        Some(&body),
+        false,
+    );
+    let width = 40;
+    let lines = expanded_call_rows(&call, width);
+    let rows = frame_rows(&lines);
+
+    // The timing line stays muted, outside the panel.
+    assert_eq!(rows[0].trim_end(), "     started 12:04:11 · → 12:04:14");
+    assert!(
+        lines[0].spans.iter().all(|span| span.style == muted()),
+        "{:?}",
+        lines[0]
+    );
+    // Then the panel: blank top row, content, blank bottom row, every row
+    // gutter-led and padded to the width on the surface.
+    let panel = &lines[1..];
+    assert_eq!(panel.len(), 5 + TOOL_PANEL_PADDING_ROWS);
+    for line in panel {
+        assert!(is_panel_row(line), "{line:?}");
+        assert_eq!(line.width(), width);
+        assert_eq!(line.spans[1].text, "┃ ");
+        assert_eq!(line.spans[1].style, surface(border()));
+    }
+    assert_eq!(rows[1].trim_end(), "   ┃");
+    assert_eq!(rows[2].trim_end(), "   ┃  line 1");
+    assert_eq!(rows[6].trim_end(), "   ┃  line 5");
+    assert_eq!(rows[7].trim_end(), "   ┃");
+    // The timing line is the only detail row off the surface.
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .all(|span| span.style.background.is_none())
+    );
+}
+
+#[test]
+fn live_output_panels_keep_their_padding_rows_as_the_tail_grows() {
+    let call = tool_call_snapshot(
+        3,
+        "shell",
+        r#"{"command":"cargo build"}"#,
+        ToolCallState::Running,
+        None,
+        false,
+    );
+    let render = |output: &str| {
+        let mut live = HashMap::new();
+        live.insert(call.id, output.to_owned());
+        render_tool_calls_simple(&[&call], &live, SimpleDetail::Rows, 0, 60, &|_, _| {
+            Vec::new()
+        })
+    };
+    // The first complete line already has both padding rows.
+    let first = render("Compiling qq-core\n");
+    assert_eq!(first.len(), 1 + 1 + TOOL_PANEL_PADDING_ROWS);
+    assert!(first[1..].iter().all(is_panel_row), "{first:?}");
+    assert!(
+        first[1].spans[2..]
+            .iter()
+            .all(|span| span.text.trim().is_empty())
+    );
+    assert!(
+        first[3].spans[2..]
+            .iter()
+            .all(|span| span.text.trim().is_empty())
+    );
+
+    // Appending a line adds exactly one content row; the frame around it
+    // is unchanged.
+    let second = render("Compiling qq-core\nCompiling qq-tui\n");
+    assert_eq!(second.len(), first.len() + 1);
+    assert_eq!(second[0], first[0]);
+    assert_eq!(second[1], first[1], "top padding row persists");
+    assert_eq!(second[2], first[2], "earlier content stays put");
+    assert_eq!(second.last(), first.last(), "bottom padding row persists");
+    assert!(frame_rows(&second)[3].contains("Compiling qq-tui"));
+
+    // Past the budget the panel stops growing: content rows are capped and
+    // the padding rows stay.
+    let many: String = (0..20).map(|n| format!("line {n}\n")).collect();
+    let capped = render(&many);
+    assert_eq!(
+        capped.len(),
+        1 + MAX_LIVE_TAIL_ROWS + TOOL_PANEL_PADDING_ROWS
+    );
+    let rows = frame_rows(&capped);
+    assert_eq!(rows[1].trim_end(), "   ┃");
+    assert!(rows[2].contains("line 14"), "{rows:?}");
+    assert!(rows[7].contains("line 19"), "{rows:?}");
+    assert_eq!(rows[8].trim_end(), "   ┃");
+
+    // Nothing complete yet: no panel, so a frame with only a partial line
+    // does not paint an empty slab.
+    assert_eq!(render("Compil").len(), 1);
+}
+
+#[test]
+fn error_tails_keep_the_error_color_on_the_panel_surface() {
+    let call = tool_call_snapshot(
+        2,
+        "shell",
+        r#"{"command":"cargo test"}"#,
+        ToolCallState::Failed,
+        Some("error[E0308]: mismatched types\n --> src/lib.rs:4:5"),
+        true,
+    );
+    let lines = render_tool_calls_simple(
+        &[&call],
+        &HashMap::new(),
+        SimpleDetail::Rows,
+        0,
+        60,
+        &|_, _| Vec::new(),
+    );
+    assert_eq!(lines.len(), 1 + 2 + TOOL_PANEL_PADDING_ROWS);
+    assert!(lines[1..].iter().all(is_panel_row), "{lines:?}");
+    for needle in ["error[E0308]: mismatched types", " --> src/lib.rs:4:5"] {
+        assert_eq!(
+            style_of(&lines, needle),
+            Some(surface(failure())),
+            "{needle}"
+        );
+    }
+    // The over-budget marker is muted, not error, and inside the panel too.
+    let long: String = (0..10).map(|n| format!("e{n}\n")).collect();
+    let mut call = call;
+    call.result = Some(long);
+    let lines = render_tool_calls_simple(
+        &[&call],
+        &HashMap::new(),
+        SimpleDetail::Rows,
+        0,
+        60,
+        &|_, _| Vec::new(),
+    );
+    assert_eq!(
+        lines.len(),
+        1 + 1 + MAX_TOOL_ERROR_ROWS + TOOL_PANEL_PADDING_ROWS
+    );
+    assert_eq!(style_of(&lines, "…"), Some(surface(muted())));
+    assert!(frame_rows(&lines)[3].contains("e4"), "tail of the error");
+}
+
+#[test]
+fn edit_diffs_keep_line_numbers_and_tints_inside_the_panel() {
+    let mut call = tool_call_snapshot(
+        4,
+        "edit_file",
+        r#"{"path":"src/lib.rs"}"#,
+        ToolCallState::Completed,
+        Some("edit ok files=1 edits=1"),
+        false,
+    );
+    call.display = Some(ToolCallDisplay::Diff {
+        path: "src/lib.rs".to_owned(),
+        diff: "@@ -10,3 +10,3 @@\n context\n-old\n+new\n tail\n".to_owned(),
+    });
+    let palette = crate::theme::active();
+    let lines = expanded_call_rows(&call, 60);
+    let rows = frame_rows(&lines);
+    assert_eq!(
+        rows[1..]
+            .iter()
+            .map(|row| squash(row).trim_end().to_owned())
+            .collect::<Vec<_>>(),
+        [
+            " ┃",
+            " ┃ @@ -10,3 +10,3 @@",
+            " ┃ 10 context",
+            " ┃ -old",
+            " ┃ 11 +new",
+            " ┃ 12 tail",
+            " ┃",
+        ]
+    );
+    assert!(lines[1..].iter().all(is_panel_row), "{lines:?}");
+    let plus = &lines[4];
+    assert_eq!(plus.spans[1].style, surface(border()), "gutter on surface");
+    assert_eq!(
+        style_of(&lines, "+new").map(|style| style.background),
+        Some(Some(palette.diff_add_bg))
+    );
+    assert_eq!(
+        style_of(&lines, "-old").map(|style| style.background),
+        Some(Some(palette.diff_del_bg))
+    );
+    // Line numbers are muted on the surface; the trailing padding returns
+    // to the surface so the slab stays solid.
+    assert_eq!(style_of(&lines, " 11 "), Some(surface(muted())));
+    assert_eq!(
+        plus.spans.last().map(|span| span.style.background),
+        Some(Some(surface_color()))
+    );
+    assert!(lines.iter().all(|line| line.width() <= 60));
+}
+
+#[test]
+fn wrapped_detail_rows_carry_the_wrap_mark_in_the_gutter() {
+    let call = tool_call_snapshot(
+        3,
+        "shell",
+        r#"{"command":"seq"}"#,
+        ToolCallState::Running,
+        None,
+        false,
+    );
+    let mut live = HashMap::new();
+    live.insert(call.id, format!("{}\nshort\n", "y".repeat(30)));
+    let lines = render_tool_calls_simple(&[&call], &live, SimpleDetail::Rows, 0, 20, &|_, _| {
+        Vec::new()
+    });
+    let rows: Vec<String> = frame_rows(&lines)
+        .iter()
+        .map(|row| row.trim_end().to_owned())
+        .collect();
+    assert_eq!(
+        &rows[1..],
+        [
+            "   ┃",
+            "   ┃  yyyyyyyyyyyyyy",
+            "   ↪  yyyyyyyyyyyyyy",
+            "   ↪  yy",
+            "   ┃  short",
+            "   ┃",
+        ]
+    );
+    for line in &lines[1..] {
+        assert!(is_panel_row(line), "{line:?}");
+        assert_eq!(line.spans[1].style, surface(border()));
+        assert_eq!(line.width(), 20);
+    }
+}
+
+#[test]
+fn the_panel_adds_exactly_its_padding_rows_to_every_detail_budget() {
+    // A Read past the head budget: MAX rows + the "more" marker.
+    let body = (1..=40)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let read = tool_call_snapshot(
+        1,
+        "read_file",
+        r#"{"path":"a.rs"}"#,
+        ToolCallState::Completed,
+        Some(&body),
+        false,
+    );
+    let lines = expanded_call_rows(&read, 80);
+    assert_eq!(
+        lines.len(),
+        1 + MAX_TOOL_RESULT_ROWS + 1 + TOOL_PANEL_PADDING_ROWS,
+        "timing + head budget + more marker + padding"
+    );
+    let text = frame_text(&lines);
+    assert!(text.contains(&format!("line {MAX_TOOL_RESULT_ROWS}")));
+    assert!(!text.contains(&format!("line {}", MAX_TOOL_RESULT_ROWS + 1)));
+
+    // A command past the tail budget: the "…" marker + MAX rows.
+    let run = tool_call_snapshot(
+        2,
+        "shell",
+        r#"{"command":"seq 40"}"#,
+        ToolCallState::Completed,
+        Some(&body),
+        false,
+    );
+    let lines = expanded_call_rows(&run, 80);
+    assert_eq!(
+        lines.len(),
+        1 + 1 + MAX_TOOL_RESULT_ROWS + TOOL_PANEL_PADDING_ROWS
+    );
+
+    // An MCP call: argument rows, a blank separator, the result, all in one
+    // panel; more arguments than the budget end in a marker.
+    let arguments = (0..12)
+        .map(|n| format!("\"k{n}\":\"v{n}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mcp = tool_call_snapshot(
+        3,
+        "mcp__srv__tool",
+        &format!("{{{arguments}}}"),
+        ToolCallState::Completed,
+        Some("ok"),
+        false,
+    );
+    let lines = expanded_call_rows(&mcp, 80);
+    assert!(lines[1..].iter().all(is_panel_row), "{lines:?}");
+    assert_eq!(
+        lines.len(),
+        1 + MAX_TOOL_ARGUMENT_ROWS + 1 + 1 + 1 + TOOL_PANEL_PADDING_ROWS,
+        "timing + argument budget + marker + separator + result + padding"
+    );
+    let rows: Vec<String> = frame_rows(&lines)
+        .iter()
+        .map(|row| row.trim_end().to_owned())
+        .collect();
+    assert_eq!(rows[2], "   ┃  k0: v0");
+    assert_eq!(rows[1 + MAX_TOOL_ARGUMENT_ROWS + 1], "   ┃  …");
+    assert_eq!(rows[1 + MAX_TOOL_ARGUMENT_ROWS + 2], "   ┃", "separator");
+    assert_eq!(rows[1 + MAX_TOOL_ARGUMENT_ROWS + 3], "   ┃  ok");
+
+    // No body at all: the timing line alone, no empty slab.
+    let quiet = tool_call_snapshot(
+        4,
+        "spawn_agent",
+        r#"{"task":"look around"}"#,
+        ToolCallState::Completed,
+        Some(""),
+        false,
+    );
+    assert_eq!(expanded_call_rows(&quiet, 80).len(), 1);
 }
 
 #[test]
