@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | RR1, RR2 in review (stacked on the plan PR). Next: RR3 |
+| Now | RR1–RR3 in review (stacked on the plan PR). Next: RR5 then RR4 |
 | Shipped | — |
 | Open | RR1–RR12 |
 | Ledger | [`progress/run-reliability.md`](./progress/run-reliability.md) |

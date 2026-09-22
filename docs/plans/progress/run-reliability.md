@@ -8,7 +8,7 @@ appended below, newest last.
 | --- | --- | --- | --- | --- |
 | RR1 | Checkpoint turn tolerates a tool call | In review | `feat/rr1-checkpoint-tolerance` | 5 runs / 120 min in the audit |
 | RR2 | Slash/empty-prompt validation at admission | In review | `fix/rr2-slash-admission` | 3 slash runs; the 5 "messages must not be empty" runs predate #27 |
-| RR3 | Jev exhaustion is an outcome, not a failure | Planned | | 9 runs |
+| RR3 | Jev exhaustion is an outcome, not a failure | In review | `fix/rr3-jev-outcome` | 9 runs |
 | RR4 | Turn-level recovery; `Paused`; `TurnRetry`; ADR-0040 superseding 0005 | Planned | | 12 runs / 4.5 h; independent review |
 | RR5 | `Retry-After` ≤ 60 s; 529 retryable; HTTP-date | Planned | | provider crate; minimal profile |
 | RR6 | Reactive overflow; un-wedge admission (mid-run compaction shipped in #92) | Planned | | 9 runs / 3 sessions; independent review |
@@ -70,3 +70,19 @@ only the workspace index can decide them, and the TUI already completes
 from that index. Regression:
 `unresolvable_slash_prompts_are_refused_at_admission_without_a_run_row`,
 `slash_clear_is_a_client_alias_for_a_new_session`.
+
+### 2026-09-21 — RR3 Jev verdicts are evidence
+
+Six `RunFailureKind::Policy` exits in the run loop turned a reviewer's
+opinion into a failed run: two-RED exhaustion (final and tool phases),
+reviewer `Unavailable` (timeout/malformed reply, final and tool phases), and
+the two "exceeded the exact review bound" cases. All six now record the
+`CheckpointReviewed` event (and the `[JEV …]` marker on the retained result
+for tool phases) and let the run continue; RED still redirects while
+`CheckpointContext::repair()` has an attempt left. The 32-request limit and
+cost admission stay failures: those are harness bounds. Tests renamed to
+match (`…_and_completes`), the repeated-RED loop case now asserts 32 durable
+Contradicted verdicts and no "correction attempts" failure, and
+`a_final_candidate_rejected_twice_completes_with_the_verdicts_on_record`
+is the regression for the 9 audited runs. The operator can re-enable
+`jev_review` without a disagreement costing the run.

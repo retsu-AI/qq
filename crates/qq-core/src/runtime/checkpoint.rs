@@ -104,11 +104,17 @@ impl CheckpointContext {
     }
 
     pub(crate) fn repair(&mut self) -> bool {
-        if self.repairs >= 2 {
+        if self.repairs_exhausted() {
             return false;
         }
         self.repairs += 1;
         true
+    }
+
+    /// Both correction attempts are spent: later RED verdicts are recorded
+    /// as evidence and no longer redirect the run.
+    pub(crate) const fn repairs_exhausted(&self) -> bool {
+        self.repairs >= 2
     }
 
     pub(crate) fn steer(&mut self, text: &str) {
