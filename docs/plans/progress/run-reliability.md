@@ -12,7 +12,7 @@ appended below, newest last.
 | RR4 | Turn-level recovery; `Paused`; `TurnRetry`; ADR-0040 superseding 0005 | Shipped (#120) | [ENG-867](https://linear.app/retsu-ai/issue/ENG-867) | `feat/rr4-turn-recovery` | 12 runs / 4.5 h; protocol 25 → 26 |
 | RR5 | `Retry-After` ≤ 60 s; 529 retryable; HTTP-date | Shipped (#118) | [ENG-866](https://linear.app/retsu-ai/issue/ENG-866) | `fix/rr5-retry-after` | provider crate; minimal profile green |
 | RR6 | Reactive overflow; un-wedge admission (mid-run compaction shipped in #92) | In review | [ENG-868](https://linear.app/retsu-ai/issue/ENG-868) | `feat/eng-868-rr6-reactive-overflow` | 9 runs / 3 sessions; independent review |
-| RR7 | Estimate calibration from reported usage | Planned | [ENG-869](https://linear.app/retsu-ai/issue/ENG-869) | | deferred from F04 |
+| RR7 | Estimate calibration from reported usage | In review | [ENG-869](https://linear.app/retsu-ai/issue/ENG-869) | `feat/eng-869-rr7-estimate-calibration` | deferred from F04 |
 | RR8 | Output-token handling and persisted `max_output_tokens` floor | Planned | [ENG-870](https://linear.app/retsu-ai/issue/ENG-870) | | 5 runs |
 | RR9 | Approval deadline policy | Planned | [ENG-871](https://linear.app/retsu-ai/issue/ENG-871) | | 4 timeouts |
 | RR10 | Lenient tool-argument decode | Planned | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872) | | ~11 wasted turns |
@@ -168,3 +168,23 @@ four prompts still in the store). Five fixtures that asserted the old
 `Sequence` scripts account for the summarizer's turn retries. New harness
 script `ShellRepeatedlyWithProviderOverflow`. Independent review requested
 (touches `sessions/`).
+
+### 2026-09-22 — RR7 estimate calibration (ENG-869)
+
+The measured-occupancy chain already seeds from the provider's reported
+input tokens; what it charged for byte deltas was the fixed four
+bytes/token, so on a code-heavy transcript (~3.1 B/t) every appended turn
+was under-charged by ~22 % and the estimate drifted low until the provider
+rejected. `adjust_measured_tokens` now charges and credits at
+`calibrated_bytes_per_token(measured_tokens, measured_bytes)`: the ratio
+the measurement itself implies, rounded to nearest, clamped to 2–6,
+defaulting to 4 below 2 000 measured tokens (noise floor). The run loop
+calibrates once against the whole measured request and applies each
+component delta via `adjust_measured_tokens_at`. The raw byte estimate for
+unmeasured requests is unchanged (that is the first request of a session;
+RR6 covers a provider rejection of it). No schema or protocol change. Tests:
+`deltas_are_charged_at_the_ratio_the_measurement_established`, the
+acceptance fixture
+`calibration_holds_the_estimate_within_ten_percent_on_a_code_heavy_transcript`
+(eight turns at 3.1 B/t, worst error < 10 %; the default would be 22 %
+under per delta), plus the existing chain and boundary tests.
