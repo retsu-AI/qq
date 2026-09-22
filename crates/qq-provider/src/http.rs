@@ -6,13 +6,14 @@ use reqwest::{
     StatusCode, Url,
     header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER},
 };
-use tokio::time::Instant;
 
 use crate::{
     ProviderError, limits::ByteCounter, request_auth::RequestAuthorizer, sanitize::sanitize_message,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bounds each body read and, because reqwest arms it when the request is
+/// sent and resets it only on a read, also the wait for response headers.
 const READ_TIMEOUT: Duration = Duration::from_secs(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const ERROR_BODY_BYTES_LIMIT: usize = 16 * 1_024;
@@ -38,9 +39,10 @@ pub struct AttemptPolicy {
 }
 
 impl Default for AttemptPolicy {
-    /// Four attempts with 500 ms → 8 s full-jitter exponential backoff inside
-    /// a 30 s budget: enough to ride out an overload blip without holding a
-    /// turn open for minutes.
+    /// Four attempts with 500 ms → 8 s full-jitter exponential backoff whose
+    /// sleeps sum to at most 30 s: enough to ride out an overload blip without
+    /// idling a turn for minutes. Each attempt is bounded by its own connect,
+    /// header, and read deadlines, not by this budget.
     fn default() -> Self {
         Self {
             max_attempts: DEFAULT_ATTEMPTS,
@@ -128,9 +130,10 @@ impl AttemptPolicy {
         }
     }
 
-    /// Returns whether sleeping `delay` still fits inside the total budget.
-    pub(crate) fn can_afford(self, elapsed: Duration, delay: Duration) -> bool {
-        elapsed
+    /// Returns whether sleeping `delay` on top of the backoff already `slept`
+    /// still fits inside the total budget.
+    pub(crate) fn can_afford(self, slept: Duration, delay: Duration) -> bool {
+        slept
             .checked_add(delay)
             .is_some_and(|total| total <= self.total_budget)
     }
@@ -139,10 +142,15 @@ impl AttemptPolicy {
 /// The attempts one logical request has spent, shared between the HTTP
 /// exchange (pre-body retries) and the stream driver (pre-first-event
 /// restarts) so their sum never exceeds the policy.
+///
+/// The time budget counts only the backoff this ledger has granted, never the
+/// time an attempt itself took: a send that stalls for the whole header
+/// deadline is exactly the send worth repeating, and charging its wait to the
+/// budget would leave nothing to retry with.
 #[derive(Debug)]
 pub(crate) struct AttemptLedger {
     policy: AttemptPolicy,
-    started: Instant,
+    slept: Duration,
     attempts: u32,
 }
 
@@ -150,7 +158,7 @@ impl AttemptLedger {
     pub(crate) fn new(policy: AttemptPolicy) -> Self {
         Self {
             policy,
-            started: Instant::now(),
+            slept: Duration::ZERO,
             attempts: 0,
         }
     }
@@ -166,19 +174,27 @@ impl AttemptLedger {
     }
 
     /// The delay to sleep before another attempt, or `None` when the policy
-    /// has no attempt or time left. `retry_after` comes from the provider.
-    pub(crate) fn next_delay(&self, retry_after: Option<Duration>) -> Option<Duration> {
+    /// has no attempt or backoff budget left. A granted delay is charged to
+    /// the budget here, so the caller must sleep it before the next
+    /// `begin_attempt`. `retry_after` comes from the provider.
+    pub(crate) fn next_delay(&mut self, retry_after: Option<Duration>) -> Option<Duration> {
+        self.next_delay_with(retry_after, random_u32())
+    }
+
+    fn next_delay_with(&mut self, retry_after: Option<Duration>, random: u32) -> Option<Duration> {
         if !self.policy.has_remaining_attempt(self.attempts) {
             return None;
         }
         let retry_index = self.attempts.saturating_sub(1);
         let delay = full_jitter(
             self.policy.delay_before_retry(retry_index, retry_after),
-            random_u32(),
+            random,
         );
-        self.policy
-            .can_afford(self.started.elapsed(), delay)
-            .then_some(delay)
+        if !self.policy.can_afford(self.slept, delay) {
+            return None;
+        }
+        self.slept = self.slept.saturating_add(delay);
+        Some(delay)
     }
 }
 
@@ -646,7 +662,10 @@ fn describe_transport(error: &reqwest::Error) -> String {
         } else if error.is_connect() {
             format!("timed out connecting after {}s", CONNECT_TIMEOUT.as_secs())
         } else {
-            "timed out waiting for response headers".to_owned()
+            format!(
+                "timed out waiting for response headers (none within {}s)",
+                READ_TIMEOUT.as_secs()
+            )
         };
     }
 
@@ -910,6 +929,42 @@ mod tests {
         assert!(!policy.can_afford(Duration::from_secs(10), Duration::MAX));
     }
 
+    #[test]
+    fn ledger_charges_only_granted_backoff_to_the_budget() {
+        // Two 1 s sleeps fit a 2 s budget; the third does not, whatever the
+        // attempts themselves cost in wall time.
+        let policy = AttemptPolicy::new(
+            4,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        );
+        let mut ledger = AttemptLedger::new(policy);
+
+        assert_eq!(ledger.begin_attempt(), 1);
+        assert_eq!(
+            ledger.next_delay_with(None, u32::MAX),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(ledger.begin_attempt(), 2);
+        assert_eq!(
+            ledger.next_delay_with(None, u32::MAX),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(ledger.begin_attempt(), 3);
+        assert_eq!(ledger.next_delay_with(None, u32::MAX), None);
+        assert_eq!(ledger.attempts(), 3);
+
+        // Jitter that lands on zero costs nothing, so the attempt cap is what
+        // ends the ledger.
+        let mut free = AttemptLedger::new(policy);
+        for attempt in 1..=3 {
+            assert_eq!(free.begin_attempt(), attempt);
+            assert_eq!(free.next_delay_with(None, 0), Some(Duration::ZERO));
+        }
+        assert_eq!(free.begin_attempt(), 4);
+        assert_eq!(free.next_delay_with(None, 0), None);
+    }
     #[test]
     fn full_jitter_spans_zero_through_delay() {
         let delay = Duration::from_millis(1_000);
@@ -1522,6 +1577,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exchange_retries_a_header_timeout_longer_than_the_budget() {
+        // Regression: the budget used to be measured from the first send, so
+        // an attempt that stalled past it could never be retried, and the
+        // header deadline (READ_TIMEOUT, 300 s) is ten times the 30 s budget.
+        // A request the gateway lost must be resent.
+        let body = b"after-stall".to_vec();
+        let (url, hits, server) = serve_scripted(vec![
+            ScriptedResponse::Stall(Duration::from_millis(400)),
+            ScriptedResponse::http(format!(
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                String::from_utf8(body.clone()).unwrap()
+            )),
+        ]);
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .read_timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let request = client.get(&url).build().unwrap();
+        // The stalled attempt outlives the whole backoff budget.
+        let policy = AttemptPolicy::new(
+            3,
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            Duration::from_millis(20),
+        );
+
+        let outcome =
+            HttpExchange::new(client, RequestAuthorizer::default(), Arc::from(Vec::new()))
+                .with_attempt_policy(policy)
+                .execute_fresh(request, body.len(), messages())
+                .await
+                .unwrap();
+        let ExchangeOutcome::Success(response) = outcome else {
+            panic!("a header timeout then 200 must succeed after retry");
+        };
+        let streamed = response
+            .into_body()
+            .map(|chunk| chunk.unwrap())
+            .collect::<Vec<_>>()
+            .await
+            .concat();
+
+        assert_eq!(streamed, body);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_headers_transport_error_names_the_deadline() {
+        let (url, _hits, server) =
+            serve_scripted(vec![ScriptedResponse::Stall(Duration::from_millis(300))]);
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .read_timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+
+        let error = client.get(&url).send().await.unwrap_err();
+        assert!(error.is_timeout(), "{error:?}");
+        let rendered = transport_error(error, &[]).to_string();
+
+        assert_eq!(
+            rendered,
+            format!(
+                "provider request failed: timed out waiting for response headers (none within {}s)",
+                READ_TIMEOUT.as_secs()
+            )
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn exchange_reauthorizes_on_every_retry_attempt() {
         let secret = "retry-bearer-secret";
         let authorize_hits = Arc::new(AtomicUsize::new(0));
@@ -1593,6 +1722,8 @@ mod tests {
     enum ScriptedResponse {
         Http(Vec<u8>),
         Drop,
+        /// Hold the connection open without answering, then drop it.
+        Stall(Duration),
     }
 
     impl ScriptedResponse {
@@ -1643,6 +1774,15 @@ mod tests {
                     }
                     ScriptedResponse::Drop => {
                         drop(stream);
+                    }
+                    ScriptedResponse::Stall(duration) => {
+                        // Park the connection off the accept loop so the next
+                        // scripted response is served as soon as the client
+                        // gives up and resends.
+                        thread::spawn(move || {
+                            thread::sleep(duration);
+                            drop(stream);
+                        });
                     }
                 }
             }

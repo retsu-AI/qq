@@ -227,7 +227,7 @@ where
                     }
                     Some(Err(error)) if !yielded && is_transient(error.kind()) => {
                         let (next_delay, attempts) = {
-                            let ledger = ledger.lock();
+                            let mut ledger = ledger.lock();
                             (ledger.next_delay(None), ledger.attempts())
                         };
                         match next_delay {
