@@ -22,8 +22,8 @@ use qq_protocol::{
     MessageId, MessageRole, MessageSnapshot, MessageState, ModelSelection, OutputContract,
     PROTOCOL_VERSION, PackSummary, PromptCacheCapabilities, PromptVersion, Question,
     QuestionPreview, ResolvedModel, ResolvedModelVersion, RunActivity, RunFailure, RunFailureKind,
-    RunId, RunLimits, RunOutcome, RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus,
-    ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind, SessionEvent,
+    RunId, RunLimits, RunOutcome, RunPause, RunPlanIdentity, RunPromptIdentity, RunSnapshot,
+    RunStatus, ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind, SessionEvent,
     SessionEventEnvelope, SessionId, SessionStatus, SessionSummary, ShellCommandPreview,
     ShellVerdict, SkillCapabilities, SteeringCapabilities, StoreId, TokenUsage, ToolCallId,
     ToolCallSnapshot, ToolCallState, ToolCapabilities, ToolExposure, ToolHostSummary, WorkspaceId,
@@ -207,7 +207,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 26);
+    assert_eq!(PROTOCOL_VERSION, 27);
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
@@ -721,6 +721,42 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 },
                 usage: None,
                 context_tokens: None,
+                final_output: None,
+            },
+        ),
+    );
+    check(
+        "event_run_turn_retrying",
+        &envelope(
+            22,
+            SessionEvent::RunTurnRetrying {
+                run_id,
+                turn_ordinal: 7,
+                attempt: 2,
+                delay_ms: 4_000,
+                kind: RunFailureKind::ProviderUnavailable,
+                message: "provider returned HTTP 529: overloaded_error".to_owned(),
+            },
+        ),
+    );
+    check(
+        "event_run_finished_paused",
+        &envelope(
+            23,
+            SessionEvent::RunFinished {
+                session: Box::new(summary()),
+                run_id,
+                outcome: RunOutcome::Paused {
+                    pause: Box::new(RunPause {
+                        kind: RunFailureKind::ProviderTransport,
+                        message: "provider request failed: response body: connection reset"
+                            .to_owned(),
+                        turn_ordinal: 7,
+                        attempts: 5,
+                    }),
+                },
+                usage: None,
+                context_tokens: Some(48_000),
                 final_output: None,
             },
         ),

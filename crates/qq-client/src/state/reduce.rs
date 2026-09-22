@@ -461,6 +461,25 @@ impl SessionStore {
                     },
                 });
             }
+            // The partial turn's message was already completed by the turn
+            // commit; the next turn's message continues the same answer.
+            // Surface why the run went quiet.
+            SessionEvent::RunTurnRetrying {
+                attempt,
+                delay_ms,
+                message,
+                ..
+            } => {
+                effects.push(StateEffect::Notice {
+                    session: Some(session_id),
+                    level: NoticeLevel::Warning,
+                    text: format!(
+                        "provider fault; retrying turn in {}s ({attempt}/{}): {message}",
+                        delay_ms.div_ceil(1_000),
+                        qq_protocol::MAX_TURN_RETRIES
+                    ),
+                });
+            }
             // The follow-through of an approve-for-workspace decision. A
             // failure is informational: the session grant already stands.
             SessionEvent::WorkspaceGrantPromoted { outcome, .. } => {
@@ -599,9 +618,9 @@ impl SessionStore {
                     let state = match outcome {
                         RunOutcome::Completed => MessageState::Complete,
                         RunOutcome::Cancelled => MessageState::Cancelled,
-                        RunOutcome::Interrupted | RunOutcome::BudgetExhausted { .. } => {
-                            MessageState::Interrupted
-                        }
+                        RunOutcome::Interrupted
+                        | RunOutcome::BudgetExhausted { .. }
+                        | RunOutcome::Paused { .. } => MessageState::Interrupted,
                         RunOutcome::Failed { .. } => MessageState::Failed,
                     };
                     for message in messages
@@ -642,6 +661,16 @@ impl SessionStore {
                             session: Some(session_id),
                             level: NoticeLevel::Error,
                             text: exhaustion.message.clone(),
+                        });
+                    }
+                    RunOutcome::Paused { pause } => {
+                        effects.push(StateEffect::Notice {
+                            session: Some(session_id),
+                            level: NoticeLevel::Warning,
+                            text: format!(
+                                "paused after {} retries of turn {}: {}; send a prompt to continue",
+                                pause.attempts, pause.turn_ordinal, pause.message
+                            ),
                         });
                     }
                     RunOutcome::Completed | RunOutcome::Cancelled | RunOutcome::Interrupted => {}

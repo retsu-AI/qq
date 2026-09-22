@@ -891,6 +891,9 @@ pub(super) fn interrupt_active_tool_calls(
         RunOutcome::BudgetExhausted { .. } => {
             "Tool execution did not start before the run exhausted its budget."
         }
+        RunOutcome::Paused { .. } => {
+            "Tool execution did not start before the run paused on a provider fault."
+        }
         RunOutcome::Failed { .. } => "Tool execution did not start before the run failed.",
     };
     for (id, execution_started) in ids {

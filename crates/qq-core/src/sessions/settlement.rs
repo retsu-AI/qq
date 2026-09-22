@@ -213,6 +213,7 @@ pub(super) fn settle_run(
             .and_then(|accounting| accounting.final_output.clone()),
         RunOutcome::Cancelled
         | RunOutcome::Interrupted
+        | RunOutcome::Paused { .. }
         | RunOutcome::Failed { .. }
         | RunOutcome::BudgetExhausted { .. } => None,
     };
@@ -1010,7 +1011,8 @@ pub(super) fn recover_interrupted_runs(
              JOIN sessions child ON child.id = child_run.session_id
              JOIN runs owner ON owner.id = child.owner_run_id
              WHERE child_run.status = 'queued'
-               AND owner.status IN ('running', 'completed', 'cancelled', 'failed', 'interrupted')
+               AND owner.status IN ('running', 'completed', 'cancelled', 'failed', 'interrupted',
+                                    'budget_exhausted', 'paused')
              ORDER BY child_run.created_at_ms, child_run.rowid",
     )?;
     let abandoned_children = statement
@@ -1135,6 +1137,9 @@ pub(super) fn outcome_states(outcome: &RunOutcome) -> (&'static str, &'static st
         RunOutcome::Cancelled => ("cancelled", "cancelled"),
         RunOutcome::Interrupted => ("interrupted", "interrupted"),
         RunOutcome::BudgetExhausted { .. } => ("budget_exhausted", "interrupted"),
+        // The transcript stands and the next prompt continues it, so the
+        // message reads as interrupted rather than failed.
+        RunOutcome::Paused { .. } => ("paused", "interrupted"),
         RunOutcome::Failed { .. } => ("failed", "failed"),
     }
 }

@@ -48,6 +48,7 @@ written.
 - [ADR-0036: designed truecolor default theme `ink` with `terminal` ANSI fallback](0036-truecolor-default-theme.md) — Accepted (ENG-851).
 - [ADR-0038: session retention — archive by session, never by row; receipts and cursors outlive their sessions](0038-session-retention.md) — Proposed (ENG-803).
 - [ADR-0039: a run compacts its own turns at a safe boundary with a run-scoped marker](0039-in-run-compaction.md) — Accepted (ENG-793, #92).
+- [ADR-0040: two-phase retry ownership — the provider owns sends, the run owns turns and settles `paused`](0040-two-phase-retry-ownership.md) — Accepted (run-reliability RR4); supersedes ADR-0005 in part.
 
 ## When to write one
 

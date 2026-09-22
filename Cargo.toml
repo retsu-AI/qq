@@ -52,6 +52,7 @@ futures-util = "0.3"
 getrandom = "0.3"
 hmac = "0.12"
 http-body = "1"
+httpdate = "1"
 ignore = "0.4"
 keyring = "4"
 qq-auth = { path = "crates/qq-auth" }

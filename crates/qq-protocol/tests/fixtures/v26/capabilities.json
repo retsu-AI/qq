@@ -16,7 +16,6 @@
     "set_approval_mode",
     "set_session_model",
     "set_session_profile",
-    "set_session_effort",
     "delete_session",
     "prune_sessions",
     "compact_session",

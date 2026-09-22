@@ -408,7 +408,12 @@ pub(super) fn load_accounting_folds(
         let Some(encoded_usage) = encoded_usage else {
             let terminal = matches!(
                 status.as_str(),
-                "completed" | "cancelled" | "failed" | "interrupted"
+                "completed"
+                    | "cancelled"
+                    | "failed"
+                    | "interrupted"
+                    | "budget_exhausted"
+                    | "paused"
             );
             // A cancelled run with no committed model turn spent no measured
             // request and preserves known prior accounting. Other terminal

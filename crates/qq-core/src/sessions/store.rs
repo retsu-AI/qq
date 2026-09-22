@@ -993,6 +993,18 @@ impl Store {
         .await
     }
 
+    /// The newest between-run summary, for a prompt whose fold is exhausted
+    /// yet still over the window: the run starts from the summary alone.
+    pub(super) async fn latest_compaction_summary(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<String>, SessionRuntimeError> {
+        self.call(Priority::AwaitControl, move |connection| {
+            Ok(latest_compaction(connection, session_id)?.map(|row| row.summary))
+        })
+        .await
+    }
+
     /// Full-transcript recall for `search_history`, on the control lane so a
     /// saturated output queue cannot starve a running tool call.
     pub(super) async fn search_history(
@@ -1229,6 +1241,34 @@ impl Store {
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
             record_run_output_truncated(connection, store_id, identity, turn_ordinal, continuation)
+        })
+        .await
+    }
+
+    /// Publishes that the runtime is re-issuing a turn after a transient
+    /// provider fault cut it short.
+    pub(super) async fn record_turn_retrying(
+        &self,
+        claimed: &ClaimedRun,
+        turn_ordinal: u32,
+        attempt: u16,
+        delay: std::time::Duration,
+        kind: RunFailureKind,
+        message: String,
+    ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            record_run_turn_retrying(
+                connection,
+                store_id,
+                identity,
+                turn_ordinal,
+                attempt,
+                delay,
+                kind,
+                message,
+            )
         })
         .await
     }
@@ -1699,7 +1739,7 @@ impl Store {
                      )
                      SELECT r.id,
                             r.outcome_json IS NOT NULL AND r.status IN
-                                ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted'),
+                                ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted', 'paused'),
                             r.usage_json, r.estimated_cost_usd_nanos,
                             r.status = 'cancelled' AND r.started_at_ms IS NULL AND r.routing_json IS NULL
                                 AND NOT EXISTS(SELECT 1 FROM model_turns t WHERE t.run_id = r.id),

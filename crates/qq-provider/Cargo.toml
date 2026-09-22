@@ -21,6 +21,7 @@ futures-core.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 http-body.workspace = true
+httpdate.workspace = true
 qq-reasoning.workspace = true
 reqwest.workspace = true
 serde.workspace = true

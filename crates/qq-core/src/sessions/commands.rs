@@ -1766,7 +1766,7 @@ pub(super) fn delete_idle_session(
                  LEFT JOIN sessions ancestor ON ancestor.id = owner.session_id
                  WHERE owner.id IS NULL OR ancestor.id IS NULL
                      OR owner.status NOT IN
-                         ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted')
+                         ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted', 'paused')
                      OR (owners.depth = ?2 AND ancestor.owner_run_id IS NOT NULL)
              )",
         params![session_id.to_string(), MAX_CHILD_DEPTH],

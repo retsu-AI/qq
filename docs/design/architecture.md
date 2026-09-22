@@ -354,9 +354,13 @@ measured prompt turn, it persists that versioned basis, request byte count, and
 run's existing reservation query loads the basis without another store call.
 Only an exact shape/prefix match may seed the next estimate; the seed then
 follows the byte delta since the measured request in both directions at the
-estimate ratio (`context::adjust_measured_tokens`), so growth from the new
-prompt is charged and shrinkage from assembly-time pruning is credited rather
-than discarding the measurement. Within a run the same rule is applied per
+ratio the measurement itself established (`context::calibrated_bytes_per_token`:
+measured bytes over measured tokens, rounded to nearest, clamped to 2–6 and
+falling back to the default four below 2 000 measured tokens), so growth from
+the new prompt is charged and shrinkage from assembly-time pruning is credited
+rather than discarding the measurement, and a code-heavy transcript that
+tokenizes near three bytes per token is no longer under-charged by a quarter
+on every turn. Within a run the same rule is applied per
 request component (system text, tool schemas, messages), so the slice
 checkpoint and continuation turns, which change the system text and drop the
 schemas, keep a measurement-derived estimate. Pricing-only refreshes are
@@ -899,6 +903,20 @@ Clients observe no terminal run event at the slice seam. Genuine completion,
 explicit caller budgets, cancellation, and failures remain the only user-level
 terminal conditions; provider adapters do not participate in slice rollover.
 
+A transient provider fault does not end a run (ADR-0040). The provider owns
+resends of one request while its stream has yielded nothing; once the run
+loop receives `provider_unavailable`, `provider_rate_limited`, or
+`provider_transport` (including a stream that ends after events without a
+terminal event), it commits whatever streamed as a partial assistant turn,
+publishes `run_turn_retrying`, sleeps under `TurnRecoveryPolicy` (2 s
+doubling to 60 s; cancellation and the run deadline cut it short), and
+re-issues the turn with a continue notice after any partial text. The
+allowance is `MAX_TURN_RETRIES` (5) per turn and resets when a turn
+completes. Exhaustion settles the run `paused`: every completed turn is
+durable and the next prompt continues the session. Faults that would recur
+(authentication, invalid request, protocol, output truncation) still fail at
+once.
+
 Once prompt submission commits, the runtime owns that accepted run until it
 persists exactly one terminal `RunFinished` event. Before settling started
 execution, it drops dispatch and drains owned child tasks and local tool work.
@@ -1393,7 +1411,7 @@ Targets the executable budgets and benchmarks enforce or approach:
 | Context overflow sent to a provider | Zero |
 | Compaction reduction when required | At least `8x` |
 | Stable-prefix provider cache use | At least `80%` where supported |
-| Core retry amplification | `< 1.05` provider stream entries per logical turn; transport attempts obey `AttemptPolicy` |
+| Core retry amplification | `< 1.05` provider stream entries per logical turn on completed turns; a turn that recovers from a transient fault costs at most `MAX_TURN_RETRIES + 1` (ADR-0040); transport attempts obey `AttemptPolicy` |
 | Release binary / minimal binary | `<= 48,000,000` / `<= 41,000,000` bytes |
 | Harness-attributable evaluation failures | `< 0.5%` |
 

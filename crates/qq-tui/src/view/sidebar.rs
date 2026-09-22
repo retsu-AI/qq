@@ -20,7 +20,8 @@ pub(super) fn session_line(app: &App, session_id: SessionId, width: usize, prefi
                 Some(
                     qq_protocol::RunOutcome::Cancelled
                     | qq_protocol::RunOutcome::Interrupted
-                    | qq_protocol::RunOutcome::BudgetExhausted { .. },
+                    | qq_protocol::RunOutcome::BudgetExhausted { .. }
+                    | qq_protocol::RunOutcome::Paused { .. },
                 ) => ("◌", muted()),
                 Some(qq_protocol::RunOutcome::Failed { .. }) => ("✕", failure()),
                 None => ("○", muted()),

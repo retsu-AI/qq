@@ -12,40 +12,9 @@
     ),
     version: 1,
     model: "xai/grok-4.6",
-    reviewer_model: "openai-codex/gpt-5.6-luna",
-    providers: {
-        "bedrock": AmazonBedrock(
-            region: "us-east-1",
-            auth: ApiKey(Stored("bedrock/default")),
-        ),
-        "bedrock-mantle": AmazonBedrockMantle(
-            region: "us-east-1",
-            api: AnthropicMessages,
-            auth: ApiKey(Stored("bedrock-mantle/default")),
-        ),
-        // LiteLLM endpoint used by local QQ runs and Terminal-Bench.
-        // Replace the two REPLACE_WITH_* values with your gateway details.
-        "litellm": LiteLlm(
-            connection: (
-                base_url: "https://litellm.example.invalid/v1",
-                api: OpenAiChatCompletions,
-                // Local QQ resolves this key from its credential store. The
-                // Harbor runner must inject an environment-backed override.
-                auth: ApiKey(Stored("litellm/default")),
-            )
-        ),
-    },
-    mcp: {
-        "executor": Http(
-            url: "https://executor.sh/lg2m/mcp",
-            // Executor Cloud accepts user-level API keys as bearer tokens.
-            bearer: Stored("executor/lg2m"),
-            allow: [
-                "execute",
-                "skills",
-                "resume",
-            ],
-            eager: true,
-        ),
-    },
+    // Anything referencing a `Stored(...)` credential (providers, MCP
+    // servers, reviewer/worker models) is personal to one machine and belongs
+    // in a gitignored `.qq/config.d/*-local.ron` fragment, not here. Built-in
+    // providers need no declaration: `qq auth login PROVIDER` or the
+    // provider's API-key variable is enough. See docs/guide/configuration.md.
 )

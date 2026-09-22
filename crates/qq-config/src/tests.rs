@@ -1250,6 +1250,47 @@ fn rejects_duplicate_struct_fields_and_map_keys() {
 }
 
 #[test]
+fn trust_required_names_every_pending_file_and_the_command_that_accepts_it() {
+    let tree = TempTree::new();
+    let root_config = tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6", policy: (allow_shell_prefixes: ["cargo test"]))"#,
+    );
+    let nested_config = tree.write(
+        "work/sub/.qq/config.ron",
+        r#"(version: 1, mcp: {"tool": Stdio(command: "tool")})"#,
+    );
+    let request = LoadRequest::new(tree.path("work/sub"));
+
+    let error = tree.loader().load(&request).unwrap_err();
+    let message = error.to_string();
+    for expected in [
+        "project configuration needs your trust before it is used:",
+        root_config.to_string_lossy().as_ref(),
+        nested_config.to_string_lossy().as_ref(),
+        "`qq trust`",
+    ] {
+        assert!(
+            message.contains(expected),
+            "missing {expected:?} in:\n{message}"
+        );
+    }
+
+    // The pending entries carry the sensitive sections each file declares,
+    // root first, so `qq trust` can show them before granting.
+    let ConfigError::TrustRequired { pending, .. } = error else {
+        panic!("expected TrustRequired, got {error}");
+    };
+    let sections: Vec<&[&str]> = pending.iter().map(PendingTrust::sections).collect();
+    assert_eq!(
+        sections,
+        [&["model", "policy.allow_shell_prefixes"][..], &["mcp"][..]]
+    );
+    let granted = tree.loader().grant_pending_trust(&request).unwrap();
+    assert_eq!(granted, pending);
+}
+
+#[test]
 fn project_trust_gates_sensitive_changes_and_ignores_safe_edits() {
     let tree = TempTree::new();
     tree.write(
@@ -1416,13 +1457,44 @@ fn require_https_and_custom_provider_policy_are_enforced() {
 }
 
 #[test]
+fn missing_model_error_names_every_way_to_set_one() {
+    // A fresh machine with no configuration at all: the failure must tell the
+    // user exactly where to put a model, including this machine's global path.
+    let tree = TempTree::new();
+    fs::create_dir_all(tree.path("work")).unwrap();
+    let error = tree
+        .loader()
+        .load(&LoadRequest::new(tree.path("work")))
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        matches!(&error, ConfigError::ModelRequired { global_config } if *global_config == tree.path("global/config.ron")),
+        "{error:?}"
+    );
+    let global = tree.path("global/config.ron").display().to_string();
+    for expected in [
+        "no model is configured",
+        "--model PROVIDER/MODEL",
+        "QQ_MODEL=PROVIDER/MODEL",
+        global.as_str(),
+        ".qq/config.ron",
+        "qq auth login openai",
+    ] {
+        assert!(
+            message.contains(expected),
+            "missing {expected:?} in:\n{message}"
+        );
+    }
+}
+
+#[test]
 fn check_validates_a_document_without_a_model_and_load_still_requires_one() {
     let tree = TempTree::new();
     let request = LoadRequest::new(tree.path("work")).with_explicit_content("(version: 1)");
 
     assert!(matches!(
         tree.loader().load(&request),
-        Err(ConfigError::ModelRequired)
+        Err(ConfigError::ModelRequired { .. })
     ));
     assert!(matches!(tree.loader().check(&request), Ok(None)));
 
@@ -3260,7 +3332,11 @@ fn agent_profiles_layer_by_name_validate_routes_and_never_declare_default() {
         )
         .unwrap();
         state.apply_document(&document, &origin, true);
-        state.finish(Vec::new(), ConfigSources::default())
+        state.finish(
+            Vec::new(),
+            ConfigSources::default(),
+            Path::new("/unused/config.ron"),
+        )
     };
     assert!(matches!(
         parse(r#""default": Profile(model: "openai/gpt-5.6")"#),

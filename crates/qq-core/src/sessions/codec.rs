@@ -175,6 +175,7 @@ pub(super) fn parse_run_status(value: &str) -> Result<RunStatus, SessionRuntimeE
         "failed" => Ok(RunStatus::Failed),
         "interrupted" => Ok(RunStatus::Interrupted),
         "budget_exhausted" => Ok(RunStatus::BudgetExhausted),
+        "paused" => Ok(RunStatus::Paused),
         _ => Err(SessionRuntimeError::CONSTRAINT),
     }
 }

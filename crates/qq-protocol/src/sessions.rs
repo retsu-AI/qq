@@ -798,6 +798,9 @@ pub enum RunStatus {
     Failed,
     Interrupted,
     BudgetExhausted,
+    /// Turn recovery gave up on a transient provider fault; the transcript
+    /// is durable and the session accepts the next prompt.
+    Paused,
 }
 
 /// Per-run budgets imposed by the caller and enforced by the core runtime.
@@ -1018,6 +1021,28 @@ pub enum RunOutcome {
     BudgetExhausted {
         exhaustion: Box<BudgetExhaustion>,
     },
+    /// Turn-level recovery retried a transient provider fault until its
+    /// allowance ran out. Distinct from `Failed`: every turn the run
+    /// completed is durable, nothing QQ or the model did was wrong, and the
+    /// next prompt continues from where it stopped.
+    Paused {
+        pause: Box<RunPause>,
+    },
+}
+
+/// Why turn recovery stopped retrying.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunPause {
+    /// The failure kind of the last attempt, always a provider kind that
+    /// recovery considers transient.
+    pub kind: RunFailureKind,
+    /// The last attempt's error text.
+    pub message: String,
+    /// Turn the recovery was retrying (1-based).
+    pub turn_ordinal: u32,
+    /// Retries spent on that turn before pausing.
+    pub attempts: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1678,6 +1703,19 @@ pub enum SessionEvent {
         run_id: RunId,
         turn_ordinal: u32,
         continuation: u16,
+    },
+    /// A transient provider fault ended turn `turn_ordinal` after it had
+    /// started streaming. Whatever text arrived is committed as a partial
+    /// turn; the run sleeps `delay_ms` and re-issues the turn as
+    /// `turn_ordinal + 1`. `attempt` is 1-based within this turn's recovery;
+    /// a turn that completes resets it. Exhaustion settles the run `paused`.
+    RunTurnRetrying {
+        run_id: RunId,
+        turn_ordinal: u32,
+        attempt: u16,
+        delay_ms: u64,
+        kind: RunFailureKind,
+        message: String,
     },
     /// The run's candidate final answer is being audited by a read-only
     /// child before it is presented as complete. `audit_session_id` is that
@@ -3240,9 +3278,11 @@ mod tests {
         // Version 22 added `ApprovalGrant::Host` and the `fetch` preview on
         // `tool_approval_requested` for the network tool.
         // Version 24 adds review start markers and typed spend receipts.
-        // Version 26 adds optional session reasoning_effort, set_session_effort,
+        // Version 26 adds turn recovery: the `run_turn_retrying` event and
+        // the `paused` run outcome and status.
+        // Version 27 adds optional session reasoning_effort, set_session_effort,
         // and session_effort_set.
-        assert_eq!(crate::PROTOCOL_VERSION, 26);
+        assert_eq!(crate::PROTOCOL_VERSION, 27);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

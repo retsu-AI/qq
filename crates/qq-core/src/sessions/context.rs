@@ -35,21 +35,76 @@ pub(crate) fn summarizer_message_byte_budget(
 }
 
 /// Carries a provider-measured token count across a request whose bytes
-/// changed: appended bytes are charged at the ratio, removed bytes credited
-/// at it. Crediting `bytes / 4` for removed text is conservative wherever the
-/// text tokenized at four or fewer bytes per token, which holds for prose
-/// and code; a provider-reported overflow remains the backstop for the rest.
-pub(crate) const fn adjust_measured_tokens(
+/// changed: appended bytes are charged and removed bytes credited at the
+/// ratio the measurement itself established (`measured_bytes / measured`,
+/// clamped to a sane band), not the fixed default. On code-heavy transcripts
+/// the real ratio is nearer three bytes per token than four, so charging
+/// deltas at four under-estimates growth by a quarter; the observed ratio
+/// tracks the transcript's own tokenizer behaviour. Falls back to the default
+/// when the measurement is empty or degenerate.
+pub(crate) fn adjust_measured_tokens(
     measured: u64,
     previous_bytes: u64,
     current_bytes: u64,
 ) -> u64 {
-    if current_bytes >= previous_bytes {
-        measured.saturating_add(estimate_tokens(current_bytes - previous_bytes))
+    adjust_measured_tokens_at(
+        measured,
+        previous_bytes,
+        current_bytes,
+        calibrated_bytes_per_token(measured, previous_bytes),
+    )
+}
+
+/// [`adjust_measured_tokens`] with the ratio supplied: for callers that apply
+/// the delta per request component and must calibrate against the whole
+/// measured request, not the component.
+pub(crate) const fn adjust_measured_tokens_at(
+    measured: u64,
+    previous_bytes: u64,
+    current_bytes: u64,
+    bytes_per_token: u64,
+) -> u64 {
+    let ratio = if bytes_per_token == 0 {
+        ESTIMATED_BYTES_PER_TOKEN
     } else {
-        measured.saturating_sub(estimate_tokens(previous_bytes - current_bytes))
+        bytes_per_token
+    };
+    if current_bytes >= previous_bytes {
+        measured.saturating_add((current_bytes - previous_bytes).div_ceil(ratio))
+    } else {
+        measured.saturating_sub((previous_bytes - current_bytes).div_ceil(ratio))
     }
 }
+
+/// Bytes per token the provider's measurement implies for the request it
+/// measured, bounded to `[MIN_CALIBRATED_BYTES_PER_TOKEN,
+/// MAX_CALIBRATED_BYTES_PER_TOKEN]` so a mis-reported count (cache-only
+/// usage, a provider that counts images) cannot swing the estimate to zero
+/// or to nothing. Small measurements are noise: below
+/// `MIN_CALIBRATION_TOKENS` the default ratio stands.
+pub(crate) const fn calibrated_bytes_per_token(measured_tokens: u64, measured_bytes: u64) -> u64 {
+    if measured_tokens < MIN_CALIBRATION_TOKENS || measured_bytes == 0 {
+        return ESTIMATED_BYTES_PER_TOKEN;
+    }
+    // Round to nearest so the two rounding directions of charging and
+    // crediting stay symmetric around the observed ratio.
+    let ratio = (measured_bytes + measured_tokens / 2) / measured_tokens;
+    if ratio < MIN_CALIBRATED_BYTES_PER_TOKEN {
+        MIN_CALIBRATED_BYTES_PER_TOKEN
+    } else if ratio > MAX_CALIBRATED_BYTES_PER_TOKEN {
+        MAX_CALIBRATED_BYTES_PER_TOKEN
+    } else {
+        ratio
+    }
+}
+
+/// Below this many measured tokens the observed ratio is dominated by the
+/// system prompt and framing rather than the transcript; keep the default.
+const MIN_CALIBRATION_TOKENS: u64 = 2_000;
+/// Dense code and non-Latin text tokenize near two bytes per token; prose
+/// with long words near five. Anything outside is a measurement artefact.
+const MIN_CALIBRATED_BYTES_PER_TOKEN: u64 = 2;
+const MAX_CALIBRATED_BYTES_PER_TOKEN: u64 = 6;
 
 /// Fraction of the model window held back as headroom before a prompt run
 /// starts: an eligible run whose estimate exceeds `window - reserve` compacts
@@ -477,11 +532,60 @@ mod tests {
 
     #[test]
     fn measured_tokens_follow_byte_deltas_in_both_directions() {
+        // Below the calibration floor the default ratio stands.
         assert_eq!(adjust_measured_tokens(100, 1_000, 1_000), 100);
         assert_eq!(adjust_measured_tokens(100, 1_000, 1_024), 106);
         assert_eq!(adjust_measured_tokens(100, 1_024, 1_000), 94);
         assert_eq!(adjust_measured_tokens(5, 1_024, 0), 0);
         assert_eq!(adjust_measured_tokens(u64::MAX, 0, 8), u64::MAX);
+    }
+
+    #[test]
+    fn deltas_are_charged_at_the_ratio_the_measurement_established() {
+        // A code-heavy request: 300 000 bytes measured at 100 000 tokens is
+        // three bytes per token. Appending 30 000 bytes costs 10 000 tokens,
+        // not the 7 500 the fixed ratio would charge; crediting is symmetric.
+        assert_eq!(calibrated_bytes_per_token(100_000, 300_000), 3);
+        assert_eq!(adjust_measured_tokens(100_000, 300_000, 330_000), 110_000);
+        assert_eq!(adjust_measured_tokens(100_000, 300_000, 270_000), 90_000);
+        // Prose at five bytes per token charges less than the default.
+        assert_eq!(calibrated_bytes_per_token(20_000, 100_000), 5);
+        assert_eq!(adjust_measured_tokens(20_000, 100_000, 110_000), 22_000);
+        // Degenerate measurements clamp rather than swing the estimate.
+        assert_eq!(calibrated_bytes_per_token(100_000, 50_000), 2);
+        assert_eq!(calibrated_bytes_per_token(2_000, 1_000_000), 6);
+        assert_eq!(calibrated_bytes_per_token(1_999, 3_000), 4);
+        assert_eq!(calibrated_bytes_per_token(5_000, 0), 4);
+    }
+
+    #[test]
+    fn calibration_holds_the_estimate_within_ten_percent_on_a_code_heavy_transcript() {
+        // A transcript that tokenizes at 3.1 bytes/token (dense Rust with
+        // punctuation), measured once at 60 000 tokens for 186 000 bytes.
+        // Each later turn appends 12 000 bytes of the same material; the
+        // provider would report ~3 871 more tokens per turn. Track the
+        // measurement across eight turns and compare against what the
+        // provider would have reported at the true ratio.
+        let true_bytes_per_token = 3.1_f64;
+        let mut measured = 60_000_u64;
+        let mut bytes = 186_000_u64;
+        let mut worst_error = 0.0_f64;
+        for _ in 0..8 {
+            let next_bytes = bytes + 12_000;
+            let estimate = adjust_measured_tokens(measured, bytes, next_bytes);
+            let truth = (next_bytes as f64 / true_bytes_per_token).round();
+            let error = ((estimate as f64 - truth) / truth).abs();
+            worst_error = worst_error.max(error);
+            // The provider re-measures each turn; the seed is always fresh.
+            measured = truth as u64;
+            bytes = next_bytes;
+        }
+        assert!(worst_error < 0.10, "worst error {worst_error:.3}");
+        // The uncalibrated default would have charged 12 000 / 4 = 3 000 per
+        // turn against a true 3 871: 22 % under on every delta.
+        let default_delta = 12_000 / ESTIMATED_BYTES_PER_TOKEN;
+        let true_delta = (12_000.0 / true_bytes_per_token).round() as u64;
+        assert!((true_delta - default_delta) * 100 / true_delta > 20);
     }
 
     #[test]

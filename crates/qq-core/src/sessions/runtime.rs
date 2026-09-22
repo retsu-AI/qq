@@ -106,7 +106,9 @@ impl LoadedRuntime {
         if let Some(reviewer) = &runtime.checkpoint {
             profile = profile.with_checkpoint_reviewer(Arc::clone(reviewer));
         }
-        profile = profile.with_context_cache(Arc::clone(&runtime.context_cache));
+        profile = profile
+            .with_context_cache(Arc::clone(&runtime.context_cache))
+            .with_turn_recovery(runtime.turn_recovery);
         Ok(Self::new(CompiledAgentPlan::compile_blocking(profile)?))
     }
 
