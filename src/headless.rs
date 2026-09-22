@@ -3330,6 +3330,9 @@ mod tests {
             "{stderr}"
         );
         assert!(stderr.contains(&format!("qq run --session {session_id}")));
+        // Both continuations are shown: the interactive one comes first
+        // because it is the one a person at a terminal wants.
+        assert!(stderr.contains(&format!("\n  qq --session {session_id}\n")));
     }
 
     #[tokio::test]

@@ -264,7 +264,9 @@ fn parse_correlation_entry(argument: &str) -> Result<(String, String), String> {
 /// the same text.
 #[must_use]
 pub fn resume_hint(session_id: qq_protocol::SessionId) -> String {
-    format!("To continue this session:\n  qq run --session {session_id} \"<prompt>\"\n")
+    format!(
+        "To continue this session:\n  qq --session {session_id}\n  qq run --session {session_id} \"<prompt>\"\n"
+    )
 }
 
 impl RunArgs {
