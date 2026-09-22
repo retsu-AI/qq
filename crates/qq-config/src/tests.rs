@@ -2817,19 +2817,95 @@ fn tui_config_selects_a_theme_by_name_with_provenance() {
 }
 
 #[test]
+fn the_qq_alias_resolves_to_ink_or_terminal_by_truecolor_and_explicit_names_win() {
+    let tree = TempTree::new();
+    let loader = tree.loader();
+    let work = tree.path("work");
+
+    // Unset (`qq`) follows what the terminal advertised.
+    let ink = loader
+        .load_theme(&work, DEFAULT_THEME, TruecolorSupport::Advertised)
+        .unwrap();
+    assert_eq!(ink.name(), TRUECOLOR_DEFAULT_THEME);
+    assert_eq!(ink.source().kind(), SourceKind::Compiled);
+    assert!(
+        matches!(ink.colors().text, ThemeColor::Rgb(_)),
+        "ink is a truecolor document"
+    );
+    let terminal = loader
+        .load_theme(&work, DEFAULT_THEME, TruecolorSupport::NotAdvertised)
+        .unwrap();
+    assert_eq!(terminal.name(), TERMINAL_THEME);
+    assert_eq!(terminal, compiled_theme());
+    assert_eq!(
+        terminal.colors().text,
+        ThemeColor::Ansi(AnsiColor::White),
+        "terminal paints with the terminal's own colors"
+    );
+    assert_eq!(default_theme_name(TruecolorSupport::Advertised), "ink");
+    assert_eq!(
+        default_theme_name(TruecolorSupport::NotAdvertised),
+        "terminal"
+    );
+
+    // An explicit name is never second-guessed.
+    assert_eq!(
+        loader
+            .load_theme(&work, "terminal", TruecolorSupport::Advertised)
+            .unwrap(),
+        compiled_theme()
+    );
+    assert_eq!(
+        loader
+            .load_theme(&work, "ink", TruecolorSupport::NotAdvertised)
+            .unwrap(),
+        ink
+    );
+
+    // A user file may shadow `ink` but not the compiled `terminal`, and the
+    // alias follows the shadowed `ink`.
+    tree.write("global/themes/ink.ron", ROSE_PINE);
+    tree.write("global/themes/terminal.ron", ROSE_PINE);
+    tree.write("global/themes/qq.ron", ROSE_PINE);
+    let shadowed = loader
+        .load_theme(&work, DEFAULT_THEME, TruecolorSupport::Advertised)
+        .unwrap();
+    assert_eq!(shadowed.name(), "ink");
+    assert_eq!(shadowed.source().kind(), SourceKind::Global);
+    assert_eq!(
+        loader
+            .load_theme(&work, "terminal", TruecolorSupport::Advertised)
+            .unwrap(),
+        compiled_theme()
+    );
+    let discovered = loader.discover_themes(&work).unwrap();
+    assert!(discovered.iter().all(|theme| theme.name() != "qq"));
+    assert_eq!(
+        discovered
+            .iter()
+            .filter(|theme| theme.name() == "terminal")
+            .map(|theme| theme.source().kind())
+            .collect::<Vec<_>>(),
+        vec![SourceKind::Compiled]
+    );
+}
+
+#[test]
 fn themes_resolve_compiled_then_global_then_nearest_project() {
     let tree = TempTree::new();
     let loader = tree.loader();
-    let compiled = loader.load_theme(&tree.path("work"), "qq").unwrap();
-    assert_eq!(compiled.name(), "qq");
-    assert_eq!(compiled.source().kind(), SourceKind::Compiled);
+    let truecolor = TruecolorSupport::Advertised;
 
     // `rose-pine` ships in the binary; a global file of the same name
     // shadows it.
-    let shipped = loader.load_theme(&tree.path("work"), "rose-pine").unwrap();
+    let shipped = loader
+        .load_theme(&tree.path("work"), "rose-pine", truecolor)
+        .unwrap();
     assert_eq!(shipped.source().kind(), SourceKind::Compiled);
     tree.write("global/themes/rose-pine.ron", ROSE_PINE);
-    let global = loader.load_theme(&tree.path("work"), "rose-pine").unwrap();
+    let global = loader
+        .load_theme(&tree.path("work"), "rose-pine", truecolor)
+        .unwrap();
     assert_eq!(global.source().kind(), SourceKind::Global);
     assert_ne!(global.colors().surface, shipped.colors().surface);
     assert_eq!(
@@ -2856,7 +2932,7 @@ fn themes_resolve_compiled_then_global_then_nearest_project() {
         &ROSE_PINE.replace("#9ccfd8", "#000002"),
     );
     let nearest = loader
-        .load_theme(&tree.path("work/child"), "rose-pine")
+        .load_theme(&tree.path("work/child"), "rose-pine", truecolor)
         .unwrap();
     assert_eq!(nearest.source().kind(), SourceKind::Project);
     assert_eq!(
@@ -2877,7 +2953,7 @@ fn themes_resolve_compiled_then_global_then_nearest_project() {
     assert_eq!(
         discovered.len(),
         COMPILED_THEMES.len() + 1,
-        "one entry per shipped name plus qq; the user file replaced, not added"
+        "one entry per shipped name plus terminal; the user file replaced, not added"
     );
 }
 
@@ -2892,7 +2968,9 @@ fn every_shipped_theme_parses_and_is_discoverable_without_any_files() {
     );
     assert!(names.contains(&"ink") && names.contains(&"gruvbox"));
     for name in &names {
-        let theme = loader.load_theme(&tree.path("work"), name).unwrap();
+        let theme = loader
+            .load_theme(&tree.path("work"), name, TruecolorSupport::NotAdvertised)
+            .unwrap();
         assert_eq!(theme.name(), *name);
         assert_eq!(theme.source().kind(), SourceKind::Compiled);
         let colors = theme.colors();
@@ -2953,7 +3031,7 @@ fn every_shipped_theme_parses_and_is_discoverable_without_any_files() {
     }
     let discovered = loader.discover_themes(&tree.path("work")).unwrap();
     let mut listed: Vec<&str> = discovered.iter().map(ThemeDocument::name).collect();
-    names.push(DEFAULT_THEME);
+    names.push(TERMINAL_THEME);
     names.sort_unstable();
     listed.sort_unstable();
     assert_eq!(listed, names);
@@ -2965,15 +3043,19 @@ fn theme_documents_fail_fast_on_every_documented_error() {
     let loader = tree.loader();
     let load = |content: &str| {
         tree.write("global/themes/bad.ron", content);
-        loader.load_theme(&tree.path("work"), "bad")
+        loader.load_theme(&tree.path("work"), "bad", TruecolorSupport::Advertised)
     };
 
     assert!(matches!(
-        loader.load_theme(&tree.path("work"), "missing"),
+        loader.load_theme(&tree.path("work"), "missing", TruecolorSupport::Advertised),
         Err(ConfigError::UnknownTheme { name }) if name == "missing"
     ));
     assert!(matches!(
-        loader.load_theme(&tree.path("work"), "../escape"),
+        loader.load_theme(
+            &tree.path("work"),
+            "../escape",
+            TruecolorSupport::Advertised
+        ),
         Err(ConfigError::UnknownTheme { .. })
     ));
     assert!(matches!(
@@ -3018,7 +3100,7 @@ fn theme_syntax_blocks_are_optional_partial_and_validated_per_field() {
     let loader = tree.loader();
     let load = |content: &str| {
         tree.write("global/themes/syn.ron", content);
-        loader.load_theme(&tree.path("work"), "syn")
+        loader.load_theme(&tree.path("work"), "syn", TruecolorSupport::Advertised)
     };
     let with_block = |block: &str| {
         ROSE_PINE.replacen(

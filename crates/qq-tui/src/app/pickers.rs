@@ -411,7 +411,7 @@ impl App {
     pub(super) fn open_themes(&mut self) -> Effects {
         if self.themes.len() < 2 {
             self.set_info(
-                "only the compiled `qq` theme is available; add themes/<name>.ron to choose"
+                "only the compiled `terminal` theme is available; add themes/<name>.ron to choose"
                     .to_owned(),
             );
             return Effects::redraw(Redraw::Immediate);

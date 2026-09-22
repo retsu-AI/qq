@@ -55,7 +55,7 @@ pub struct TuiOptions {
     pub model: ModelSelection,
     pub models: Vec<ModelOption>,
     /// Every selectable theme; the first is active at startup. An empty list
-    /// means the compiled `qq` theme.
+    /// means the compiled `terminal` theme.
     pub themes: Vec<Theme>,
     /// The canonical workspace root `@` mentions resolve against. `None`
     /// (a remote client without the tree) leaves `@` as literal text.

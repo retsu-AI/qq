@@ -3,7 +3,8 @@
 //!
 //! Themes are load-time configuration and fail fast: an unknown name, a
 //! missing role, a bad literal, or an alias cycle is a configuration error
-//! before the TUI starts. The compiled `qq` theme is always present.
+//! before the TUI starts. The compiled `terminal` theme and the shipped
+//! `ink` document are always present, so the default always resolves.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -21,12 +22,41 @@ use super::{
     },
 };
 
-/// The compiled default theme name, always resolvable.
+/// The theme name TUI settings carry when no layer set one. It is an alias,
+/// not a palette: `load` resolves it through `default_theme_name`, so a
+/// `theme: "qq"` written before the designed default existed keeps working
+/// (ADR 0036).
 pub const DEFAULT_THEME: &str = "qq";
+
+/// The designed truecolor default (`themes/ink.ron`).
+pub const TRUECOLOR_DEFAULT_THEME: &str = "ink";
+
+/// The compiled palette built from the terminal's own ANSI colors; the
+/// default when truecolor is not advertised and selectable by name anywhere.
+pub const TERMINAL_THEME: &str = "terminal";
+
+/// Whether the terminal advertised 24-bit color. The composition root reads
+/// `COLORTERM` once at startup and passes the answer in; this crate never
+/// consults the environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TruecolorSupport {
+    Advertised,
+    NotAdvertised,
+}
+
+/// The theme the `qq` alias (and an unset `theme`) selects.
+#[must_use]
+pub const fn default_theme_name(truecolor: TruecolorSupport) -> &'static str {
+    match truecolor {
+        TruecolorSupport::Advertised => TRUECOLOR_DEFAULT_THEME,
+        TruecolorSupport::NotAdvertised => TERMINAL_THEME,
+    }
+}
 
 /// Themes shipped inside the binary as ordinary theme documents, so they go
 /// through the same parser and errors as user files and double as
-/// copy-and-tweak examples. Sorted by name; `qq` itself is built in code.
+/// copy-and-tweak examples. Sorted by name; `terminal` is built in code
+/// because files cannot name ANSI colors.
 pub const COMPILED_THEMES: &[(&str, &str)] = &[
     ("catppuccin", include_str!("../themes/catppuccin.ron")),
     ("dracula", include_str!("../themes/dracula.ron")),
@@ -70,8 +100,8 @@ impl Rgb {
 }
 
 /// The standard terminal colors, which follow the user's terminal palette.
-/// Only the compiled theme uses them; files are `#RRGGBB` so a theme looks
-/// the same everywhere.
+/// Only the compiled `terminal` theme uses them; files are `#RRGGBB` so a
+/// theme looks the same everywhere.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AnsiColor {
     White,
@@ -200,15 +230,16 @@ impl ThemeDocument {
     }
 }
 
-/// The compiled `qq` theme: the palette the renderer shipped with before
-/// themes existed, so existing installs keep their look.
+/// The compiled `terminal` theme: the terminal's own ANSI colors for every
+/// role but `brand` and `surface`, so it follows whatever palette the user's
+/// terminal has. The fallback when truecolor is not advertised.
 #[must_use]
 pub fn compiled_theme() -> ThemeDocument {
     const fn rgb(r: u8, g: u8, b: u8) -> ThemeColor {
         ThemeColor::Rgb(Rgb { r, g, b })
     }
     ThemeDocument {
-        name: DEFAULT_THEME.to_owned(),
+        name: TERMINAL_THEME.to_owned(),
         colors: ThemeColors {
             text: ThemeColor::Ansi(AnsiColor::White),
             muted: ThemeColor::Ansi(AnsiColor::DarkGrey),
@@ -220,7 +251,7 @@ pub fn compiled_theme() -> ThemeDocument {
             surface: rgb(0x26, 0x28, 0x30),
         },
         syntax: ThemeSyntax::default(),
-        source: SourceIdentity::virtual_source(SourceKind::Compiled, "compiled theme qq"),
+        source: SourceIdentity::virtual_source(SourceKind::Compiled, "compiled theme terminal"),
     }
 }
 
@@ -388,12 +419,22 @@ fn theme_paths(
 /// Resolve theme `name`: the global `themes/` directory, then project
 /// `.qq/themes/` directories nearest-last so the nearest wins, falling back
 /// to the compiled set so a user file may shadow a shipped theme.
+///
+/// `qq` is the default alias and resolves to `default_theme_name(truecolor)`
+/// before lookup; every other name is taken literally, so an explicit
+/// `terminal` or `ink` wins regardless of what the terminal advertised.
 pub(super) fn load(
     loader: &ConfigLoader,
     cwd: &Path,
     name: &str,
+    truecolor: TruecolorSupport,
 ) -> Result<ThemeDocument, ConfigError> {
-    if name == DEFAULT_THEME {
+    let name = if name == DEFAULT_THEME {
+        default_theme_name(truecolor)
+    } else {
+        name
+    };
+    if name == TERMINAL_THEME {
         return Ok(compiled_theme());
     }
     validate_name(name)?;
@@ -442,7 +483,7 @@ pub(super) fn discover(
     let cwd = canonical_working_directory(cwd)?;
     let mut probes = Probes::default();
     let mut themes: BTreeMap<String, ThemeDocument> = BTreeMap::new();
-    themes.insert(DEFAULT_THEME.to_owned(), compiled_theme());
+    themes.insert(TERMINAL_THEME.to_owned(), compiled_theme());
     for (name, content) in COMPILED_THEMES {
         let document = compiled_document(name, content)?;
         themes.insert((*name).to_owned(), document);
@@ -464,7 +505,9 @@ pub(super) fn discover(
             .collect();
         names.sort();
         for name in names.into_iter().take(MAX_DISCOVERED_THEMES) {
-            if name == DEFAULT_THEME {
+            // `load` never reads a file for these names: `qq` is rewritten to
+            // the default and `terminal` is built in code.
+            if name == DEFAULT_THEME || name == TERMINAL_THEME {
                 continue;
             }
             let Some(candidate) = discover_file(

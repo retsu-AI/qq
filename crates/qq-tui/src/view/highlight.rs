@@ -172,13 +172,13 @@ mod tests {
 
         let themed = Palette {
             syn_keyword: Color::Magenta,
-            ..Palette::QQ
+            ..Palette::TERMINAL
         };
         theme::activate(themed);
         let mut highlighter = Highlighter::default();
         assert!(highlighter.request(key(1), || vec![Line::styled("kw", code_keyword())]));
         let result = highlighter.next().await;
         assert_eq!(result.lines[0].spans[0].style.color, Some(Color::Magenta));
-        theme::activate(Palette::QQ);
+        theme::activate(Palette::TERMINAL);
     }
 }

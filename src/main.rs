@@ -504,10 +504,18 @@ async fn interactive(
     let workspace = environment.workspace;
     let model_is_fallback = request.overrides().model().is_none();
     let config_factory = factory.clone();
+    // Read once, here: neither `qq-config` nor `qq-tui` consults the
+    // environment, they take the answer as a value.
+    let truecolor = truecolor_support(std::env::var_os("COLORTERM").as_deref());
     let (snapshot, tui, themes, models) = tokio::task::spawn_blocking(move || {
         let snapshot = config_factory.load(&request)?;
         let (tui_snapshot, tui) = load_tui_config(&loader, request.cwd())?;
-        let themes = load_tui_themes(&loader, request.cwd(), tui_snapshot.settings().theme())?;
+        let themes = load_tui_themes(
+            &loader,
+            request.cwd(),
+            tui_snapshot.settings().theme(),
+            truecolor,
+        )?;
         let models = config_factory.configured_model_options(&snapshot);
         Ok::<_, runtime::RuntimeBuildError>((snapshot, tui, themes, models))
     })
@@ -850,7 +858,11 @@ fn config_command(
             let request = overrides.load_request()?;
             let snapshot = loader.check(&request)?;
             let (tui, _) = load_tui_config(&loader, request.cwd())?;
-            loader.load_theme(request.cwd(), tui.settings().theme())?;
+            loader.load_theme(
+                request.cwd(),
+                tui.settings().theme(),
+                truecolor_support(std::env::var_os("COLORTERM").as_deref()),
+            )?;
             match snapshot {
                 Some(snapshot) => println!(
                     "configuration is valid (model: {})",
@@ -1119,15 +1131,33 @@ fn load_tui_config(
     Ok((snapshot, settings))
 }
 
+/// Whether the terminal advertises 24-bit color: `COLORTERM` is `truecolor`
+/// or `24bit`, case-insensitive. Takes the variable's value so callers read
+/// the environment exactly once at startup and tests never touch it.
+fn truecolor_support(colorterm: Option<&std::ffi::OsStr>) -> config::TruecolorSupport {
+    match colorterm.and_then(|value| value.to_str()) {
+        Some(value)
+            if value.eq_ignore_ascii_case("truecolor") || value.eq_ignore_ascii_case("24bit") =>
+        {
+            config::TruecolorSupport::Advertised
+        }
+        Some(_) | None => config::TruecolorSupport::NotAdvertised,
+    }
+}
+
 /// The selected theme first, then every other discoverable theme so the
-/// in-TUI picker can preview them. Selecting an unknown or invalid theme
-/// is a configuration error; a broken *unselected* theme file is skipped.
+/// in-TUI picker can preview them. `selected` may be the `qq` alias, which
+/// the loader resolves to `ink` or `terminal` from `truecolor`; the resolved
+/// document's own name is what the picker marks active. Selecting an unknown
+/// or invalid theme is a configuration error; a broken *unselected* theme
+/// file is skipped.
 fn load_tui_themes(
     loader: &config::ConfigLoader,
     cwd: &Path,
     selected: &str,
+    truecolor: config::TruecolorSupport,
 ) -> Result<Vec<qq_tui::Theme>, config::ConfigError> {
-    let active = loader.load_theme(cwd, selected)?;
+    let active = loader.load_theme(cwd, selected, truecolor)?;
     let mut themes = vec![tui_theme(&active)];
     for document in loader.discover_themes(cwd)? {
         if document.name() != active.name() {
@@ -2139,7 +2169,13 @@ mod tests {
         .unwrap();
         let loader = config::ConfigLoader::new(config::ConfigPaths::new(global, data, managed));
 
-        let themes = load_tui_themes(&loader, &workspace, "custom").unwrap();
+        let themes = load_tui_themes(
+            &loader,
+            &workspace,
+            "custom",
+            config::TruecolorSupport::Advertised,
+        )
+        .unwrap();
         let custom = &themes[0];
         assert_eq!(custom.name, "custom");
         let derived = qq_tui::Theme::from_roles(
@@ -2169,14 +2205,110 @@ mod tests {
             },
             derived.palette
         );
-        // Shipped themes with a `syntax` block and the compiled `qq` theme
-        // ride the same adapter; the picker list carries them all.
-        assert!(themes.iter().any(|theme| theme.name == "qq"));
+        // Shipped themes with a `syntax` block and the compiled `terminal`
+        // theme ride the same adapter; the picker list carries them all and
+        // never the `qq` alias.
+        assert!(themes.iter().any(|theme| theme.name == "terminal"));
+        assert!(themes.iter().any(|theme| theme.name == "ink"));
+        assert!(themes.iter().all(|theme| theme.name != "qq"));
         let shipped = themes
             .iter()
             .find(|theme| theme.name == "dracula")
             .expect("dracula ships");
         assert_ne!(shipped.palette.syn_keyword, shipped.palette.brand);
         assert_ne!(shipped.palette.syn_constant, shipped.palette.error);
+    }
+
+    #[test]
+    fn colorterm_detection_reads_truecolor_and_24bit_case_insensitively() {
+        use config::TruecolorSupport::{Advertised, NotAdvertised};
+        let detect = |value: Option<&str>| truecolor_support(value.map(std::ffi::OsStr::new));
+        assert_eq!(detect(Some("truecolor")), Advertised);
+        assert_eq!(detect(Some("24bit")), Advertised);
+        assert_eq!(detect(Some("TrueColor")), Advertised);
+        assert_eq!(detect(Some("24BIT")), Advertised);
+        assert_eq!(detect(Some("")), NotAdvertised);
+        assert_eq!(detect(Some("256color")), NotAdvertised);
+        assert_eq!(detect(Some("yes")), NotAdvertised);
+        assert_eq!(detect(Some(" truecolor")), NotAdvertised);
+        assert_eq!(detect(None), NotAdvertised);
+    }
+
+    #[test]
+    fn the_default_theme_rule_picks_ink_on_truecolor_and_terminal_otherwise() {
+        use config::TruecolorSupport::{Advertised, NotAdvertised};
+        let directory = tempfile::tempdir().unwrap();
+        let global = directory.path().join("global");
+        let data = directory.path().join("data");
+        let managed = directory.path().join("managed");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let loader = config::ConfigLoader::new(config::ConfigPaths::new(global, data, managed));
+        // `selected` is what the layered `tui.ron` produced: the `qq` alias
+        // when unset, otherwise the user's literal choice.
+        let table = [
+            (config::DEFAULT_THEME, Advertised, "ink"),
+            (config::DEFAULT_THEME, NotAdvertised, "terminal"),
+            ("qq", Advertised, "ink"),
+            ("qq", NotAdvertised, "terminal"),
+            ("terminal", Advertised, "terminal"),
+            ("ink", NotAdvertised, "ink"),
+            ("dracula", Advertised, "dracula"),
+        ];
+        for (selected, truecolor, expected) in table {
+            let themes = load_tui_themes(&loader, &workspace, selected, truecolor).unwrap();
+            assert_eq!(
+                themes[0].name, expected,
+                "theme {selected:?} with {truecolor:?}"
+            );
+            // The active theme leads and appears once; the alias never does.
+            assert_eq!(
+                themes.iter().filter(|theme| theme.name == expected).count(),
+                1,
+                "{selected:?}/{truecolor:?}: {:?}",
+                themes.iter().map(|theme| &theme.name).collect::<Vec<_>>()
+            );
+            assert!(themes.iter().all(|theme| theme.name != "qq"));
+            assert!(themes.iter().any(|theme| theme.name == "ink"));
+            assert!(themes.iter().any(|theme| theme.name == "terminal"));
+        }
+        // The two defaults are the palettes they claim to be.
+        let ink = &load_tui_themes(&loader, &workspace, "qq", Advertised).unwrap()[0];
+        let terminal = &load_tui_themes(&loader, &workspace, "qq", NotAdvertised).unwrap()[0];
+        let declared = |palette: qq_tui::Palette| {
+            [
+                palette.text,
+                palette.muted,
+                palette.accent,
+                palette.brand,
+                palette.warning,
+                palette.error,
+                palette.success,
+                palette.surface,
+            ]
+        };
+        assert_eq!(
+            declared(terminal.palette),
+            declared(qq_tui::Palette::TERMINAL)
+        );
+        assert_ne!(declared(ink.palette), declared(qq_tui::Palette::TERMINAL));
+        assert_eq!(
+            ink.palette,
+            qq_tui::Theme::from_roles(
+                "ink",
+                [
+                    qq_tui::ThemeColor::Rgb(0xd8, 0xde, 0xe9),
+                    qq_tui::ThemeColor::Rgb(0x7b, 0x84, 0x97),
+                    qq_tui::ThemeColor::Rgb(0x8f, 0xb8, 0xe8),
+                    qq_tui::ThemeColor::Rgb(0xe0, 0xa0, 0x71),
+                    qq_tui::ThemeColor::Rgb(0xe6, 0xc0, 0x7b),
+                    qq_tui::ThemeColor::Rgb(0xec, 0x7b, 0x8d),
+                    qq_tui::ThemeColor::Rgb(0x8f, 0xd3, 0xa6),
+                    qq_tui::ThemeColor::Rgb(0x20, 0x24, 0x2c),
+                ],
+            )
+            .palette,
+            "ink is the shipped document, syntax derived"
+        );
     }
 }

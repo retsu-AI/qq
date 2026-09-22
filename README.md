@@ -160,7 +160,7 @@ from the repository root to the current directory.
 ```ron
 (
     version: 1,
-    theme: "qq",
+    theme: "ink",
     bindings: (
         toggle_navigator: ["Ctrl-T"],
         create_root_session: ["Alt-N"],
@@ -172,7 +172,10 @@ from the repository root to the current directory.
 ```
 
 An omitted action inherits the previous layer. An empty list disables that
-action. Invalid chords and collisions are rejected before the TUI starts.
+action. Invalid chords and collisions are rejected before the TUI starts. An
+omitted `theme` picks `ink` when the terminal advertises truecolor
+(`COLORTERM=truecolor` or `24bit`) and the ANSI `terminal` theme otherwise;
+`/theme` lists every shipped and user theme (`docs/design/theme.md`).
 
 Every other key lives in one command table. `?` on an empty composer, `F1`, or
 `/help` lists every command with its chord and slash name grouped by area;

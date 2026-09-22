@@ -9,11 +9,20 @@ own palettes without touching layout or keybinding config.
 Themes are load-time configuration. Invalid themes fail before the TUI starts,
 the same way invalid key chords do.
 
-## Current Baseline
+## Defaults
 
-Until a theme is selected, the renderer uses the compiled default palette:
+Two themes are always present and one of them is the default
+([ADR 0036](../adr/0036-truecolor-default-theme.md)):
 
-| Role | Default |
+- `ink` is the designed default: a truecolor document
+  (`crates/qq-config/themes/ink.ron`) with cool paper text, a sky accent, a
+  copper brand, and a graphite surface. It is the default when the terminal
+  advertises truecolor.
+- `terminal` is the compiled ANSI fallback. It paints with the terminal's own
+  named colors for every role but `brand` and `surface`, so it follows the
+  user's terminal palette:
+
+| Role | `terminal` |
 |------|---------|
 | `text` | white |
 | `muted` | dark grey (dim) |
@@ -24,30 +33,46 @@ Until a theme is selected, the renderer uses the compiled default palette:
 | `success` | green |
 | `surface` | `#262830` (code-block background) |
 
-The compiled theme uses the terminal's own named colors for every role but
-`brand` and `surface`, so it follows the user's terminal palette. Theme files
-use `#RRGGBB` literals only, so a named theme looks the same everywhere.
+Theme files use `#RRGGBB` literals only, so a named theme looks the same
+everywhere; `terminal` is built in code because a file cannot name ANSI
+colors.
 
 These roles are the only colors the view should depend on. Attributes such as
 bold, dim, and italic stay in the renderer; themes supply colors only.
 
 ## Selection
 
-Theme selection lives in `tui.ron` beside layout and bindings:
+Theme selection lives in `tui.ron` beside bindings:
 
 ```ron
 (
     version: 1,
-    theme: "qq",
-    layout: Threadline,
+    theme: "ink",
     bindings: (
-        select_threadline: ["F1"],
+        toggle_navigator: ["Ctrl-T"],
         // ...
     ),
 )
 ```
 
-`theme` is a string name. When omitted, the compiled default `"qq"` is used.
+`theme` is a string name. When omitted, or set to the alias `"qq"`, the
+default rule picks the theme:
+
+| `theme` | `COLORTERM` is `truecolor` / `24bit` | anything else or unset |
+|---------|------|------|
+| omitted or `"qq"` | `ink` | `terminal` |
+| `"ink"` | `ink` | `ink` |
+| `"terminal"` | `terminal` | `terminal` |
+| any other name | that theme | that theme |
+
+An explicit name always wins; only the omitted/`qq` case consults the
+terminal. The `COLORTERM` comparison is case-insensitive and exact (no
+trimming). The composition root reads the variable once at startup
+(`src/main.rs`, `truecolor_support`) and passes a `TruecolorSupport` value to
+`ConfigLoader::load_theme`; neither `qq-config` nor `qq-tui` reads the
+environment. `qq` is an alias for the rule, not a palette: `default_theme_name`
+rewrites it to `ink` or `terminal` before lookup, TUI settings still report
+`qq` as the compiled default name, and no theme named `qq` is ever listed.
 
 `tui.ron` continues to layer as today:
 
@@ -61,7 +86,9 @@ A global `tui.ron` or `themes/N.ron` may be a leaf symlink to a regular file.
 Project `.qq/tui.ron` and `.qq/themes/N.ron` still reject symbolic links.
 
 Later layers may override the theme name. The resolved name is then loaded once
-when TUI settings are compiled.
+when TUI settings are compiled. A user file named `ink.ron` shadows the shipped
+`ink` (and the alias follows it); `terminal.ron` and `qq.ron` are ignored,
+because those names never reach the file system.
 
 ## Theme Documents
 
@@ -188,7 +215,7 @@ Rules:
 - Unknown fields inside `syntax` are rejected, like the rest of the document.
 - No derived default is `error`, so code never reads as broken. The blend
   for `constant` mixes RGB channels; when `brand` or `text` is a terminal
-  color (only the compiled `qq` theme), `constant` is `brand` unchanged.
+  color (only the compiled `terminal` theme), `constant` is `brand` unchanged.
 - The italic on comments is a renderer attribute, not a theme value.
 
 Shipped themes declare a `syntax` block where the upstream palette
@@ -220,8 +247,10 @@ pub struct Palette {
 }
 ```
 
-`Theme::qq()` returns the compiled baseline and is the fallback when no theme
-name is configured. `Theme::from_roles(name, [ThemeColor; 8])` builds a theme
+`Theme::terminal()` returns the compiled ANSI palette and is what
+`Theme::default()` builds when the root passes no themes; the designed default
+`ink` is a theme document the root loads and passes in like any other.
+`Theme::from_roles(name, [ThemeColor; 8])` builds a theme
 from the root's resolved role colors without exposing a terminal library type
 across the crate boundary; `Theme::from_roles_and_syntax(name, roles,
 SyntaxOverrides)` additionally applies a document's `syntax` block after the
@@ -231,8 +260,9 @@ come from, and `Palette::with_syntax` the single place overrides land.
 Configuration loading:
 
 1. Load layered `tui.ron` documents.
-2. Resolve the effective theme name (default `"qq"`).
-3. Load and validate the theme document for that name.
+2. Resolve the effective theme name (the `qq` alias when unset).
+3. Resolve the alias through the default rule (§ Selection) and load and
+   validate the theme document for the resulting name.
 4. Expand aliases into concrete colors, for `colors` and any `syntax` field.
 5. Derive the syntax roles, then apply the document's `syntax` overrides.
 6. Attach the resolved `Theme` to TUI options alongside layout and bindings.
@@ -247,9 +277,9 @@ when it changes; the next frame repaints every row in the new palette.
 
 ## Shipped Themes
 
-The compiled theme id is `"qq"`. Its colors match the baseline table above so
-existing installs keep the current look when `theme` is omitted or set to
-`"qq"`.
+The compiled theme is `terminal`; its colors are the table in § Defaults. It
+is built in code, never from a file, so it is always present and cannot be
+shadowed.
 
 The binary also ships these themes as ordinary theme documents
 (`crates/qq-config/themes/*.ron`, embedded with `include_str!` and parsed by
@@ -258,7 +288,7 @@ defect that surfaces as a `ConfigError`):
 
 | Name | Source | `syntax` block |
 |------|--------|----------------|
-| `ink` | QQ house theme: cool paper text, sky accent, copper brand | derived |
+| `ink` (default on truecolor) | QQ house theme: cool paper text, sky accent, copper brand | derived |
 | `ember` | QQ warm theme: parchment text, teal accent, ember brand | derived |
 | `catppuccin` | Catppuccin Mocha | style guide "Code Editors" table |
 | `dracula` | Dracula | draculatheme.com/spec |
@@ -324,8 +354,11 @@ from disk, which path supplied the theme document.
 ## Theme Picker
 
 `/theme` opens a picker listing every theme discoverable from the working
-directory (the root passes the selected theme first, then the rest of the
-catalog). Moving the cursor or typing a filter previews the highlighted theme
+directory: `ink`, `terminal`, the other shipped themes, and user files. The
+root passes the selected theme first, then the rest of the catalog; when the
+selection came from the default rule, the first entry is the resolved `ink` or
+`terminal`, so the `active` marker sits on the theme actually painting. `qq`
+is an alias and never a row. Moving the cursor or typing a filter previews the highlighted theme
 immediately; Enter keeps it for the rest of the session and shows the
 `theme: "<name>"` line to add to `tui.ron`; Esc restores the theme that was
 active when the picker opened. Each row paints a swatch of the theme's roles
@@ -354,12 +387,14 @@ discovery.
 2. Replace hardcoded palette helpers in the view with theme-backed styles.
 3. Extend `tui.ron` loading with an optional `theme` field.
 4. Resolve theme files from compiled, global, and project locations.
-5. Ship the compiled `"qq"` theme and document the custom-theme workflow.
+5. Ship the compiled `terminal` theme and document the custom-theme workflow.
 6. Tests: default resolution, layered name override, `defs` aliases, unknown
    name, incomplete theme, bad hex, and a render smoke path with a non-default
    palette.
 7. Syntax roles on `Palette` with derived defaults, an optional `syntax`
    block per document, and shipped blocks where the upstream defines them.
+8. `ink` as the truecolor default with `terminal` as the fallback and `qq` as
+   the alias for the rule (ADR 0036).
 
 ## Design Constraints
 

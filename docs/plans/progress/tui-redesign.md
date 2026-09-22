@@ -13,7 +13,7 @@ Raw frames and bench reports live under `target/qq-perf/tui-<slice>-<date>/`
 | U2 ([ENG-848](https://linear.app/retsu-ai/issue/ENG-848)) | Inline styling, `Style.underline` | In review | [#102](https://github.com/retsu-AI/qq/pull/102) | Rebased onto main after #95 |
 | U3 ([ENG-849](https://linear.app/retsu-ai/issue/ENG-849)) | Code panel | In review | [#100](https://github.com/retsu-AI/qq/pull/100) | Stacked on #102 |
 | U4 ([ENG-850](https://linear.app/retsu-ai/issue/ENG-850)) | Syntax palette, theme `syntax` block | In review | [#103](https://github.com/retsu-AI/qq/pull/103) | Stacked on #101 |
-| U5 ([ENG-851](https://linear.app/retsu-ai/issue/ENG-851)) | `ink` default theme, `terminal` fallback, ADR 0036 | Planned | | Needs U4 |
+| U5 ([ENG-851](https://linear.app/retsu-ai/issue/ENG-851)) | `ink` default theme, `terminal` fallback, ADR 0036 | In review | `feat/eng-851-u5-ink-default` | ADR 0036 |
 | U9 ([ENG-852](https://linear.app/retsu-ai/issue/ENG-852)) | Sessions rail, adaptive density | In review | [#101](https://github.com/retsu-AI/qq/pull/101) | Stacked on #100 |
 | L3 ([ENG-853](https://linear.app/retsu-ai/issue/ENG-853)) | Inspector pane | In review | [#104](https://github.com/retsu-AI/qq/pull/104) | Stacked on #103 |
 | L4 ([ENG-854](https://linear.app/retsu-ai/issue/ENG-854)) | Split transcripts | Planned | | Needs L2 |
@@ -284,3 +284,21 @@ Baseline: `cargo bench -p qq-tui --bench render` on `51ccf13` recorded to
 - Docs: `layout.md` § Tiers, § Preferences, new § Inspector, § Evidence.
 - Root request: `architecture.md`'s `qq-tui` bullet should mention the
   inspector as a per-frame pane fed by the shared tool-row cache.
+
+### 2026-09-21 — U5 receipt
+
+- Default rule (ADR 0036, `theme.md` § Selection): unset or `theme: "qq"` →
+  `ink` when `COLORTERM` is `truecolor`/`24bit` (case-insensitive), else
+  `terminal`; any explicit name is literal. `qq` is an alias resolved in
+  `qq-config::theme::load` via `default_theme_name(TruecolorSupport)`, not a
+  third palette. The root reads `COLORTERM` once (`truecolor_support`) and
+  passes the value in; `qq-config`/`qq-tui` never touch the environment.
+- Renames: compiled `qq` → `terminal` (`compiled_theme`, `Palette::TERMINAL`,
+  `Theme::terminal()`); `load_theme` takes `TruecolorSupport`. Discovery skips
+  `qq.ron`/`terminal.ron`; `ink.ron` may be shadowed and the alias follows it.
+  Picker never lists `qq`; the active marker follows the resolved name.
+- Tests: root 170 → 172, qq-config 89 → 90, qq-tui 289 → 290. Goldens
+  unchanged (plain text). fmt, clippy `-D warnings` clean.
+- Bench (`target/qq-perf/tui-U5-2026-09-21/after.txt`, core 2): steady 22.0,
+  golden_path 39.4, keystroke 26.8, run_on_32kb 417.6 µs — neutral; the
+  harness still runs on the compiled ANSI palette (now named `terminal`).
