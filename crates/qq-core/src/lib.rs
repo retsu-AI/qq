@@ -2505,37 +2505,31 @@ impl plan::CompiledAgentPlan {
                             .join("\n");
                         let context = checkpoint_context.as_mut().expect("enabled review context");
                         let correlation = format!("final:{turn_ordinal}");
-                        if context.task_overflow {
-                            let feedback = "JEV final checkpoint was not sent because the original task exceeded the exact review bound".to_owned();
-                            yield RuntimeEvent::CheckpointReviewed {
-                                spend: None,
-                                correlation,
-                                phase: qq_protocol::CheckpointPhase::FinalCandidate,
-                                tool_call_id: None,
-                                outcome: qq_protocol::CheckpointOutcome::Unavailable,
-                                confidence: None,
-                                feedback: feedback.clone(),
-                            };
-                            yield RuntimeEvent::Failed { kind: RunFailureKind::Policy, message: feedback };
-                            return;
-                        }
-                        let Some(final_evidence) = context.final_evidence(answer) else {
-                            let feedback = "JEV final checkpoint was not sent because the combined candidate and tool evidence exceeded the exact review bound".to_owned();
-                            yield RuntimeEvent::CheckpointReviewed {
-                                spend: None,
-                                correlation,
-                                phase: qq_protocol::CheckpointPhase::FinalCandidate,
-                                tool_call_id: None,
-                                outcome: qq_protocol::CheckpointOutcome::Unavailable,
-                                confidence: None,
-                                feedback: feedback.clone(),
-                            };
-                            yield RuntimeEvent::Failed {
-                                kind: RunFailureKind::Policy,
-                                message: feedback,
-                            };
-                            return;
+                        // A review the harness could not run is recorded as
+                        // `Unavailable` and the candidate completes: the
+                        // verdict is evidence for the user, not the run's
+                        // outcome. Only the reviewer's own RED verdict, within
+                        // the repair allowance, redirects the run.
+                        let final_evidence = if context.task_overflow {
+                            Err("JEV final checkpoint was not sent because the original task exceeded the exact review bound")
+                        } else {
+                            context.final_evidence(answer).ok_or(
+                                "JEV final checkpoint was not sent because the combined candidate and tool evidence exceeded the exact review bound",
+                            )
                         };
+                        match final_evidence {
+                            Err(feedback) => {
+                                yield RuntimeEvent::CheckpointReviewed {
+                                    spend: None,
+                                    correlation,
+                                    phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                                    tool_call_id: None,
+                                    outcome: qq_protocol::CheckpointOutcome::Unavailable,
+                                    confidence: None,
+                                    feedback: feedback.to_owned(),
+                                };
+                            }
+                            Ok(final_evidence) => {
                         let remaining = match budget.remaining(tokio::time::Instant::now()) {
                             Ok(remaining) => remaining,
                             Err(kind) => {
@@ -2604,18 +2598,15 @@ impl plan::CompiledAgentPlan {
                             yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
                             return;
                         }
-                        if verdict.outcome == runtime::CheckpointOutcome::Unavailable {
-                            yield RuntimeEvent::Failed {
-                                kind: RunFailureKind::Policy,
-                                message: format!("JEV final checkpoint {}: {}", verdict.outcome.label(), verdict.feedback),
-                            };
-                            return;
-                        }
-                        if !verdict.outcome.allows_progress() {
-                            if !checkpoint_context.as_mut().expect("enabled review context").repair() {
-                                yield RuntimeEvent::Failed { kind: RunFailureKind::Policy, message: "Jev exhausted its two correction attempts; revise the task or collect missing evidence in a new run".to_owned() };
-                                return;
-                            }
+                        // `Unavailable` (timeout, malformed reply, outage) is
+                        // already recorded above; the candidate stands. A RED
+                        // verdict redirects the run while a correction attempt
+                        // remains; once both are spent the run completes with
+                        // the verdict on record rather than failing.
+                        if !verdict.outcome.allows_progress()
+                            && verdict.outcome != runtime::CheckpointOutcome::Unavailable
+                            && checkpoint_context.as_mut().expect("enabled review context").repair()
+                        {
                             irreducible_message_bytes = irreducible_message_bytes
                                 .saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
@@ -2627,6 +2618,8 @@ impl plan::CompiledAgentPlan {
                             irreducible_message_bytes = irreducible_message_bytes
                                 .saturating_add(measure_message(messages.last().expect("just pushed")));
                             continue;
+                        }
+                            }
                         }
                     }
                     // A review may await remote inference. Input accepted during
@@ -3214,7 +3207,6 @@ impl plan::CompiledAgentPlan {
                 let mut checkpoint_correction_notice = None;
                 if let Some(reviewer) = &checkpoint {
                     let context = checkpoint_context.as_mut().expect("enabled review context");
-                    let mut unavailable = None;
                     let mut correction = Vec::new();
                     for (call, retained) in calls.iter().zip(results.iter_mut()) {
                         let retained = retained.as_mut().expect("every tool outcome is retained before checkpointing");
@@ -3238,9 +3230,12 @@ impl plan::CompiledAgentPlan {
                             None
                         };
                         if let Some(field) = overflow {
+                            // Recorded as unreviewed; the durable result stands
+                            // and the run continues.
                             let feedback = format!(
                                 "JEV tool checkpoint was not sent because {field} exceeded the exact review bound"
                             );
+                            retained.model_text.push_str(&format!("\n\n[JEV unavailable: {feedback}]"));
                             yield RuntimeEvent::CheckpointReviewed {
                                 spend: None,
                                 correlation,
@@ -3248,13 +3243,9 @@ impl plan::CompiledAgentPlan {
                                 tool_call_id: Some(call.id),
                                 outcome: qq_protocol::CheckpointOutcome::Unavailable,
                                 confidence: None,
-                                feedback: feedback.clone(),
+                                feedback,
                             };
-                            yield RuntimeEvent::Failed {
-                                kind: RunFailureKind::Policy,
-                                message: feedback,
-                            };
-                            return;
+                            continue;
                         }
                         let remaining = match budget.remaining(tokio::time::Instant::now()) {
                             Ok(remaining) => remaining,
@@ -3304,24 +3295,19 @@ impl plan::CompiledAgentPlan {
                             yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
                             return;
                         }
-                        if verdict.outcome == runtime::CheckpointOutcome::Unavailable {
-                            unavailable.get_or_insert_with(|| format!(
-                                "JEV tool checkpoint {} for {}: {}",
-                                verdict.outcome.label(), call.name, verdict.feedback
-                            ));
-                        } else if !verdict.outcome.allows_progress() {
+                        // An unavailable reviewer leaves its marker on the
+                        // retained result and the run continues; only a RED
+                        // verdict asks for correction.
+                        if !verdict.outcome.allows_progress()
+                            && verdict.outcome != runtime::CheckpointOutcome::Unavailable
+                        {
                             correction.push(format!("{}: {}", call.name, verdict.feedback));
                         }
                     }
-                    if let Some(message) = unavailable {
-                        yield RuntimeEvent::Failed { kind: RunFailureKind::Policy, message };
-                        return;
-                    }
-                    if !correction.is_empty() {
-                        if !context.repair() {
-                            yield RuntimeEvent::Failed { kind: RunFailureKind::Policy, message: "Jev exhausted its two correction attempts; revise the task or collect missing evidence in a new run".to_owned() };
-                            return;
-                        }
+                    // Both correction attempts spent: the RED markers stay on
+                    // the results as evidence and the model proceeds without
+                    // another redirect, instead of the run failing.
+                    if !correction.is_empty() && context.repair() {
                         checkpoint_correction_notice = Some(format!(
                             "JEV RED. Do not claim completion. Produce fresh direct evidence or correct the work, then retry one tool call. Feedback:\n- {}",
                             correction.join("\n- ")
@@ -5901,32 +5887,137 @@ mod tests {
         }
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("note"), "evidence").unwrap();
-        for (outcome, expected_calls, message) in [
-            (CheckpointOutcome::Supported, 32, "32 review requests"),
-            (
-                CheckpointOutcome::Contradicted,
-                3,
-                "two correction attempts",
-            ),
-        ] {
+        // A GREEN reviewer is asked 32 times and then the per-run review
+        // limit fails the run: that is a harness bound, not a verdict.
+        {
             let calls = Arc::new(AtomicUsize::new(0));
             let runtime = Runtime::new(RepeatingProvider, "test", 256)
                 .unwrap()
-                .with_checkpoint_reviewer(Arc::new(Reviewer(outcome, Arc::clone(&calls))));
+                .with_checkpoint_reviewer(Arc::new(Reviewer(
+                    CheckpointOutcome::Supported,
+                    Arc::clone(&calls),
+                )));
             let events = runtime
                 .run_messages_in_workspace(vec![Message::user("inspect")], directory.path().into())
                 .collect::<Vec<_>>()
                 .await;
-            assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+            assert_eq!(calls.load(Ordering::SeqCst), 32);
             assert!(
-                matches!(events.last(), Some(RuntimeEvent::Failed { message: actual, .. }) if actual.contains(message)),
+                matches!(events.last(), Some(RuntimeEvent::Failed { message, .. }) if message.contains("32 review requests")),
+                "{events:?}"
+            );
+        }
+        // A RED reviewer redirects the run twice. After that its verdicts
+        // are recorded on each result and the model proceeds; the run is not
+        // failed for disagreeing with the reviewer (RR3). The provider here
+        // never stops calling tools, so the review limit is what ends it,
+        // with every one of the 32 verdicts durable in the event stream.
+        {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let runtime = Runtime::new(RepeatingProvider, "test", 256)
+                .unwrap()
+                .with_checkpoint_reviewer(Arc::new(Reviewer(
+                    CheckpointOutcome::Contradicted,
+                    Arc::clone(&calls),
+                )));
+            let events = runtime
+                .run_messages_in_workspace(vec![Message::user("inspect")], directory.path().into())
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(calls.load(Ordering::SeqCst), 32);
+            let red = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        RuntimeEvent::CheckpointReviewed {
+                            outcome: qq_protocol::CheckpointOutcome::Contradicted,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            assert_eq!(red, 32);
+            assert!(
+                !events.iter().any(|event| matches!(event, RuntimeEvent::Failed { message, .. } if message.contains("correction attempts"))),
+                "{events:?}"
+            );
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Failed { message, .. }) if message.contains("32 review requests")),
                 "{events:?}"
             );
         }
     }
 
+    #[tokio::test]
+    async fn a_final_candidate_rejected_twice_completes_with_the_verdicts_on_record() {
+        // Regression (RR3): 9 real runs on 2026-09-19/20 ended as `Failed`
+        // with "Jev exhausted its two correction attempts" after the model
+        // had produced an answer. The reviewer's disagreement is now evidence
+        // in the transcript: two RED verdicts redirect, the third completes.
+        struct AnswerProvider(AtomicUsize);
+        impl Provider for AnswerProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                let attempt = self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: format!("answer {attempt}"),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        struct RedReviewer(Arc<AtomicUsize>);
+        impl CheckpointReviewer for RedReviewer {
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                assert_eq!(request.phase, runtime::CheckpointPhase::FinalCandidate);
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome: CheckpointOutcome::InsufficientEvidence,
+                    confidence: Some(0.9),
+                    feedback: "C1: no direct evidence".into(),
+                    spend: qq_protocol::CheckpointSpend::default(),
+                }))
+            }
+        }
+        let reviews = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(AnswerProvider(AtomicUsize::new(0)), "test", 256)
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(RedReviewer(Arc::clone(&reviews))));
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("answer")], directory.path().into())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(reviews.load(Ordering::SeqCst), 3);
+        let verdicts = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    RuntimeEvent::CheckpointReviewed {
+                        outcome: qq_protocol::CheckpointOutcome::InsufficientEvidence,
+                        phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(verdicts, 3);
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{:?}",
+            events.last()
+        );
+        // The third candidate is the one that stands.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::OutputTextDelta { text } if text == "answer 2"
+        )));
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn final_checkpoint_timeout_records_unknown_spend_and_fails() {
+    async fn final_checkpoint_timeout_records_unknown_spend_and_completes() {
         struct Reviewer;
         impl CheckpointReviewer for Reviewer {
             fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
@@ -5949,7 +6040,12 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
         assert!(events.iter().any(|event| matches!(event, RuntimeEvent::CheckpointReviewed { outcome: qq_protocol::CheckpointOutcome::Unavailable, spend: Some(spend), feedback, .. } if spend.usage.is_none() && feedback.contains("five seconds"))));
-        assert!(matches!(events.last(), Some(RuntimeEvent::Failed { .. })));
+        // A reviewer outage is recorded, not turned into a failed run (RR3).
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{:?}",
+            events.last()
+        );
     }
 
     #[tokio::test]
@@ -6222,20 +6318,27 @@ mod tests {
                 ..
             } if feedback.contains("original task exceeded")
         )));
-        assert!(matches!(
-            events.last(),
-            Some(RuntimeEvent::Failed {
-                kind: RunFailureKind::Policy,
-                ..
-            })
-        ));
+        // Unreviewable is recorded, not fatal (RR3): the answer stands.
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{:?}",
+            events.last()
+        );
     }
 
     #[tokio::test]
     async fn enforced_checkpoint_does_not_assess_oversized_tool_evidence() {
-        struct ToolProvider;
+        struct ToolProvider(AtomicUsize);
         impl Provider for ToolProvider {
             fn stream(&self, _request: ModelRequest) -> ProviderStream {
+                if self.0.fetch_add(1, Ordering::SeqCst) > 0 {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".into(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
                 let arguments = serde_json::json!({
                     "delay_ms": 0,
                     "result": "x".repeat(runtime::MAX_CHECKPOINT_TEXT_BYTES)
@@ -6269,7 +6372,7 @@ mod tests {
         }
 
         let reviews = Arc::new(AtomicUsize::new(0));
-        let runtime = Runtime::new(ToolProvider, "test", 256)
+        let runtime = Runtime::new(ToolProvider(AtomicUsize::new(0)), "test", 256)
             .unwrap()
             .with_checkpoint_reviewer(Arc::new(CountingReviewer(Arc::clone(&reviews))));
         let directory = tempfile::tempdir().unwrap();
@@ -6278,7 +6381,9 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
 
-        assert_eq!(reviews.load(Ordering::SeqCst), 0);
+        // The final candidate is reviewed as usual; only the oversized tool
+        // result was skipped.
+        assert_eq!(reviews.load(Ordering::SeqCst), 1);
         assert!(events.iter().any(|event| matches!(
             event,
             RuntimeEvent::CheckpointReviewed {
@@ -6288,13 +6393,12 @@ mod tests {
                 ..
             } if feedback.contains("tool arguments and result exceeded")
         )));
-        assert!(matches!(
-            events.last(),
-            Some(RuntimeEvent::Failed {
-                kind: RunFailureKind::Policy,
-                ..
-            })
-        ));
+        // Unreviewed is recorded, not fatal (RR3): the run completes.
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{:?}",
+            events.last()
+        );
     }
 
     #[cfg(unix)]
