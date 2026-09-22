@@ -11,9 +11,9 @@ use std::{
 
 use qq_auth::{AuthError, CredentialStore, Secret, resolve_provider_credential};
 use qq_config::{
-    AwsAuth, BedrockAuth, ConfigError, ConfigLoader, ConfigSnapshot, EndpointMode, HttpAccess,
-    HttpCredential, LoadRequest, PromotionOutcome, ProviderAccess, ProviderApi, ProviderAuth,
-    ProviderConfig, RuntimeOverrides, WorkspaceGrant,
+    AwsAuth, BedrockAuth, ClientSnapshot, ConfigError, ConfigLoader, ConfigSnapshot, EndpointMode,
+    HttpAccess, HttpCredential, LoadRequest, PromotionOutcome, ProviderAccess, ProviderApi,
+    ProviderAuth, ProviderConfig, RuntimeOverrides, WorkspaceGrant,
 };
 use qq_core::{
     ApprovalReviewer, CheckpointFuture, CheckpointOutcome, CheckpointRequest, CheckpointReviewer,
@@ -55,6 +55,52 @@ use crate::{
 
 const MAX_MODEL_OPTIONS: usize = 4_096;
 const MAX_DISCOVERY_PROVIDERS: usize = 4;
+
+/// The configuration fields the served model catalog is built from, borrowed
+/// from either snapshot shape so one builder serves plan compilation (which
+/// always has a model) and the interactive client (which may not).
+#[derive(Clone, Copy)]
+struct CatalogSource<'a> {
+    model: Option<&'a qq_config::ModelRoute>,
+    organization: Option<&'a str>,
+    max_output_tokens: u32,
+    providers: &'a BTreeMap<String, ProviderConfig>,
+    policy: &'a qq_config::EffectivePolicy,
+}
+
+impl<'a> From<&'a ConfigSnapshot> for CatalogSource<'a> {
+    fn from(snapshot: &'a ConfigSnapshot) -> Self {
+        Self {
+            model: Some(snapshot.model()),
+            organization: snapshot.organization(),
+            max_output_tokens: snapshot.max_output_tokens(),
+            providers: snapshot.providers(),
+            policy: snapshot.policy(),
+        }
+    }
+}
+
+impl<'a> From<&'a ClientSnapshot> for CatalogSource<'a> {
+    fn from(snapshot: &'a ClientSnapshot) -> Self {
+        Self {
+            model: snapshot.model(),
+            organization: snapshot.organization(),
+            max_output_tokens: snapshot.max_output_tokens(),
+            providers: snapshot.providers(),
+            policy: snapshot.policy(),
+        }
+    }
+}
+
+/// A built-in provider the configuration admits but that has no resolvable
+/// credential, with the command or environment variable that would supply
+/// one. The TUI shows it where the provider's models would otherwise appear.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderRemedy {
+    pub provider: String,
+    /// Imperative, ready to follow `<provider> needs a credential: `.
+    pub remedy: String,
+}
 
 #[derive(Clone)]
 pub struct RuntimeFactory {
@@ -193,6 +239,23 @@ impl RuntimeFactory {
         Ok(snapshot)
     }
 
+    /// [`Self::load`] for the interactive client: the configuration may lack
+    /// a model, in which case the TUI opens and asks for one. The isolated
+    /// TUI QA profile still requires its pinned route because the fixture's
+    /// safety checks are about that route.
+    pub fn load_for_client(
+        &self,
+        request: &LoadRequest,
+    ) -> Result<ClientSnapshot, RuntimeBuildError> {
+        self.validate_isolated_tui_qa_state()?;
+        self.validate_tui_qa_workspace(request.cwd())?;
+        if self.is_isolated_tui_qa() {
+            let snapshot = self.inner.config.load(request)?;
+            self.validate_tui_qa_snapshot(&snapshot)?;
+        }
+        Ok(self.inner.config.load_for_client(request)?)
+    }
+
     /// Direct ask keeps its ephemeral output contract while reusing the same
     /// router and selected-provider loader as durable sessions.
     pub async fn route_direct(
@@ -268,21 +331,109 @@ impl RuntimeFactory {
         if self.is_isolated_tui_qa() {
             vec![Self::isolated_tui_qa_model_option(snapshot)]
         } else {
-            self.model_options_with_discovery(snapshot, &BTreeMap::new())
+            self.model_options_with_discovery(&CatalogSource::from(snapshot), &BTreeMap::new())
         }
+    }
+
+    /// [`Self::configured_model_options`] for the interactive client, whose
+    /// configuration may lack a model. The isolated TUI QA profile always has
+    /// one (its fixture pins the route) and never probes other providers.
+    pub fn client_model_options(&self, snapshot: &ClientSnapshot) -> Vec<ModelDescriptor> {
+        if self.is_isolated_tui_qa() {
+            return snapshot
+                .model()
+                .map(|route| vec![Self::isolated_tui_qa_model_option_for(snapshot, route)])
+                .unwrap_or_default();
+        }
+        self.model_options_with_discovery(&CatalogSource::from(snapshot), &BTreeMap::new())
+    }
+
+    /// Built-in providers the policy admits that have no resolvable
+    /// credential, each with the command or environment variable that would
+    /// supply one. Custom and gateway providers are not listed: their
+    /// credential is whatever `auth` references. The isolated TUI QA profile
+    /// lists nothing because it never consults the credential store for
+    /// providers it does not select.
+    pub fn unauthenticated_providers(&self, snapshot: &ClientSnapshot) -> Vec<ProviderRemedy> {
+        if self.is_isolated_tui_qa() {
+            return Vec::new();
+        }
+        let allowed = snapshot.policy().allowed_providers();
+        let denied = snapshot.policy().denied_providers();
+        let mut remedies = Vec::new();
+        for (provider_id, provider) in snapshot.providers() {
+            if allowed.is_some_and(|allowed| !allowed.iter().any(|id| id == provider_id))
+                || denied.iter().any(|id| id == provider_id)
+            {
+                continue;
+            }
+            let remedy = match provider.access() {
+                Some(ProviderAccess::Http(access)) => match access.auth() {
+                    HttpCredential::ApiKey {
+                        explicit: None,
+                        environment_variable,
+                        ..
+                    } => format!("run qq auth login {provider_id} or set {environment_variable}"),
+                    HttpCredential::OpenAiCodex { .. } => {
+                        format!("run qq auth login {provider_id}")
+                    }
+                    HttpCredential::XAi { api_key: None, .. } => {
+                        format!("run qq auth login {provider_id} or set XAI_API_KEY")
+                    }
+                    // An operator-supplied reference is the credential; the
+                    // built-in remedy would point at the wrong place.
+                    HttpCredential::ApiKey {
+                        explicit: Some(_), ..
+                    }
+                    | HttpCredential::XAi {
+                        api_key: Some(_), ..
+                    }
+                    | HttpCredential::Configured(_) => continue,
+                },
+                Some(
+                    ProviderAccess::AmazonBedrock { auth, .. }
+                    | ProviderAccess::AmazonBedrockMantle { auth, .. },
+                ) => match auth {
+                    BedrockAuth::Aws(AwsAuth::DefaultChain) => {
+                        "set AWS_PROFILE or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY".to_owned()
+                    }
+                    BedrockAuth::Aws(AwsAuth::Profile(profile)) => {
+                        format!("configure the AWS profile {profile}")
+                    }
+                    BedrockAuth::ApiKey(_) => continue,
+                },
+                None => continue,
+            };
+            if self.provider_authenticated(provider_id, provider) {
+                continue;
+            }
+            remedies.push(ProviderRemedy {
+                provider: provider_id.clone(),
+                remedy,
+            });
+        }
+        remedies
     }
 
     /// Returns only the already-validated selected model without probing any
     /// other provider's authentication. The isolated TUI QA profile uses this
     /// after restricting the route to a loopback Custom/NoAuth fixture.
     pub fn isolated_tui_qa_model_option(snapshot: &ConfigSnapshot) -> ModelDescriptor {
+        Self::isolated_tui_qa_model_option_for(CatalogSource::from(snapshot), snapshot.model())
+    }
+
+    fn isolated_tui_qa_model_option_for<'a>(
+        snapshot: impl Into<CatalogSource<'a>>,
+        route: &qq_config::ModelRoute,
+    ) -> ModelDescriptor {
+        let snapshot = snapshot.into();
         let metadata = snapshot
-            .providers()
-            .get(snapshot.model().provider())
-            .and_then(|provider| provider.models().get(snapshot.model().model()));
+            .providers
+            .get(route.provider())
+            .and_then(|provider| provider.models().get(route.model()));
         ModelDescriptor {
-            provider: snapshot.model().provider().to_owned(),
-            model: snapshot.model().model().to_owned(),
+            provider: route.provider().to_owned(),
+            model: route.model().to_owned(),
             name: metadata
                 .and_then(|metadata| metadata.name())
                 .map(str::to_owned),
@@ -292,28 +443,28 @@ impl RuntimeFactory {
                 .unwrap_or_default(),
             selection: ModelSelection {
                 model_is_fallback: false,
-                model: Some(snapshot.model().as_str().to_owned()),
+                model: Some(route.as_str().to_owned()),
                 max_output_tokens: Some(
                     metadata
                         .and_then(|metadata| metadata.max_output_tokens())
-                        .map_or(snapshot.max_output_tokens(), |limit| {
-                            limit.min(snapshot.max_output_tokens())
+                        .map_or(snapshot.max_output_tokens, |limit| {
+                            limit.min(snapshot.max_output_tokens)
                         }),
                 ),
-                organization: snapshot.organization().map(str::to_owned),
+                organization: snapshot.organization.map(str::to_owned),
             },
         }
     }
 
     fn model_options_with_discovery(
         &self,
-        snapshot: &ConfigSnapshot,
+        snapshot: &CatalogSource<'_>,
         discovered: &BTreeMap<String, Vec<DiscoveredModel>>,
     ) -> Vec<ModelDescriptor> {
-        let allowed = snapshot.policy().allowed_providers();
-        let denied = snapshot.policy().denied_providers();
+        let allowed = snapshot.policy.allowed_providers();
+        let denied = snapshot.policy.denied_providers();
         let mut options = Vec::new();
-        'providers: for (provider_id, provider) in snapshot.providers() {
+        'providers: for (provider_id, provider) in snapshot.providers {
             if allowed.is_some_and(|allowed| !allowed.iter().any(|id| id == provider_id))
                 || denied.iter().any(|id| id == provider_id)
                 || !self.provider_authenticated(provider_id, provider)
@@ -336,11 +487,11 @@ impl RuntimeFactory {
                         max_output_tokens: Some(
                             metadata
                                 .max_output_tokens()
-                                .map_or(snapshot.max_output_tokens(), |limit| {
-                                    limit.min(snapshot.max_output_tokens())
+                                .map_or(snapshot.max_output_tokens, |limit| {
+                                    limit.min(snapshot.max_output_tokens)
                                 }),
                         ),
-                        organization: snapshot.organization().map(str::to_owned),
+                        organization: snapshot.organization.map(str::to_owned),
                     },
                 });
             }
@@ -361,24 +512,27 @@ impl RuntimeFactory {
                         selection: qq_protocol::ModelSelection {
                             model_is_fallback: false,
                             model: Some(format!("{provider_id}/{}", model.id)),
-                            max_output_tokens: Some(snapshot.max_output_tokens()),
-                            organization: snapshot.organization().map(str::to_owned),
+                            max_output_tokens: Some(snapshot.max_output_tokens),
+                            organization: snapshot.organization.map(str::to_owned),
                         },
                     });
                 }
             }
         }
-        if options.len() < MAX_MODEL_OPTIONS
+        // The configured route is selectable even when the catalog does not
+        // list it, provided its provider is authenticated.
+        if let Some(route) = snapshot.model
+            && options.len() < MAX_MODEL_OPTIONS
             && !options
                 .iter()
-                .any(|option| option.selection.model.as_deref() == Some(snapshot.model().as_str()))
-            && let Some(provider) = snapshot.providers().get(snapshot.model().provider())
-            && self.provider_authenticated(snapshot.model().provider(), provider)
+                .any(|option| option.selection.model.as_deref() == Some(route.as_str()))
+            && let Some(provider) = snapshot.providers.get(route.provider())
+            && self.provider_authenticated(route.provider(), provider)
         {
-            let metadata = provider.models().get(snapshot.model().model());
+            let metadata = provider.models().get(route.model());
             options.push(ModelDescriptor {
-                provider: snapshot.model().provider().to_owned(),
-                model: snapshot.model().model().to_owned(),
+                provider: route.provider().to_owned(),
+                model: route.model().to_owned(),
                 name: None,
                 context_window: metadata.and_then(|metadata| metadata.context_window()),
                 reasoning_efforts: metadata
@@ -386,9 +540,9 @@ impl RuntimeFactory {
                     .unwrap_or_default(),
                 selection: qq_protocol::ModelSelection {
                     model_is_fallback: false,
-                    model: Some(snapshot.model().as_str().to_owned()),
-                    max_output_tokens: Some(snapshot.max_output_tokens()),
-                    organization: snapshot.organization().map(str::to_owned),
+                    model: Some(route.as_str().to_owned()),
+                    max_output_tokens: Some(snapshot.max_output_tokens),
+                    organization: snapshot.organization.map(str::to_owned),
                 },
             });
         }
@@ -402,9 +556,12 @@ impl RuntimeFactory {
         options
     }
 
-    fn discovered_model_options(&self, snapshot: &ConfigSnapshot) -> Vec<ModelDescriptor> {
+    fn discovered_model_options(&self, snapshot: &ClientSnapshot) -> Vec<ModelDescriptor> {
         if self.is_isolated_tui_qa() {
-            return vec![Self::isolated_tui_qa_model_option(snapshot)];
+            return snapshot
+                .model()
+                .map(|route| vec![Self::isolated_tui_qa_model_option_for(snapshot, route)])
+                .unwrap_or_default();
         }
         let allowed = snapshot.policy().allowed_providers();
         let denied = snapshot.policy().denied_providers();
@@ -429,7 +586,7 @@ impl RuntimeFactory {
                 discovered.insert(provider_id.clone(), models);
             }
         }
-        self.model_options_with_discovery(snapshot, &discovered)
+        self.model_options_with_discovery(&CatalogSource::from(snapshot), &discovered)
     }
 
     fn is_isolated_tui_qa(&self) -> bool {
@@ -698,7 +855,9 @@ impl RuntimeFactory {
             overrides = overrides.with_organization(organization.clone());
         }
         load = load.with_overrides(overrides);
-        let snapshot = self.load(&load)?;
+        // The catalog answers "what could I choose?", so it must not require
+        // a choice already: a client without a model lists what is available.
+        let snapshot = self.load_for_client(&load)?;
         Ok(self.discovered_model_options(&snapshot))
     }
 
@@ -5583,6 +5742,112 @@ mod tests {
     }
 
     #[test]
+    fn served_catalog_does_not_require_a_configured_model() {
+        // OB1: `ListModels` answers "what could I choose?", so a workspace
+        // whose configuration lacks `model` still lists every authenticated
+        // built-in instead of failing with `ModelRequired`.
+        let fixture = RuntimeFixture::new();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        );
+        credentials
+            .set("anthropic/default", "test-secret", false)
+            .unwrap();
+        let factory = fixture.factory_with_credentials(credentials);
+        fs::write(fixture.path("global/config.ron"), "(version: 1)").unwrap();
+        let workspace = fs::canonicalize(fixture.path("work")).unwrap();
+        let request = LoadRequest::new(&workspace);
+        assert!(matches!(
+            factory.load(&request),
+            Err(RuntimeBuildError::Config(ConfigError::ModelRequired { .. }))
+        ));
+
+        let client = factory.load_for_client(&request).unwrap();
+        assert!(client.model().is_none());
+        let options = factory.client_model_options(&client);
+        assert!(!options.is_empty());
+        assert!(options.iter().all(|option| option.provider == "anthropic"));
+
+        let served = factory
+            .models_for(&ModelCatalogRequest {
+                workspace: workspace.display().to_string(),
+                selection: ModelSelection::default(),
+            })
+            .unwrap();
+        assert_eq!(served, options);
+    }
+
+    #[test]
+    fn unauthenticated_builtins_carry_a_remedy_and_authenticated_ones_do_not() {
+        // OB2: the TUI names the missing credential for the configured
+        // provider and lists the other built-ins as `needs credential`.
+        let fixture = RuntimeFixture::new();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        );
+        let factory = fixture.factory_with_credentials(credentials.clone());
+        fs::write(
+            fixture.path("managed/managed.ron"),
+            r#"(version: 1, policy: (denied_providers: ["bedrock", "bedrock-mantle"]))"#,
+        )
+        .unwrap();
+        let request = fixture.request(r#"(version: 1, model: "openai/gpt-5.6")"#);
+
+        let client = factory.load_for_client(&request).unwrap();
+        assert_eq!(
+            client.model().map(|route| route.as_str()),
+            Some("openai/gpt-5.6")
+        );
+        assert!(factory.client_model_options(&client).is_empty());
+        let remedies = factory.unauthenticated_providers(&client);
+        let remedy = |provider: &str| {
+            remedies
+                .iter()
+                .find(|remedy| remedy.provider == provider)
+                .map(|remedy| remedy.remedy.as_str())
+        };
+        assert_eq!(
+            remedy("openai"),
+            Some("run qq auth login openai or set OPENAI_API_KEY")
+        );
+        assert_eq!(
+            remedy("anthropic"),
+            Some("run qq auth login anthropic or set ANTHROPIC_API_KEY")
+        );
+        assert_eq!(
+            remedy("google"),
+            Some("run qq auth login google or set GEMINI_API_KEY")
+        );
+        assert_eq!(
+            remedy("xai"),
+            Some("run qq auth login xai or set XAI_API_KEY")
+        );
+        assert_eq!(
+            remedy("openai-codex"),
+            Some("run qq auth login openai-codex")
+        );
+        // Denied providers are not offered a remedy: the policy, not a
+        // credential, keeps them out.
+        assert_eq!(remedy("bedrock"), None);
+        assert_eq!(remedy("bedrock-mantle"), None);
+
+        credentials
+            .set("openai/default", "test-secret", false)
+            .unwrap();
+        let remedies = factory.unauthenticated_providers(&client);
+        assert!(remedies.iter().all(|remedy| remedy.provider != "openai"));
+        assert!(remedies.iter().any(|remedy| remedy.provider == "anthropic"));
+        assert!(
+            factory
+                .client_model_options(&client)
+                .iter()
+                .any(|option| option.selection.model.as_deref() == Some("openai/gpt-5.6"))
+        );
+    }
+
+    #[test]
     fn catalog_merges_live_ids_without_overriding_configured_metadata() {
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
@@ -5618,7 +5883,8 @@ mod tests {
             ],
         )]);
 
-        let options = factory.model_options_with_discovery(&snapshot, &discovered);
+        let options =
+            factory.model_options_with_discovery(&CatalogSource::from(&snapshot), &discovered);
 
         assert!(options.iter().any(|option| {
             option.model == "configured" && option.name.as_deref() == Some("Configured name")
