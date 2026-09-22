@@ -6,7 +6,7 @@ dated entries appended below, newest last.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| DA1 | Reviewer `Deny` is final under `auto`; escalation restarts the human wait | Planned | | No dependency. Independent review (touches `sessions/`) |
+| DA1 | Reviewer `Deny` is final under `auto`; escalation restarts the human wait | In review | `feat/eng-862-da1-reviewer-deny-final`, stacked on #125 | No dependency. Independent review (touches `sessions/`) |
 | DA2 | Delegate clock separate from the human wait; no server deadline while a client is attached | Planned | | Input: RR9, or include its minimum and say so. Do not start while RR9 is `In progress` on `sessions/approvals.rs` |
 | DA3 | `approval.delegate` opt-in; default `auto` enables it only when a delegate is configured | Planned | | Input: DA1. No protocol bump |
 | DA4 | Delegate grants are exact-command or exact-host, session-scoped, never written to config | Planned | | Input: DA1. Independent of DA2 |
@@ -60,3 +60,57 @@ the command. The per-run cap of 64 is an additional bound on delegate-recorded
 grants, not a replacement for the session cap.
 
 ADR-0041 stays reserved. DA1–DA6 stay `Planned`.
+
+### 2026-09-22 — DA1 in review: a reviewer denial settles the call
+
+Branch `feat/eng-862-da1-reviewer-deny-final`, stacked on #125 (the grant
+fix) so the approval path is tested as it will merge. Owned paths only:
+`crates/qq-core/src/sessions/approvals.rs`, the reviewer prompt in
+`src/runtime.rs`, plus the ledger and the design paragraph the slice names.
+
+What changed:
+
+- `ReviewDecision::Deny` under `auto` now settles the call as
+  `denied_by_reviewer`, the same durable path `supervised` already used. No
+  human prompt follows; the model receives the reviewer's bounded reason as a
+  tool error and the run continues. The client-wins race is unchanged: a
+  client resolution that committed first still stands.
+- The human wait starts at the escalation. Before, the reviewer and the human
+  shared one deadline that started when the reviewer was consulted, so a slow
+  reviewer ate the human's time. Now `Escalate` restarts the deadline. A
+  reviewer that never answers is still bounded by the approval wait, so a
+  broken delegate cannot hold a run open.
+- The denial text is mode-aware. `supervised` keeps "for the supervised
+  sub-agent"; `auto` says "The approval reviewer denied this tool call:" and
+  never claims a sub-agent.
+- `REVIEWER_SYSTEM_PROMPT` no longer tells the model a root deny only
+  escalates. It states that deny is final under every mode the reviewer is
+  consulted for, and the request names the mode with what that mode holds.
+- `tools.md` § Approval Policy and `protocol.md`'s resolution paragraph
+  describe the as-built behavior. `ApprovalResolution::DeniedByReviewer`'s doc
+  comment no longer says `auto` escalates.
+
+What did not change: `ask` never consults the reviewer; `read-only` and `full`
+never reach the hold; headless `auto` still supplies a deferred unattended
+deny for an escalation (`REVIEWER_DENY_GRACE`), which a reviewer resolution
+that landed first makes a no-op. No protocol bump: the resolution vocabulary
+is unchanged, only when `denied_by_reviewer` can occur.
+
+Tests added in `sessions/tests/approvals.rs`:
+`a_reviewer_denial_is_final_under_auto_and_no_human_is_asked` (replaces
+`reviewer_denial_still_lets_the_client_decide`, which asserted the old
+behavior), `a_reviewer_escalation_starts_the_human_wait_at_the_escalation`,
+`a_reviewer_that_never_answers_is_bounded_by_the_approval_wait`. The existing
+supervised denial test still passes with the supervised wording.
+
+Gates: `sessions::tests::*` (292 passed), `qq` binary reviewer and headless
+tests, `qq-protocol` goldens, `cargo fmt --check`, clippy `-D warnings` on
+`qq-core`, `qq-protocol`, `qq`. No named performance gate: the reviewer is
+off the default path and the change adds one `Instant::now()` on escalation.
+
+DA2 note: the escalation-restarts-the-wait half of DA2's acceptance is now
+done here, because it fell out of making `Deny` final on the same select
+arms. DA2 keeps the rest: the delegate's own short deadline, no server
+deadline while a client is attached, headless immediate denial, and the
+config option. RR9 still owns the deadline policy; this slice did not touch
+`DEFAULT_APPROVAL_TIMEOUT` or its plumbing.

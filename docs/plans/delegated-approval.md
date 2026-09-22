@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | Proposed. No slice started; no code |
+| Now | DA1 in review (`feat/eng-862-da1-reviewer-deny-final`, stacked on #125). Next: DA4, then DA3 |
 | Shipped | — |
 | Open | DA1–DA6 |
 | Ledger | [`progress/delegated-approval.md`](./progress/delegated-approval.md) |
@@ -154,7 +154,9 @@ says which.
 the budget is "delegate budget ≤ 10 s and not added to a human wait."
 **Acceptance:**
 - a reviewer that takes 8 s does not shorten the human wait that follows an
-  escalation;
+  escalation (shipped in DA1: the wait restarts at the escalation; DA2 adds
+  the delegate's own bound so a stuck reviewer is cut off at 10 s rather than
+  at the human wait);
 - an interactive session with a client attached is not settled
   `denied_timeout` by the server; the run deadline still cancels it;
 - a headless run with no client receives a tool result naming the policy
