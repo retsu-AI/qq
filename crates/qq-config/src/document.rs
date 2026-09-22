@@ -14,15 +14,15 @@ use sha2::{Digest, Sha256};
 
 use super::{
     AgentProfileConfig, AuditConfig, AuditMode, AwsAuth, BedrockAuth, BuiltinPreference,
-    ConfigError, ConfigKey, ConfigProvenance, ConfigSnapshot, ConfigSources, Connection,
-    DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MCP_CALL_TIMEOUT_SECONDS, DEFAULT_MCP_MAX_CONCURRENT_CALLS,
-    DelegationConfig, DelegationEntry, DelegationRole, EffectivePolicy, HttpAccess, HttpCredential,
-    InputModality, JevReviewMode, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH,
-    MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER, MAX_MCP_CALL_TIMEOUT_SECONDS,
-    MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES, McpServerConfig, McpTransport,
-    ModelMetadata, ModelPricing, ModelRoute, PolicyGrants, ProfileApprovalMode, ProviderAccess,
-    ProviderApi, ProviderConfig, ProviderKind, RuntimeOverrides, SecretRef, SourceIdentity,
-    SourceKind, SourceReport, WorkspaceGrant,
+    ClientSnapshot, ConfigError, ConfigKey, ConfigProvenance, ConfigSnapshot, ConfigSources,
+    Connection, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MCP_CALL_TIMEOUT_SECONDS,
+    DEFAULT_MCP_MAX_CONCURRENT_CALLS, DelegationConfig, DelegationEntry, DelegationRole,
+    EffectivePolicy, HttpAccess, HttpCredential, InputModality, JevReviewMode, MAX_AUDIT_REVISIONS,
+    MAX_DELEGATION_DEPTH, MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER,
+    MAX_MCP_CALL_TIMEOUT_SECONDS, MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES,
+    McpServerConfig, McpTransport, ModelMetadata, ModelPricing, ModelRoute, PolicyGrants,
+    ProfileApprovalMode, ProviderAccess, ProviderApi, ProviderConfig, ProviderKind,
+    RuntimeOverrides, SecretRef, SourceIdentity, SourceKind, SourceReport, WorkspaceGrant,
 };
 
 pub(super) fn deserialize_unique_btree_map<'de, D, K, V>(
@@ -2009,12 +2009,16 @@ impl MergeState {
         }
     }
 
-    pub(super) fn finish(
+    /// Everything the loader validates except the model requirement. The
+    /// model, when present, is parsed and policy-checked; only its absence
+    /// is tolerated. Interactive clients start from this so they can open
+    /// and ask for a model instead of exiting; headless paths call
+    /// [`ClientSnapshot::require_model`] on the result.
+    pub(super) fn finish_for_client(
         mut self,
         reports: Vec<SourceReport>,
         sources: ConfigSources,
-        global_config: &Path,
-    ) -> Result<ConfigSnapshot, ConfigError> {
+    ) -> Result<ClientSnapshot, ConfigError> {
         // Packs contribute beneath the configuration: their MCP servers join
         // where the configuration declared none of that name, and their
         // profiles join where no configured profile claims the name. Two
@@ -2248,13 +2252,9 @@ impl MergeState {
         };
         let grants = resolve_policy_grants(&self.policy, &self.mcp);
         // Every other rule has passed by this point, so `ModelRequired` is the
-        // only error a model-less but otherwise valid document can produce.
-        let Some(model) = model else {
-            return Err(ConfigError::ModelRequired {
-                global_config: global_config.to_path_buf(),
-            });
-        };
-        Ok(ConfigSnapshot {
+        // only error a model-less but otherwise valid document can produce
+        // from `require_model`.
+        Ok(ClientSnapshot {
             organization: self.organization,
             model,
             worker_model,
@@ -2274,6 +2274,39 @@ impl MergeState {
             reports,
             provenance: self.provenance,
             sources,
+        })
+    }
+}
+
+impl ClientSnapshot {
+    /// Promotes to the full snapshot every headless path requires, failing
+    /// with [`ConfigError::ModelRequired`] when no model was configured.
+    pub(super) fn require_model(self, global_config: &Path) -> Result<ConfigSnapshot, ConfigError> {
+        let Some(model) = self.model else {
+            return Err(ConfigError::ModelRequired {
+                global_config: global_config.to_path_buf(),
+            });
+        };
+        Ok(ConfigSnapshot {
+            organization: self.organization,
+            model,
+            worker_model: self.worker_model,
+            reviewer_model: self.reviewer_model,
+            delegation: self.delegation,
+            audit: self.audit,
+            jev_review: self.jev_review,
+            jev_routing: self.jev_routing,
+            reasoning_effort: self.reasoning_effort,
+            max_output_tokens: self.max_output_tokens,
+            providers: self.providers,
+            mcp: self.mcp,
+            profiles: self.profiles,
+            packs: self.packs,
+            policy: self.policy,
+            grants: self.grants,
+            reports: self.reports,
+            provenance: self.provenance,
+            sources: self.sources,
         })
     }
 }
