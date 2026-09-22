@@ -163,9 +163,6 @@ pub(crate) enum RuntimeEvent {
         usage: Option<TokenUsage>,
         cost_usd_nanos: Option<u64>,
     },
-    /// Queued steering entered model context: the message will be part of
-    /// the request for `turn_ordinal`. Emitted at the boundary, before that
-    /// turn is prepared.
     /// The run summarized its own turns through `turn_cutoff` before
     /// preparing `turn_ordinal`; the compactor already committed the marker.
     /// Informational for the session layer (occupancy is unknown again).
@@ -173,6 +170,16 @@ pub(crate) enum RuntimeEvent {
         turn_ordinal: u32,
         turn_cutoff: u32,
     },
+    /// The provider rejected turn `turn_ordinal` for its context window even
+    /// though the estimate said it fit. Nothing streamed; the loop re-plans
+    /// the turn with in-run compaction forced. Informational.
+    ProviderOverflow {
+        turn_ordinal: u32,
+        message: String,
+    },
+    /// Queued steering entered model context: the message will be part of
+    /// the request for `turn_ordinal`. Emitted at the boundary, before that
+    /// turn is prepared.
     SteeringApplied {
         message_id: MessageId,
         turn_ordinal: u32,
@@ -193,6 +200,23 @@ pub(crate) enum RuntimeEvent {
     OutputTruncated {
         turn_ordinal: u32,
         continuation: u16,
+    },
+    /// A transient provider fault ended turn `turn_ordinal` after its first
+    /// event. Emitted after the partial turn is committed via
+    /// `AssistantTurnCompleted`; the loop then sleeps `delay` and re-issues
+    /// the turn. `attempt` is 1-based within this turn's recovery.
+    TurnRetrying {
+        turn_ordinal: u32,
+        attempt: u16,
+        delay: std::time::Duration,
+        kind: RunFailureKind,
+        message: String,
+    },
+    /// Turn recovery exhausted its allowance on a transient provider fault.
+    /// Every completed turn is durable; the run is resumable by the next
+    /// prompt rather than failed.
+    Paused {
+        pause: Box<qq_protocol::RunPause>,
     },
     /// The final answer failed its output contract and the loop is about to
     /// spend repair turn `repair` (1-based) on it. Emitted after the failing

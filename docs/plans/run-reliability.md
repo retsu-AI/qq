@@ -4,9 +4,9 @@
 
 | | |
 | --- | --- |
-| Now | RR1–RR3 in review (stacked on the plan PR). Next: RR5 then RR4 |
-| Shipped | — |
-| Open | RR1–RR12 |
+| Now | RR1–RR5 shipped (#108, #116, #117, #118, #120). RR6, RR7 in review. Next: RR8 |
+| Shipped | RR1 (#108), RR2 (#116), RR3 (#117), RR5 (#118), RR4 (#120, protocol 26, ADR-0040) |
+| Open | RR6–RR12 (Linear milestone "Run Reliability", ENG-868–ENG-874) |
 | Ledger | [`progress/run-reliability.md`](./progress/run-reliability.md) |
 
 ## Goal

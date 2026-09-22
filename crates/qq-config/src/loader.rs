@@ -441,7 +441,8 @@ pub(super) fn grant_pending_trust(
                 .path()
                 .expect("project file sources always have a canonical path");
             if !trust.contains(path, &digest) {
-                pending.push(PendingTrust::new(source, digest));
+                let sections = document.sensitive_sections();
+                pending.push(PendingTrust::new(source, digest, sections));
             }
         }
     }
@@ -698,9 +699,11 @@ fn apply_document(
         apply_explicit_packs(&document, &source, merged, probes)?;
     }
     let status = if let Some(digest) = pending_digest {
-        report
-            .pending
-            .push(PendingTrust::new(source.clone(), digest));
+        report.pending.push(PendingTrust::new(
+            source.clone(),
+            digest,
+            document.sensitive_sections(),
+        ));
         SourceStatus::PartiallyAppliedPendingTrust
     } else {
         SourceStatus::Applied

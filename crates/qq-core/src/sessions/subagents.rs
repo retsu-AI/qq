@@ -462,7 +462,7 @@ async fn run_owned_child(
         if let Err(error) = inner
             .loader
             .load(RuntimeLoadRequest {
-                reasoning_effort: None,
+                reasoning_effort: parent.reasoning_effort,
                 checkpoint: parent.checkpoint.clone(),
                 routing: parent.routing.clone(),
                 workspace: parent.workspace.clone(),
@@ -629,6 +629,13 @@ async fn run_owned_child(
             format!(
                 "the sub-agent run exhausted its budget: {}",
                 exhaustion.message
+            ),
+            spend,
+        ),
+        RunOutcome::Paused { pause } => spawn_error_with_spend(
+            format!(
+                "the sub-agent run paused on a provider fault after {} retries: {}",
+                pause.attempts, pause.message
             ),
             spend,
         ),

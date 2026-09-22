@@ -42,3 +42,21 @@ Facts checked against the tree before writing:
   composition root, not a new trait and not a plugin lane.
 
 Shipped: none. In progress: none. Blocked: none.
+
+### 2026-09-22 — grant storage reconciled with the design
+
+The approval command no longer fails when a grant cannot be stored. A session
+or workspace choice whose value is empty, longer than 256 bytes, or past the
+session's 256-grant cap approves the call once, records nothing, and promotes
+nothing. `SessionRuntimeError::InvalidApprovalGrant` is removed, so the string
+"approval grant is empty or exceeds the session limit" cannot be produced.
+That landed on `fix/eng-862-approval-grants` ([#125](https://github.com/retsu-AI/qq/pull/125)),
+not in a DA slice: it is the storage rule DA4 must keep.
+
+The target contract and DA4's acceptance now say the same thing. A delegate
+exact-command grant is subject to the 256-byte value cap and the 256-grant
+session cap; a value that does not fit approves the call once and never fails
+the command. The per-run cap of 64 is an additional bound on delegate-recorded
+grants, not a replacement for the session cap.
+
+ADR-0041 stays reserved. DA1–DA6 stay `Planned`.

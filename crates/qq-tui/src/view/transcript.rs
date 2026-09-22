@@ -1424,6 +1424,7 @@ pub(super) fn run_completion_line(
             ("◌", warning())
         }
         qq_protocol::RunOutcome::BudgetExhausted { .. } => ("◌", warning()),
+        qq_protocol::RunOutcome::Paused { .. } => ("◌", warning()),
         qq_protocol::RunOutcome::Failed { .. } => ("✕", failure()),
     };
     let mut parts: Vec<String> = Vec::with_capacity(4);
@@ -1497,6 +1498,7 @@ pub(super) fn run_completion_line(
                 qq_protocol::RunOutcome::Cancelled => "cancelled",
                 qq_protocol::RunOutcome::Interrupted => "interrupted",
                 qq_protocol::RunOutcome::BudgetExhausted { .. } => "budget exhausted",
+                qq_protocol::RunOutcome::Paused { .. } => "paused",
                 qq_protocol::RunOutcome::Failed { .. } => "failed",
                 qq_protocol::RunOutcome::Completed => "",
             },

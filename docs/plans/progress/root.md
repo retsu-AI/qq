@@ -62,7 +62,7 @@ may append a **request** row; only root changes a request's status.
 | 0037 | Responsive TUI layout: width-selected tiers and panes, never features | tui-redesign U8 (L1–L4) | Reserved 2026-09-20 |
 | 0038 | Session retention: archive by session, never by row; receipts and cursors outlive their sessions | ENG-803 (F20 + F07 retention remainder) | Proposed: `docs/adr/0038-session-retention.md` |
 | 0039 | In-run compaction: run-scoped marker, owned summarizer run, no session slot | ENG-793 (F03), #92 | Accepted 2026-09-20: `docs/adr/0039-in-run-compaction.md`; supersedes the plan's Durable Protocol |
-| 0040 | Two-phase retry ownership: provider owns pre-event sends, the run owns post-event turn recovery and `Paused`; supersedes ADR-0005 | run-reliability RR4 | Reserved 2026-09-21 |
+| 0040 | Two-phase retry ownership: provider owns pre-event sends, the run owns post-event turn recovery and `Paused`; supersedes ADR-0005 in part | run-reliability RR4 | Accepted 2026-09-21: `docs/adr/0040-two-phase-retry-ownership.md`; `PROTOCOL_VERSION` 25 → 26 |
 | 0041 | Jev may authorize a side effect the approval mode already holds, only when `jev_approval: on`; supersedes ADR-0030's "never authorizes side effects" for that lane | delegated-approval DA5 | Reserved 2026-09-21 |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
@@ -134,7 +134,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0040. Reserve here before opening a PR that adds an ADR.
+Next free number: 0041. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -150,6 +150,7 @@ Next free number: 0040. Reserve here before opening a PR that adds an ADR.
 | 2026-09-14 | tool-layer T6 (ahead of start) | root `Cargo.toml`, `Cargo.lock` | Promote `tree-sitter` and `tree-sitter-bash` to `[workspace.dependencies]` for the shell classifier (`approval/classify.rs`); `qq-tui` already depends on `tree-sitter = "0.26"` / `tree-sitter-bash = "0.25"` directly; promote those rows to the workspace table and point `qq-tui` at them so `qq-core` shares one version. No lock delta | Done (#40; `Cargo.toml` `[workspace.dependencies]`, both crates `.workspace = true`) |
 | 2026-09-20 | tui-redesign | `AGENTS.md` § Git And Reviews | Linear team is `ENG` (per the 2026-09-19 entry below and the live board), not `DEV`; fix the reference and the branch-name examples | Open |
 | 2026-09-20 | tui-redesign | `docs/plans/README.md`, `docs/README.md`, `docs/design/architecture.md` § repository map (`qq-tui` bullet) | Plan row and priority entry for `tui-redesign.md`. The `docs/README.md` index entry and a one-sentence `architecture.md` pointer to `docs/design/layout.md` were made in the L1 PR (index and pointer only; no boundary change) | Partly done (L1) |
+| 2026-09-21 | run-reliability RR4 | root `Cargo.toml`, `Cargo.lock` (RR5: `httpdate = "1"` workspace row, already in the lock via hyper); `crates/qq-protocol` `PROTOCOL_VERSION` 25 → 26 (`run_turn_retrying`, `paused`); `docs/adr/README.md`; `docs/design/architecture.md` § run loop | Turn recovery per ADR-0040 | Done in the RR4 PR |
 
 Shared files: root `Cargo.toml` and `Cargo.lock` version bumps,
 `rust-toolchain.toml`, `flake.nix`, `.github/workflows/*`,

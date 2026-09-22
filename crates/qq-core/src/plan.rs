@@ -119,6 +119,7 @@ pub struct AgentProfile {
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     shell: ShellPolicy,
     network: crate::tools::network::NetworkPolicy,
+    turn_recovery: crate::TurnRecoveryPolicy,
     adapter_build: String,
     provenance: Vec<String>,
     credential_epoch: CredentialEpoch,
@@ -160,6 +161,7 @@ impl AgentProfile {
             reasoning_effort: None,
             shell: ShellPolicy::default(),
             network: crate::tools::network::NetworkPolicy::default(),
+            turn_recovery: crate::TurnRecoveryPolicy::default(),
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -169,6 +171,13 @@ impl AgentProfile {
             context_sources: Vec::new(),
             context_cache: None,
         }
+    }
+
+    /// Backoff between turn retries after a transient provider fault.
+    #[must_use]
+    pub const fn with_turn_recovery(mut self, policy: crate::TurnRecoveryPolicy) -> Self {
+        self.turn_recovery = policy;
+        self
     }
 
     #[must_use]
@@ -211,6 +220,7 @@ impl AgentProfile {
             reasoning_effort: runtime.reasoning_effort,
             shell: runtime.shell.as_ref().clone(),
             network: runtime.network.as_ref().clone(),
+            turn_recovery: runtime.turn_recovery,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -515,6 +525,7 @@ impl CompiledAgentPlan {
             reasoning_effort,
             shell,
             network,
+            turn_recovery,
             adapter_build,
             provenance,
             credential_epoch,
@@ -540,7 +551,8 @@ impl CompiledAgentPlan {
         .with_delegation(delegation)
         .with_audit(audit)
         .with_shell_policy(shell)
-        .with_network_policy(network);
+        .with_network_policy(network)
+        .with_turn_recovery(turn_recovery);
         if let Some(effort) = reasoning_effort {
             runtime = runtime.with_reasoning_effort(effort);
         }

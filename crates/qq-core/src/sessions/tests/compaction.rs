@@ -941,11 +941,14 @@ async fn failed_manual_compaction_does_not_mask_provider_overflow_evidence() {
 
     let failed_compaction = compact_session(&harness.runtime, harness.session_id).await;
     let failed = collect_until(&mut harness.events, finished_for(failed_compaction)).await;
+    // A transport fault before any summary text streamed: the run's own
+    // recovery re-issues the turn until its allowance is spent, then the
+    // compaction settles paused (no marker committed).
     assert!(failed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::RunFinished {
             run_id,
-            outcome: RunOutcome::Failed { .. },
+            outcome: RunOutcome::Paused { .. },
             ..
         } if *run_id == failed_compaction
     )));
@@ -962,7 +965,7 @@ async fn failed_manual_compaction_does_not_mask_provider_overflow_evidence() {
     assert!(compacted < prompt_started);
     assert_eq!(
         harness.requests.lock().unwrap().len(),
-        4,
+        4 + usize::from(crate::MAX_TURN_RETRIES),
         "the retry must compact instead of repeating the known overflow"
     );
 }
@@ -1101,7 +1104,16 @@ async fn provider_overflow_evidence_survives_restart_until_compaction_commits() 
 async fn failed_overflow_recovery_never_resends_the_known_overflowing_prompt() {
     let mut harness = auto_compact_harness(vec![
         AutoCompactScript::ContextOverflow,
-        AutoCompactScript::Fail,
+        // One loaded provider serves the failed summarizer step (six sends:
+        // the fault and its turn retries) and then the downgraded prompt.
+        AutoCompactScript::Sequence(
+            std::iter::repeat_n(
+                AutoCompactScript::Fail,
+                1 + usize::from(crate::MAX_TURN_RETRIES),
+            )
+            .chain([AutoCompactScript::Text("recovered".to_owned())])
+            .collect(),
+        ),
         AutoCompactScript::Text("must not be polled".to_owned()),
     ])
     .await;
@@ -1110,24 +1122,31 @@ async fn failed_overflow_recovery_never_resends_the_known_overflowing_prompt() {
 
     let second = queue_prompt(&harness.runtime, harness.session_id, "retry".to_owned()).await;
     let observed = collect_until(&mut harness.events, finished_for(second)).await;
-    assert!(observed.iter().any(|event| matches!(
-        &event.event,
-        SessionEvent::RunFinished {
-            run_id,
-            outcome: RunOutcome::Failed {
-                failure: RunFailure {
-                    kind: RunFailureKind::Policy,
-                    message,
-                },
-            },
-            ..
-        } if *run_id == second && message.contains("provider previously rejected")
-    )));
+    let outcome = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, outcome, ..
+            } if *run_id == second => Some(outcome.clone()),
+            _ => None,
+        })
+        .unwrap();
+    // The fold is exhausted and the provider already rejected this shape:
+    // the prompt is admitted from the (absent) summary alone rather than
+    // refused (RR6), and its downgraded request reaches the provider once.
+    assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
+    // One overflow, the failed summarizer's attempt plus its turn retries,
+    // then the downgraded prompt. The known-overflowing shape itself was
+    // never resent.
+    let requests = harness.requests.lock().unwrap();
     assert_eq!(
-        harness.requests.lock().unwrap().len(),
-        2,
+        requests.len(),
+        3 + usize::from(crate::MAX_TURN_RETRIES),
         "the second prompt must not repeat a provider-known overflow"
     );
+    let texts = request_texts(requests.last().unwrap());
+    assert!(texts[0].starts_with(crate::sessions::SUMMARY_ONLY_NOTICE));
+    assert!(!texts.iter().any(|text| text == "big ask"));
 }
 
 #[tokio::test]
@@ -1237,7 +1256,7 @@ async fn exceeding_the_hard_budget_compacts_once_and_the_prompt_proceeds() {
 }
 
 #[tokio::test]
-async fn a_prompt_still_over_budget_after_compacting_fails_with_the_policy_outcome() {
+async fn a_prompt_still_over_budget_after_compacting_runs_from_the_summary_alone() {
     let mut harness = auto_compact_harness_with_window(
         vec![
             AutoCompactScript::Text("x".repeat(20 * 1024 * 4)),
@@ -1245,6 +1264,7 @@ async fn a_prompt_still_over_budget_after_compacting_fails_with_the_policy_outco
             // transcript it replaces. Validation rejects it, so no marker
             // commits and the retry is still past the model window.
             AutoCompactScript::Text(valid_summary(&"s".repeat(20 * 1024 * 4))),
+            AutoCompactScript::Text("recovered".to_owned()),
         ],
         Some(32 * 1024),
     )
@@ -1273,8 +1293,9 @@ async fn a_prompt_still_over_budget_after_compacting_fails_with_the_policy_outco
             ..
         } if *run_id != second && message.contains("did not shrink")
     )));
-    // ...and the prompt then fails with the context policy failure
-    // without reaching the model.
+    // ...and the prompt then runs from the summary alone (RR6): no marker
+    // ever committed, so the opening carries the notice without a summary,
+    // and the 80 KiB run is not in the request.
     let outcome = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -1284,16 +1305,13 @@ async fn a_prompt_still_over_budget_after_compacting_fails_with_the_policy_outco
             _ => None,
         })
         .unwrap();
-    assert!(matches!(
-        outcome,
-        RunOutcome::Failed {
-            failure: RunFailure {
-                kind: RunFailureKind::Policy,
-                ref message,
-            }
-        } if message.contains("selected model")
-    ));
-    assert_eq!(harness.requests.lock().unwrap().len(), 2);
+    assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let texts = request_texts(requests.last().unwrap());
+    assert_eq!(texts.len(), 2, "{}", texts.len());
+    assert_eq!(texts[0], crate::sessions::SUMMARY_ONLY_NOTICE);
+    assert_eq!(texts[1], "y".repeat(10 * 1024 * 4));
 }
 
 #[tokio::test]
@@ -1344,7 +1362,16 @@ async fn oversized_compaction_summary_fails_without_committing_a_marker() {
 async fn a_failed_auto_compaction_does_not_strand_the_queued_prompt() {
     let mut harness = auto_compact_harness(vec![
         AutoCompactScript::Text(over_threshold_output()),
-        AutoCompactScript::Fail,
+        // One loaded provider serves the failed summarizer step (six sends:
+        // the fault and its turn retries) and then the downgraded prompt.
+        AutoCompactScript::Sequence(
+            std::iter::repeat_n(
+                AutoCompactScript::Fail,
+                1 + usize::from(crate::MAX_TURN_RETRIES),
+            )
+            .chain([AutoCompactScript::Text("done".to_owned())])
+            .collect(),
+        ),
         AutoCompactScript::Text("done".to_owned()),
     ])
     .await;
@@ -1358,7 +1385,8 @@ async fn a_failed_auto_compaction_does_not_strand_the_queued_prompt() {
     )
     .await;
     let observed = collect_until(&mut harness.events, finished_for(second)).await;
-    // The summarizer failed and committed nothing...
+    // The summarizer's transport fault was retried and then paused: nothing
+    // committed...
     let compaction = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -1368,7 +1396,7 @@ async fn a_failed_auto_compaction_does_not_strand_the_queued_prompt() {
         .unwrap();
     assert!(observed.iter().any(|event| matches!(
         &event.event,
-        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Failed { .. }, .. }
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Paused { .. }, .. }
             if *run_id == compaction
     )));
     assert!(
@@ -1376,22 +1404,19 @@ async fn a_failed_auto_compaction_does_not_strand_the_queued_prompt() {
             .iter()
             .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
     );
-    // ...and the unchanged overflowing prompt fails closed after that one
-    // attempt instead of reaching the provider.
+    // ...and the unchanged overflowing prompt is not refused after that one
+    // attempt: it runs from the summary alone (RR6). No marker exists, so
+    // the opening is the bare notice and the over-threshold run is absent.
     assert!(observed.iter().any(|event| matches!(
         &event.event,
-        SessionEvent::RunFinished {
-            run_id,
-            outcome: RunOutcome::Failed {
-                failure: RunFailure {
-                    kind: RunFailureKind::Policy,
-                    ..
-                },
-            },
-            ..
-        } if *run_id == second
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. }
+            if *run_id == second
     )));
-    assert_eq!(harness.requests.lock().unwrap().len(), 2);
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3 + usize::from(crate::MAX_TURN_RETRIES));
+    let texts = request_texts(requests.last().unwrap());
+    assert_eq!(texts[0], crate::sessions::SUMMARY_ONLY_NOTICE);
+    assert!(!texts.iter().any(|text| text.starts_with("grow")));
 }
 
 #[tokio::test]
@@ -1427,20 +1452,14 @@ async fn a_compaction_that_does_not_shrink_the_assembly_never_loops() {
         })
         .count();
     assert_eq!(compactions, 1, "exactly one automatic attempt per prompt");
+    // The attempt did not shrink the assembly; the prompt runs from the
+    // summary alone instead of looping or failing (RR6).
     assert!(observed.iter().any(|event| matches!(
         &event.event,
-        SessionEvent::RunFinished {
-            run_id,
-            outcome: RunOutcome::Failed {
-                failure: RunFailure {
-                    kind: RunFailureKind::Policy,
-                    ..
-                },
-            },
-            ..
-        } if *run_id == second
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. }
+            if *run_id == second
     )));
-    assert_eq!(harness.requests.lock().unwrap().len(), 2);
+    assert_eq!(harness.requests.lock().unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -2869,8 +2888,9 @@ async fn one_run_larger_than_the_window_fails_as_irreducible_not_already_attempt
 async fn a_bounded_step_that_fails_stops_the_fold_without_repeating_its_input() {
     // The first bounded step commits; the next prompt's step is rejected by
     // the provider. No further step may run for that prompt: it would read
-    // exactly the input the failed one did. The prompt fails naming the
-    // step it spent, and the fold's cutoff never moved backwards.
+    // exactly the input the failed one did. The prompt then runs from the
+    // summary alone (RR6) and, when the provider rejects even that, fails
+    // with the provider's own reason; the fold's cutoff never moved backwards.
     let window: u32 = 32 * 1024;
     let run_bytes = 20 * 1024 * 4;
     let mut harness = auto_compact_harness_with_window(
@@ -2886,7 +2906,8 @@ async fn a_bounded_step_that_fails_stops_the_fold_without_repeating_its_input() 
                 AutoCompactScript::ContextOverflow,
             ]),
             // The retry compacts first: step two ("b" folded with the
-            // summary) is rejected, and nothing further may be sent.
+            // summary) is rejected; the retry then runs from the summary
+            // alone and the provider rejects that too.
             AutoCompactScript::ContextOverflow,
         ],
         Some(window),
@@ -2925,17 +2946,30 @@ async fn a_bounded_step_that_fails_stops_the_fold_without_repeating_its_input() 
     assert!(
         matches!(
             &outcome,
-            RunOutcome::Failed { failure: RunFailure { kind: RunFailureKind::Policy, message } }
-                if message.contains("1 automatic compaction step did not produce")
+            RunOutcome::Failed {
+                failure: RunFailure {
+                    kind: RunFailureKind::ProviderContextExceeded,
+                    ..
+                }
+            }
         ),
         "{outcome:?}"
     );
-    // Two seeds; step one; prompt three's rejected send; step two. The
-    // retry itself never reached the provider.
+    // Two seeds; step one; prompt three's rejected send; step two; the
+    // summary-only retry. The known-overflowing shape was never resent, and
+    // the downgraded request carried the summary in place of "b".
     let requests = harness.requests.lock().unwrap();
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), 6);
     let steps = summarizer_requests(&requests);
     assert_eq!(steps.len(), 2, "{steps:?}");
+    let downgraded = request_texts(requests.last().unwrap());
+    assert!(downgraded[0].starts_with(crate::sessions::SUMMARY_ONLY_NOTICE));
+    assert!(downgraded[0].contains("step one"));
+    assert!(
+        !downgraded
+            .iter()
+            .any(|text| text.contains(&"b".repeat(run_bytes)))
+    );
     // The failed step read new input, not the first step's.
     let first_step = request_texts(&requests[steps[0].0]);
     let second_step = request_texts(&requests[steps[1].0]);
@@ -3694,6 +3728,156 @@ async fn an_in_run_marker_survives_restart_and_folds_into_a_later_between_run_co
     runtime.close().await.unwrap();
     drop(store);
     assert_assembly_matches_reference(&database_path, session_id);
+}
+
+#[tokio::test]
+async fn a_provider_window_rejection_compacts_the_run_and_continues() {
+    // RR6 (b): the estimate said the request fit, the provider said it did
+    // not. The first such rejection used to fail the run with
+    // `provider_context_exceeded` (and wedge the next prompt on a known
+    // overflow). Now the loop treats the provider's verdict as authoritative,
+    // compacts its own turns at the boundary, and re-issues the turn.
+    let overflows = Arc::new(AtomicUsize::new(0));
+    let mut harness = auto_compact_harness_with_loader_and_mode(
+        AutoCompactLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            scripts: vec![AutoCompactScript::ShellRepeatedlyWithProviderOverflow {
+                turns: 12,
+                overflow_at: 7,
+                text: "task complete".to_owned(),
+                summary: valid_summary("work so far"),
+                overflows: Arc::clone(&overflows),
+            }],
+            loads: StdMutex::new(0),
+            // Wide enough that the estimate never trips on 12 tiny results;
+            // only the provider's scripted verdict can trigger compaction.
+            context_window: Some(200_000),
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        },
+        ApprovalMode::Full,
+    )
+    .await;
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "do the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    let outcome = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, outcome, ..
+            } if *run_id == run => Some(outcome.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
+    // Exactly one provider rejection, answered by exactly one in-run
+    // compaction, and every one of the 12 shell calls ran once.
+    assert_eq!(overflows.load(Ordering::SeqCst), 1);
+    let compactions = observed
+        .iter()
+        .filter(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+        .count();
+    assert_eq!(compactions, 1);
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let calls: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1 AND state = 'completed'",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(calls, 12);
+    // The next prompt is admitted normally: the overflow was recovered, not
+    // recorded as a failed run whose basis the next prompt must avoid.
+    let next = queue_prompt(&harness.runtime, harness.session_id, "more".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(next)).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if *run_id == next
+    )));
+}
+
+#[tokio::test]
+async fn an_exhausted_fold_admits_the_prompt_with_summary_only_history() {
+    // RR6 (c): after the fold ran and the retained transcript still does not
+    // fit, the prompt used to be refused with "automatic compaction ran N
+    // summarizer steps ... start a new session" — and every later prompt hit
+    // the same wall (3 sessions wedged in the audit). Now the run starts
+    // from the latest summary alone with a notice; nothing is deleted.
+    let window: u32 = 32 * 1024;
+    let run_bytes = 20 * 1024 * 4;
+    let mut harness = auto_compact_harness_with_window(
+        vec![
+            AutoCompactScript::Text("a".repeat(run_bytes)),
+            AutoCompactScript::Text("b".repeat(run_bytes)),
+            // Prompt three: step one summarizes "a" and commits; the
+            // prompt's own send is rejected by the provider.
+            AutoCompactScript::Sequence(vec![
+                AutoCompactScript::Text(valid_summary("step one")),
+                AutoCompactScript::ContextOverflow,
+            ]),
+            // The retry's step two is rejected too: the fold is exhausted.
+            // The retry then runs from the summary alone and completes.
+            AutoCompactScript::Sequence(vec![
+                AutoCompactScript::ContextOverflow,
+                AutoCompactScript::Text("recovered".to_owned()),
+            ]),
+        ],
+        Some(window),
+    )
+    .await;
+    for prompt in ["one", "two"] {
+        let run = queue_prompt(&harness.runtime, harness.session_id, prompt.to_owned()).await;
+        collect_until(&mut harness.events, finished_for(run)).await;
+    }
+    let third = queue_prompt(&harness.runtime, harness.session_id, "three".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(third)).await;
+    let retry = queue_prompt(&harness.runtime, harness.session_id, "retry".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(retry)).await;
+    let outcome = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, outcome, ..
+            } if *run_id == retry => Some(outcome.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
+    let requests = harness.requests.lock().unwrap();
+    let texts = request_texts(requests.last().unwrap());
+    // Notice, then the summary, then the prompt; none of the verbatim
+    // 80 KiB runs.
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(
+        texts[0].starts_with(crate::sessions::SUMMARY_ONLY_NOTICE),
+        "{}",
+        texts[0]
+    );
+    assert!(texts[0].contains(COMPACTION_SUMMARY_PREAMBLE));
+    assert!(texts[0].contains("step one"));
+    assert_eq!(texts[1], "retry");
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text.contains(&"b".repeat(run_bytes)))
+    );
+    drop(requests);
+    // Nothing was deleted: the session still holds every prompt.
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let prompts: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND role = 'user' AND steering = 0",
+            [harness.session_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(prompts, 4);
 }
 
 #[test]

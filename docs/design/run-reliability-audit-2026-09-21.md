@@ -191,9 +191,10 @@ estimate error after calibration < 10 % on a code-heavy fixture.
 
 *Status 2026-09-21:* (a) shipped in #92 (`322aa94`, ADR-0039) after this
 snapshot: the loop compacts its own turns at a tool boundary through
-`InRunCompactor`; `BetweenRunsOnly` at `execution.rs:2109-2113` is now only
-the fail-closed backstop after the loop's own compaction could not help. (b),
-(c), and (d) remain open as RR6/RR7.
+`InRunCompactor`. *2026-09-22:* (b) and (c) shipped as RR6 (ENG-868): a
+provider window rejection forces in-run compaction and re-issues the turn
+once; an exhausted fold admits the prompt with summary-only history. (d)
+remains RR7.
 
 ### R03 — The tool-free checkpoint fails the run on a tool call
 

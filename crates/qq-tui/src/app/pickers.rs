@@ -6,7 +6,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use qq_protocol::{
-    AgentProfileId, ApprovalMode, GuidanceKind, ModelDescriptor, ModelSelection,
+    AgentProfileId, ApprovalMode, GuidanceKind, ModelDescriptor, ModelSelection, ReasoningEffort,
     ServerCapabilities, SessionCommand, SessionId, SessionStatus,
 };
 
@@ -15,9 +15,9 @@ use crate::{
     commands::{Command, SlashAction},
     effect::{Effects, Redraw},
     input::{
-        ApprovalModeRow, CommandRow, HistoryRow, ModelRow, Overlay, PickerOutcome, ProfileRow,
-        SessionConfirm, SessionRow, SkillRow, ThemeRow, approval_mode_label, approval_mode_row,
-        command_rows,
+        ApprovalModeRow, CommandRow, EffortRow, HistoryRow, ModelRow, Overlay, PickerOutcome,
+        ProfileRow, SessionConfirm, SessionRow, SkillRow, ThemeRow, approval_mode_label,
+        approval_mode_row, command_rows, effort_label, effort_row,
     },
     picker::Picker,
     theme::Theme,
@@ -72,6 +72,12 @@ impl App {
                     return Effects::none();
                 };
                 self.accept_approval_mode(mode)
+            }
+            (PickerOutcome::Accept, Overlay::Effort(picker)) => {
+                let Some(effort) = picker.current().map(|row| row.effort) else {
+                    return Effects::none();
+                };
+                self.accept_effort(effort)
             }
             (PickerOutcome::Accept, Overlay::Skills(picker)) => {
                 let Some((name, kind)) = picker
@@ -361,6 +367,99 @@ impl App {
                 self.set_info(format!(
                     "new sessions will use approval mode {}",
                     approval_mode_label(mode)
+                ));
+                Effects::redraw(Redraw::Immediate)
+            }
+        }
+    }
+
+    // --- effort ---
+
+    /// Rows are the focused model's advertised ladder when the catalog knows
+    /// it, otherwise every level. `default` always leads. `none` is a request
+    /// opt-out, not a model capability, so it rides along whenever the ladder
+    /// is known and the adapter transmits effort at all.
+    pub(crate) fn open_effort(&mut self) -> Effects {
+        let advertised = self.focused_model_efforts();
+        let levels: Vec<Option<ReasoningEffort>> = if advertised.is_empty() {
+            ReasoningEffort::ALL.into_iter().map(Some).collect()
+        } else {
+            std::iter::once(ReasoningEffort::None)
+                .chain(advertised.iter().copied())
+                .map(Some)
+                .collect()
+        };
+        let rows: Vec<EffortRow> = std::iter::once(None)
+            .chain(levels)
+            .map(effort_row)
+            .collect();
+        let mut picker = Picker::with_items(rows);
+        let current = self.effective_effort();
+        if let Some(index) = picker.items().iter().position(|row| row.effort == current) {
+            picker.select_item(index);
+        }
+        self.overlay = Some(Overlay::Effort(picker));
+        Effects::redraw(Redraw::Immediate)
+    }
+
+    /// The effort ladder the catalog advertises for the focused session's
+    /// model (or the default model when nothing is focused). Empty when
+    /// unknown.
+    pub(crate) fn focused_model_efforts(&self) -> &[ReasoningEffort] {
+        let model = self
+            .focused()
+            .and_then(|session_id| self.sessions.get(&session_id))
+            .map_or(self.model.model.as_deref(), |session| {
+                session.summary.model.as_deref()
+            });
+        super::model_reasoning_efforts(&self.models, model)
+    }
+
+    /// The effort pin in effect: the focused session's, or the default for the
+    /// next session.
+    pub(crate) fn effective_effort(&self) -> Option<ReasoningEffort> {
+        self.focused()
+            .and_then(|session_id| self.sessions.get(&session_id))
+            .map_or(self.reasoning_effort, |session| {
+                session.summary.reasoning_effort
+            })
+    }
+
+    /// Apply `effort` to the focused idle session, or record it as the default
+    /// for sessions created next when nothing is focused. A running session
+    /// keeps the effort it started with, so refuse mid-run like profile.
+    fn accept_effort(&mut self, effort: Option<ReasoningEffort>) -> Effects {
+        let focused = self
+            .focused()
+            .and_then(|session_id| self.sessions.get(&session_id).map(|s| (session_id, s)));
+        match focused {
+            Some((_, session)) if session.summary.status == SessionStatus::Running => {
+                self.set_warning("wait for the run to finish before changing effort".to_owned());
+                Effects::redraw(Redraw::Immediate)
+            }
+            Some((_, session)) if session.summary.reasoning_effort == effort => {
+                self.overlay = None;
+                self.reasoning_effort = effort;
+                self.set_info(format!(
+                    "session already uses effort {}",
+                    effort_label(effort)
+                ));
+                Effects::redraw(Redraw::Immediate)
+            }
+            Some((session_id, _)) => {
+                self.overlay = None;
+                self.reasoning_effort = effort;
+                self.send(
+                    PendingIntent::SetEffort { session_id },
+                    SessionCommand::SetSessionEffort { session_id, effort },
+                )
+            }
+            None => {
+                self.overlay = None;
+                self.reasoning_effort = effort;
+                self.set_info(format!(
+                    "new sessions will use effort {}",
+                    effort_label(effort)
                 ));
                 Effects::redraw(Redraw::Immediate)
             }

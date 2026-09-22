@@ -1,0 +1,27 @@
+name: Feature request
+description: Something QQ should do.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what gets in the way today? Concrete workflows beat abstract wishes.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: How it would look to a user — a command, a config key, a TUI interaction. Leave it open if you are not sure.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do instead today
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before filing
+      options:
+        - label: I looked through docs/plans/README.md and open issues for this.
+          required: true

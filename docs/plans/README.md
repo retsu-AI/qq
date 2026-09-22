@@ -29,6 +29,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | --- | --- |
 | [`workflow.md`](./workflow.md) | Slice protocol, ledger rules, review, escalation, dispatch skeletons |
 | [`speed-first-extensible-agent-harness.md`](./speed-first-extensible-agent-harness.md) | Backend plan, collapsed to what is open: two quiet-host recordings, seven H22 deferrals, Phases 7–9 gated. Shipped design lives in `architecture.md` § Extension Contract and § Performance Discipline |
+| [`onboarding-ux.md`](./onboarding-ux.md) | From `git clone` to a working agent in one minute: user guide, actionable startup errors, TUI opens without a model or credential, `qq doctor`, `qq init`, install script/brew/nix, in-TUI trust prompt, docs-truth CI. OB0 in review; OB1–OB11 open |
 | [`run-reliability.md`](./run-reliability.md) | Sessions finish: turn-level recovery and `Paused`, reactive overflow and un-wedged admission, tolerant checkpoint, admission-time slash validation, lenient tool arguments. RR1–RR12 open; from the 2026-09-21 audit |
 | [`terminal-bench-readiness.md`](./terminal-bench-readiness.md) | Harness reliability and Terminal-Bench program; R6–R8 open (R6 candidate designs moved to `tool-layer.md`) |
 | [`tool-layer.md`](./tool-layer.md) | Slim, safe, token-efficient built-ins. T1–T9 and T12 shipped (v0.1.0, #45, #49, #50); open: T11 `view_image`, T13 ablations, T14 `select_tools` index; T10 `terminal` gated |
@@ -46,14 +47,15 @@ in [`progress/root.md`](./progress/root.md) as before.
 | # | Next slice | Plan | Why now |
 | ---: | --- | --- | --- |
 | 0 | RR1–RR3 (checkpoint tolerance, slash admission, Jev outcome), then RR4 turn recovery | [`run-reliability.md`](./run-reliability.md) | 27 % of real prompt runs fail and 73 % of those are harness decisions on recoverable situations; 8.5 h of completed work discarded in the sampled store. Blocks daily use |
-| 1 | Live qualification of the context-usability stack | — (one manual run; record in `progress/root.md`) | C1–C6 shipped (#56–#64) on fixtures only. Confirm on a real long session: `cache_read_input_tokens > 0` on turn 2 of an Anthropic/Bedrock session, and a ~700 KB transcript on a 200k model sends and compacts |
-| 2 | Harness-audit findings F03–F28 triage | [`../design/harness-scale-audit-2026-09-16.md`](../design/harness-scale-audit-2026-09-16.md) § Proposed work order | F01/F02/F14 shipped; the remaining findings have no owning plan yet. Largest: true mid-run summarization (F03; C2 stubs stale reads but defers the summarizer cutoff) |
-| 3 | T13 ablation harness (A0–A4s arms) | `tool-layer.md` | Every tool-layer target (≥25 % fewer calls, ≥35 % fewer tokens) is unmeasured until this runs; it also feeds R6's evidence gate for T10 and H10 |
-| 4 | D6b paired evaluation (paid runs) and the default decisions it feeds | `supervised-delegation.md` | Decides delegation depth and worker-model defaults with evidence; audit default flipped to `off` in C3 pending B1 |
-| 5 | Multi-surface S2 enrollment (ADR-0015) and S4 exposure (ADR-0016); then W3 | `multi-surface-clients.md` | W1/W2/S1/S3 shipped; a remote client is blocked on authentication |
-| 6 | T14 `select_tools` index; T11 `view_image` | `tool-layer.md` | Small; T11 needs the provider image content block |
-| 7 | Phase 7 — H10 process sandbox | `speed-first-…` | Gated on R6 (T13 evidence, T10 decision) and a platform threat model |
-| 8 | Phase 8 — H11 product adapters; Phase 9 — H12 qualification | `speed-first-…` | H11 needs a real consumer; H12 closes the story |
+| 1 | OB1–OB2 (TUI opens without a model / credential), then OB6 install paths | [`onboarding-ux.md`](./onboarding-ux.md) | Every new user hits the first minute; the audit found the TUI exits or opens blank where every reference harness asks. Install today is a manual archive download |
+| 2 | Live qualification of the context-usability stack | — (one manual run; record in `progress/root.md`) | C1–C6 shipped (#56–#64) on fixtures only. Confirm on a real long session: `cache_read_input_tokens > 0` on turn 2 of an Anthropic/Bedrock session, and a ~700 KB transcript on a 200k model sends and compacts |
+| 3 | Harness-audit findings F03–F28 triage | [`../design/harness-scale-audit-2026-09-16.md`](../design/harness-scale-audit-2026-09-16.md) § Proposed work order | F01/F02/F14 shipped; the remaining findings have no owning plan yet. Largest: true mid-run summarization (F03; C2 stubs stale reads but defers the summarizer cutoff) |
+| 4 | T13 ablation harness (A0–A4s arms) | `tool-layer.md` | Every tool-layer target (≥25 % fewer calls, ≥35 % fewer tokens) is unmeasured until this runs; it also feeds R6's evidence gate for T10 and H10 |
+| 5 | D6b paired evaluation (paid runs) and the default decisions it feeds | `supervised-delegation.md` | Decides delegation depth and worker-model defaults with evidence; audit default flipped to `off` in C3 pending B1 |
+| 6 | Multi-surface S2 enrollment (ADR-0015) and S4 exposure (ADR-0016); then W3 | `multi-surface-clients.md` | W1/W2/S1/S3 shipped; a remote client is blocked on authentication |
+| 7 | T14 `select_tools` index; T11 `view_image` | `tool-layer.md` | Small; T11 needs the provider image content block |
+| 8 | Phase 7 — H10 process sandbox | `speed-first-…` | Gated on R6 (T13 evidence, T10 decision) and a platform threat model |
+| 9 | Phase 8 — H11 product adapters; Phase 9 — H12 qualification | `speed-first-…` | H11 needs a real consumer; H12 closes the story |
 | — | Quiet-host recordings: Phase 5a H0 tail comparison; H20 eight-stream p95 then the 50→20 ms budget | `speed-first-…` | Implemented; tails not repeatable on the shared host; retained, not waived |
 | — | Seven H22 deferrals (`StaticHttpAuth`, headless writer, config parse-once, reviewer via `PlanCache`, run-loop enums, args-parse-once, `Arc` calls) | `speed-first-…` § Bundled Fixes | Each is its own slice when that code is next opened |
 | — | Run snapshots, LSP diagnostics, delegated approval | proposed plans | No scheduled slice. Delegated approval DA1 is the first slice when an operator wants fewer approval prompts; DA2 waits on RR9 |
@@ -70,6 +72,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | Reversible mutating-run state | `run-snapshots.md` |
 | Mid-run compaction and continuation | `mid-run-compaction.md` |
 | Diagnostics integration | `lsp-diagnostics.md` |
+| First-run and configuration UX, user guide, install paths, community files | `onboarding-ux.md` |
 | Run outcome policy: turn recovery, `Paused`, mid-run compaction, checkpoint, admission validation, tool-argument leniency, approval deadline | `run-reliability.md` |
 | Who settles a held approval: Jev, `reviewer_model`, or the human; delegate grants and the delegate clock | `delegated-approval.md` |
 | Reference audit of Codex, OpenCode, Pi, and fx; findings F01–F28 | [`../design/harness-scale-audit-2026-09-16.md`](../design/harness-scale-audit-2026-09-16.md) (research, not a plan; F03–F28 unowned) |

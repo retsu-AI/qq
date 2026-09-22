@@ -477,6 +477,47 @@ pub(super) fn record_run_output_truncated(
     Ok(event)
 }
 
+/// Publishes `run_turn_retrying` for a running run. The partial turn was
+/// committed by the preceding `persist_model_turn`; the retry itself changes
+/// no row, so this is display and replay evidence of why the run went quiet.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn record_run_turn_retrying(
+    connection: &mut Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+    turn_ordinal: u32,
+    attempt: u16,
+    delay: std::time::Duration,
+    kind: RunFailureKind,
+    message: String,
+) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    let running = transaction
+        .query_row(
+            "SELECT 1 FROM runs WHERE id = ?1 AND session_id = ?2 AND status = 'running'",
+            params![identity.run_id.to_string(), identity.session_id.to_string()],
+            |_| Ok(()),
+        )
+        .optional()?;
+    if running.is_none() {
+        return Err(SessionRuntimeError::Unavailable);
+    }
+    let event = append_event(
+        &transaction,
+        EventContext::for_run(store_id, identity, now_ms()),
+        SessionEvent::RunTurnRetrying {
+            run_id: identity.run_id,
+            turn_ordinal,
+            attempt,
+            delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            kind,
+            message,
+        },
+    )?;
+    transaction.commit()?;
+    Ok(event)
+}
+
 /// retained in the event log for reconnect/replay, but does not alter model
 /// context or transcript rows.
 pub(super) fn append_run_activity(

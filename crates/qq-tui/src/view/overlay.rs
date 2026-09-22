@@ -2,7 +2,8 @@ use super::*;
 use crate::{
     commands::Category,
     input::{
-        ApprovalModeRow, CommandRow, ModelRow, Overlay, ProfileRow, SessionRow, SkillRow, ThemeRow,
+        ApprovalModeRow, CommandRow, EffortRow, ModelRow, Overlay, ProfileRow, SessionRow,
+        SkillRow, ThemeRow,
     },
     picker::{Picker, PickerItem},
 };
@@ -279,6 +280,58 @@ pub(super) fn approval_mode_picker(app: &App, width: usize, height: usize) -> Ve
             );
             line.push(row.summary, muted());
             if row.mode == current {
+                line.push("  active", accent());
+            }
+            out.push(finish_row(line, selected, width));
+        },
+    )
+}
+
+/// Effort picker: `default` (restore config/profile) plus the levels the
+/// focused model advertises, or every level when the catalog is silent. The
+/// pin in effect is marked.
+pub(super) fn effort_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
+    let Some(Overlay::Effort(picker)) = &app.overlay else {
+        return fit_height(Vec::new(), height);
+    };
+    let current = app.effective_effort();
+    let advertised = !app.focused_model_efforts().is_empty();
+    picker_frame(
+        picker,
+        PickerChrome {
+            title: "EFFORT",
+            hint: match (app.focused().is_some(), advertised) {
+                (true, true) => {
+                    "levels this model advertises; Enter sets the session's effort, Esc closes"
+                }
+                (true, false) => {
+                    "model advertises no ladder, showing every level; Enter sets the session's effort, Esc closes"
+                }
+                (false, true) => {
+                    "levels the default model advertises; Enter sets the effort for new sessions, Esc closes"
+                }
+                (false, false) => {
+                    "type to search, Enter sets the effort for new sessions, Esc closes"
+                }
+            },
+            placeholder: if advertised {
+                "advertised effort levels"
+            } else {
+                "all effort levels"
+            },
+            question: None,
+            empty: "  No matching effort levels.",
+        },
+        width,
+        height,
+        |row: &EffortRow, selected, out| {
+            let mut line = cursor_prefix(selected);
+            line.push(
+                format!("{:<10}", row.label),
+                if selected { normal().bold() } else { normal() },
+            );
+            line.push(row.summary, muted());
+            if row.effort == current {
                 line.push("  active", accent());
             }
             out.push(finish_row(line, selected, width));

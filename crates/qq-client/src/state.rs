@@ -74,13 +74,15 @@ pub fn plain_text_character(character: char) -> Option<char> {
 
 /// A model the surface knows about: what the catalog said plus the selection
 /// that picks it. The reducer uses the catalog to derive each session's
-/// context window from its selected model.
+/// context window from its selected model; pickers use the advertised effort
+/// ladder to shape `/effort`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelOption {
     pub provider: String,
     pub model: String,
     pub name: Option<String>,
     pub context_window: Option<u32>,
+    pub reasoning_efforts: Vec<qq_protocol::ReasoningEffort>,
     pub selection: qq_protocol::ModelSelection,
 }
 
@@ -91,9 +93,23 @@ impl From<ModelDescriptor> for ModelOption {
             model: descriptor.model,
             name: descriptor.name,
             context_window: descriptor.context_window,
+            reasoning_efforts: descriptor.reasoning_efforts,
             selection: descriptor.selection,
         }
     }
+}
+
+/// The effort ladder of the catalog entry whose selection names `model`.
+/// Empty when the model is unknown or advertises none.
+#[must_use]
+pub fn model_reasoning_efforts<'a>(
+    models: &'a [ModelOption],
+    model: Option<&str>,
+) -> &'a [qq_protocol::ReasoningEffort] {
+    models
+        .iter()
+        .find(|option| option.selection.model.as_deref() == model)
+        .map_or(&[], |option| option.reasoning_efforts.as_slice())
 }
 
 /// The context window of the catalog entry whose selection names `model`.

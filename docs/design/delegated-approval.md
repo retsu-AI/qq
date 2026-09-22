@@ -69,10 +69,15 @@ bounded, and an over-bound preview escalates rather than being truncated into
 a confident answer.
 
 A delegate `Approve` executes the call and may record a session grant for the
-exact command string or the exact host. It may not record a prefix grant, and
-it may not promote a grant into `.qq/config.ron`. A human approval keeps the
-once, session, and workspace choices, including prefix grants and workspace
-promotion. Delegate-recorded grants are capped per run.
+exact command string or the exact host, when that value fits a session grant:
+non-empty and at most 256 bytes, and the session is under its 256-grant cap
+([`tools.md`](tools.md) § Grant Lifetimes). A value that does not fit still
+approves the call, once, and records nothing. A grant the table cannot store
+never fails the approval. It may not record a prefix grant, and it may not
+promote a grant into `.qq/config.ron`. A human approval keeps the once,
+session, and workspace choices, including prefix grants and workspace
+promotion, under the same storage rule: a choice whose grant cannot be stored
+approves the call once. Delegate-recorded grants are also capped per run.
 
 A delegate `Deny` is final under `auto` and `supervised`: the call settles
 `denied`, no human prompt is published, and the tool result names the

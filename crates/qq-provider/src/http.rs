@@ -21,6 +21,11 @@ const DEFAULT_ATTEMPTS: u32 = 4;
 const DEFAULT_BASE_DELAY: Duration = Duration::from_millis(500);
 const DEFAULT_MAX_DELAY: Duration = Duration::from_secs(8);
 const DEFAULT_TOTAL_BUDGET: Duration = Duration::from_secs(30);
+/// The longest server-directed wait honoured. A `Retry-After` beyond this is
+/// a provider asking the caller to come back later, not to hold a turn open.
+const RETRY_AFTER_CAP: Duration = Duration::from_secs(60);
+/// Anthropic's overloaded status; not in `http::StatusCode`'s named set.
+const OVERLOADED: u16 = 529;
 
 /// The single retry owner for one compiled provider.
 ///
@@ -118,14 +123,20 @@ impl AttemptPolicy {
     }
 
     /// Delay before the next attempt, honoring `Retry-After` when present.
+    ///
+    /// A server-directed wait is authoritative: sleeping less only earns the
+    /// same rejection again, so it is honoured above `max_delay`, up to
+    /// [`RETRY_AFTER_CAP`]. Only the exponential part is jittered; the
+    /// server's figure is a floor, not a range.
     pub(crate) fn delay_before_retry(
         self,
         retry_index: u32,
         retry_after: Option<Duration>,
+        random: u32,
     ) -> Duration {
-        let exponential = self.exponential_delay(retry_index);
+        let exponential = full_jitter(self.exponential_delay(retry_index), random);
         match retry_after {
-            Some(retry_after) => exponential.max(retry_after).min(self.max_delay),
+            Some(retry_after) => exponential.max(retry_after.min(RETRY_AFTER_CAP)),
             None => exponential,
         }
     }
@@ -186,14 +197,18 @@ impl AttemptLedger {
             return None;
         }
         let retry_index = self.attempts.saturating_sub(1);
-        let delay = full_jitter(
-            self.policy.delay_before_retry(retry_index, retry_after),
-            random,
-        );
-        if !self.policy.can_afford(self.slept, delay) {
+        let delay = self
+            .policy
+            .delay_before_retry(retry_index, retry_after, random);
+        // The budget bounds the caller's own guessing, so a server-directed
+        // wait is charged at the exponential rate: the part above it is time
+        // the provider asked for, and refusing it would only earn the same
+        // rejection sooner. The cap on `Retry-After` bounds the excess.
+        let charged = delay.min(self.policy.exponential_delay(retry_index));
+        if !self.policy.can_afford(self.slept, charged) {
             return None;
         }
-        self.slept = self.slept.saturating_add(delay);
+        self.slept = self.slept.saturating_add(charged);
         Some(delay)
     }
 }
@@ -256,14 +271,22 @@ pub(crate) fn is_retryable_status(status: StatusCode) -> bool {
             | StatusCode::BAD_GATEWAY
             | StatusCode::SERVICE_UNAVAILABLE
             | StatusCode::GATEWAY_TIMEOUT
-    )
+    ) || status.as_u16() == OVERLOADED
 }
 
-/// Parses `Retry-After` delta-seconds. HTTP-date forms are ignored.
+/// Parses `Retry-After` as delta-seconds or an HTTP-date. A date already in
+/// the past means "now" and yields zero, so the exponential floor applies.
 pub(crate) fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
+    retry_after_delay_at(headers, std::time::SystemTime::now())
+}
+
+fn retry_after_delay_at(headers: &HeaderMap, now: std::time::SystemTime) -> Option<Duration> {
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
-    let seconds = value.parse::<u64>().ok()?;
-    Some(Duration::from_secs(seconds))
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let at = httpdate::parse_http_date(value).ok()?;
+    Some(at.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
 /// Full jitter over `0..=delay` from a uniform 32-bit random value.
@@ -860,7 +883,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_parses_delta_seconds_and_ignores_invalid_values() {
+    fn retry_after_parses_delta_seconds_and_http_dates() {
         let mut headers = HeaderMap::new();
         headers.insert(RETRY_AFTER, HeaderValue::from_static("2"));
         assert_eq!(retry_after_delay(&headers), Some(Duration::from_secs(2)));
@@ -868,16 +891,34 @@ mod tests {
         headers.insert(RETRY_AFTER, HeaderValue::from_static(" 7 "));
         assert_eq!(retry_after_delay(&headers), Some(Duration::from_secs(7)));
 
+        // HTTP-date forms are relative to the clock: 90 s ahead is 90 s, in
+        // the past is zero (retry now, exponential floor applies).
+        let now = httpdate::parse_http_date("Wed, 21 Oct 2015 07:28:00 GMT").unwrap();
         headers.insert(
             RETRY_AFTER,
-            HeaderValue::from_static("Wed, 21 Oct 2015 07:28:00 GMT"),
+            HeaderValue::from_static("Wed, 21 Oct 2015 07:29:30 GMT"),
         );
-        assert_eq!(retry_after_delay(&headers), None);
+        assert_eq!(
+            retry_after_delay_at(&headers, now),
+            Some(Duration::from_secs(90))
+        );
+        headers.insert(
+            RETRY_AFTER,
+            HeaderValue::from_static("Wed, 21 Oct 2015 07:00:00 GMT"),
+        );
+        assert_eq!(retry_after_delay_at(&headers, now), Some(Duration::ZERO));
 
         headers.insert(RETRY_AFTER, HeaderValue::from_static("soon"));
         assert_eq!(retry_after_delay(&headers), None);
 
         assert_eq!(retry_after_delay(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn overloaded_529_is_retryable() {
+        // Anthropic answers `overloaded_error` with 529, which is not one of
+        // http's named statuses. Five audited runs gave up on it at once.
+        assert!(is_retryable_status(StatusCode::from_u16(529).unwrap()));
     }
 
     #[test]
@@ -893,24 +934,53 @@ mod tests {
     }
 
     #[test]
-    fn delay_before_retry_honors_retry_after_then_caps() {
+    fn delay_before_retry_honors_retry_after_above_max_delay_up_to_the_cap() {
         let policy = AttemptPolicy::default();
+        // No header: jittered exponential (u32::MAX jitter = full delay).
         assert_eq!(
-            policy.delay_before_retry(0, None),
+            policy.delay_before_retry(0, None, u32::MAX),
             Duration::from_millis(500)
         );
+        // Header above the exponential wins and is not jittered down.
         assert_eq!(
-            policy.delay_before_retry(0, Some(Duration::from_secs(2))),
+            policy.delay_before_retry(0, Some(Duration::from_secs(2)), 0),
             Duration::from_secs(2)
         );
+        // Header below the exponential: the exponential floor stands.
         assert_eq!(
-            policy.delay_before_retry(0, Some(Duration::from_millis(100))),
+            policy.delay_before_retry(0, Some(Duration::from_millis(100)), u32::MAX),
             Duration::from_millis(500)
         );
+        // Above `max_delay` (8 s) the server's figure is honoured...
         assert_eq!(
-            policy.delay_before_retry(0, Some(Duration::from_secs(30))),
-            Duration::from_secs(8)
+            policy.delay_before_retry(0, Some(Duration::from_secs(20)), u32::MAX),
+            Duration::from_secs(20)
         );
+        // ...up to the 60 s cap.
+        assert_eq!(
+            policy.delay_before_retry(0, Some(Duration::from_secs(600)), u32::MAX),
+            RETRY_AFTER_CAP
+        );
+    }
+
+    #[test]
+    fn ledger_charges_a_server_directed_wait_at_the_exponential_rate() {
+        // Retry-After: 20 on the default policy sleeps 20 s but charges only
+        // the 500 ms exponential to the 30 s budget, so honouring the server
+        // never exhausts the budget by itself.
+        let mut ledger = AttemptLedger::new(AttemptPolicy::default());
+        assert_eq!(ledger.begin_attempt(), 1);
+        assert_eq!(
+            ledger.next_delay_with(Some(Duration::from_secs(20)), u32::MAX),
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(ledger.slept, Duration::from_millis(500));
+        assert_eq!(ledger.begin_attempt(), 2);
+        assert_eq!(
+            ledger.next_delay_with(Some(Duration::from_secs(600)), u32::MAX),
+            Some(RETRY_AFTER_CAP)
+        );
+        assert_eq!(ledger.slept, Duration::from_millis(1_500));
     }
 
     #[test]
@@ -1514,7 +1584,7 @@ mod tests {
         let body = b"after-wait".to_vec();
         let (url, hits, server) = serve_scripted(vec![
             ScriptedResponse::http(
-                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 2\r\nConnection: close\r\nContent-Length: 4\r\n\r\nwait",
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nConnection: close\r\nContent-Length: 4\r\n\r\nwait",
             ),
             ScriptedResponse::http(format!(
                 "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{}",
@@ -1524,8 +1594,9 @@ mod tests {
         ]);
         let request = build_direct_client().unwrap().get(&url).build().unwrap();
 
-        // Cap Retry-After via max_delay so the test stays fast while still
-        // exercising the header parse + delay selection path.
+        // A zero Retry-After keeps the test fast while still exercising the
+        // header parse + delay selection path; the server's figure is a floor
+        // and is never jittered down, so a real value would be slept in full.
         let policy = AttemptPolicy::new(
             3,
             Duration::from_millis(1),

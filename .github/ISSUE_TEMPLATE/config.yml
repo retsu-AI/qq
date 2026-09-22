@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/retsu-AI/qq/discussions
+    about: Ask how to do something or float an idea before it becomes a feature request.
+  - name: Security vulnerability
+    url: https://github.com/retsu-AI/qq/security/advisories/new
+    about: Report privately. Please do not open a public issue.
+  - name: User guide
+    url: https://github.com/retsu-AI/qq/tree/main/docs/guide
+    about: Install, quickstart, configuration reference, troubleshooting.

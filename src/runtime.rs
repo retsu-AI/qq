@@ -287,6 +287,9 @@ impl RuntimeFactory {
                 .and_then(|metadata| metadata.name())
                 .map(str::to_owned),
             context_window: metadata.and_then(|metadata| metadata.context_window()),
+            reasoning_efforts: metadata
+                .map(|metadata| metadata.reasoning_efforts().to_vec())
+                .unwrap_or_default(),
             selection: ModelSelection {
                 model_is_fallback: false,
                 model: Some(snapshot.model().as_str().to_owned()),
@@ -326,6 +329,7 @@ impl RuntimeFactory {
                     model: model_id.clone(),
                     name: metadata.name().map(str::to_owned),
                     context_window: metadata.context_window(),
+                    reasoning_efforts: metadata.reasoning_efforts().to_vec(),
                     selection: qq_protocol::ModelSelection {
                         model_is_fallback: false,
                         model: Some(format!("{provider_id}/{model_id}")),
@@ -353,6 +357,7 @@ impl RuntimeFactory {
                         model: model.id.clone(),
                         name: model.name.clone(),
                         context_window: None,
+                        reasoning_efforts: Vec::new(),
                         selection: qq_protocol::ModelSelection {
                             model_is_fallback: false,
                             model: Some(format!("{provider_id}/{}", model.id)),
@@ -376,6 +381,9 @@ impl RuntimeFactory {
                 model: snapshot.model().model().to_owned(),
                 name: None,
                 context_window: metadata.and_then(|metadata| metadata.context_window()),
+                reasoning_efforts: metadata
+                    .map(|metadata| metadata.reasoning_efforts().to_vec())
+                    .unwrap_or_default(),
                 selection: qq_protocol::ModelSelection {
                     model_is_fallback: false,
                     model: Some(snapshot.model().as_str().to_owned()),
@@ -1104,6 +1112,23 @@ impl RuntimeFactory {
             return Err(RuntimeBuildError::UnsupportedReasoningEffort(
                 snapshot.model().as_str().to_owned(),
             ));
+        }
+        // A pin outside the route's advertised ladder is a configuration error
+        // here, not a provider 400 mid-turn. An empty ladder advertises nothing
+        // and is not checked: unknown is not the same as unsupported.
+        if let Some(effort) = snapshot.reasoning_effort()
+            && let Some(metadata) = snapshot
+                .providers()
+                .get(snapshot.model().provider())
+                .and_then(|provider| provider.models().get(snapshot.model().model()))
+            && !metadata.reasoning_efforts().is_empty()
+            && !metadata.reasoning_efforts().contains(&effort)
+        {
+            return Err(RuntimeBuildError::ReasoningEffortNotAdvertised {
+                model: snapshot.model().as_str().to_owned(),
+                effort,
+                advertised: metadata.reasoning_efforts().to_vec(),
+            });
         }
 
         let provider_id = snapshot.model().provider();
@@ -3062,6 +3087,16 @@ pub enum RuntimeBuildError {
         "model route {0:?} uses a provider API that does not support reasoning_effort; remove that setting or choose a supported route"
     )]
     UnsupportedReasoningEffort(String),
+    #[error(
+        "model route {model:?} does not advertise reasoning_effort {}; it accepts {}",
+        effort.as_str(),
+        advertised.iter().map(|effort| effort.as_str()).collect::<Vec<_>>().join(", ")
+    )]
+    ReasoningEffortNotAdvertised {
+        model: String,
+        effort: qq_provider::ReasoningEffort,
+        advertised: Vec<qq_provider::ReasoningEffort>,
+    },
     #[error("isolated TUI QA profile is invalid: {reason}")]
     InvalidTuiQaProfile { reason: String },
 }
@@ -3101,6 +3136,7 @@ impl RuntimeBuildError {
             | Self::JevKeyRequired
             | Self::JevKeyInvalid
             | Self::UnsupportedReasoningEffort(_)
+            | Self::ReasoningEffortNotAdvertised { .. }
             | Self::JevClientUnavailable
             | Self::InvalidTuiQaProfile { .. } => RunFailureKind::Configuration,
             Self::UnauthenticatedProvider(_) => RunFailureKind::Authentication,
@@ -3405,6 +3441,7 @@ mod tests {
                         },
                         approval_mode: qq_protocol::ApprovalMode::Ask,
                         profile: qq_protocol::AgentProfileId::default(),
+                        reasoning_effort: None,
                         correlation: qq_protocol::Correlation::default(),
                     },
                 )
@@ -3635,6 +3672,7 @@ mod tests {
                         },
                         approval_mode: qq_protocol::ApprovalMode::ReadOnly,
                         profile: AgentProfileId::default(),
+                        reasoning_effort: None,
                         correlation: qq_protocol::Correlation::default(),
                     },
                 )
@@ -3809,6 +3847,7 @@ mod tests {
                     },
                     approval_mode: qq_protocol::ApprovalMode::Ask,
                     profile: qq_protocol::AgentProfileId::default(),
+                    reasoning_effort: None,
                     correlation: qq_protocol::Correlation::default(),
                 },
             )
@@ -7036,6 +7075,99 @@ mod tests {
             factory.plan_for(&unsupported),
             Err(RuntimeBuildError::UnsupportedReasoningEffort(_))
         ));
+    }
+
+    /// A pin outside a route's advertised ladder fails at plan time with the
+    /// accepted set named; a route that advertises nothing accepts any pin
+    /// (unknown is not unsupported), and a pin inside the ladder compiles.
+    #[test]
+    fn reasoning_effort_outside_the_advertised_ladder_is_a_plan_error() {
+        use qq_provider::ReasoningEffort;
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let declared = |effort: &str| {
+            fixture.request(format!(
+                r#"(
+                version: 1, model: "custom/test", reasoning_effort: {effort},
+                providers: {{ "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: {{ "test": (name: "test", reasoning_efforts: [low, high]) }}) }},
+            )"#
+            ))
+        };
+        let inside = factory.plan_for(&declared("high")).unwrap();
+        assert_eq!(
+            inside.descriptor().reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+        match factory.plan_for(&declared("xhigh")) {
+            Err(RuntimeBuildError::ReasoningEffortNotAdvertised {
+                model,
+                effort,
+                advertised,
+            }) => {
+                assert_eq!(model, "custom/test");
+                assert_eq!(effort, ReasoningEffort::Xhigh);
+                assert_eq!(
+                    advertised,
+                    vec![ReasoningEffort::Low, ReasoningEffort::High]
+                );
+                let message = RuntimeBuildError::ReasoningEffortNotAdvertised {
+                    model,
+                    effort,
+                    advertised,
+                }
+                .to_string();
+                assert!(message.contains("xhigh"), "{message}");
+                assert!(message.contains("low, high"), "{message}");
+            }
+            other => panic!("expected ReasoningEffortNotAdvertised, got {other:?}"),
+        }
+        let silent = fixture.request(
+            r#"(
+            version: 1, model: "custom/test", reasoning_effort: xhigh,
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test": (name: "test") }) },
+        )"#,
+        );
+        assert_eq!(
+            factory
+                .plan_for(&silent)
+                .unwrap()
+                .descriptor()
+                .reasoning_effort,
+            Some(ReasoningEffort::Xhigh)
+        );
+    }
+
+    /// The model catalog the TUI receives carries each route's advertised
+    /// ladder so `/effort` can be shaped before a run is claimed.
+    #[test]
+    fn model_options_carry_the_advertised_effort_ladder() {
+        use qq_provider::ReasoningEffort;
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let request = fixture.request(
+            r#"(
+            version: 1, model: "custom/ladder",
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: {
+                "ladder": (name: "ladder", reasoning_efforts: [minimal, xhigh]),
+                "silent": (name: "silent"),
+            }) },
+        )"#,
+        );
+        let snapshot = factory.load(&request).unwrap();
+        let options = factory.configured_model_options(&snapshot);
+        let efforts = |id: &str| {
+            options
+                .iter()
+                .find(|option| option.model == id)
+                .unwrap_or_else(|| panic!("{id} missing from options"))
+                .reasoning_efforts
+                .clone()
+        };
+        assert_eq!(
+            efforts("ladder"),
+            vec![ReasoningEffort::Minimal, ReasoningEffort::Xhigh]
+        );
+        assert!(efforts("silent").is_empty());
     }
 
     #[test]

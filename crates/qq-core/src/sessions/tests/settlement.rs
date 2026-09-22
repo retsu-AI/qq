@@ -313,6 +313,7 @@ async fn recovery_interrupts_only_the_current_turns_message() {
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -485,6 +486,7 @@ async fn recovery_interrupts_running_tools_without_reexecuting_them() {
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -652,6 +654,7 @@ async fn orphaned_tool_call_blocks_replay_with_synthesized_interrupted_results()
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -2158,6 +2161,7 @@ async fn reservation_is_publicly_queued_exclusive_and_cancel_wins_before_start()
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -2350,6 +2354,7 @@ async fn delayed_old_panic_cannot_settle_a_newer_auto_compaction() {
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -2492,6 +2497,7 @@ async fn recovery_ignores_legacy_overflow_evidence_without_spending_a_second_att
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )
@@ -2655,6 +2661,7 @@ async fn version_sixteen_active_auto_compaction_backfills_exact_attempt_ownershi
                 },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: Correlation::default(),
             },
         )

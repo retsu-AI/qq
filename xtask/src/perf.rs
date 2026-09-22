@@ -1904,9 +1904,10 @@ enum ProviderMode {
         chunk_bytes: usize,
         streams: Arc<std::sync::atomic::AtomicUsize>,
     },
-    /// Every stream fails before its first event. The runtime above the
-    /// provider must not resend, so the attempts-per-turn ratio it produces
-    /// is the retry amplification above the single provider retry owner.
+    /// Every stream fails before its first event. The provider's own ledger
+    /// is out of scope (this provider has none), so the entries per turn the
+    /// runtime produces are exactly the run-owned turn retries of ADR-0040:
+    /// one send plus `MAX_TURN_RETRIES`, then `paused`.
     Faulting,
 }
 
@@ -1979,12 +1980,17 @@ impl RuntimeLoader for BenchmarkLoader {
             activity: Arc::clone(&self.activity),
         };
         Box::pin(async move {
-            let runtime = Runtime::new(provider, "benchmark/model", 16_384).map_err(|error| {
-                RuntimeLoadError {
+            // Turn recovery sleeps minute-scale in production; the benchmark
+            // measures sends, not wall time.
+            let runtime = Runtime::new(provider, "benchmark/model", 16_384)
+                .map_err(|error| RuntimeLoadError {
                     kind: RunFailureKind::Configuration,
                     message: error.to_string(),
-                }
-            })?;
+                })?
+                .with_turn_recovery(qq_core::TurnRecoveryPolicy::new(
+                    Duration::from_millis(1),
+                    Duration::from_millis(1),
+                ));
             let compiled = tokio::task::spawn_blocking(move || {
                 LoadedRuntime::compile_blocking(
                     &runtime,
@@ -2279,6 +2285,7 @@ impl RuntimeFixture {
                 model: benchmark_model(),
                 approval_mode,
                 profile: qq_protocol::AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: qq_protocol::Correlation::default(),
             },
         )
@@ -3269,6 +3276,7 @@ async fn http_pipeline_workloads(
                 model: benchmark_model(),
                 approval_mode: ApprovalMode::ReadOnly,
                 profile: qq_protocol::AgentProfileId::default(),
+                reasoning_effort: None,
                 correlation: qq_protocol::Correlation::default(),
             },
         )
@@ -3376,6 +3384,7 @@ async fn http_reconnect_workload(
             model: benchmark_model(),
             approval_mode: ApprovalMode::ReadOnly,
             profile: qq_protocol::AgentProfileId::default(),
+            reasoning_effort: None,
             correlation: qq_protocol::Correlation::default(),
         },
     )
@@ -3696,14 +3705,17 @@ async fn cancellation_workloads(
 }
 
 /// Retry amplification above the provider: with a provider that fails every
-/// stream before its first event, the number of provider entries per failed
-/// run is the number of sends the runtime issued for one logical turn. The
-/// provider is the single retry owner, so the expected value is exactly one
-/// and the gate is below 1.05.
+/// stream before its first event, the number of provider entries per paused
+/// run is the number of sends the runtime issued for one logical turn. Under
+/// ADR-0040 the run owns turn recovery, so the expected value is exactly
+/// `MAX_TURN_RETRIES + 1` and the gate is 5 % above it; anything more means
+/// a second retry owner crept in above the loop.
 async fn retry_amplification_workloads(
     samples: u16,
 ) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>), PerfError> {
     let runs = samples.clamp(5, 20);
+    let expected_milli = (u64::from(qq_core::MAX_TURN_RETRIES) + 1) * 1_000;
+    let gate_milli = expected_milli + expected_milli / 20;
     let mut fixture = RuntimeFixture::open(ProviderMode::Faulting).await?;
     let operation = async {
         let mut entries_per_run = Vec::with_capacity(usize::from(runs));
@@ -3725,10 +3737,10 @@ async fn retry_amplification_workloads(
             .await?;
             let run_id = prompt_run_id(&queued)?;
             let (outcome, _, _) = wait_for_run(&mut events, run_id).await?;
-            if !matches!(outcome, RunOutcome::Failed { .. }) {
-                return Err(PerfError::Fixture(
-                    "faulting run did not settle as failed".to_owned(),
-                ));
+            if !matches!(outcome, RunOutcome::Paused { .. }) {
+                return Err(PerfError::Fixture(format!(
+                    "faulting run did not settle as paused: {outcome:?}"
+                )));
             }
             // The run has settled, so every provider entry it caused is
             // already in the channel.
@@ -3746,14 +3758,14 @@ async fn retry_amplification_workloads(
             vec![MetricResult::scalar(
                 "provider_retry_amplification_milli",
                 "ratio_milli",
-                "provider stream entries per logical turn when every stream fails before its first event; the provider owns retry so the runtime must add none",
+                "provider stream entries per logical turn when every stream fails before its first event; the run owns turn recovery (ADR-0040) so this is one send plus MAX_TURN_RETRIES and nothing above it",
                 ratio_milli,
             )?],
             vec![CorrectnessCheck {
                 name: "retry_amplification_bounded".to_owned(),
-                passed: ratio_milli < 1_050,
+                passed: ratio_milli <= gate_milli,
                 detail: format!(
-                    "{total} provider entries across {runs} failed runs ({ratio_milli} milli); gate is below 1050"
+                    "{total} provider entries across {runs} paused runs ({ratio_milli} milli); expected {expected_milli}, gate is at most {gate_milli}"
                 ),
             }],
         ))
@@ -5381,14 +5393,20 @@ async fn measure_load_profile(
 mod tests {
     use super::*;
 
-    /// The fixture's amplification counter must observe exactly one provider
-    /// entry per failed run: the provider owns retry, the runtime adds none.
+    /// The fixture's amplification counter must observe exactly one send plus
+    /// `MAX_TURN_RETRIES` provider entries per paused run: the run owns turn
+    /// recovery (ADR-0040) and nothing above it resends.
     #[tokio::test]
-    async fn retry_amplification_fixture_observes_one_send_per_turn() {
+    async fn retry_amplification_fixture_observes_the_turn_retry_bound() {
         let (metrics, checks) = retry_amplification_workloads(5).await.unwrap();
         assert_eq!(metrics.len(), 1);
         assert_eq!(metrics[0].name, "provider_retry_amplification_milli");
-        assert_eq!(metrics[0].summary.p95, 1_000, "{:?}", metrics[0].summary);
+        assert_eq!(
+            metrics[0].summary.p95,
+            (u64::from(qq_core::MAX_TURN_RETRIES) + 1) * 1_000,
+            "{:?}",
+            metrics[0].summary
+        );
         assert!(checks[0].passed, "{}", checks[0].detail);
     }
 

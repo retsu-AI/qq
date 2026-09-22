@@ -1,6 +1,6 @@
 # ADR-0005 — The provider is the single retry owner
 
-**Status:** Accepted
+**Status:** Accepted; superseded in part by [ADR-0040](0040-two-phase-retry-ownership.md) (the run owns *turn* recovery after a transient fault; the provider still owns every resend of one request)
 **Date:** 2026-09-04
 **Deciders:** speed-first plan D3 / H14
 **Implements:** [`architecture.md` § Provider Compilation](../design/architecture.md#provider-compilation)
@@ -45,4 +45,6 @@ yielded, where duplication is impossible. The core `TurnRetryPolicy` and
 - Commit `d02a619`.
 - Tests `restarts_a_stream_that_fails_before_its_first_event`,
   `never_restarts_after_an_event_has_been_yielded` (`exchange.rs`).
-- Metric `provider_retry_amplification_milli` = 1000 (budgeted).
+- Metric `provider_retry_amplification_milli` = 1000 (budgeted) while this
+  ADR stood alone; under ADR-0040 the same metric measures the run's own
+  turn retries and is budgeted at `(MAX_TURN_RETRIES + 1) × 1000`.

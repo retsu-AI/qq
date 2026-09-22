@@ -175,6 +175,7 @@ pub(super) fn parse_run_status(value: &str) -> Result<RunStatus, SessionRuntimeE
         "failed" => Ok(RunStatus::Failed),
         "interrupted" => Ok(RunStatus::Interrupted),
         "budget_exhausted" => Ok(RunStatus::BudgetExhausted),
+        "paused" => Ok(RunStatus::Paused),
         _ => Err(SessionRuntimeError::CONSTRAINT),
     }
 }
@@ -218,6 +219,29 @@ pub(super) fn parse_approval_mode(value: &str) -> Result<ApprovalMode, SessionRu
         "full" => Ok(ApprovalMode::Full),
         _ => Err(SessionRuntimeError::CONSTRAINT),
     }
+}
+
+/// NULL is omission (provider/config defaults). A stored value is the session's
+/// explicit pin for the next claim.
+pub(super) fn parse_reasoning_effort(
+    encoded: Option<&str>,
+) -> Result<Option<qq_provider::ReasoningEffort>, SessionRuntimeError> {
+    match encoded {
+        None => Ok(None),
+        Some("none") => Ok(Some(qq_provider::ReasoningEffort::None)),
+        Some("minimal") => Ok(Some(qq_provider::ReasoningEffort::Minimal)),
+        Some("low") => Ok(Some(qq_provider::ReasoningEffort::Low)),
+        Some("medium") => Ok(Some(qq_provider::ReasoningEffort::Medium)),
+        Some("high") => Ok(Some(qq_provider::ReasoningEffort::High)),
+        Some("xhigh") => Ok(Some(qq_provider::ReasoningEffort::Xhigh)),
+        Some(_) => Err(SessionRuntimeError::CODEC),
+    }
+}
+
+pub(super) fn reasoning_effort_column(
+    effort: Option<qq_provider::ReasoningEffort>,
+) -> Option<&'static str> {
+    effort.map(qq_provider::ReasoningEffort::as_str)
 }
 
 /// Authority order of approval modes: a higher rank executes strictly more

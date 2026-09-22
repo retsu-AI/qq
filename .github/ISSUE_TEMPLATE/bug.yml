@@ -1,0 +1,54 @@
+name: Bug report
+description: Something QQ does is wrong.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The exact message or behavior. Paste text rather than screenshots where you can.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Commands from a fresh shell. If it needs a repository, the smallest one that shows it.
+      placeholder: |
+        1. qq auth login openai
+        2. QQ_MODEL=openai/gpt-5.6 qq run --approval auto "…"
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: version
+    attributes:
+      label: "`qq version` output"
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and terminal
+      placeholder: "Ubuntu 24.04, kitty 0.35 / macOS 15, iTerm2 / Windows 11, Windows Terminal"
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: "`qq config show` output with anything sensitive removed, or the relevant part of your config.ron. `qq config sources` helps when the problem is which file applied."
+      render: ron
+  - type: textarea
+    id: trace
+    attributes:
+      label: Run trace (optional)
+      description: "For `qq run` problems, `--format jsonl` or `--trace FILE` output, trimmed. Check it for secrets or private code first."
+      render: json

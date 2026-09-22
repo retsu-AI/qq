@@ -78,7 +78,9 @@ falls below the share a delegate settles. No regression in `Forbidden` refusals.
    and low confidence escalate. Headless with no client denies immediately as
    a tool result.
 6. **A delegate cannot widen its own future authority.** It may record an
-   exact-command or exact-host session grant. It may not write `.qq/config.ron`,
+   exact-command or exact-host session grant, and only when that value fits a
+   session grant. A value that does not fit approves the call once and records
+   nothing; it never fails the approval. It may not write `.qq/config.ron`,
    record a prefix grant, or promote "always allow."
 
 ## Decision summary
@@ -109,7 +111,7 @@ Design constraints inherited from `AGENTS.md` and the harness plan:
 | DA1 | `Deny` is final under `auto` when a reviewer is configured; escalation restarts the human wait; the reviewer prompt stops telling the model that a root deny only escalates | none | `crates/qq-core/src/sessions/approvals.rs`, `src/runtime.rs` | `auto` + reviewer `Deny` settles `denied` with no human prompt; `Escalate` and reviewer timeout still prompt; `supervised` unchanged; prompt text no longer says a root deny only escalates |
 | DA2 | Delegate deadline is separate from the human wait; interactive attached clients are not denied by a server timer; headless denies immediately | RR9, or the minimum of RR9 included here | `crates/qq-core/src/sessions.rs`, `sessions/approvals.rs`, `src/runtime.rs`, `qq-config` | reviewer/Jev budget does not consume the human wait; attached interactive wait bounded only by the run deadline; headless denial is a tool result naming the policy; config option plumbed |
 | DA3 | `DelegatedApproval` mode on `ApprovalMode`: `ask` may opt in; default `auto` profile enables it; `read-only` and `full` ignore it | DA1 | `crates/qq-core/src/approval.rs`, `qq-config`, `src/runtime.rs` | `ask` without the mode prompts as today; `ask` with it routes holds to the delegate; `full` never calls the reviewer; `read-only` denies without one |
-| DA4 | Delegate-recorded grants are exact-command or exact-host, session-scoped, and never written to config | DA1 | `crates/qq-core/src/sessions/approvals.rs`, `crates/qq-core/src/approval.rs` | a delegate approval of `git commit -m x` covers that exact command for the session and not `git commit -m y`; a prefix grant still requires the human; promotion to `.qq/config.ron` is refused for a delegate verdict |
+| DA4 | Delegate-recorded grants are exact-command or exact-host, session-scoped, and never written to config | DA1 | `crates/qq-core/src/sessions/approvals.rs`, `crates/qq-core/src/approval.rs` | a delegate approval of `git commit -m x` covers that exact command for the session and not `git commit -m y`; a value past 256 bytes or a full grant table approves once and records nothing; a prefix grant still requires the human; promotion to `.qq/config.ron` is refused for a delegate verdict |
 | DA5 | `jev_approval` opt-in: typed yes/no/abstain over the approval preview, 5 s bound, fails closed to escalate, spend against the run budget | DA1, DA3; ADR-0041 reserved | `src/runtime.rs`, `src/jev.rs`, `crates/qq-config`, `qq-core` reviewer seam, `docs/adr/0041-*.md` | key stored and `jev_approval: off` never calls TypeSafe; `on` with no key falls through to `reviewer_model`; abstain and over-bound escalate; `Forbidden` never reaches the client; `approved_by_reviewer` records `delegate: jev` |
 | DA6 | Surfaces: TUI shows who settled a call and offers "stop delegating for this session"; headless records the delegate on the approval event; runbook | DA3, DA5 | `crates/qq-tui`, `crates/qq-protocol` docs, `docs/runbooks/delegated-approval.md`, `docs/design/tools.md`, `docs/design/protocol.md` | a delegated approval renders the delegate and the preview digest; the session toggle clears the delegate for the rest of the session without a restart; protocol fixtures updated if the event gains a field |
 
@@ -186,13 +188,19 @@ enum on the wire does not grow.
 **Gates:** none.
 **Acceptance:**
 - a delegate `Approve` may record an exact-command session grant or an
-  exact-host session grant, counted against a per-run cap (64);
+  exact-host session grant, counted against a per-run cap (64), and only when
+  the value fits a session grant (non-empty, at most 256 bytes, session under
+  its 256-grant cap);
+- a grant that does not fit still approves the call, once, and records
+  nothing. It never fails the approval command. That rule already holds for a
+  human choice (`InvalidApprovalGrant` is gone); a delegate verdict must not
+  reintroduce it;
 - that grant matches the exact command string or exact host and nothing
   broader; a prefix grant is not recorded from a delegate verdict;
 - the workspace-lifetime promotion path refuses a delegate verdict and does
   not write `.qq/config.ron`;
 - a human approval keeps today's once/session/workspace choices, including
-  prefix grants.
+  prefix grants, under the same storage rule.
 **Docs:** `docs/design/tools.md` § Grant Lifetimes.
 
 ### DA5 — Jev as the delegate

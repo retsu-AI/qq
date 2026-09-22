@@ -10,12 +10,14 @@ pub(crate) use qq_client::state::{
 };
 use qq_client::state::{
     MAX_QUEUED_DRAFTS, ReduceContext, StateEffect, body_request, model_context_window,
+    model_reasoning_efforts,
 };
 use qq_protocol::{
     AgentProfileId, ApprovalDecision, ApprovalGrant, ApprovalMode, ApprovalResolution, CommandId,
-    CommandOutcome, CommandRequest, ModelSelection, QuestionPreview, ServerCapabilities,
-    SessionCommand, SessionEvent, SessionEventEnvelope, SessionId, SessionStatus,
-    SteeringCapabilities, ToolCallSnapshot, ToolCallState, WorkspaceId, WorkspaceSnapshot,
+    CommandOutcome, CommandRequest, ModelSelection, QuestionPreview, ReasoningEffort,
+    ServerCapabilities, SessionCommand, SessionEvent, SessionEventEnvelope, SessionId,
+    SessionStatus, SteeringCapabilities, ToolCallSnapshot, ToolCallState, WorkspaceId,
+    WorkspaceSnapshot,
 };
 use thiserror::Error;
 
@@ -24,7 +26,7 @@ use crate::{
     commands::{self, Command, SlashAction, SlashEntry},
     composer::Composer,
     effect::{Effect, Effects, PendingSubmit, Redraw, SubmitTarget},
-    input::{Mode, Overlay, SessionConfirm, approval_mode_label},
+    input::{Mode, Overlay, SessionConfirm, approval_mode_label, effort_label},
     picker::Picker,
     terminal,
     theme::Theme,
@@ -224,6 +226,9 @@ enum PendingIntent {
     SetApprovalMode {
         session_id: SessionId,
     },
+    SetEffort {
+        session_id: SessionId,
+    },
     Delete {
         session_id: SessionId,
     },
@@ -241,6 +246,9 @@ pub(crate) struct App {
     /// Approval mode new sessions are created with; `/approval` with nothing
     /// focused sets it.
     pub approval_mode: ApprovalMode,
+    /// Reasoning effort new sessions are created with; `/effort` with nothing
+    /// focused sets it. `None` leaves the compiled plan's configured choice.
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub workspace_id: Option<WorkspaceId>,
     pub workspace_path: String,
     /// Local root for `@` mention resolution and completion, when this
@@ -341,6 +349,7 @@ impl App {
             model: options.model,
             profile: AgentProfileId::default(),
             approval_mode: ApprovalMode::default(),
+            reasoning_effort: None,
             models: options.models,
             workspace_id: None,
             workspace_path: String::new(),
@@ -570,6 +579,12 @@ impl App {
                                 self.set_info_for(
                                     Some(*session_id),
                                     format!("session profile set to {}", profile.as_str()),
+                                );
+                            }
+                            CommandOutcome::SessionEffortSet { session_id, effort } => {
+                                self.set_info_for(
+                                    Some(*session_id),
+                                    format!("session effort set to {}", effort_label(*effort)),
                                 );
                             }
                             CommandOutcome::SessionDeleted { .. } => {
@@ -922,6 +937,7 @@ impl App {
             | Some(PendingIntent::SetModel { session_id })
             | Some(PendingIntent::SetProfile { session_id })
             | Some(PendingIntent::SetApprovalMode { session_id })
+            | Some(PendingIntent::SetEffort { session_id })
             | Some(PendingIntent::Delete { session_id }) => Some(*session_id),
             Some(PendingIntent::Approval { tool_call_id }) => self
                 .sessions
@@ -995,6 +1011,7 @@ impl App {
             | Mode::Models
             | Mode::Profiles
             | Mode::ApprovalModes
+            | Mode::Effort
             | Mode::Skills
             | Mode::Themes
             | Mode::Commands
@@ -1321,6 +1338,7 @@ impl App {
             Command::OpenModels => self.open_models(),
             Command::OpenProfiles => self.open_profiles(),
             Command::OpenApprovalModes => self.open_approval_modes(),
+            Command::OpenEffort => self.open_effort(),
             Command::OpenSkills => self.open_skills(),
             Command::OpenThemes => self.open_themes(),
             Command::OpenSessions => self.open_sessions(),
@@ -1556,6 +1574,7 @@ impl App {
                 model,
                 approval_mode: self.approval_mode,
                 profile: self.profile.clone(),
+                reasoning_effort: self.reasoning_effort,
                 correlation: qq_protocol::Correlation::default(),
             },
         )
@@ -2448,6 +2467,7 @@ impl App {
                 | PendingIntent::SetModel { .. }
                 | PendingIntent::SetProfile { .. }
                 | PendingIntent::SetApprovalMode { .. }
+                | PendingIntent::SetEffort { .. }
                 | PendingIntent::Delete { .. }
                 | PendingIntent::Prune => None,
             })

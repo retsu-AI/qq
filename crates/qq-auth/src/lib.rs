@@ -193,6 +193,18 @@ pub enum AuthError {
     #[error("environment variable `{variable}` is not set")]
     EnvironmentMissing { variable: String },
 
+    /// A built-in provider has neither a stored credential nor its
+    /// environment variable. Names both remedies because a new user reaches
+    /// this before knowing either exists.
+    #[error(
+        "no credential for provider `{provider}`: run `qq auth login {provider}` \
+         or set the environment variable `{environment_variable}`"
+    )]
+    ProviderCredentialMissing {
+        provider: String,
+        environment_variable: String,
+    },
+
     #[error("environment variable `{variable}` is empty")]
     EnvironmentEmpty { variable: String },
 
@@ -1169,7 +1181,18 @@ pub fn resolve_provider_credential(
     if let Some(secret) = store.resolve_registered(stored_name, expected_endpoint)? {
         return Ok(secret);
     }
-    resolve_environment(environment_variable)
+    match resolve_environment(environment_variable) {
+        Err(AuthError::EnvironmentMissing { .. }) => {
+            // `PROVIDER/PROFILE`: the provider half is what `qq auth login`
+            // takes. A name without a slash is used verbatim.
+            let provider = stored_name.split('/').next().unwrap_or(stored_name);
+            Err(AuthError::ProviderCredentialMissing {
+                provider: provider.to_owned(),
+                environment_variable: environment_variable.to_owned(),
+            })
+        }
+        other => other,
+    }
 }
 
 pub fn validate_credential_name(name: &str) -> Result<(), AuthError> {

@@ -693,6 +693,66 @@ impl Document {
             || self.policy.as_ref().is_some_and(PolicyPatch::has_grants)
     }
 
+    /// The sensitive sections this document declares, by configuration key,
+    /// in document order. What `qq trust` shows the user before they accept.
+    pub(super) fn sensitive_sections(&self) -> Vec<&'static str> {
+        let mut sections = Vec::new();
+        if self.organization.is_present() {
+            sections.push("organization");
+        }
+        if self.model.is_present() {
+            sections.push("model");
+        }
+        if self.worker_model.is_present() {
+            sections.push("worker_model");
+        }
+        if self.reviewer_model.is_present() {
+            sections.push("reviewer_model");
+        }
+        if self.delegation.is_present() {
+            sections.push("delegation");
+        }
+        if self.audit.is_present() {
+            sections.push("audit");
+        }
+        if self.jev_review.is_present() {
+            sections.push("jev_review");
+        }
+        if self.jev_routing.is_present() {
+            sections.push("jev_routing");
+        }
+        if self.reasoning_effort.is_present() {
+            sections.push("reasoning_effort");
+        }
+        if self.providers.is_present() {
+            sections.push("providers");
+        }
+        if self.mcp.is_present() {
+            sections.push("mcp");
+        }
+        if self.profiles.is_present() {
+            sections.push("profiles");
+        }
+        if self.packs.is_present() {
+            sections.push("packs");
+        }
+        if let Some(policy) = &self.policy {
+            if policy.allow_tools.is_some() {
+                sections.push("policy.allow_tools");
+            }
+            if policy.allow_shell_prefixes.is_some() {
+                sections.push("policy.allow_shell_prefixes");
+            }
+            if policy.allow_hosts.is_some() {
+                sections.push("policy.allow_hosts");
+            }
+            if policy.shell_env.is_some() {
+                sections.push("policy.shell_env");
+            }
+        }
+        sections
+    }
+
     /// Explicit pack declarations, for the loader to resolve against the
     /// declaring file's directory.
     pub(super) const fn packs(&self) -> &Field<UniqueMap<String, PackPatch>> {

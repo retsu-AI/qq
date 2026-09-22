@@ -354,9 +354,13 @@ measured prompt turn, it persists that versioned basis, request byte count, and
 run's existing reservation query loads the basis without another store call.
 Only an exact shape/prefix match may seed the next estimate; the seed then
 follows the byte delta since the measured request in both directions at the
-estimate ratio (`context::adjust_measured_tokens`), so growth from the new
-prompt is charged and shrinkage from assembly-time pruning is credited rather
-than discarding the measurement. Within a run the same rule is applied per
+ratio the measurement itself established (`context::calibrated_bytes_per_token`:
+measured bytes over measured tokens, rounded to nearest, clamped to 2–6 and
+falling back to the default four below 2 000 measured tokens), so growth from
+the new prompt is charged and shrinkage from assembly-time pruning is credited
+rather than discarding the measurement, and a code-heavy transcript that
+tokenizes near three bytes per token is no longer under-charged by a quarter
+on every turn. Within a run the same rule is applied per
 request component (system text, tool schemas, messages), so the slice
 checkpoint and continuation turns, which change the system text and drop the
 schemas, keep a measurement-derived estimate. Pricing-only refreshes are
@@ -435,12 +439,20 @@ values, secret hashes, live handles, and the credential epoch never enter the
 descriptor or its digest.
 
 Explicit `reasoning_effort` is resolved from trusted configuration and profiles,
-with runtime overrides first. Descriptor version 9 records the choice and its
-cache key distinguishes overrides. Every model turn uses the compiled choice;
-omission uses provider defaults, while explicit `none` requests disabled
-reasoning. This does not enable Jev. HTTP OpenAI Responses/Chat adapters carry
+with runtime overrides first. A session pin (`/effort`, `set_session_effort`)
+takes precedence for that session's next run. Descriptor version 9 records the
+choice and its cache key distinguishes overrides. Every model turn uses the
+compiled choice; omission uses provider defaults, while explicit `none` requests
+disabled reasoning. This does not enable Jev. HTTP OpenAI Responses/Chat adapters carry
 effort; other adapter families reject it before credential lookup. Capability
 means transport support, not that every remote model accepts every effort value.
+The bundled catalog records the ladder each OpenAI-shaped route documents
+(`ModelMetadata::reasoning_efforts`, surfaced as `ModelDescriptor.reasoning_efforts`);
+Anthropic-shaped routes advertise none because their adapters never transmit
+effort. A pin outside a non-empty ladder is a plan-time `ReasoningEffortNotAdvertised`
+error naming the accepted values, so the operator sees it before the provider
+would fail the turn. An empty ladder is unknown, not unsupported, and is not
+checked.
 
 Credential rotation is tracked separately by an opaque `CredentialEpoch` owned
 by `qq-auth`: every durable credential write advances the store's index
@@ -897,6 +909,20 @@ cap) and the run continues into the next slice, where the model re-issues it.
 Clients observe no terminal run event at the slice seam. Genuine completion,
 explicit caller budgets, cancellation, and failures remain the only user-level
 terminal conditions; provider adapters do not participate in slice rollover.
+
+A transient provider fault does not end a run (ADR-0040). The provider owns
+resends of one request while its stream has yielded nothing; once the run
+loop receives `provider_unavailable`, `provider_rate_limited`, or
+`provider_transport` (including a stream that ends after events without a
+terminal event), it commits whatever streamed as a partial assistant turn,
+publishes `run_turn_retrying`, sleeps under `TurnRecoveryPolicy` (2 s
+doubling to 60 s; cancellation and the run deadline cut it short), and
+re-issues the turn with a continue notice after any partial text. The
+allowance is `MAX_TURN_RETRIES` (5) per turn and resets when a turn
+completes. Exhaustion settles the run `paused`: every completed turn is
+durable and the next prompt continues the session. Faults that would recur
+(authentication, invalid request, protocol, output truncation) still fail at
+once.
 
 Once prompt submission commits, the runtime owns that accepted run until it
 persists exactly one terminal `RunFinished` event. Before settling started
@@ -1392,7 +1418,7 @@ Targets the executable budgets and benchmarks enforce or approach:
 | Context overflow sent to a provider | Zero |
 | Compaction reduction when required | At least `8x` |
 | Stable-prefix provider cache use | At least `80%` where supported |
-| Core retry amplification | `< 1.05` provider stream entries per logical turn; transport attempts obey `AttemptPolicy` |
+| Core retry amplification | `< 1.05` provider stream entries per logical turn on completed turns; a turn that recovers from a transient fault costs at most `MAX_TURN_RETRIES + 1` (ADR-0040); transport attempts obey `AttemptPolicy` |
 | Release binary / minimal binary | `<= 48,000,000` / `<= 41,000,000` bytes |
 | Harness-attributable evaluation failures | `< 0.5%` |
 
