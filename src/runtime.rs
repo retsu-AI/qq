@@ -475,6 +475,14 @@ impl RuntimeFactory {
                 continue;
             }
             for (model_id, metadata) in provider.models() {
+                if provider.kind() == qq_config::ProviderKind::OpenAiCodex
+                    && !metadata.explicitly_configured()
+                    && discovered
+                        .get(provider_id)
+                        .is_some_and(|models| !models.iter().any(|model| &model.id == model_id))
+                {
+                    continue;
+                }
                 if options.len() >= MAX_MODEL_OPTIONS {
                     break 'providers;
                 }
@@ -980,17 +988,22 @@ impl RuntimeFactory {
                 provider_id.to_owned(),
             ));
         }
-        if provider.models().contains_key(model_id) {
+        if provider.models().get(model_id).is_some_and(|metadata| {
+            metadata.explicitly_configured()
+                || provider.kind() != qq_config::ProviderKind::OpenAiCodex
+        }) {
             return Ok(());
         }
-        // The discovery cache keeps this equal to the served list without a
-        // network round trip while the cache is warm; when discovery is
-        // unavailable the builtin catalog and configured ids above are the
-        // whole list.
-        if self
-            .inner
-            .discovery
-            .discover(provider_id, provider, &self.inner.credentials)
+        let discovered =
+            self.inner
+                .discovery
+                .discover(provider_id, provider, &self.inner.credentials);
+        if provider.models().get(model_id).is_some_and(|metadata| {
+            metadata.explicitly_configured()
+                || provider.kind() != qq_config::ProviderKind::OpenAiCodex
+                || discovered.is_none()
+        }) || discovered
+            .as_ref()
             .is_some_and(|models| models.iter().any(|model| model.id == model_id))
         {
             return Ok(());
@@ -1043,6 +1056,14 @@ impl RuntimeFactory {
                 .discovery
                 .discover(provider_id, provider, &self.inner.credentials)
         {
+            if provider.kind() == qq_config::ProviderKind::OpenAiCodex {
+                ids.retain(|id| {
+                    provider
+                        .models()
+                        .get(id)
+                        .is_some_and(|model| model.explicitly_configured())
+                });
+            }
             ids.extend(discovered.into_iter().map(|model| model.id));
         }
         if ids.is_empty() || ids.len() > MAX_LISTED_ROUTES {
@@ -5926,6 +5947,53 @@ mod tests {
         assert!(options
             .iter()
             .any(|option| option.model == "live" && option.name.as_deref() == Some("Live name")));
+    }
+
+    #[test]
+    fn codex_live_catalog_replaces_implicit_models_but_keeps_explicit_routes() {
+        let fixture = RuntimeFixture::new();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        );
+        credentials.set_with_metadata("openai-codex/default", serde_json::to_vec(&serde_json::json!({
+            "version": 1, "id_token": "id", "access_token": "access", "refresh_token": "refresh",
+            "account_id": "test", "is_fedramp": false, "refreshed_at": 1
+        })).unwrap(), false, Some("openai-codex"), Some("https://chatgpt.com")).unwrap();
+        let factory = fixture.factory_with_credentials(credentials);
+        let snapshot = factory
+            .load(&fixture.request(
+                r#"(
+            version: 1,
+            model: "openai-codex/selected",
+            providers: {"openai-codex": OpenAiCodex(
+                models: {"gpt-5.5": (name: "Explicit legacy")},
+            )},
+        )"#,
+            ))
+            .unwrap();
+        let source = CatalogSource::from(&snapshot);
+        let fallback = factory.model_options_with_discovery(&source, &BTreeMap::new());
+        assert!(fallback.iter().any(|model| model.model == "gpt-5.4"));
+        let live = BTreeMap::from([(
+            "openai-codex".to_owned(),
+            vec![DiscoveredModel {
+                id: "gpt-6-sol".to_owned(),
+                name: Some("GPT-6 Sol".to_owned()),
+            }],
+        )]);
+        let options = factory.model_options_with_discovery(&source, &live);
+        assert!(
+            options
+                .iter()
+                .any(|model| model.model == "gpt-6-sol" && model.context_window.is_some())
+        );
+        assert!(options.iter().any(|model| model.model == "gpt-5.5"));
+        assert!(options.iter().any(|model| model.model == "selected"));
+        assert!(!options.iter().any(|model| model.model == "gpt-5.4"));
+        let empty = BTreeMap::from([("openai-codex".to_owned(), Vec::new())]);
+        let options = factory.model_options_with_discovery(&source, &empty);
+        assert_eq!(options.len(), 2);
     }
 
     #[test]

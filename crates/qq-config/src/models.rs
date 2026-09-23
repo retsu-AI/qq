@@ -158,7 +158,21 @@ const fn tiered(
     })
 }
 
+// GPT-6 excludes the legacy `minimal` effort. `max` is not yet represented
+// by QQ's shared effort vocabulary.
+const GPT6_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::None,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::Xhigh,
+];
+
 const MODELS: &[ModelDefinition] = &[
+    model! { catalogs: OPENAI_API, wire: "gpt-6-sol", canonical: "openai/gpt-6-sol", name: "GPT-6 Sol", reasoning: true, efforts: GPT6_EFFORTS, limits: 1_050_000 / 128_000, pricing: None },
+    model! { catalogs: OPENAI_API, wire: "gpt-6-luna", canonical: "openai/gpt-6-luna", name: "GPT-6 Luna", reasoning: true, efforts: GPT6_EFFORTS, limits: 1_050_000 / 128_000, pricing: None },
+    model! { catalogs: OPENAI_CODEX, wire: "gpt-6-sol", canonical: "openai/gpt-6-sol", name: "GPT-6 Sol", reasoning: true, efforts: GPT6_EFFORTS, limits: 272_000 / 128_000, pricing: None },
+    model! { catalogs: OPENAI_CODEX, wire: "gpt-6-luna", canonical: "openai/gpt-6-luna", name: "GPT-6 Luna", reasoning: true, efforts: GPT6_EFFORTS, limits: 272_000 / 128_000, pricing: None },
     model! {
         catalogs: ANTHROPIC_API,
         wire: "claude-sonnet-5",
@@ -409,6 +423,23 @@ pub(crate) fn builtin_models(catalog: BuiltinCatalog) -> BTreeMap<String, ModelM
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpt6_sol_and_luna_have_current_api_limits_and_no_minimal_effort() {
+        for catalog in [BuiltinCatalog::OpenAiApi, BuiltinCatalog::OpenAiCodex] {
+            let models = builtin_models(catalog);
+            for id in ["gpt-6-sol", "gpt-6-luna"] {
+                let model = &models[id];
+                assert_eq!(model.canonical_id(), Some(format!("openai/{id}").as_str()));
+                assert_eq!(model.max_output_tokens(), Some(128_000));
+                assert_eq!(model.reasoning_efforts(), GPT6_EFFORTS);
+                assert!(!model.explicitly_configured());
+            }
+        }
+        let models = builtin_models(BuiltinCatalog::OpenAiApi);
+        assert_eq!(models["gpt-6-sol"].context_window(), Some(1_050_000));
+        assert_eq!(models["gpt-6-luna"].context_window(), Some(1_050_000));
+    }
 
     #[test]
     fn access_routes_share_canonical_model_identity() {

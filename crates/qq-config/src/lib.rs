@@ -724,6 +724,7 @@ pub enum InputModality {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ModelMetadata {
+    explicitly_configured: bool,
     canonical_id: Option<String>,
     api: Option<ProviderApi>,
     name: Option<String>,
@@ -762,6 +763,12 @@ pub struct ModelPricingTier {
 }
 
 impl ModelMetadata {
+    /// Whether configuration explicitly declares this model, even if discovery omits it.
+    #[must_use]
+    pub const fn explicitly_configured(&self) -> bool {
+        self.explicitly_configured
+    }
+
     #[must_use]
     pub fn canonical_id(&self) -> Option<&str> {
         self.canonical_id.as_deref()
@@ -818,6 +825,7 @@ impl ModelMetadata {
         pricing: Option<ModelPricing>,
     ) -> Self {
         Self {
+            explicitly_configured: false,
             canonical_id: Some(canonical_id.to_owned()),
             api,
             name: Some(name.to_owned()),

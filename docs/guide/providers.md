@@ -76,16 +76,31 @@ still be used by declaring it under the provider's `models`.
 
 | Provider | Routes |
 | --- | --- |
-| `openai` | `gpt-6-astra`, `gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.3-codex-spark`, `gpt-5.2`, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-4o`, `gpt-4o-mini` |
+| `openai` | `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra`, `gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.3-codex-spark`, `gpt-5.2`, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-4o`, `gpt-4o-mini` |
 | `openai-codex` | the OpenAI routes your subscription includes |
 | `anthropic` | `claude-opus-5`, `claude-sonnet-5`, `claude-fable-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5`, `claude-sonnet-4-6`, `claude-sonnet-4-5`, `claude-haiku-4-5` |
 | `google` | `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
 | `xai` | `grok-4.7`, `grok-4.6`, `grok-4.5`, `grok-4.3` |
 | `bedrock`, `bedrock-mantle` | the same Anthropic and OpenAI models under their Bedrock ids |
 
-The TUI's `/models` lists exactly the routes your stored credentials unlock,
-including models discovered live from providers that offer a listing
-endpoint.
+The TUI's `/models` lists authenticated providers and includes live discovery.
+For Codex, a successful response replaces implicit bundled entries: hidden or
+retired models no longer linger in the picker. Explicit `models` declarations
+and the currently selected route remain visible; neither grants account access.
+Failed discovery falls back to the bundled catalog. Results are cached for five
+minutes. QQ sends Codex client version `0.156.1` for discovery (the upstream
+release that adds GPT-6 Sol/Luna); upgrading a separately installed Codex CLI
+does not change QQ's discovery version.
+
+GPT-6 Sol/Luna support `none`, `low`, `medium`, `high`, and `xhigh` in QQ.
+The API's `max` effort is not yet represented by QQ's shared effort vocabulary.
+Their pricing is currently unknown in the bundled catalog; cost-budget behavior
+therefore remains conservative. Codex uses the conservative bundled 272K
+context limit, distinct from the direct API's 1.05M limit.
+
+Opus 5.5 is not yet advertised as supported: its always-on thinking requires
+signed thinking-block replay during tool rounds, which QQ does not yet retain.
+
 
 ## Amazon Bedrock
 

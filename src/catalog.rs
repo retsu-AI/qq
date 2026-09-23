@@ -26,7 +26,7 @@ const FAILURE_CACHE_TTL: Duration = Duration::from_secs(5);
 // Codex gates `/models` on a supported Codex client version, not QQ's package
 // version. Keep this at least as high as the newest listed model's
 // `minimal_client_version`.
-const CODEX_MODELS_CLIENT_VERSION: &str = "0.153.0";
+const CODEX_MODELS_CLIENT_VERSION: &str = "0.156.1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DiscoveredModel {
@@ -428,8 +428,20 @@ fn parse_models(
     } else {
         body.get("data")?.as_array()?
     };
+    // A partial response must not evict the bundled fallback catalog.
+    if kind == ProviderKind::OpenAiCodex && entries.len() > MAX_DISCOVERED_MODELS {
+        return None;
+    }
     let mut models = Vec::with_capacity(entries.len().min(MAX_DISCOVERED_MODELS));
     for entry in entries.iter().take(MAX_DISCOVERED_MODELS) {
+        if kind == ProviderKind::OpenAiCodex {
+            match entry.get("visibility") {
+                None => {}
+                Some(value) if value.as_str() == Some("list") => {}
+                Some(value) if value.as_str() == Some("hide") => continue,
+                Some(_) => return None,
+            }
+        }
         if api == ProviderApi::GoogleGenerateContent
             && entry
                 .get("supportedGenerationMethods")
@@ -450,6 +462,9 @@ fn parse_models(
             .map(|id| id.strip_prefix("models/").unwrap_or(id))
             .filter(|id| valid_model_id(id))
         else {
+            if kind == ProviderKind::OpenAiCodex {
+                return None;
+            }
             continue;
         };
         let name = entry
@@ -492,6 +507,63 @@ mod tests {
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
+    fn malformed_codex_entries_do_not_replace_the_fallback_catalog() {
+        for entry in [
+            serde_json::json!({"slug": 123, "visibility": "list"}),
+            serde_json::json!({"slug": "valid", "visibility": false}),
+            serde_json::json!({"slug": "valid", "visibility": "unknown"}),
+        ] {
+            assert!(
+                parse_models(
+                    &serde_json::json!({"models": [entry]}),
+                    ProviderKind::OpenAiCodex,
+                    ProviderApi::OpenAiResponses
+                )
+                .is_none()
+            );
+        }
+        assert_eq!(
+            parse_models(
+                &serde_json::json!({"models": []}),
+                ProviderKind::OpenAiCodex,
+                ProviderApi::OpenAiResponses
+            ),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn codex_discovery_filters_hidden_models_and_rejects_partial_catalogs() {
+        let body = serde_json::json!({"models": [
+            {"slug": "gpt-6-sol", "visibility": "list"},
+            {"slug": "gpt-6-luna"},
+            {"slug": "retired", "visibility": "hide"}
+        ]});
+        let models = parse_models(
+            &body,
+            ProviderKind::OpenAiCodex,
+            ProviderApi::OpenAiResponses,
+        )
+        .unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-6-luna", "gpt-6-sol"]
+        );
+        let oversized = serde_json::json!({"models": vec![serde_json::json!({"slug": "test"}); MAX_DISCOVERED_MODELS + 1]});
+        assert!(
+            parse_models(
+                &oversized,
+                ProviderKind::OpenAiCodex,
+                ProviderApi::OpenAiResponses
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn codex_discovery_sends_supported_client_version_and_returns_astra() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -500,7 +572,7 @@ mod tests {
             let mut request = [0_u8; 4096];
             let length = stream.read(&mut request).unwrap();
             let request = std::str::from_utf8(&request[..length]).unwrap();
-            assert!(request.starts_with("GET /v1/models?client_version=0.153.0 HTTP/1.1\r\n"));
+            assert!(request.starts_with("GET /v1/models?client_version=0.156.1 HTTP/1.1\r\n"));
             let headers = request.to_ascii_lowercase();
             assert!(headers.contains("authorization: bearer test-token\r\n"));
             assert!(headers.contains("chatgpt-account-id: test-account\r\n"));
