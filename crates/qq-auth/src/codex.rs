@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::{AuthError, CredentialBackend, CredentialStore, Secret, validate_credential_name};
+use super::{
+    AuthError, CredentialBackend, CredentialStore, MissingCredentialRemedies, Secret,
+    validate_credential_name,
+};
 use qq_protocol::CredentialEpoch;
 use qq_provider::SecretRef;
 use qq_provider::{
@@ -737,11 +740,7 @@ impl CodexCredential {
 
 impl CredentialStore {
     pub fn codex_request_credentials(&self, profile: &str) -> SharedRequestCredentialProvider {
-        SharedRequestCredentialProvider::new(CodexRequestCredentials {
-            store: self.clone(),
-            profile: profile.to_owned(),
-            cache: tokio::sync::Mutex::new(None),
-        })
+        SharedRequestCredentialProvider::new(CodexRequestCredentials::new(self, profile))
     }
 
     pub fn resolve_codex(&self, profile: &str) -> Result<CodexCredential, AuthError> {
@@ -831,6 +830,25 @@ pub(super) struct CodexRequestCredentials {
     pub(super) store: CredentialStore,
     pub(super) profile: String,
     pub(super) cache: tokio::sync::Mutex<Option<CachedCodexCredential>>,
+    remedies: MissingCredentialRemedies,
+}
+
+impl CodexRequestCredentials {
+    pub(super) fn new(store: &CredentialStore, profile: &str) -> Self {
+        // Remedy text is authored here, once, so the request path never
+        // formats provider-specific guidance. Codex has no API-key variable.
+        Self {
+            store: store.clone(),
+            profile: profile.to_owned(),
+            cache: tokio::sync::Mutex::new(None),
+            remedies: MissingCredentialRemedies::new(
+                "openai-codex",
+                profile,
+                &["qq auth login openai-codex"],
+                None,
+            ),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -861,7 +879,7 @@ impl RequestCredentialProvider for CodexRequestCredentials {
                     store.resolve_codex_with_epoch(&profile).map(Some)
                 })
                 .await?
-                .map_err(map_request_credential_error)?;
+                .map_err(|error| map_request_credential_error(error, &self.remedies))?;
             let Some((credential, epoch)) = resolved else {
                 let credential = &cache
                     .as_ref()
@@ -894,7 +912,10 @@ fn request_credential(
     )
 }
 
-fn map_request_credential_error(error: AuthError) -> RequestCredentialError {
+fn map_request_credential_error(
+    error: AuthError,
+    remedies: &MissingCredentialRemedies,
+) -> RequestCredentialError {
     match error {
         AuthError::Codex(
             CodexAuthError::TokenRequestRejected { .. }
@@ -906,7 +927,7 @@ fn map_request_credential_error(error: AuthError) -> RequestCredentialError {
             | CodexAuthError::CallbackTimedOut,
         ) => RequestCredentialError::RefreshUnavailable,
         AuthError::StoredCredentialNotRegistered { .. }
-        | AuthError::StoredCredentialMissing { .. } => RequestCredentialError::Missing,
+        | AuthError::StoredCredentialMissing { .. } => remedies.missing(&error),
         AuthError::Codex(CodexAuthError::StoredCredentialInvalid)
         | AuthError::Codex(CodexAuthError::UnsupportedStoredCredentialVersion { .. })
         | AuthError::SecretNotUnicode => RequestCredentialError::Invalid,

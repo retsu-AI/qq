@@ -195,14 +195,17 @@ pub enum AuthError {
 
     /// A built-in provider has neither a stored credential nor its
     /// environment variable. Names both remedies because a new user reaches
-    /// this before knowing either exists.
+    /// this before knowing either exists. `alternate_variables` lists the
+    /// aliases that would also have been accepted (Google's `GOOGLE_API_KEY`).
     #[error(
         "no credential for provider `{provider}`: run `qq auth login {provider}` \
-         or set the environment variable `{environment_variable}`"
+         or set the environment variable `{environment_variable}`{}",
+        format_alternate_variables(.alternate_variables)
     )]
     ProviderCredentialMissing {
         provider: String,
         environment_variable: String,
+        alternate_variables: &'static [&'static str],
     },
 
     #[error("environment variable `{variable}` is empty")]
@@ -1175,13 +1178,37 @@ pub fn resolve_provider_credential(
     environment_variable: &str,
     expected_endpoint: Option<&str>,
 ) -> Result<Secret, AuthError> {
+    resolve_provider_credential_with_aliases(
+        store,
+        explicit,
+        stored_name,
+        environment_variable,
+        &[],
+        expected_endpoint,
+    )
+}
+
+/// [`resolve_provider_credential`] for providers whose SDKs read more than
+/// one variable: `environment_variable` wins, then each of
+/// `alternate_variables` in order. A set-but-empty or non-Unicode variable
+/// is reported for the first variable that is present rather than skipped.
+pub fn resolve_provider_credential_with_aliases(
+    store: &CredentialStore,
+    explicit: Option<&SecretRef>,
+    stored_name: &str,
+    environment_variable: &str,
+    alternate_variables: &'static [&'static str],
+    expected_endpoint: Option<&str>,
+) -> Result<Secret, AuthError> {
     if let Some(reference) = explicit {
         return store.resolve_with_endpoint(reference, expected_endpoint);
     }
     if let Some(secret) = store.resolve_registered(stored_name, expected_endpoint)? {
         return Ok(secret);
     }
-    match resolve_environment(environment_variable) {
+    match environment_secret_from_any(environment_variable, alternate_variables, |variable| {
+        env::var_os(variable)
+    }) {
         Err(AuthError::EnvironmentMissing { .. }) => {
             // `PROVIDER/PROFILE`: the provider half is what `qq auth login`
             // takes. A name without a slash is used verbatim.
@@ -1189,9 +1216,132 @@ pub fn resolve_provider_credential(
             Err(AuthError::ProviderCredentialMissing {
                 provider: provider.to_owned(),
                 environment_variable: environment_variable.to_owned(),
+                alternate_variables,
             })
         }
         other => other,
+    }
+}
+
+/// Reads the first of `environment_variable` then `alternate_variables` that
+/// is set. A variable that is set but empty or non-Unicode is reported, not
+/// skipped, so a typo in the preferred variable is never masked by an alias.
+/// `lookup` is injected so the walk is testable without touching the process
+/// environment.
+fn environment_secret_from_any(
+    environment_variable: &str,
+    alternate_variables: &[&str],
+    lookup: impl Fn(&str) -> Option<OsString>,
+) -> Result<Secret, AuthError> {
+    for variable in std::iter::once(environment_variable).chain(alternate_variables.iter().copied())
+    {
+        match environment_secret(variable, lookup(variable)) {
+            Err(AuthError::EnvironmentMissing { .. }) => {}
+            other => return other,
+        }
+    }
+    Err(AuthError::EnvironmentMissing {
+        variable: environment_variable.to_owned(),
+    })
+}
+
+/// Renders the `(or `A` or `B`)` suffix for alias variables; empty when there
+/// are none so single-variable providers keep the short message.
+fn format_alternate_variables(alternate_variables: &[&str]) -> String {
+    if alternate_variables.is_empty() {
+        return String::new();
+    }
+    let mut suffix = String::from(" (or ");
+    for (index, variable) in alternate_variables.iter().enumerate() {
+        if index > 0 {
+            suffix.push_str(" or ");
+        }
+        suffix.push('`');
+        suffix.push_str(variable);
+        suffix.push('`');
+    }
+    suffix.push(')');
+    suffix
+}
+
+/// Text attached to request-time "missing credential" failures so the run
+/// error names the provider and the command that fixes it. Built once when a
+/// request-credential provider is constructed; the request path only clones
+/// an `Arc`. `qq-provider` carries the text opaquely and never learns about
+/// `qq auth login`.
+pub(crate) struct MissingCredentialRemedies {
+    /// `PROVIDER/PROFILE`, the name the provider stores under.
+    name: String,
+    /// Nothing usable exists: not stored and (when applicable) no variable.
+    absent: Arc<str>,
+    /// The index knows the name but the secret behind it is gone.
+    secret_missing: Arc<str>,
+}
+
+impl MissingCredentialRemedies {
+    /// `login_commands` are the `qq auth login` spellings for this provider
+    /// in the order they should be suggested; `--profile` is appended for a
+    /// non-default profile. `environment_variable` is the fallback variable
+    /// the provider also reads, if any.
+    pub(crate) fn new(
+        provider: &str,
+        profile: &str,
+        login_commands: &[&str],
+        environment_variable: Option<&str>,
+    ) -> Self {
+        let name = format!("{provider}/{profile}");
+        let mut commands = String::new();
+        for (index, command) in login_commands.iter().enumerate() {
+            if index > 0 {
+                commands.push_str(" or ");
+            }
+            commands.push('`');
+            commands.push_str(command);
+            if profile != "default" {
+                commands.push_str(" --profile ");
+                commands.push_str(profile);
+            }
+            commands.push('`');
+        }
+        let variable = environment_variable.map_or_else(String::new, |variable| {
+            format!(" or set the environment variable `{variable}`")
+        });
+        let absent = if profile == "default" {
+            format!("no credential for provider `{provider}`: run {commands}{variable}")
+        } else {
+            format!("credential `{name}` is not registered: run {commands}{variable}")
+        };
+        let secret_missing = format!(
+            "credential `{name}` is registered, but its secret is missing: \
+             run `qq auth logout {name}`, then {commands}"
+        );
+        Self {
+            name,
+            absent: Arc::from(absent),
+            secret_missing: Arc::from(secret_missing),
+        }
+    }
+
+    /// Maps one of the missing-credential `AuthError`s to a request error
+    /// carrying the matching remedy. An error about a credential the user
+    /// referenced explicitly (an `Env(...)` variable, a `Stored(...)` name
+    /// other than ours) keeps its own message, since our remedies would
+    /// describe the wrong thing.
+    pub(crate) fn missing(&self, error: &AuthError) -> qq_provider::RequestCredentialError {
+        let remedy = match error {
+            AuthError::ProviderCredentialMissing { .. } => Arc::clone(&self.absent),
+            AuthError::StoredCredentialNotRegistered { name } if *name == self.name => {
+                Arc::clone(&self.absent)
+            }
+            AuthError::StoredCredentialMissing { name, .. } if *name == self.name => {
+                Arc::clone(&self.secret_missing)
+            }
+            AuthError::EnvironmentMissing { .. }
+            | AuthError::StoredCredentialNotRegistered { .. }
+            | AuthError::StoredCredentialMissing { .. } => Arc::from(error.to_string()),
+            _ => return qq_provider::RequestCredentialError::missing(),
+        };
+        qq_provider::RequestCredentialError::missing_with_remedy(remedy)
     }
 }
 

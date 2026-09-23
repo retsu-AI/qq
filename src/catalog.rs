@@ -9,7 +9,7 @@ use std::{
 };
 
 use hmac::{Hmac, Mac};
-use qq_auth::{CredentialStore, Secret, resolve_provider_credential};
+use qq_auth::{CredentialStore, Secret, resolve_provider_credential_with_aliases};
 use qq_config::{
     EndpointMode, HttpAccess, HttpCredential, ProviderApi, ProviderAuth, ProviderConfig,
     ProviderKind,
@@ -326,13 +326,15 @@ fn resolve_auth(access: &HttpAccess, credentials: &CredentialStore) -> Option<Di
             explicit,
             stored_name,
             environment_variable,
+            alternate_variables,
             audience,
         } => Some(DiscoveryAuth::ApiKey(
-            resolve_provider_credential(
+            resolve_provider_credential_with_aliases(
                 credentials,
                 explicit.as_ref(),
                 stored_name,
                 environment_variable,
+                alternate_variables,
                 Some(audience),
             )
             .ok()?,
