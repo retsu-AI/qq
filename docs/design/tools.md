@@ -1093,7 +1093,12 @@ carry three lifetimes:
   prefix never extends over shell control characters — a command
   containing `|`, `;`, `&`, redirection, or substitution is more than
   one program, so it matches only a grant equal to the exact string.
-  The check is quote-blind on purpose: it errs toward prompting.
+  The check is quote-blind on purpose: it errs toward prompting. A
+  grant value is at most 256 bytes, and a session holds at most 256
+  grants. A session or workspace choice whose value is empty, longer
+  than that, or past the session cap still approves the call, but as a
+  once-approval: nothing is recorded and nothing is promoted. The
+  approval command never fails because a grant cannot be stored.
 - **Workspace** — the grants a user always wants live in the `policy`
   section of configuration, in the same layered documents as everything
   else. Same shapes, longer lifetime: exact tool names, shell command

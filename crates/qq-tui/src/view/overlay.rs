@@ -617,20 +617,32 @@ pub(super) fn approval_block(app: &App, width: usize) -> Vec<Line> {
         );
     }
     let mut choices = Line::styled("       ", muted());
-    for (index, (key, label)) in [
-        ("y", "once"),
-        ("a", "session"),
-        ("w", "workspace"),
-        ("n", "deny"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    // A grant the server cannot store is not offered. The keys still approve
+    // this call once and say why; the prompt just does not pretend a session
+    // grant is available.
+    let grantable = app
+        .pending_approval()
+        .is_some_and(|tool_call| approval_grant_recordable(tool_call, preview));
+    let offered: &[(&str, &str)] = if grantable {
+        &[
+            ("y", "once"),
+            ("a", "session"),
+            ("w", "workspace"),
+            ("n", "deny"),
+        ]
+    } else {
+        &[("y", "once"), ("n", "deny")]
+    };
+    for (index, (key, label)) in offered.iter().copied().enumerate() {
         if index > 0 {
             choices.push("   ", muted());
         }
         choices.push(key, accent().bold());
         choices.push(format!(" {label}"), muted());
+    }
+    if !grantable {
+        choices.push("   ", muted());
+        choices.push("command too long to grant for the session", muted());
     }
     lines.push(truncate_line(choices, width));
     lines
