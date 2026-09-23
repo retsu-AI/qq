@@ -1,8 +1,9 @@
 # Token efficiency: more verified work per token
 
-**Status:** TE0 documentation in progress; TE1–TE8 planned, no new runtime
+**Status:** TE0 documentation in review; TE1–TE8 planned, no new runtime
 behavior or savings established. [Ledger](progress/token-efficiency.md).
-**Baseline:** `8089a0e`. **Tracker:** Linear project `qq`, team `ENG`.
+**Baseline:** `8089a0e`. **Tracker:** [ENG-886](https://linear.app/retsu-ai/issue/ENG-886), project `qq`,
+team `ENG`. Planning PR: [#141](https://github.com/retsu-AI/qq/pull/141).
 **Research:** [current mechanisms and hypotheses](../design/token-efficiency.md).
 **Decision:** [ADR-0042 (Proposed)](../adr/0042-verified-task-efficiency.md).
 
@@ -53,6 +54,23 @@ an unbounded rewrite. All production changes amend their as-built design docs.
 Owned path families are candidate locations, not permission to edit everything
 under them. Slice dispatch must resolve concrete files after reading scoped
 instructions; shared manifests/protocol/store changes go through root.
+
+## Linear slice map
+
+| Slice | Issue |
+| --- | --- |
+| TE0 | [ENG-887](https://linear.app/retsu-ai/issue/ENG-887) |
+| TE1 | [ENG-888](https://linear.app/retsu-ai/issue/ENG-888) |
+| TE2 | [ENG-889](https://linear.app/retsu-ai/issue/ENG-889) |
+| TE3 | [ENG-890](https://linear.app/retsu-ai/issue/ENG-890) |
+| TE4 | [ENG-891](https://linear.app/retsu-ai/issue/ENG-891) |
+| TE5 | [ENG-892](https://linear.app/retsu-ai/issue/ENG-892) |
+| TE6 | [ENG-893](https://linear.app/retsu-ai/issue/ENG-893) |
+| TE7 | [ENG-894](https://linear.app/retsu-ai/issue/ENG-894) |
+| TE8 | [ENG-895](https://linear.app/retsu-ai/issue/ENG-895) |
+
+Existing issues in the ownership table remain authoritative for their work;
+these children track only the new deliverables and integration decisions.
 
 ## TE1 — measurement contract
 
