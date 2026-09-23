@@ -1052,12 +1052,15 @@ Each session has an approval mode:
   calls each request approval.
 - `auto` (default) — workspace-contained edits, writes, and MCP calls execute
   without prompting; shell commands the classifier allows or a grant covers
-  execute; everything it would prompt for asks (or is adjudicated by the
-  configured reviewer model); `Forbidden` shapes are refused.
+  execute; everything it would prompt for is held. With a `reviewer_model`
+  configured the reviewer settles the hold: `approve` executes, `deny` is
+  final and the model receives the reason as a tool error, `escalate` (or a
+  reviewer timeout or outage) asks the human, whose wait starts at the
+  escalation rather than when the reviewer was consulted. Without a reviewer
+  the human is asked. `Forbidden` shapes are refused before any of this.
 - `supervised` — every mutating, shell, and MCP call is held and adjudicated
-  by the reviewer model regardless of grants; a reviewer denial is final and a
-  reviewer escalation reaches the human. Only spawned write children run here;
-  a client cannot select it directly.
+  by the reviewer model regardless of grants, under the same three verdicts.
+  Only spawned write children run here; a client cannot select it directly.
 - `full` — everything executes without prompting, except shell commands the
   classifier marks `Forbidden` (§ Shell Classification): `full` is
   unrestricted authority over the workspace, not over the machine.
@@ -1093,7 +1096,26 @@ carry three lifetimes:
   prefix never extends over shell control characters — a command
   containing `|`, `;`, `&`, redirection, or substitution is more than
   one program, so it matches only a grant equal to the exact string.
-  The check is quote-blind on purpose: it errs toward prompting.
+  The check is quote-blind on purpose: it errs toward prompting. A
+  grant value is at most 256 bytes, and a session holds at most 256
+  grants. A session or workspace choice whose value is empty, longer
+  than that, or past the session cap still approves the call, but as a
+  once-approval: nothing is recorded and nothing is promoted. The
+  approval command never fails because a grant cannot be stored.
+- **Delegate** — when the configured `reviewer_model` approves a held
+  call, it records a session grant of its own in the same transaction as
+  the approval: the exact command string for shell, the exact host for
+  `fetch`, nothing for other tool classes. Every `session_grants` row
+  carries `source` (`human` or `delegate`) and, for a delegate, the
+  `run_id` that recorded it. A delegate grant is deliberately narrower
+  than a human one. It matches only the byte-exact command or host,
+  never a prefix and never a `*.suffix`; it does not lift a `Forbidden`
+  verdict, which only a human's exact string may do (ADR-0020); it is
+  never promoted to workspace configuration; and one run may record at
+  most 64 of them. The storage rule above applies unchanged: a value
+  that does not fit approves the call once and records nothing. If a
+  human grant already covers the same string, the human row is kept and
+  the delegate row is not written.
 - **Workspace** — the grants a user always wants live in the `policy`
   section of configuration, in the same layered documents as everything
   else. Same shapes, longer lifetime: exact tool names, shell command

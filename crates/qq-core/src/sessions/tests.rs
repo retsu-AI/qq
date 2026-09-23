@@ -1085,10 +1085,20 @@ async fn scripted_runs_harness_with_authority(
     runs: Vec<Vec<(&'static str, String)>>,
     grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
 ) -> ScriptedRunsHarness {
+    scripted_runs_harness_with(mode, runs, grant_authority, None).await
+}
+
+async fn scripted_runs_harness_with(
+    mode: ApprovalMode,
+    runs: Vec<Vec<(&'static str, String)>>,
+    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
+    approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
+) -> ScriptedRunsHarness {
     let directory = tempfile::tempdir().unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.grant_authority = grant_authority;
+    options.approval_reviewer = approval_reviewer;
     let runtime = SessionRuntime::open(
         options,
         Arc::new(ScriptedRunsLoader {

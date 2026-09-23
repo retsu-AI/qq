@@ -3,6 +3,7 @@
 use std::process::ExitCode;
 
 mod eval;
+mod homebrew;
 mod perf;
 mod providers;
 mod release;

@@ -10,8 +10,9 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ConfigError, ConfigLoader, ConfigPaths, ConfigSnapshot, ConfigSources, LoadRequest,
-    MAX_CONFIG_BYTES, PendingTrust, SourceIdentity, SourceKind, SourceReport, SourceStatus,
+    ClientSnapshot, ConfigError, ConfigLoader, ConfigPaths, ConfigSnapshot, ConfigSources,
+    LoadRequest, MAX_CONFIG_BYTES, PendingTrust, SourceIdentity, SourceKind, SourceReport,
+    SourceStatus,
     document::{Document, MergeState},
     managed::MdmConfiguration,
     remote,
@@ -65,6 +66,13 @@ pub(super) fn load(
     loader: &ConfigLoader,
     request: &LoadRequest,
 ) -> Result<ConfigSnapshot, ConfigError> {
+    load_for_client(loader, request)?.require_model(&loader.paths.global_dir.join("config.ron"))
+}
+
+pub(super) fn load_for_client(
+    loader: &ConfigLoader,
+    request: &LoadRequest,
+) -> Result<ClientSnapshot, ConfigError> {
     let mut probes = Probes::default();
     let probes = &mut probes;
     probes.record(&request.cwd);
@@ -254,11 +262,7 @@ pub(super) fn load(
             reports: report.sources,
         });
     }
-    merged.finish(
-        report.sources,
-        std::mem::take(probes).into_sources(),
-        &loader.paths.global_dir.join("config.ron"),
-    )
+    merged.finish_for_client(report.sources, std::mem::take(probes).into_sources())
 }
 
 fn selected_organization(

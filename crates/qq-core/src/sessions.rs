@@ -83,6 +83,9 @@ pub use runtime::{
 };
 pub use snapshots::run_cost;
 pub use store::STORE_SCHEMA_VERSION;
+pub(crate) use tool_calls::DelegateGrant;
+#[cfg(test)]
+pub(crate) use tool_calls::MAX_DELEGATE_GRANTS_PER_RUN;
 
 /// Entry points for the `context_assembly` bench. Not a public API.
 #[doc(hidden)]
@@ -340,7 +343,9 @@ const MAX_MODEL_SELECTION_BYTES: usize = 512;
 const OUTPUT_BATCH_BYTES: usize = 8 * 1024;
 const OUTPUT_BATCH_DELAY: Duration = Duration::from_millis(8);
 const MAX_PERSISTED_EVENT_BYTES: usize = 1024 * 1024;
-const MAX_GRANT_BYTES: usize = 256;
+/// Bytes one `session_grants.value` may hold. A longer prefix is not a
+/// grant: the call may still be approved once, but nothing is recorded.
+pub const MAX_GRANT_BYTES: usize = 256;
 const MAX_SESSION_GRANTS: u32 = 256;
 const MAX_PENDING_GRANT_PROMOTIONS: u32 = 256;
 const MAX_SESSION_FILES: u32 = 4_096;

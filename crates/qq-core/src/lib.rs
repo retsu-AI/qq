@@ -73,15 +73,15 @@ pub use runtime::{
 pub use sessions::{
     ApprovalReviewer, CheckpointSelection, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime,
     MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN,
-    MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT, MAX_PENDING_PROMPTS, MAX_REPLAY_EVENTS,
-    MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS,
-    MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent, PublishedEventStream,
-    RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend,
-    ReviewVerdict, RoutingSelection, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
-    RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream,
-    SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SlashCommandError,
-    SpawnModelValidationFuture, TaskRouter, TaskRoutingFuture, WorkerRuntimeLoadFuture,
-    WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
+    MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT, MAX_GRANT_BYTES, MAX_PENDING_PROMPTS,
+    MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES,
+    MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent,
+    PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest,
+    ReviewSpend, ReviewVerdict, RoutingSelection, RuntimeLoadError, RuntimeLoadFuture,
+    RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION,
+    SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions,
+    SlashCommandError, SpawnModelValidationFuture, TaskRouter, TaskRoutingFuture,
+    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 pub use workspace::skills::{MAX_INDEXED_SKILLS, MAX_SKILL_DESCRIPTION_BYTES};
 pub use workspace::{SkillEntry, SkillIndex, SkillKind};
@@ -1098,6 +1098,7 @@ impl Runtime {
             tools: self.config_grants(),
             shell_prefixes: Vec::new(),
             hosts: Vec::new(),
+            delegate: approval::DelegateGrants::default(),
         };
         self.run_loop(
             messages,
@@ -1246,6 +1247,7 @@ impl plan::CompiledAgentPlan {
             tools: self.runtime.config_grants(),
             shell_prefixes: Vec::new(),
             hosts: Vec::new(),
+            delegate: approval::DelegateGrants::default(),
         };
         public_run_stream(
             self.execute(
@@ -10022,6 +10024,7 @@ mod tests {
                         tools: ["edit_file".to_owned()].into_iter().collect(),
                         shell_prefixes: Vec::new(),
                         hosts: Vec::new(),
+                        delegate: approval::DelegateGrants::default(),
                     },
                     network: Arc::default(),
                 }),

@@ -22,6 +22,8 @@ jobs:
         run: cargo fmt --all --check
       - name: Exact-test coverage guard
         run: bash .github/scripts/test-exact-test.sh
+      - name: install.sh against a local fixture release
+        run: bash tests/install_sh.sh
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Tests

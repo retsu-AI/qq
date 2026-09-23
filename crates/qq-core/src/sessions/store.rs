@@ -1421,15 +1421,19 @@ impl Store {
         .await
     }
 
+    /// Resolves a held call as reviewer-approved and, when `grant` is given,
+    /// records the delegate's exact grant in the same transaction. See
+    /// [`resolve_approval_by_reviewer`] for the storage rule.
     pub(super) async fn resolve_approval_by_reviewer(
         &self,
         claimed: &ClaimedRun,
         tool_call_id: ToolCallId,
+        grant: Option<DelegateGrant>,
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            resolve_approval_by_reviewer(connection, store_id, identity, tool_call_id)
+            resolve_approval_by_reviewer(connection, store_id, identity, tool_call_id, grant)
         })
         .await
     }
@@ -1521,7 +1525,8 @@ impl Store {
         .await
     }
 
-    /// Settles a held `Supervised` call as denied by the reviewer.
+    /// Settles a held call as denied by the reviewer. Final under `auto` and
+    /// `supervised`; a client resolution that already committed wins.
     pub(super) async fn deny_approval_by_reviewer(
         &self,
         claimed: &ClaimedRun,

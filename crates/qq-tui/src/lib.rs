@@ -20,7 +20,7 @@ mod theme;
 mod view;
 mod viewport;
 
-pub use app::{ModelOption, TuiError, TuiOptions, run};
+pub use app::{ModelOption, ProviderRemedy, TuiError, TuiOptions, run};
 pub use lazy_port::LazyPort;
 pub use qq_client::{ClientFailure, ClientPort, ClientRequest, ClientUpdate, ConnectionState};
 pub use settings::{Action, KeyChord, Settings, SettingsBuilder, SettingsError, StatusItem};

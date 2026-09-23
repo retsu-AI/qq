@@ -3,8 +3,27 @@
 Messages you may see, what they mean, and the fix. Quoted text is what QQ
 prints; `…` stands for a path or name specific to your machine.
 
-First stop for anything: `qq config check`, `qq config sources`, `qq auth
-list`.
+First stop for anything: `qq doctor`. It runs every local readiness check and
+puts the fix next to whatever failed:
+
+```
+qq 0.1.3 (ad01547 2026-09-22) · protocol 27 · capabilities 1 · descriptor 9 · store schema 34
+ok    configuration    2 sources; qq config sources lists them
+ok    project trust    nothing pending
+ok    model            anthropic/claude-sonnet-5
+fail  credential       anthropic: none found
+                       run `qq auth login anthropic` or set ANTHROPIC_API_KEY
+ok    credential store 0 stored (keyring)
+ok    server           none running; qq starts one on demand
+ok    workspace        /home/you/repo (AGENTS.md)
+ok    data             /home/you/.local/share/qq (no sessions yet)
+
+1 check failed
+```
+
+Exit status 0 means nothing failed. Then `qq config check`, `qq config
+sources`, `qq auth list` for the detail behind any one line
+([CLI › `qq doctor`](cli.md#qq-doctor---json)).
 
 ## Starting
 
@@ -14,7 +33,8 @@ QQ found no `model:` in any configuration layer and no `--model` /
 `QQ_MODEL`. The message lists every way to set one and names your global
 config path. Pick a route from [Providers](providers.md#built-in-models);
 [Quickstart § 2](quickstart.md#2-tell-qq-which-model-to-use) shows the
-one-time setup.
+one-time setup. Only `qq ask` and `qq run` stop here; bare `qq` opens the
+TUI and asks with `/models` instead.
 
 ### `project configuration needs your trust before it is used: …`
 
@@ -85,19 +105,28 @@ supply everything through `QQ_CONFIG_CONTENT` and environment credentials.
 
 The model's provider has no stored credential and no environment variable.
 Do either. Check what is stored with `qq auth list`. The same shape appears
-for `anthropic` / `ANTHROPIC_API_KEY` and `google` / `GEMINI_API_KEY`.
+for `anthropic` / `ANTHROPIC_API_KEY` and for `google`, whose message ends
+`` `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) ``: either variable works, and
+`GEMINI_API_KEY` wins when both are set.
 
 ### `environment variable `NAME` is not set`
 
 Configuration references `Env("NAME")` explicitly and the variable is unset
 in this shell.
 
-### `provider response failed: request credentials are missing`
+### `provider response failed: no credential for provider `xai`: run `qq auth login xai --oauth` or `qq auth login xai` or set the environment variable `XAI_API_KEY``
 
 Same cause for providers that resolve credentials at request time (`xai`,
-`openai-codex`): nothing stored under `PROVIDER/default` (or the configured
-profile) and no `XAI_API_KEY`. `qq auth login xai` or `qq auth login
-openai-codex`. Naming the provider in this message is planned (OB3).
+`openai-codex`), so it surfaces when the first request is sent rather than at
+startup: nothing stored under `PROVIDER/default` and, for xAI, no
+`XAI_API_KEY`. Run one of the commands named. `openai-codex` reads no
+environment variable, so its message offers only `qq auth login openai-codex`.
+
+With a configured profile the message names it instead: `` credential
+`xai/work` is not registered: run `qq auth login xai --oauth --profile work`
+or `qq auth login xai --profile work` … ``. If the entry exists but the
+keyring lost its secret: `` credential `xai/work` is registered, but its
+secret is missing: run `qq auth logout xai/work`, then … ``.
 
 ### `credential `…` is not registered`
 
@@ -136,11 +165,13 @@ provider with no credential. Store one or remove the route.
 those ids (check the spelling). For a gateway or MCP bearer use `qq auth set
 NAME` and reference `Stored("NAME")`.
 
-### Nothing in `/models`
+### Nothing in `/models`, or every row says `needs credential`
 
-No built-in provider has a resolvable credential. `qq auth list` shows what
-is stored; the environment variables count too. Custom providers appear once
-their `auth` reference resolves.
+No built-in provider has a resolvable credential. Each `needs credential`
+row names the fix: `qq auth login PROVIDER` or the environment variable.
+`qq auth list` shows what is stored. Custom providers appear once their
+`auth` reference resolves. Credentials are checked when `qq` starts, so
+start it again after adding one.
 
 ## Running
 
@@ -185,16 +216,27 @@ JSONL stream (`tool_approval_requested`); answer it interactively with
 
 ## TUI
 
-### It opened but shows only `Alt-N creates the first session.`
+### `openai needs a credential: run qq auth login openai or set OPENAI_API_KEY`
 
-The configured model's provider has no credential yet, so QQ did not create
-a session (a session needs a usable model). `qq auth login PROVIDER`, then
-`Alt-N`. Guidance inside the TUI for this state is planned (OB2).
+The configured model's provider has no credential, so QQ did not create a
+session (a session needs a usable model). Do what the line says in another
+terminal, then start `qq` again; `Alt-N` before that repeats the same line.
+The provider and variable name follow your configuration (`anthropic` /
+`ANTHROPIC_API_KEY`, `google` / `GEMINI_API_KEY`, `xai` / `XAI_API_KEY`;
+`openai-codex` has only `qq auth login openai-codex`).
+
+### Top row says `no model`; the rule says `choose a model with /models`
+
+No `model` is configured anywhere and none was given with `--model` or
+`QQ_MODEL`. Open `/models`, pick one, `Enter` creates the session. To make it
+permanent, put `model: "PROVIDER/MODEL"` in your global or project
+`config.ron` ([Quickstart § 2](quickstart.md#2-tell-qq-which-model-to-use)).
 
 ### `choose a model with /models before creating a session`
 
-Same as above, or the session default has no model. `/models`, pick one,
-`Ctrl-N` to create a session with it.
+You pressed `Alt-N` (or `/new`) with no model chosen and no session focused
+to inherit one from. `/models`, pick one, `Ctrl-N` to create a session with
+it.
 
 ### Keys do nothing / wrong characters appear
 
@@ -229,10 +271,12 @@ directory.
 
 ## Getting more detail
 
+- `qq doctor --json` — the same checks as a JSON object, for scripts and
+  bug reports.
 - `qq config sources` — every path consulted and whether it applied.
 - `qq config explain FIELD` — which layer set a value.
 - `qq run --format jsonl` — every event of a run.
 - `qq version` — protocol and schema versions, for bug reports.
 
-If none of this helps, open an issue with `qq version` output and the exact
-message: [bug report](https://github.com/retsu-AI/qq/issues/new?template=bug.yml).
+If none of this helps, open an issue with `qq doctor` and `qq version` output
+and the exact message: [bug report](https://github.com/retsu-AI/qq/issues/new?template=bug.yml).

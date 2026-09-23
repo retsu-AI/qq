@@ -12,7 +12,7 @@ to disk in plain text unless you pass `--allow-file`.
 | --- | --- | --- | --- |
 | OpenAI | `qq auth login openai` | `OPENAI_API_KEY` | `openai/gpt-5.6` |
 | Anthropic | `qq auth login anthropic` | `ANTHROPIC_API_KEY` | `anthropic/claude-sonnet-5` |
-| Google Gemini | `qq auth login google` | `GEMINI_API_KEY` | `google/gemini-2.5-flash` |
+| Google Gemini | `qq auth login google` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | `google/gemini-2.5-flash` |
 | xAI | `qq auth login xai` (API key) or `qq auth login xai --oauth` | `XAI_API_KEY` | `xai/grok-4.6` |
 | ChatGPT / Codex subscription | `qq auth login openai-codex` (opens a browser) | — | `openai-codex/gpt-5.6-luna` |
 | Amazon Bedrock | AWS credential chain | `AWS_PROFILE` or `AWS_ACCESS_KEY_ID`+`AWS_SECRET_ACCESS_KEY` | see [Providers](providers.md#amazon-bedrock) |
@@ -37,6 +37,10 @@ qq config check     # configuration is valid (model: openai/gpt-5.6)
 
 Or for one project, in `<repo>/.qq/config.ron` with the same content, or for
 one command with `--model openai/gpt-5.6` or `QQ_MODEL=openai/gpt-5.6`.
+
+`qq doctor` confirms everything before the first run: configuration, model,
+credential, and server, one line each, with the fix next to anything that
+fails ([CLI › `qq doctor`](cli.md#qq-doctor---json)).
 
 Do not know which model to pick? `qq ask --model PROVIDER/MODEL "hi"` with
 any route from [Providers](providers.md#built-in-models); the TUI's `/models`
@@ -73,6 +77,14 @@ y once   a session   w workspace   n deny
 writes the grant into the project's `.qq/config.ron` so it never asks
 again, `n` denies and tells the model why. See
 [Permissions and trust](permissions.md) for the full model.
+
+Skipped step 1 or 2? `qq` still opens. Without a model the top row reads
+`no model` and the composer rule says `choose a model with /models`; pick
+one there and `Enter` creates the session. With a model whose provider has
+no credential, the transcript reads `openai needs a credential: run qq auth
+login openai or set OPENAI_API_KEY` (for whichever provider you named); add
+the credential and start `qq` again. Only `qq ask` and `qq run` insist on
+both before they start.
 
 Useful keys while it works: `Esc Esc` cancels, `Enter` steers the running
 agent with a new instruction, `Ctrl-K` opens the command palette, `?` on an

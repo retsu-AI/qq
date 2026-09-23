@@ -118,8 +118,19 @@ pub enum Command {
     /// Trust the sensitive operations in current project configuration.
     Trust,
 
+    /// Check that QQ is ready to run here: configuration, model, credentials,
+    /// server, workspace. Exit status 0 when nothing fails, 1 otherwise.
+    Doctor(DoctorArgs),
+
     /// Print the version with the compatibility contracts this build speaks.
     Version,
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Print the report as one JSON object instead of text.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -708,6 +719,21 @@ mod tests {
             .command,
             Some(Command::Serve { allow_origins, .. }) if allow_origins.len() == 2
         ));
+    }
+
+    #[test]
+    fn parses_doctor_with_optional_json() {
+        assert!(matches!(
+            Cli::try_parse_from(["qq", "doctor"]).unwrap().command,
+            Some(Command::Doctor(DoctorArgs { json: false }))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["qq", "doctor", "--json"])
+                .unwrap()
+                .command,
+            Some(Command::Doctor(DoctorArgs { json: true }))
+        ));
+        assert!(Cli::try_parse_from(["qq", "doctor", "extra"]).is_err());
     }
 
     #[test]

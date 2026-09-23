@@ -6,6 +6,18 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# `cargo binstall qq --git https://github.com/retsu-AI/qq` (and `cargo
+# binstall qq` once the crate is on crates.io) fetches the release archives
+# instead of compiling. The archive holds the binary under a
+# `qq-v{version}-{target}/` directory, mirroring release.yml's Package step.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/qq-v{ version }-{ target }{ archive-suffix }"
+bin-dir = "qq-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [workspace]
 members = [
   "crates/qq-auth",
@@ -23,10 +35,10 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.4"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/lg2m/qq"
+repository = "https://github.com/retsu-AI/qq"
 
 [workspace.dependencies]
 async-stream = "0.3"

@@ -56,6 +56,10 @@ pub struct TuiOptions {
     pub settings: Settings,
     pub model: ModelSelection,
     pub models: Vec<ModelOption>,
+    /// Built-in providers with no credential, each with the command or
+    /// environment variable that would supply one. The empty state and
+    /// `/models` show these where the provider's models would otherwise be.
+    pub unauthenticated_providers: Vec<ProviderRemedy>,
     /// Every selectable theme; the first is active at startup. An empty list
     /// means the compiled `terminal` theme.
     pub themes: Vec<Theme>,
@@ -63,6 +67,26 @@ pub struct TuiOptions {
     /// (a remote client without the tree) leaves `@` as literal text.
     pub workspace_root: Option<std::path::PathBuf>,
 }
+
+/// A provider the configuration admits but that has no credential, and how
+/// to give it one. `remedy` is imperative and complete (`run qq auth login
+/// openai or set OPENAI_API_KEY`); the TUI prefixes it with the provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRemedy {
+    pub provider: String,
+    pub remedy: String,
+}
+
+impl ProviderRemedy {
+    /// The one-line guidance shown in the empty state and as a warning.
+    #[must_use]
+    pub fn message(&self) -> String {
+        format!("{} needs a credential: {}", self.provider, self.remedy)
+    }
+}
+
+/// The composer notice a client without a configured model starts with.
+pub(crate) const CHOOSE_MODEL_NOTICE: &str = "choose a model with /models";
 
 /// Runs the TUI to exit. Returns the session focused at exit, after the
 /// terminal has been restored, so the caller can tell the user how to
@@ -240,6 +264,10 @@ pub(crate) struct App {
     pub settings: Settings,
     pub model: ModelSelection,
     pub models: Vec<ModelOption>,
+    /// Admitted built-in providers that lack a credential, with the remedy.
+    /// Read-only after startup: a credential added while the TUI runs takes
+    /// effect at the next launch, like the catalog it gates.
+    pub(crate) unauthenticated_providers: Vec<ProviderRemedy>,
     /// Profile new sessions are created with. `/profile` with nothing focused
     /// sets it; the server validates the name when the session is created.
     pub profile: AgentProfileId,
@@ -351,6 +379,7 @@ impl App {
             approval_mode: ApprovalMode::default(),
             reasoning_effort: None,
             models: options.models,
+            unauthenticated_providers: options.unauthenticated_providers,
             workspace_id: None,
             workspace_path: String::new(),
             workspace_root: options.workspace_root,
@@ -912,6 +941,29 @@ impl App {
             return None;
         }
         self.status.as_deref().map(|text| (text, self.status_level))
+    }
+
+    /// The remedy for the client default model's provider when that provider
+    /// has no credential: the reason Alt-N cannot create a session yet.
+    pub(crate) fn configured_provider_remedy(&self) -> Option<&ProviderRemedy> {
+        let provider = self.model.model.as_deref()?.split_once('/')?.0;
+        self.unauthenticated_providers
+            .iter()
+            .find(|remedy| remedy.provider == provider)
+    }
+
+    /// What a client that cannot create a session yet should do: name the
+    /// missing credential for the configured model, or point at `/models`
+    /// when no model is configured at all. `None` once a model with an
+    /// authenticated provider is in hand.
+    pub(crate) fn startup_guidance(&self) -> Option<String> {
+        if let Some(remedy) = self.configured_provider_remedy() {
+            return Some(remedy.message());
+        }
+        if self.model.model.is_none() {
+            return Some(CHOOSE_MODEL_NOTICE.to_owned());
+        }
+        None
     }
 
     fn expire_status(&mut self) -> bool {
@@ -1551,12 +1603,22 @@ impl App {
         parent_id: Option<SessionId>,
         model: ModelSelection,
     ) -> Effects {
-        if !model.model.as_ref().is_some_and(|route| {
-            route
-                .split_once('/')
-                .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
-        }) {
+        let Some(route) = model
+            .model
+            .as_deref()
+            .filter(|route| valid_model_route(route))
+        else {
             self.set_warning("choose a model with /models before creating a session".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        // A route on a provider known to lack a credential would only fail at
+        // the server; name the fix here instead.
+        if let Some(remedy) = route.split_once('/').and_then(|(provider, _)| {
+            self.unauthenticated_providers
+                .iter()
+                .find(|remedy| remedy.provider == provider)
+        }) {
+            self.set_warning(remedy.message());
             return Effects::redraw(Redraw::Immediate);
         }
         let Some(workspace_id) = self.workspace_id else {
@@ -2203,17 +2265,42 @@ impl App {
         let tool_call_id = tool_call.id;
         let run_id = tool_call.run_id;
         let preview = self.pending_approval_preview();
-        let decision = match choice {
-            ApprovalChoice::Once => ApprovalDecision::ApproveOnce,
-            ApprovalChoice::Session => ApprovalDecision::ApproveForSession {
-                grant: approval_grant(tool_call, preview),
-            },
-            ApprovalChoice::Workspace => ApprovalDecision::ApproveForWorkspace {
-                grant: approval_grant(tool_call, preview),
-            },
-            ApprovalChoice::Deny => ApprovalDecision::Deny,
-            ApprovalChoice::Answer(answers) => ApprovalDecision::Answer { answers },
+        // A session or workspace choice whose grant cannot be stored must not
+        // be sent as one: the server would reject the whole approval. Approve
+        // this call once and say why, so the key never produces a 400.
+        let (decision, notice) = match choice {
+            ApprovalChoice::Once => (ApprovalDecision::ApproveOnce, None),
+            ApprovalChoice::Session | ApprovalChoice::Workspace => {
+                let grant = approval_grant(tool_call, preview);
+                let workspace = matches!(choice, ApprovalChoice::Workspace);
+                match grant_recording(&grant) {
+                    GrantRecording::Recorded => (
+                        if workspace {
+                            ApprovalDecision::ApproveForWorkspace { grant }
+                        } else {
+                            ApprovalDecision::ApproveForSession { grant }
+                        },
+                        None,
+                    ),
+                    GrantRecording::TooLong { bytes } => (
+                        ApprovalDecision::ApproveOnce,
+                        Some(format!(
+                            "approved once; a session grant may be at most {} bytes and this command is {bytes}",
+                            qq_core::MAX_GRANT_BYTES
+                        )),
+                    ),
+                    GrantRecording::Empty => (
+                        ApprovalDecision::ApproveOnce,
+                        Some("approved once; there is no command or tool name to grant".to_owned()),
+                    ),
+                }
+            }
+            ApprovalChoice::Deny => (ApprovalDecision::Deny, None),
+            ApprovalChoice::Answer(answers) => (ApprovalDecision::Answer { answers }, None),
         };
+        if let Some(notice) = notice {
+            self.set_warning(notice);
+        }
         self.answered_approvals.insert(tool_call_id);
         self.send(
             PendingIntent::Approval { tool_call_id },
@@ -2571,6 +2658,44 @@ fn approval_grant(
     ApprovalGrant::Tool {
         name: tool_call.name.clone(),
     }
+}
+
+/// Why a derived grant cannot be recorded, or that it can. The byte cap is the
+/// server's `MAX_GRANT_BYTES`; a value past it used to fail the whole approval
+/// with "approval grant is empty or exceeds the session limit".
+enum GrantRecording {
+    Recorded,
+    Empty,
+    TooLong { bytes: usize },
+}
+
+fn grant_recording(grant: &ApprovalGrant) -> GrantRecording {
+    let value = match grant {
+        ApprovalGrant::Tool { name } => name,
+        ApprovalGrant::ShellPrefix { prefix } => prefix,
+        ApprovalGrant::Host { host } => host,
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        GrantRecording::Empty
+    } else if value.len() > qq_core::MAX_GRANT_BYTES {
+        GrantRecording::TooLong { bytes: value.len() }
+    } else {
+        GrantRecording::Recorded
+    }
+}
+
+/// Whether the approval prompt may offer a session or workspace grant for this
+/// call. The server's per-session count is not known here; a grant that is
+/// empty or over the byte cap is the case the prompt can prevent.
+pub(crate) fn approval_grant_recordable(
+    tool_call: &ToolCallSnapshot,
+    preview: Option<&ApprovalPreview>,
+) -> bool {
+    matches!(
+        grant_recording(&approval_grant(tool_call, preview)),
+        GrantRecording::Recorded
+    )
 }
 
 fn valid_model_route(route: &str) -> bool {

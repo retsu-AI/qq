@@ -34,8 +34,9 @@ use tokio::time::Instant;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 /// How long an `auto` headless run holds an escalated approval open for the
 /// configured reviewer before denying it. Covers the reviewer's own 10s
-/// request timeout with margin; without a verdict by then the deny proceeds
-/// so the run never stalls.
+/// request timeout with margin. The reviewer's `approve` and `deny` both
+/// settle the call themselves; this deny is the unattended answer to an
+/// `escalate`, a reviewer timeout, or an outage, so the run never stalls.
 const REVIEWER_DENY_GRACE: Duration = Duration::from_secs(20);
 /// Steering lines buffered between stdin and the run. Beyond this the reader
 /// waits; the runtime's own per-run pending bound refuses the rest anyway.
@@ -894,8 +895,11 @@ async fn stream_run(
                         // shell) so the run never stalls waiting for a human —
                         // but when a reviewer model is configured the deny is
                         // deferred briefly, giving the reviewer its window.
-                        // A late deny is harmless: resolution is idempotent,
-                        // so a reviewer approval that landed first stands.
+                        // The reviewer settles the call itself on approve or
+                        // deny; the deferred deny is the unattended answer to
+                        // an escalation. A late deny is harmless: resolution is
+                        // idempotent, so a reviewer resolution that landed
+                        // first stands.
                         // A child session's held calls belong to a supervised
                         // write child: the reviewer adjudicates them, and the
                         // headless root only supplies the unattended fallback
@@ -1199,7 +1203,7 @@ fn allowlisted_grant(
     shell: Option<&ShellCommandPreview>,
     fetch: Option<&qq_protocol::FetchPreview>,
 ) -> Option<ApprovalGrant> {
-    if options.allow_tools.iter().any(|name| name == tool_name) {
+    if recordable_grant(tool_name) && options.allow_tools.iter().any(|name| name == tool_name) {
         return Some(ApprovalGrant::Tool {
             name: tool_name.to_owned(),
         });
@@ -1208,7 +1212,9 @@ fn allowlisted_grant(
         return options
             .allow_hosts
             .iter()
-            .find(|grant| qq_core::host_grant_matches(grant, &fetch.host))
+            .find(|grant| {
+                recordable_grant(grant) && qq_core::host_grant_matches(grant, &fetch.host)
+            })
             .map(|grant| ApprovalGrant::Host {
                 host: grant.clone(),
             });
@@ -1217,10 +1223,20 @@ fn allowlisted_grant(
     options
         .allow_shell_prefixes
         .iter()
-        .find(|prefix| qq_core::shell_prefix_matches(prefix, command))
+        .find(|prefix| recordable_grant(prefix) && qq_core::shell_prefix_matches(prefix, command))
         .map(|prefix| ApprovalGrant::ShellPrefix {
             prefix: prefix.clone(),
         })
+}
+
+/// A grant value the session table will store: non-empty and within
+/// [`qq_core::MAX_GRANT_BYTES`]. An allowlist entry past that bound used to
+/// make the approval command fail with "approval grant is empty or exceeds the
+/// session limit"; such an entry now matches nothing, so the call takes the
+/// unattended path instead of erroring.
+fn recordable_grant(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value.len() <= qq_core::MAX_GRANT_BYTES
 }
 
 async fn respond_approval(

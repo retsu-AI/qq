@@ -345,11 +345,7 @@ fn codex_request_provider(
     store: &CredentialStore,
     profile: &str,
 ) -> codex::CodexRequestCredentials {
-    codex::CodexRequestCredentials {
-        store: store.clone(),
-        profile: profile.to_owned(),
-        cache: tokio::sync::Mutex::new(None),
-    }
+    codex::CodexRequestCredentials::new(store, profile)
 }
 
 fn callback(port: u16, query: &str) -> String {
@@ -422,15 +418,16 @@ fn a_built_in_provider_without_any_credential_names_both_remedies() {
 
     assert!(matches!(
         &error,
-        AuthError::ProviderCredentialMissing { provider, environment_variable }
+        AuthError::ProviderCredentialMissing { provider, environment_variable, alternate_variables }
             if provider == "openai"
                 && environment_variable == "QQ_TEST_OPENAI_KEY_THAT_DOES_NOT_EXIST_3F2A"
+                && alternate_variables.is_empty()
     ));
     let message = error.to_string();
-    assert!(message.contains("`qq auth login openai`"), "{message}");
-    assert!(
-        message.contains("QQ_TEST_OPENAI_KEY_THAT_DOES_NOT_EXIST_3F2A"),
-        "{message}"
+    assert_eq!(
+        message,
+        "no credential for provider `openai`: run `qq auth login openai` or set the \
+         environment variable `QQ_TEST_OPENAI_KEY_THAT_DOES_NOT_EXIST_3F2A`"
     );
 
     // An explicit Env(...) reference is the user's own choice of variable;
@@ -441,6 +438,74 @@ fn a_built_in_provider_without_any_credential_names_both_remedies() {
         ))
         .unwrap_err();
     assert!(matches!(explicit, AuthError::EnvironmentMissing { .. }));
+}
+
+#[test]
+fn a_provider_with_alias_variables_names_every_variable_when_none_is_set() {
+    let (store, _keyring, _directory) = test_store();
+
+    let error = resolve_provider_credential_with_aliases(
+        &store,
+        None,
+        "google/default",
+        "QQ_TEST_GEMINI_KEY_THAT_DOES_NOT_EXIST_7B1C",
+        &["QQ_TEST_GOOGLE_KEY_THAT_DOES_NOT_EXIST_7B1C"],
+        Some("https://generativelanguage.googleapis.com"),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        AuthError::ProviderCredentialMissing { provider, .. } if provider == "google"
+    ));
+    assert_eq!(
+        error.to_string(),
+        "no credential for provider `google`: run `qq auth login google` or set the \
+         environment variable `QQ_TEST_GEMINI_KEY_THAT_DOES_NOT_EXIST_7B1C` \
+         (or `QQ_TEST_GOOGLE_KEY_THAT_DOES_NOT_EXIST_7B1C`)"
+    );
+}
+
+#[test]
+fn alias_variables_are_read_in_precedence_order_and_an_empty_one_is_reported() {
+    const PRIMARY: &str = "QQ_TEST_GEMINI_KEY_A91E";
+    const ALIAS: &str = "QQ_TEST_GOOGLE_KEY_A91E";
+    let lookup = |values: &[(&str, &str)]| {
+        let values = values
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), OsString::from(*value)))
+            .collect::<BTreeMap<_, _>>();
+        move |variable: &str| values.get(variable).cloned()
+    };
+
+    let only_alias =
+        environment_secret_from_any(PRIMARY, &[ALIAS], lookup(&[(ALIAS, "from-alias")])).unwrap();
+    assert_eq!(only_alias.expose_secret_str().unwrap(), "from-alias");
+
+    let both = environment_secret_from_any(
+        PRIMARY,
+        &[ALIAS],
+        lookup(&[(PRIMARY, "from-primary"), (ALIAS, "from-alias")]),
+    )
+    .unwrap();
+    assert_eq!(both.expose_secret_str().unwrap(), "from-primary");
+
+    let empty_primary = environment_secret_from_any(
+        PRIMARY,
+        &[ALIAS],
+        lookup(&[(PRIMARY, ""), (ALIAS, "from-alias")]),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        empty_primary,
+        AuthError::EnvironmentEmpty { variable } if variable == PRIMARY
+    ));
+
+    let neither = environment_secret_from_any(PRIMARY, &[ALIAS], lookup(&[])).unwrap_err();
+    assert!(matches!(
+        neither,
+        AuthError::EnvironmentMissing { variable } if variable == PRIMARY
+    ));
 }
 
 #[test]
@@ -1167,13 +1232,129 @@ async fn codex_request_cache_reloads_after_rotation_and_rejects_deletion() {
     );
 
     assert!(store.remove("openai-codex/work").unwrap());
+    let error = qq_provider::RequestCredentialProvider::credential(&provider)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        qq_provider::RequestCredentialError::Missing { .. }
+    ));
     assert_eq!(
-        qq_provider::RequestCredentialProvider::credential(&provider)
-            .await
-            .unwrap_err(),
-        qq_provider::RequestCredentialError::Missing
+        error.to_string(),
+        "credential `openai-codex/work` is not registered: run `qq auth login openai-codex --profile work`"
     );
     assert_eq!(keyring.read_count("openai-codex/work"), 2);
+}
+
+#[tokio::test]
+async fn xai_request_credentials_name_the_provider_and_both_remedies_when_nothing_exists() {
+    let (store, _keyring, _directory) = test_store();
+    let provider = store.xai_request_credentials("default", None);
+
+    let error = qq_provider::RequestCredentialProvider::credential(&provider)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        qq_provider::RequestCredentialError::Missing { .. }
+    ));
+    // Depends on `XAI_API_KEY` being unset in the test environment, which
+    // the suite requires for the plain-resolution tests above as well.
+    assert_eq!(
+        error.to_string(),
+        "no credential for provider `xai`: run `qq auth login xai --oauth` or \
+         `qq auth login xai` or set the environment variable `XAI_API_KEY`"
+    );
+}
+
+#[tokio::test]
+async fn xai_request_credentials_name_a_missing_profile_with_its_flag() {
+    let (store, _keyring, _directory) = test_store();
+    let provider = store.xai_request_credentials("work", None);
+
+    let error = qq_provider::RequestCredentialProvider::credential(&provider)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "credential `xai/work` is not registered: run `qq auth login xai --oauth --profile work` \
+         or `qq auth login xai --profile work` or set the environment variable `XAI_API_KEY`"
+    );
+}
+
+#[tokio::test]
+async fn xai_request_credentials_report_a_registered_name_whose_secret_is_gone() {
+    let (store, keyring, _directory) = test_store();
+    store
+        .set_with_metadata(
+            "xai/default",
+            "secret",
+            false,
+            Some("xai"),
+            Some("https://api.x.ai"),
+        )
+        .unwrap();
+    keyring.erase("xai/default");
+    let provider = store.xai_request_credentials("default", None);
+
+    let error = qq_provider::RequestCredentialProvider::credential(&provider)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        qq_provider::RequestCredentialError::Missing { .. }
+    ));
+    assert_eq!(
+        error.to_string(),
+        "credential `xai/default` is registered, but its secret is missing: run \
+         `qq auth logout xai/default`, then `qq auth login xai --oauth` or `qq auth login xai`"
+    );
+}
+
+#[tokio::test]
+async fn xai_request_credentials_keep_the_message_of_an_explicit_reference() {
+    let (store, _keyring, _directory) = test_store();
+    let provider = store.xai_request_credentials(
+        "default",
+        Some(SecretRef::Env(
+            "QQ_TEST_XAI_EXPLICIT_THAT_DOES_NOT_EXIST_C4D2".to_owned(),
+        )),
+    );
+
+    let error = qq_provider::RequestCredentialProvider::credential(&provider)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        qq_provider::RequestCredentialError::Missing { .. }
+    ));
+    assert_eq!(
+        error.to_string(),
+        "environment variable `QQ_TEST_XAI_EXPLICIT_THAT_DOES_NOT_EXIST_C4D2` is not set"
+    );
+}
+
+#[tokio::test]
+async fn codex_request_credentials_name_the_provider_when_nothing_is_stored() {
+    let (store, _keyring, _directory) = test_store();
+    let provider = store.codex_request_credentials("default");
+
+    let error = qq_provider::RequestCredentialProvider::credential(&provider)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        qq_provider::RequestCredentialError::Missing { .. }
+    ));
+    assert_eq!(
+        error.to_string(),
+        "no credential for provider `openai-codex`: run `qq auth login openai-codex`"
+    );
 }
 
 #[tokio::test]

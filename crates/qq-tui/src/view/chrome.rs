@@ -50,10 +50,18 @@ pub(super) fn top_row(app: &App, width: usize) -> Line {
         .map(|session| &session.summary);
     for item in app.settings.status_line() {
         let part: Option<(String, Style)> = match item {
-            StatusItem::Model => focused
-                .and_then(|session| session.model.as_deref())
-                .or(app.model.model.as_deref())
-                .map(|model| (model.to_owned(), accent())),
+            // Without a session or a client default there is nothing to
+            // route to; say so where the model would be so `/models` is the
+            // obvious next step.
+            StatusItem::Model => Some(
+                focused
+                    .and_then(|session| session.model.as_deref())
+                    .or(app.model.model.as_deref())
+                    .map_or_else(
+                        || ("no model".to_owned(), warning()),
+                        |model| (model.to_owned(), accent()),
+                    ),
+            ),
             // The default profile is the unremarkable case; the badge appears
             // only when a session (or the next one) runs as something else.
             StatusItem::Profile => {
@@ -137,6 +145,16 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
             crate::app::NoticeLevel::Error => ("error: ", failure()),
         };
         left.push(format!(" {prefix}{status} "), style.bold());
+        return rule_with(left, Line::default(), width);
+    }
+    // Standing guidance for a client that cannot create a session yet: it
+    // occupies the notice slot for as long as nothing is focused, so the
+    // first frame already says what to do instead of waiting for Alt-N to
+    // fail. A transient notice above takes precedence while it lasts.
+    if app.focused().is_none()
+        && let Some(guidance) = app.startup_guidance()
+    {
+        left.push(format!(" {guidance} "), accent().bold());
         return rule_with(left, Line::default(), width);
     }
     if let Some(session) = app.focused().and_then(|id| app.sessions.get(&id))
