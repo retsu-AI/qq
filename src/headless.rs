@@ -263,6 +263,9 @@ struct RunEnd {
     final_output: Option<Box<qq_protocol::FinalOutput>>,
     /// Accumulated text of the last assistant message: the final answer.
     answer: String,
+    /// Tool calls of this run that settled as denied. Under `read-only`
+    /// that is every held call, which is what the closing hint explains.
+    denied_calls: usize,
 }
 
 impl RunEnd {
@@ -276,6 +279,7 @@ impl RunEnd {
             audit: None,
             final_output: None,
             answer: String::new(),
+            denied_calls: 0,
         }
     }
 }
@@ -411,6 +415,7 @@ pub async fn run(
         audit,
         final_output,
         answer,
+        denied_calls,
     } = end;
     let outcome = HeadlessOutcome {
         status,
@@ -459,6 +464,15 @@ pub async fn run(
                     let _ = writeln!(stderr, "error: {message}");
                 }
             }
+        }
+        // A first `qq run` that only read when it meant to edit is the most
+        // common surprise of the read-only default; name the flag that
+        // changes it. JSONL consumers already see each denied call's state.
+        if options.approval == HeadlessApproval::ReadOnly && denied_calls > 0 {
+            let _ = writeln!(
+                stderr,
+                "held calls were denied under --approval read-only; rerun with --approval auto to allow workspace edits"
+            );
         }
     } else if let Some(message) = &outcome.message {
         let _ = writeln!(stderr, "error: {message}");
@@ -690,6 +704,7 @@ async fn stream_run(
     let mut answer = String::new();
     let mut answer_message: Option<MessageId> = None;
     let mut answer_truncated = false;
+    let mut denied_calls: usize = 0;
     let text = options.format == HeadlessFormat::Text;
 
     loop {
@@ -806,6 +821,9 @@ async fn stream_run(
                         }
                     }
                     SessionEvent::ToolCallFinished { tool_call } if ours => {
+                        if tool_call.state == ToolCallState::Denied {
+                            denied_calls += 1;
+                        }
                         if text {
                             let verdict = match tool_call.state {
                                 ToolCallState::Completed => "ok",
@@ -991,6 +1009,7 @@ async fn stream_run(
                             audit,
                             final_output: final_output.clone(),
                             answer,
+                            denied_calls,
                         });
                     }
                     _ => {}
@@ -3352,6 +3371,78 @@ mod tests {
         // Both continuations are shown: the interactive one comes first
         // because it is the one a person at a terminal wants.
         assert!(stderr.contains(&format!("\n  qq --session {session_id}\n")));
+    }
+
+    const DENIAL_HINT: &str = "held calls were denied under --approval read-only; rerun with --approval auto to allow workspace edits";
+
+    #[tokio::test]
+    async fn text_read_only_denials_end_with_the_approval_auto_hint_before_the_resume_hint() {
+        let fixture = fixture(MutatingProvider::new).await;
+        let mut options = options(&fixture.workspace);
+        options.format = HeadlessFormat::Text;
+        options.resume_hint = true;
+
+        let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(
+            status,
+            HeadlessStatus::Completed,
+            "the hint never changes the exit status"
+        );
+        assert_eq!(stdout, "done\n", "the hint stays off stdout");
+        assert!(stderr.contains("[tool] write_file denied"), "{stderr}");
+        let hint_at = stderr
+            .find(DENIAL_HINT)
+            .unwrap_or_else(|| panic!("no denial hint in:\n{stderr}"));
+        let session_id = workspace_snapshot(&fixture).await.sessions[0].id;
+        let resume = crate::cli::resume_hint(session_id);
+        assert!(stderr.ends_with(&resume), "{stderr}");
+        assert!(
+            hint_at < stderr.len() - resume.len(),
+            "the denial hint precedes the resume hint:\n{stderr}"
+        );
+        assert_eq!(stderr.matches(DENIAL_HINT).count(), 1, "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn the_denial_hint_is_silent_under_auto() {
+        // `auto` executes the same calls: nothing to explain.
+        let fixture = fixture(MutatingProvider::new).await;
+        let mut options = options(&fixture.workspace);
+        options.format = HeadlessFormat::Text;
+        options.approval = HeadlessApproval::Auto;
+
+        let (status, _, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        assert!(!stderr.contains(DENIAL_HINT), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn the_denial_hint_is_silent_in_jsonl_where_records_carry_the_denials() {
+        let fixture = fixture(MutatingProvider::new).await;
+        let options = options(&fixture.workspace);
+
+        let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        let calls = finished_tool_calls(&records);
+        assert!(!calls.is_empty());
+        assert!(calls.iter().all(|call| call["state"] == "denied"));
+        assert!(!stderr.contains(DENIAL_HINT), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn the_denial_hint_is_silent_when_read_only_denied_nothing() {
+        let fixture = fixture(|| TextProvider).await;
+        let mut options = options(&fixture.workspace);
+        options.format = HeadlessFormat::Text;
+
+        let (status, _, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        assert!(!stderr.contains(DENIAL_HINT), "{stderr}");
     }
 
     #[tokio::test]
