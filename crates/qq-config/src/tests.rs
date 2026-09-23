@@ -574,6 +574,63 @@ fn jev_approval_is_independent_of_review_and_routing_and_requires_trust() {
 }
 
 #[test]
+fn approval_timeout_is_absent_by_default_and_bounded_when_set() {
+    // DA2 / RR9: absent is no server deadline. A set value reaches the
+    // snapshot as a duration, is bounded, and needs no trust because it only
+    // shortens a wait.
+    let tree = TempTree::new();
+    let bare = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(bare.approval_timeout(), None);
+    assert!(bare.provenance().approval_timeout().is_none());
+
+    let bounded = tree
+        .loader()
+        .load(
+            &tree
+                .request()
+                .with_explicit_content(r#"(version: 1, approval_timeout_seconds: 120)"#),
+        )
+        .unwrap();
+    assert_eq!(
+        bounded.approval_timeout(),
+        Some(std::time::Duration::from_secs(120))
+    );
+    assert_eq!(
+        bounded.provenance().approval_timeout().unwrap().kind(),
+        SourceKind::Inline
+    );
+
+    // An untrusted project file may set it: it adds no authority.
+    tree.write(
+        "work/qq.ron",
+        r#"(version: 1, approval_timeout_seconds: 30)"#,
+    );
+    let project = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(
+        project.approval_timeout(),
+        Some(std::time::Duration::from_secs(30))
+    );
+
+    for (document, fragment) in [
+        ("(version: 1, approval_timeout_seconds: 0)", "at least 1"),
+        (
+            "(version: 1, approval_timeout_seconds: 86401)",
+            "at most 86400",
+        ),
+    ] {
+        let clean = TempTree::new();
+        let error = clean
+            .loader()
+            .load(&clean.request().with_explicit_content(document))
+            .unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::InvalidApprovalTimeout(message) if message.contains(fragment)),
+            "{document}: {error}"
+        );
+    }
+}
+
+#[test]
 fn approval_delegate_is_absent_by_default_and_reads_on_off_from_every_layer() {
     // DA3: absent means the mode's own default; the snapshot reports `None`
     // so the composition root can tell "never said" from "said off".

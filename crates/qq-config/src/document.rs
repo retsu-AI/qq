@@ -17,12 +17,13 @@ use super::{
     BuiltinPreference, ClientSnapshot, ConfigError, ConfigKey, ConfigProvenance, ConfigSnapshot,
     ConfigSources, Connection, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MCP_CALL_TIMEOUT_SECONDS,
     DEFAULT_MCP_MAX_CONCURRENT_CALLS, DelegationConfig, DelegationEntry, DelegationRole,
-    EffectivePolicy, HttpAccess, HttpCredential, InputModality, JevReviewMode, MAX_AUDIT_REVISIONS,
-    MAX_DELEGATION_DEPTH, MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER,
-    MAX_MCP_CALL_TIMEOUT_SECONDS, MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES,
-    McpServerConfig, McpTransport, ModelMetadata, ModelPricing, ModelRoute, PolicyGrants,
-    ProfileApprovalMode, ProviderAccess, ProviderApi, ProviderConfig, ProviderKind,
-    RuntimeOverrides, SecretRef, SourceIdentity, SourceKind, SourceReport, WorkspaceGrant,
+    EffectivePolicy, HttpAccess, HttpCredential, InputModality, JevReviewMode,
+    MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH,
+    MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER, MAX_MCP_CALL_TIMEOUT_SECONDS,
+    MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES, McpServerConfig, McpTransport,
+    ModelMetadata, ModelPricing, ModelRoute, PolicyGrants, ProfileApprovalMode, ProviderAccess,
+    ProviderApi, ProviderConfig, ProviderKind, RuntimeOverrides, SecretRef, SourceIdentity,
+    SourceKind, SourceReport, WorkspaceGrant,
 };
 
 pub(super) fn deserialize_unique_btree_map<'de, D, K, V>(
@@ -534,6 +535,12 @@ pub(super) struct Document {
     /// keeps the mode's own default (reviewer under `auto` and `supervised`).
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     approval_delegate: Field<ApprovalDelegateSetting>,
+    /// Seconds a held call may wait for a client before the server denies it.
+    /// Missing is no server deadline: interactive holds wait for the client,
+    /// the run deadline, or cancellation. Not trust-gated: it can only make
+    /// a hold end sooner, never widen what runs.
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    approval_timeout_seconds: Field<u64>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     reasoning_effort: Field<qq_provider::ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
@@ -917,6 +924,9 @@ impl Document {
         }
         if self.max_output_tokens.is_present() {
             touched.push(ConfigKey::MaxOutputTokens);
+        }
+        if self.approval_timeout_seconds.is_present() {
+            touched.push(ConfigKey::ApprovalTimeout);
         }
         if self.providers.is_present() {
             touched.push(ConfigKey::Providers);
@@ -1448,6 +1458,7 @@ pub(super) struct MergeState {
     jev_routing: bool,
     jev_approval: bool,
     approval_delegate: Option<ApprovalDelegateSetting>,
+    approval_timeout_seconds: Option<u64>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
@@ -1526,6 +1537,7 @@ impl MergeState {
                 jev_routing: false,
                 jev_approval: false,
                 approval_delegate: None,
+                approval_timeout_seconds: None,
                 reasoning_effort: None,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
                 providers,
@@ -1558,6 +1570,16 @@ impl MergeState {
         );
         if document.max_output_tokens.is_present() {
             self.provenance.max_output_tokens = Some(source.clone());
+        }
+        // A shorter approval wait adds no authority; it applies from any
+        // layer, trusted or not, like `max_output_tokens`.
+        match document.approval_timeout_seconds {
+            Field::Missing => {}
+            Field::Set(seconds) => self.approval_timeout_seconds = Some(seconds),
+            Field::Clear => self.approval_timeout_seconds = None,
+        }
+        if document.approval_timeout_seconds.is_present() {
+            self.provenance.approval_timeout = Some(source.clone());
         }
         // Narrowing exposure adds no authority, even when another field in
         // this document still requires workspace trust.
@@ -2319,6 +2341,21 @@ impl MergeState {
         // Every other rule has passed by this point, so `ModelRequired` is the
         // only error a model-less but otherwise valid document can produce
         // from `require_model`.
+        let approval_timeout = match self.approval_timeout_seconds {
+            None => None,
+            Some(0) => {
+                return Err(ConfigError::InvalidApprovalTimeout(
+                    "approval_timeout_seconds must be at least 1; omit it for no deadline"
+                        .to_owned(),
+                ));
+            }
+            Some(seconds) if seconds > MAX_APPROVAL_TIMEOUT_SECONDS => {
+                return Err(ConfigError::InvalidApprovalTimeout(format!(
+                    "approval_timeout_seconds must be at most {MAX_APPROVAL_TIMEOUT_SECONDS}, found {seconds}"
+                )));
+            }
+            Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
+        };
         Ok(ClientSnapshot {
             organization: self.organization,
             model,
@@ -2330,6 +2367,7 @@ impl MergeState {
             jev_routing: self.jev_routing,
             jev_approval: self.jev_approval,
             approval_delegate: self.approval_delegate,
+            approval_timeout,
             reasoning_effort: self.reasoning_effort,
             max_output_tokens: self.max_output_tokens,
             providers: self.providers,
@@ -2365,6 +2403,7 @@ impl ClientSnapshot {
             jev_routing: self.jev_routing,
             jev_approval: self.jev_approval,
             approval_delegate: self.approval_delegate,
+            approval_timeout: self.approval_timeout,
             reasoning_effort: self.reasoning_effort,
             max_output_tokens: self.max_output_tokens,
             providers: self.providers,

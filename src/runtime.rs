@@ -2464,7 +2464,20 @@ pub struct RuntimeHandler {
 }
 
 impl RuntimeHandler {
+    /// [`Self::open_with`] with no server-side approval deadline: the
+    /// interactive default.
+    #[cfg(test)]
     pub async fn open(factory: RuntimeFactory) -> Result<Self, RuntimeHandlerError> {
+        Self::open_with(factory, None).await
+    }
+
+    /// Opens the durable runtime with the server-side approval wait chosen
+    /// by the caller: `None` is no deadline (the interactive default); a
+    /// headless supervisor passes what its configuration asked for.
+    pub async fn open_with(
+        factory: RuntimeFactory,
+        approval_timeout: Option<std::time::Duration>,
+    ) -> Result<Self, RuntimeHandlerError> {
         factory.validate_isolated_tui_qa_state()?;
         let database_path = factory.inner.config.session_database_path()?;
         // The factory is both the runtime loader and the workspace grant
@@ -2483,6 +2496,7 @@ impl RuntimeHandler {
             Arc::new(ModelApprovalReviewer::new(factory.clone())),
         ));
         let options = SessionRuntimeOptions::new(database_path)
+            .with_approval_timeout(approval_timeout)
             .with_grant_authority(Arc::new(factory.clone()))
             .with_approval_reviewer(reviewer);
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;

@@ -1197,7 +1197,7 @@ async fn approval_harness(
     tool: &'static str,
     arguments: &'static str,
     tool_turns: usize,
-    approval_timeout: Duration,
+    approval_timeout: Option<Duration>,
 ) -> ApprovalHarness {
     approval_harness_with_authority(mode, tool, arguments, tool_turns, approval_timeout, None).await
 }
@@ -1207,7 +1207,7 @@ async fn approval_harness_with_authority(
     tool: &'static str,
     arguments: &'static str,
     tool_turns: usize,
-    approval_timeout: Duration,
+    approval_timeout: Option<Duration>,
     grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
 ) -> ApprovalHarness {
     approval_harness_with_reviewer(
@@ -1227,7 +1227,7 @@ async fn approval_harness_with_reviewer(
     tool: &'static str,
     arguments: &'static str,
     tool_turns: usize,
-    approval_timeout: Duration,
+    approval_timeout: Option<Duration>,
     grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
     approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
 ) -> ApprovalHarness {
@@ -1250,7 +1250,33 @@ async fn approval_harness_with_delegate(
     tool: &'static str,
     arguments: &'static str,
     tool_turns: usize,
-    approval_timeout: Duration,
+    approval_timeout: Option<Duration>,
+    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
+    approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
+    delegate: approval::ApprovalDelegate,
+) -> ApprovalHarness {
+    approval_harness_with_clocks(
+        mode,
+        tool,
+        arguments,
+        tool_turns,
+        approval_timeout,
+        DEFAULT_DELEGATE_TIMEOUT,
+        grant_authority,
+        approval_reviewer,
+        delegate,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn approval_harness_with_clocks(
+    mode: ApprovalMode,
+    tool: &'static str,
+    arguments: &'static str,
+    tool_turns: usize,
+    approval_timeout: Option<Duration>,
+    delegate_timeout: Duration,
     grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
     approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
     delegate: approval::ApprovalDelegate,
@@ -1262,6 +1288,7 @@ async fn approval_harness_with_delegate(
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
             approval_timeout,
+            delegate_timeout,
             grant_authority,
             approval_reviewer,
         },
@@ -4861,7 +4888,7 @@ async fn write_child_harness(
     let directory = tempfile::tempdir().unwrap();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.max_active_runs = 8;
-    options.approval_timeout = Duration::from_secs(2);
+    options.approval_timeout = Some(Duration::from_secs(2));
     if let Some(reviewer) = reviewer {
         options = options.with_approval_reviewer(reviewer);
     }

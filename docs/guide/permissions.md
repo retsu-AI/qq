@@ -139,6 +139,17 @@ When several sessions run at once, `Alt-A` / `Alt-D` approve or deny the
 oldest waiting call in another session without leaving yours, and
 `/attention` lists everything waiting.
 
+A prompt waits for you. There is no server-side timer that denies it while
+you are away: the hold ends when you answer, when the run's own deadline
+(`--max-duration` or `RunLimits`) cancels the run, or when you cancel. If
+you want a bound anyway — a shared server, an unattended supervisor — set
+`approval_timeout_seconds` in configuration and the call is denied
+`denied_timeout` after that many seconds, counted from when you were
+actually asked (after the delegate answered or was cut off, not from when
+the delegate was consulted). `qq run` has nobody to ask and never waits on
+you: an `auto` hold is denied immediately, or after the delegate has had its
+20 s when one is configured.
+
 ## Grants in configuration
 
 The `w` key appends to the `policy` section of the project's

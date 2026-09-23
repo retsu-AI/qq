@@ -95,7 +95,7 @@ impl ToolGate for SessionToolGate {
                             return approval_persistence_failure(error);
                         }
                     }
-                    let deadline = tokio::time::Instant::now() + inner.approval_timeout;
+                    let deadline = human_deadline(inner.approval_timeout);
                     let timed_out = tokio::select! {
                         biased;
                         changed = cancellation.changed() => {
@@ -107,7 +107,7 @@ impl ToolGate for SessionToolGate {
                             };
                         }
                         result = &mut resolved => result.is_err(),
-                        () = tokio::time::sleep_until(deadline) => true,
+                        () = sleep_until_or_never(deadline) => true,
                     };
                     inner.remove_approval(call.id);
                     conclude(&inner, &claimed, call.id, timed_out, None).await
@@ -228,12 +228,21 @@ impl ToolGate for SessionToolGate {
                     // `Some` once a reviewer verdict arrived; its spend is
                     // charged to this run whatever the outcome.
                     let mut review_spend: Option<ReviewSpend> = None;
-                    // The human's deadline. While a reviewer is deciding the
-                    // human is not being asked, so the wait starts when the
-                    // reviewer escalates, not when it was consulted: a slow
-                    // reviewer must not eat into the human's time. Without a
-                    // reviewer the deadline starts now.
-                    let mut deadline = tokio::time::Instant::now() + inner.approval_timeout;
+                    // Two clocks. The delegate's: a bounded wait for its
+                    // verdict, after which the gate treats silence as an
+                    // escalation, so a delegate that breaks its contract
+                    // cannot hold the run. The human's: `None` means no server
+                    // deadline at all (the run deadline and cancellation still
+                    // apply); a configured bound starts when the human is
+                    // actually asked, which is now without a delegate and at
+                    // the escalation with one. A slow delegate never eats
+                    // into the human's time.
+                    let delegate_deadline = tokio::time::Instant::now() + inner.delegate_timeout;
+                    let mut deadline = if review.is_some() {
+                        None
+                    } else {
+                        human_deadline(inner.approval_timeout)
+                    };
                     let timed_out = loop {
                         if let Some(pending_review) = review.as_mut() {
                             tokio::select! {
@@ -308,15 +317,17 @@ impl ToolGate for SessionToolGate {
                                         // human's wait starts here, on the
                                         // remaining select arms.
                                         ReviewDecision::Escalate { .. } | ReviewDecision::Deny { .. } => {
-                                            deadline = tokio::time::Instant::now()
-                                                + inner.approval_timeout;
+                                            deadline = human_deadline(inner.approval_timeout);
                                         }
                                     }
                                 }
-                                // Bounds the reviewer as well as the human: a
-                                // reviewer that never answers cannot hold the
-                                // run past the configured wait.
-                                () = tokio::time::sleep_until(deadline) => break true,
+                                // The delegate's own clock: past it the
+                                // pending verdict is dropped and the human is
+                                // asked, exactly as for an `Escalate`.
+                                () = tokio::time::sleep_until(delegate_deadline) => {
+                                    review = None;
+                                    deadline = human_deadline(inner.approval_timeout);
+                                }
                             }
                         } else {
                             tokio::select! {
@@ -332,7 +343,7 @@ impl ToolGate for SessionToolGate {
                                     };
                                 }
                                 result = &mut resolved => break result.is_err(),
-                                () = tokio::time::sleep_until(deadline) => break true,
+                                () = sleep_until_or_never(deadline) => break true,
                             }
                         }
                     };
@@ -341,6 +352,21 @@ impl ToolGate for SessionToolGate {
                 }
             }
         })
+    }
+}
+
+/// When the human's wait ends, counted from now. `None` is no server
+/// deadline: the hold waits for the client, the run deadline, or cancellation.
+fn human_deadline(timeout: Option<Duration>) -> Option<tokio::time::Instant> {
+    timeout.map(|timeout| tokio::time::Instant::now() + timeout)
+}
+
+/// Resolves at `deadline`, or never when there is none. Used as a select arm
+/// so an unbounded wait is expressed by the arm simply not firing.
+async fn sleep_until_or_never(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 

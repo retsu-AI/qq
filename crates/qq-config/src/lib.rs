@@ -49,6 +49,9 @@ pub const DEFAULT_MCP_CALL_TIMEOUT_SECONDS: u64 = 60;
 pub const MAX_MCP_CALL_TIMEOUT_SECONDS: u64 = 600;
 pub const DEFAULT_MCP_MAX_CONCURRENT_CALLS: u32 = 4;
 pub const MAX_MCP_MAX_CONCURRENT_CALLS: u32 = 64;
+/// Longest server-side approval wait a configuration may set (24 h). Absent
+/// is no deadline; this bounds what "a deadline" may mean.
+pub const MAX_APPROVAL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 
 /// All process-dependent inputs captured before a configuration load begins.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -1449,6 +1452,7 @@ pub enum ConfigKey {
     JevRouting,
     JevApproval,
     ApprovalDelegate,
+    ApprovalTimeout,
     ReasoningEffort,
     MaxOutputTokens,
     Providers,
@@ -1506,6 +1510,7 @@ pub struct ConfigProvenance {
     jev_routing: Option<SourceIdentity>,
     jev_approval: Option<SourceIdentity>,
     approval_delegate: Option<SourceIdentity>,
+    approval_timeout: Option<SourceIdentity>,
     reasoning_effort: Option<SourceIdentity>,
     max_output_tokens: Option<SourceIdentity>,
     providers: BTreeMap<String, SourceIdentity>,
@@ -1578,6 +1583,11 @@ impl ConfigProvenance {
     #[must_use]
     pub const fn approval_delegate(&self) -> Option<&SourceIdentity> {
         self.approval_delegate.as_ref()
+    }
+
+    #[must_use]
+    pub const fn approval_timeout(&self) -> Option<&SourceIdentity> {
+        self.approval_timeout.as_ref()
     }
 
     #[must_use]
@@ -1671,6 +1681,7 @@ pub struct ConfigSnapshot {
     jev_routing: bool,
     jev_approval: bool,
     approval_delegate: Option<ApprovalDelegateSetting>,
+    approval_timeout: Option<std::time::Duration>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
@@ -1701,6 +1712,7 @@ pub struct ClientSnapshot {
     jev_routing: bool,
     jev_approval: bool,
     approval_delegate: Option<ApprovalDelegateSetting>,
+    approval_timeout: Option<std::time::Duration>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
@@ -1720,6 +1732,13 @@ impl ClientSnapshot {
     #[must_use]
     pub const fn model(&self) -> Option<&ModelRoute> {
         self.model.as_ref()
+    }
+
+    /// The server-side approval wait, or `None` for no deadline. See
+    /// [`ConfigSnapshot::approval_timeout`].
+    #[must_use]
+    pub const fn approval_timeout(&self) -> Option<std::time::Duration> {
+        self.approval_timeout
     }
 
     #[must_use]
@@ -2191,6 +2210,15 @@ impl ConfigSnapshot {
         self.approval_delegate
     }
 
+    /// How long a held call may wait for a client before the server denies
+    /// it, from `approval_timeout_seconds`. `None` (the default) is no server
+    /// deadline: an interactive hold waits for the client, the run deadline,
+    /// or cancellation. A supervisor that wants a bound sets one.
+    #[must_use]
+    pub const fn approval_timeout(&self) -> Option<std::time::Duration> {
+        self.approval_timeout
+    }
+
     #[must_use]
     pub fn organization(&self) -> Option<&str> {
         self.organization.as_deref()
@@ -2473,6 +2501,8 @@ pub enum ConfigError {
     InvalidDelegation(String),
     #[error("audit settings are invalid: {0}")]
     InvalidAudit(String),
+    #[error("approval timeout is invalid: {0}")]
+    InvalidApprovalTimeout(String),
     #[error("managed policy {rule} was violated: {message}")]
     PolicyViolation { rule: &'static str, message: String },
     #[error("TUI settings are invalid: {message}")]
