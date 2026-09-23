@@ -1098,6 +1098,7 @@ impl Runtime {
             tools: self.config_grants(),
             shell_prefixes: Vec::new(),
             hosts: Vec::new(),
+            delegate: approval::DelegateGrants::default(),
         };
         self.run_loop(
             messages,
@@ -1246,6 +1247,7 @@ impl plan::CompiledAgentPlan {
             tools: self.runtime.config_grants(),
             shell_prefixes: Vec::new(),
             hosts: Vec::new(),
+            delegate: approval::DelegateGrants::default(),
         };
         public_run_stream(
             self.execute(
@@ -10022,6 +10024,7 @@ mod tests {
                         tools: ["edit_file".to_owned()].into_iter().collect(),
                         shell_prefixes: Vec::new(),
                         hosts: Vec::new(),
+                        delegate: approval::DelegateGrants::default(),
                     },
                     network: Arc::default(),
                 }),

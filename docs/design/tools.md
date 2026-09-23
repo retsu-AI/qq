@@ -1102,6 +1102,20 @@ carry three lifetimes:
   than that, or past the session cap still approves the call, but as a
   once-approval: nothing is recorded and nothing is promoted. The
   approval command never fails because a grant cannot be stored.
+- **Delegate** — when the configured `reviewer_model` approves a held
+  call, it records a session grant of its own in the same transaction as
+  the approval: the exact command string for shell, the exact host for
+  `fetch`, nothing for other tool classes. Every `session_grants` row
+  carries `source` (`human` or `delegate`) and, for a delegate, the
+  `run_id` that recorded it. A delegate grant is deliberately narrower
+  than a human one. It matches only the byte-exact command or host,
+  never a prefix and never a `*.suffix`; it does not lift a `Forbidden`
+  verdict, which only a human's exact string may do (ADR-0020); it is
+  never promoted to workspace configuration; and one run may record at
+  most 64 of them. The storage rule above applies unchanged: a value
+  that does not fit approves the call once and records nothing. If a
+  human grant already covers the same string, the human row is kept and
+  the delegate row is not written.
 - **Workspace** — the grants a user always wants live in the `policy`
   section of configuration, in the same layered documents as everything
   else. Same shapes, longer lifetime: exact tool names, shell command

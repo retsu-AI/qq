@@ -384,8 +384,8 @@ pub struct ReviewRequest {
     /// The child's task brief (the prompt that created its run), truncated to
     /// `MAX_REVIEW_BRIEF_BYTES`. `None` for root sessions.
     pub task_brief: Option<String>,
-    /// The session's approval mode, so the reviewer knows whether its `Deny`
-    /// is final (`Supervised`) or advisory (`Auto`).
+    /// The session's approval mode. The reviewer's `Deny` is final under
+    /// both `Auto` and `Supervised`; the mode tells it what that mode holds.
     pub mode: ApprovalMode,
     /// The last `MAX_REVIEW_RECENT_ACTIONS` finished tool calls of the run.
     pub recent_actions: Vec<RecentAction>,

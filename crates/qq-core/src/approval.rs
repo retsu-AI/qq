@@ -146,11 +146,25 @@ pub(crate) struct SessionGrants {
     pub(crate) shell_prefixes: Vec<String>,
     /// Hosts `fetch` may reach without prompting: exact names or `*.suffix`.
     pub(crate) hosts: Vec<String>,
+    /// Grants a delegate (the approval reviewer) recorded on its own verdict.
+    /// Narrower than a human grant on purpose: a command matches only the
+    /// exact string, a host only the exact name, and neither lifts `Forbidden`
+    /// or is ever written to workspace configuration. The human's tools,
+    /// prefixes, and hosts above stay the wide shapes.
+    pub(crate) delegate: DelegateGrants,
+}
+
+/// The exact strings a delegate may bless for the rest of a session.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DelegateGrants {
+    pub(crate) commands: HashSet<String>,
+    pub(crate) hosts: HashSet<String>,
 }
 
 impl SessionGrants {
-    /// A grant that quotes the exact command string lifts even a `Forbidden`
-    /// verdict: the user typed the whole thing and blessed it.
+    /// A human grant that quotes the exact command string lifts even a
+    /// `Forbidden` verdict: the user typed the whole thing and blessed it. A
+    /// delegate grant never does, however exact; the floor stays above it.
     fn quotes_exactly(&self, command: &str) -> bool {
         let command = command.trim();
         self.shell_prefixes
@@ -163,16 +177,20 @@ impl SessionGrants {
             return true;
         }
         match class {
-            ToolClass::Shell { command, .. } => self
-                .shell_prefixes
-                .iter()
-                .any(|prefix| shell_prefix_matches(prefix, command)),
+            ToolClass::Shell { command, .. } => {
+                self.shell_prefixes
+                    .iter()
+                    .any(|prefix| shell_prefix_matches(prefix, command))
+                    || self.delegate.commands.contains(command.trim())
+            }
             ToolClass::Network {
                 host: Some(host), ..
-            } => self
-                .hosts
-                .iter()
-                .any(|grant| crate::tools::network::host_grant_matches(grant, host)),
+            } => {
+                self.hosts
+                    .iter()
+                    .any(|grant| crate::tools::network::host_grant_matches(grant, host))
+                    || self.delegate.hosts.contains(host.as_str())
+            }
             ToolClass::ReadOnly
             | ToolClass::Mutating
             | ToolClass::External
@@ -607,6 +625,7 @@ mod tests {
             tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
             shell_prefixes: prefixes.iter().map(|prefix| (*prefix).to_owned()).collect(),
             hosts: Vec::new(),
+            delegate: DelegateGrants::default(),
         }
     }
 
@@ -1068,6 +1087,90 @@ mod tests {
             forbidden_result(&[RuleId::PrivilegeEscalation]),
             "forbidden: this command is refused under every approval mode (rule: privilege_escalation); run without sudo; the workspace needs no elevated rights"
         );
+    }
+
+    #[test]
+    fn delegate_grants_match_exactly_and_never_lift_forbidden() {
+        // DA4: a delegate's grant covers the exact command string and the
+        // exact host, nothing broader. The human's prefix and wildcard
+        // shapes are not available to it, and its exact string does not
+        // open the Forbidden floor the way a human's exact string does.
+        let mut grants = grants(&[], &[]);
+        grants
+            .delegate
+            .commands
+            .insert("git commit -m x".to_owned());
+        grants.delegate.hosts.insert("docs.rs".to_owned());
+        for mode in [ApprovalMode::Ask, ApprovalMode::Auto] {
+            assert_eq!(
+                evaluate(mode, "shell", &shell("git commit -m x"), &grants),
+                PolicyDecision::Execute,
+                "{mode:?}: the exact command is covered"
+            );
+            assert_eq!(
+                evaluate(mode, "shell", &shell("  git commit -m x "), &grants),
+                PolicyDecision::Execute,
+                "{mode:?}: surrounding whitespace is not a different command"
+            );
+            assert_eq!(
+                evaluate(mode, "shell", &shell("git commit -m y"), &grants),
+                PolicyDecision::RequireApproval,
+                "{mode:?}: a different argument is a different command"
+            );
+            assert_eq!(
+                evaluate(mode, "shell", &shell("git commit -m x --amend"), &grants),
+                PolicyDecision::RequireApproval,
+                "{mode:?}: a delegate grant is never a prefix"
+            );
+            let docs = ToolClass::Network {
+                host: Some("docs.rs".to_owned()),
+                refusal: None,
+            };
+            let sub = ToolClass::Network {
+                host: Some("api.docs.rs".to_owned()),
+                refusal: None,
+            };
+            assert_eq!(
+                evaluate(mode, "fetch", &docs, &grants),
+                PolicyDecision::Execute
+            );
+            assert_eq!(
+                evaluate(mode, "fetch", &sub, &grants),
+                PolicyDecision::RequireApproval,
+                "{mode:?}: a delegate host grant is never a wildcard"
+            );
+        }
+        // The floor. A human's exact string lifts Forbidden (ADR-0020); a
+        // delegate's identical string does not, under any mode.
+        let mut delegate_only = SessionGrants::default();
+        delegate_only
+            .delegate
+            .commands
+            .insert("git push --force".to_owned());
+        let mut human = SessionGrants::default();
+        human.shell_prefixes.push("git push --force".to_owned());
+        for mode in [
+            ApprovalMode::ReadOnly,
+            ApprovalMode::Ask,
+            ApprovalMode::Auto,
+            ApprovalMode::Supervised,
+            ApprovalMode::Full,
+        ] {
+            assert!(
+                matches!(
+                    evaluate(mode, "shell", &shell("git push --force"), &delegate_only),
+                    PolicyDecision::Forbidden { .. }
+                ),
+                "{mode:?}: a delegate grant must not lift Forbidden"
+            );
+            assert!(
+                !matches!(
+                    evaluate(mode, "shell", &shell("git push --force"), &human),
+                    PolicyDecision::Forbidden { .. }
+                ),
+                "{mode:?}: the human's exact string still does"
+            );
+        }
     }
 
     #[test]
