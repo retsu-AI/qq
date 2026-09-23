@@ -44,9 +44,10 @@ below is for people changing QQ.
   OpenCode, Pi, and fx keep runs alive, and findings R01–R12 (research; owned
   by `plans/run-reliability.md`).
 - [`delegated-approval.md`](design/delegated-approval.md) — target contract for
-  an opt-in delegate that settles held approvals. Absorbed into `tools.md` as
-  [`plans/delegated-approval.md`](plans/delegated-approval.md) ships; not yet
-  as-built.
+  an opt-in delegate that settles held approvals. Mostly absorbed into
+  `tools.md` § Approval Policy; what remains is DA6 of
+  [`plans/delegated-approval.md`](plans/delegated-approval.md). Deleted when
+  DA6 ships.
 
 ## Decisions — `adr/`
 

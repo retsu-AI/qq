@@ -4,12 +4,12 @@
 
 | | |
 | --- | --- |
-| Now | DA1 and DA4 in review (`feat/eng-862-da1-reviewer-deny-final` → `feat/eng-862-da4-delegate-grants`, stacked on #125). Next: DA3 |
-| Shipped | — |
-| Open | DA1–DA6 |
+| Now | DA2 in review ([#150](https://github.com/retsu-AI/qq/pull/150)); this docs PR ([#123](https://github.com/retsu-AI/qq/pull/123)) is stacked on it. Next: DA6 |
+| Shipped | #125 grant storage rule; DA1 [#133](https://github.com/retsu-AI/qq/pull/133); DA4 [#135](https://github.com/retsu-AI/qq/pull/135); DA3 [#143](https://github.com/retsu-AI/qq/pull/143); DA5 [#144](https://github.com/retsu-AI/qq/pull/144) with ADR-0041 accepted |
+| Open | DA2 (in review), DA6 |
 | Ledger | [`progress/delegated-approval.md`](./progress/delegated-approval.md) |
-| Target contract | [`../design/delegated-approval.md`](../design/delegated-approval.md) |
-| Supersedes, when DA5 ships | ADR-0030's "Jev never authorizes side effects", for the `jev_approval` lane only. Review and routing are unchanged |
+| Target contract | [`../design/delegated-approval.md`](../design/delegated-approval.md); as-built text is [`../design/tools.md`](../design/tools.md) § Approval Policy |
+| Supersedes | ADR-0030's "Jev never authorizes side effects", for the `jev_approval` lane only, by [ADR-0041](../adr/0041-jev-delegated-approval.md). Review and routing are unchanged |
 
 ## Goal
 
@@ -111,14 +111,17 @@ Design constraints inherited from `AGENTS.md` and the harness plan:
 
 | ID | Goal | Inputs | Owned paths | Acceptance |
 | --- | --- | --- | --- | --- |
-| DA1 | `Deny` is final under `auto` when a reviewer is configured; escalation restarts the human wait; the reviewer prompt stops telling the model that a root deny only escalates | none | `crates/qq-core/src/sessions/approvals.rs`, `src/runtime.rs` | `auto` + reviewer `Deny` settles `denied` with no human prompt; `Escalate` and reviewer timeout still prompt; `supervised` unchanged; prompt text no longer says a root deny only escalates |
-| DA2 | Delegate deadline is separate from the human wait; interactive attached clients are not denied by a server timer; headless denies immediately | RR9, or the minimum of RR9 included here | `crates/qq-core/src/sessions.rs`, `sessions/approvals.rs`, `src/runtime.rs`, `qq-config` | reviewer/Jev budget does not consume the human wait; attached interactive wait bounded only by the run deadline; headless denial is a tool result naming the policy; config option plumbed |
-| DA3 | `DelegatedApproval` mode on `ApprovalMode`: `ask` may opt in; default `auto` profile enables it; `read-only` and `full` ignore it | DA1 | `crates/qq-core/src/approval.rs`, `qq-config`, `src/runtime.rs` | `ask` without the mode prompts as today; `ask` with it routes holds to the delegate; `full` never calls the reviewer; `read-only` denies without one |
-| DA4 | Delegate-recorded grants are exact-command or exact-host, session-scoped, and never written to config | DA1 | `crates/qq-core/src/sessions/approvals.rs`, `crates/qq-core/src/approval.rs` | a delegate approval of `git commit -m x` covers that exact command for the session and not `git commit -m y`; a value past 256 bytes or a full grant table approves once and records nothing; a prefix grant still requires the human; promotion to `.qq/config.ron` is refused for a delegate verdict |
-| DA5 | `jev_approval` opt-in: typed yes/no/abstain over the approval preview, 5 s bound, fails closed to escalate, spend against the run budget | DA1, DA3; ADR-0041 reserved | `src/runtime.rs`, `src/jev.rs`, `crates/qq-config`, `qq-core` reviewer seam, `docs/adr/0041-*.md` | key stored and `jev_approval: off` never calls TypeSafe; `on` with no key falls through to `reviewer_model`; abstain and over-bound escalate; `Forbidden` never reaches the client; `approved_by_reviewer` records `delegate: jev` |
+| DA1 | `Deny` is final under `auto` when a reviewer is configured; escalation restarts the human wait; the reviewer prompt stops telling the model that a root deny only escalates | none | `crates/qq-core/src/sessions/approvals.rs`, `src/runtime.rs` | `auto` + reviewer `Deny` settles `denied` with no human prompt; `Escalate` and reviewer timeout still prompt; `supervised` unchanged; prompt text no longer says a root deny only escalates. **Merged, #133** |
+| DA2 | Delegate deadline is separate from the human wait; interactive attached clients are not denied by a server timer; headless denies immediately | RR9, or the minimum of RR9 included here | `crates/qq-core/src/sessions.rs`, `sessions/approvals.rs`, `src/runtime.rs`, `qq-config` | reviewer/Jev budget does not consume the human wait; attached interactive wait bounded only by the run deadline; headless denial is a tool result naming the policy; config option plumbed. **In review, #150**: shipped RR9's minimum; delegate backstop is 20 s |
+| DA3 | `approval_delegate: by-mode\|on\|off` beside the mode: `ask` may opt in; `by-mode` is the prior behavior; `read-only` and `full` ignore it | DA1 | `crates/qq-core/src/approval.rs`, `qq-config`, `src/runtime.rs` | `ask` without it prompts as today; `ask` with `on` routes holds to the delegate; `off` withdraws the reviewer under `auto`; `full` never calls the reviewer; `read-only` denies without one. **Merged, #143** (a knob beside the mode, not a mode variant: the mode enum is on the wire) |
+| DA4 | Delegate-recorded grants are exact-command or exact-host, session-scoped, and never written to config | DA1 | `crates/qq-core/src/sessions/approvals.rs`, `crates/qq-core/src/approval.rs` | a delegate approval of `git commit -m x` covers that exact command for the session and not `git commit -m y`; a value past 256 bytes or a full grant table approves once and records nothing; a prefix grant still requires the human; promotion to `.qq/config.ron` is refused for a delegate verdict. **Merged, #135** |
+| DA5 | `jev_approval` opt-in: typed approve/deny/abstain over the approval preview, 5 s bound, fails closed to escalate, spend against the run budget | DA1, DA3; ADR-0041 reserved | `src/runtime.rs`, `src/runtime/approval.rs`, `crates/qq-config`, `qq-core` reviewer seam, `docs/adr/0041-*.md` | key stored and `jev_approval: off` never calls TypeSafe; `on` with no key falls through to `reviewer_model`; abstain and over-bound escalate; `Forbidden` never reaches the client; the delegate grant row records `source = 'jev'`. **Merged, #144**; ADR-0041 accepted |
 | DA6 | Surfaces: TUI shows who settled a call and offers "stop delegating for this session"; headless records the delegate on the approval event; runbook | DA3, DA5 | `crates/qq-tui`, `crates/qq-protocol` docs, `docs/runbooks/delegated-approval.md`, `docs/design/tools.md`, `docs/design/protocol.md` | a delegated approval renders the delegate and the preview digest; the session toggle clears the delegate for the rest of the session without a restart; protocol fixtures updated if the event gains a field |
 
 Order: DA1 → DA2 and DA4 (independent once DA1 has merged) → DA3 → DA5 → DA6.
+As delivered: #125 → DA1 → DA4 → DA3 → DA5 → DA2 → DA6; DA2 moved last
+because RR9 was still planned when DA3 became unblocked, and it then shipped
+RR9's minimum itself.
 DA1, DA2, and DA5 touch `sessions/` and approval, so each needs independent
 review (`workflow.md` § 4). DA5 is the only slice that changes a durability or
 approval invariant enough to need the ADR; reserve ADR-0041 in
@@ -155,8 +158,9 @@ the budget is "delegate budget ≤ 10 s and not added to a human wait."
 **Acceptance:**
 - a reviewer that takes 8 s does not shorten the human wait that follows an
   escalation (shipped in DA1: the wait restarts at the escalation; DA2 adds
-  the delegate's own bound so a stuck reviewer is cut off at 10 s rather than
-  at the human wait);
+  the delegate's own bound so a stuck reviewer is cut off by its own clock
+  rather than at the human wait — delivered as a 20 s backstop above the
+  delegates' own 5 s / 10 s bounds);
 - an interactive session with a client attached is not settled
   `denied_timeout` by the server; the run deadline still cancels it;
 - a headless run with no client receives a tool result naming the policy
@@ -174,16 +178,19 @@ slice absorbed it.
 `src/runtime.rs`.
 **Gates:** none.
 **Acceptance:**
-- `approval.delegate: off` (the default for `ask`) prompts as today;
-- `approval.delegate: on` under `ask` and `auto` routes holds to the
-  configured delegate;
-- the default `auto` profile sets `delegate: on` only when `reviewer_model`
-  or `jev_approval` is configured; with neither, behavior is unchanged;
+- `approval_delegate: off` prompts as today under `ask` and withdraws the
+  reviewer under `auto` and `supervised`;
+- `approval_delegate: on` under `ask` routes holds to the configured
+  delegate; a delegate `Deny` under `ask` escalates with its reason;
+- the default (`by-mode`) consults the reviewer under `auto` and `supervised`
+  only when one is configured; with neither `reviewer_model` nor
+  `jev_approval`, behavior is unchanged;
 - `read-only` denies and `full` executes without calling the reviewer;
 - `supervised` keeps its current meaning and gains the same delegate
   selection as `auto`.
 **Docs:** `docs/design/tools.md` § Approval Policy. No protocol bump: the mode
-enum on the wire does not grow.
+enum on the wire does not grow. Delivered in #143 as `ApprovalDelegate {
+ByMode, On, Off }` beside the mode rather than a mode variant.
 
 ### DA4 — Exact grants, no durable widening
 
@@ -214,7 +221,7 @@ enum on the wire does not grow.
 ### DA5 — Jev as the delegate
 
 **Inputs:** DA1, DA3. ADR-0041 reserved in `progress/root.md` before the PR.
-**Owned paths:** `src/runtime.rs`, `src/jev.rs`, `crates/qq-config`, the
+**Owned paths:** `src/runtime.rs`, `src/runtime/approval.rs`, `crates/qq-config`, the
 `ApprovalReviewer` seam in `crates/qq-core`, `docs/adr/0041-jev-delegated-approval.md`.
 **Gates:** none named. The call is off the hot path and bounded at 5 s.
 **Acceptance:**
@@ -226,8 +233,9 @@ enum on the wire does not grow.
   payload; abstain, low confidence, timeout, and a malformed reply escalate;
 - a `Forbidden` call and an `ask_user` call never reach the client;
 - spend counts against the run's reviewer budget; over-budget escalates;
-- the durable resolution records `delegate: jev` distinct from
-  `delegate: reviewer`, so a later audit can tell them apart;
+- the durable resolution records the delegate (`source = 'jev'` on the grant
+  row, `DelegateIdentity::Jev` on the verdict) distinct from
+  `reviewer_model`, so a later audit can tell them apart;
 - `qq --tui-qa-root` rejects `jev_approval: on` the way it rejects other Jev
   capabilities.
 **Docs:** ADR-0041, explicitly superseding ADR-0030's "never authorizes side

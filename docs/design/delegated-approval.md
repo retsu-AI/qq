@@ -4,9 +4,9 @@ A session's approval mode is the ceiling on what may run. A delegate decides
 the calls that ceiling still holds, so an operator who opted in is not asked
 for every ordinary side effect. This document is the contract
 [`../plans/delegated-approval.md`](../plans/delegated-approval.md) builds.
-Until a slice ships, the as-built behavior is
-[`tools.md`](tools.md) § Approval Policy; that section absorbs this text as
-the slices land, and this file is then deleted.
+The as-built behavior is [`tools.md`](tools.md) § Approval Policy, which has
+absorbed DA1, DA3, DA4, DA5, and DA2; what remains here beyond that section
+is DA6 (§ What the operator sees). This file is deleted when DA6 ships.
 
 ## Ceiling and delegate
 
@@ -16,14 +16,15 @@ ADR-0007, ADR-0021):
 | Mode | Ceiling | Delegate |
 | --- | --- | --- |
 | `read-only` | deny mutations | none; nothing is delegated |
-| `ask` | hold every ungranted mutation | the human, unless `approval.delegate: on` |
-| `auto` | edits and allow-listed shell execute; `Prompt` shell and ungranted hosts hold | the configured delegate when one exists |
+| `ask` | hold every ungranted mutation | the human, unless `approval_delegate: on` |
+| `auto` | edits and allow-listed shell execute; `Prompt` shell and ungranted hosts hold | the configured delegate when one exists, unless `approval_delegate: off` |
 | `supervised` | every non-read call of a write child is held | the configured delegate; a denial is final |
 | `full` | execute, except shell `Forbidden` | none |
 
-`approval.delegate` defaults off for `ask`. The default `auto` profile turns
-it on only when a delegate is configured. With neither `jev_approval` nor
-`reviewer_model` set, `auto` behaves exactly as it does today.
+`approval_delegate` defaults to `by-mode`: the reviewer under `auto` and
+`supervised`, the human under `ask`. `on` extends the delegate to `ask`;
+`off` withdraws it everywhere. With neither `jev_approval` nor
+`reviewer_model` set there is no delegate and every mode behaves as it did.
 
 `Forbidden` shell shapes (ADR-0020), blocked hosts, and managed `deny_tools`,
 `deny_shell_prefixes`, and `deny_hosts` are settled by the classifier before
@@ -88,18 +89,19 @@ human wait; it does not inherit time the delegate already spent.
 
 ## Two clocks
 
-The delegate has its own deadline: 10 s for `reviewer_model`, 5 s for Jev.
-That deadline does not consume the human wait.
+The delegate has its own deadline: Jev bounds itself at 5 s and
+`reviewer_model` at 10 s, and the gate cuts off a delegate that breaks its
+own bound at `delegate_timeout` (20 s). None of that consumes the human wait.
 
-An interactive session with a client attached has no server approval
-deadline. The run deadline still cancels the run. A headless run with no
-client attached is denied immediately with a tool result that names the
-policy, the same way an unanswered `ask_user` exits `needs_input`. A
-supervisor that wants a bound sets `approval_timeout`; absent means this
-policy, not a hidden 300 s.
+An interactive session has no server approval deadline: `approval_timeout`
+is `None` by default. The run deadline still cancels the run. A headless run
+with no client is denied without a human wait, with a tool result that names
+the policy, the same way an unanswered `ask_user` exits `needs_input`. A
+supervisor that wants a bound sets `approval_timeout_seconds`; absent means
+this policy, not a hidden 300 s.
 
-This split is owned by run-reliability RR9. Delegated approval consumes it
-and adds only the delegate's clock.
+Run-reliability RR9 owned this split; delegated approval DA2 shipped RR9's
+minimum together with the delegate clock ([#150](https://github.com/retsu-AI/qq/pull/150)).
 
 ## Jev as a delegate
 
@@ -120,16 +122,18 @@ capabilities. The fixture stays credential-free.
 ## What is recorded
 
 A delegated decision is persisted before the tool starts and before any
-client is told it executed. The record carries the verdict, the delegate
-(`jev` or `reviewer`), and the preview digest. A human decision is unchanged.
-A failed write is not an approval and does not dispatch.
+client is told it executed. The record carries the verdict and the delegate
+(`jev` or `reviewer`, as `source` on the grant row it writes). A human
+decision is unchanged. A failed write is not an approval and does not
+dispatch.
 
 The resolution vocabulary stays `approved`, `approved_for_session`,
 `approved_for_workspace`, `approved_by_reviewer`, `denied`,
-`denied_timeout`. `approved_by_reviewer` gains a delegate identity so an
-audit can tell Jev from `reviewer_model`. Adding that field is a protocol
-change only if a supervisor must reconstruct the decision from the stream; the
-slice that adds it says which and updates the headless goldens.
+`denied_timeout`. Whether `approved_by_reviewer` also gains the delegate
+identity on the wire, so a supervisor can tell Jev from `reviewer_model`
+without the store, is DA6's decision: it is a protocol change only if a
+supervisor must reconstruct the decision from the stream; the slice that adds
+it says which and updates the headless goldens.
 
 ## What the operator sees
 
@@ -143,12 +147,13 @@ event.
 
 Stricter and looser operation are profiles, not new modes.
 
-| Profile | Mode | Delegate | Who is asked |
+| Profile | Mode | `approval_delegate` | Who is asked |
 | --- | --- | --- | --- |
-| strict | `ask` | off | the human, for every ungranted mutation |
-| default | `auto` | on, if one is configured | the delegate; the human on abstain |
-| unattended | `auto` | on | the delegate; headless abstain is an immediate tool error |
-| open | `full` | off | nobody, except the `Forbidden` floor |
+| strict | `ask` | `off` | the human, for every ungranted mutation |
+| default | `auto` | `by-mode` | the delegate when one is configured; the human on abstain |
+| hands-off | `ask` | `on` | the delegate; its deny still comes to the human |
+| unattended | `auto` | `by-mode` | the delegate; a headless abstain is an immediate tool error |
+| open | `full` | — | nobody, except the `Forbidden` floor |
 
 `supervised` is not a profile. It remains the mode a spawned write child runs
 under, and it uses the same delegate selection as `auto`.

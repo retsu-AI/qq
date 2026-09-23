@@ -6,12 +6,14 @@ dated entries appended below, newest last.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| DA1 | Reviewer `Deny` is final under `auto`; escalation restarts the human wait | In review | `feat/eng-862-da1-reviewer-deny-final`, stacked on #125 | No dependency. Independent review (touches `sessions/`) |
-| DA2 | Delegate clock separate from the human wait; no server deadline while a client is attached | Planned | | Input: RR9, or include its minimum and say so. Do not start while RR9 is `In progress` on `sessions/approvals.rs` |
-| DA3 | `approval.delegate` opt-in; default `auto` enables it only when a delegate is configured | Planned | | Input: DA1. No protocol bump |
-| DA4 | Delegate grants are exact-command or exact-host, session-scoped, never written to config | In review | `feat/eng-862-da4-delegate-grants`, stacked on DA1 | Input: DA1. Independent of DA2. Store schema 34 → 35 |
-| DA5 | `jev_approval` typed yes/no/abstain; ADR-0041 | Planned | | Inputs: DA1, DA3. Reserve ADR-0041 in `root.md` before the PR |
-| DA6 | TUI delegate rendering, session off switch, headless delegate identity, runbook | Planned | | Inputs: DA3, DA5 |
+| — | Grant storage rule: a grant that cannot be stored approves once and never fails the command | Merged | [#125](https://github.com/retsu-AI/qq/pull/125) | Removes `InvalidApprovalGrant`; the 400 string cannot be produced |
+| DA1 | Reviewer `Deny` is final under `auto`; escalation restarts the human wait | Merged | [#133](https://github.com/retsu-AI/qq/pull/133) | Independent review done (touches `sessions/`) |
+| DA2 | Delegate clock separate from the human wait; no server deadline for an interactive hold; `approval_timeout_seconds` | In review | `feat/eng-862-da2-two-clocks`, [#150](https://github.com/retsu-AI/qq/pull/150) | Ships RR9's minimum; RR9 (ENG-871) row updated in the same PR. Independent review needed |
+| DA3 | `approval_delegate: by-mode\|on\|off` says who settles a held call | Merged | [#143](https://github.com/retsu-AI/qq/pull/143) | No protocol bump; not part of the plan digest |
+| DA4 | Delegate grants are exact-command or exact-host, session-scoped, never written to config | Merged | [#135](https://github.com/retsu-AI/qq/pull/135) | Store schema 34 → 35 |
+| DA5 | `jev_approval` typed approve/deny/abstain; ADR-0041 | Merged | [#144](https://github.com/retsu-AI/qq/pull/144) | ADR-0041 accepted. `source = 'jev'` on delegate grant rows |
+| DA6 | TUI delegate rendering, session off switch, headless delegate identity, runbook | Planned | | Inputs: DA3, DA5 (both merged). Decides the `approved_by_reviewer` field question |
+| docs | Plan, target contract, ledger | In review | `docs/eng-862-delegated-approval`, [#123](https://github.com/retsu-AI/qq/pull/123), stacked on DA2 | Merge after #150; retarget to `main` then |
 
 ## Entries
 
@@ -181,3 +183,126 @@ DA5 note: the `delegate: jev` vs `delegate: reviewer` distinction the design
 asks for is not in this slice. Both would write `source = 'delegate'` today;
 DA5 should widen `source` (or add a column) when Jev becomes a second
 writer, and the `approved_by_reviewer` event field question stays with DA6.
+
+### 2026-09-23 — #125, DA1, DA4 merged
+
+[#125](https://github.com/retsu-AI/qq/pull/125), [#133](https://github.com/retsu-AI/qq/pull/133),
+and [#135](https://github.com/retsu-AI/qq/pull/135) are on `main` in that
+order, each retargeted to `main` as the one below it merged. No conflicts
+beyond the ledger.
+
+### 2026-09-23 — DA3 merged: `approval_delegate` says who settles a held call
+
+Branch `feat/eng-862-da3-delegate-opt-in`, [#143](https://github.com/retsu-AI/qq/pull/143).
+The plan's task index says "a `DelegatedApproval` mode on `ApprovalMode`";
+the slice did not do that, because the mode enum is on the wire and the
+non-goals say modes stay the ceiling. It is a separate knob:
+
+- `qq_core::ApprovalDelegate { ByMode, On, Off }`, default `ByMode`.
+  `consults_reviewer(mode)`: `ByMode` asks the reviewer under `auto` and
+  `supervised` and the human under `ask` (prior behavior); `On` extends the
+  reviewer to `ask`; `Off` withdraws it everywhere. `read-only` and `full`
+  never consult. `deny_is_final(mode)`: `auto` and `supervised` only, so
+  under `ask` with `On` a reviewer `Deny` escalates with its reason and the
+  human wait starts at the denial.
+- Plumbed `Runtime.approval_delegate` → `AgentProfile` →
+  `CompiledAgentPlan::approval_delegate()` → `SessionToolGate`. Not part of
+  the plan digest: it changes who is asked, never what the model may do.
+- Config: `approval_delegate: on|off` top-level and per profile,
+  `QQ_APPROVAL_DELEGATE`, `ConfigKey::ApprovalDelegate` (trust-gated,
+  sensitive). The root translates `Option<ApprovalDelegateSetting>` to
+  `ApprovalDelegate` in `src/runtime.rs`; the request override wins over the
+  profile.
+- The reviewer prompt names the mode with an `Ask` arm and says deny is
+  final under `auto`/`supervised` and escalates under `ask`.
+
+The plan's "default `auto` profile turns it on only when a delegate is
+configured" is satisfied by construction: without `reviewer_model` or
+`jev_approval` there is no reviewer to consult, and `ByMode` under `auto`
+asks the human as before.
+
+Tests: five DA3 cases in `sessions/tests/approvals.rs` (`Off` withdraws the
+reviewer under `auto`; `On` lets the reviewer approve under `ask`; `On`
+escalates a reviewer denial under `ask`; `ByMode` is the prior behavior;
+`read-only`/`full` never consult), two `qq-config` tests, and the root test
+`approval_delegate_reaches_the_plan_from_config_profile_and_override`.
+Gates: `cargo test --workspace`, fmt, clippy `-D warnings`. No protocol or
+schema change.
+
+### 2026-09-23 — DA5 merged: Jev decides when `jev_approval` is on
+
+Branch `feat/eng-862-da5-jev-approval`, [#144](https://github.com/retsu-AI/qq/pull/144).
+ADR-0041 accepted (`docs/adr/0041-jev-delegated-approval.md`); it
+supersedes ADR-0030's "never authorizes side effects" for this lane only.
+
+- `src/runtime/approval.rs`: `JevApprovalReviewer` wraps
+  `ModelApprovalReviewer` unconditionally at the composition root. Whether
+  Jev is consulted is read per hold from the held call's workspace config
+  (`jev_approval`), cached per credential epoch; off means the fallback is
+  asked directly and the key is never read (ADR-0030 holds). No key with it
+  on falls through and records `no TypeSafe key` in the escalation reason.
+- One `choice` question with labels `approve`/`deny`/`abstain` over the
+  masked preview (8 KiB per section, 64 KiB per request; over-bound
+  abstains). Bounded at 5 s. The reply must pin `jev-1.13.0`, carry usage,
+  and have the chosen label at max with confidence and probability ≥ 0.7;
+  anything else is `JevAbstain::{NoKey, OverBound, Transport, Malformed,
+  LowConfidence, Abstained}` and falls through to `reviewer_model`, then the
+  human, with the reason prepended. Never fails open. Spend is summed onto
+  the fallback's.
+- `qq_core::DelegateIdentity { Reviewer, Jev }` on `ReviewVerdict`; the
+  delegate grant row writes `source = 'jev'` or `'delegate'`, so an audit can
+  tell them apart (the DA4 note is closed). No schema bump: the column has
+  existed since 35; the per-run cap counts both.
+- Config: `jev_approval: bool` top-level and per profile, `QQ_JEV_APPROVAL`,
+  `ConfigKey::JevApproval` (trust-gated). `qq --tui-qa-root` rejects it like
+  the other Jev capabilities.
+
+Tests: six in `runtime::approval` (contract over a local HTTP server, off
+means no request, transport failure escalates with the reason, over-bound
+abstains, low confidence abstains, deny is final under `auto`),
+`a_jev_approval_records_a_grant_row_that_names_jev_and_still_matches_exactly`,
+config independence and trust tests. Gates: `cargo test --workspace`, fmt,
+clippy `-D warnings`.
+
+The plan's acceptance 2 (`Forbidden` never reaches a delegate with both
+configured) is covered by
+`a_delegate_grant_never_lifts_forbidden_and_a_forbidden_call_never_reaches_the_reviewer`
+(DA4) plus the DA5 wrapper being in front of that same seam; a `Forbidden`
+call never reaches the gate's hold, so neither delegate is constructed a
+request.
+
+### 2026-09-23 — DA2 in review: two clocks
+
+Branch `feat/eng-862-da2-two-clocks`, [#150](https://github.com/retsu-AI/qq/pull/150),
+against `main`. RR9 (ENG-871) was still `Planned`, so this slice ships RR9's
+minimum and the RR9 row in `run-reliability.md` says so.
+
+- `DEFAULT_APPROVAL_TIMEOUT: Option<Duration> = None`. An interactive hold
+  has **no server deadline**: it ends when the client answers, the run's own
+  deadline cancels, or the run is cancelled. `denied_timeout` only occurs when
+  `approval_timeout_seconds` is set.
+- `DEFAULT_DELEGATE_TIMEOUT = 20 s`, a backstop for a delegate that breaks
+  its own bound (Jev 5 s, reviewer 10 s). When it fires the pending review is
+  dropped and the human is asked; the human clock, when there is one, starts
+  then, at an `Escalate`, or at a non-final `Deny`. The plan said 10 s; the
+  slice chose 20 s so a slow reviewer model on a cold provider is not cut off
+  before its own 10 s timeout plus transport.
+- `SessionRuntimeOptions { approval_timeout: Option<Duration>,
+  delegate_timeout }`; `RuntimeHandler::open_with(factory, approval_timeout)`
+  threads the configured wait through `qq run`, the TUI, and `qq serve`.
+- Config: `approval_timeout_seconds` 1..=86400, validated in `finish`
+  (`ConfigError::InvalidApprovalTimeout`), not trust-gated because it only
+  shortens a wait. `qq explain approval_timeout`; `qq show` prints it.
+- Headless keeps `REVIEWER_DENY_GRACE` (20 s) for the unattended deny after
+  an escalation; without a delegate the deny is immediate.
+
+Tests: `a_reviewer_that_never_answers_is_cut_off_by_its_own_clock_not_the_humans`,
+`a_stuck_reviewer_and_an_absent_human_settle_on_the_human_clock_after_the_delegates`,
+`an_interactive_hold_has_no_server_deadline_by_default`,
+`approval_timeout_is_absent_by_default_and_bounded_when_set`. The DA1 test
+`a_reviewer_that_never_answers_is_bounded_by_the_approval_wait` is replaced
+by the first of these. Gates: `cargo test --workspace`, fmt, clippy
+`-D warnings`, on `main` after OB5/OB9.
+
+Shipped: #125, DA1, DA3, DA4, DA5. In review: DA2 (#150), docs (#123, stacked
+on DA2). Open: DA6.
