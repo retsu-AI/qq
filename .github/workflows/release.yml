@@ -179,3 +179,58 @@ jobs:
             --generate-notes \
             --verify-tag \
             dist/*
+
+  # Regenerates Formula/qq.rb in retsu-AI/homebrew-qq from the published
+  # SHA256SUMS. Skipped, not failed, until the tap exists and the
+  # HOMEBREW_TAP_TOKEN secret (a fine-grained PAT with contents: write on the
+  # tap repository) is set; see docs/runbooks/release.md § Homebrew tap.
+  homebrew:
+    name: update Homebrew tap
+    needs: [verify, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for the tap token
+        id: token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -n "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set; skipping the Homebrew tap update"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.present == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.token.outputs.present == 'true'
+        with:
+          key: xtask
+      - name: Render the formula from the release checksums
+        if: steps.token.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir dist
+          cargo xtask homebrew-formula --version "${{ needs.verify.outputs.version }}" --sums dist/SHA256SUMS > qq.rb
+          cat qq.rb
+      - name: Push Formula/qq.rb to retsu-AI/homebrew-qq
+        if: steps.token.outputs.present == 'true'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/retsu-AI/homebrew-qq" tap
+          mkdir -p tap/Formula
+          cp qq.rb tap/Formula/qq.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/qq.rb
+          if git diff --cached --quiet; then
+            echo "Formula/qq.rb already at v${{ needs.verify.outputs.version }}"
+            exit 0
+          fi
+          git commit -q -m "qq ${{ needs.verify.outputs.version }}"
+          git push
