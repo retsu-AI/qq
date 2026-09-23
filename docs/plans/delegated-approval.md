@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | DA1 in review (`feat/eng-862-da1-reviewer-deny-final`, stacked on #125). Next: DA4, then DA3 |
+| Now | DA1 and DA4 in review (`feat/eng-862-da1-reviewer-deny-final` → `feat/eng-862-da4-delegate-grants`, stacked on #125). Next: DA3 |
 | Shipped | — |
 | Open | DA1–DA6 |
 | Ledger | [`progress/delegated-approval.md`](./progress/delegated-approval.md) |
