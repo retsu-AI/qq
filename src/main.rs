@@ -19,6 +19,7 @@ mod catalog;
 mod cli;
 mod doctor;
 mod headless;
+mod init;
 mod mcp;
 mod output;
 mod plan;
@@ -66,6 +67,7 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         Some(cli::Command::Doctor(args)) => {
             return doctor_command(args, &overrides).await;
         }
+        Some(cli::Command::Init(args)) => run_blocking_command(move || init_command(args)).await?,
         Some(cli::Command::Version) => print!("{}", version_report()),
         None => interactive(&overrides, cli.session, cli.tui_qa_root).await?,
     }
@@ -864,21 +866,29 @@ fn config_command(
     let loader = config::ConfigLoader::system()?;
     match command {
         cli::ConfigCommand::Paths => {
-            println!("global:  {}", loader.paths().global_dir().display());
-            println!(
-                "global TUI: {}",
-                loader.paths().global_dir().join("tui.ron").display()
-            );
-            println!("data:    {}", loader.paths().data_dir().display());
-            println!("managed: {}", loader.paths().managed_dir().display());
-            println!(
-                "organizations: {}",
-                loader.paths().organizations_file().display()
-            );
-            println!(
-                "organization cache: {}",
-                loader.paths().organizations_cache_dir().display()
-            );
+            let paths = loader.paths();
+            let rows: [(&str, PathBuf); 7] = [
+                ("global", paths.global_dir().to_path_buf()),
+                ("global config", paths.global_dir().join("config.ron")),
+                ("global TUI", paths.global_dir().join("tui.ron")),
+                ("data", paths.data_dir().to_path_buf()),
+                ("managed", paths.managed_dir().to_path_buf()),
+                ("organizations", paths.organizations_file()),
+                ("organization cache", paths.organizations_cache_dir()),
+            ];
+            let width = rows
+                .iter()
+                .map(|(label, _)| label.len() + 1)
+                .max()
+                .unwrap_or(0);
+            for (label, path) in &rows {
+                let state = if path.exists() { "exists" } else { "missing" };
+                println!(
+                    "{:<width$} {} ({state})",
+                    format!("{label}:"),
+                    path.display()
+                );
+            }
         }
         cli::ConfigCommand::Sources => {
             let request = overrides.load_request()?;
@@ -1355,6 +1365,26 @@ async fn doctor_command(
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// `qq init`. Runs on a blocking thread: it reads one line from stdin when
+/// choosing interactively and writes one file.
+fn init_command(args: cli::InitArgs) -> Result<(), Box<dyn Error>> {
+    let paths = config::ConfigPaths::system()?;
+    let cwd = std::env::current_dir()?;
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    let result = if stdin.is_terminal() {
+        let mut chooser = stdin.lock();
+        init::run(&paths, &cwd, args, Some(&mut chooser), &mut stdout)
+    } else {
+        init::run(&paths, &cwd, args, None::<&mut io::Empty>, &mut stdout)
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn auth_command(command: cli::AuthCommand) -> Result<(), Box<dyn Error>> {
