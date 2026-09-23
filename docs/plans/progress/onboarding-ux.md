@@ -9,8 +9,8 @@ below, newest last.
 | OB0 | Audit, plan, user guide, community files, P0 error text | In review | `feat/eng-875-onboarding-ux` | ENG-875; ENG-859 shipped separately as #119 |
 | OB1 | TUI opens without a model | Shipped (#136) | `feat/eng-860-tui-without-model` | ENG-860; shares the branch with OB2 |
 | OB2 | TUI opens without a credential; empty state names the remedy | Shipped (#136) | `feat/eng-860-tui-without-model` | ENG-876; shares the branch with OB1 |
-| OB3 | Request-time credential errors name provider and remedy; `GOOGLE_API_KEY` alias | In review | `fix/eng-877-request-credential-errors` | ENG-877 |
-| OB4 | `qq doctor` | Planned | | ENG-878 |
+| OB3 | Request-time credential errors name provider and remedy; `GOOGLE_API_KEY` alias | Shipped (#137) | `fix/eng-877-request-credential-errors` | ENG-877 |
+| OB4 | `qq doctor` | In review | `feat/eng-878-doctor` | ENG-878; independent of OB1–OB3 |
 | OB5 | `qq init`; `config paths` marks existing files | Planned | | ENG-879 |
 | OB6 | `install.sh`, Homebrew tap, Nix package, binstall | Planned | | ENG-880 |
 | OB7 | In-TUI trust prompt | Planned | | ENG-881; needs ADR + protocol row in root |
@@ -71,3 +71,19 @@ environment variable `XAI_API_KEY` ``. `HttpCredential::ApiKey` gained
 plan-time message names both. Descriptor still reports `GEMINI_API_KEY` so
 the plan digest is spelling-independent. Tests in qq-provider (both feature
 profiles), qq-auth, and the bin (child process with `GOOGLE_API_KEY` only).
+
+### 2026-09-22 — OB4 `qq doctor` in review
+
+Branch `feat/eng-878-doctor` off `v0.1.3`. New `src/doctor.rs`: `run_checks`
+returns a `DoctorReport` (no printing); `render_text` / `render_json` are
+separate. Eight checks in order: configuration, project trust, model,
+credential, credential store, server, workspace, data; statuses
+`ok`/`warn`/`fail`/`skipped`; exit 1 only on `fail`. Credential logic mirrors
+`RuntimeFactory::provider_authenticated`; the AWS helpers in `runtime.rs`
+became `pub(crate)` so both share one definition. No provider network;
+server discovery reuses `discover_at` over loopback. Tests: 11 in
+`doctor::tests` + 1 CLI parse test (temp roots, `MemoryKeyring`,
+`UnavailableKeyring`). Gates green: fmt, clippy `-D warnings`, `cargo test
+--workspace`. Docs: guide `cli.md`, `troubleshooting.md`, `quickstart.md`,
+`README.md`. Deviation: the keyring is not probed blindly (unlock prompts);
+it is exercised only through the model's stored credential. No perf gate.

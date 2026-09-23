@@ -38,6 +38,10 @@ qq config check     # configuration is valid (model: openai/gpt-5.6)
 Or for one project, in `<repo>/.qq/config.ron` with the same content, or for
 one command with `--model openai/gpt-5.6` or `QQ_MODEL=openai/gpt-5.6`.
 
+`qq doctor` confirms everything before the first run: configuration, model,
+credential, and server, one line each, with the fix next to anything that
+fails ([CLI › `qq doctor`](cli.md#qq-doctor---json)).
+
 Do not know which model to pick? `qq ask --model PROVIDER/MODEL "hi"` with
 any route from [Providers](providers.md#built-in-models); the TUI's `/models`
 lists every model your credentials unlock.
