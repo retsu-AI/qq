@@ -9,20 +9,24 @@ so sessions survive restarts and many agents can run at once.
 
 ## Install
 
-Download the archive for your platform from the
-[latest release](https://github.com/retsu-AI/qq/releases/latest), verify it
-against `SHA256SUMS`, and put `qq` on your `PATH`:
+Linux and macOS:
 
 ```sh
-V=0.1.2 T=x86_64-unknown-linux-musl   # or aarch64-unknown-linux-musl, aarch64-apple-darwin, x86_64-apple-darwin
-curl -fsSLO "https://github.com/retsu-AI/qq/releases/download/v$V/qq-v$V-$T.tar.gz"
-tar -xzf "qq-v$V-$T.tar.gz" && install -m 755 qq ~/.local/bin/qq
-qq --version
+curl -fsSL https://raw.githubusercontent.com/retsu-AI/qq/main/install.sh | sh
 ```
 
-Windows: the `x86_64-pc-windows-msvc.zip`. From source:
-`cargo install --git https://github.com/retsu-AI/qq --locked qq`. Details and
-checksums: [Install](docs/guide/install.md).
+The script picks the archive for your machine, verifies it against the
+release's `SHA256SUMS`, and installs to `~/.local/bin`. Other routes:
+
+| | |
+| --- | --- |
+| Homebrew | `brew install retsu-ai/qq/qq` (once the tap is published) |
+| Nix | `nix run github:retsu-AI/qq` or `nix profile install github:retsu-AI/qq` |
+| cargo-binstall | `cargo binstall --git https://github.com/retsu-AI/qq qq` |
+| From source | `cargo install --git https://github.com/retsu-AI/qq --locked qq` |
+| Windows | the `x86_64-pc-windows-msvc.zip` from the [latest release](https://github.com/retsu-AI/qq/releases/latest) |
+
+Pinning, checksums, and upgrades: [Install](docs/guide/install.md).
 
 ## First run
 
