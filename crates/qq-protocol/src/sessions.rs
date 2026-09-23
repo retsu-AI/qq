@@ -375,9 +375,10 @@ pub enum ApprovalResolution {
     ApprovedByReviewer,
     Denied,
     DeniedTimeout,
-    /// Denied by the configured approval reviewer model. Live for `supervised`
-    /// sessions (write children), where a reviewer denial is final; for root
-    /// `auto` sessions the reviewer still escalates to a human instead.
+    /// Denied by the configured approval reviewer model, without a human in
+    /// the loop. Final under `supervised` (write children) and `auto` (the
+    /// dangerous-shaped calls that mode holds): the model receives the
+    /// reviewer's reason as a tool error.
     DeniedByReviewer,
     /// The user answered an `ask_user` question (protocol 21); the call
     /// completed with the answers as its result.

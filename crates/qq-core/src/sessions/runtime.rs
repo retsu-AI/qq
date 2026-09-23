@@ -424,10 +424,11 @@ impl ReviewVerdict {
     }
 }
 
-/// The reviewer's judgement. For `Auto` sessions anything other than a clear
-/// `Approve` leaves the call waiting for a human: the reviewer can expedite
-/// approvals but never widens a denial. For `Supervised` sessions `Deny` is
-/// final and `Escalate` reaches the human.
+/// The reviewer's judgement for a call the mode held. `Approve` executes it
+/// and `Deny` settles it as a tool error, under `Auto` and `Supervised`
+/// alike; `Escalate` hands the call to the human, whose wait starts at the
+/// escalation. A reviewer that cannot answer must return `Escalate`, never
+/// hang and never `Approve`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewDecision {
     Approve,
@@ -435,7 +436,8 @@ pub enum ReviewDecision {
     Escalate {
         reason: String,
     },
-    /// The reviewer judges the call unsafe or unnecessary for the task.
+    /// The reviewer judges the call unsafe or unnecessary for the task. Final:
+    /// the call is denied and the model receives the reason as a tool error.
     Deny {
         reason: String,
     },

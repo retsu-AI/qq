@@ -553,9 +553,9 @@ pub(super) fn resolve_approval_by_reviewer(
     Ok(Some(event))
 }
 
-/// A reviewer denial for a `Supervised` call: the call settles as denied with
-/// the reviewer's bounded reason in one transaction, exactly like a human
-/// denial. `Ok(None)` when a client resolution won the race.
+/// A reviewer denial: the call settles as denied with the reviewer's bounded
+/// reason in one transaction, exactly like a human denial. Final under `auto`
+/// and `supervised`. `Ok(None)` when a client resolution won the race.
 pub(super) fn deny_approval_by_reviewer(
     connection: &mut Connection,
     store_id: StoreId,

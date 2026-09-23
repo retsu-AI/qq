@@ -1052,12 +1052,15 @@ Each session has an approval mode:
   calls each request approval.
 - `auto` (default) — workspace-contained edits, writes, and MCP calls execute
   without prompting; shell commands the classifier allows or a grant covers
-  execute; everything it would prompt for asks (or is adjudicated by the
-  configured reviewer model); `Forbidden` shapes are refused.
+  execute; everything it would prompt for is held. With a `reviewer_model`
+  configured the reviewer settles the hold: `approve` executes, `deny` is
+  final and the model receives the reason as a tool error, `escalate` (or a
+  reviewer timeout or outage) asks the human, whose wait starts at the
+  escalation rather than when the reviewer was consulted. Without a reviewer
+  the human is asked. `Forbidden` shapes are refused before any of this.
 - `supervised` — every mutating, shell, and MCP call is held and adjudicated
-  by the reviewer model regardless of grants; a reviewer denial is final and a
-  reviewer escalation reaches the human. Only spawned write children run here;
-  a client cannot select it directly.
+  by the reviewer model regardless of grants, under the same three verdicts.
+  Only spawned write children run here; a client cannot select it directly.
 - `full` — everything executes without prompting, except shell commands the
   classifier marks `Forbidden` (§ Shell Classification): `full` is
   unrestricted authority over the workspace, not over the machine.

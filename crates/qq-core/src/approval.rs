@@ -46,8 +46,21 @@ pub(crate) const UNATTENDED_QUESTION_RESULT: &str =
     "No user is available to answer questions in this run; decide without asking.";
 pub(crate) const DECLINED_QUESTION_RESULT: &str =
     "The user declined to answer; proceed with your best judgement.";
-pub(crate) const REVIEWER_DENIED_RESULT: &str =
-    "The approval reviewer denied this tool call for the supervised sub-agent:";
+
+/// The model-facing prefix of a reviewer denial. Final under `supervised`
+/// (every held call of a write child) and under `auto` (the dangerous-shaped
+/// shell and ungranted hosts that mode holds); the reviewer's bounded reason
+/// follows. No other mode consults the reviewer.
+pub(crate) fn reviewer_denied_result(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::Supervised => {
+            "The approval reviewer denied this tool call for the supervised sub-agent:"
+        }
+        ApprovalMode::Auto | ApprovalMode::Ask | ApprovalMode::ReadOnly | ApprovalMode::Full => {
+            "The approval reviewer denied this tool call:"
+        }
+    }
+}
 
 /// The model-facing refusal for a `Forbidden` shell command: the rule(s) that
 /// refused it and what to do instead. A tool error, not a run failure.

@@ -2201,8 +2201,9 @@ the workspace owns, reinstalling dependencies, editing source files); escalate a
 externally visible, credential-touching, system-level, or ambiguous (force-pushing shared \
 branches, sudo, piped installers, writes outside the workspace). (2) necessity — when a task \
 brief is given, the action must be plausibly necessary for that task; deny actions clearly \
-outside it. For a supervised sub-agent your deny is final; for a root session it only \
-escalates to the human. \
+outside it. Your deny is final under every mode you are consulted for: the agent receives \
+it as a tool error and no human is asked. Escalate when you are unsure; a human decides \
+escalations. \
 Reply with exactly one JSON object on one line and nothing else: \
 {\"verdict\":\"approve\"} or {\"verdict\":\"escalate\",\"reason\":\"...\"} \
 or {\"verdict\":\"deny\",\"reason\":\"...\"}.";
@@ -2221,8 +2222,15 @@ async fn collect_reviewer_verdict(
         request.tool_name,
         request.workspace,
         match request.mode {
-            qq_protocol::ApprovalMode::Supervised => "supervised sub-agent (your deny is final)",
-            _ => "root session (deny escalates to the human)",
+            qq_protocol::ApprovalMode::Supervised => {
+                "supervised sub-agent: every non-read action is held for you"
+            }
+            qq_protocol::ApprovalMode::Auto => {
+                "auto root session: only dangerous-shaped shell and ungranted hosts are held for you"
+            }
+            qq_protocol::ApprovalMode::ReadOnly
+            | qq_protocol::ApprovalMode::Ask
+            | qq_protocol::ApprovalMode::Full => "root session",
         }
     );
     match request.origin {

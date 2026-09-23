@@ -894,11 +894,14 @@ Resolution values: `approved_once`, `approved_for_session`,
 `denied_by_reviewer`, `answered`. `answered` settles an `ask_user` hold: the
 call is `completed` and its `result` is the rendered questions and answers
 (or the decline text). The reviewer resolutions are written by the configured
-`reviewer_model` without a human: `approved_by_reviewer` for `auto` sessions'
-dangerous shell and for every held call of a `supervised` child;
-`denied_by_reviewer` only for `supervised` children, where the denial is final
-and the child receives it as a tool error. Reviewer spend is charged to the
-reviewed run.
+`reviewer_model` without a human, for the calls `auto` holds (dangerous-shaped
+shell, ungranted hosts) and for every held call of a `supervised` child:
+`approved_by_reviewer` executes the call; `denied_by_reviewer` is final under
+both modes and the model receives the reviewer's reason as a tool error. A
+reviewer `escalate` leaves the hold open for a client, whose wait starts at
+the escalation. The hold (`tool_approval_requested`) is always published
+before the reviewer is consulted, so a client may still answer first; the
+first durable resolution wins. Reviewer spend is charged to the reviewed run.
 
 Approval modes are `read_only`, `supervised`, `ask`, `auto` (default), and
 `full`. `supervised` is never advertised for root sessions and cannot be set by
