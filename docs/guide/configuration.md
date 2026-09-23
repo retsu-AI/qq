@@ -330,7 +330,7 @@ Themes are `.ron` files in `<global>/themes/` or `.qq/themes/`; shape in
 | `QQ_CONFIG_CONTENT` | an inline RON document applied after `QQ_CONFIG` |
 | `QQ_JEV_CHECKPOINTS` | `off` `final` `enforce` |
 | `QQ_JEV_ROUTING` | `on` `off` |
-| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY` | built-in provider credentials when nothing is stored |
+| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `GOOGLE_API_KEY`, `XAI_API_KEY` | built-in provider credentials when nothing is stored (`GEMINI_API_KEY` wins over `GOOGLE_API_KEY`) |
 | `AWS_PROFILE`, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`, `AWS_CONTAINER_CREDENTIALS_*` | Bedrock default credential chain |
 | `TYPESAFE_API_KEY` | Jev, when not stored |
 | `COLORTERM` | `truecolor` / `24bit` selects the `ink` default theme |

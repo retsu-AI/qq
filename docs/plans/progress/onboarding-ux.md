@@ -7,9 +7,9 @@ below, newest last.
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | OB0 | Audit, plan, user guide, community files, P0 error text | In review | `feat/eng-875-onboarding-ux` | ENG-875; ENG-859 shipped separately as #119 |
-| OB1 | TUI opens without a model | In review | `feat/eng-860-tui-without-model` | ENG-860; shares the branch with OB2 |
-| OB2 | TUI opens without a credential; empty state names the remedy | In review | `feat/eng-860-tui-without-model` | ENG-876; shares the branch with OB1 |
-| OB3 | Request-time credential errors name provider and remedy; `GOOGLE_API_KEY` alias | Planned | | ENG-877 |
+| OB1 | TUI opens without a model | Shipped (#136) | `feat/eng-860-tui-without-model` | ENG-860; shares the branch with OB2 |
+| OB2 | TUI opens without a credential; empty state names the remedy | Shipped (#136) | `feat/eng-860-tui-without-model` | ENG-876; shares the branch with OB1 |
+| OB3 | Request-time credential errors name provider and remedy; `GOOGLE_API_KEY` alias | In review | `fix/eng-877-request-credential-errors` | ENG-877 |
 | OB4 | `qq doctor` | Planned | | ENG-878 |
 | OB5 | `qq init`; `config paths` marks existing files | Planned | | ENG-879 |
 | OB6 | `install.sh`, Homebrew tap, Nix package, binstall | Planned | | ENG-880 |
@@ -54,3 +54,20 @@ remedy; `qq ask`/`qq run` still exit with `no model is configured`.
 Deviation: OB2 acceptance said `guide/providers.md`; the guidance landed in
 `guide/tui.md` and `guide/troubleshooting.md` where the states are described.
 No protocol change; no perf gate named.
+
+### 2026-09-22 — OB3 in review
+
+`RequestCredentialError::Missing` now carries an optional `Arc<str>` remedy
+that `qq-auth` authors once per request-credential provider (xAI, Codex) and
+attaches when mapping `ProviderCredentialMissing` /
+`StoredCredentialNotRegistered` / `StoredCredentialMissing`; `qq-provider`
+displays it opaquely, keeps the old text when absent, and the
+`Authentication` classification is unchanged. `qq ask hi` on `xai/...` with
+nothing stored reads `` provider response failed: no credential for provider
+`xai`: run `qq auth login xai --oauth` or `qq auth login xai` or set the
+environment variable `XAI_API_KEY` ``. `HttpCredential::ApiKey` gained
+`alternate_variables`; google lists `GOOGLE_API_KEY`, read after
+`GEMINI_API_KEY` by `resolve_provider_credential_with_aliases`, and the
+plan-time message names both. Descriptor still reports `GEMINI_API_KEY` so
+the plan digest is spelling-independent. Tests in qq-provider (both feature
+profiles), qq-auth, and the bin (child process with `GOOGLE_API_KEY` only).

@@ -86,19 +86,28 @@ supply everything through `QQ_CONFIG_CONTENT` and environment credentials.
 
 The model's provider has no stored credential and no environment variable.
 Do either. Check what is stored with `qq auth list`. The same shape appears
-for `anthropic` / `ANTHROPIC_API_KEY` and `google` / `GEMINI_API_KEY`.
+for `anthropic` / `ANTHROPIC_API_KEY` and for `google`, whose message ends
+`` `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) ``: either variable works, and
+`GEMINI_API_KEY` wins when both are set.
 
 ### `environment variable `NAME` is not set`
 
 Configuration references `Env("NAME")` explicitly and the variable is unset
 in this shell.
 
-### `provider response failed: request credentials are missing`
+### `provider response failed: no credential for provider `xai`: run `qq auth login xai --oauth` or `qq auth login xai` or set the environment variable `XAI_API_KEY``
 
 Same cause for providers that resolve credentials at request time (`xai`,
-`openai-codex`): nothing stored under `PROVIDER/default` (or the configured
-profile) and no `XAI_API_KEY`. `qq auth login xai` or `qq auth login
-openai-codex`. Naming the provider in this message is planned (OB3).
+`openai-codex`), so it surfaces when the first request is sent rather than at
+startup: nothing stored under `PROVIDER/default` and, for xAI, no
+`XAI_API_KEY`. Run one of the commands named. `openai-codex` reads no
+environment variable, so its message offers only `qq auth login openai-codex`.
+
+With a configured profile the message names it instead: `` credential
+`xai/work` is not registered: run `qq auth login xai --oauth --profile work`
+or `qq auth login xai --profile work` … ``. If the entry exists but the
+keyring lost its secret: `` credential `xai/work` is registered, but its
+secret is missing: run `qq auth logout xai/work`, then … ``.
 
 ### `credential `…` is not registered`
 
