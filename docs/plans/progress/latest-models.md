@@ -2,7 +2,7 @@
 
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
-| ENG-885.1 | GPT-6 catalogs and authoritative Codex discovery | In progress | `feat/eng-885-latest-models` | Preserve explicit models and offline fallback |
+| ENG-885.1 | GPT-6 catalogs and authoritative Codex discovery | In review | [PR 142](https://github.com/retsu-AI/qq/pull/142) | Preserve explicit models and offline fallback |
 | ENG-885.2 | Opus 5.5 signed thinking replay | Planned | follow-up | Separate durable-storage/recovery slice; not advertised as supported |
 
 ## 2026-09-23
