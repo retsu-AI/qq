@@ -108,7 +108,8 @@ impl LoadedRuntime {
         }
         profile = profile
             .with_context_cache(Arc::clone(&runtime.context_cache))
-            .with_turn_recovery(runtime.turn_recovery);
+            .with_turn_recovery(runtime.turn_recovery)
+            .with_approval_delegate(runtime.approval_delegate);
         Ok(Self::new(CompiledAgentPlan::compile_blocking(profile)?))
     }
 
@@ -385,7 +386,9 @@ pub struct ReviewRequest {
     /// `MAX_REVIEW_BRIEF_BYTES`. `None` for root sessions.
     pub task_brief: Option<String>,
     /// The session's approval mode. The reviewer's `Deny` is final under
-    /// both `Auto` and `Supervised`; the mode tells it what that mode holds.
+    /// `Auto` and `Supervised`; under `Ask` (reached only when the operator
+    /// opted the delegate in) a `Deny` escalates to the human. The mode tells
+    /// the reviewer what that mode holds.
     pub mode: ApprovalMode,
     /// The last `MAX_REVIEW_RECENT_ACTIONS` finished tool calls of the run.
     pub recent_actions: Vec<RecentAction>,

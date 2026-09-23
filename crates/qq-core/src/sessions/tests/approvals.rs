@@ -1864,6 +1864,8 @@ async fn client_resolution_wins_over_a_late_reviewer_approval() {
 
 #[tokio::test]
 async fn ask_mode_never_consults_the_reviewer() {
+    // DA3: with no delegate choice configured, `ask` is the human's mode. A
+    // configured reviewer is not consulted, before or after the answer.
     let (reviewer, consulted) =
         StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let mut harness = approval_harness_with_reviewer(
@@ -1888,6 +1890,223 @@ async fn ask_mode_never_consults_the_reviewer() {
     .unwrap();
     collect_through_finished(&mut harness.events).await;
     assert!(consulted.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ask_mode_with_the_delegate_on_lets_the_reviewer_approve_the_hold() {
+    // DA3: `approval_delegate: on` routes an `ask` hold to the reviewer. Its
+    // Approve settles the call as a reviewer approval and no human answers.
+    // The hold is still published first so an attached client can win.
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+    let mut harness = approval_harness_with_delegate(
+        ApprovalMode::Ask,
+        "__test_mutate",
+        "{}",
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+        None,
+        Some(reviewer),
+        approval::ApprovalDelegate::On,
+    )
+    .await;
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. }))
+    );
+    assert!(observed.iter().any(|event| matches!(
+        event.event,
+        SessionEvent::ToolApprovalResolved {
+            resolution: ApprovalResolution::ApprovedByReviewer,
+            ..
+        }
+    )));
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolCallFinished { tool_call }
+            if tool_call.state == ToolCallState::Completed
+    )));
+    assert_eq!(consulted.lock().unwrap().len(), 1);
+    let request = &consulted.lock().unwrap()[0];
+    assert_eq!(request.mode, ApprovalMode::Ask);
+}
+
+#[tokio::test]
+async fn ask_mode_with_the_delegate_on_escalates_a_reviewer_denial_to_the_human() {
+    // DA3: under `ask` the operator asked to decide everything, so a reviewer
+    // Deny is advice, not a verdict. The hold stays open, the human's wait
+    // starts at the denial, and the human's answer stands.
+    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Deny {
+        reason: "looks unnecessary".to_owned(),
+    }));
+    let wait = Duration::from_millis(1_000);
+    let mut harness = approval_harness_with_delegate(
+        ApprovalMode::Ask,
+        "__test_mutate",
+        "{}",
+        1,
+        wait,
+        None,
+        Some(reviewer),
+        approval::ApprovalDelegate::On,
+    )
+    .await;
+    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    // Let most of the original wait elapse before the reviewer answers, then
+    // answer after the original deadline would have passed: the restarted
+    // wait is what bounds the human.
+    tokio::time::sleep(wait / 2).await;
+    release.send(()).unwrap();
+    tokio::time::sleep(wait * 7 / 10).await;
+    let receipt = respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        tool_call.id,
+        ApprovalDecision::ApproveOnce,
+    )
+    .await
+    .expect("the human's answer inside the restarted wait must stand");
+    assert!(matches!(
+        receipt.outcome,
+        CommandOutcome::ToolApprovalResolved {
+            resolution: ApprovalResolution::ApprovedOnce,
+            ..
+        }
+    ));
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(
+        !observed.iter().any(|event| matches!(
+            event.event,
+            SessionEvent::ToolApprovalResolved {
+                resolution: ApprovalResolution::DeniedByReviewer,
+                ..
+            }
+        )),
+        "an ask-mode reviewer denial is never final"
+    );
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolCallFinished { tool_call }
+            if tool_call.state == ToolCallState::Completed
+    )));
+}
+
+#[tokio::test]
+async fn the_delegate_off_withdraws_the_reviewer_under_auto() {
+    // DA3: `approval_delegate: off` is the strict profile: a reviewer is
+    // configured but every held call waits for a human, so an `auto` hold
+    // that the reviewer would have approved is answered by the client.
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+    let mut harness = approval_harness_with_delegate(
+        ApprovalMode::Auto,
+        "__test_shell",
+        r#"{"command":"git push origin main"}"#,
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+        None,
+        Some(reviewer),
+        approval::ApprovalDelegate::Off,
+    )
+    .await;
+    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    assert!(consulted.lock().unwrap().is_empty());
+    respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        tool_call.id,
+        ApprovalDecision::Deny,
+    )
+    .await
+    .unwrap();
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(consulted.lock().unwrap().is_empty());
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolApprovalResolved {
+            tool_call,
+            resolution: ApprovalResolution::Denied,
+        } if tool_call.state == ToolCallState::Denied
+    )));
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::ToolCallStarted { .. })),
+        "the human's denial is the verdict; nothing executed"
+    );
+}
+
+#[tokio::test]
+async fn full_mode_executes_without_the_reviewer_even_with_the_delegate_on() {
+    // DA3: `full` holds nothing a delegate may decide. Turning the delegate
+    // on does not introduce a reviewer round trip into a mode that executes.
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Deny {
+            reason: "would have denied".to_owned(),
+        }));
+    let mut harness = approval_harness_with_delegate(
+        ApprovalMode::Full,
+        "__test_shell",
+        r#"{"command":"git push origin main"}"#,
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+        None,
+        Some(reviewer),
+        approval::ApprovalDelegate::On,
+    )
+    .await;
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(consulted.lock().unwrap().is_empty());
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. }))
+    );
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolCallFinished { tool_call }
+            if tool_call.state == ToolCallState::Completed
+    )));
+}
+
+#[test]
+fn the_delegate_table_keeps_the_mode_as_the_ceiling() {
+    use approval::ApprovalDelegate::{ByMode, Off, On};
+    // Who is consulted: the reviewer only where the mode holds something and
+    // the choice admits it. ReadOnly and Full never consult; the strict
+    // profile (Off) consults nowhere; On extends to Ask and nothing else.
+    for delegate in [ByMode, On, Off] {
+        assert!(!delegate.consults_reviewer(ApprovalMode::ReadOnly));
+        assert!(!delegate.consults_reviewer(ApprovalMode::Full));
+    }
+    assert!(ByMode.consults_reviewer(ApprovalMode::Auto));
+    assert!(ByMode.consults_reviewer(ApprovalMode::Supervised));
+    assert!(!ByMode.consults_reviewer(ApprovalMode::Ask));
+    assert!(On.consults_reviewer(ApprovalMode::Auto));
+    assert!(On.consults_reviewer(ApprovalMode::Supervised));
+    assert!(On.consults_reviewer(ApprovalMode::Ask));
+    assert!(!Off.consults_reviewer(ApprovalMode::Auto));
+    assert!(!Off.consults_reviewer(ApprovalMode::Supervised));
+    assert!(!Off.consults_reviewer(ApprovalMode::Ask));
+    // Whose deny settles: the reviewer's only under the two modes where it is
+    // the delegate for what is held.
+    assert!(approval::ApprovalDelegate::deny_is_final(
+        ApprovalMode::Auto
+    ));
+    assert!(approval::ApprovalDelegate::deny_is_final(
+        ApprovalMode::Supervised
+    ));
+    assert!(!approval::ApprovalDelegate::deny_is_final(
+        ApprovalMode::Ask
+    ));
+    assert!(!approval::ApprovalDelegate::deny_is_final(
+        ApprovalMode::ReadOnly
+    ));
+    assert!(!approval::ApprovalDelegate::deny_is_final(
+        ApprovalMode::Full
+    ));
 }
 
 #[cfg(unix)]

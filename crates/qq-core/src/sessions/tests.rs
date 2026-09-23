@@ -919,6 +919,9 @@ struct ApprovalLoader {
     tool: &'static str,
     arguments: &'static str,
     tool_turns: usize,
+    /// Who settles the held call, as the composition root would configure
+    /// it on the plan.
+    delegate: approval::ApprovalDelegate,
 }
 
 impl RuntimeLoader for ApprovalLoader {
@@ -931,9 +934,16 @@ impl RuntimeLoader for ApprovalLoader {
             tool_turns: self.tool_turns,
             usage: None,
         };
+        let delegate = self.delegate;
         Box::pin(async move {
             Runtime::new(provider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+                .map(|runtime| {
+                    loaded_runtime(
+                        runtime.with_approval_delegate(delegate),
+                        &request.workspace,
+                        None,
+                    )
+                })
                 .map_err(|error| RuntimeLoadError {
                     kind: RunFailureKind::Configuration,
                     message: error.to_string(),
@@ -1221,6 +1231,30 @@ async fn approval_harness_with_reviewer(
     grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
     approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
 ) -> ApprovalHarness {
+    approval_harness_with_delegate(
+        mode,
+        tool,
+        arguments,
+        tool_turns,
+        approval_timeout,
+        grant_authority,
+        approval_reviewer,
+        approval::ApprovalDelegate::ByMode,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn approval_harness_with_delegate(
+    mode: ApprovalMode,
+    tool: &'static str,
+    arguments: &'static str,
+    tool_turns: usize,
+    approval_timeout: Duration,
+    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
+    approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
+    delegate: approval::ApprovalDelegate,
+) -> ApprovalHarness {
     let directory = tempfile::tempdir().unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
@@ -1236,6 +1270,7 @@ async fn approval_harness_with_reviewer(
             tool,
             arguments,
             tool_turns,
+            delegate,
         }),
     )
     .await

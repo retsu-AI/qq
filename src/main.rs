@@ -952,6 +952,7 @@ fn config_command(
                     "audit" => snapshot.provenance().audit(),
                     "jev_review" => snapshot.provenance().jev_review(),
                     "jev_routing" => snapshot.provenance().jev_routing(),
+                    "approval_delegate" => snapshot.provenance().approval_delegate(),
                     "reasoning_effort" => snapshot.provenance().reasoning_effort(),
                     "max_output_tokens" => snapshot.provenance().max_output_tokens(),
                     _ => field
@@ -1049,6 +1050,12 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
     println!("jev_review: {}", snapshot.jev_review().as_str());
     println!("jev_routing: {}", snapshot.jev_routing());
     println!(
+        "approval_delegate: {}",
+        snapshot
+            .approval_delegate()
+            .map_or("by_mode", config::ApprovalDelegateSetting::as_str)
+    );
+    println!(
         "reasoning_effort: {}",
         serde_json::to_string(&snapshot.reasoning_effort()).expect("effort is serializable")
     );
@@ -1114,6 +1121,9 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
                     config::ProfileApprovalMode::Full => "full",
                 };
                 parts.push(format!("approval_mode={mode}"));
+            }
+            if let Some(delegate) = profile.approval_delegate() {
+                parts.push(format!("approval_delegate={}", delegate.as_str()));
             }
             if let Some(tokens) = profile.max_output_tokens() {
                 parts.push(format!("max_output_tokens={tokens}"));
