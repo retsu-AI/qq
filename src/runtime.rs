@@ -1,5 +1,6 @@
 //! Application configuration to model-runtime composition.
 
+mod approval;
 mod routing;
 
 use std::{
@@ -694,11 +695,13 @@ impl RuntimeFactory {
         };
         if snapshot.jev_review() != qq_config::JevReviewMode::Off
             || snapshot.jev_routing()
+            || snapshot.jev_approval()
             || matches!(
                 std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref(),
                 Some("final" | "enforce")
             )
             || std::env::var("QQ_JEV_ROUTING").ok().as_deref() == Some("on")
+            || std::env::var("QQ_JEV_APPROVAL").ok().as_deref() == Some("on")
         {
             return Err(invalid(
                 "enabled Jev capabilities require external inference; use the ordinary profile",
@@ -1251,6 +1254,11 @@ impl RuntimeFactory {
                     && let Some(enabled) = profile.jev_routing()
                 {
                     overrides = overrides.with_jev_routing(enabled);
+                }
+                if request.overrides().jev_approval().is_none()
+                    && let Some(enabled) = profile.jev_approval()
+                {
+                    overrides = overrides.with_jev_approval(enabled);
                 }
                 if request.overrides().approval_delegate().is_none()
                     && let Some(setting) = profile.approval_delegate()
@@ -2341,6 +2349,7 @@ async fn collect_reviewer_verdict(
                         usage: None,
                         cost_usd_nanos: None,
                     },
+                    delegate: qq_core::DelegateIdentity::Reviewer,
                 };
             }
             None => break,
@@ -2349,6 +2358,7 @@ async fn collect_reviewer_verdict(
     ReviewVerdict {
         decision: parse_reviewer_decision(&text),
         spend,
+        delegate: qq_core::DelegateIdentity::Reviewer,
     }
 }
 
@@ -2461,9 +2471,20 @@ impl RuntimeHandler {
         // authority: config grants seed each new session's grant set, and
         // approve-for-workspace promotions write back through the loader's
         // configuration layer.
+        // The approval delegate chain: Jev first when the held call's
+        // workspace opted it in (`jev_approval`, trust-gated), then that
+        // workspace's `reviewer_model`, then the human. Both speak
+        // `ReviewDecision`; qq-core learns neither. Whether Jev is consulted
+        // is decided per hold from the workspace configuration, so one handle
+        // serves every workspace and a missing key falls through at the first
+        // hold rather than refusing startup.
+        let reviewer: Arc<dyn ApprovalReviewer> = Arc::new(approval::JevApprovalReviewer::new(
+            factory.clone(),
+            Arc::new(ModelApprovalReviewer::new(factory.clone())),
+        ));
         let options = SessionRuntimeOptions::new(database_path)
             .with_grant_authority(Arc::new(factory.clone()))
-            .with_approval_reviewer(Arc::new(ModelApprovalReviewer::new(factory.clone())));
+            .with_approval_reviewer(reviewer);
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
         Ok(Self { durable, factory })
     }
@@ -3398,7 +3419,7 @@ mod tests {
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Default)]
-    struct MemoryKeyring(Mutex<BTreeMap<String, Vec<u8>>>);
+    pub(super) struct MemoryKeyring(Mutex<BTreeMap<String, Vec<u8>>>);
 
     impl KeyringBackend for MemoryKeyring {
         fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
@@ -3428,7 +3449,7 @@ mod tests {
         }
     }
 
-    struct PanicKeyring;
+    pub(super) struct PanicKeyring;
 
     impl KeyringBackend for PanicKeyring {
         fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
@@ -3444,12 +3465,12 @@ mod tests {
         }
     }
 
-    struct RuntimeFixture {
+    pub(super) struct RuntimeFixture {
         root: PathBuf,
     }
 
     impl RuntimeFixture {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -3468,7 +3489,7 @@ mod tests {
             Self { root }
         }
 
-        fn path(&self, relative: impl AsRef<Path>) -> PathBuf {
+        pub(super) fn path(&self, relative: impl AsRef<Path>) -> PathBuf {
             self.root.join(relative)
         }
 
@@ -3478,7 +3499,10 @@ mod tests {
             )))
         }
 
-        fn factory_with_credentials(&self, credentials: CredentialStore) -> RuntimeFactory {
+        pub(super) fn factory_with_credentials(
+            &self,
+            credentials: CredentialStore,
+        ) -> RuntimeFactory {
             RuntimeFactory::new(
                 ConfigLoader::new(ConfigPaths::new(
                     self.path("global"),

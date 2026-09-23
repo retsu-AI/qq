@@ -120,6 +120,32 @@ them on stderr and remains ephemeral. Routing spends count against session run
 budgets. Owned children inherit the parent's routing activation; later user
 prompts resolve current configuration.
 
+## Jev as the approval delegate
+
+`jev_approval: true` (or `QQ_JEV_APPROVAL=on`) makes Jev the first delegate
+for tool calls the session's approval mode holds, ahead of `reviewer_model`
+and the human (ADR-0041). It is independent of review and routing and does
+not enable them; a stored key with it off is never read. Like the other Jev
+capabilities it is trust-gated in project files and profiles and refused by
+the credential-free `--tui-qa-root` fixture.
+
+Jev sees the approval preview only: the command or the diff, the host, the
+task brief, recent action names, the session's grants, and the mode. Each
+section is bounded to 8 KiB and secret-masked; the transcript is not sent. It
+answers one `choice` question (`approve`, `deny`, `abstain`) and the answer
+counts only when confidence and the winning probability both reach 0.7 under
+the pinned `jev-1.13.0` contract. `abstain`, low confidence, a malformed
+reply, a transport failure, a 5 s timeout, or a missing key falls through to
+`reviewer_model`, then to you, with the reason attached to the prompt. Jev is
+never failed open to approve. A Jev deny is final under `auto` and
+`supervised` and advice under `ask`, exactly like a reviewer-model deny; a
+Jev approve may record the exact command or host for the session and nothing
+wider. `Forbidden` shell shapes, blocked hosts, managed denies, and
+`ask_user` never reach it.
+
+Spend counts against the run's budget as reviewer spend. Inspect the setting
+with `qq config show` and `qq config explain jev_approval`.
+
 Explicit effort can be pinned independently of Jev in trusted configuration:
 
 ```ron

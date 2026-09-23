@@ -1088,6 +1088,23 @@ of the plan digest: it changes who is asked, never what the model may do.
 `Forbidden` shapes, blocked hosts, managed `deny_*`, and `ask_user` never
 reach the reviewer under any setting.
 
+"The reviewer" in the table is a chain (ADR-0041). With `jev_approval: true`
+and a stored TypeSafe key, Jev is asked first: one typed `choice` over
+`approve` / `deny` / `abstain` against the approval preview (command or diff,
+host, task brief, recent action names, grants, mode), each section bounded to
+8 KiB and secret-masked, the whole request refused past 64 KiB, the call
+bounded at 5 s. A confident `approve` or `deny` (confidence and winning
+probability both at least 0.7 under the pinned `jev-1.13.0` contract) is the
+delegate's verdict. `abstain`, low confidence, a malformed reply, a transport
+failure, a timeout, or a missing key falls through to `reviewer_model`, then
+to the human, with the reason attached to the escalation. Jev is never failed
+open to approve. Whether Jev is consulted is the held call's workspace
+configuration, read per hold and cached per credential epoch; a stored key
+with `jev_approval` off is never read (ADR-0030). `ReviewVerdict` names the
+delegate that decided, and a delegate-recorded grant row carries it as
+`source = 'jev'` or `source = 'delegate'` (§ Grant Lifetimes); the wire
+resolution stays `approved_by_reviewer` / `denied_by_reviewer` for both.
+
 Decision by effect class before grants (ADR-0021):
 
 | class | read-only | ask | auto | supervised | full |
@@ -1125,12 +1142,13 @@ carry three lifetimes:
   than that, or past the session cap still approves the call, but as a
   once-approval: nothing is recorded and nothing is promoted. The
   approval command never fails because a grant cannot be stored.
-- **Delegate** — when the configured `reviewer_model` approves a held
-  call, it records a session grant of its own in the same transaction as
-  the approval: the exact command string for shell, the exact host for
-  `fetch`, nothing for other tool classes. Every `session_grants` row
-  carries `source` (`human` or `delegate`) and, for a delegate, the
-  `run_id` that recorded it. A delegate grant is deliberately narrower
+- **Delegate** — when the configured delegate (Jev with `jev_approval`, else
+  `reviewer_model`) approves a held call, it records a session grant of its
+  own in the same transaction as the approval: the exact command string for
+  shell, the exact host for `fetch`, nothing for other tool classes. Every
+  `session_grants` row carries `source` (`human`, `delegate` for the
+  reviewer model, `jev` for Jev) and, for a delegate, the `run_id` that
+  recorded it. A delegate grant is deliberately narrower
   than a human one. It matches only the byte-exact command or host,
   never a prefix and never a `*.suffix`; it does not lift a `Forbidden`
   verdict, which only a human's exact string may do (ADR-0020); it is

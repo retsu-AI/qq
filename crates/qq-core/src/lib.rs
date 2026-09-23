@@ -71,8 +71,8 @@ pub use runtime::{
     MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
 };
 pub use sessions::{
-    ApprovalReviewer, CheckpointSelection, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime,
-    MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN,
+    ApprovalReviewer, CheckpointSelection, DelegateIdentity, GrantPromotionFuture, GrantSeedFuture,
+    LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN,
     MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT, MAX_GRANT_BYTES, MAX_PENDING_PROMPTS,
     MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES,
     MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent,

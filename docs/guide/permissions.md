@@ -25,9 +25,9 @@ sections (providers, MCP servers, grants, model) load only after that.
 
 Sensitive means any of: `model`, `worker_model`, `reviewer_model`,
 `organization`, `providers`, `mcp`, `packs`, `profiles`, `delegation`,
-`audit`, `jev_review`, `jev_routing`, `approval_delegate`, `reasoning_effort`,
-or a `policy` grant (`allow_tools`, `allow_shell_prefixes`, `allow_hosts`,
-`shell_env`).
+`audit`, `jev_review`, `jev_routing`, `jev_approval`, `approval_delegate`,
+`reasoning_effort`, or a `policy` grant (`allow_tools`,
+`allow_shell_prefixes`, `allow_hosts`, `shell_env`).
 A project file that only sets `policy.exposed_tools` or `max_output_tokens`
 loads without trust.
 
@@ -68,7 +68,10 @@ your own session. `full` is authority over the workspace, not the machine:
 ## Who decides a held call
 
 The mode says what is held. `approval_delegate` says who settles it when a
-`reviewer_model` is configured; without one, every held call is yours.
+delegate is configured; without one, every held call is yours. The delegate
+is Jev when `jev_approval: true` and a TypeSafe key is stored, otherwise
+`reviewer_model`; when Jev abstains or is unavailable the reviewer model is
+asked next, then you.
 
 | Profile | Set | What happens |
 | --- | --- | --- |
@@ -86,7 +89,8 @@ the reviewer.
 Set it at the top level, in a profile
 (`Profile(approval_mode: ask, approval_delegate: on)`), or for one process
 with `QQ_APPROVAL_DELEGATE=on|off`. In a project file it needs trust like
-any other sensitive key.
+any other sensitive key. `jev_approval` works the same way
+(`QQ_JEV_APPROVAL=on|off`); a stored key with it off is never read.
 
 ## What the shell classifier decides
 
