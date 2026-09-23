@@ -28,6 +28,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | File | Purpose |
 | --- | --- |
 | [`workflow.md`](./workflow.md) | Slice protocol, ledger rules, review, escalation, dispatch skeletons |
+| [`token-efficiency.md`](token-efficiency.md) | TE0–TE8: task-tree economics, tools, selective discovery, evidence reuse and context experiments; reuses existing D6b/T13/cache owners |
 | [`speed-first-extensible-agent-harness.md`](./speed-first-extensible-agent-harness.md) | Backend plan, collapsed to what is open: two quiet-host recordings, seven H22 deferrals, Phases 7–9 gated. Shipped design lives in `architecture.md` § Extension Contract and § Performance Discipline |
 | [`onboarding-ux.md`](./onboarding-ux.md) | From `git clone` to a working agent in one minute: user guide, actionable startup errors, TUI opens without a model or credential, `qq doctor`, `qq init`, install script/brew/nix, in-TUI trust prompt, docs-truth CI. OB0 in review; OB1–OB11 open |
 | [`run-reliability.md`](./run-reliability.md) | Sessions finish: turn-level recovery and `Paused`, reactive overflow and un-wedged admission, tolerant checkpoint, admission-time slash validation, lenient tool arguments. RR1–RR12 open; from the 2026-09-21 audit |
@@ -58,6 +59,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | — | Quiet-host recordings: Phase 5a H0 tail comparison; H20 eight-stream p95 then the 50→20 ms budget | `speed-first-…` | Implemented; tails not repeatable on the shared host; retained, not waived |
 | — | Seven H22 deferrals (`StaticHttpAuth`, headless writer, config parse-once, reviewer via `PlanCache`, run-loop enums, args-parse-once, `Arc` calls) | `speed-first-…` § Bundled Fixes | Each is its own slice when that code is next opened |
 | — | Run snapshots, LSP diagnostics | proposed plans | No scheduled slice |
+| — | TE1 offline efficiency baseline, then TE2/TE4 | [`token-efficiency.md`](token-efficiency.md) | Measurement first; paid runs remain with ENG-809 and existing reliability priorities are unchanged |
 
 ## Ownership
 
@@ -75,6 +77,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | Run outcome policy: turn recovery, `Paused`, mid-run compaction, checkpoint, admission validation, tool-argument leniency, approval deadline | `run-reliability.md` |
 | Reference audit of Codex, OpenCode, Pi, and fx; findings F01–F28 | [`../design/harness-scale-audit-2026-09-16.md`](../design/harness-scale-audit-2026-09-16.md) (research, not a plan; F03–F28 unowned) |
 | Shared files, dependency and toolchain bumps, ADR numbering | [`progress/root.md`](./progress/root.md) |
+| Cross-cutting efficiency accounting and new evidence/context experiments; D6b/T13/cache retain their owners | [`token-efficiency.md`](token-efficiency.md) |
 
 ## Conventions
 

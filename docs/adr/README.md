@@ -50,6 +50,8 @@ written.
 - [ADR-0039: a run compacts its own turns at a safe boundary with a run-scoped marker](0039-in-run-compaction.md) — Accepted (ENG-793, #92).
 - [ADR-0040: two-phase retry ownership — the provider owns sends, the run owns turns and settles `paused`](0040-two-phase-retry-ownership.md) — Accepted (run-reliability RR4); supersedes ADR-0005 in part.
 
+- [ADR-0042: optimize verified task efficiency, not individual turn size](0042-verified-task-efficiency.md) — Proposed (token-efficiency TE0).
+
 ## When to write one
 
 Write an ADR when a change:
