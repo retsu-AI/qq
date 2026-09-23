@@ -163,12 +163,15 @@ pub(super) fn model_picker(app: &App, width: usize, height: usize) -> Vec<Line> 
     let Some(Overlay::Models(picker)) = &app.overlay else {
         return fit_height(Vec::new(), height);
     };
+    let unauthenticated_only = picker.items().iter().all(|row| row.index.is_none());
     let mut provider: Option<String> = None;
     picker_frame(
         picker,
         PickerChrome {
             title: "MODELS",
-            hint: if app.focused().is_some() {
+            hint: if unauthenticated_only {
+                "no provider has a credential yet; Esc closes"
+            } else if app.focused().is_some() {
                 "type to search, Enter sets the session model, Ctrl-N creates a session, Esc closes"
             } else {
                 "type to search, Up/Down select, Enter creates session, Esc closes"
@@ -180,6 +183,16 @@ pub(super) fn model_picker(app: &App, width: usize, height: usize) -> Vec<Line> 
         width,
         height,
         |row: &ModelRow, selected, out| {
+            // A provider without a credential is one greyed row: its name,
+            // `needs credential`, and the remedy, in place of its models.
+            if row.index.is_none() {
+                let mut line = cursor_prefix(selected);
+                line.push(row.provider.clone(), muted());
+                line.push("  needs credential", warning());
+                line.push(format!("  {}", row.model), muted());
+                out.push(finish_row(line, selected, width));
+                return;
+            }
             if provider.as_deref() != Some(row.provider.as_str()) {
                 provider = Some(row.provider.clone());
                 out.push(Line::styled(

@@ -947,6 +947,12 @@ impl TranscriptCache {
             ..VirtualBody::default()
         };
         let Some(session_id) = session_id else {
+            // A configured model whose provider has no credential is the one
+            // state Alt-N cannot fix; name the credential first so the next
+            // command is obvious.
+            if let Some(remedy) = app.configured_provider_remedy() {
+                body.push_line(Line::styled(format!("  {}", remedy.message()), warning()));
+            }
             body.push_line(Line::styled(
                 format!(
                     "  {} creates the first session.",

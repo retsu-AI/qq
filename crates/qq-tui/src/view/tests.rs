@@ -2875,6 +2875,117 @@ fn a_pane_following_a_deleted_session_shows_the_empty_prompt() {
     assert_eq!(app.panes[0].viewport.offset(), 0);
 }
 
+/// An empty workspace as the first frame after bootstrap sees it.
+fn empty_workspace_app(options: TuiOptions) -> App {
+    let mut app = App::new(options);
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        sessions: Vec::new(),
+        focused: None,
+        ..fixtures::workspace_snapshot()
+    }));
+    app
+}
+
+#[test]
+fn empty_state_names_the_missing_credential_for_the_configured_model() {
+    // OB2: model configured, provider unauthenticated. The transcript names
+    // the credential above the Alt-N hint and the composer rule repeats it.
+    let mut app = empty_workspace_app(TuiOptions {
+        model: ModelSelection {
+            model_is_fallback: true,
+            model: Some("openai/gpt-5.6".to_owned()),
+            max_output_tokens: Some(8_192),
+            organization: None,
+        },
+        unauthenticated_providers: vec![crate::ProviderRemedy {
+            provider: "openai".to_owned(),
+            remedy: "run qq auth login openai or set OPENAI_API_KEY".to_owned(),
+        }],
+        ..TuiOptions::default()
+    });
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 12));
+    let remedy = rows
+        .iter()
+        .position(|row| {
+            row.contains(
+                "openai needs a credential: run qq auth login openai or set OPENAI_API_KEY",
+            )
+        })
+        .unwrap_or_else(|| panic!("no remedy line in:\n{}", rows.join("\n")));
+    assert!(
+        rows[remedy + 1].contains("creates the first session."),
+        "{:?}",
+        rows[remedy + 1]
+    );
+    assert!(rows[0].contains("openai/gpt-5.6"), "{:?}", rows[0]);
+    assert!(
+        rows.iter()
+            .filter(|row| row.contains("openai needs a credential"))
+            .count()
+            >= 2,
+        "composer rule repeats the remedy:\n{}",
+        rows.join("\n")
+    );
+}
+
+#[test]
+fn a_client_without_a_model_shows_no_model_and_the_picker_hint() {
+    // OB1: `(version: 1)`. Top row says `no model`; the composer rule says
+    // where to get one; the empty state still offers Alt-N.
+    let mut app = empty_workspace_app(TuiOptions::default());
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 12));
+    assert!(rows[0].contains("no model"), "{:?}", rows[0]);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("choose a model with /models")),
+        "{}",
+        rows.join("\n")
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("creates the first session.")),
+        "{}",
+        rows.join("\n")
+    );
+    assert!(!rows.iter().any(|row| row.contains("needs a credential")));
+}
+
+#[test]
+fn model_picker_renders_needs_credential_rows_when_nothing_is_authenticated() {
+    let mut app = empty_workspace_app(TuiOptions {
+        unauthenticated_providers: vec![
+            crate::ProviderRemedy {
+                provider: "anthropic".to_owned(),
+                remedy: "run qq auth login anthropic or set ANTHROPIC_API_KEY".to_owned(),
+            },
+            crate::ProviderRemedy {
+                provider: "openai-codex".to_owned(),
+                remedy: "run qq auth login openai-codex".to_owned(),
+            },
+        ],
+        ..TuiOptions::default()
+    });
+    app.execute(Command::OpenModels);
+    let mut renderer = FrameRenderer::default();
+    let rows = squashed_rows(&renderer.frame_and_commit(&mut app, 100, 14));
+    let text = rows.join("\n");
+    assert!(text.contains("MODELS"), "{text}");
+    assert!(
+        text.contains(
+            "anthropic needs credential run qq auth login anthropic or set ANTHROPIC_API_KEY"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("openai-codex needs credential run qq auth login openai-codex"),
+        "{text}"
+    );
+    assert!(text.contains("no provider has a credential yet"), "{text}");
+    assert!(!text.contains("Enter creates session"), "{text}");
+}
+
 #[test]
 fn switching_theme_repaints_every_row_in_the_new_palette() {
     let mut app = app_with_messages(2);
@@ -2942,6 +3053,7 @@ fn the_theme_picker_lists_ink_and_terminal_and_marks_the_default_rule_pick_activ
         ],
     );
     let mut app = App::new(TuiOptions {
+        unauthenticated_providers: Vec::new(),
         themes: vec![ink, crate::Theme::terminal()],
         ..TuiOptions::default()
     });
@@ -2979,6 +3091,7 @@ fn the_theme_picker_lists_ink_and_terminal_and_marks_the_default_rule_pick_activ
     // Explicit `terminal` first (the user asked, or truecolor is absent):
     // the marker follows.
     let mut app = App::new(TuiOptions {
+        unauthenticated_providers: Vec::new(),
         themes: vec![
             crate::Theme::terminal(),
             crate::Theme::from_roles("ink", [crate::ThemeColor::Rgb(1, 1, 1); 8]),

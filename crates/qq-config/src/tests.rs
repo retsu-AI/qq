@@ -1507,6 +1507,51 @@ fn check_validates_a_document_without_a_model_and_load_still_requires_one() {
 }
 
 #[test]
+fn load_for_client_tolerates_a_missing_model_and_keeps_every_other_field() {
+    // OB1: bare `qq` with `(version: 1)` opens the TUI, so the client load
+    // must succeed with the built-in providers and policy intact and only
+    // the model absent. `load` keeps the headless contract.
+    let tree = TempTree::new();
+    tree.write(
+        "managed/managed.ron",
+        r#"(version: 1, policy: (denied_providers: ["xai"]))"#,
+    );
+    let request = LoadRequest::new(tree.path("work")).with_explicit_content("(version: 1)");
+
+    let client = tree.loader().load_for_client(&request).unwrap();
+    assert!(client.model().is_none());
+    assert!(client.organization().is_none());
+    assert!(client.providers().contains_key("openai"));
+    assert!(client.providers().contains_key("anthropic"));
+    assert_eq!(client.policy().denied_providers(), ["xai".to_owned()]);
+    assert_eq!(client.max_output_tokens(), DEFAULT_MAX_OUTPUT_TOKENS);
+    assert!(
+        client
+            .source_reports()
+            .iter()
+            .any(|report| report.source().kind() == SourceKind::Inline)
+    );
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::ModelRequired { .. })
+    ));
+
+    // With a model, the client load carries the same route and validates it
+    // the same way `load` does: an unknown provider is still an error.
+    let with_model = tree.request();
+    let loaded = tree.loader().load(&with_model).unwrap();
+    let client = tree.loader().load_for_client(&with_model).unwrap();
+    assert_eq!(client.model(), Some(loaded.model()));
+    assert_eq!(client.providers(), loaded.providers());
+    let unknown = LoadRequest::new(tree.path("work"))
+        .with_explicit_content(r#"(version: 1, model: "nope/model")"#);
+    assert!(matches!(
+        tree.loader().load_for_client(&unknown),
+        Err(ConfigError::UnknownProvider(provider)) if provider == "nope"
+    ));
+}
+
+#[test]
 fn check_without_a_model_still_reports_every_other_error() {
     let tree = TempTree::new();
     // Provider-level policy is independent of the selected route.
@@ -3332,11 +3377,9 @@ fn agent_profiles_layer_by_name_validate_routes_and_never_declare_default() {
         )
         .unwrap();
         state.apply_document(&document, &origin, true);
-        state.finish(
-            Vec::new(),
-            ConfigSources::default(),
-            Path::new("/unused/config.ron"),
-        )
+        state
+            .finish_for_client(Vec::new(), ConfigSources::default())
+            .and_then(|snapshot| snapshot.require_model(Path::new("/unused/config.ron")))
     };
     assert!(matches!(
         parse(r#""default": Profile(model: "openai/gpt-5.6")"#),

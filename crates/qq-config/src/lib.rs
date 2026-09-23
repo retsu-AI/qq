@@ -375,6 +375,15 @@ impl ConfigLoader {
         loader::load(self, request)
     }
 
+    /// Loads the layered configuration for an interactive client, which may
+    /// open without a model and ask for one. Every rule other than the model
+    /// requirement is enforced exactly as in [`Self::load`]; a configured
+    /// model is parsed and policy-checked the same way. Headless paths use
+    /// [`Self::load`] and keep failing fast with `ModelRequired`.
+    pub fn load_for_client(&self, request: &LoadRequest) -> Result<ClientSnapshot, ConfigError> {
+        loader::load_for_client(self, request)
+    }
+
     /// Validates the layered configuration without requiring a model
     /// selection. Every other rule (syntax, providers, policy, profiles,
     /// packs, MCP, trust) is enforced exactly as in [`Self::load`]; a
@@ -1613,6 +1622,68 @@ pub struct ConfigSnapshot {
     reports: Vec<SourceReport>,
     provenance: ConfigProvenance,
     sources: ConfigSources,
+}
+
+/// A merged, validated configuration that may lack a model selection. Every
+/// other rule (syntax, providers, policy, profiles, packs, MCP, trust) has
+/// passed; the model, when present, was parsed and policy-checked exactly as
+/// for [`ConfigSnapshot`]. Interactive clients load this so they can open and
+/// ask for a model; headless paths never see it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientSnapshot {
+    organization: Option<String>,
+    model: Option<ModelRoute>,
+    worker_model: Option<ModelRoute>,
+    reviewer_model: Option<ModelRoute>,
+    delegation: DelegationConfig,
+    audit: AuditConfig,
+    jev_review: JevReviewMode,
+    jev_routing: bool,
+    reasoning_effort: Option<qq_provider::ReasoningEffort>,
+    max_output_tokens: u32,
+    providers: BTreeMap<String, ProviderConfig>,
+    mcp: BTreeMap<String, McpServerConfig>,
+    profiles: BTreeMap<String, AgentProfileConfig>,
+    packs: BTreeMap<String, AgentPack>,
+    policy: EffectivePolicy,
+    grants: PolicyGrants,
+    reports: Vec<SourceReport>,
+    provenance: ConfigProvenance,
+    sources: ConfigSources,
+}
+
+impl ClientSnapshot {
+    /// The configured model route, or `None` when the configuration is valid
+    /// apart from lacking one.
+    #[must_use]
+    pub const fn model(&self) -> Option<&ModelRoute> {
+        self.model.as_ref()
+    }
+
+    #[must_use]
+    pub fn organization(&self) -> Option<&str> {
+        self.organization.as_deref()
+    }
+
+    #[must_use]
+    pub const fn max_output_tokens(&self) -> u32 {
+        self.max_output_tokens
+    }
+
+    #[must_use]
+    pub const fn providers(&self) -> &BTreeMap<String, ProviderConfig> {
+        &self.providers
+    }
+
+    #[must_use]
+    pub const fn policy(&self) -> &EffectivePolicy {
+        &self.policy
+    }
+
+    #[must_use]
+    pub fn source_reports(&self) -> &[SourceReport] {
+        &self.reports
+    }
 }
 
 /// Shared filesystem evidence for one configuration load. Contains paths and

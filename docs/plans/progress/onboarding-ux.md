@@ -7,8 +7,8 @@ below, newest last.
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | OB0 | Audit, plan, user guide, community files, P0 error text | In review | `feat/eng-875-onboarding-ux` | ENG-875; ENG-859 shipped separately as #119 |
-| OB1 | TUI opens without a model | Planned | | ENG-860 |
-| OB2 | TUI opens without a credential; empty state names the remedy | Planned | | ENG-876 |
+| OB1 | TUI opens without a model | In review | `feat/eng-860-tui-without-model` | ENG-860; shares the branch with OB2 |
+| OB2 | TUI opens without a credential; empty state names the remedy | In review | `feat/eng-860-tui-without-model` | ENG-876; shares the branch with OB1 |
 | OB3 | Request-time credential errors name provider and remedy; `GOOGLE_API_KEY` alias | Planned | | ENG-877 |
 | OB4 | `qq doctor` | Planned | | ENG-878 |
 | OB5 | `qq init`; `config paths` marks existing files | Planned | | ENG-879 |
@@ -35,3 +35,22 @@ trust` lists what it trusts; `qq auth login` rejects unknown providers;
 `EnvironmentVariableMissing` names `qq auth login`; resume hint shows both
 continuations; non-TTY bare `qq` points at `ask`/`run`). No hot-path change;
 no protocol or schema change. Linear issues filed per slice.
+
+### 2026-09-22 — OB1 + OB2 in review
+
+Branch `feat/eng-860-tui-without-model` (off `v0.1.3`), four commits:
+config `load_for_client` → `ClientSnapshot` (model optional; `load`
+unchanged); runtime `load_for_client` / `client_model_options` /
+`unauthenticated_providers`, `models_for` no longer requires a model;
+TUI `TuiOptions.unauthenticated_providers`, `no model` top row, standing
+`choose a model with /models` rule, empty-state remedy line, `needs
+credential` picker rows, Alt-N remedy warning; `interactive()` wired.
+Tests added: 1 qq-config, 2 qq (bin), 3 qq-tui reducer, 3 qq-tui view
+(9 total). Gates: fmt, clippy `-D warnings`, `cargo test --workspace` all
+green (qq-config 94, qq bin 178, qq-tui 317). Manual: bare `qq` under
+`QQ_CONFIG_CONTENT='(version: 1)'` in a pty paints `no model` and the
+`/models` hint; with `model: "openai/gpt-5.6"` and no key paints the openai
+remedy; `qq ask`/`qq run` still exit with `no model is configured`.
+Deviation: OB2 acceptance said `guide/providers.md`; the guidance landed in
+`guide/tui.md` and `guide/troubleshooting.md` where the states are described.
+No protocol change; no perf gate named.
