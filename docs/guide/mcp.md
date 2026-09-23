@@ -81,15 +81,23 @@ grants one for a headless run; `a` in the TUI grants one for the session.
 ## When a server is unavailable
 
 A server that fails to start or connect contributes no tools; the tool
-catalog reports `unavailable MCP servers: NAME` and the run continues with
-built-ins and the other servers. Calls to it return a typed unavailable
-error to the model. The next use retries with backoff.
+catalog reports `unavailable MCP servers: NAME (reason)` and the run
+continues with built-ins and the other servers. Calls to it return a typed
+unavailable error to the model. The next use retries with backoff.
 
-A server whose `Stored(...)` bearer is not in this machine's credential store
-currently fails the run with ``credential `NAME` is not registered``; making
-that degrade like a connection failure is planned
-([`../plans/onboarding-ux.md`](../plans/onboarding-ux.md) OB9). Until then,
-register the credential or move the declaration to a local fragment.
+A server whose `Stored(...)` or `Env(...)` bearer does not resolve on this
+machine degrades the same way rather than failing the run. Its `allow`
+grants stay in force and its tool names stay reserved; the readiness
+message names the credential and the fix:
+
+```text
+unavailable MCP servers: linear (credential `linear/default` is not registered; run `qq auth set linear/default`)
+```
+
+Run the command named, and the next run picks the credential up without a
+restart: the tool registry is keyed by the credential store's epoch, which
+`qq auth set` advances. `qq doctor` reports the same finding under `mcp`
+as a warning. Inline `Value(...)` bearers are unaffected.
 
 ## Inspecting
 

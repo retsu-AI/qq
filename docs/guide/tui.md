@@ -17,7 +17,7 @@ works against a server started with `qq serve`, locally or remote.
  │                           │
  │                           │  The test expected seconds but the parser…
  ─────────────────────────────────────────────────────────────────────────────────────────
- running · 12s · first token 0.8s                        ^? help  ^K commands  ^O detail
+ running · 12s · first token 0.8s                         ? help  ^K commands  ^O detail
  › Ask QQ...
 ```
 
@@ -34,7 +34,8 @@ works against a server started with `qq serve`, locally or remote.
   output tail, an MCP call its arguments). `Ctrl-O` folds finished blocks
   to one row each; `Alt-R` shows or hides reasoning.
 - **Rule**: running activity, elapsed time, time to first token, or the last
-  notice; key hints for the current state at the right.
+  notice; key hints for the current state at the right. The help hint reads
+  `? help` while the composer is empty and `F1 help` once you have typed.
 - **Composer**: type and press `Enter`. `Shift-Enter` or `Alt-Enter` inserts
   a newline. `Alt-E` or `/editor` opens the draft in `$EDITOR`.
 
@@ -119,6 +120,23 @@ run` refuse to start.
   session.`; `Alt-N` repeats the same line as a warning. Add the credential
   in another terminal and start `qq` again — the credential check runs at
   startup.
+
+## Your first session
+
+The first session in a workspace opens with a short list in the transcript:
+
+```
+  Try one of these:
+    /models    choose a model
+    /approval  choose an approval mode
+    /skills    list workspace commands and skills
+    @path      mention a file in your prompt
+```
+
+It disappears as soon as you send your first prompt and never shows for a
+second session; those read `Ask QQ to begin this session.` instead. When the
+configured provider still needs a credential, that remedy is printed above
+the list.
 
 ## Prompts
 

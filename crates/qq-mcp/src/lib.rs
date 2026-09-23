@@ -105,7 +105,21 @@ pub enum McpTransportSettings {
         env: Vec<String>,
     },
     /// Streamable-HTTP endpoint with an optional bearer token.
-    Http { url: String, bearer: Option<String> },
+    Http { url: String, bearer: McpBearer },
+}
+
+/// The bearer an HTTP server is reached with. The composition root resolves
+/// configured secrets; this crate only carries the outcome.
+#[derive(Debug, Clone)]
+pub enum McpBearer {
+    None,
+    Token(String),
+    /// The declared credential could not be resolved on this machine; the
+    /// server stays declared (grants, tool names) but never connects. The
+    /// message is shown to the user as the unavailability reason.
+    Unavailable {
+        reason: String,
+    },
 }
 
 /// The outcome of one MCP tool call; failures are `is_error` outcomes.
@@ -160,12 +174,19 @@ pub struct McpTool {
 /// changes whenever any server's cached tool set changes (connect, loss,
 /// `list_changed`), so a holder can ask whether its snapshot is stale
 /// without refetching. `unavailable` names servers that contributed nothing
-/// because they could not be reached.
+/// because they could not be reached, each with the reason.
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpCatalog {
     pub generation: u64,
     pub tools: Vec<McpTool>,
-    pub unavailable: Vec<String>,
+    pub unavailable: Vec<McpUnavailable>,
+}
+
+/// One server that contributed no tools to a catalog, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpUnavailable {
+    pub server: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -362,8 +383,14 @@ impl ServerHandle {
             }
             McpTransportSettings::Http { url, bearer } => {
                 let mut config = StreamableHttpClientTransportConfig::with_uri(url.clone());
-                if let Some(token) = bearer {
-                    config = config.auth_header(token.clone());
+                match bearer {
+                    McpBearer::None => {}
+                    McpBearer::Token(token) => config = config.auth_header(token.clone()),
+                    // Nothing to send: the connection is never attempted and
+                    // the reason is the failure text callers see. The
+                    // resulting `last_failure` only delays the next probe by
+                    // the ordinary backoff.
+                    McpBearer::Unavailable { reason } => return Err(reason.clone()),
                 }
                 let transport =
                     StreamableHttpClientTransport::with_client(reqwest::Client::default(), config);
@@ -397,8 +424,8 @@ impl ServerHandle {
 
     /// Cached namespaced tools, connecting and fetching on first use and
     /// refetching after a `list_changed` notification. `Err` names this
-    /// server as unavailable; the next use retries.
-    async fn tools(&self) -> Result<Arc<Vec<McpTool>>, ()> {
+    /// server as unavailable with the reason; the next use retries.
+    async fn tools(&self) -> Result<Arc<Vec<McpTool>>, String> {
         let mut state = self.state.lock().await;
         if self.tools_dirty.swap(false, Ordering::AcqRel) {
             state.tools = None;
@@ -406,8 +433,9 @@ impl ServerHandle {
         if let Some(tools) = &state.tools {
             return Ok(Arc::clone(tools));
         }
-        let Ok(client) = self.client_locked(&mut state).await else {
-            return Err(());
+        let client = match self.client_locked(&mut state).await {
+            Ok(client) => client,
+            Err(reason) => return Err(reason),
         };
         match tokio::time::timeout(LIST_TOOLS_TIMEOUT, client.list_all_tools()).await {
             Ok(Ok(tools)) => {
@@ -416,11 +444,24 @@ impl ServerHandle {
                 self.bump_generation();
                 Ok(tools)
             }
-            Ok(Err(_)) | Err(_) => {
+            Ok(Err(error)) => {
                 state.client = None;
                 state.tools = None;
                 state.last_failure = Some(Instant::now());
-                Err(())
+                Err(format!(
+                    "listing tools on MCP server {:?} failed: {error}",
+                    self.settings.name
+                ))
+            }
+            Err(_) => {
+                state.client = None;
+                state.tools = None;
+                state.last_failure = Some(Instant::now());
+                Err(format!(
+                    "listing tools on MCP server {:?} timed out after {} s",
+                    self.settings.name,
+                    LIST_TOOLS_TIMEOUT.as_secs()
+                ))
             }
         }
     }
@@ -681,7 +722,10 @@ impl McpManager {
         for (name, result) in results {
             match result {
                 Ok(listed) => tools.extend(listed.iter().cloned()),
-                Err(()) => unavailable.push(name.clone()),
+                Err(reason) => unavailable.push(McpUnavailable {
+                    server: name.clone(),
+                    reason,
+                }),
             }
         }
         McpCatalog {

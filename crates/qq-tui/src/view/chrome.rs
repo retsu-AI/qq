@@ -246,13 +246,24 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
 
     let mut right = Line::default();
     for (command, label) in hints_for(app) {
-        let Some(chord) = app.chord_label(command) else {
-            continue;
+        // `?` on an empty composer opens help too, and is the cheaper key
+        // to discover; the hint names it while it works and falls back to
+        // the chord once typing has started.
+        let chord = if command == crate::commands::Command::OpenHelp
+            && app.mode() == Mode::Compose
+            && app.composer.text.is_empty()
+        {
+            "?".to_owned()
+        } else {
+            let Some(chord) = app.chord_label(command) else {
+                continue;
+            };
+            compact_chord(&chord)
         };
         if !right.is_empty() {
             right.push("  ", muted());
         }
-        right.push(compact_chord(&chord), accent());
+        right.push(chord, accent());
         right.push(format!(" {label}"), muted());
     }
     rule_with(left, right, width)

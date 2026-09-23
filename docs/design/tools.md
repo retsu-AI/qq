@@ -1040,6 +1040,16 @@ are folded into the resolved grant set as exact names
 (`mcp__<server>__<tool>`) — the same set the approval flow consults, and
 the same set a managed `deny_tools` list can filter.
 
+An HTTP server's `bearer` is resolved by the composition root when the
+registry is built, not by `qq-mcp`. A reference that does not resolve on
+this machine (`Stored` not registered, `Env` unset, an endpoint binding
+that does not match) becomes `McpBearer::Unavailable { reason }`: the
+server stays declared with its grants, never connects, and reports as
+`unavailable MCP servers: NAME (reason)` alongside connection failures,
+so one missing credential degrades one server rather than failing plan
+compilation for the workspace. The registry cache key includes the
+credential epoch, so `qq auth set` is picked up by the next compile.
+
 ## Approval Policy
 
 Approvals are explicit policy, not hidden behavior, and they are first-class

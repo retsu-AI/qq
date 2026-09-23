@@ -19,6 +19,6 @@
    ┃
    ✓ 0.0s · 6 tools · ttft 0.0s
  3 agents
-─────────────────────────────────────────────── F1 help  ^K commands  ^O detail
+──────────────────────────────────────────────── ? help  ^K commands  ^O detail
  › Ask QQ...
 
