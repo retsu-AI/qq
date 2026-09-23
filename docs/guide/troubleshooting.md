@@ -137,6 +137,11 @@ PROVIDER` when the name is `PROVIDER/default`). If the reference came from a
 repository's committed config, that config should use `Env(...)` or live in a
 local, uncommitted fragment ([MCP › Where to declare it](mcp.md#where-to-declare-it)).
 
+For a provider this fails the run. For an MCP server's `bearer` it only
+degrades that server: the run proceeds and the catalog reports
+`unavailable MCP servers: NAME (credential `…` is not registered; run `qq
+auth set …`)` (see below); `qq doctor` warns about it under `mcp`.
+
 ### `credential `…` is registered in keyring, but its secret is missing`
 
 The index knows the name but the keyring entry is gone (a keyring reset, a
@@ -193,9 +198,15 @@ not lift `forbidden`). Rules: [Permissions](permissions.md#what-the-shell-classi
 
 ### `unavailable MCP servers: …`
 
-The named server did not start or connect. The run continues without it.
-Check the `command` is on `PATH` (stdio) or the `url` and `bearer` (HTTP);
-`eager: true` surfaces the failure at startup instead of first use.
+The named server did not start, connect, or authenticate; the reason follows
+its name in parentheses. The run continues without it, and calls to its
+tools return an unavailable error to the model. For a stdio server check the
+`command` is on `PATH`; for HTTP check the `url`. When the reason names a
+credential (`credential `linear/default` is not registered; run `qq auth set
+linear/default``, or the environment variable for `Env(...)`), run the
+command it names — the next run picks the credential up without a restart.
+`qq doctor` reports the same finding under `mcp`; `eager: true` surfaces a
+connection failure at startup instead of first use.
 
 ### `configuration working directory is invalid: …`
 

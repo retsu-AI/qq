@@ -15,7 +15,7 @@ below, newest last.
 | OB6 | `install.sh`, Homebrew tap, Nix package, binstall | Shipped (#139) | `feat/eng-880-install-paths` | ENG-880; tap repo + `HOMEBREW_TAP_TOKEN` are owner setup |
 | OB7 | In-TUI trust prompt | Planned | | ENG-881; needs ADR + protocol row in root |
 | OB8 | First-session guidance; `qq run` denial hint | In review | `feat/eng-882-first-session-guidance` | ENG-882 |
-| OB9 | Missing MCP credential degrades the server | Planned | | ENG-861 |
+| OB9 | Missing MCP credential degrades the server | In review | `fix/eng-861-mcp-credential-degrade` | ENG-861 |
 | OB10 | Docs-truth test; CHANGELOG at release | Planned | | ENG-883 |
 | OB11 | Wiki mirror workflow | Planned | | ENG-884 |
 
@@ -163,3 +163,34 @@ documented. Docs: `guide/quickstart.md` § 2 uses `qq init` (the awk/heredoc
 is gone), `guide/configuration.md`, `guide/cli.md` (new `qq init` section,
 `paths` row), `guide/troubleshooting.md`, `README.md`. No `qq-config`
 change; no hot-path or protocol impact.
+
+### 2026-09-23 — OB9 MCP credential degrade in review
+
+Branch `fix/eng-861-mcp-credential-degrade` off `main` (v0.1.4). An HTTP
+server whose `Stored`/`Env` bearer does not resolve no longer fails plan
+compilation for the workspace (`RuntimeBuildError::Auth` →
+`RunFailureKind::Authentication`); it degrades like a connection failure.
+`qq-mcp`: `McpTransportSettings::Http { bearer: McpBearer }` with
+`None | Token(String) | Unavailable { reason }`; `connect` returns the reason
+without building a transport; `ServerHandle::tools()` returns `Err(String)`
+and `McpCatalog::unavailable` is `Vec<McpUnavailable { server, reason }>`.
+`src/mcp.rs::resolve_server` matches the `AuthError` exhaustively for the
+variants `resolve_with_endpoint` produces (`StoredCredentialNotRegistered`,
+`StoredCredentialMissing`, `EndpointMismatch`/`EndpointRequired`,
+`InvalidEndpoint`, `KeyringUnavailable`, `Environment*`) and words the
+reason as problem + remedy via `BearerFailure`, shared with the new `qq
+doctor` `mcp` check (warn, not fail; `none declared` when empty). Readiness:
+`` unavailable MCP servers: linear (credential `linear/default` is not
+registered; run `qq auth set linear/default`) ``. Re-resolution after `qq
+auth set` verified by test: the registry key carries the credential epoch,
+which the store advances on `set_with_metadata`; a fresh
+`registry_for_snapshot` under the new epoch is a different manager that
+connects with the stored token (`plan` sources already fingerprint the
+credential index, `runtime.rs:1160,1397`). Tests: qq-mcp 1 (declared but
+unavailable, sibling unaffected, `Unavailable` call), qq bin `mcp` 2
+(regression + conformance availability subset for an unresolved bearer),
+`doctor` 3 (+1 skip assertion). Docs: `guide/mcp.md`,
+`guide/troubleshooting.md`, `guide/cli.md` doctor table, `design/tools.md`.
+No hot-path change: resolution runs once per registry miss on the compile
+thread. Gates: fmt, clippy `-D warnings`, `cargo test -p qq-mcp`, `-p qq
+--bin qq mcp|doctor`, `-p qq-core hosts`.
