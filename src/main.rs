@@ -17,6 +17,7 @@ use qq_server as server;
 mod advisory;
 mod catalog;
 mod cli;
+mod doctor;
 mod headless;
 mod mcp;
 mod output;
@@ -62,6 +63,9 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         }) => run_blocking_command(move || jev_setup(allow_file)).await?,
         Some(cli::Command::Org { command }) => organization_command(command)?,
         Some(cli::Command::Trust) => trust_command(&overrides)?,
+        Some(cli::Command::Doctor(args)) => {
+            return doctor_command(args, &overrides).await;
+        }
         Some(cli::Command::Version) => print!("{}", version_report()),
         None => interactive(&overrides, cli.session, cli.tui_qa_root).await?,
     }
@@ -1308,6 +1312,37 @@ fn trust_command(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+/// `qq doctor`. A failing check is part of the report and sets the exit
+/// status; only the doctor's own inability to run (no home directory, no
+/// current directory) is an error.
+async fn doctor_command(
+    args: cli::DoctorArgs,
+    overrides: &CliOverrides,
+) -> Result<ExitCode, Box<dyn Error>> {
+    let loader = config::ConfigLoader::system()?;
+    let store = auth::CredentialStore::system()?;
+    let request = overrides.load_request()?;
+    let server_paths = server::ServerPaths::for_user()?;
+    let cwd = std::env::current_dir()?;
+    let report = tokio::task::spawn_blocking(move || {
+        doctor::run_checks(&loader, &store, &request, &server_paths, &cwd)
+    })
+    .await?;
+    let stdout = io::stdout();
+    let color = stdout.is_terminal();
+    let mut stdout = stdout.lock();
+    if args.json {
+        doctor::render_json(&report, &mut stdout)?;
+    } else {
+        doctor::render_text(&report, color, &mut stdout)?;
+    }
+    Ok(if report.passed() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 fn auth_command(command: cli::AuthCommand) -> Result<(), Box<dyn Error>> {

@@ -922,17 +922,7 @@ impl RuntimeFactory {
             ) => match auth {
                 BedrockAuth::ApiKey(reference) => self.inner.credentials.resolve(reference).is_ok(),
                 BedrockAuth::Aws(AwsAuth::Profile(profile)) => aws_profile_configured(profile),
-                BedrockAuth::Aws(AwsAuth::DefaultChain) => {
-                    (std::env::var_os("AWS_ACCESS_KEY_ID").is_some()
-                        && std::env::var_os("AWS_SECRET_ACCESS_KEY").is_some())
-                        || std::env::var_os("AWS_PROFILE")
-                            .and_then(|profile| profile.into_string().ok())
-                            .is_some_and(|profile| aws_profile_configured(&profile))
-                        || (std::env::var_os("AWS_WEB_IDENTITY_TOKEN_FILE").is_some()
-                            && std::env::var_os("AWS_ROLE_ARN").is_some())
-                        || std::env::var_os("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").is_some()
-                        || std::env::var_os("AWS_CONTAINER_CREDENTIALS_FULL_URI").is_some()
-                }
+                BedrockAuth::Aws(AwsAuth::DefaultChain) => aws_default_chain_source().is_some(),
             },
             None => false,
         }
@@ -1795,7 +1785,35 @@ fn effective_provider_api(
     }
 }
 
-fn aws_profile_configured(profile: &str) -> bool {
+/// Which input the AWS default credential chain would pick up from this
+/// process's environment, named for a human, without calling AWS. `None`
+/// means the chain has nothing local to start from (IMDS is not probed).
+pub(crate) fn aws_default_chain_source() -> Option<&'static str> {
+    if std::env::var_os("AWS_ACCESS_KEY_ID").is_some()
+        && std::env::var_os("AWS_SECRET_ACCESS_KEY").is_some()
+    {
+        return Some("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY");
+    }
+    if std::env::var_os("AWS_PROFILE")
+        .and_then(|profile| profile.into_string().ok())
+        .is_some_and(|profile| aws_profile_configured(&profile))
+    {
+        return Some("AWS_PROFILE");
+    }
+    if std::env::var_os("AWS_WEB_IDENTITY_TOKEN_FILE").is_some()
+        && std::env::var_os("AWS_ROLE_ARN").is_some()
+    {
+        return Some("web identity (AWS_WEB_IDENTITY_TOKEN_FILE and AWS_ROLE_ARN)");
+    }
+    if std::env::var_os("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").is_some()
+        || std::env::var_os("AWS_CONTAINER_CREDENTIALS_FULL_URI").is_some()
+    {
+        return Some("container credentials");
+    }
+    None
+}
+
+pub(crate) fn aws_profile_configured(profile: &str) -> bool {
     if profile.is_empty() {
         return false;
     }
