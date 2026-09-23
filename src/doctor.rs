@@ -319,50 +319,64 @@ fn credential_check(
             "choose a built-in provider id or declare this one under `providers`",
         );
     };
-    let stored_then_env = |stored_name: &str, variable: &str, audience: Option<&str>| match store
-        .status(stored_name)
-    {
-        Ok(Some(item)) => match store
-            .resolve_with_endpoint(&config::SecretRef::Stored(stored_name.to_owned()), audience)
-        {
-            Ok(_) => Check::ok(
-                NAME,
-                format!("{provider_id}: stored {stored_name} ({})", item.backend),
-            ),
-            Err(error @ auth::AuthError::KeyringUnavailable { .. }) => Check::fail(
-                NAME,
-                format!("{provider_id}: {error}"),
-                format!(
-                    "start the OS keyring, or `qq auth login {provider_id} --allow-file`, \
-                     or set {variable}"
+    // `variables` is the provider's environment variable followed by its
+    // aliases, in resolution order; the remedy names them all.
+    let stored_then_env = |stored_name: &str, variables: &[&str], audience: Option<&str>| {
+        let variable = variables[0];
+        let set_hint = match &variables[1..] {
+            [] => format!("set {variable}"),
+            aliases => format!("set {variable} (or {})", aliases.join(", ")),
+        };
+        match store.status(stored_name) {
+            Ok(Some(item)) => match store
+                .resolve_with_endpoint(&config::SecretRef::Stored(stored_name.to_owned()), audience)
+            {
+                Ok(_) => Check::ok(
+                    NAME,
+                    format!("{provider_id}: stored {stored_name} ({})", item.backend),
                 ),
-            ),
+                Err(error @ auth::AuthError::KeyringUnavailable { .. }) => Check::fail(
+                    NAME,
+                    format!("{provider_id}: {error}"),
+                    format!(
+                        "start the OS keyring, or `qq auth login {provider_id} --allow-file`, \
+                         or {set_hint}"
+                    ),
+                ),
+                Err(error) => Check::fail(
+                    NAME,
+                    format!("{provider_id}: {error}"),
+                    format!(
+                        "run `qq auth logout {stored_name}` then `qq auth login {provider_id}`"
+                    ),
+                ),
+            },
+            Ok(None) => {
+                let found = variables
+                    .iter()
+                    .find_map(|name| std::env::var_os(name).map(|value| (*name, value)));
+                match found {
+                    Some((name, value)) if !value.is_empty() => {
+                        Check::ok(NAME, format!("{provider_id}: environment {name}"))
+                    }
+                    Some((name, _)) => Check::fail(
+                        NAME,
+                        format!("{provider_id}: {name} is set but empty"),
+                        format!("run `qq auth login {provider_id}` or {set_hint}"),
+                    ),
+                    None => Check::fail(
+                        NAME,
+                        format!("{provider_id}: none found"),
+                        format!("run `qq auth login {provider_id}` or {set_hint}"),
+                    ),
+                }
+            }
             Err(error) => Check::fail(
                 NAME,
                 format!("{provider_id}: {error}"),
-                format!("run `qq auth logout {stored_name}` then `qq auth login {provider_id}`"),
+                "the credential store could not be read; see the credential store check",
             ),
-        },
-        Ok(None) => match std::env::var_os(variable) {
-            Some(value) if !value.is_empty() => {
-                Check::ok(NAME, format!("{provider_id}: environment {variable}"))
-            }
-            Some(_) => Check::fail(
-                NAME,
-                format!("{provider_id}: {variable} is set but empty"),
-                format!("run `qq auth login {provider_id}` or set {variable}"),
-            ),
-            None => Check::fail(
-                NAME,
-                format!("{provider_id}: none found"),
-                format!("run `qq auth login {provider_id}` or set {variable}"),
-            ),
-        },
-        Err(error) => Check::fail(
-            NAME,
-            format!("{provider_id}: {error}"),
-            "the credential store could not be read; see the credential store check",
-        ),
+        }
     };
     let reference = |reference: &config::SecretRef, endpoint: Option<&str>| match reference {
         config::SecretRef::Env(variable) => match std::env::var_os(variable) {
@@ -408,10 +422,16 @@ fn credential_check(
                 explicit,
                 stored_name,
                 environment_variable,
+                alternate_variables,
                 audience,
             } => match explicit {
                 Some(secret) => reference(secret, Some(audience)),
-                None => stored_then_env(stored_name, environment_variable, Some(audience)),
+                None => {
+                    let mut variables = Vec::with_capacity(1 + alternate_variables.len());
+                    variables.push(*environment_variable);
+                    variables.extend_from_slice(alternate_variables);
+                    stored_then_env(stored_name, &variables, Some(audience))
+                }
             },
             config::HttpCredential::OpenAiCodex { profile } => {
                 let stored_name =
@@ -437,7 +457,7 @@ fn credential_check(
                 Some(secret) => reference(secret, Some(config::XAI_CREDENTIAL_ENDPOINT)),
                 None => stored_then_env(
                     &format!("xai/{}", profile.as_deref().unwrap_or("default")),
-                    "XAI_API_KEY",
+                    &["XAI_API_KEY"],
                     Some(config::XAI_CREDENTIAL_ENDPOINT),
                 ),
             },
@@ -922,6 +942,26 @@ mod tests {
         assert!(remedy.contains("qq auth login openai"), "{remedy}");
         assert!(remedy.contains("OPENAI_API_KEY"), "{remedy}");
         assert_eq!(report.failed, 1);
+    }
+
+    #[test]
+    fn google_remedy_names_both_accepted_variables() {
+        let fixture = Fixture::new(Arc::new(MemoryKeyring::default()));
+        fixture.write_global("(version: 1, model: \"google/gemini-2.5-flash\")");
+        if std::env::var_os("GEMINI_API_KEY").is_some()
+            || std::env::var_os("GOOGLE_API_KEY").is_some()
+        {
+            return;
+        }
+        let report = fixture.run();
+
+        let credential = check(&report, "credential");
+        assert_eq!(credential.status, Status::Fail, "{credential:#?}");
+        let remedy = credential.remedy.as_deref().unwrap();
+        assert!(
+            remedy.contains("set GEMINI_API_KEY (or GOOGLE_API_KEY)"),
+            "{remedy}"
+        );
     }
 
     #[test]
