@@ -1049,21 +1049,44 @@ Each session has an approval mode:
 - `read-only` — only read-only built-ins and allowlisted read-only MCP tools
   execute; everything else is denied without prompting.
 - `ask` — workspace-contained edits, writes, shell, and non-allowlisted MCP
-  calls each request approval.
+  calls each request approval. The human decides by default; with
+  `approval_delegate: on` the reviewer is consulted first and its `approve`
+  settles the hold, while its `deny` is advice: the human is still asked,
+  their wait starting at the denial.
 - `auto` (default) — workspace-contained edits, writes, and MCP calls execute
   without prompting; shell commands the classifier allows or a grant covers
   execute; everything it would prompt for is held. With a `reviewer_model`
   configured the reviewer settles the hold: `approve` executes, `deny` is
   final and the model receives the reason as a tool error, `escalate` (or a
   reviewer timeout or outage) asks the human, whose wait starts at the
-  escalation rather than when the reviewer was consulted. Without a reviewer
-  the human is asked. `Forbidden` shapes are refused before any of this.
+  escalation rather than when the reviewer was consulted. Without a reviewer,
+  or with `approval_delegate: off`, the human is asked. `Forbidden` shapes are
+  refused before any of this.
 - `supervised` — every mutating, shell, and MCP call is held and adjudicated
   by the reviewer model regardless of grants, under the same three verdicts.
   Only spawned write children run here; a client cannot select it directly.
+  `approval_delegate: off` withdraws the reviewer here too.
 - `full` — everything executes without prompting, except shell commands the
   classifier marks `Forbidden` (§ Shell Classification): `full` is
   unrestricted authority over the workspace, not over the machine.
+
+The mode is the ceiling; `approval_delegate` only chooses who settles the
+calls the mode already holds. It is a top-level or per-profile configuration
+key (`on`, `off`, or absent) and the `QQ_APPROVAL_DELEGATE` override; absent
+means the mode's own default above, so a configuration that never mentions it
+behaves exactly as before. It is a sensitive declaration under project trust
+like `jev_routing`. Who is consulted, by mode and setting:
+
+| mode | absent | `on` | `off` |
+| --- | --- | --- | --- |
+| `read-only`, `full` | nobody; nothing is held | nobody | nobody |
+| `ask` | human | reviewer, then human on `escalate` or `deny` | human |
+| `auto`, `supervised` | reviewer, then human on `escalate` | reviewer, then human on `escalate` | human |
+
+Without a `reviewer_model` every cell is the human. The setting is not part
+of the plan digest: it changes who is asked, never what the model may do.
+`Forbidden` shapes, blocked hosts, managed `deny_*`, and `ask_user` never
+reach the reviewer under any setting.
 
 Decision by effect class before grants (ADR-0021):
 

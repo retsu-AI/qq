@@ -9,6 +9,7 @@ pub(super) struct SessionToolGate {
     claimed: ClaimedRun,
     cancellation: watch::Receiver<bool>,
     network: Arc<crate::tools::network::NetworkPolicy>,
+    delegate: approval::ApprovalDelegate,
 }
 
 impl SessionToolGate {
@@ -17,12 +18,14 @@ impl SessionToolGate {
         claimed: ClaimedRun,
         cancellation: watch::Receiver<bool>,
         network: Arc<crate::tools::network::NetworkPolicy>,
+        delegate: approval::ApprovalDelegate,
     ) -> Self {
         Self {
             inner,
             claimed,
             cancellation,
             network,
+            delegate,
         }
     }
 }
@@ -34,6 +37,7 @@ impl ToolGate for SessionToolGate {
         let call = call.clone();
         let mut cancellation = self.cancellation.clone();
         let network = Arc::clone(&self.network);
+        let delegate = self.delegate;
         Box::pin(async move {
             let (mode, grants) = match inner
                 .store
@@ -174,16 +178,20 @@ impl ToolGate for SessionToolGate {
                             return approval_persistence_failure(error);
                         }
                     }
-                    // The reviewer adjudicates under Auto (the held bucket is
-                    // "dangerous-shaped but possibly fine") and under
-                    // Supervised (every action of a write child). Ask means
-                    // the human asked to decide everything; ReadOnly never
-                    // reaches here. Under both modes the reviewer settles the
-                    // call: Approve executes, Deny is final, and only Escalate
-                    // (or a reviewer failure, which the reviewer must report as
-                    // Escalate) reaches the human.
-                    let mut review: Option<ReviewFuture> = match (&inner.approval_reviewer, mode) {
-                        (Some(reviewer), ApprovalMode::Auto | ApprovalMode::Supervised) => {
+                    // Who the held call goes to first. The mode is the
+                    // ceiling; the delegate setting chooses who decides inside
+                    // it: by default the reviewer under Auto (the held bucket
+                    // is "dangerous-shaped but possibly fine") and Supervised
+                    // (every action of a write child), the human under Ask.
+                    // `On` extends the reviewer to Ask; `Off` withdraws it.
+                    // ReadOnly and Full never reach here. Where the reviewer
+                    // is the delegate its verdict settles the call: Approve
+                    // executes, Deny is final under Auto and Supervised, and
+                    // Escalate (or a reviewer failure, which the reviewer must
+                    // report as Escalate) reaches the human.
+                    let consult = delegate.consults_reviewer(mode);
+                    let mut review: Option<ReviewFuture> = match &inner.approval_reviewer {
+                        Some(reviewer) if consult => {
                             // Context is advisory: a missing brief must not
                             // skip the review.
                             let (task_brief, recent_actions) = inner
@@ -264,11 +272,17 @@ impl ToolGate for SessionToolGate {
                                                 Ok(None) | Err(_) => break false,
                                             }
                                         }
-                                        // Final under Auto and Supervised alike:
-                                        // the reviewer is the configured delegate
-                                        // for the calls those modes hold. The
-                                        // client-wins race is unchanged.
-                                        ReviewDecision::Deny { reason } => {
+                                        // Final under Auto and Supervised: the
+                                        // reviewer is the configured delegate
+                                        // for the calls those modes hold. Under
+                                        // Ask the operator asked to decide
+                                        // everything, so a denial is advice: the
+                                        // human is still asked and their wait
+                                        // starts here. The client-wins race is
+                                        // unchanged.
+                                        ReviewDecision::Deny { reason }
+                                            if approval::ApprovalDelegate::deny_is_final(mode) =>
+                                        {
                                             let message = format!(
                                                 "{} {}",
                                                 approval::reviewer_denied_result(mode),
@@ -289,9 +303,10 @@ impl ToolGate for SessionToolGate {
                                                 Ok(None) | Err(_) => break false,
                                             }
                                         }
-                                        // Escalate: the human's wait starts
-                                        // here, on the remaining select arms.
-                                        ReviewDecision::Escalate { .. } => {
+                                        // Escalate, or a non-final Deny: the
+                                        // human's wait starts here, on the
+                                        // remaining select arms.
+                                        ReviewDecision::Escalate { .. } | ReviewDecision::Deny { .. } => {
                                             deadline = tokio::time::Instant::now()
                                                 + inner.approval_timeout;
                                         }

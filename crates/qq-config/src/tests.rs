@@ -514,6 +514,111 @@ fn jev_is_off_by_default_and_can_be_explicitly_disabled() {
 }
 
 #[test]
+fn approval_delegate_is_absent_by_default_and_reads_on_off_from_every_layer() {
+    // DA3: absent means the mode's own default; the snapshot reports `None`
+    // so the composition root can tell "never said" from "said off".
+    let tree = TempTree::new();
+    let bare = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(bare.approval_delegate(), None);
+    assert!(bare.provenance().approval_delegate().is_none());
+
+    let on = tree
+        .loader()
+        .load(
+            &tree
+                .request()
+                .with_explicit_content(r#"(version: 1, approval_delegate: on)"#),
+        )
+        .unwrap();
+    assert_eq!(on.approval_delegate(), Some(ApprovalDelegateSetting::On));
+    assert_eq!(
+        on.provenance().approval_delegate().unwrap().kind(),
+        SourceKind::Inline
+    );
+
+    // A runtime override wins over the document and is reported as such.
+    let off = tree
+        .loader()
+        .load(
+            &tree
+                .request()
+                .with_explicit_content(r#"(version: 1, approval_delegate: on)"#)
+                .with_overrides(
+                    RuntimeOverrides::new()
+                        .with_model("openai/test-model")
+                        .with_approval_delegate(ApprovalDelegateSetting::Off),
+                ),
+        )
+        .unwrap();
+    assert_eq!(off.approval_delegate(), Some(ApprovalDelegateSetting::Off));
+    assert_eq!(
+        off.provenance().approval_delegate().unwrap().kind(),
+        SourceKind::Runtime
+    );
+
+    // Only `on` and `off` parse, in the document and in the environment form.
+    assert!(matches!(
+        tree.loader().load(
+            &tree
+                .request()
+                .with_explicit_content("(version: 1, approval_delegate: maybe)")
+        ),
+        Err(ConfigError::Parse { .. })
+    ));
+    assert!(matches!(
+        "maybe".parse::<ApprovalDelegateSetting>(),
+        Err(ConfigError::InvalidJevSetting { .. })
+    ));
+    assert_eq!(
+        "on".parse::<ApprovalDelegateSetting>().unwrap(),
+        ApprovalDelegateSetting::On
+    );
+}
+
+#[test]
+fn approval_delegate_in_a_workspace_file_or_profile_requires_trust() {
+    // DA3: the delegate choice widens who may settle a hold, so a project
+    // file that sets it is a sensitive declaration exactly like `jev_routing`.
+    let tree = TempTree::new();
+    tree.write(
+        "work/qq.ron",
+        r#"(version: 1, approval_delegate: on,
+        profiles: { "strict": Profile(approval_mode: ask, approval_delegate: off) })"#,
+    );
+    let request = tree.request();
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    tree.loader().grant_pending_trust(&request).unwrap();
+    let trusted = tree.loader().load(&request).unwrap();
+    assert_eq!(
+        trusted.approval_delegate(),
+        Some(ApprovalDelegateSetting::On)
+    );
+    assert_eq!(
+        trusted.profile("strict").unwrap().approval_delegate(),
+        Some(ApprovalDelegateSetting::Off)
+    );
+    assert_eq!(
+        trusted.profile("default").unwrap().approval_delegate(),
+        None
+    );
+    assert!(
+        trusted
+            .source_reports()
+            .iter()
+            .any(|report| report.touched().contains(&ConfigKey::ApprovalDelegate))
+    );
+    // Changing the value invalidates the trust the same way.
+    tree.write("work/qq.ron", r#"(version: 1, approval_delegate: off)"#);
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+}
+
+#[test]
 fn jev_workspace_and_profile_activation_require_current_trust() {
     let tree = TempTree::new();
     tree.write(

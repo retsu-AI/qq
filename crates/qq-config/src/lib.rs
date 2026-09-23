@@ -95,6 +95,9 @@ impl LoadRequest {
                 }
             });
         }
+        if let Some(value) = optional_environment("QQ_APPROVAL_DELEGATE")? {
+            request.overrides.approval_delegate = Some(value.parse()?);
+        }
         Ok(request)
     }
 
@@ -178,6 +181,7 @@ pub struct RuntimeOverrides {
     max_output_tokens: Option<u32>,
     jev_review: Option<JevReviewMode>,
     jev_routing: Option<bool>,
+    approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
 }
 
@@ -253,12 +257,24 @@ impl RuntimeOverrides {
         self.jev_routing
     }
 
+    #[must_use]
+    pub const fn with_approval_delegate(mut self, setting: ApprovalDelegateSetting) -> Self {
+        self.approval_delegate = Some(setting);
+        self
+    }
+
+    #[must_use]
+    pub const fn approval_delegate(&self) -> Option<ApprovalDelegateSetting> {
+        self.approval_delegate
+    }
+
     fn is_empty(&self) -> bool {
         self.organization.is_none()
             && self.model.is_none()
             && self.max_output_tokens.is_none()
             && self.jev_review.is_none()
             && self.jev_routing.is_none()
+            && self.approval_delegate.is_none()
             && self.reasoning_effort.is_none()
     }
 }
@@ -1406,6 +1422,7 @@ pub enum ConfigKey {
     Audit,
     JevReview,
     JevRouting,
+    ApprovalDelegate,
     ReasoningEffort,
     MaxOutputTokens,
     Providers,
@@ -1461,6 +1478,7 @@ pub struct ConfigProvenance {
     audit: Option<SourceIdentity>,
     jev_review: Option<SourceIdentity>,
     jev_routing: Option<SourceIdentity>,
+    approval_delegate: Option<SourceIdentity>,
     reasoning_effort: Option<SourceIdentity>,
     max_output_tokens: Option<SourceIdentity>,
     providers: BTreeMap<String, SourceIdentity>,
@@ -1523,6 +1541,11 @@ impl ConfigProvenance {
     #[must_use]
     pub const fn jev_routing(&self) -> Option<&SourceIdentity> {
         self.jev_routing.as_ref()
+    }
+
+    #[must_use]
+    pub const fn approval_delegate(&self) -> Option<&SourceIdentity> {
+        self.approval_delegate.as_ref()
     }
 
     #[must_use]
@@ -1614,6 +1637,7 @@ pub struct ConfigSnapshot {
     audit: AuditConfig,
     jev_review: JevReviewMode,
     jev_routing: bool,
+    approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
@@ -1642,6 +1666,7 @@ pub struct ClientSnapshot {
     audit: AuditConfig,
     jev_review: JevReviewMode,
     jev_routing: bool,
+    approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
@@ -1933,6 +1958,45 @@ impl std::str::FromStr for JevReviewMode {
     }
 }
 
+/// Who settles the approvals a session's mode holds. The mode stays the
+/// ceiling; this only chooses whether the configured `reviewer_model` is
+/// consulted before a human. Absent from configuration, `auto` and
+/// `supervised` consult the reviewer and `ask` does not; that is what every
+/// session did before the setting existed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDelegateSetting {
+    /// Consult the reviewer under `ask` as well as `auto` and `supervised`.
+    On,
+    /// Never consult the reviewer; every held call waits for a human.
+    Off,
+}
+
+impl ApprovalDelegateSetting {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl std::str::FromStr for ApprovalDelegateSetting {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "on" => Ok(Self::On),
+            "off" => Ok(Self::Off),
+            _ => Err(ConfigError::InvalidJevSetting {
+                setting: "QQ_APPROVAL_DELEGATE (on, off)",
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
 /// Per-session approval policy a profile may preselect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1954,6 +2018,7 @@ pub struct AgentProfileConfig {
     approval_mode: Option<ProfileApprovalMode>,
     jev_review: Option<JevReviewMode>,
     jev_routing: Option<bool>,
+    approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     /// Set when this profile came from an agent pack rather than `profiles`.
     pack: Option<PackProfileRef>,
@@ -2022,6 +2087,11 @@ impl AgentProfileConfig {
         self.jev_routing
     }
 
+    #[must_use]
+    pub const fn approval_delegate(&self) -> Option<ApprovalDelegateSetting> {
+        self.approval_delegate
+    }
+
     /// The pack resources this profile carries, when it came from a pack.
     #[must_use]
     pub const fn pack(&self) -> Option<&PackProfileRef> {
@@ -2065,6 +2135,13 @@ impl ConfigSnapshot {
     #[must_use]
     pub const fn jev_routing(&self) -> bool {
         self.jev_routing
+    }
+
+    /// The explicit delegate choice, or `None` when the mode's own default
+    /// applies (reviewer under `auto` and `supervised`, human under `ask`).
+    #[must_use]
+    pub const fn approval_delegate(&self) -> Option<ApprovalDelegateSetting> {
+        self.approval_delegate
     }
 
     #[must_use]

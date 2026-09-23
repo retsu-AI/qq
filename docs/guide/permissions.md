@@ -25,8 +25,9 @@ sections (providers, MCP servers, grants, model) load only after that.
 
 Sensitive means any of: `model`, `worker_model`, `reviewer_model`,
 `organization`, `providers`, `mcp`, `packs`, `profiles`, `delegation`,
-`audit`, `jev_review`, `jev_routing`, `reasoning_effort`, or a `policy`
-grant (`allow_tools`, `allow_shell_prefixes`, `allow_hosts`, `shell_env`).
+`audit`, `jev_review`, `jev_routing`, `approval_delegate`, `reasoning_effort`,
+or a `policy` grant (`allow_tools`, `allow_shell_prefixes`, `allow_hosts`,
+`shell_env`).
 A project file that only sets `policy.exposed_tools` or `max_output_tokens`
 loads without trust.
 
@@ -63,6 +64,29 @@ your own session. `full` is authority over the workspace, not the machine:
 
 `qq run` defaults to `read_only` because nobody is there to answer. Pass
 `--approval auto` for a run that may edit.
+
+## Who decides a held call
+
+The mode says what is held. `approval_delegate` says who settles it when a
+`reviewer_model` is configured; without one, every held call is yours.
+
+| Profile | Set | What happens |
+| --- | --- | --- |
+| default | nothing | `auto` and `supervised` holds go to the reviewer first; `ask` holds come to you |
+| hands-off | `approval_delegate: on` | `ask` holds go to the reviewer too. Its approve runs the call; its deny still comes to you, with the reason, and your wait starts then |
+| strict | `approval_delegate: off` | every held call comes to you, even under `auto`, even with a reviewer configured |
+
+Under `auto` and `supervised` a reviewer deny is final: the model gets the
+reason as a tool error and you are not asked. Under `ask` you asked to decide
+everything, so a reviewer deny is advice and the prompt still appears. A
+reviewer `escalate`, timeout, or outage always comes to you. `forbidden`
+shell shapes, private or denied hosts, and `ask_user` questions never go to
+the reviewer.
+
+Set it at the top level, in a profile
+(`Profile(approval_mode: ask, approval_delegate: on)`), or for one process
+with `QQ_APPROVAL_DELEGATE=on|off`. In a project file it needs trust like
+any other sensitive key.
 
 ## What the shell classifier decides
 

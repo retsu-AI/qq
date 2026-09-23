@@ -13,9 +13,9 @@ use serde::{
 use sha2::{Digest, Sha256};
 
 use super::{
-    AgentProfileConfig, AuditConfig, AuditMode, AwsAuth, BedrockAuth, BuiltinPreference,
-    ClientSnapshot, ConfigError, ConfigKey, ConfigProvenance, ConfigSnapshot, ConfigSources,
-    Connection, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MCP_CALL_TIMEOUT_SECONDS,
+    AgentProfileConfig, ApprovalDelegateSetting, AuditConfig, AuditMode, AwsAuth, BedrockAuth,
+    BuiltinPreference, ClientSnapshot, ConfigError, ConfigKey, ConfigProvenance, ConfigSnapshot,
+    ConfigSources, Connection, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MCP_CALL_TIMEOUT_SECONDS,
     DEFAULT_MCP_MAX_CONCURRENT_CALLS, DelegationConfig, DelegationEntry, DelegationRole,
     EffectivePolicy, HttpAccess, HttpCredential, InputModality, JevReviewMode, MAX_AUDIT_REVISIONS,
     MAX_DELEGATION_DEPTH, MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER,
@@ -525,6 +525,11 @@ pub(super) struct Document {
     jev_review: Field<JevReviewMode>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     jev_routing: Field<bool>,
+    /// Who settles held approvals: `on` sends `ask`-mode holds to the
+    /// configured reviewer too, `off` sends every hold to a human. Missing
+    /// keeps the mode's own default (reviewer under `auto` and `supervised`).
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    approval_delegate: Field<ApprovalDelegateSetting>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     reasoning_effort: Field<qq_provider::ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
@@ -602,6 +607,8 @@ enum ProfilePatch {
         jev_review: Option<JevReviewMode>,
         #[serde(default)]
         jev_routing: Option<bool>,
+        #[serde(default)]
+        approval_delegate: Option<ApprovalDelegateSetting>,
         #[serde(default)]
         reasoning_effort: Option<qq_provider::ReasoningEffort>,
     },
@@ -685,6 +692,7 @@ impl Document {
             || self.audit.is_present()
             || self.jev_review.is_present()
             || self.jev_routing.is_present()
+            || self.approval_delegate.is_present()
             || self.reasoning_effort.is_present()
             || self.profiles.is_present()
             || self.providers.is_present()
@@ -720,6 +728,9 @@ impl Document {
         }
         if self.jev_routing.is_present() {
             sections.push("jev_routing");
+        }
+        if self.approval_delegate.is_present() {
+            sections.push("approval_delegate");
         }
         if self.reasoning_effort.is_present() {
             sections.push("reasoning_effort");
@@ -795,6 +806,8 @@ impl Document {
             #[serde(skip_serializing_if = "Option::is_none")]
             jev_routing: Option<&'a Field<bool>>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            approval_delegate: Option<&'a Field<ApprovalDelegateSetting>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             reasoning_effort: Option<&'a Field<qq_provider::ReasoningEffort>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             profiles: Option<&'a Field<UniqueMap<String, ProfilePatch>>>,
@@ -824,6 +837,7 @@ impl Document {
             audit: present(&self.audit),
             jev_review: present(&self.jev_review),
             jev_routing: present(&self.jev_routing),
+            approval_delegate: present(&self.approval_delegate),
             reasoning_effort: present(&self.reasoning_effort),
             profiles: present(&self.profiles),
             providers: present(&self.providers),
@@ -878,6 +892,9 @@ impl Document {
         }
         if self.jev_routing.is_present() {
             touched.push(ConfigKey::JevRouting);
+        }
+        if self.approval_delegate.is_present() {
+            touched.push(ConfigKey::ApprovalDelegate);
         }
         if self.audit.is_present() {
             touched.push(ConfigKey::Audit);
@@ -1413,6 +1430,7 @@ pub(super) struct MergeState {
     audit: Option<AuditPatch>,
     jev_review: JevReviewMode,
     jev_routing: bool,
+    approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
@@ -1489,6 +1507,7 @@ impl MergeState {
                 audit: None,
                 jev_review: JevReviewMode::Off,
                 jev_routing: false,
+                approval_delegate: None,
                 reasoning_effort: None,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
                 providers,
@@ -1572,6 +1591,14 @@ impl MergeState {
             JevReviewMode::Off,
         );
         apply_default(&document.jev_routing, &mut self.jev_routing, false);
+        match document.approval_delegate {
+            Field::Missing => {}
+            Field::Set(setting) => self.approval_delegate = Some(setting),
+            Field::Clear => self.approval_delegate = None,
+        }
+        if document.approval_delegate.is_present() {
+            self.provenance.approval_delegate = Some(source.clone());
+        }
         match document.reasoning_effort {
             Field::Missing => {}
             Field::Set(effort) => self.reasoning_effort = Some(effort),
@@ -1648,6 +1675,7 @@ impl MergeState {
                             approval_mode,
                             jev_review,
                             jev_routing,
+                            approval_delegate,
                             reasoning_effort,
                         } => {
                             self.profiles.insert(
@@ -1659,6 +1687,7 @@ impl MergeState {
                                     approval_mode: *approval_mode,
                                     jev_review: *jev_review,
                                     jev_routing: *jev_routing,
+                                    approval_delegate: *approval_delegate,
                                     reasoning_effort: *reasoning_effort,
                                     pack: None,
                                 },
@@ -1693,6 +1722,11 @@ impl MergeState {
             self.jev_routing = enabled;
             self.provenance.jev_routing = Some(source.clone());
             touched.push(ConfigKey::JevRouting);
+        }
+        if let Some(setting) = overrides.approval_delegate {
+            self.approval_delegate = Some(setting);
+            self.provenance.approval_delegate = Some(source.clone());
+            touched.push(ConfigKey::ApprovalDelegate);
         }
         if let Some(organization) = &overrides.organization {
             self.organization = Some(organization.clone());
@@ -2060,6 +2094,7 @@ impl MergeState {
                             approval_mode: profile.approval_mode(),
                             jev_review: None,
                             jev_routing: None,
+                            approval_delegate: None,
                             reasoning_effort: None,
                             pack: Some(crate::PackProfileRef::new(pack, profile.clone())),
                         },
@@ -2263,6 +2298,7 @@ impl MergeState {
             audit,
             jev_review: self.jev_review,
             jev_routing: self.jev_routing,
+            approval_delegate: self.approval_delegate,
             reasoning_effort: self.reasoning_effort,
             max_output_tokens: self.max_output_tokens,
             providers: self.providers,
@@ -2296,6 +2332,7 @@ impl ClientSnapshot {
             audit: self.audit,
             jev_review: self.jev_review,
             jev_routing: self.jev_routing,
+            approval_delegate: self.approval_delegate,
             reasoning_effort: self.reasoning_effort,
             max_output_tokens: self.max_output_tokens,
             providers: self.providers,
