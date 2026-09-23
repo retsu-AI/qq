@@ -430,8 +430,10 @@ or `edit`). A client answers with `ApprovalDecision::Answer { answers }`,
 one string per question in order; the store settles the call `completed`
 with the rendered questions and answers as its result and resolves the hold
 `answered`. An empty answer set declines: the result tells the model to
-proceed on its own judgement. The approval timeout applies unchanged, so an
-unanswered question settles `denied_timeout` and the run continues. Under
+proceed on its own judgement. An unanswered question follows the approval
+clocks (§ Approval Policy, "Two clocks"): no server deadline unless
+`approval_timeout_seconds` is set, in which case it settles `denied_timeout`
+and the run continues. Under
 `supervised` the reviewer is not consulted — there is nothing to adjudicate —
 but it sees the question and the answer in the transcript like any other
 call. Malformed arguments never hold: they fall through to dispatch and the
@@ -1128,6 +1130,26 @@ Decision by effect class before grants (ADR-0021):
 
 Blocked hosts (private, link-local, metadata, managed `deny_hosts`) are
 refused before the mode, like a shell `Forbidden` (§ Network Tools).
+
+**Two clocks.** A held call is bounded by two independent timers, neither
+of which consumes the other. The delegate's: the gate waits
+`SessionRuntimeOptions::delegate_timeout` (20 s) for a verdict, past which
+the pending review is dropped and treated as an `escalate`; Jev bounds
+itself at 5 s and the reviewer model at 10 s, so this is a backstop for a
+delegate that breaks its contract, never the normal path. The human's:
+`approval_timeout` is `None` by default, meaning **no server deadline**. An
+interactive hold waits for the client, the run's own deadline
+(`RunLimits::max_duration_ms`), or cancellation, and is never settled
+`denied_timeout` by a timer the operator did not set. A supervisor that wants
+a bound sets `approval_timeout_seconds` in configuration (1–86400, not
+trust-gated: it only shortens a wait); when set, the human's clock starts when
+the human is actually asked — at the hold without a delegate, at the
+escalation or delegate cut-off with one — so a slow delegate never eats into
+it. Headless `qq run` has no human and does not rely on either clock: an
+`auto` hold with no delegate configured is denied the moment it is
+published, and with a delegate it is denied 20 s after the request unless
+the delegate settled it first (§ Headless Contract). This is the RR9 policy
+from the run-reliability plan, shipped here.
 
 The allowlist is deliberately simple: exact commands or command prefixes
 (`cargo test`, `git status`), plus per-tool grants for MCP. No pattern DSL

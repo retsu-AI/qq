@@ -33,10 +33,11 @@ use tokio::time::Instant;
 /// before the invocation gives up and reports a harness failure.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 /// How long an `auto` headless run holds an escalated approval open for the
-/// configured reviewer before denying it. Covers the reviewer's own 10s
-/// request timeout with margin. The reviewer's `approve` and `deny` both
-/// settle the call themselves; this deny is the unattended answer to an
-/// `escalate`, a reviewer timeout, or an outage, so the run never stalls.
+/// configured delegate before denying it. Covers the delegate chain's own
+/// bound (Jev 5 s, then the reviewer model 10 s) with margin. A delegate's
+/// `approve` and `deny` both settle the call themselves; this deny is the
+/// unattended answer to an `escalate`, a delegate timeout, or an outage, so
+/// the run never stalls. Without a delegate configured the deny is immediate.
 const REVIEWER_DENY_GRACE: Duration = Duration::from_secs(20);
 /// Steering lines buffered between stdin and the run. Beyond this the reader
 /// waits; the runtime's own per-run pending bound refuses the rest anyway.

@@ -360,7 +360,7 @@ async fn prepare_headless(
         max_output_tokens: Some(snapshot.max_output_tokens()),
         organization: snapshot.organization().map(str::to_owned),
     };
-    let handler = runtime::RuntimeHandler::open(factory)
+    let handler = runtime::RuntimeHandler::open_with(factory, snapshot.approval_timeout())
         .await
         .map_err(|error| match error {
             runtime::RuntimeHandlerError::Build(error) => invalid(error.to_string()),
@@ -416,8 +416,25 @@ async fn serve(bind: std::net::SocketAddr, allow_origins: &[String]) -> Result<(
             println!("qq server already running at {}", connection.address());
         }
         server::ReserveOutcome::Reserved(reservation) => {
+            let factory = runtime::RuntimeFactory::system()?;
+            // The server's own configuration decides the approval wait for
+            // every session it serves: a server-side control like the Jev
+            // settings, not one a client forwards. Absent is no deadline. A
+            // configuration that does not load yet (no model, untrusted
+            // project) still serves; it simply has no bound.
+            let request = config::LoadRequest::from_current_process(None)?;
+            let approval_timeout = {
+                let factory = factory.clone();
+                tokio::task::spawn_blocking(move || {
+                    factory
+                        .load_for_client(&request)
+                        .ok()
+                        .and_then(|snapshot| snapshot.approval_timeout())
+                })
+                .await?
+            };
             let handler =
-                Arc::new(runtime::RuntimeHandler::open(runtime::RuntimeFactory::system()?).await?);
+                Arc::new(runtime::RuntimeHandler::open_with(factory, approval_timeout).await?);
             let identity = handler.server_identity(None);
             let server = match reservation.start(handler.clone(), identity) {
                 Ok(server) => server,
@@ -607,9 +624,12 @@ async fn interactive(
                 server::ReserveOutcome::Existing(connection) => (connection, initial(false)),
                 server::ReserveOutcome::Reserved(reservation) => {
                     let handler = Arc::new(
-                        runtime::RuntimeHandler::open(factory.clone())
-                            .await
-                            .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?,
+                        runtime::RuntimeHandler::open_with(
+                            factory.clone(),
+                            snapshot.approval_timeout(),
+                        )
+                        .await
+                        .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?,
                     );
                     let identity = handler.server_identity(None);
                     let server = match reservation.start(handler.clone(), identity) {
@@ -964,6 +984,7 @@ fn config_command(
                     "jev_routing" => snapshot.provenance().jev_routing(),
                     "jev_approval" => snapshot.provenance().jev_approval(),
                     "approval_delegate" => snapshot.provenance().approval_delegate(),
+                    "approval_timeout" => snapshot.provenance().approval_timeout(),
                     "reasoning_effort" => snapshot.provenance().reasoning_effort(),
                     "max_output_tokens" => snapshot.provenance().max_output_tokens(),
                     _ => field
@@ -1066,6 +1087,12 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
         snapshot
             .approval_delegate()
             .map_or("by_mode", config::ApprovalDelegateSetting::as_str)
+    );
+    println!(
+        "approval_timeout_seconds: {}",
+        snapshot
+            .approval_timeout()
+            .map_or("none".to_owned(), |timeout| timeout.as_secs().to_string())
     );
     println!(
         "reasoning_effort: {}",

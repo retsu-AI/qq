@@ -72,6 +72,7 @@ repository should not commit; this repository's `.gitignore` excludes
 | `jev_routing` | bool | `false` | optional Jev model routing |
 | `jev_approval` | bool | `false` | Jev decides held approvals before `reviewer_model` and you; see [`../runbooks/jev.md`](../runbooks/jev.md#jev-as-the-approval-delegate) |
 | `approval_delegate` | `on` `off` | absent | who settles held approvals: `on` lets the delegate decide `ask` holds too, `off` sends every hold to you; absent keeps each mode's default (delegate under `auto`, you under `ask`). See [permissions](permissions.md#who-decides-a-held-call) |
+| `approval_timeout_seconds` | `1`–`86400` | absent | server-side bound on how long a held call waits for you before it is denied. Absent is **no deadline**: the prompt waits for you, the run's own deadline, or cancellation. Not trust-gated: it can only shorten a wait |
 | `providers` | map | built-ins | provider declarations; [below](#providers) |
 | `mcp` | map | empty | MCP servers; [MCP servers](mcp.md) |
 | `profiles` | map | empty | named per-session presets; [below](#profiles) |
