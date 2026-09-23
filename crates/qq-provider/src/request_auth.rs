@@ -24,6 +24,12 @@ impl SharedRequestCredentialProvider {
     }
 }
 
+impl RequestCredentialProvider for SharedRequestCredentialProvider {
+    fn credential(&self) -> RequestCredentialFuture<'_> {
+        self.0.credential()
+    }
+}
+
 impl std::fmt::Debug for SharedRequestCredentialProvider {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("SharedRequestCredentialProvider([REDACTED])")
@@ -94,10 +100,14 @@ fn validate_credential_value(value: &str) -> Result<(), RequestCredentialError> 
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RequestCredentialError {
-    #[error("request credentials are missing")]
-    Missing,
+    /// No credential could be loaded. `remedy` is opaque text authored by
+    /// the [`RequestCredentialProvider`] (which knows the provider, profile,
+    /// and how the user stores a credential); it is precomputed when the
+    /// provider is constructed so the request path never formats it.
+    #[error("{}", .remedy.as_deref().unwrap_or(MISSING_CREDENTIAL_MESSAGE))]
+    Missing { remedy: Option<Arc<str>> },
     #[error("request credentials are invalid")]
     Invalid,
     #[error("credential refresh was rejected")]
@@ -112,6 +122,24 @@ pub enum RequestCredentialError {
     CapacityUnavailable,
     #[error("credential loading worker stopped unexpectedly")]
     WorkerFailed,
+}
+
+const MISSING_CREDENTIAL_MESSAGE: &str = "request credentials are missing";
+
+impl RequestCredentialError {
+    /// A missing credential with no provider-specific guidance.
+    pub const fn missing() -> Self {
+        Self::Missing { remedy: None }
+    }
+
+    /// A missing credential whose message tells the user what to do. The
+    /// text is shared, not copied, so a provider can attach the same remedy
+    /// to every failure without allocating.
+    pub fn missing_with_remedy(remedy: Arc<str>) -> Self {
+        Self::Missing {
+            remedy: Some(remedy),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,7 +218,7 @@ impl RequestAuthorizer {
 
 fn request_credential_error(error: RequestCredentialError) -> ProviderError {
     let kind = match error {
-        RequestCredentialError::Missing
+        RequestCredentialError::Missing { .. }
         | RequestCredentialError::Invalid
         | RequestCredentialError::RefreshRejected => ProviderErrorKind::Authentication,
         RequestCredentialError::RefreshUnavailable
@@ -286,6 +314,77 @@ mod tests {
     use reqwest::header::AUTHORIZATION;
 
     use super::*;
+
+    #[test]
+    fn a_missing_credential_displays_its_remedy_when_one_is_attached() {
+        let remedy: Arc<str> =
+            Arc::from("no credential for provider `example`: run `example login`");
+        let with_remedy = RequestCredentialError::missing_with_remedy(remedy.clone());
+        let without_remedy = RequestCredentialError::missing();
+
+        assert_eq!(with_remedy.to_string(), remedy.as_ref());
+        assert_eq!(
+            without_remedy.to_string(),
+            "request credentials are missing"
+        );
+        assert_ne!(with_remedy, without_remedy);
+    }
+
+    #[test]
+    fn a_missing_credential_is_an_authentication_failure_with_or_without_a_remedy() {
+        let remedy: Arc<str> = Arc::from("no credential for provider `example`");
+        for error in [
+            RequestCredentialError::missing(),
+            RequestCredentialError::missing_with_remedy(remedy.clone()),
+        ] {
+            let expected_message = error.to_string();
+            let provider_error = request_credential_error(error);
+
+            assert_eq!(provider_error.kind(), ProviderErrorKind::Authentication);
+            assert!(matches!(
+                &provider_error,
+                ProviderError::ResponseFailed { message, .. } if *message == expected_message
+            ));
+        }
+        assert_eq!(
+            request_credential_error(RequestCredentialError::missing_with_remedy(remedy))
+                .to_string(),
+            "provider response failed: no credential for provider `example`"
+        );
+    }
+
+    struct MissingCredentials {
+        remedy: Arc<str>,
+    }
+
+    impl RequestCredentialProvider for MissingCredentials {
+        fn credential(&self) -> RequestCredentialFuture<'_> {
+            let remedy = self.remedy.clone();
+            Box::pin(async move { Err(RequestCredentialError::missing_with_remedy(remedy)) })
+        }
+    }
+
+    #[tokio::test]
+    async fn authorization_surfaces_the_provider_remedy_without_touching_the_request() {
+        let authorizer = RequestAuthorizer::request_time_bearer(
+            SharedRequestCredentialProvider::new(MissingCredentials {
+                remedy: Arc::from("no credential for provider `example`: run `example login`"),
+            }),
+        );
+        let mut request = reqwest::Client::new()
+            .get("https://example.test")
+            .build()
+            .unwrap();
+
+        let error = authorizer.authorize(&mut request).await.unwrap_err();
+
+        assert_eq!(error.kind(), ProviderErrorKind::Authentication);
+        assert_eq!(
+            error.to_string(),
+            "provider response failed: no credential for provider `example`: run `example login`"
+        );
+        assert!(request.headers().get(AUTHORIZATION).is_none());
+    }
 
     struct RotatingRequestCredentials {
         calls: AtomicUsize,

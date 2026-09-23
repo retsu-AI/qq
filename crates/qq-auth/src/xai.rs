@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::{
-    AuthError, CredentialBackend, CredentialStore, Secret, resolve_provider_credential,
-    validate_credential_name,
+    AuthError, CredentialBackend, CredentialStore, MissingCredentialRemedies, Secret,
+    resolve_provider_credential, validate_credential_name,
 };
 use qq_provider::{
     RequestCredential, RequestCredentialError, RequestCredentialFuture, RequestCredentialProvider,
@@ -401,10 +401,19 @@ impl CredentialStore {
         profile: &str,
         explicit: Option<SecretRef>,
     ) -> SharedRequestCredentialProvider {
+        // Remedy text is authored here, once, so the request path never
+        // formats provider-specific guidance.
+        let remedies = MissingCredentialRemedies::new(
+            "xai",
+            profile,
+            &["qq auth login xai --oauth", "qq auth login xai"],
+            Some("XAI_API_KEY"),
+        );
         SharedRequestCredentialProvider::new(XaiRequestCredentials {
             store: self.clone(),
             profile: profile.to_owned(),
             explicit,
+            remedies,
         })
     }
 
@@ -492,6 +501,7 @@ struct XaiRequestCredentials {
     store: CredentialStore,
     profile: String,
     explicit: Option<SecretRef>,
+    remedies: MissingCredentialRemedies,
 }
 
 impl RequestCredentialProvider for XaiRequestCredentials {
@@ -505,7 +515,7 @@ impl RequestCredentialProvider for XaiRequestCredentials {
                     store.resolve_xai(&profile, explicit.as_ref())
                 })
                 .await?
-                .map_err(map_request_credential_error)?;
+                .map_err(|error| map_request_credential_error(error, &self.remedies))?;
             RequestCredential::bearer(
                 secret
                     .expose_secret_str()
@@ -515,12 +525,15 @@ impl RequestCredentialProvider for XaiRequestCredentials {
     }
 }
 
-fn map_request_credential_error(error: AuthError) -> RequestCredentialError {
+fn map_request_credential_error(
+    error: AuthError,
+    remedies: &MissingCredentialRemedies,
+) -> RequestCredentialError {
     match error {
         AuthError::EnvironmentMissing { .. }
         | AuthError::ProviderCredentialMissing { .. }
         | AuthError::StoredCredentialNotRegistered { .. }
-        | AuthError::StoredCredentialMissing { .. } => RequestCredentialError::Missing,
+        | AuthError::StoredCredentialMissing { .. } => remedies.missing(&error),
         AuthError::XAi(XaiAuthError::RefreshRejected | XaiAuthError::AuthorizationDenied) => {
             RequestCredentialError::RefreshRejected
         }

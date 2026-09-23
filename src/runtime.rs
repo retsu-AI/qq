@@ -9,7 +9,10 @@ use std::{
     sync::Arc,
 };
 
-use qq_auth::{AuthError, CredentialStore, Secret, resolve_provider_credential};
+use qq_auth::{
+    AuthError, CredentialStore, Secret, resolve_provider_credential,
+    resolve_provider_credential_with_aliases,
+};
 use qq_config::{
     AwsAuth, BedrockAuth, ClientSnapshot, ConfigError, ConfigLoader, ConfigSnapshot, EndpointMode,
     HttpAccess, HttpCredential, LoadRequest, PromotionOutcome, ProviderAccess, ProviderApi,
@@ -878,12 +881,14 @@ impl RuntimeFactory {
                     explicit,
                     stored_name,
                     environment_variable,
+                    alternate_variables,
                     audience,
-                } => resolve_provider_credential(
+                } => resolve_provider_credential_with_aliases(
                     &self.inner.credentials,
                     explicit.as_ref(),
                     stored_name,
                     environment_variable,
+                    alternate_variables,
                     Some(audience),
                 )
                 .is_ok(),
@@ -1559,18 +1564,22 @@ impl RuntimeFactory {
                 explicit,
                 stored_name,
                 environment_variable,
+                alternate_variables,
                 audience,
             } => {
-                let secret = resolve_provider_credential(
+                let secret = resolve_provider_credential_with_aliases(
                     &self.inner.credentials,
                     explicit.as_ref(),
                     stored_name,
                     environment_variable,
+                    alternate_variables,
                     Some(audience),
                 )?;
                 // Built-in providers try the explicit reference, then the
                 // stored name, then the environment variable; the descriptor
-                // names the source that actually applies.
+                // names the source that actually applies. An alias variable
+                // (`GOOGLE_API_KEY`) is reported under the canonical name so
+                // the plan digest does not depend on which spelling is set.
                 let credential = match explicit {
                     Some(reference) => credential_reference(reference),
                     None => {
@@ -6458,6 +6467,62 @@ mod tests {
             assert!(!debug.contains("sk-first-secret"));
             assert!(!debug.contains("sk-second-secret"));
         }
+    }
+
+    #[test]
+    fn google_is_authenticated_by_the_google_api_key_alias() {
+        // Process environment is shared across the test binary, so the alias
+        // is injected into a child that runs the `_child` test below with
+        // nothing else in its environment but what this test provides.
+        let fixture = RuntimeFixture::new();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::tests::google_is_authenticated_by_the_google_api_key_alias_child",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("QQ_GOOGLE_ALIAS_CHILD_ROOT", &fixture.root)
+            .env("GOOGLE_API_KEY", "alias-secret-for-test")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "child failed: stdout={stdout} stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn google_is_authenticated_by_the_google_api_key_alias_child() {
+        let Some(root) = std::env::var_os("QQ_GOOGLE_ALIAS_CHILD_ROOT") else {
+            return;
+        };
+        assert!(std::env::var_os("GEMINI_API_KEY").is_none());
+        let fixture = RuntimeFixture {
+            root: PathBuf::from(root),
+        };
+        let factory = fixture.factory_with_credentials(CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(PanicKeyring),
+        ));
+        let request = fixture.request(r#"(version: 1, model: "google/gemini-2.5-flash")"#);
+        let snapshot = factory.load(&request).unwrap();
+        let provider = snapshot.providers().get("google").unwrap();
+
+        assert!(factory.provider_authenticated("google", provider));
+        let plan = factory.plan_for(&request).unwrap();
+        // The descriptor names the canonical variable whichever spelling
+        // supplied the secret, so the plan digest does not depend on it.
+        assert_eq!(
+            plan.descriptor().provider.credential,
+            CredentialReference::Environment("GEMINI_API_KEY".to_owned())
+        );
+        let canonical = String::from_utf8(plan.descriptor().canonical_bytes().unwrap()).unwrap();
+        assert!(!canonical.contains("alias-secret-for-test"));
+        // The parent owns the fixture directory.
+        std::mem::forget(fixture);
     }
 
     #[test]

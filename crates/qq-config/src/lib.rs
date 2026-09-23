@@ -869,6 +869,9 @@ pub enum HttpCredential {
         explicit: Option<SecretRef>,
         stored_name: &'static str,
         environment_variable: &'static str,
+        /// Further variables accepted after `environment_variable`, in
+        /// precedence order, for providers whose SDKs read more than one.
+        alternate_variables: &'static [&'static str],
         audience: &'static str,
     },
     OpenAiCodex {
