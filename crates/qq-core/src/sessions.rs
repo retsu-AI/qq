@@ -83,6 +83,9 @@ pub use runtime::{
 };
 pub use snapshots::run_cost;
 pub use store::STORE_SCHEMA_VERSION;
+pub(crate) use tool_calls::DelegateGrant;
+#[cfg(test)]
+pub(crate) use tool_calls::MAX_DELEGATE_GRANTS_PER_RUN;
 
 /// Entry points for the `context_assembly` bench. Not a public API.
 #[doc(hidden)]

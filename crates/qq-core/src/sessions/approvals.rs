@@ -115,6 +115,20 @@ impl ToolGate for SessionToolGate {
                         } => crate::tools::fetch::preview(&call.arguments, host),
                         _ => None,
                     };
+                    // What a delegate's Approve may bless for the rest of the
+                    // session: the exact command string or the exact host,
+                    // nothing wider, and nothing for other tool classes. The
+                    // human's own choices (prefix, tool name, workspace) stay
+                    // on the client path; a delegate never gets them.
+                    let mut delegate_grant = match &class {
+                        approval::ToolClass::Shell { command, .. } => {
+                            Some(DelegateGrant::Command(command.clone()))
+                        }
+                        approval::ToolClass::Network {
+                            host: Some(host), ..
+                        } => Some(DelegateGrant::Host(host.clone())),
+                        _ => None,
+                    };
                     let shell = match class {
                         approval::ToolClass::Shell { command, cwd } => {
                             // Why the gate is asking, so the client can say so.
@@ -232,7 +246,11 @@ impl ToolGate for SessionToolGate {
                                         ReviewDecision::Approve => {
                                             match inner
                                                 .store
-                                                .resolve_approval_by_reviewer(&claimed, call.id)
+                                                .resolve_approval_by_reviewer(
+                                                    &claimed,
+                                                    call.id,
+                                                    delegate_grant.take(),
+                                                )
                                                 .await
                                             {
                                                 Ok(Some(_)) => {

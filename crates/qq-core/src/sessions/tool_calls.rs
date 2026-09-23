@@ -386,21 +386,34 @@ pub(super) fn load_approval_policy(
         .optional()?
         .ok_or(SessionRuntimeError::SessionNotFound)?;
     let mode = parse_approval_mode(&mode)?;
-    let mut statement =
-        connection.prepare("SELECT kind, value FROM session_grants WHERE session_id = ?1")?;
+    let mut statement = connection
+        .prepare("SELECT kind, value, source FROM session_grants WHERE session_id = ?1")?;
     let rows = statement
         .query_map([session_id.to_string()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut grants = approval::SessionGrants::default();
-    for (kind, value) in rows {
-        match kind.as_str() {
-            "tool" => {
+    for (kind, value, source) in rows {
+        match (source.as_str(), kind.as_str()) {
+            ("human", "tool") => {
                 grants.tools.insert(value);
             }
-            "shell_prefix" => grants.shell_prefixes.push(value),
-            "host" => grants.hosts.push(value),
+            ("human", "shell_prefix") => grants.shell_prefixes.push(value),
+            ("human", "host") => grants.hosts.push(value),
+            // A delegate row is an exact string; the kinds it may hold are
+            // the two the gate can match exactly. Anything else in the table
+            // is a write this code never made.
+            ("delegate", "shell_prefix") => {
+                grants.delegate.commands.insert(value);
+            }
+            ("delegate", "host") => {
+                grants.delegate.hosts.insert(value);
+            }
             _ => return Err(SessionRuntimeError::CONSTRAINT),
         }
     }
@@ -512,16 +525,40 @@ pub(super) fn request_tool_approval(
     Ok(event)
 }
 
+/// The exact string a delegate's approval may bless for the rest of the
+/// session, and the run whose cap it counts against. Only the two shapes the
+/// gate matches byte-for-byte exist; a delegate never records a tool name or
+/// a prefix, because either would widen what its own later verdicts skip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DelegateGrant {
+    Command(String),
+    Host(String),
+}
+
+/// Delegate grants one run may record. Bounds how much a single run's
+/// reviewer can widen the session without a human, independent of the
+/// session-wide `MAX_SESSION_GRANTS`.
+pub(crate) const MAX_DELEGATE_GRANTS_PER_RUN: u32 = 64;
+
 /// Resolves one awaiting approval as reviewer-approved, unless a client
 /// resolution already committed — the client always wins the race. Returns
 /// the resolution event to publish when the reviewer's approval landed, and
 /// `None` when the call was no longer awaiting (already resolved, or the run
 /// finished and interrupted it).
+///
+/// A `grant` is recorded in the same transaction as the approval when it fits
+/// a session grant (non-empty, within `MAX_GRANT_BYTES`, session under
+/// `MAX_SESSION_GRANTS`) and this run is under `MAX_DELEGATE_GRANTS_PER_RUN`.
+/// A grant that does not fit is dropped and the call still executes once:
+/// the storage rule never fails an approval. The row is marked
+/// `source = 'delegate'`, so the gate reads it as an exact match only and
+/// the workspace promotion path never sees it.
 pub(super) fn resolve_approval_by_reviewer(
     connection: &mut Connection,
     store_id: StoreId,
     identity: RunIdentity,
     tool_call_id: ToolCallId,
+    grant: Option<DelegateGrant>,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
@@ -539,6 +576,48 @@ pub(super) fn resolve_approval_by_reviewer(
     )?;
     if updated != 1 {
         return Ok(None);
+    }
+    if let Some(grant) = grant {
+        let (kind, value) = match &grant {
+            DelegateGrant::Command(command) => ("shell_prefix", command.trim()),
+            DelegateGrant::Host(host) => ("host", host.trim()),
+        };
+        let session = identity.session_id.to_string();
+        let run = identity.run_id.to_string();
+        let recordable = !value.is_empty() && value.len() <= MAX_GRANT_BYTES && {
+            let already_stored: bool = transaction.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM session_grants
+                     WHERE session_id = ?1 AND kind = ?2 AND value = ?3
+                 )",
+                params![session, kind, value],
+                |row| row.get(0),
+            )?;
+            already_stored || {
+                let session_total: u32 = transaction.query_row(
+                    "SELECT COUNT(*) FROM session_grants WHERE session_id = ?1",
+                    [&session],
+                    |row| row.get(0),
+                )?;
+                let run_total: u32 = transaction.query_row(
+                    "SELECT COUNT(*) FROM session_grants
+                     WHERE session_id = ?1 AND source = 'delegate' AND run_id = ?2",
+                    params![session, run],
+                    |row| row.get(0),
+                )?;
+                session_total < MAX_SESSION_GRANTS && run_total < MAX_DELEGATE_GRANTS_PER_RUN
+            }
+        };
+        if recordable {
+            // OR IGNORE: a human grant with the same (kind, value) already
+            // covers the call and is the wider of the two; keep it.
+            transaction.execute(
+                "INSERT OR IGNORE INTO session_grants(
+                         session_id, kind, value, created_at_ms, source, run_id
+                     ) VALUES (?1, ?2, ?3, ?4, 'delegate', ?5)",
+                params![session, kind, value, now, run],
+            )?;
+        }
     }
     let tool_call = load_tool_call(&transaction, tool_call_id)?;
     let event = append_event(
