@@ -2,8 +2,18 @@
 
 A release is a `vX.Y.Z` tag on `main`. Pushing the tag runs
 `.github/workflows/release.yml`, which builds `qq` for every supported target,
-checks `qq --version`, and publishes a GitHub release with the archives, a
-combined `SHA256SUMS`, and notes generated from the merged PR titles.
+checks `qq --version`, publishes a GitHub release with the archives, a
+combined `SHA256SUMS`, and notes generated from the merged PR titles, and then
+regenerates the Homebrew tap formula from that `SHA256SUMS`.
+
+Every install route reads these assets, so nothing else is published:
+
+| Route | Reads | Where it lives |
+| --- | --- | --- |
+| `install.sh` | `releases/latest` (or `--version`), the archive, `SHA256SUMS` | repository root, served raw from `main` |
+| Homebrew | the four `.tar.gz` archives by URL and sha256 | `retsu-AI/homebrew-qq` `Formula/qq.rb`, pushed by the `homebrew` job |
+| cargo-binstall | the archive named by `[package.metadata.binstall]` in `Cargo.toml` | the manifest at the requested git ref |
+| Nix | the source tree at the flake ref | `nix/packages.nix` |
 
 ## Procedure
 
@@ -40,7 +50,52 @@ release is a bump PR followed by a tag on the merged result.
 4. Watch the `Release` workflow. The first job fails fast if the tag does not
    match the manifest version or its commit is not on `main`, so a tag made
    on the wrong commit never produces a release. The publish job runs only
-   after every target builds.
+   after every target builds; the `homebrew` job runs after publish and is
+   skipped (with a notice, not a failure) when `HOMEBREW_TAP_TOKEN` is unset.
+
+5. Confirm the routes: `curl -fsSL
+   https://raw.githubusercontent.com/retsu-AI/qq/main/install.sh | sh -s --
+   --dir /tmp/qq-check` prints the new version, and `Formula/qq.rb` in the tap
+   carries it.
+
+## Homebrew tap
+
+`cargo xtask homebrew-formula --version X.Y.Z --sums SHA256SUMS` renders
+`Formula/qq.rb` for `retsu-AI/homebrew-qq` from the release's checksum file:
+one `url`/`sha256` pair per macOS and Linux archive, `bin.install "qq"`, and a
+`--version` test. It refuses a `SHA256SUMS` that lacks any of the four
+archives, so a partial release never reaches the tap. The formula is
+generated; do not edit it in the tap by hand.
+
+One-time setup (repository owner):
+
+1. Create the public repository `retsu-AI/homebrew-qq` with a README; the
+   `homebrew-` prefix is what makes `brew install retsu-ai/qq/qq` resolve.
+2. Create a fine-grained personal access token scoped to that repository
+   only, with **Contents: read and write**; set its expiry and note the date.
+3. In `retsu-AI/qq` → Settings → Secrets and variables → Actions, add it as
+   `HOMEBREW_TAP_TOKEN`.
+4. Re-run the `homebrew` job of the latest release workflow (or cut the next
+   release). It clones the tap, writes `Formula/qq.rb`, and pushes
+   `qq X.Y.Z`; a formula already at that version is a no-op.
+
+To backfill or repair the formula locally:
+
+```sh
+gh release download vX.Y.Z --repo retsu-AI/qq --pattern SHA256SUMS --dir /tmp/qq-rel
+cargo xtask homebrew-formula --version X.Y.Z --sums /tmp/qq-rel/SHA256SUMS > Formula/qq.rb
+```
+
+## Install script
+
+`install.sh` at the repository root is what `curl … | sh` runs, served from
+`main`, so a change to it is live for every user on merge; keep it POSIX
+`sh`, shellcheck-clean, and covered by `tests/install_sh.sh`, which CI runs
+against a local fixture release (no network). It expects the archive layout
+the `Package` step produces (`qq-vX.Y.Z-<target>/qq`) or a binary at the
+archive root, and a `SHA256SUMS` row per archive. Renaming an archive or the
+checksum file is a breaking change for the script, the formula renderer, and
+the binstall metadata together.
 
 ## Versioning
 

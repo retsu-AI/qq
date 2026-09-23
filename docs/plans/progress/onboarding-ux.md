@@ -10,9 +10,9 @@ below, newest last.
 | OB1 | TUI opens without a model | Shipped (#136) | `feat/eng-860-tui-without-model` | ENG-860; shares the branch with OB2 |
 | OB2 | TUI opens without a credential; empty state names the remedy | Shipped (#136) | `feat/eng-860-tui-without-model` | ENG-876; shares the branch with OB1 |
 | OB3 | Request-time credential errors name provider and remedy; `GOOGLE_API_KEY` alias | Shipped (#137) | `fix/eng-877-request-credential-errors` | ENG-877 |
-| OB4 | `qq doctor` | In review | `feat/eng-878-doctor` | ENG-878; independent of OB1–OB3 |
+| OB4 | `qq doctor` | Shipped (#138) | `feat/eng-878-doctor` | ENG-878 |
 | OB5 | `qq init`; `config paths` marks existing files | Planned | | ENG-879 |
-| OB6 | `install.sh`, Homebrew tap, Nix package, binstall | Planned | | ENG-880 |
+| OB6 | `install.sh`, Homebrew tap, Nix package, binstall | In review | `feat/eng-880-install-paths` | ENG-880; tap repo + `HOMEBREW_TAP_TOKEN` are owner setup |
 | OB7 | In-TUI trust prompt | Planned | | ENG-881; needs ADR + protocol row in root |
 | OB8 | First-session guidance; `qq run` denial hint | Planned | | ENG-882 |
 | OB9 | Missing MCP credential degrades the server | Planned | | ENG-861 |
@@ -87,3 +87,21 @@ server discovery reuses `discover_at` over loopback. Tests: 11 in
 --workspace`. Docs: guide `cli.md`, `troubleshooting.md`, `quickstart.md`,
 `README.md`. Deviation: the keyring is not probed blindly (unlock prompts);
 it is exercised only through the model's stored credential. No perf gate.
+
+### 2026-09-22 — OB6 install paths
+
+Branch `feat/eng-880-install-paths`. `install.sh` (POSIX, 135 lines,
+shellcheck-clean) resolves latest via the API with a redirect fallback,
+verifies `SHA256SUMS`, installs to `~/.local/bin`, prints the PATH hint per
+shell; `tests/install_sh.sh` (17 checks against a local `http.server`
+fixture, wired into CI) covers install, `--dir`, `QQ_INSTALL_DIR`, tampered
+checksum, missing release, bad args. Verified live: `curl … | sh` installs
+v0.1.3 on x86_64 Linux. Nix: `packages.qq`/`default`, `apps.default`;
+`nix build .#qq` succeeded in 138 s (warm crate cache), `result/bin/qq
+--version` → `qq 0.1.3 (unknown unknown)` from a dirty tree; no git deps in
+`Cargo.lock`, so no `outputHashes`. binstall: metadata added, `--dry-run`
+resolves the real v0.1.3 archive; `repository` fixed from the `lg2m/qq` fork
+to `retsu-AI/qq` (binstall derives `{ repo }` from it). `cargo xtask
+homebrew-formula` (4 tests) + a guarded `homebrew` release job; untestable
+until the tap and token exist. Homebrew and `nix run github:` are documented
+but not exercised against the remote.

@@ -224,6 +224,8 @@ enum Task {
     Perf(crate::perf::PerfArgs),
     /// Bump the workspace version, commit `chore(release): vX.Y.Z`, and tag it.
     Release(crate::release::ReleaseArgs),
+    /// Render the Homebrew tap formula for a release from its `SHA256SUMS`.
+    HomebrewFormula(crate::homebrew::HomebrewArgs),
 }
 
 #[derive(Debug, Args)]
@@ -424,6 +426,8 @@ enum XtaskError {
     Perf(#[from] crate::perf::PerfError),
     #[error(transparent)]
     Release(#[from] crate::release::ReleaseError),
+    #[error(transparent)]
+    Homebrew(#[from] crate::homebrew::HomebrewError),
     #[error("choose one or more --provider values or --all, but not both")]
     InvalidSelection,
     #[error("live provider checks require {LIVE_OPT_IN}=1")]
@@ -463,6 +467,7 @@ async fn try_run(cli: Cli) -> Result<(), XtaskError> {
         Task::Eval(args) => crate::eval::run(*args).await.map_err(Into::into),
         Task::Perf(args) => crate::perf::run(args).await.map_err(Into::into),
         Task::Release(args) => crate::release::run(args).await.map_err(Into::into),
+        Task::HomebrewFormula(args) => crate::homebrew::run(args).map_err(Into::into),
     }
 }
 
