@@ -6,15 +6,15 @@ below, newest last.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| OB0 | Audit, plan, user guide, community files, P0 error text | In review | `feat/eng-875-onboarding-ux` | ENG-875; ENG-859 shipped separately as #119 |
+| OB0 | Audit, plan, user guide, community files, P0 error text | Shipped (#128) | `feat/eng-875-onboarding-ux` | ENG-875; ENG-859 shipped separately as #119 |
 | OB1 | TUI opens without a model | Shipped (#136) | `feat/eng-860-tui-without-model` | ENG-860; shares the branch with OB2 |
 | OB2 | TUI opens without a credential; empty state names the remedy | Shipped (#136) | `feat/eng-860-tui-without-model` | ENG-876; shares the branch with OB1 |
 | OB3 | Request-time credential errors name provider and remedy; `GOOGLE_API_KEY` alias | Shipped (#137) | `fix/eng-877-request-credential-errors` | ENG-877 |
 | OB4 | `qq doctor` | Shipped (#138) | `feat/eng-878-doctor` | ENG-878 |
 | OB5 | `qq init`; `config paths` marks existing files | Planned | | ENG-879 |
-| OB6 | `install.sh`, Homebrew tap, Nix package, binstall | In review | `feat/eng-880-install-paths` | ENG-880; tap repo + `HOMEBREW_TAP_TOKEN` are owner setup |
+| OB6 | `install.sh`, Homebrew tap, Nix package, binstall | Shipped (#139) | `feat/eng-880-install-paths` | ENG-880; tap repo + `HOMEBREW_TAP_TOKEN` are owner setup |
 | OB7 | In-TUI trust prompt | Planned | | ENG-881; needs ADR + protocol row in root |
-| OB8 | First-session guidance; `qq run` denial hint | Planned | | ENG-882 |
+| OB8 | First-session guidance; `qq run` denial hint | In review | `feat/eng-882-first-session-guidance` | ENG-882 |
 | OB9 | Missing MCP credential degrades the server | Planned | | ENG-861 |
 | OB10 | Docs-truth test; CHANGELOG at release | Planned | | ENG-883 |
 | OB11 | Wiki mirror workflow | Planned | | ENG-884 |
@@ -105,3 +105,34 @@ to `retsu-AI/qq` (binstall derives `{ repo }` from it). `cargo xtask
 homebrew-formula` (4 tests) + a guarded `homebrew` release job; untestable
 until the tap and token exist. Homebrew and `nix run github:` are documented
 but not exercised against the remote.
+
+### 2026-09-23 — OB8 first-session guidance in review
+
+Branch `feat/eng-882-first-session-guidance` off `main` (v0.1.4). Three
+render-time changes, no new state and no protocol change. (a) The empty
+transcript branch in `view/transcript.rs` shows `Try one of these:` with
+`/models`, `/approval`, `/skills` (spelling and title read from
+`commands::COMMANDS`, so the text cannot drift) and `@path — mention a file
+in your prompt` when `app.sessions.len() == 1` and the focused session's
+`prompt_history` is empty; `record_prompt` runs synchronously on Enter, so
+the cell is gone in the next frame. Other empty sessions keep `Ask QQ to
+begin this session.`; the configured-provider remedy paints above the list
+when present. (b) The composer rule's help hint reads `? help` in compose
+mode with an empty composer and `F1 help` otherwise; the swap is local to
+the right-side loop in `chrome::composer_rule`, `hints_for` is unchanged.
+(c) `RunEnd.denied_calls` counts `ToolCallFinished` events of this run with
+`ToolCallState::Denied`; in text mode under `--approval read-only` with a
+non-zero count, `run` prints `held calls were denied under --approval
+read-only; rerun with --approval auto to allow workspace edits` on stderr
+after the answer/error and before the resume hint. Exit status unchanged;
+JSONL prints nothing. Tests: 3 qq-tui view tests (first session shows the
+cell and drops it on Enter; second session says Ask QQ; remedy stays above),
+2 existing rule tests updated for `? help` + a `F1 help`-after-typing
+assertion, 4 headless tests (hint order vs resume hint; silent under auto;
+silent in JSONL; silent with no denials); 34 goldens re-recorded, every
+diff is the `F1 help` → `? help` swap on the rule. Gates: fmt, clippy `-D
+warnings`, `cargo test -p qq-tui` (321 + 6 goldens), `cargo test -p qq --bin
+qq headless` (46) green. Docs: `guide/tui.md` (layout diagram, rule bullet,
+"Your first session"), `guide/headless.md` (denial hint under the approval
+table). Follow-up: no golden scene covers a first empty session; add one if
+the cell's layout changes. Also marked OB0 (#128) and OB6 (#139) shipped.
