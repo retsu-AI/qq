@@ -11,7 +11,7 @@ below, newest last.
 | OB2 | TUI opens without a credential; empty state names the remedy | Shipped (#136) | `feat/eng-860-tui-without-model` | ENG-876; shares the branch with OB1 |
 | OB3 | Request-time credential errors name provider and remedy; `GOOGLE_API_KEY` alias | Shipped (#137) | `fix/eng-877-request-credential-errors` | ENG-877 |
 | OB4 | `qq doctor` | Shipped (#138) | `feat/eng-878-doctor` | ENG-878 |
-| OB5 | `qq init`; `config paths` marks existing files | Planned | | ENG-879 |
+| OB5 | `qq init`; `config paths` marks existing files | In review | `feat/eng-879-init` | ENG-879 |
 | OB6 | `install.sh`, Homebrew tap, Nix package, binstall | Shipped (#139) | `feat/eng-880-install-paths` | ENG-880; tap repo + `HOMEBREW_TAP_TOKEN` are owner setup |
 | OB7 | In-TUI trust prompt | Planned | | ENG-881; needs ADR + protocol row in root |
 | OB8 | First-session guidance; `qq run` denial hint | In review | `feat/eng-882-first-session-guidance` | ENG-882 |
@@ -136,3 +136,30 @@ qq headless` (46) green. Docs: `guide/tui.md` (layout diagram, rule bullet,
 "Your first session"), `guide/headless.md` (denial hint under the approval
 table). Follow-up: no golden scene covers a first empty session; add one if
 the cell's layout changes. Also marked OB0 (#128) and OB6 (#139) shipped.
+
+### 2026-09-23 — OB5 `qq init` in review
+
+Branch `feat/eng-879-init` off `main` (v0.1.4). New `src/init.rs`:
+`init::run(paths, cwd, args, chooser, stdout)` takes injected `ConfigPaths`,
+an optional `BufRead` chooser (stdin when it is a terminal; `None` makes a
+missing `--model` the `ModelRequired` error), and the output stream, so the
+tests run against a temp tree. Writes `<global>/config.ron` (dir 0700, file
+0600 on unix) or `<cwd>/.qq/config.ron` with `--project`, from a commented
+RON template with the route escaped; `create_new` unless `--force`, with
+`AlreadyExists` mapped to its own variant. The written file is validated
+through `ConfigLoader::check` (a project file pending trust is accepted as
+the documented state; anything else is `InitError::Invalid` naming the
+path). Output: `wrote PATH (model: ROUTE)`, then `next:` (`qq auth login
+PROVIDER  # or export VAR`, the browser sign-in for `openai-codex`, the AWS
+chain for `bedrock*`, a `providers:` declaration otherwise), `then: qq`, and
+for `--project` a `qq trust` note. Chooser lists the five `LOGIN_PROVIDERS`
+(shared with `qq auth login`; a test pins the two lists together) with example routes and accepts a number or a full route.
+`qq config paths` gained a `global config:` row, pads labels, and appends
+`(exists)` / `(missing)` to every path. Tests: 15 in `init::tests` + 1 CLI
+parse test. Gates green: fmt, clippy `-D warnings`, `cargo test -p qq --bin
+qq` (209). Manual: global, `--project`, second run, `--force`, bad route,
+unknown provider, codex, bedrock, and the pty chooser (`2`) all behave as
+documented. Docs: `guide/quickstart.md` § 2 uses `qq init` (the awk/heredoc
+is gone), `guide/configuration.md`, `guide/cli.md` (new `qq init` section,
+`paths` row), `guide/troubleshooting.md`, `README.md`. No `qq-config`
+change; no hot-path or protocol impact.

@@ -35,14 +35,11 @@ qq auth login anthropic                 # or openai, google, xai, openai-codex; 
 QQ_MODEL=anthropic/claude-sonnet-5 qq ask "Reply with pong"
 ```
 
-Make the model permanent in `~/.config/qq/config.ron` (`qq config paths`
-shows the path on your OS):
+Make the model permanent (`~/.config/qq/config.ron` on Linux; `qq config
+paths` shows the path on your OS):
 
-```ron
-(
-    version: 1,
-    model: "anthropic/claude-sonnet-5",
-)
+```sh
+qq init --model anthropic/claude-sonnet-5   # or plain `qq init` to pick from a list
 ```
 
 Then, in any repository:

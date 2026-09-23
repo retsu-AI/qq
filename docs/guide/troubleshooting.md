@@ -31,7 +31,8 @@ sources`, `qq auth list` for the detail behind any one line
 
 QQ found no `model:` in any configuration layer and no `--model` /
 `QQ_MODEL`. The message lists every way to set one and names your global
-config path. Pick a route from [Providers](providers.md#built-in-models);
+config path. `qq init --model PROVIDER/MODEL` writes that file; pick a
+route from [Providers](providers.md#built-in-models);
 [Quickstart § 2](quickstart.md#2-tell-qq-which-model-to-use) shows the
 one-time setup. Only `qq ask` and `qq run` stop here; bare `qq` opens the
 TUI and asks with `/models` instead.

@@ -14,9 +14,12 @@ typo cannot silently do nothing. Files are limited to 1 MiB.
 )
 ```
 
-`qq config check` validates the merged result; `qq config show` prints it
-with secrets redacted; `qq config explain model` says which file set a
-value; `qq config sources` lists every file consulted in order.
+`qq init` writes a commented starter file with the model you choose (or
+`--model PROVIDER/MODEL`); `qq init --project` writes `.qq/config.ron` in
+the current directory instead. Neither replaces an existing file without
+`--force`. `qq config check` validates the merged result; `qq config show`
+prints it with secrets redacted; `qq config explain model` says which file
+set a value; `qq config sources` lists every file consulted in order.
 
 ## Files and precedence
 
@@ -39,8 +42,10 @@ Sections `delegation` and `audit` replace as a whole.
 
 `<global>` is `~/.config/qq` on Linux, `~/Library/Application
 Support/dev.qq.qq` on macOS, `%APPDATA%\qq\qq\config` on Windows;
-`qq config paths` prints it. The global `config.ron` may be a symlink to a
-regular file; project files may not.
+`qq config paths` prints it, along with the global `config.ron`, `tui.ron`,
+and the data, managed, and organization paths, each marked `(exists)` or
+`(missing)`. The global `config.ron` may be a symlink to a regular file;
+project files may not.
 
 Project layers that declare anything sensitive — `model`, `providers`,
 `mcp`, `packs`, `profiles`, `delegation`, `audit`, Jev settings,
