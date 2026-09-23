@@ -120,6 +120,7 @@ pub struct AgentProfile {
     shell: ShellPolicy,
     network: crate::tools::network::NetworkPolicy,
     turn_recovery: crate::TurnRecoveryPolicy,
+    approval_delegate: crate::approval::ApprovalDelegate,
     adapter_build: String,
     provenance: Vec<String>,
     credential_epoch: CredentialEpoch,
@@ -162,6 +163,7 @@ impl AgentProfile {
             shell: ShellPolicy::default(),
             network: crate::tools::network::NetworkPolicy::default(),
             turn_recovery: crate::TurnRecoveryPolicy::default(),
+            approval_delegate: crate::approval::ApprovalDelegate::default(),
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -177,6 +179,17 @@ impl AgentProfile {
     #[must_use]
     pub const fn with_turn_recovery(mut self, policy: crate::TurnRecoveryPolicy) -> Self {
         self.turn_recovery = policy;
+        self
+    }
+
+    /// Who settles the calls the session's approval mode holds. Not part of
+    /// the plan digest: it changes who is asked, never what the model may do.
+    #[must_use]
+    pub const fn with_approval_delegate(
+        mut self,
+        delegate: crate::approval::ApprovalDelegate,
+    ) -> Self {
+        self.approval_delegate = delegate;
         self
     }
 
@@ -221,6 +234,7 @@ impl AgentProfile {
             shell: runtime.shell.as_ref().clone(),
             network: runtime.network.as_ref().clone(),
             turn_recovery: runtime.turn_recovery,
+            approval_delegate: runtime.approval_delegate,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -526,6 +540,7 @@ impl CompiledAgentPlan {
             shell,
             network,
             turn_recovery,
+            approval_delegate,
             adapter_build,
             provenance,
             credential_epoch,
@@ -552,7 +567,8 @@ impl CompiledAgentPlan {
         .with_audit(audit)
         .with_shell_policy(shell)
         .with_network_policy(network)
-        .with_turn_recovery(turn_recovery);
+        .with_turn_recovery(turn_recovery)
+        .with_approval_delegate(approval_delegate);
         if let Some(effort) = reasoning_effort {
             runtime = runtime.with_reasoning_effort(effort);
         }
@@ -890,6 +906,13 @@ impl CompiledAgentPlan {
     /// The network policy the plan's `fetch` calls are judged by.
     pub(crate) fn network_policy(&self) -> Arc<crate::tools::network::NetworkPolicy> {
         Arc::clone(&self.runtime.network)
+    }
+
+    /// Who settles the approvals this plan's sessions hold. Not part of the
+    /// digest: it changes who is asked, never what the model may do.
+    #[must_use]
+    pub const fn approval_delegate(&self) -> crate::approval::ApprovalDelegate {
+        self.runtime.approval_delegate
     }
 
     pub(crate) fn workspace_handle(&self) -> Workspace {

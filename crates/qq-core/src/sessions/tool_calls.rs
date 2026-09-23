@@ -405,13 +405,13 @@ pub(super) fn load_approval_policy(
             }
             ("human", "shell_prefix") => grants.shell_prefixes.push(value),
             ("human", "host") => grants.hosts.push(value),
-            // A delegate row is an exact string; the kinds it may hold are
-            // the two the gate can match exactly. Anything else in the table
-            // is a write this code never made.
-            ("delegate", "shell_prefix") => {
+            // A delegate row is an exact string whichever delegate wrote it;
+            // the kinds it may hold are the two the gate can match exactly.
+            // Anything else in the table is a write this code never made.
+            ("delegate" | "jev", "shell_prefix") => {
                 grants.delegate.commands.insert(value);
             }
-            ("delegate", "host") => {
+            ("delegate" | "jev", "host") => {
                 grants.delegate.hosts.insert(value);
             }
             _ => return Err(SessionRuntimeError::CONSTRAINT),
@@ -550,15 +550,17 @@ pub(crate) const MAX_DELEGATE_GRANTS_PER_RUN: u32 = 64;
 /// a session grant (non-empty, within `MAX_GRANT_BYTES`, session under
 /// `MAX_SESSION_GRANTS`) and this run is under `MAX_DELEGATE_GRANTS_PER_RUN`.
 /// A grant that does not fit is dropped and the call still executes once:
-/// the storage rule never fails an approval. The row is marked
-/// `source = 'delegate'`, so the gate reads it as an exact match only and
-/// the workspace promotion path never sees it.
+/// the storage rule never fails an approval. The row's `source` names the
+/// delegate (`delegate` for the reviewer model, `jev` for Jev), so the gate
+/// reads it as an exact match only, the workspace promotion path never sees
+/// it, and an audit can tell the two delegates apart.
 pub(super) fn resolve_approval_by_reviewer(
     connection: &mut Connection,
     store_id: StoreId,
     identity: RunIdentity,
     tool_call_id: ToolCallId,
     grant: Option<DelegateGrant>,
+    delegate: DelegateIdentity,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
@@ -601,7 +603,7 @@ pub(super) fn resolve_approval_by_reviewer(
                 )?;
                 let run_total: u32 = transaction.query_row(
                     "SELECT COUNT(*) FROM session_grants
-                     WHERE session_id = ?1 AND source = 'delegate' AND run_id = ?2",
+                     WHERE session_id = ?1 AND source IN ('delegate', 'jev') AND run_id = ?2",
                     params![session, run],
                     |row| row.get(0),
                 )?;
@@ -614,8 +616,8 @@ pub(super) fn resolve_approval_by_reviewer(
             transaction.execute(
                 "INSERT OR IGNORE INTO session_grants(
                          session_id, kind, value, created_at_ms, source, run_id
-                     ) VALUES (?1, ?2, ?3, ?4, 'delegate', ?5)",
-                params![session, kind, value, now, run],
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![session, kind, value, now, delegate.as_str(), run],
             )?;
         }
     }

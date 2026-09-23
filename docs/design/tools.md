@@ -430,8 +430,10 @@ or `edit`). A client answers with `ApprovalDecision::Answer { answers }`,
 one string per question in order; the store settles the call `completed`
 with the rendered questions and answers as its result and resolves the hold
 `answered`. An empty answer set declines: the result tells the model to
-proceed on its own judgement. The approval timeout applies unchanged, so an
-unanswered question settles `denied_timeout` and the run continues. Under
+proceed on its own judgement. An unanswered question follows the approval
+clocks (§ Approval Policy, "Two clocks"): no server deadline unless
+`approval_timeout_seconds` is set, in which case it settles `denied_timeout`
+and the run continues. Under
 `supervised` the reviewer is not consulted — there is nothing to adjudicate —
 but it sees the question and the answer in the transcript like any other
 call. Malformed arguments never hold: they fall through to dispatch and the
@@ -1049,21 +1051,61 @@ Each session has an approval mode:
 - `read-only` — only read-only built-ins and allowlisted read-only MCP tools
   execute; everything else is denied without prompting.
 - `ask` — workspace-contained edits, writes, shell, and non-allowlisted MCP
-  calls each request approval.
+  calls each request approval. The human decides by default; with
+  `approval_delegate: on` the reviewer is consulted first and its `approve`
+  settles the hold, while its `deny` is advice: the human is still asked,
+  their wait starting at the denial.
 - `auto` (default) — workspace-contained edits, writes, and MCP calls execute
   without prompting; shell commands the classifier allows or a grant covers
   execute; everything it would prompt for is held. With a `reviewer_model`
   configured the reviewer settles the hold: `approve` executes, `deny` is
   final and the model receives the reason as a tool error, `escalate` (or a
   reviewer timeout or outage) asks the human, whose wait starts at the
-  escalation rather than when the reviewer was consulted. Without a reviewer
-  the human is asked. `Forbidden` shapes are refused before any of this.
+  escalation rather than when the reviewer was consulted. Without a reviewer,
+  or with `approval_delegate: off`, the human is asked. `Forbidden` shapes are
+  refused before any of this.
 - `supervised` — every mutating, shell, and MCP call is held and adjudicated
   by the reviewer model regardless of grants, under the same three verdicts.
   Only spawned write children run here; a client cannot select it directly.
+  `approval_delegate: off` withdraws the reviewer here too.
 - `full` — everything executes without prompting, except shell commands the
   classifier marks `Forbidden` (§ Shell Classification): `full` is
   unrestricted authority over the workspace, not over the machine.
+
+The mode is the ceiling; `approval_delegate` only chooses who settles the
+calls the mode already holds. It is a top-level or per-profile configuration
+key (`on`, `off`, or absent) and the `QQ_APPROVAL_DELEGATE` override; absent
+means the mode's own default above, so a configuration that never mentions it
+behaves exactly as before. It is a sensitive declaration under project trust
+like `jev_routing`. Who is consulted, by mode and setting:
+
+| mode | absent | `on` | `off` |
+| --- | --- | --- | --- |
+| `read-only`, `full` | nobody; nothing is held | nobody | nobody |
+| `ask` | human | reviewer, then human on `escalate` or `deny` | human |
+| `auto`, `supervised` | reviewer, then human on `escalate` | reviewer, then human on `escalate` | human |
+
+Without a `reviewer_model` every cell is the human. The setting is not part
+of the plan digest: it changes who is asked, never what the model may do.
+`Forbidden` shapes, blocked hosts, managed `deny_*`, and `ask_user` never
+reach the reviewer under any setting.
+
+"The reviewer" in the table is a chain (ADR-0041). With `jev_approval: true`
+and a stored TypeSafe key, Jev is asked first: one typed `choice` over
+`approve` / `deny` / `abstain` against the approval preview (command or diff,
+host, task brief, recent action names, grants, mode), each section bounded to
+8 KiB and secret-masked, the whole request refused past 64 KiB, the call
+bounded at 5 s. A confident `approve` or `deny` (confidence and winning
+probability both at least 0.7 under the pinned `jev-1.13.0` contract) is the
+delegate's verdict. `abstain`, low confidence, a malformed reply, a transport
+failure, a timeout, or a missing key falls through to `reviewer_model`, then
+to the human, with the reason attached to the escalation. Jev is never failed
+open to approve. Whether Jev is consulted is the held call's workspace
+configuration, read per hold and cached per credential epoch; a stored key
+with `jev_approval` off is never read (ADR-0030). `ReviewVerdict` names the
+delegate that decided, and a delegate-recorded grant row carries it as
+`source = 'jev'` or `source = 'delegate'` (§ Grant Lifetimes); the wire
+resolution stays `approved_by_reviewer` / `denied_by_reviewer` for both.
 
 Decision by effect class before grants (ADR-0021):
 
@@ -1078,6 +1120,26 @@ Decision by effect class before grants (ADR-0021):
 
 Blocked hosts (private, link-local, metadata, managed `deny_hosts`) are
 refused before the mode, like a shell `Forbidden` (§ Network Tools).
+
+**Two clocks.** A held call is bounded by two independent timers, neither
+of which consumes the other. The delegate's: the gate waits
+`SessionRuntimeOptions::delegate_timeout` (20 s) for a verdict, past which
+the pending review is dropped and treated as an `escalate`; Jev bounds
+itself at 5 s and the reviewer model at 10 s, so this is a backstop for a
+delegate that breaks its contract, never the normal path. The human's:
+`approval_timeout` is `None` by default, meaning **no server deadline**. An
+interactive hold waits for the client, the run's own deadline
+(`RunLimits::max_duration_ms`), or cancellation, and is never settled
+`denied_timeout` by a timer the operator did not set. A supervisor that wants
+a bound sets `approval_timeout_seconds` in configuration (1–86400, not
+trust-gated: it only shortens a wait); when set, the human's clock starts when
+the human is actually asked — at the hold without a delegate, at the
+escalation or delegate cut-off with one — so a slow delegate never eats into
+it. Headless `qq run` has no human and does not rely on either clock: an
+`auto` hold with no delegate configured is denied the moment it is
+published, and with a delegate it is denied 20 s after the request unless
+the delegate settled it first (§ Headless Contract). This is the RR9 policy
+from the run-reliability plan, shipped here.
 
 The allowlist is deliberately simple: exact commands or command prefixes
 (`cargo test`, `git status`), plus per-tool grants for MCP. No pattern DSL
@@ -1102,12 +1164,13 @@ carry three lifetimes:
   than that, or past the session cap still approves the call, but as a
   once-approval: nothing is recorded and nothing is promoted. The
   approval command never fails because a grant cannot be stored.
-- **Delegate** — when the configured `reviewer_model` approves a held
-  call, it records a session grant of its own in the same transaction as
-  the approval: the exact command string for shell, the exact host for
-  `fetch`, nothing for other tool classes. Every `session_grants` row
-  carries `source` (`human` or `delegate`) and, for a delegate, the
-  `run_id` that recorded it. A delegate grant is deliberately narrower
+- **Delegate** — when the configured delegate (Jev with `jev_approval`, else
+  `reviewer_model`) approves a held call, it records a session grant of its
+  own in the same transaction as the approval: the exact command string for
+  shell, the exact host for `fetch`, nothing for other tool classes. Every
+  `session_grants` row carries `source` (`human`, `delegate` for the
+  reviewer model, `jev` for Jev) and, for a delegate, the `run_id` that
+  recorded it. A delegate grant is deliberately narrower
   than a human one. It matches only the byte-exact command or host,
   never a prefix and never a `*.suffix`; it does not lift a `Forbidden`
   verdict, which only a human's exact string may do (ADR-0020); it is

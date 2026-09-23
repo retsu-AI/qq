@@ -65,6 +65,9 @@ repository should not commit; this repository's `.gitignore` excludes
 | `reasoning_effort` | `none` `minimal` `low` `medium` `high` `xhigh` | provider default | effort hint for reasoning models that accept one |
 | `jev_review` | `off` `final` `enforce` | `off` | optional TypeSafe Jev checkpoints; see [`../runbooks/jev.md`](../runbooks/jev.md) |
 | `jev_routing` | bool | `false` | optional Jev model routing |
+| `jev_approval` | bool | `false` | Jev decides held approvals before `reviewer_model` and you; see [`../runbooks/jev.md`](../runbooks/jev.md#jev-as-the-approval-delegate) |
+| `approval_delegate` | `on` `off` | absent | who settles held approvals: `on` lets the delegate decide `ask` holds too, `off` sends every hold to you; absent keeps each mode's default (delegate under `auto`, you under `ask`). See [permissions](permissions.md#who-decides-a-held-call) |
+| `approval_timeout_seconds` | `1`–`86400` | absent | server-side bound on how long a held call waits for you before it is denied. Absent is **no deadline**: the prompt waits for you, the run's own deadline, or cancellation. Not trust-gated: it can only shorten a wait |
 | `providers` | map | built-ins | provider declarations; [below](#providers) |
 | `mcp` | map | empty | MCP servers; [MCP servers](mcp.md) |
 | `profiles` | map | empty | named per-session presets; [below](#profiles) |
@@ -215,9 +218,9 @@ profiles: {
 ```
 
 Keys: `model`, `organization`, `max_output_tokens`, `approval_mode`
-(`read_only` `ask` `auto` `full`), `jev_review`, `jev_routing`,
-`reasoning_effort`. Pack profiles (below) add prompts, skills, and tool
-filters.
+(`read_only` `ask` `auto` `full`), `approval_delegate` (`on` `off`),
+`jev_review`, `jev_routing`, `jev_approval`, `reasoning_effort`. Pack
+profiles (below) add prompts, skills, and tool filters.
 
 ## `packs`
 
@@ -330,6 +333,8 @@ Themes are `.ron` files in `<global>/themes/` or `.qq/themes/`; shape in
 | `QQ_CONFIG_CONTENT` | an inline RON document applied after `QQ_CONFIG` |
 | `QQ_JEV_CHECKPOINTS` | `off` `final` `enforce` |
 | `QQ_JEV_ROUTING` | `on` `off` |
+| `QQ_JEV_APPROVAL` | `on` `off`; overrides `jev_approval` for this process |
+| `QQ_APPROVAL_DELEGATE` | `on` `off`; overrides `approval_delegate` for this process |
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `GOOGLE_API_KEY`, `XAI_API_KEY` | built-in provider credentials when nothing is stored (`GEMINI_API_KEY` wins over `GOOGLE_API_KEY`) |
 | `AWS_PROFILE`, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`, `AWS_CONTAINER_CREDENTIALS_*` | Bedrock default credential chain |
 | `TYPESAFE_API_KEY` | Jev, when not stored |

@@ -1429,11 +1429,19 @@ impl Store {
         claimed: &ClaimedRun,
         tool_call_id: ToolCallId,
         grant: Option<DelegateGrant>,
+        delegate: DelegateIdentity,
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            resolve_approval_by_reviewer(connection, store_id, identity, tool_call_id, grant)
+            resolve_approval_by_reviewer(
+                connection,
+                store_id,
+                identity,
+                tool_call_id,
+                grant,
+                delegate,
+            )
         })
         .await
     }

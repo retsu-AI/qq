@@ -4,9 +4,9 @@
 
 | | |
 | --- | --- |
-| Now | RR1–RR5 shipped (#108, #116, #117, #118, #120). RR6, RR7 in review. Next: RR8 |
-| Shipped | RR1 (#108), RR2 (#116), RR3 (#117), RR5 (#118), RR4 (#120, protocol 26, ADR-0040) |
-| Open | RR6–RR12 (Linear milestone "Run Reliability", ENG-868–ENG-874) |
+| Now | RR1–RR5 shipped (#108, #116, #117, #118, #120). RR6, RR7 in review. RR9 shipped by delegated-approval DA2. Next: RR8 |
+| Shipped | RR1 (#108), RR2 (#116), RR3 (#117), RR5 (#118), RR4 (#120, protocol 26, ADR-0040), RR9 (delegated-approval DA2) |
+| Open | RR6–RR8, RR10–RR12 (Linear milestone "Run Reliability", ENG-868–ENG-874) |
 | Ledger | [`progress/run-reliability.md`](./progress/run-reliability.md) |
 
 ## Goal
@@ -66,7 +66,7 @@ tokens with no result.
 | RR6 | Reactive overflow: provider `ContextExceeded` marks occupancy full and the loop's in-run compaction (#92) runs on the next turn; exhausted fold admits with summary-only history instead of rejecting | R02 (b), (c) | `crates/qq-core/src/sessions/{execution,context}.rs`, `lib.rs` plan step | 413 on turn 7 recovers on turn 8; `Exhausted` session accepts next prompt; independent review required (touches `sessions/`) |
 | RR7 | Estimate calibration from previous turn's reported input tokens | R02 | `sessions/context.rs`, `execution.rs` | Error < 10 % on code-heavy fixture; no change when usage incompatible |
 | RR8 | Output-token handling: persisted `max_output_tokens` below preset floor treated as unset; truncated tool call → synthetic re-issue result; continuation exhaustion completes with notice | R04 | `src/runtime.rs` load path, `crates/qq-core/src/lib.rs` continuation block, adapters' incomplete mapping | Session with 2 048 resolves 16 384; `max_tokens` mid-tool-call continues; 4th truncation completes |
-| RR9 | Approval: no server deadline for interactive sessions; immediate deny-as-result headless; option plumbed from config | R07 | `sessions.rs`, `sessions/approvals.rs`, `src/runtime.rs`, `qq-config` | 2 s option test; interactive wait bounded only by run deadline; headless denial result text. Delegated approval DA2 consumes this and adds the delegate clock; do not let the two slices edit the deadline together |
+| RR9 | Approval: no server deadline for interactive sessions; immediate deny-as-result headless; option plumbed from config | R07 | `sessions.rs`, `sessions/approvals.rs`, `src/runtime.rs`, `qq-config` | **Shipped in delegated-approval DA2** (ENG-862): `approval_timeout: Option<Duration>` defaults to `None`; `approval_timeout_seconds` (1–86400) reaches `SessionRuntimeOptions`; the delegate has its own 20 s clock; headless denies immediately without a delegate and after the delegate's window with one |
 | RR10 | Lenient tool-argument decode: stringified arrays, clamped integers, dropped unknown fields (noted); `{}` for MCP no-arg tools; unknown tool name → result | R08 | `crates/qq-core/src/tools/dispatch.rs`, `tools/search.rs`, `src/mcp.rs` | 11 observed malformed calls execute with a note; `exec` extra `command` still rejects |
 | RR11 | Persist the read-hash ledger with the session; edit accepted when stored hash matches | R09 | `crates/qq-core/src/tools/edit.rs`, `sessions/{store,transcript}.rs` (schema bump) | Read in run 1, edit in run 2 succeeds; file changed → refusal carries current hash |
 | RR12 | Stream leniency (auto-close reasoning, synthesize ids, display cap for reasoning) and 3-identical-call loop result; per-turn latency in `RunStats` | R10, R11, R12 | `crates/qq-core/src/lib.rs`, `qq-protocol` stats | Fixtures for each quirk; loop fixture returns result not execution |

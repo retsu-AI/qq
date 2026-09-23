@@ -919,6 +919,9 @@ struct ApprovalLoader {
     tool: &'static str,
     arguments: &'static str,
     tool_turns: usize,
+    /// Who settles the held call, as the composition root would configure
+    /// it on the plan.
+    delegate: approval::ApprovalDelegate,
 }
 
 impl RuntimeLoader for ApprovalLoader {
@@ -931,9 +934,16 @@ impl RuntimeLoader for ApprovalLoader {
             tool_turns: self.tool_turns,
             usage: None,
         };
+        let delegate = self.delegate;
         Box::pin(async move {
             Runtime::new(provider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+                .map(|runtime| {
+                    loaded_runtime(
+                        runtime.with_approval_delegate(delegate),
+                        &request.workspace,
+                        None,
+                    )
+                })
                 .map_err(|error| RuntimeLoadError {
                     kind: RunFailureKind::Configuration,
                     message: error.to_string(),
@@ -1187,7 +1197,7 @@ async fn approval_harness(
     tool: &'static str,
     arguments: &'static str,
     tool_turns: usize,
-    approval_timeout: Duration,
+    approval_timeout: Option<Duration>,
 ) -> ApprovalHarness {
     approval_harness_with_authority(mode, tool, arguments, tool_turns, approval_timeout, None).await
 }
@@ -1197,7 +1207,7 @@ async fn approval_harness_with_authority(
     tool: &'static str,
     arguments: &'static str,
     tool_turns: usize,
-    approval_timeout: Duration,
+    approval_timeout: Option<Duration>,
     grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
 ) -> ApprovalHarness {
     approval_harness_with_reviewer(
@@ -1217,9 +1227,59 @@ async fn approval_harness_with_reviewer(
     tool: &'static str,
     arguments: &'static str,
     tool_turns: usize,
-    approval_timeout: Duration,
+    approval_timeout: Option<Duration>,
     grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
     approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
+) -> ApprovalHarness {
+    approval_harness_with_delegate(
+        mode,
+        tool,
+        arguments,
+        tool_turns,
+        approval_timeout,
+        grant_authority,
+        approval_reviewer,
+        approval::ApprovalDelegate::ByMode,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn approval_harness_with_delegate(
+    mode: ApprovalMode,
+    tool: &'static str,
+    arguments: &'static str,
+    tool_turns: usize,
+    approval_timeout: Option<Duration>,
+    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
+    approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
+    delegate: approval::ApprovalDelegate,
+) -> ApprovalHarness {
+    approval_harness_with_clocks(
+        mode,
+        tool,
+        arguments,
+        tool_turns,
+        approval_timeout,
+        DEFAULT_DELEGATE_TIMEOUT,
+        grant_authority,
+        approval_reviewer,
+        delegate,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn approval_harness_with_clocks(
+    mode: ApprovalMode,
+    tool: &'static str,
+    arguments: &'static str,
+    tool_turns: usize,
+    approval_timeout: Option<Duration>,
+    delegate_timeout: Duration,
+    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
+    approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
+    delegate: approval::ApprovalDelegate,
 ) -> ApprovalHarness {
     let directory = tempfile::tempdir().unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
@@ -1228,6 +1288,7 @@ async fn approval_harness_with_reviewer(
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
             approval_timeout,
+            delegate_timeout,
             grant_authority,
             approval_reviewer,
         },
@@ -1236,6 +1297,7 @@ async fn approval_harness_with_reviewer(
             tool,
             arguments,
             tool_turns,
+            delegate,
         }),
     )
     .await
@@ -4826,7 +4888,7 @@ async fn write_child_harness(
     let directory = tempfile::tempdir().unwrap();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.max_active_runs = 8;
-    options.approval_timeout = Duration::from_secs(2);
+    options.approval_timeout = Some(Duration::from_secs(2));
     if let Some(reviewer) = reviewer {
         options = options.with_approval_reviewer(reviewer);
     }

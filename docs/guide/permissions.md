@@ -25,8 +25,9 @@ sections (providers, MCP servers, grants, model) load only after that.
 
 Sensitive means any of: `model`, `worker_model`, `reviewer_model`,
 `organization`, `providers`, `mcp`, `packs`, `profiles`, `delegation`,
-`audit`, `jev_review`, `jev_routing`, `reasoning_effort`, or a `policy`
-grant (`allow_tools`, `allow_shell_prefixes`, `allow_hosts`, `shell_env`).
+`audit`, `jev_review`, `jev_routing`, `jev_approval`, `approval_delegate`,
+`reasoning_effort`, or a `policy` grant (`allow_tools`,
+`allow_shell_prefixes`, `allow_hosts`, `shell_env`).
 A project file that only sets `policy.exposed_tools` or `max_output_tokens`
 loads without trust.
 
@@ -63,6 +64,33 @@ your own session. `full` is authority over the workspace, not the machine:
 
 `qq run` defaults to `read_only` because nobody is there to answer. Pass
 `--approval auto` for a run that may edit.
+
+## Who decides a held call
+
+The mode says what is held. `approval_delegate` says who settles it when a
+delegate is configured; without one, every held call is yours. The delegate
+is Jev when `jev_approval: true` and a TypeSafe key is stored, otherwise
+`reviewer_model`; when Jev abstains or is unavailable the reviewer model is
+asked next, then you.
+
+| Profile | Set | What happens |
+| --- | --- | --- |
+| default | nothing | `auto` and `supervised` holds go to the reviewer first; `ask` holds come to you |
+| hands-off | `approval_delegate: on` | `ask` holds go to the reviewer too. Its approve runs the call; its deny still comes to you, with the reason, and your wait starts then |
+| strict | `approval_delegate: off` | every held call comes to you, even under `auto`, even with a reviewer configured |
+
+Under `auto` and `supervised` a reviewer deny is final: the model gets the
+reason as a tool error and you are not asked. Under `ask` you asked to decide
+everything, so a reviewer deny is advice and the prompt still appears. A
+reviewer `escalate`, timeout, or outage always comes to you. `forbidden`
+shell shapes, private or denied hosts, and `ask_user` questions never go to
+the reviewer.
+
+Set it at the top level, in a profile
+(`Profile(approval_mode: ask, approval_delegate: on)`), or for one process
+with `QQ_APPROVAL_DELEGATE=on|off`. In a project file it needs trust like
+any other sensitive key. `jev_approval` works the same way
+(`QQ_JEV_APPROVAL=on|off`); a stored key with it off is never read.
 
 ## What the shell classifier decides
 
@@ -121,6 +149,17 @@ host; MCP calls show the server, tool, and arguments.
 When several sessions run at once, `Alt-A` / `Alt-D` approve or deny the
 oldest waiting call in another session without leaving yours, and
 `/attention` lists everything waiting.
+
+A prompt waits for you. There is no server-side timer that denies it while
+you are away: the hold ends when you answer, when the run's own deadline
+(`--max-duration` or `RunLimits`) cancels the run, or when you cancel. If
+you want a bound anyway — a shared server, an unattended supervisor — set
+`approval_timeout_seconds` in configuration and the call is denied
+`denied_timeout` after that many seconds, counted from when you were
+actually asked (after the delegate answered or was cut off, not from when
+the delegate was consulted). `qq run` has nobody to ask and never waits on
+you: an `auto` hold is denied immediately, or after the delegate has had its
+20 s when one is configured.
 
 ## Grants in configuration
 

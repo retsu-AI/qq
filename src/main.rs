@@ -358,7 +358,7 @@ async fn prepare_headless(
         max_output_tokens: Some(snapshot.max_output_tokens()),
         organization: snapshot.organization().map(str::to_owned),
     };
-    let handler = runtime::RuntimeHandler::open(factory)
+    let handler = runtime::RuntimeHandler::open_with(factory, snapshot.approval_timeout())
         .await
         .map_err(|error| match error {
             runtime::RuntimeHandlerError::Build(error) => invalid(error.to_string()),
@@ -414,8 +414,25 @@ async fn serve(bind: std::net::SocketAddr, allow_origins: &[String]) -> Result<(
             println!("qq server already running at {}", connection.address());
         }
         server::ReserveOutcome::Reserved(reservation) => {
+            let factory = runtime::RuntimeFactory::system()?;
+            // The server's own configuration decides the approval wait for
+            // every session it serves: a server-side control like the Jev
+            // settings, not one a client forwards. Absent is no deadline. A
+            // configuration that does not load yet (no model, untrusted
+            // project) still serves; it simply has no bound.
+            let request = config::LoadRequest::from_current_process(None)?;
+            let approval_timeout = {
+                let factory = factory.clone();
+                tokio::task::spawn_blocking(move || {
+                    factory
+                        .load_for_client(&request)
+                        .ok()
+                        .and_then(|snapshot| snapshot.approval_timeout())
+                })
+                .await?
+            };
             let handler =
-                Arc::new(runtime::RuntimeHandler::open(runtime::RuntimeFactory::system()?).await?);
+                Arc::new(runtime::RuntimeHandler::open_with(factory, approval_timeout).await?);
             let identity = handler.server_identity(None);
             let server = match reservation.start(handler.clone(), identity) {
                 Ok(server) => server,
@@ -605,9 +622,12 @@ async fn interactive(
                 server::ReserveOutcome::Existing(connection) => (connection, initial(false)),
                 server::ReserveOutcome::Reserved(reservation) => {
                     let handler = Arc::new(
-                        runtime::RuntimeHandler::open(factory.clone())
-                            .await
-                            .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?,
+                        runtime::RuntimeHandler::open_with(
+                            factory.clone(),
+                            snapshot.approval_timeout(),
+                        )
+                        .await
+                        .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?,
                     );
                     let identity = handler.server_identity(None);
                     let server = match reservation.start(handler.clone(), identity) {
@@ -952,6 +972,9 @@ fn config_command(
                     "audit" => snapshot.provenance().audit(),
                     "jev_review" => snapshot.provenance().jev_review(),
                     "jev_routing" => snapshot.provenance().jev_routing(),
+                    "jev_approval" => snapshot.provenance().jev_approval(),
+                    "approval_delegate" => snapshot.provenance().approval_delegate(),
+                    "approval_timeout" => snapshot.provenance().approval_timeout(),
                     "reasoning_effort" => snapshot.provenance().reasoning_effort(),
                     "max_output_tokens" => snapshot.provenance().max_output_tokens(),
                     _ => field
@@ -1048,6 +1071,19 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
     );
     println!("jev_review: {}", snapshot.jev_review().as_str());
     println!("jev_routing: {}", snapshot.jev_routing());
+    println!("jev_approval: {}", snapshot.jev_approval());
+    println!(
+        "approval_delegate: {}",
+        snapshot
+            .approval_delegate()
+            .map_or("by_mode", config::ApprovalDelegateSetting::as_str)
+    );
+    println!(
+        "approval_timeout_seconds: {}",
+        snapshot
+            .approval_timeout()
+            .map_or("none".to_owned(), |timeout| timeout.as_secs().to_string())
+    );
     println!(
         "reasoning_effort: {}",
         serde_json::to_string(&snapshot.reasoning_effort()).expect("effort is serializable")
@@ -1114,6 +1150,9 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
                     config::ProfileApprovalMode::Full => "full",
                 };
                 parts.push(format!("approval_mode={mode}"));
+            }
+            if let Some(delegate) = profile.approval_delegate() {
+                parts.push(format!("approval_delegate={}", delegate.as_str()));
             }
             if let Some(tokens) = profile.max_output_tokens() {
                 parts.push(format!("max_output_tokens={tokens}"));
@@ -1746,6 +1785,12 @@ mod tests {
             (
                 r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "http://localhost:9080/v1", api: OpenAiResponses, auth: NoAuth, headers: {"authorization": "secret"}), models: { "test-model": (name: "Test model") }) })"#,
                 "no static headers",
+            ),
+            // DA5: Jev as approver is a Jev capability like review and
+            // routing; the credential-free fixture rejects it the same way.
+            (
+                r#"(version: 1, model: "custom/test-model", jev_approval: true, providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test-model": (name: "Test model") }) })"#,
+                "enabled Jev capabilities",
             ),
         ];
         for (document, expected) in cases {

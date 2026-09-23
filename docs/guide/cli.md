@@ -61,7 +61,7 @@ The user-scoped server in the foreground. Default bind `127.0.0.1:0`.
 | `sources` | every file consulted in precedence order, and `pending trust:` lines |
 | `check` | `configuration is valid (model: …)` or the first error; exit 1 on error |
 | `show` | the merged configuration with secrets redacted, then TUI settings |
-| `explain FIELD` | which source set `FIELD`: `model`, `organization`, `worker_model`, `delegation`, `audit`, `jev_review`, `jev_routing`, `reasoning_effort`, `max_output_tokens`, `provider.NAME`, `profile.NAME`, `pack.ID`, `grant.tool.NAME`, `grant.shell.PREFIX`, `tui.theme`, `tui.bindings.ACTION` |
+| `explain FIELD` | which source set `FIELD`: `model`, `organization`, `worker_model`, `delegation`, `audit`, `jev_review`, `jev_routing`, `jev_approval`, `approval_delegate`, `approval_timeout`, `reasoning_effort`, `max_output_tokens`, `provider.NAME`, `profile.NAME`, `pack.ID`, `grant.tool.NAME`, `grant.shell.PREFIX`, `tui.theme`, `tui.bindings.ACTION` |
 
 ## `qq auth …`
 

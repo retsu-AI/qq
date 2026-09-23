@@ -108,7 +108,8 @@ impl LoadedRuntime {
         }
         profile = profile
             .with_context_cache(Arc::clone(&runtime.context_cache))
-            .with_turn_recovery(runtime.turn_recovery);
+            .with_turn_recovery(runtime.turn_recovery)
+            .with_approval_delegate(runtime.approval_delegate);
         Ok(Self::new(CompiledAgentPlan::compile_blocking(profile)?))
     }
 
@@ -385,7 +386,9 @@ pub struct ReviewRequest {
     /// `MAX_REVIEW_BRIEF_BYTES`. `None` for root sessions.
     pub task_brief: Option<String>,
     /// The session's approval mode. The reviewer's `Deny` is final under
-    /// both `Auto` and `Supervised`; the mode tells it what that mode holds.
+    /// `Auto` and `Supervised`; under `Ask` (reached only when the operator
+    /// opted the delegate in) a `Deny` escalates to the human. The mode tells
+    /// the reviewer what that mode holds.
     pub mode: ApprovalMode,
     /// The last `MAX_REVIEW_RECENT_ACTIONS` finished tool calls of the run.
     pub recent_actions: Vec<RecentAction>,
@@ -402,11 +405,39 @@ pub struct ReviewSpend {
     pub cost_usd_nanos: Option<u64>,
 }
 
-/// A reviewer's answer for one held tool call, with what answering cost.
+/// Which delegate produced a verdict. The embedding application selects the
+/// implementation; the store records the identity on every grant a delegate
+/// writes so an audit can tell them apart. `qq-core` does not know what
+/// either delegate is beyond this name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DelegateIdentity {
+    /// The configured `reviewer_model`.
+    #[default]
+    Reviewer,
+    /// TypeSafe Jev, when the operator opted it in as an approver.
+    Jev,
+}
+
+impl DelegateIdentity {
+    /// The `session_grants.source` value a grant from this delegate carries.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reviewer => "delegate",
+            Self::Jev => "jev",
+        }
+    }
+}
+
+/// A reviewer's answer for one held tool call, with what answering cost and
+/// who answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewVerdict {
     pub decision: ReviewDecision,
     pub spend: ReviewSpend,
+    /// Who decided. A composed reviewer that falls through from Jev to the
+    /// model reports whichever one produced `decision`.
+    pub delegate: DelegateIdentity,
 }
 
 impl ReviewVerdict {
@@ -420,7 +451,15 @@ impl ReviewVerdict {
                 usage: None,
                 cost_usd_nanos: Some(0),
             },
+            delegate: DelegateIdentity::Reviewer,
         }
+    }
+
+    /// The same verdict attributed to a different delegate.
+    #[must_use]
+    pub const fn by(mut self, delegate: DelegateIdentity) -> Self {
+        self.delegate = delegate;
+        self
     }
 }
 
@@ -466,8 +505,16 @@ pub type PublishedEventStream =
 pub struct SessionRuntimeOptions {
     pub database_path: PathBuf,
     pub max_active_runs: usize,
-    /// How long an approval request may wait for a client before it is denied.
-    pub approval_timeout: Duration,
+    /// How long a held call may wait for a client before the server denies
+    /// it `denied_timeout`. `None` (the default) is no server deadline: an
+    /// interactive hold waits for the client, the run's own deadline, or
+    /// cancellation, and is never denied by a timer the operator did not set.
+    /// A supervisor that wants a bound sets one.
+    pub approval_timeout: Option<Duration>,
+    /// How long the gate waits for a delegate's verdict before treating the
+    /// silence as an escalation. Separate from the human's wait, which starts
+    /// only once the delegate has answered or been cut off.
+    pub delegate_timeout: Duration,
     /// Where workspace-lifetime grants come from and go to. Absent, sessions
     /// seed no config grants and approve-for-workspace decisions record only
     /// their session grant (the promotion reports failure).
@@ -484,6 +531,7 @@ impl std::fmt::Debug for SessionRuntimeOptions {
             .field("database_path", &self.database_path)
             .field("max_active_runs", &self.max_active_runs)
             .field("approval_timeout", &self.approval_timeout)
+            .field("delegate_timeout", &self.delegate_timeout)
             .field("grant_authority", &self.grant_authority.is_some())
             .field("approval_reviewer", &self.approval_reviewer.is_some())
             .finish()
@@ -497,9 +545,18 @@ impl SessionRuntimeOptions {
             database_path,
             max_active_runs: 8,
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
+            delegate_timeout: DEFAULT_DELEGATE_TIMEOUT,
             grant_authority: None,
             approval_reviewer: None,
         }
+    }
+
+    /// Bounds every held call's wait for a client. Absent means no server
+    /// deadline; see [`Self::approval_timeout`].
+    #[must_use]
+    pub const fn with_approval_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.approval_timeout = timeout;
+        self
     }
 
     #[must_use]
@@ -543,7 +600,8 @@ pub(super) struct SessionRuntimeInner {
     /// run loop starts and removed when it settles.
     pub(super) steering: Mutex<HashMap<RunId, crate::runtime::SteeringSender>>,
     approvals: Mutex<HashMap<ToolCallId, PendingApproval>>,
-    pub(super) approval_timeout: Duration,
+    pub(super) approval_timeout: Option<Duration>,
+    pub(super) delegate_timeout: Duration,
     wakeups: Mutex<HashMap<WorkspaceId, watch::Sender<u64>>>,
     pub(super) failed: watch::Sender<bool>,
     pub(super) shutdown: watch::Sender<bool>,
@@ -679,6 +737,7 @@ impl SessionRuntime {
             steering: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
             approval_timeout: options.approval_timeout,
+            delegate_timeout: options.delegate_timeout,
             wakeups: Mutex::new(HashMap::new()),
             failed,
             shutdown,
