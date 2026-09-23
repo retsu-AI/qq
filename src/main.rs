@@ -952,6 +952,7 @@ fn config_command(
                     "audit" => snapshot.provenance().audit(),
                     "jev_review" => snapshot.provenance().jev_review(),
                     "jev_routing" => snapshot.provenance().jev_routing(),
+                    "jev_approval" => snapshot.provenance().jev_approval(),
                     "approval_delegate" => snapshot.provenance().approval_delegate(),
                     "reasoning_effort" => snapshot.provenance().reasoning_effort(),
                     "max_output_tokens" => snapshot.provenance().max_output_tokens(),
@@ -1049,6 +1050,7 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
     );
     println!("jev_review: {}", snapshot.jev_review().as_str());
     println!("jev_routing: {}", snapshot.jev_routing());
+    println!("jev_approval: {}", snapshot.jev_approval());
     println!(
         "approval_delegate: {}",
         snapshot
@@ -1756,6 +1758,12 @@ mod tests {
             (
                 r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "http://localhost:9080/v1", api: OpenAiResponses, auth: NoAuth, headers: {"authorization": "secret"}), models: { "test-model": (name: "Test model") }) })"#,
                 "no static headers",
+            ),
+            // DA5: Jev as approver is a Jev capability like review and
+            // routing; the credential-free fixture rejects it the same way.
+            (
+                r#"(version: 1, model: "custom/test-model", jev_approval: true, providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test-model": (name: "Test model") }) })"#,
+                "enabled Jev capabilities",
             ),
         ];
         for (document, expected) in cases {

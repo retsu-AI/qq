@@ -258,6 +258,7 @@ impl ToolGate for SessionToolGate {
                                                     &claimed,
                                                     call.id,
                                                     delegate_grant.take(),
+                                                    verdict.delegate,
                                                 )
                                                 .await
                                             {

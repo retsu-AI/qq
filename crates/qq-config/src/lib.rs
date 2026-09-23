@@ -95,6 +95,18 @@ impl LoadRequest {
                 }
             });
         }
+        if let Some(value) = optional_environment("QQ_JEV_APPROVAL")? {
+            request.overrides.jev_approval = Some(match value.as_str() {
+                "on" => true,
+                "off" => false,
+                _ => {
+                    return Err(ConfigError::InvalidJevSetting {
+                        setting: "QQ_JEV_APPROVAL",
+                        value,
+                    });
+                }
+            });
+        }
         if let Some(value) = optional_environment("QQ_APPROVAL_DELEGATE")? {
             request.overrides.approval_delegate = Some(value.parse()?);
         }
@@ -181,6 +193,7 @@ pub struct RuntimeOverrides {
     max_output_tokens: Option<u32>,
     jev_review: Option<JevReviewMode>,
     jev_routing: Option<bool>,
+    jev_approval: Option<bool>,
     approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
 }
@@ -258,6 +271,17 @@ impl RuntimeOverrides {
     }
 
     #[must_use]
+    pub const fn with_jev_approval(mut self, enabled: bool) -> Self {
+        self.jev_approval = Some(enabled);
+        self
+    }
+
+    #[must_use]
+    pub const fn jev_approval(&self) -> Option<bool> {
+        self.jev_approval
+    }
+
+    #[must_use]
     pub const fn with_approval_delegate(mut self, setting: ApprovalDelegateSetting) -> Self {
         self.approval_delegate = Some(setting);
         self
@@ -274,6 +298,7 @@ impl RuntimeOverrides {
             && self.max_output_tokens.is_none()
             && self.jev_review.is_none()
             && self.jev_routing.is_none()
+            && self.jev_approval.is_none()
             && self.approval_delegate.is_none()
             && self.reasoning_effort.is_none()
     }
@@ -1422,6 +1447,7 @@ pub enum ConfigKey {
     Audit,
     JevReview,
     JevRouting,
+    JevApproval,
     ApprovalDelegate,
     ReasoningEffort,
     MaxOutputTokens,
@@ -1478,6 +1504,7 @@ pub struct ConfigProvenance {
     audit: Option<SourceIdentity>,
     jev_review: Option<SourceIdentity>,
     jev_routing: Option<SourceIdentity>,
+    jev_approval: Option<SourceIdentity>,
     approval_delegate: Option<SourceIdentity>,
     reasoning_effort: Option<SourceIdentity>,
     max_output_tokens: Option<SourceIdentity>,
@@ -1541,6 +1568,11 @@ impl ConfigProvenance {
     #[must_use]
     pub const fn jev_routing(&self) -> Option<&SourceIdentity> {
         self.jev_routing.as_ref()
+    }
+
+    #[must_use]
+    pub const fn jev_approval(&self) -> Option<&SourceIdentity> {
+        self.jev_approval.as_ref()
     }
 
     #[must_use]
@@ -1637,6 +1669,7 @@ pub struct ConfigSnapshot {
     audit: AuditConfig,
     jev_review: JevReviewMode,
     jev_routing: bool,
+    jev_approval: bool,
     approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
@@ -1666,6 +1699,7 @@ pub struct ClientSnapshot {
     audit: AuditConfig,
     jev_review: JevReviewMode,
     jev_routing: bool,
+    jev_approval: bool,
     approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
@@ -2018,6 +2052,7 @@ pub struct AgentProfileConfig {
     approval_mode: Option<ProfileApprovalMode>,
     jev_review: Option<JevReviewMode>,
     jev_routing: Option<bool>,
+    jev_approval: Option<bool>,
     approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     /// Set when this profile came from an agent pack rather than `profiles`.
@@ -2088,6 +2123,11 @@ impl AgentProfileConfig {
     }
 
     #[must_use]
+    pub const fn jev_approval(&self) -> Option<bool> {
+        self.jev_approval
+    }
+
+    #[must_use]
     pub const fn approval_delegate(&self) -> Option<ApprovalDelegateSetting> {
         self.approval_delegate
     }
@@ -2135,6 +2175,13 @@ impl ConfigSnapshot {
     #[must_use]
     pub const fn jev_routing(&self) -> bool {
         self.jev_routing
+    }
+
+    /// Whether Jev is the approval delegate. Off by default; a stored key
+    /// enables nothing by itself (ADR-0030, ADR-0041).
+    #[must_use]
+    pub const fn jev_approval(&self) -> bool {
+        self.jev_approval
     }
 
     /// The explicit delegate choice, or `None` when the mode's own default

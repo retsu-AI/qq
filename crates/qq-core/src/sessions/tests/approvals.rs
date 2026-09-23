@@ -1463,6 +1463,93 @@ async fn a_delegate_host_grant_covers_the_exact_host_only() {
 }
 
 #[tokio::test]
+async fn a_jev_approval_records_a_grant_row_that_names_jev_and_still_matches_exactly() {
+    // DA5: when the verdict came from Jev the grant row says so, so an audit
+    // can tell Jev from `reviewer_model`. The row is still a delegate row:
+    // exact match only, counted against the same per-run cap, never a human
+    // prefix grant.
+    let (reviewer, consulted) = StubReviewer::immediate(
+        ReviewVerdict::free(ReviewDecision::Approve).by(DelegateIdentity::Jev),
+    );
+    let mut harness = scripted_runs_harness_with(
+        ApprovalMode::Auto,
+        vec![vec![
+            (
+                "__test_shell",
+                r#"{"command":"git commit -m x"}"#.to_owned(),
+            ),
+            (
+                "__test_shell",
+                r#"{"command":"git commit -m x"}"#.to_owned(),
+            ),
+            (
+                "__test_shell",
+                r#"{"command":"git commit -m x --amend"}"#.to_owned(),
+            ),
+        ]],
+        None,
+        Some(reviewer),
+    )
+    .await;
+    submit_prompt(&harness, "commit").await;
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert_eq!(
+        consulted.lock().unwrap().len(),
+        2,
+        "the exact command is covered after Jev approved it; the longer one is not"
+    );
+    assert!(observed.iter().all(|event| !matches!(
+        &event.event,
+        SessionEvent::ToolApprovalResolved {
+            resolution: ApprovalResolution::DeniedByReviewer,
+            ..
+        }
+    )));
+    let rows: Vec<(String, String, String)> = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            let mut statement = connection.prepare(
+                "SELECT kind, value, source FROM session_grants ORDER BY created_at_ms, value",
+            )?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        [
+            (
+                "shell_prefix".to_owned(),
+                "git commit -m x".to_owned(),
+                "jev".to_owned()
+            ),
+            (
+                "shell_prefix".to_owned(),
+                "git commit -m x --amend".to_owned(),
+                "jev".to_owned()
+            ),
+        ]
+    );
+    let (_, grants) = harness
+        .runtime
+        .inner
+        .store
+        .approval_policy(harness.session_id)
+        .await
+        .unwrap();
+    assert!(
+        grants.shell_prefixes.is_empty(),
+        "a Jev row is a delegate row, not a human prefix: {grants:?}"
+    );
+    assert!(grants.delegate.commands.contains("git commit -m x"));
+}
+
+#[tokio::test]
 async fn a_delegate_grant_that_cannot_be_stored_still_approves_the_call_once() {
     // The storage rule from #125 holds for a delegate verdict too: a value
     // past MAX_GRANT_BYTES, or a run already at its delegate cap, approves

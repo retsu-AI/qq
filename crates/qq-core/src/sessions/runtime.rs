@@ -405,11 +405,39 @@ pub struct ReviewSpend {
     pub cost_usd_nanos: Option<u64>,
 }
 
-/// A reviewer's answer for one held tool call, with what answering cost.
+/// Which delegate produced a verdict. The embedding application selects the
+/// implementation; the store records the identity on every grant a delegate
+/// writes so an audit can tell them apart. `qq-core` does not know what
+/// either delegate is beyond this name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DelegateIdentity {
+    /// The configured `reviewer_model`.
+    #[default]
+    Reviewer,
+    /// TypeSafe Jev, when the operator opted it in as an approver.
+    Jev,
+}
+
+impl DelegateIdentity {
+    /// The `session_grants.source` value a grant from this delegate carries.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reviewer => "delegate",
+            Self::Jev => "jev",
+        }
+    }
+}
+
+/// A reviewer's answer for one held tool call, with what answering cost and
+/// who answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewVerdict {
     pub decision: ReviewDecision,
     pub spend: ReviewSpend,
+    /// Who decided. A composed reviewer that falls through from Jev to the
+    /// model reports whichever one produced `decision`.
+    pub delegate: DelegateIdentity,
 }
 
 impl ReviewVerdict {
@@ -423,7 +451,15 @@ impl ReviewVerdict {
                 usage: None,
                 cost_usd_nanos: Some(0),
             },
+            delegate: DelegateIdentity::Reviewer,
         }
+    }
+
+    /// The same verdict attributed to a different delegate.
+    #[must_use]
+    pub const fn by(mut self, delegate: DelegateIdentity) -> Self {
+        self.delegate = delegate;
+        self
     }
 }
 
