@@ -192,9 +192,11 @@ grant specific extras with `--allow-shell` / `--allow-tool` / `--allow-host`.
 
 The shell classifier refuses some shapes under every mode — `rm -rf` outside
 the workspace, `sudo`, `git push --force`, `curl … | sh`, writes to `~/.ssh`
-or `/etc`. Run it yourself, or if the classifier is wrong for a benign
-command, approve for the session with the exact string (prefix grants do
-not lift `forbidden`). Rules: [Permissions](permissions.md#what-the-shell-classifier-decides).
+or `/etc`. A prefix grant does not lift that. A grant that quotes the exact
+command string does, and only when that string fits a session grant (at most
+256 bytes); a longer command cannot be blessed this way. Otherwise run it
+yourself. Rules:
+[Permissions](permissions.md#what-the-shell-classifier-decides).
 
 ### `unavailable MCP servers: …`
 
