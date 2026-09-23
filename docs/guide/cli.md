@@ -57,7 +57,7 @@ The user-scoped server in the foreground. Default bind `127.0.0.1:0`.
 
 | Subcommand | Prints |
 | --- | --- |
-| `paths` | global config dir, global `tui.ron`, data dir, managed dir, organizations file and cache |
+| `paths` | global config dir, global `config.ron`, global `tui.ron`, data dir, managed dir, organizations file and cache; each path ends in `(exists)` or `(missing)` |
 | `sources` | every file consulted in precedence order, and `pending trust:` lines |
 | `check` | `configuration is valid (model: …)` or the first error; exit 1 on error |
 | `show` | the merged configuration with secrets redacted, then TUI settings |
@@ -95,6 +95,7 @@ discovery file. No provider is contacted and nothing is written.
 | `model` | a route is selected (`--model`, `QQ_MODEL`, or a file) | `fail` naming your global `config.ron`; `skip` when configuration did not load |
 | `credential` | the model's provider resolves a credential: `stored PROVIDER/default (OS keyring)`, `environment VAR`, an AWS chain input, or `none required` | `fail` with `qq auth login PROVIDER` / the environment variable; `skip` when there is no model |
 | `credential store` | the store index reads; `N stored (keyring)` | `warn` when the index cannot be read |
+| `mcp` | `none declared`, or every declared HTTP server's `bearer` resolves | `warn` naming the server, the credential problem, and its remedy (`qq auth set NAME`, export the variable); runs proceed without that server; `skip` when configuration did not load |
 | `server` | `running at ADDR (pid, version)` or `none running; qq starts one on demand` | `warn` when the discovery state is unreadable |
 | `workspace` | the current directory resolves; lists `.qq/config.ron` and `AGENTS.md` when present | `warn` without an `AGENTS.md`; `fail` when the directory does not exist |
 | `data` | the data directory is private and writable; shows `sessions.sqlite3` and its size | `fail` when it is not a directory, world-readable, or read-only |
@@ -104,6 +105,32 @@ discovery file. No provider is contacted and nothing is written.
 "checks": [ { "name", "status": "ok|warn|fail|skipped", "summary",
 "details": [...], "remedy": null|"..." } ], "failed": N }`
 (`details` is omitted when empty).
+
+## `qq init [--project] [--model PROVIDER/MODEL] [--force]`
+
+Write a commented starter `config.ron` with the model sessions start with,
+then print the path and the next command:
+
+```
+wrote /home/you/.config/qq/config.ron (model: openai/gpt-5.6)
+
+next: qq auth login openai          # or export OPENAI_API_KEY
+then: qq
+```
+
+| Flag | Effect |
+| --- | --- |
+| none | write `<global>/config.ron` (the directory `qq config paths` lists as `global`), created user-private |
+| `--project` | write `.qq/config.ron` in the current directory instead; the output adds `note: run qq trust so this project's model is loaded` |
+| `--model PROVIDER/MODEL` | use this route; without it, and with a terminal on stdin, `qq init` lists the built-in providers and reads a number or a full route. Without a terminal it fails with `pass --model PROVIDER/MODEL` |
+| `--force` | replace an existing file; otherwise `… already exists; pass --force to overwrite` and the file is untouched |
+
+The next-step line names `qq auth login PROVIDER` and the API-key variable
+for the built-in HTTP providers, the browser sign-in for `openai-codex`, the
+AWS credential chain for `bedrock`, and a `providers:` declaration for any
+other name. The written file is validated through the same loader as every
+other command; a route that names an unknown provider is reported with the
+path so you can edit it or rerun with `--force`.
 
 ## `qq org …`
 
