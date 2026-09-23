@@ -3,8 +3,27 @@
 Messages you may see, what they mean, and the fix. Quoted text is what QQ
 prints; `…` stands for a path or name specific to your machine.
 
-First stop for anything: `qq config check`, `qq config sources`, `qq auth
-list`.
+First stop for anything: `qq doctor`. It runs every local readiness check and
+puts the fix next to whatever failed:
+
+```
+qq 0.1.3 (ad01547 2026-09-22) · protocol 27 · capabilities 1 · descriptor 9 · store schema 34
+ok    configuration    2 sources; qq config sources lists them
+ok    project trust    nothing pending
+ok    model            anthropic/claude-sonnet-5
+fail  credential       anthropic: none found
+                       run `qq auth login anthropic` or set ANTHROPIC_API_KEY
+ok    credential store 0 stored (keyring)
+ok    server           none running; qq starts one on demand
+ok    workspace        /home/you/repo (AGENTS.md)
+ok    data             /home/you/.local/share/qq (no sessions yet)
+
+1 check failed
+```
+
+Exit status 0 means nothing failed. Then `qq config check`, `qq config
+sources`, `qq auth list` for the detail behind any one line
+([CLI › `qq doctor`](cli.md#qq-doctor---json)).
 
 ## Starting
 
@@ -250,10 +269,12 @@ directory.
 
 ## Getting more detail
 
+- `qq doctor --json` — the same checks as a JSON object, for scripts and
+  bug reports.
 - `qq config sources` — every path consulted and whether it applied.
 - `qq config explain FIELD` — which layer set a value.
 - `qq run --format jsonl` — every event of a run.
 - `qq version` — protocol and schema versions, for bug reports.
 
-If none of this helps, open an issue with `qq version` output and the exact
-message: [bug report](https://github.com/retsu-AI/qq/issues/new?template=bug.yml).
+If none of this helps, open an issue with `qq doctor` and `qq version` output
+and the exact message: [bug report](https://github.com/retsu-AI/qq/issues/new?template=bug.yml).

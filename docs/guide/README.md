@@ -11,6 +11,7 @@ QQ, start at [`../README.md`](../README.md) instead.
 | install QQ | [Install](install.md) |
 | go from nothing to a first answer in a minute | [Quickstart](quickstart.md) |
 | connect a model provider (OpenAI, Anthropic, Google, xAI, Codex, Bedrock, a gateway) | [Providers and credentials](providers.md) |
+| check my setup before the first run | [`qq doctor`](cli.md#qq-doctor---json) |
 | understand what the agent may do without asking | [Permissions and trust](permissions.md) |
 | learn the terminal UI | [The TUI](tui.md) |
 | run agents from scripts and CI | [Headless: `qq ask`, `qq run`, `qq serve`](headless.md) |
