@@ -95,6 +95,7 @@ discovery file. No provider is contacted and nothing is written.
 | `model` | a route is selected (`--model`, `QQ_MODEL`, or a file) | `fail` naming your global `config.ron`; `skip` when configuration did not load |
 | `credential` | the model's provider resolves a credential: `stored PROVIDER/default (OS keyring)`, `environment VAR`, an AWS chain input, or `none required` | `fail` with `qq auth login PROVIDER` / the environment variable; `skip` when there is no model |
 | `credential store` | the store index reads; `N stored (keyring)` | `warn` when the index cannot be read |
+| `mcp` | `none declared`, or every declared HTTP server's `bearer` resolves | `warn` naming the server, the credential problem, and its remedy (`qq auth set NAME`, export the variable); runs proceed without that server; `skip` when configuration did not load |
 | `server` | `running at ADDR (pid, version)` or `none running; qq starts one on demand` | `warn` when the discovery state is unreadable |
 | `workspace` | the current directory resolves; lists `.qq/config.ron` and `AGENTS.md` when present | `warn` without an `AGENTS.md`; `fail` when the directory does not exist |
 | `data` | the data directory is private and writable; shows `sessions.sqlite3` and its size | `fail` when it is not a directory, world-readable, or read-only |
