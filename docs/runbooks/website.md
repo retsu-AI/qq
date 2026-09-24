@@ -18,6 +18,13 @@ also gets a site build, which fails when
 Heading anchors are Starlight's slugs of the heading text; renaming a heading
 that another page links to fails the build until the link follows.
 
+The guide's coverage is also guarded from the code side: `cargo test
+--workspace` runs the docs-truth tests (`src/docs_truth.rs`, `cli::tests`,
+`doctor::tests`), which fail when a configuration key, environment variable,
+CLI subcommand or long flag, slash command, or `qq doctor` check exists in
+the code but is not named in `docs/guide/`, so the site can never lag the
+binary on those surfaces.
+
 ## Add a page
 
 1. `docs/guide/<name>.md` with one H1 (it becomes the page title).

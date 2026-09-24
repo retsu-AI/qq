@@ -438,7 +438,86 @@ pub struct SetCredentialArgs {
 mod tests {
     use std::path::Path;
 
+    use clap::CommandFactory as _;
+
     use super::*;
+
+    /// Long flags deliberately absent from the user guide, keyed by their
+    /// subcommand path (`"run --trace"`), each with a reason. Empty today:
+    /// hidden arguments are skipped automatically and everything visible is
+    /// documented.
+    const UNDOCUMENTED_FLAGS: &[&str] = &[];
+
+    /// Every subcommand name and every visible long flag reachable from
+    /// `qq`, as `(category, name, allow-list key)`.
+    fn cli_surface() -> Vec<(&'static str, String, String)> {
+        fn walk(
+            command: &clap::Command,
+            path: &str,
+            out: &mut Vec<(&'static str, String, String)>,
+        ) {
+            for argument in command.get_arguments() {
+                if argument.is_hide_set() {
+                    continue;
+                }
+                let Some(long) = argument.get_long() else {
+                    continue;
+                };
+                if matches!(long, "help" | "version") {
+                    continue;
+                }
+                let flag = format!("--{long}");
+                let key = if path.is_empty() {
+                    flag.clone()
+                } else {
+                    format!("{path} {flag}")
+                };
+                out.push(("CLI long flag", flag, key));
+            }
+            for subcommand in command.get_subcommands() {
+                if subcommand.is_hide_set() || subcommand.get_name() == "help" {
+                    continue;
+                }
+                let name = subcommand.get_name().to_owned();
+                let key = if path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{path} {name}")
+                };
+                out.push(("CLI subcommand", name, key.clone()));
+                walk(subcommand, &key, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&Cli::command(), "", &mut out);
+        out
+    }
+
+    #[test]
+    fn every_subcommand_and_long_flag_is_documented_in_the_guide() {
+        let surface = cli_surface();
+        assert!(
+            surface
+                .iter()
+                .any(|(_, name, _)| name == "--output-repair-turns")
+                && surface.iter().any(|(_, _, key)| key == "config explain"),
+            "{surface:?}"
+        );
+        for allowed in UNDOCUMENTED_FLAGS {
+            assert!(
+                surface.iter().any(|(_, _, key)| key == allowed),
+                "allow-list entry {allowed:?} no longer exists; remove it"
+            );
+        }
+        let guide = crate::docs_truth::guide_text();
+        crate::docs_truth::assert_documented(
+            &guide,
+            surface
+                .iter()
+                .filter(|(_, _, key)| !UNDOCUMENTED_FLAGS.contains(&key.as_str()))
+                .map(|(category, name, _)| (*category, name.as_str())),
+        );
+    }
 
     #[test]
     fn advisory_cli_requires_scope_receipts_and_explicit_budget() {

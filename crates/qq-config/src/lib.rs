@@ -53,6 +53,24 @@ pub const MAX_MCP_MAX_CONCURRENT_CALLS: u32 = 64;
 /// is no deadline; this bounds what "a deadline" may mean.
 pub const MAX_APPROVAL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 
+/// Every environment variable [`LoadRequest::from_process_env`] reads, in
+/// the order it reads them. Provider credential variables are not here: they
+/// are resolved at request time and listed by
+/// [`provider_credential_variables`].
+pub const ENVIRONMENT_VARIABLES: [&str; 8] = [
+    "QQ_CONFIG",
+    "QQ_CONFIG_CONTENT",
+    "QQ_MODEL",
+    "QQ_ORGANIZATION",
+    "QQ_JEV_CHECKPOINTS",
+    "QQ_JEV_ROUTING",
+    "QQ_JEV_APPROVAL",
+    "QQ_APPROVAL_DELEGATE",
+];
+
+pub use document::{DOCUMENT_FIELD_NAMES, POLICY_FIELD_NAMES};
+pub use providers::provider_credential_variables;
+
 /// All process-dependent inputs captured before a configuration load begins.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct LoadRequest {
@@ -77,40 +95,52 @@ impl LoadRequest {
         cwd: impl Into<PathBuf>,
         max_output_tokens: Option<u32>,
     ) -> Result<Self, ConfigError> {
+        // Every name is taken from `ENVIRONMENT_VARIABLES` by position so the
+        // published list and what is actually read cannot drift apart.
+        let [
+            config,
+            config_content,
+            model,
+            organization,
+            jev_checkpoints,
+            jev_routing,
+            jev_approval,
+            approval_delegate,
+        ] = ENVIRONMENT_VARIABLES;
         let mut request = Self::new(cwd);
-        request.explicit_path = optional_environment("QQ_CONFIG")?.map(PathBuf::from);
-        request.explicit_content = optional_environment("QQ_CONFIG_CONTENT")?;
-        request.overrides.model = optional_environment("QQ_MODEL")?;
-        request.overrides.organization = optional_environment("QQ_ORGANIZATION")?;
+        request.explicit_path = optional_environment(config)?.map(PathBuf::from);
+        request.explicit_content = optional_environment(config_content)?;
+        request.overrides.model = optional_environment(model)?;
+        request.overrides.organization = optional_environment(organization)?;
         request.overrides.max_output_tokens = max_output_tokens;
-        if let Some(value) = optional_environment("QQ_JEV_CHECKPOINTS")? {
+        if let Some(value) = optional_environment(jev_checkpoints)? {
             request.overrides.jev_review = Some(value.parse()?);
         }
-        if let Some(value) = optional_environment("QQ_JEV_ROUTING")? {
+        if let Some(value) = optional_environment(jev_routing)? {
             request.overrides.jev_routing = Some(match value.as_str() {
                 "on" => true,
                 "off" => false,
                 _ => {
                     return Err(ConfigError::InvalidJevSetting {
-                        setting: "QQ_JEV_ROUTING",
+                        setting: jev_routing,
                         value,
                     });
                 }
             });
         }
-        if let Some(value) = optional_environment("QQ_JEV_APPROVAL")? {
+        if let Some(value) = optional_environment(jev_approval)? {
             request.overrides.jev_approval = Some(match value.as_str() {
                 "on" => true,
                 "off" => false,
                 _ => {
                     return Err(ConfigError::InvalidJevSetting {
-                        setting: "QQ_JEV_APPROVAL",
+                        setting: jev_approval,
                         value,
                     });
                 }
             });
         }
-        if let Some(value) = optional_environment("QQ_APPROVAL_DELEGATE")? {
+        if let Some(value) = optional_environment(approval_delegate)? {
             request.overrides.approval_delegate = Some(value.parse()?);
         }
         Ok(request)

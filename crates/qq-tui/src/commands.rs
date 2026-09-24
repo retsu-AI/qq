@@ -434,6 +434,12 @@ pub(crate) fn slash_entries() -> impl Iterator<Item = SlashEntry> {
     })
 }
 
+/// Every client slash spelling, canonical names and aliases alike, for the
+/// user guide's docs-truth test.
+pub fn slash_names() -> impl Iterator<Item = &'static str> {
+    COMMANDS.iter().flat_map(|spec| spec.slash.iter().copied())
+}
+
 /// Slash entries matching `token` as a subsequence after the `/`. `token`
 /// must start with `/` and contain no whitespace, otherwise nothing matches:
 /// a slash token followed by arguments is a prompt for the runtime, not a

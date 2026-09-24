@@ -31,10 +31,15 @@ release is a bump PR followed by a tag on the merged result.
    ```
 
    This rewrites `[workspace.package] version` in `Cargo.toml` (every crate
-   inherits it), refreshes `Cargo.lock`, and commits `chore(release): v0.2.0`.
-   It refuses a dirty worktree. Use `--no-commit` to inspect the bump first.
+   inherits it), refreshes `Cargo.lock`, prepends a `## 0.2.0 — YYYY-MM-DD`
+   section to `CHANGELOG.md` (see below), and commits all three as
+   `chore(release): v0.2.0`. It refuses a dirty worktree. Use `--no-commit`
+   to inspect the bump and the changelog section first.
 
 2. Open a PR titled `chore(release): v0.2.0` and merge it once CI is green.
+   Review the changelog section in the diff: it is the release's user-facing
+   summary, and a commit that landed with a wrong Conventional Commit type
+   shows up in the wrong group here.
 
 3. Tag the merged `main` and push the tag.
 
@@ -57,6 +62,43 @@ release is a bump PR followed by a tag on the merged result.
    https://raw.githubusercontent.com/retsu-AI/qq/main/install.sh | sh -s --
    --dir /tmp/qq-check` prints the new version, and `Formula/qq.rb` in the tap
    carries it.
+
+## Changelog
+
+`CHANGELOG.md` at the repository root is generated, never edited by hand.
+`cargo xtask release X.Y.Z` reads `git log <newest v* tag>..HEAD
+--format=%s --no-merges` (every commit when no tag exists) and prepends one
+section above the previous release:
+
+```markdown
+## 0.2.0 — 2026-09-24
+
+### Features
+- provider: add compiled provider cache (#123)
+- **breaking:** protocol: replace the event envelope (#125)
+
+### Fixes
+- runtime: preserve session context (#124)
+
+### Performance
+- trim startup allocations (#126)
+
+### Other
+- guide: explain trust (#127)
+```
+
+Subjects are parsed as `type(scope)!: summary (#PR)`: `feat` → Features,
+`fix` → Fixes, `perf` → Performance, every other type → Other. The scope
+becomes the bullet's prefix, `!` prefixes the bullet with `**breaking:**`,
+and the `(#N)` suffix from squash-merging is kept as the link back to the
+PR. Empty groups are omitted. `chore(release):` subjects are dropped (they
+are the previous release's own bump); a subject that does not follow the
+grammar is listed verbatim under Other rather than lost. Because the section
+is built from commit subjects, fix a wrong entry by fixing the commit before
+it merges — the merged PR title is the squash commit's subject.
+
+The first release after this tool exists creates the file with its header;
+history before that is not backfilled.
 
 ## Homebrew tap
 
