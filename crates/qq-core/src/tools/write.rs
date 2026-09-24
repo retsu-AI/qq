@@ -6,11 +6,14 @@ use std::{
 use qq_protocol::ToolCallDisplay;
 use serde::Deserialize;
 
-use crate::workspace::{FileState, FileStateUpdate, Workspace, content_hash};
+use crate::workspace::{
+    FileState, FileStateUpdate, StagedWrite, Workspace, content_hash, is_transaction_path,
+    run_transaction,
+};
 
 use super::{
     dispatch::{ToolCancellation, ToolOutput},
-    edit::{MAX_DIFF_BYTES, MAX_EDIT_FILE_BYTES, apply_atomically, read_editable, unified_diff},
+    edit::{MAX_DIFF_BYTES, MAX_EDIT_FILE_BYTES, read_editable, unified_diff},
     matching::lcs_len,
     output::Header,
 };
@@ -56,6 +59,12 @@ pub(super) fn write_file(
         Ok(resolved) => resolved,
         Err(error) => return ToolOutput::error(error),
     };
+    if is_transaction_path(&path) {
+        return ToolOutput::error(format!(
+            "path_reserved: {} is QQ's transaction journal",
+            arguments.path
+        ));
+    }
     let key = path.to_string_lossy().into_owned();
 
     let guard = workspace
@@ -65,7 +74,7 @@ pub(super) fn write_file(
     if cancelled.is_cancelled() {
         return ToolOutput::error("tool execution was cancelled");
     }
-    let (created, before) = match workspace.root().symlink_metadata(&path) {
+    let staged = match workspace.root().symlink_metadata(&path) {
         Ok(metadata) if metadata.is_file() => {
             if arguments.create_only {
                 return ToolOutput::error(format!("exists: {} already exists", arguments.path));
@@ -103,15 +112,12 @@ pub(super) fn write_file(
                     ));
                 }
             }
-            if let Err(error) = apply_atomically(
-                workspace,
-                &path,
-                arguments.content.as_bytes(),
-                Some(current.permissions),
-            ) {
-                return ToolOutput::error(error);
+            StagedWrite {
+                path: path.clone(),
+                before: Some(current.bytes),
+                after: arguments.content.clone().into_bytes(),
+                permissions: Some(current.permissions),
             }
-            (false, Some(current.bytes))
         }
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return ToolOutput::error("not_a_file: path is a symlink; address its target directly");
@@ -123,18 +129,24 @@ pub(super) fn write_file(
             {
                 return ToolOutput::error(format!("could not create parent directories: {error}"));
             }
-            if let Err(error) =
-                apply_atomically(workspace, &path, arguments.content.as_bytes(), None)
-            {
-                return ToolOutput::error(error);
+            StagedWrite {
+                path: path.clone(),
+                before: None,
+                after: arguments.content.clone().into_bytes(),
+                permissions: None,
             }
-            (true, None)
         }
         Err(error) => {
             return ToolOutput::error(format!("could not inspect path: {error}"));
         }
     };
+    let created = staged.before.is_none();
+    let receipt = match run_transaction(workspace, "write_file", std::slice::from_ref(&staged)) {
+        Ok(receipt) => receipt,
+        Err(error) => return ToolOutput::error(error.to_string()),
+    };
     drop(guard);
+    let before = staged.before;
 
     let hash = content_hash(arguments.content.as_bytes());
     file_state.record(key.clone(), hash.clone());
@@ -143,7 +155,8 @@ pub(super) fn write_file(
         .token(if created { "created" } else { "replaced" })
         .field("bytes", arguments.content.len())
         .field("lines", lines)
-        .token(format_args!("h:{}", &hash[..12]));
+        .token(format_args!("h:{}", &hash[..12]))
+        .token(format_args!("tx:{}", receipt.short()));
     let before_text = before
         .as_deref()
         .and_then(|bytes| std::str::from_utf8(bytes).ok());
