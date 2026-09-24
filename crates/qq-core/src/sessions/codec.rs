@@ -76,6 +76,16 @@ pub(super) fn parse_run_activity(column: &str) -> Result<RunActivity, SessionRun
     }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub(super) enum PersistedTurn {
+    Legacy(Vec<PersistedContentBlock>),
+    Replay {
+        content: Vec<PersistedContentBlock>,
+        replay: String,
+    },
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum PersistedContentBlock {

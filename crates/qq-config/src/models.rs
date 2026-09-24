@@ -188,6 +188,7 @@ const CLAUDE_45_EFFORTS: &[ReasoningEffort] = &[
 ];
 
 const MODELS: &[ModelDefinition] = &[
+    model! { catalogs: ANTHROPIC_API, wire: "claude-opus-5-5", canonical: "anthropic/claude-opus-5-5", name: "Claude Opus 5.5", reasoning: true, efforts: FRONTIER_EFFORTS, limits: 1_000_000 / 128_000, pricing: metered(4_000, 20_000, 200, 5_000) },
     model! { catalogs: OPENAI_API, wire: "gpt-6-sol", canonical: "openai/gpt-6-sol", name: "GPT-6 Sol", reasoning: true, efforts: GPT6_EFFORTS, limits: 1_050_000 / 128_000, pricing: None },
     model! { catalogs: OPENAI_API, wire: "gpt-6-luna", canonical: "openai/gpt-6-luna", name: "GPT-6 Luna", reasoning: true, efforts: GPT6_EFFORTS, limits: 1_050_000 / 128_000, pricing: None },
     model! { catalogs: OPENAI_CODEX, wire: "gpt-6-sol", canonical: "openai/gpt-6-sol", name: "GPT-6 Sol", reasoning: true, efforts: GPT6_EFFORTS, limits: 272_000 / 128_000, pricing: None },

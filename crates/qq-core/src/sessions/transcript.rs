@@ -793,7 +793,13 @@ pub(super) fn context_bytes(messages: &[Message]) -> usize {
                 call_id, content, ..
             } => call_id.len() + content.len(),
         })
-        .fold(0_usize, usize::saturating_add)
+        .fold(
+            messages
+                .iter()
+                .map(|message| message.replay().map_or(0, str::len))
+                .fold(0usize, usize::saturating_add),
+            usize::saturating_add,
+        )
 }
 
 /// Searches the session's complete durable transcript for a case-insensitive
@@ -899,7 +905,11 @@ pub(super) fn search_session_history(
                     &result,
                 );
             }
-            let content = serde_json::from_str::<Vec<PersistedContentBlock>>(&content_json)?;
+            let content = match serde_json::from_str::<super::codec::PersistedTurn>(&content_json)?
+            {
+                super::codec::PersistedTurn::Legacy(content)
+                | super::codec::PersistedTurn::Replay { content, .. } => content,
+            };
             for block in content.into_iter().rev() {
                 match ContentBlock::from(block) {
                     ContentBlock::Text { text } => record(
@@ -1040,11 +1050,12 @@ pub(super) fn append_run_turns(
             let (_, text) = steering.pop_front().expect("front was just checked");
             context.push(Message::user(text));
         }
-        let content: Vec<ContentBlock> =
-            serde_json::from_str::<Vec<PersistedContentBlock>>(&content_json)?
-                .into_iter()
-                .map(ContentBlock::from)
-                .collect();
+        let (content, replay) =
+            match serde_json::from_str::<super::codec::PersistedTurn>(&content_json)? {
+                super::codec::PersistedTurn::Legacy(content) => (content, None),
+                super::codec::PersistedTurn::Replay { content, replay } => (content, Some(replay)),
+            };
+        let content: Vec<ContentBlock> = content.into_iter().map(ContentBlock::from).collect();
         // A block without a recorded result (a crash between the turn commit
         // and its tool_calls rows in an older store) gets an explicit
         // interrupted result so replayed context stays provider-valid
@@ -1100,7 +1111,11 @@ pub(super) fn append_run_turns(
                 ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,
             })
             .collect::<Vec<_>>();
-        context.push(Message::new(Role::Assistant, content));
+        let mut message = Message::new(Role::Assistant, content);
+        if let Some(replay) = replay {
+            message = message.with_replay(replay.into());
+        }
+        context.push(message);
         if !results.is_empty() {
             context.push(Message::tool_results(results));
         }

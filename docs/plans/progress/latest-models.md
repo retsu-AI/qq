@@ -1,5 +1,20 @@
 # Latest model support (ENG-885)
 
+## Opus replay implementation
+
+- Branch `feat/eng-885-opus-replay` stacks on effort PR 154; live Codex effort commit 1b164d9 pushed to that parent.
+- Implemented signature/redacted-block capture, prefix-bound replay, durable turn envelopes and schema 37; Opus 5.5 catalog includes five effort levels.
+- Focused signed replay and persistence reopen tests pass; workspace Clippy passes.
+- Workspace test run failed at `wall_clock_budget_settles_a_hanging_provider_without_a_final_response` (0 provider requests versus expected 1); focused rerun also fails. Not declared baseline/unrelated without proof.
+- Independent review found remaining blockers: origin/current-visible-content replay binding, strict capture state validation, history scan byte budget, quadratic prefix hashing. Cache stripping was narrowed to metadata locations; delta concatenation now appends in place; core rejects oversized/duplicate replay and includes sidecars in context byte weight.
+- Must remain draft: no end-to-end tool-loop/restart acceptance yet; explicit provider-default semantics and full capability audit also outstanding.
+
+## 2026-09-24 continuation
+
+- Working on draft PR 154. Added uncommitted Codex supported_reasoning_levels parsing and picker projection plus cache-based effort validation.
+- Started provider-owned Message replay sidecar, complete-turn runtime attachment and legacy-compatible persisted turn envelope. Adapter capture/replay, eligibility validation, bounds and regression tests are not yet implemented; this plumbing must not be advertised as working Opus support.
+- `cargo check --workspace --all-targets` passes for the intermediate tree. No final tests or push for these changes yet.
+
 ## Effort implementation session
 
 - In progress: shared Max value, Anthropic output_config.effort encoding, per-model Claude ladders and GPT-6 Sol/Luna Max.
