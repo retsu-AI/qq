@@ -890,6 +890,62 @@ impl SessionRuntime {
         self.inner.store.snapshot(request).await
     }
 
+    /// One page of the workspace's audit stream: committed event rows after
+    /// `after` with their chain links, oldest first, at most
+    /// `MAX_AUDIT_PAGE` per call. The bytes are the store's own; an exporter
+    /// can re-verify them with the same rule `verify_audit` applies.
+    pub async fn export_audit(
+        &self,
+        workspace_id: WorkspaceId,
+        after: u64,
+        limit: u16,
+    ) -> Result<Vec<AuditChainRecord>, SessionRuntimeError> {
+        if *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        if limit == 0 || limit > MAX_AUDIT_PAGE {
+            return Err(SessionRuntimeError::InvalidPageLimit);
+        }
+        let (records, _) = self
+            .inner
+            .store
+            .audit_page(workspace_id, after, limit)
+            .await?;
+        Ok(records)
+    }
+
+    /// Walks the workspace's whole chain in bounded pages and reports the
+    /// first record that fails, or the intact record count together with the
+    /// unhashed prefix a pre-37 store contributes. The head is checked
+    /// against the tail read in the same store call, so a chain that grows
+    /// during the walk still verifies against its own head.
+    pub async fn verify_audit(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<AuditVerification, SessionRuntimeError> {
+        if *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        let mut walk = audit::ChainWalk::new(workspace_id);
+        let mut after = 0;
+        loop {
+            let (records, head) = self
+                .inner
+                .store
+                .audit_page(workspace_id, after, MAX_AUDIT_PAGE)
+                .await?;
+            for record in &records {
+                walk.feed(record);
+            }
+            if let Some(last) = records.last() {
+                after = last.cursor.sequence;
+            }
+            if records.len() < usize::from(MAX_AUDIT_PAGE) {
+                return Ok(walk.finish(head, after));
+            }
+        }
+    }
+
     /// Committed events after `request.after`, as parsed envelopes.
     pub fn subscribe(
         &self,

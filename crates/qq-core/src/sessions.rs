@@ -48,6 +48,7 @@ use crate::{
 };
 
 mod approvals;
+mod audit;
 mod claim;
 mod codec;
 mod commands;
@@ -69,6 +70,7 @@ mod tests;
 mod tool_calls;
 mod transcript;
 
+pub use audit::{AuditChainRecord, AuditFault, AuditVerification, MAX_AUDIT_PAGE};
 pub use commands::MAX_DESCENDANTS_PER_ROOT;
 pub use feed::PublishedEvent;
 pub use runtime::{

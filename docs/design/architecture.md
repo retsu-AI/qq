@@ -1156,6 +1156,19 @@ terminal event additionally requires proof that its tools and children were
 drained (`TeardownComplete`, minted only by the execution teardown), so
 publication before teardown does not compile (ADR-0012).
 
+Every persisted event is hash-linked to the one before it (ADR-0042). The
+append transaction stores `previous_hash` and
+`record_hash = sha256("qq-audit-v1\0" ‖ previous_hash ‖ "\0" ‖ envelope_json)`
+next to the envelope and advances `workspaces.audit_head` before the row is
+published; a workspace's first record links from a genesis hash derived from
+its identity, so two workspaces never share a chain. Rows written before the
+chain existed keep NULL hashes and are reported as an unhashed prefix, never
+as history. `SessionRuntime::export_audit` pages the stored bytes plus both
+hashes by sequence with a bounded limit, and `verify_audit` walks the chain
+from genesis, recomputing each hash over the exact stored bytes, and names the
+first sequence whose bytes, link, or head no longer match. External anchoring
+and long-term sinks live above the kernel.
+
 One process owns a store at a time. Opening the store takes an advisory lock
 on a sibling `<store>.lock` file before SQLite is opened and before recovery
 runs; a second opener is refused as `StoreBusy` without touching the database

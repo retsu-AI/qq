@@ -8,6 +8,7 @@ use super::*;
 
 mod accounting;
 mod approvals;
+mod audit;
 mod budgets;
 mod commands;
 mod compaction;

@@ -137,14 +137,21 @@ pub(super) fn append_event(
     context: EventContext,
     event: SessionEvent,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
-    let sequence: u64 = transaction
+    let workspace_key = context.workspace_id.to_string();
+    let (sequence, head): (u64, Option<String>) = transaction
         .prepare_cached(
             "UPDATE workspaces SET next_sequence = next_sequence + 1 WHERE id = ?1
-             RETURNING next_sequence",
+             RETURNING next_sequence, audit_head",
         )
         .and_then(|mut statement| {
-            statement.query_row([context.workspace_id.to_string()], |row| row.get(0))
+            statement.query_row([workspace_key.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
         })?;
+    let previous_hash = match head {
+        Some(head) => head.parse().map_err(|_| SessionRuntimeError::CODEC)?,
+        None => audit::genesis_hash(context.workspace_id),
+    };
     let envelope = SessionEventEnvelope {
         cursor: EventCursor {
             store_id: context.store_id,
@@ -161,16 +168,27 @@ pub(super) fn append_event(
     if encoded.len() > MAX_PERSISTED_EVENT_BYTES {
         return Err(SessionRuntimeError::EventTooLarge);
     }
+    // The chain link is part of the same transaction as the row: a commit
+    // either advances the head to this record or leaves neither behind.
+    let record_hash = audit::record_hash(&previous_hash, &encoded).to_string();
     transaction
         .prepare_cached(
-            "INSERT INTO events(workspace_id, sequence, envelope_json) VALUES (?1, ?2, ?3)",
+            "INSERT INTO events(workspace_id, sequence, envelope_json, previous_hash, record_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .and_then(|mut statement| {
             statement.execute(params![
-                context.workspace_id.to_string(),
+                workspace_key.as_str(),
                 sequence,
-                encoded.as_str()
+                encoded.as_str(),
+                previous_hash.to_string(),
+                record_hash.as_str()
             ])
+        })?;
+    transaction
+        .prepare_cached("UPDATE workspaces SET audit_head = ?2 WHERE id = ?1")
+        .and_then(|mut statement| {
+            statement.execute(params![workspace_key.as_str(), record_hash.as_str()])
         })?;
     // The encoding is kept, not dropped: after commit the worker publishes
     // it to live subscribers and the server writes it to the wire as-is.

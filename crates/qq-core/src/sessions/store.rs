@@ -844,6 +844,24 @@ impl Store {
         .await
     }
 
+    /// One page of the audit stream plus the workspace head as of the same
+    /// read, so a verifier walking pages sees the head that closed its last
+    /// page.
+    pub(super) async fn audit_page(
+        &self,
+        workspace_id: WorkspaceId,
+        after: u64,
+        limit: u16,
+    ) -> Result<(Vec<AuditChainRecord>, Option<ContentHash>), SessionRuntimeError> {
+        let store_id = self.store_id;
+        self.call(Priority::Control, move |connection| {
+            let records = audit::read_audit_page(connection, store_id, workspace_id, after, limit)?;
+            let head = audit::audit_head(connection, workspace_id)?;
+            Ok((records, head))
+        })
+        .await
+    }
+
     #[cfg(test)]
     pub(super) async fn events_after(
         &self,
