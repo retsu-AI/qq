@@ -78,18 +78,36 @@ impl ExternalToolHost for WiredMcpRegistry {
                         },
                     })
                     .collect(),
-                readiness: if catalog.unavailable.is_empty() {
+                readiness: if catalog.unavailable.is_empty() && catalog.quarantined.is_empty() {
                     HostReadiness::Ready
                 } else {
-                    let mut message = String::from("unavailable MCP servers: ");
-                    for (index, unavailable) in catalog.unavailable.iter().enumerate() {
-                        if index > 0 {
+                    let mut message = String::new();
+                    if !catalog.unavailable.is_empty() {
+                        message.push_str("unavailable MCP servers: ");
+                        for (index, unavailable) in catalog.unavailable.iter().enumerate() {
+                            if index > 0 {
+                                message.push_str("; ");
+                            }
+                            message.push_str(&unavailable.server);
+                            message.push_str(" (");
+                            message.push_str(&unavailable.reason);
+                            message.push(')');
+                        }
+                    }
+                    if !catalog.quarantined.is_empty() {
+                        if !message.is_empty() {
                             message.push_str("; ");
                         }
-                        message.push_str(&unavailable.server);
-                        message.push_str(" (");
-                        message.push_str(&unavailable.reason);
-                        message.push(')');
+                        message.push_str("quarantined MCP servers: ");
+                        for (index, quarantine) in catalog.quarantined.iter().enumerate() {
+                            if index > 0 {
+                                message.push_str("; ");
+                            }
+                            message.push_str(&format!(
+                                "{} (tool set digests to {} but the configured pin is {})",
+                                quarantine.server, quarantine.actual, quarantine.expected
+                            ));
+                        }
                     }
                     HostReadiness::Degraded { message }
                 },
@@ -132,7 +150,7 @@ impl ExternalToolHost for WiredMcpRegistry {
                 Some(McpCallFailure::Unavailable) => {
                     Err(HostCallError::Unavailable(outcome.content))
                 }
-                Some(McpCallFailure::InvalidArguments) => {
+                Some(McpCallFailure::InvalidArguments | McpCallFailure::Quarantined) => {
                     Err(HostCallError::Refused(outcome.content))
                 }
                 Some(McpCallFailure::UnknownTool) => Err(HostCallError::UnknownTool(name)),
@@ -361,6 +379,9 @@ fn resolve_server(
     settings.call_timeout = std::time::Duration::from_secs(server.call_timeout_seconds());
     settings.max_concurrent_calls = usize::try_from(server.max_concurrent_calls())
         .expect("the validated concurrency bound fits usize");
+    settings.pin = server
+        .pin()
+        .map(|pin| pin.parse().expect("the validated pin is a tool-set digest"));
     settings
 }
 

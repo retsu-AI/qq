@@ -26,6 +26,7 @@ approval policy as built-ins.
             bearer: Env("LINEAR_TOKEN"),    // or Stored("linear/default")
             call_timeout_seconds: 120,      // default 60
             max_concurrent_calls: 2,        // default 4
+            pin: "5a1f…e9c0",               // quarantine the server if its tools change
         ),
 
         // Drop one an earlier layer declared.
@@ -44,8 +45,31 @@ approval policy as built-ins.
 | `allow` | `[]` | `[]` | tool names granted for the workspace, folded into `policy.allow_tools` as `mcp__server__tool` |
 | `call_timeout_seconds` | `60` | `60` | per call |
 | `max_concurrent_calls` | `4` | `4` | per server |
+| `pin` | optional | optional | the 64-hex-digit digest of the server's tool set; a server whose tools no longer match is quarantined |
 
 Entries replace whole declarations by name; there is no per-field layering.
+
+## Pinning a server's tools
+
+An MCP server can change what its tools are called, what they accept, or
+what they say they do at any time, and the model reads those descriptions.
+`pin` freezes the tool set you reviewed: QQ digests every listing (SHA-256
+over each tool's name, description, input schema, and hints, independent of
+order) and, when a pinned server lists something else, quarantines it. Its
+tools disappear from the catalog, every call to it is refused — including
+tools that did not change themselves — and the readiness message names the
+server with both digests:
+
+```text
+quarantined MCP servers: linear (tool set digests to 9c2e… but the configured pin is 5a1f…)
+```
+
+To pin a server, declare it with any well-formed placeholder pin (64 hex
+digits), read the actual digest from that message, review the tools, and
+copy the digest into `pin`. To accept a change later, repeat with the new
+digest. A server that reverts to the pinned listing leaves quarantine on its
+next `list_changed` notification without a restart. Unpinned servers behave
+as before.
 
 ## Where to declare it
 

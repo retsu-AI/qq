@@ -680,6 +680,7 @@ pub struct McpServerConfig {
     allow: Vec<String>,
     call_timeout_seconds: u64,
     max_concurrent_calls: u32,
+    pin: Option<String>,
 }
 
 impl McpServerConfig {
@@ -689,6 +690,7 @@ impl McpServerConfig {
         allow: Vec<String>,
         call_timeout_seconds: u64,
         max_concurrent_calls: u32,
+        pin: Option<String>,
     ) -> Self {
         Self {
             transport,
@@ -696,6 +698,7 @@ impl McpServerConfig {
             allow,
             call_timeout_seconds,
             max_concurrent_calls,
+            pin,
         }
     }
 
@@ -725,6 +728,14 @@ impl McpServerConfig {
     #[must_use]
     pub const fn max_concurrent_calls(&self) -> u32 {
         self.max_concurrent_calls
+    }
+
+    /// The tool-set digest this server's listing must match (64 lowercase
+    /// hex digits, validated at load); a listing that differs is
+    /// quarantined by `qq-mcp`. `None` leaves the server unpinned.
+    #[must_use]
+    pub fn pin(&self) -> Option<&str> {
+        self.pin.as_deref()
     }
 }
 

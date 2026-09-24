@@ -27,7 +27,7 @@ and tenancy are deliberately left out (see the ADR's alternatives).
 | --- | --- | --- |
 | SK0 | ADR-0042, this plan, ledger | In review |
 | SK1 | Hash-linked event history and exportable audit stream (A3) | In review |
-| SK2 | MCP tool-set digest pinning and drift quarantine (A2) | Planned |
+| SK2 | MCP tool-set digest pinning and drift quarantine (A2) | In review |
 | SK3 | Approval ledger: recorded authority, digest-bound commit, at-most-once execution (A1) | Planned |
 
 Order: SK1 → SK2 → SK3. SK2 is independent in code but stacks on SK1 so the

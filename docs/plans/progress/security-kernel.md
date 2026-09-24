@@ -8,7 +8,7 @@ guarantees: `retsu-AI/axiom-rs` `ARCHITECTURE.md` (read-only design record).
 | --- | --- | --- | --- | --- |
 | SK0 | ADR-0042, plan, ledger | In review | `devin/1790291851-security-kernel-adr` | Docs only; ADR-0042 reserved in `root.md` |
 | SK1 | Hash-linked events + audit export/verify (A3) | In review | `devin/1790292004-audit-chain` | Schema 36 → 37; stacked on SK0 |
-| SK2 | MCP tool-set digest pin + drift quarantine (A2) | Planned | — | `pin` on the server declaration |
+| SK2 | MCP tool-set digest pin + drift quarantine (A2) | In review | `devin/1790293341-mcp-toolset-pin` | `pin` on the server declaration; stacked on SK1 |
 | SK3 | Approval ledger: recorded authority, bound commit, at-most-once (A1) | Planned | — | Schema 37 → 38 |
 
 ## Entries
@@ -56,3 +56,38 @@ Gate: `store_output_batch` 18–20 ms/batch on the branch vs 18–19 ms on
 Deliberately not ported: signatures over the head, issuer keys, external
 anchoring (supervisor), a CLI/HTTP surface for export (follow-up once the
 control plane names its sink).
+
+### 2026-09-24 — SK2 implemented
+
+`qq-mcp`: `McpToolSetDigest` (32-byte SHA-256, `Display`/`FromStr` as 64
+lowercase hex, domain `qq-mcp-tool-set-v1\0`) over the namespaced tools in
+name order — name, description, compact sorted-key schema text
+(`ToolSpec::input_schema().get()`), and a hint bitmask. `ServerState`
+caches a `Listing { tools, digest }`; `ServerHandle::listing` fetches on
+first use / after `list_changed` and compares against `settings.pin` on
+every use, returning `ListingFault::Quarantined { expected, actual }`
+without dropping the cache. `McpCatalog` gains `servers` (digest of every
+server that answered, quarantined included) and `quarantined`; quarantined
+tools never enter `tools`. `ServerHandle::execute` re-verifies a pinned
+server before connecting for the call, so a drift announced by
+`list_changed` fails the next call closed with `McpCallFailure::Quarantined`
+even when no catalog was fetched in between. `qq-config`: `pin:
+Option<String>` on `Stdio`/`Http` patches, validated at load as 64 lowercase
+hex digits, `McpServerConfig::pin()`. `src/mcp.rs` parses it into
+`McpServerSettings::pin`, maps `Quarantined` to `HostCallError::Refused`,
+and appends `quarantined MCP servers: NAME (…)` to the readiness message.
+
+Tests (`qq-mcp/src/tests.rs`): order-independent digest that changes on
+name/description/schema/hint and round-trips through text; unpinned server
+lists and publishes its digest; matching pin passes on a reordered listing;
+drift quarantines catalog and every call (including the unchanged tool),
+caches the quarantined listing, leaves a sibling untouched, and clears when
+the server reverts; `list_changed` drift quarantines the next call before
+any catalog fetch. `qq-config/src/tests.rs`: pin parsed and surfaced,
+unpinned stays `None`, short/uppercase/non-hex pins rejected at load.
+
+Deliberately not ported: Axiom's `ServerIdentityChanged` (qq names servers
+in configuration; the name is inside the digest, so a rename is a digest
+change), BLAKE3 (workspace already carries `sha2`), a CLI to print a
+server's digest (the quarantine readiness message carries the actual digest;
+follow-up if operators want `qq mcp digest <server>`), per-tool pins.

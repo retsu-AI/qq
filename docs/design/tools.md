@@ -992,6 +992,25 @@ embedded host above.
 - Concurrency: calls to distinct MCP servers proceed in parallel; calls to
   one server are limited by a small per-server bound so a slow server
   backpressures instead of queueing unboundedly.
+- Tool-set pinning (ADR-0042): every listing is reduced to an
+  `McpToolSetDigest` — SHA-256 under a versioned domain separator over the
+  tools in name order, each contributing its namespaced name (which
+  carries the server name), description, compact sorted-key input schema,
+  and hints. Listing order does not affect it; any change to what a tool is
+  called, says, accepts, or claims about itself does. The digest is computed
+  once per fetch, next to the cached listing, and `McpCatalog.servers`
+  publishes it for every server that answered. A server declared with a
+  `pin` whose listing digests differently is *quarantined*:
+  `McpCatalog.quarantined` names it with the expected and actual digests,
+  none of its tools reach `tools`, and `McpManager::call` fails closed with
+  `McpCallFailure::Quarantined` for every tool on it — including one whose
+  own schema did not change, because a server that changed one tool cannot
+  be trusted about the others. The call path re-checks the pin against the
+  cached listing before every call, so a `list_changed` that drifts a pinned
+  server quarantines it before the next call executes even if no catalog is
+  fetched in between; when the listing matches the pin again the server
+  leaves quarantine on the same notification. A server without a `pin`
+  behaves exactly as before.
 
 MCP tools execute outside the workspace containment model, so they are
 externally visible by default and require approval unless allowlisted.
@@ -1028,10 +1047,19 @@ declare servers at all.
             bearer: Env("LINEAR_TOKEN"),  // sourced like every other secret
             call_timeout_seconds: 60,     // default 60, max 600
             max_concurrent_calls: 4,      // per-server bound, default 4
+            // The tool-set digest this server must keep listing; any
+            // drift quarantines it until the pin is updated.
+            pin: "5a1f…e9c0",
         ),
     },
 )
 ```
+
+`pin` is the 64 lowercase hex digits of the server's tool-set digest,
+validated when the document loads so a typo fails configuration rather
+than quarantining the server at first use. The composition root parses it
+into `McpServerSettings::pin` (an `McpToolSetDigest`), so `qq-mcp`
+compares digests, never text.
 
 One deliberate convenience: the per-MCP-server tool allowlist lives on
 the server's own `mcp` entry, next to the declaration it scopes, even
@@ -1049,6 +1077,13 @@ server stays declared with its grants, never connects, and reports as
 so one missing credential degrades one server rather than failing plan
 compilation for the workspace. The registry cache key includes the
 credential epoch, so `qq auth set` is picked up by the next compile.
+
+A quarantined server is reported the same way — `quarantined MCP servers:
+NAME (tool set digests to ACTUAL but the configured pin is EXPECTED)` —
+and its calls surface to the runtime as refused, not unavailable: the
+server is reachable, the kernel declines to use it. The actual digest in
+the message is what an operator copies into `pin` after reviewing the
+change.
 
 ## Approval Policy
 

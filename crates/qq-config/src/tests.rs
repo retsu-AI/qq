@@ -2181,6 +2181,7 @@ fn mcp_servers_parse_layer_by_name_and_apply_defaults() {
                     allow: ["execute", "skills"],
                     call_timeout_seconds: 120,
                     max_concurrent_calls: 2,
+                    pin: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 ),
                 "linear": Http(
                     url: "https://mcp.linear.app/mcp",
@@ -2215,6 +2216,10 @@ fn mcp_servers_parse_layer_by_name_and_apply_defaults() {
     assert_eq!(executor.allow(), ["execute", "skills"]);
     assert_eq!(executor.call_timeout_seconds(), 120);
     assert_eq!(executor.max_concurrent_calls(), 2);
+    assert_eq!(
+        executor.pin(),
+        Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+    );
     assert!(matches!(
         executor.transport(),
         McpTransport::Stdio { command, args, env }
@@ -2226,6 +2231,7 @@ fn mcp_servers_parse_layer_by_name_and_apply_defaults() {
     let search = &servers["search"];
     assert!(!search.eager());
     assert!(search.allow().is_empty());
+    assert_eq!(search.pin(), None, "a server without a pin stays unpinned");
     assert_eq!(
         search.call_timeout_seconds(),
         DEFAULT_MCP_CALL_TIMEOUT_SECONDS
@@ -2283,8 +2289,35 @@ fn rejects_invalid_mcp_declarations() {
         r#""blank": Stdio(command: "./tool.sh", allow: [""])"#,
         "empty tool name",
     );
+    // A pin is checked at load: a typo must fail the document rather than
+    // quarantine the server at first use.
+    expect_message(
+        r#""short": Stdio(command: "./tool.sh", pin: "abc123")"#,
+        "pin must be the 64 lowercase hex digits",
+    );
+    expect_message(
+        &format!(
+            r#""upper": Http(url: "https://example.test/mcp", pin: "{}")"#,
+            "A".repeat(64)
+        ),
+        "pin must be the 64 lowercase hex digits",
+    );
+    expect_message(
+        &format!(
+            r#""hexish": Stdio(command: "./tool.sh", pin: "{}")"#,
+            "g".repeat(64)
+        ),
+        "pin must be the 64 lowercase hex digits",
+    );
 
     assert!(parse(r#""fine": Stdio(command: "./tool.sh")"#).is_ok());
+    assert!(
+        parse(&format!(
+            r#""pinned": Stdio(command: "./tool.sh", pin: "{}")"#,
+            "0f".repeat(32)
+        ))
+        .is_ok()
+    );
 }
 
 #[test]
