@@ -43,7 +43,6 @@
         pkgs.biome
         inputs.nub.packages.${system}.nub
         pkgs.nodejs_24
-        pkgs.pnpm
         pkgs.typescript
         pkgs.typescript-language-server
         pkgs.vscode-langservers-extracted

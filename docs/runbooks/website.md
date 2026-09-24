@@ -24,19 +24,19 @@ that another page links to fails the build until the link follows.
 2. Add `{ "page": "<name>", "label": "…", "description": "…" }` to the right
    group in `website/sidebar.json`. The description is the page's meta
    description and search summary.
-3. `cd website && pnpm build`.
+3. `cd website && nub run build`.
 
 ## Build locally
 
 ```sh
-nix develop            # node 24 + pnpm
+nix develop            # node 24 + nub
 cd website
-pnpm install --frozen-lockfile
-pnpm build             # sync-docs, astro check, astro build, pagefind, check-links
-pnpm preview           # http://localhost:4321/qq/
+nub ci
+nub run build          # sync-docs, astro check, astro build, pagefind, check-links
+nub run preview        # http://localhost:4321/qq/
 ```
 
-`pnpm dev` serves with hot reload; search only works against a production
+`nub run dev` serves with hot reload; search only works against a production
 build because Pagefind indexes `dist/`.
 
 ## Deploy

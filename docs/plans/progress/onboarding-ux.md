@@ -222,7 +222,7 @@ was removed. Deployment: `retsu-ai.github.io/qq` (base `/qq/`), decided
 over a custom domain and over Vercel — no new account, PR previews not
 needed for docs. `.github/workflows/website.yml` builds on PRs touching
 `website/`, `docs/guide/`, `install.sh`, or `Cargo.toml` and deploys from
-`main` with `actions/deploy-pages`. `nix/dev-shells.nix` adds `pnpm`. OB11
+`main` with `actions/deploy-pages`. The site is installed and run with `nub` (already in the Nix shell); CI uses `nubjs/setup-nub`, not Nix, so the job stays at seconds. OB11
 (wiki mirror) is superseded. Follow-ups: OB10's docs-truth test now also
 protects the site; a custom domain is two lines in `site.config.mjs` plus
 `public/CNAME`; the eight dropped topics are candidate guides.

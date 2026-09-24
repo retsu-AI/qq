@@ -48,7 +48,7 @@ Acceptance for the plan as a whole (the fresh-machine script in
 | OB9 | Degrade an MCP server whose `Stored(...)` bearer is unregistered (ENG-861) | `src/mcp.rs`, `crates/qq-mcp` | Planned |
 | OB10 | Docs CI: a test that every `Document` key, `PolicyPatch` key, env var, `CommandSpec` slash name, and `ConfigCommand` appears in `docs/guide/`; CHANGELOG generated from Conventional Commits at release | `xtask/`, `tests/`, `.github/workflows/ci.yml`, `docs/runbooks/release.md` | Planned |
 | OB11 | Wiki mirror: a release-time job pushes `docs/guide/` to the GitHub Wiki with a `_Sidebar.md`; decide on a docs site when the guide exceeds what a wiki renders well | `.github/workflows/`, `docs/guide/_Sidebar.md` | Superseded by OB12 |
-| OB12 | Docs website: an Astro/Starlight site under `website/` whose documentation pages are generated from `docs/guide/` at build time, with a landing page, search, and the real `install.sh`; built on every PR that touches it or the guide, deployed to GitHub Pages from `main` | `website/`, `.github/workflows/website.yml`, `nix/dev-shells.nix` | In review |
+| OB12 | Docs website: an Astro/Starlight site under `website/` whose documentation pages are generated from `docs/guide/` at build time, with a landing page, search, and the real `install.sh`; built on every PR that touches it or the guide, deployed to GitHub Pages from `main` | `website/`, `.github/workflows/website.yml` | In review |
 
 Dependencies: OB1 → OB2 (both change `interactive()`); OB2 → OB8; OB5 and
 OB4 are independent; OB6 is independent of code; OB7 needs a protocol

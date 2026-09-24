@@ -35,20 +35,16 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      # nub installs from a release archive in about a second, provisions the
+      # Node pinned by website/package.json engines, and caches its store.
+      - uses: nubjs/setup-nub@v0.6.0
         with:
-          # Keep in step with the lockfile's pnpm; nix/dev-shells.nix provides the same major.
-          version: 12
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: website/pnpm-lock.yaml
+          working-directory: website
       - name: Install
-        run: pnpm install --frozen-lockfile
+        run: nub ci
         working-directory: website
       - name: Build
-        run: pnpm build
+        run: nub run build
         working-directory: website
       - uses: actions/upload-pages-artifact@v3
         with:

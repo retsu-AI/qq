@@ -31,18 +31,20 @@ or fragment that does not resolve in `dist/`.
 1. Write `docs/guide/<name>.md` with one H1.
 2. Add `{ "page": "<name>", "label": …, "description": … }` to the right group
    in `sidebar.json`.
-3. `pnpm build`.
+3. `nub run build`.
 
 ## Develop
 
-Node 22+ and pnpm (`nix develop` provides both).
+[nub](https://nubjs.com) and Node 24; `nix develop` provides both. nub reads
+the pnpm-format lockfile and `pnpm-workspace.yaml` as they are, so plain
+pnpm works too, but the lockfile is maintained with nub.
 
 ```sh
 cd website
-pnpm install
-pnpm dev        # http://localhost:4321/qq/  (search needs a production build)
-pnpm build      # sync, type-check, build, index search, check links
-pnpm preview
+nub ci               # strict install from the lockfile
+nub run dev          # http://localhost:4321/qq/  (search needs a production build)
+nub run build        # sync, type-check, build, index search, check links
+nub run preview
 ```
 
 ## Deploy
