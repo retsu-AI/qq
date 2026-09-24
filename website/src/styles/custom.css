@@ -2,7 +2,7 @@
 @import '@fontsource/jetbrains-mono/latin-400.css';
 @import '@fontsource/jetbrains-mono/latin-500.css';
 
-/* Ink is the terminal's source palette. These tokens never change with the page theme. */
+/* Ink is the terminal's source palette (crates/qq-config/themes/ink.ron). These tokens never change with the page theme. */
 :root {
   --paper: #d8dee9;
   --slate: #7b8497;
@@ -165,38 +165,6 @@ header.header { border-bottom: 1px solid var(--border); padding-inline: max(1.5r
 .copy-button[data-copied] { color: var(--mint); }
 .copy-icon { width: 12px; height: 14px; border: 1px solid currentColor; border-radius: 2px; box-shadow: -3px -3px 0 -1px var(--graphite), -3px -3px 0 0 currentColor; }
 .hero-terminal-wrap { min-width: 0; }
-.terminal { background: var(--graphite); color: var(--paper); border: 1px solid #7b84974d; border-radius: 10px; overflow: hidden; font-family: var(--font-mono); font-size: 0.875rem; line-height: 1.75; box-shadow: 0 16px 40px #00000015; }
-.terminal-titlebar { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #7b849733; padding: 0.75rem 1.1rem; color: var(--terminal-muted); font-size: 0.875rem; }
-.window-dots { display: flex; gap: 6px; }
-.window-dots i { width: 8px; height: 8px; border-radius: 50%; background: var(--slate); opacity: 0.55; }
-.terminal-titlebar .terminal-type { font-size: 0.875rem; color: var(--terminal-muted); }
-.terminal-content { padding: 1.25rem 1.35rem 1rem; }
-.terminal-launch { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1rem; }
-.terminal-prompt { color: var(--sky); }
-.typed-command { display: inline-block; overflow: hidden; white-space: nowrap; width: 2ch; animation: type-command 0.45s steps(2) 0.4s both; }
-.terminal-cursor { width: 7px; height: 16px; background: var(--copper); animation: blink-cursor 0.7s 3; }
-.terminal-workspace { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; color: var(--paper); gap: 0.25rem; padding-bottom: 0.85rem; border-bottom: 1px solid #7b849733; }
-.terminal-workspace .model { color: var(--terminal-muted); font-size: 0.875rem; }
-.terminal-request { color: var(--paper); margin-top: 1rem; }
-.terminal-response { color: var(--terminal-muted); margin-block: 0.4rem 1rem; }
-.tool-rows { display: flex; flex-direction: column; gap: 0.4rem; }
-.tool-row { display: grid; grid-template-columns: 10px 4.25rem 1fr auto; align-items: baseline; column-gap: 0.65rem; }
-.tool-row .dot { color: var(--mint); font-size: 0.6rem; }
-.tool-row .file { color: var(--terminal-muted); }
-.tool-row .time { color: var(--terminal-muted); }
-.tool-row .diff { color: var(--mint); }
-.approval-prompt { border: 1px solid #e0a07170; border-radius: 5px; padding: 0.875rem 1rem; margin-top: 1.25rem; background: #e0a07105; }
-.approval-title { color: var(--copper); font-weight: 500; margin-bottom: 0.35rem; }
-.approval-title .diamond { font-size: 1.1rem; }
-.approval-command { color: var(--paper); }
-.approval-command span, .approval-reason { color: var(--terminal-muted); }
-.approval-reason code { color: var(--gold); font-size: 0.875rem; }
-.approval-keys { display: flex; flex-wrap: wrap; gap: 0.5rem 1.15rem; margin-top: 0.6rem; color: var(--terminal-muted); }
-.approval-keys b { color: var(--paper); font-weight: 400; }
-.terminal-status { display: flex; justify-content: space-between; color: var(--terminal-muted); border-top: 1px solid #7b849733; padding: 0.6rem 1.35rem; }
-.terminal-status .status-dot { color: var(--copper); }
-.terminal-caption { display: flex; align-items: center; justify-content: center; gap: 0.6rem; color: var(--muted); font-size: 0.875rem; margin-top: 1rem; }
-.terminal-caption span { color: var(--brand); }
 .trust-row { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 1.75rem; padding-block: 1.5rem 2.5rem; color: var(--muted); font-size: 0.875rem; border-bottom: 1px solid var(--border); }
 .trust-row > span, .trust-row > a { display: inline-flex; align-items: center; gap: 0.5rem; }
 .trust-row a { color: var(--muted); }
@@ -231,22 +199,6 @@ header.header { border-bottom: 1px solid var(--border); padding-inline: max(1.5r
 .policy-table .prompt { color: var(--gold); }
 .policy-table .forbidden { color: var(--rose); }
 .policy-table .outcome { color: var(--terminal-muted); }
-.session-mock { background: var(--graphite); color: var(--paper); border: 1px solid #7b84974d; border-radius: 8px; overflow: hidden; font-family: var(--font-mono); font-size: 0.875rem; }
-.session-top { padding: 0.75rem 1rem; border-bottom: 1px solid #7b849733; color: var(--terminal-muted); display: flex; justify-content: space-between; }
-.session-columns { display: grid; grid-template-columns: 1fr 1.1fr; }
-.session-sidebar { border-right: 1px solid #7b849733; padding: 1rem; }
-.session-group + .session-group { margin-top: 1rem; }
-.session-group-title { display: flex; justify-content: space-between; color: var(--terminal-muted); font-size: 0.875rem; letter-spacing: 0.04em; margin-bottom: 0.3rem; }
-.session-group-title.needs-you { color: var(--gold); }
-.session-row { padding: 0.35rem 0.5rem; white-space: nowrap; }
-.session-row.active { background: #8fb8e810; color: var(--sky); border-radius: 3px; }
-.session-row .count { float: none; color: var(--gold); }
-.session-detail { padding: 1.1rem; }
-.session-detail p { color: var(--terminal-muted); margin-top: 0.8rem; }
-.session-detail .roster { border-top: 1px solid #7b849733; margin-top: 1.25rem; padding-top: 1rem; color: var(--terminal-muted); }
-.session-detail .roster div { margin-top: 0.5rem; }
-.session-detail .ok { color: var(--mint); }
-.session-detail .working { color: var(--copper); }
 .providers-section { text-align: center; padding-block: 4.5rem 4rem; }
 .provider-tags { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.75rem; margin-block: 2rem; }
 .provider-tag { padding: 0.6rem 1.1rem; border: 1px solid var(--border); border-radius: 6px; font-size: 0.9375rem; color: var(--foreground); background: var(--subtle); }
@@ -304,21 +256,89 @@ starlight-toc a { font-size: 0.875rem; }
 .sl-markdown-content .sl-link-card { border-radius: var(--radius); background: var(--subtle); border: 1px solid var(--border); box-shadow: none; }
 .sl-markdown-content .sl-link-card .title { font-size: 1rem; }
 .qq-kbd { display: inline-block; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0.1rem 0.35rem; background: var(--surface); color: var(--foreground); font-size: 0.875rem; line-height: 1.4; white-space: nowrap; }
-.docs-terminal { margin-block: 1.5rem; }
-.docs-terminal .approval-prompt { margin-top: 0; }
-.docs-terminal .terminal-content { padding: 1rem; }
 
-@keyframes type-command { from { width: 0; } to { width: 2ch; } }
-@keyframes blink-cursor { 50% { opacity: 0; } }
+/* ---- The TUI, as qq draws it ------------------------------------------------
+   One frame = top row, transcript (+ sidebar at 100 cols), rule, composer.
+   Text-only chrome on graphite, exactly like the terminal: no window dots,
+   no rounded panels inside the frame. Glyphs and colors follow
+   crates/qq-tui/src/view/{tools,sidebar}.rs; layout follows the goldens. */
+.tui { --tui-border: #7b849755; --tui-muted: var(--terminal-muted); background: var(--ink-background); color: var(--paper); border: 1px solid var(--tui-border); border-radius: 10px; overflow: hidden; font-family: var(--font-mono); font-size: 0.8125rem; line-height: 1.6; box-shadow: 0 1px 2px #0003, 0 14px 40px -24px #000c; white-space: nowrap; }
+.tui-top { display: flex; align-items: baseline; gap: 0.75rem; padding: 0.5rem 0.75rem; color: var(--paper); }
+.tui-brand { color: var(--copper); font-weight: 500; }
+.tui-crumb { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tui-sep { color: var(--tui-muted); }
+.tui-right { display: flex; gap: 1.25rem; color: var(--tui-muted); }
+.tui-right > span:first-child { color: var(--paper); }
+.tui-body { padding: 0.35rem 0.75rem 0.6rem; }
+.tui-blank { height: 1.6em; }
+.tui-msg { display: grid; grid-template-columns: 1ch 1fr; column-gap: 0.75rem; }
+.tui-msg .rail { color: var(--sky); }
+.tui-msg .who { font-weight: 600; color: var(--sky); }
+.tui-msg.qq .who { color: var(--tui-muted); }
+.tui-msg .text { white-space: normal; }
+.tui-msg .text code { font: inherit; color: var(--paper); background: var(--graphite); padding: 0 0.3ch; border-radius: 3px; }
+.tui-tool { display: grid; grid-template-columns: 1ch 6ch 1fr auto 4.5ch; column-gap: 0.75rem; align-items: baseline; }
+.tui-tool .verb { color: var(--paper); }
+.tui-tool .arg { color: var(--paper); overflow: hidden; text-overflow: ellipsis; }
+.tui-tool .detail, .tui-tool .time { color: var(--tui-muted); text-align: right; }
+.tui .g { text-align: center; }
+.tui .g.done, .tui .g.idle { color: var(--tui-muted); }
+.tui .g.run { color: var(--sky); }
+.tui .g.wait, .tui .detail.wait { color: var(--gold); }
+.tui .g.fail { color: var(--rose); }
+/* An awaiting Edit expands under its row: a `◇ approval needed` header, the
+   path, a unified hunk with old/new line numbers, then the key line. */
+.tui-approval { margin: 0 0 0 calc(1ch + 0.75rem); padding: 0.1rem 0 0.2rem 1.5ch; }
+.tui-approval .line { display: block; }
+.tui-approval .wait { color: var(--gold); }
+.tui-approval .path, .tui-approval .hunk { color: var(--tui-muted); padding-left: 2ch; }
+.tui-approval .ctx, .tui-approval .add, .tui-approval .del { padding-left: 0; }
+.tui-approval .n { display: inline-block; width: 3ch; text-align: right; color: var(--tui-muted); margin-right: 1ch; }
+.tui-approval .sign { display: inline-block; width: 1ch; }
+.tui-approval .add { color: var(--mint); }
+.tui-approval .del { color: var(--rose); }
+.tui-approval .keys { display: flex; gap: 2.5ch; padding-left: 2ch; margin-top: 0.15rem; color: var(--tui-muted); }
+.tui-approval .keys b { color: var(--paper); font-weight: 500; }
+/* The rule: spinner + activity at left, key hints at right, a ─ line between. */
+.tui-rule { display: flex; align-items: center; gap: 0.75ch; padding: 0 0.75rem; color: var(--tui-muted); }
+.tui-rule .spin, .tui .g.run { color: var(--sky); }
+.tui-rule .spin::before { content: '◐'; animation: tui-spin 0.8s steps(4) infinite; }
+@keyframes tui-spin { 0% { content: '◐'; } 25% { content: '◓'; } 50% { content: '◑'; } 75% { content: '◒'; } }
+.tui-rule .activity { color: var(--sky); }
+.tui-rule .hr { flex: 1; height: 1px; background: var(--tui-border); margin-inline: 0.5ch; }
+.tui-rule .hints { display: flex; gap: 2ch; }
+.tui-rule .hints b { color: var(--sky); font-weight: 400; }
+.tui-composer { display: flex; gap: 0.75rem; padding: 0.15rem 0.75rem 0.55rem; }
+.tui-composer .prompt { color: var(--sky); }
+.tui-composer .pen { color: var(--gold); }
+.tui-composer .placeholder { color: var(--tui-muted); }
+/* Sessions: transcript left, sidebar right, divided by │ like the real pane. */
+.tui-split { display: grid; grid-template-columns: 1fr 27ch; }
+.tui-sidebar { border-left: 1px solid var(--tui-border); padding: 0.35rem 0.75rem 0.6rem; overflow: hidden; }
+.tui-sidebar .grp { display: flex; gap: 2ch; color: var(--tui-muted); font-weight: 600; margin-top: 1.6em; }
+.tui-sidebar .grp:first-child { margin-top: 0; }
+.tui-sidebar .grp.wait { color: var(--gold); }
+.tui-sidebar .grp span { font-weight: 400; }
+.tui-sidebar .row { display: grid; grid-template-columns: 1ch 1fr auto; column-gap: 1ch; overflow: hidden; }
+.tui-sidebar .row .name { overflow: hidden; text-overflow: ellipsis; }
+.tui-sidebar .row.child { padding-left: 2ch; }
+.tui-sidebar .row.status { color: var(--tui-muted); grid-template-columns: 1fr; padding-left: 3ch; }
+.tui-sidebar .row.child.status { grid-template-columns: 1ch 1fr; padding-left: 5ch; }
+.tui-sidebar .new { color: var(--sky); }
+.tui-related { display: flex; gap: 1ch; padding-left: 0.25ch; }
+.tui-related .label { color: var(--tui-muted); font-weight: 600; }
+.tui-related .arrow { color: var(--tui-muted); }
+.tui-rule .meta { color: var(--tui-muted); white-space: pre; }
+.terminal-caption { display: flex; align-items: center; justify-content: center; gap: 0.6rem; color: var(--muted); font-size: 0.875rem; margin-top: 1rem; }
+.terminal-caption span { color: var(--brand); }
+.mono { font-family: var(--font-mono); font-size: 0.875em; }
+
 @media (hover: none) { .expressive-code .copy button { opacity: 1; } }
 @media (min-width: 50rem) { [data-has-sidebar] header.header { padding-inline: 2rem; } }
 @media (max-width: 1100px) {
   .hero-grid { gap: 2rem; }
   .brand-caption, .brand-divider { display: none; }
   .split-section { gap: 2.5rem; }
-  .terminal-content { padding-inline: 1rem; }
-  .terminal-workspace .model { font-size: 0.875rem; }
-  .tool-row { column-gap: 0.4rem; }
   .surface-card { padding: 1.25rem; }
 }
 @media (max-width: 799px) {
@@ -354,16 +374,13 @@ starlight-toc a { font-size: 0.875rem; }
   .hero-actions { gap: 0.65rem; }
   .action-primary, .action-secondary { padding-inline: 1rem; }
   .install-widget .tab > a { padding-inline: 0.5rem; }
-  .terminal { font-size: 0.875rem; }
-  .terminal-workspace { align-items: start; flex-direction: column; }
-  .tool-row { grid-template-columns: 8px 3.5rem 1fr auto; column-gap: 0.35rem; }
-  .tool-row .file { overflow-wrap: anywhere; }
-  .approval-prompt { padding-inline: 0.75rem; }
-  .approval-command span { display: block; }
-  .terminal-status { padding-inline: 1rem; }
-  .session-columns { grid-template-columns: 1fr; }
-  .session-sidebar { border-right: 0; }
-  .session-detail { border-top: 1px solid #7b849733; }
+  .tui { font-size: 0.75rem; }
+  .tui-right > span:not(:first-child) { display: none; }
+  .tui-tool { grid-template-columns: 1ch 6ch 1fr 4.5ch; }
+  .tui-tool .detail { display: none; }
+  .tui-rule .meta, .tui-rule .hints span:not(:first-child) { display: none; }
+  .tui-split { grid-template-columns: 1fr; }
+  .tui-sidebar { border-left: 0; border-top: 1px solid var(--tui-border); }
   .footer-brand { align-items: start; gap: 1rem; }
   .footer-bottom { flex-direction: column; }
 }
