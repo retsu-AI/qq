@@ -46,11 +46,22 @@ pub(crate) const UNATTENDED_QUESTION_RESULT: &str =
     "No user is available to answer questions in this run; decide without asking.";
 pub(crate) const DECLINED_QUESTION_RESULT: &str =
     "The user declined to answer; proceed with your best judgement.";
+/// Prefix of the `tool_approval_escalated` reason when a delegate's `deny`
+/// was advice rather than a verdict (under `ask`).
+pub(crate) const ADVISORY_DENIAL_PREFIX: &str = "the delegate would deny:";
+/// The `tool_approval_escalated` reason when the delegate's own clock ran
+/// out before it answered.
+pub(crate) const DELEGATE_TIMED_OUT_REASON: &str = "the delegate did not answer within its window";
+
+/// Who settles a session's held calls before a human is asked. The wire
+/// type (`qq_protocol::ApprovalDelegate`) is the one source: the mode stays
+/// the ceiling and this only chooses who decides inside it.
+pub use qq_protocol::ApprovalDelegate;
 
 /// The model-facing prefix of a reviewer denial. Final under `supervised`
 /// (every held call of a write child) and under `auto` (the dangerous-shaped
 /// shell and ungranted hosts that mode holds); the reviewer's bounded reason
-/// follows. No other mode consults the reviewer.
+/// follows. Under `ask` a denial escalates instead, so no result is built.
 pub(crate) fn reviewer_denied_result(mode: ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::Supervised => {

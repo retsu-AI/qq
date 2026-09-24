@@ -13,10 +13,10 @@ use qq_client::state::{
     model_reasoning_efforts,
 };
 use qq_protocol::{
-    AgentProfileId, ApprovalDecision, ApprovalGrant, ApprovalMode, ApprovalResolution, CommandId,
-    CommandOutcome, CommandRequest, ModelSelection, QuestionPreview, ReasoningEffort,
-    ServerCapabilities, SessionCommand, SessionEvent, SessionEventEnvelope, SessionId,
-    SessionStatus, SteeringCapabilities, ToolCallSnapshot, ToolCallState, WorkspaceId,
+    AgentProfileId, ApprovalDecision, ApprovalDelegate, ApprovalGrant, ApprovalMode,
+    ApprovalResolution, CommandId, CommandOutcome, CommandRequest, ModelSelection, QuestionPreview,
+    ReasoningEffort, ServerCapabilities, SessionCommand, SessionEvent, SessionEventEnvelope,
+    SessionId, SessionStatus, SteeringCapabilities, ToolCallSnapshot, ToolCallState, WorkspaceId,
     WorkspaceSnapshot,
 };
 use thiserror::Error;
@@ -26,7 +26,7 @@ use crate::{
     commands::{self, Command, SlashAction, SlashEntry},
     composer::Composer,
     effect::{Effect, Effects, PendingSubmit, Redraw, SubmitTarget},
-    input::{Mode, Overlay, SessionConfirm, approval_mode_label, effort_label},
+    input::{Mode, Overlay, SessionConfirm, approval_mode_label, delegate_label, effort_label},
     picker::Picker,
     terminal,
     theme::Theme,
@@ -251,6 +251,9 @@ enum PendingIntent {
         session_id: SessionId,
     },
     SetEffort {
+        session_id: SessionId,
+    },
+    SetDelegate {
         session_id: SessionId,
     },
     Delete {
@@ -528,14 +531,14 @@ impl App {
                                         "tool call approved for this workspace"
                                     }
                                     ApprovalResolution::ApprovedByReviewer => {
-                                        "tool call already approved by the reviewer"
+                                        "tool call already approved by the delegate"
                                     }
                                     ApprovalResolution::Denied => "tool call denied",
                                     ApprovalResolution::DeniedTimeout => {
                                         "tool call already denied by timeout"
                                     }
                                     ApprovalResolution::DeniedByReviewer => {
-                                        "tool call already denied by the reviewer"
+                                        "tool call already denied by the delegate"
                                     }
                                     ApprovalResolution::Answered => "answer sent",
                                 }
@@ -614,6 +617,24 @@ impl App {
                                 self.set_info_for(
                                     Some(*session_id),
                                     format!("session effort set to {}", effort_label(*effort)),
+                                );
+                            }
+                            CommandOutcome::ApprovalDelegateSet {
+                                session_id,
+                                delegate,
+                            } => {
+                                self.set_info_for(
+                                    Some(*session_id),
+                                    match delegate {
+                                        Some(ApprovalDelegate::Off) => {
+                                            "delegate off: every held call now waits for you"
+                                                .to_owned()
+                                        }
+                                        Some(_) | None => format!(
+                                            "session delegate set to {}",
+                                            delegate_label(*delegate)
+                                        ),
+                                    },
                                 );
                             }
                             CommandOutcome::SessionDeleted { .. } => {
@@ -990,6 +1011,7 @@ impl App {
             | Some(PendingIntent::SetProfile { session_id })
             | Some(PendingIntent::SetApprovalMode { session_id })
             | Some(PendingIntent::SetEffort { session_id })
+            | Some(PendingIntent::SetDelegate { session_id })
             | Some(PendingIntent::Delete { session_id }) => Some(*session_id),
             Some(PendingIntent::Approval { tool_call_id }) => self
                 .sessions
@@ -1064,6 +1086,7 @@ impl App {
             | Mode::Profiles
             | Mode::ApprovalModes
             | Mode::Effort
+            | Mode::Delegate
             | Mode::Skills
             | Mode::Themes
             | Mode::Commands
@@ -1391,6 +1414,7 @@ impl App {
             Command::OpenProfiles => self.open_profiles(),
             Command::OpenApprovalModes => self.open_approval_modes(),
             Command::OpenEffort => self.open_effort(),
+            Command::OpenDelegate => self.open_delegate(),
             Command::OpenSkills => self.open_skills(),
             Command::OpenThemes => self.open_themes(),
             Command::OpenSessions => self.open_sessions(),
@@ -2555,6 +2579,7 @@ impl App {
                 | PendingIntent::SetProfile { .. }
                 | PendingIntent::SetApprovalMode { .. }
                 | PendingIntent::SetEffort { .. }
+                | PendingIntent::SetDelegate { .. }
                 | PendingIntent::Delete { .. }
                 | PendingIntent::Prune => None,
             })

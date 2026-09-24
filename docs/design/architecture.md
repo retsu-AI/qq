@@ -1286,6 +1286,7 @@ Application configuration types must not leak into `qq-core`.
 | General tools | MCP and the embedded `ExternalToolHost` | Startup catalog; call on demand | One selected adapter call | MCP process/HTTP boundary or trusted embedder |
 | Context/memory | Typed bounded `ContextSource` | Plan compile plus pre-turn fetch | No per-delta hook | Time/byte/token budgets; explicit fail policy |
 | Jev review | Typed `CheckpointReviewer` | Trusted `jev_review` setting/profile, default off | `final`: final candidate only; `enforce`: each tool result and final candidate | Fixed endpoint/model/policy; bounded evidence; fail closed; durable correlated status |
+| Jev approval | Typed `ApprovalReviewer`, composed ahead of `reviewer_model` | Trusted `jev_approval` setting/profile, default off | Only a call the approval mode already holds; one typed yes/no/abstain, 5 s bound | Fixed endpoint/model/policy; bounded masked preview; falls through to the reviewer model then the human, never approves on failure (ADR-0041) |
 | Observers | Durable SSE/outbox | Subscription | Post-commit only | Cannot affect authoritative execution |
 | Process execution | Local implementation plus one real sandbox adapter (deferred sandbox adapter) | Startup | Direct selected backend | Explicit filesystem/network/process capabilities |
 | Surface adapters | Versioned `qq-client` contract | Client startup | Outside agent loop | Product owns remote auth and UX |
@@ -1296,7 +1297,7 @@ selects one precompiled tool entry and never runs before/after hook lists;
 product memory is not a synchronous observer of every token and ordinary
 retrieval fails open with a visible diagnostic; synchronous decisions remain
 limited to typed approval, exact tool validation, budget admission, and the
-explicit Jev review modes from ADR-0030; provider
+explicit Jev review and approval modes from ADR-0030 and ADR-0041; provider
 adapter families are feature-gated inside `qq-provider` (`provider-bedrock`
 owns the AWS SDK closure) rather than split into crates.
 

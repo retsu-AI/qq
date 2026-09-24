@@ -2,8 +2,8 @@ use super::*;
 use crate::{
     commands::Category,
     input::{
-        ApprovalModeRow, CommandRow, EffortRow, ModelRow, Overlay, ProfileRow, SessionRow,
-        SkillRow, ThemeRow,
+        ApprovalModeRow, CommandRow, DelegateRow, EffortRow, ModelRow, Overlay, ProfileRow,
+        SessionRow, SkillRow, ThemeRow,
     },
     picker::{Picker, PickerItem},
 };
@@ -352,6 +352,43 @@ pub(super) fn effort_picker(app: &App, width: usize, height: usize) -> Vec<Line>
     )
 }
 
+/// Delegate picker: who settles the focused session's held calls for the rest
+/// of the session. `configured` restores the workspace setting; `off` is the
+/// "stop delegating" switch. The choice in effect is marked.
+pub(super) fn delegate_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
+    let Some(Overlay::Delegate(picker)) = &app.overlay else {
+        return fit_height(Vec::new(), height);
+    };
+    let current = app
+        .focused()
+        .and_then(|session_id| app.sessions.get(&session_id))
+        .and_then(|session| session.summary.approval_delegate);
+    picker_frame(
+        picker,
+        PickerChrome {
+            title: "APPROVAL DELEGATE",
+            hint: "who settles this session's held calls; Enter applies from the next hold, Esc closes",
+            placeholder: "configured, by_mode, on, off",
+            question: None,
+            empty: "  No matching choice.",
+        },
+        width,
+        height,
+        |row: &DelegateRow, selected, out| {
+            let mut line = cursor_prefix(selected);
+            line.push(
+                format!("{:<11}", row.label),
+                if selected { normal().bold() } else { normal() },
+            );
+            line.push(row.summary, muted());
+            if row.delegate == current {
+                line.push("  active", accent());
+            }
+            out.push(finish_row(line, selected, width));
+        },
+    )
+}
+
 /// Skills picker: the workspace's indexed commands and skills with their
 /// source and description. Commands are grouped before skills.
 pub(super) fn skill_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
@@ -615,6 +652,21 @@ pub(super) fn approval_block(app: &App, width: usize) -> Vec<Line> {
                     indented
                 }),
         );
+    }
+    // Why this reached you when a delegate was asked first: the delegate's
+    // own words, or that its clock ran out.
+    if let Some(escalated) = preview.and_then(|preview| preview.escalated.as_ref()) {
+        let mut line = Line::styled("         ", muted());
+        let who = match escalated.delegate {
+            Some(delegate) => format!("{} passed to you: ", delegate.as_str()),
+            None => "delegate timed out: ".to_owned(),
+        };
+        line.push(who, warning());
+        line.push(
+            super::preview(&escalated.reason, width.saturating_sub(line.width())),
+            muted(),
+        );
+        lines.push(truncate_line(line, width));
     }
     let mut choices = Line::styled("       ", muted());
     // A grant the server cannot store is not offered. The keys still approve

@@ -1372,7 +1372,14 @@ impl Store {
     pub(super) async fn approval_policy(
         &self,
         session_id: SessionId,
-    ) -> Result<(ApprovalMode, approval::SessionGrants), SessionRuntimeError> {
+    ) -> Result<
+        (
+            ApprovalMode,
+            approval::SessionGrants,
+            Option<approval::ApprovalDelegate>,
+        ),
+        SessionRuntimeError,
+    > {
         self.call(Priority::Output, move |connection| {
             load_approval_policy(connection, session_id)
         })
@@ -1429,11 +1436,19 @@ impl Store {
         claimed: &ClaimedRun,
         tool_call_id: ToolCallId,
         grant: Option<DelegateGrant>,
+        delegate: DelegateIdentity,
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            resolve_approval_by_reviewer(connection, store_id, identity, tool_call_id, grant)
+            resolve_approval_by_reviewer(
+                connection,
+                store_id,
+                identity,
+                tool_call_id,
+                grant,
+                delegate,
+            )
         })
         .await
     }
@@ -1532,11 +1547,43 @@ impl Store {
         claimed: &ClaimedRun,
         tool_call_id: ToolCallId,
         message: String,
+        delegate: DelegateIdentity,
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            deny_approval_by_reviewer(connection, store_id, identity, tool_call_id, &message)
+            deny_approval_by_reviewer(
+                connection,
+                store_id,
+                identity,
+                tool_call_id,
+                &message,
+                delegate,
+            )
+        })
+        .await
+    }
+
+    /// Records that a delegate handed the hold to the human and why. Advisory:
+    /// a client resolution that already committed leaves nothing to say.
+    pub(super) async fn escalate_tool_approval(
+        &self,
+        claimed: &ClaimedRun,
+        tool_call_id: ToolCallId,
+        delegate: Option<DelegateIdentity>,
+        reason: String,
+    ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            escalate_tool_approval(
+                connection,
+                store_id,
+                identity,
+                tool_call_id,
+                delegate,
+                &reason,
+            )
         })
         .await
     }

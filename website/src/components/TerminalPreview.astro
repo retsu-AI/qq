@@ -1,0 +1,42 @@
+---
+// A frame of the real TUI, laid out the way `qq` draws it (see the goldens
+// in crates/qq-tui/tests/goldens and docs/guide/tui.md § Layout):
+//
+//   top row      ` qq  workspace › session … model  12% ctx  $0.04`
+//   transcript   `▌ YOU` header + prompt; tool rows `● Read   path   detail  time`;
+//                `  QQ` header + reply; an awaiting `◇` row expands to its diff
+//                and the `y once  a session  w workspace  n deny` key line
+//   rule         `◐ working ──────── ? help  ^K commands  ^O detail`
+//   composer     `› Ask QQ...` (or `✎ Answer the approval above`)
+//
+// Glyphs and colors follow view/tools.rs and view/sidebar.rs: completed `●`
+// muted, running `◐` sky, awaiting approval `◇` gold, failed `✕` rose.
+---
+<div class="tui" role="img" aria-label="The QQ terminal UI: a prompt, four tool calls, and an edit waiting for approval with its diff and the keys y, a, w, n">
+      <div class="tui-top"><span class="tui-brand">qq</span><span class="tui-crumb">my-project <span class="tui-sep">›</span> add dry-run</span><span class="tui-right">anthropic/claude-sonnet-5<span>12% ctx</span><span>$0.04</span></span></div>
+  <div class="tui-body">
+            <div class="tui-msg you"><span class="rail">▌</span><span class="who">YOU</span></div>
+        <div class="tui-msg you"><span class="rail">▌</span><span class="text">Add a --dry-run flag to the CLI and a test for it.</span></div>
+        <div class="tui-blank" />
+        <div class="tui-tool"><span class="g done">●</span><span class="verb">Read</span><span class="arg">src/cli.rs</span><span class="detail">212 lines</span><span class="time">0.0s</span></div>
+        <div class="tui-tool"><span class="g done">●</span><span class="verb">Search</span><span class="arg">"fn parse_args"</span><span class="detail">3 hits</span><span class="time">0.0s</span></div>
+        <div class="tui-tool"><span class="g done">●</span><span class="verb">Run</span><span class="arg">cargo test -p cli</span><span class="detail">exit 0</span><span class="time">4.1s</span></div>
+        <div class="tui-blank" />
+        <div class="tui-msg qq"><span class="rail"> </span><span class="who">QQ</span></div>
+        <div class="tui-msg qq"><span class="rail"> </span><span class="text">I’ll add the flag next to <code>--verbose</code> and gate the write behind it.</span></div>
+        <div class="tui-blank" />
+    <div class="tui-tool"><span class="g wait">◇</span><span class="verb">Edit</span><span class="arg">src/cli.rs</span><span class="detail wait">awaiting approval</span></div>
+    <div class="tui-approval">
+      <div class="line wait">◇ approval needed</div>
+      <div class="line path">src/cli.rs</div>
+      <div class="line hunk">@@ -18,3 +18,4 @@</div>
+      <div class="line ctx"><span class="n">18</span>    #[arg(long)]</div>
+      <div class="line ctx"><span class="n">19</span>    verbose: bool,</div>
+      <div class="line add"><span class="n">20</span><span class="sign">+</span>   #[arg(long)]</div>
+      <div class="line add"><span class="n">21</span><span class="sign">+</span>   dry_run: bool,</div>
+      <div class="line keys"><span><b>y</b> once</span><span><b>a</b> session</span><span><b>w</b> workspace</span><span><b>n</b> deny</span></div>
+    </div>
+  </div>
+        <div class="tui-rule"><span class="spin" aria-hidden="true"></span><span class="activity">preparing tool call</span><span class="meta">6.2s  ttft 0.8s  turn 1</span><span class="hr" aria-hidden="true"></span><span class="hints"><span><b>?</b> help</span><span><b>^K</b> commands</span><span><b>^O</b> detail</span></span></div>
+      <div class="tui-composer"><span class="prompt pen">✎</span><span class="placeholder">Answer the approval above</span></div>
+</div>

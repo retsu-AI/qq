@@ -72,14 +72,14 @@ mod transcript;
 pub use commands::MAX_DESCENDANTS_PER_ROOT;
 pub use feed::PublishedEvent;
 pub use runtime::{
-    ApprovalReviewer, CheckpointSelection, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime,
-    MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS, PersistenceFault,
-    PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest,
-    ReviewSpend, ReviewVerdict, RoutingSelection, RuntimeLoadError, RuntimeLoadFuture,
-    RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, SessionEventStream,
-    SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SlashCommandError,
-    SpawnModelValidationFuture, TaskRouter, TaskRoutingFuture, WorkerRuntimeLoadFuture,
-    WorkspaceGrantAuthority, WorkspaceGrantSeed,
+    ApprovalReviewer, CheckpointSelection, DelegateIdentity, GrantPromotionFuture, GrantSeedFuture,
+    LoadedRuntime, MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS,
+    PersistenceFault, PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture,
+    ReviewOrigin, ReviewRequest, ReviewSpend, ReviewVerdict, RoutingSelection, RuntimeLoadError,
+    RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader,
+    SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions,
+    SlashCommandError, SpawnModelValidationFuture, TaskRouter, TaskRoutingFuture,
+    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
 };
 pub use snapshots::run_cost;
 pub use store::STORE_SCHEMA_VERSION;
@@ -356,7 +356,13 @@ const MAX_SESSION_SPILL_BYTES: u64 = 64 * 1024 * 1024;
 /// oldest blobs of finished runs lose their content (never their row) past
 /// this, and the reconstructed prompt says so.
 const MAX_SESSION_ATTACHMENT_BYTES: u64 = 64 * 1024 * 1024;
-const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_APPROVAL_TIMEOUT: Option<Duration> = None;
+/// The gate's backstop for a delegate that breaks its contract and never
+/// answers. The delegate chain bounds itself (Jev 5 s, then the reviewer
+/// model 10 s); past this the gate drops the pending review and treats the
+/// silence as an escalation, so a stuck delegate cannot hold a run and never
+/// eats the human's wait.
+const DEFAULT_DELEGATE_TIMEOUT: Duration = Duration::from_secs(20);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 /// Child runs one parent run may hold in flight at once. Spawn calls beyond
 /// this cap queue behind it inside the parent's turn rather than failing.

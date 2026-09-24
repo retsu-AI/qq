@@ -2,7 +2,8 @@
 
 QQ is one binary that runs AI coding agents in your terminal, from scripts,
 and as a local server. This guide is for people using QQ. If you are changing
-QQ, start at [`../README.md`](../README.md) instead.
+QQ, start at [`../README.md`](../README.md) instead. This guide is also
+published at <https://retsu-ai.github.io/qq/>.
 
 ## Start here
 

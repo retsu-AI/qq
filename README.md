@@ -7,12 +7,15 @@ sub-agents. Every mutating action passes an explicit approval policy — a
 real bash parser grades each command — and every event is stored in SQLite,
 so sessions survive restarts and many agents can run at once.
 
+Documentation: <https://retsu-ai.github.io/qq/> (the same pages as
+[`docs/guide/`](docs/guide/README.md)).
+
 ## Install
 
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/retsu-AI/qq/main/install.sh | sh
+curl -fsSL https://retsu-ai.github.io/qq/install.sh | sh
 ```
 
 The script picks the archive for your machine, verifies it against the
@@ -35,14 +38,11 @@ qq auth login anthropic                 # or openai, google, xai, openai-codex; 
 QQ_MODEL=anthropic/claude-sonnet-5 qq ask "Reply with pong"
 ```
 
-Make the model permanent in `~/.config/qq/config.ron` (`qq config paths`
-shows the path on your OS):
+Make the model permanent (`~/.config/qq/config.ron` on Linux; `qq config
+paths` shows the path on your OS):
 
-```ron
-(
-    version: 1,
-    model: "anthropic/claude-sonnet-5",
-)
+```sh
+qq init --model anthropic/claude-sonnet-5   # or plain `qq init` to pick from a list
 ```
 
 Then, in any repository:

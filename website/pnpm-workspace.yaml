@@ -1,0 +1,5 @@
+# Read by nub (pnpm-compatible): esbuild and sharp compile native helpers on
+# install; nothing else may run scripts.
+allowBuilds:
+  esbuild: true
+  sharp: true

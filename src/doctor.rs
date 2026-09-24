@@ -121,12 +121,13 @@ impl DoctorReport {
 
 /// Check names in the order they are reported; the text renderer aligns on
 /// the longest.
-pub const CHECK_NAMES: [&str; 8] = [
+pub const CHECK_NAMES: [&str; 9] = [
     "configuration",
     "project trust",
     "model",
     "credential",
     "credential store",
+    "mcp",
     "server",
     "workspace",
     "data",
@@ -279,6 +280,19 @@ pub fn run_checks(
                 store.paths().data_dir().display()
             ),
         ),
+    });
+
+    // Declared MCP servers: an HTTP bearer that does not resolve here
+    // degrades that server at run time (the run proceeds without it), so the
+    // finding is a warning that names the same remedy the runtime shows.
+    checks.push(match &loaded {
+        Ok(snapshot) => mcp_check(store, snapshot),
+        Err(NotLoaded::NoModel) => Check::skipped("mcp", "not checked; no model is configured"),
+        Err(NotLoaded::AwaitingTrust) => Check::skipped(
+            "mcp",
+            "not checked; project configuration is awaiting trust",
+        ),
+        Err(NotLoaded::Failed) => Check::skipped("mcp", "not checked; configuration did not load"),
     });
 
     checks.push(server_check(server_paths));
@@ -494,6 +508,67 @@ fn credential_check(
             format!("{provider_id}: provider declares no connection"),
             "declare `connection` for this provider or choose a built-in one",
         ),
+    }
+}
+
+/// Whether every declared HTTP MCP server's bearer resolves on this machine.
+/// Stdio servers and bearer-less HTTP servers need nothing; inline values
+/// always resolve. Mirrors `mcp::resolve_server`: a failure here is exactly
+/// what degrades that server at run time, so it warns rather than fails.
+fn mcp_check(store: &auth::CredentialStore, snapshot: &config::ConfigSnapshot) -> Check {
+    const NAME: &str = "mcp";
+    let servers = snapshot.mcp_servers();
+    if servers.is_empty() {
+        return Check::ok(NAME, "none declared");
+    }
+    let mut failures = Vec::new();
+    for (server, declaration) in servers {
+        let (url, reference) = match declaration.transport() {
+            config::McpTransport::Stdio { .. }
+            | config::McpTransport::Http { bearer: None, .. } => continue,
+            config::McpTransport::Http {
+                url,
+                bearer: Some(reference),
+            } => (url, reference),
+        };
+        match store.resolve_with_endpoint(reference, Some(url)) {
+            Ok(_) => {}
+            Err(error) => {
+                failures.push((
+                    server,
+                    crate::mcp::BearerFailure::new(&error, reference, url),
+                ));
+            }
+        }
+    }
+    match failures.as_slice() {
+        [] => Check::ok(
+            NAME,
+            format!("{} declared; every bearer resolves", servers.len()),
+        ),
+        [(server, failure)] => Check::warn(
+            NAME,
+            format!("{server}: {}", failure.problem),
+            format!("{}; runs proceed without this server", failure.remedy),
+        ),
+        _ => {
+            let mut check = Check::warn(
+                NAME,
+                format!(
+                    "{} of {} servers cannot authenticate",
+                    failures.len(),
+                    servers.len()
+                ),
+                "fix each credential named above; runs proceed without these servers",
+            );
+            check.details = failures
+                .iter()
+                .map(|(server, failure)| {
+                    format!("{server}: {}; {}", failure.problem, failure.remedy)
+                })
+                .collect();
+            check
+        }
     }
 }
 
@@ -1207,6 +1282,122 @@ mod tests {
         assert_eq!(check(&report, "project trust").status, Status::Skipped);
         assert_eq!(check(&report, "model").status, Status::Skipped);
         assert_eq!(check(&report, "credential").status, Status::Skipped);
+        assert_eq!(check(&report, "mcp").status, Status::Skipped);
         assert_eq!(report.failed, 1);
+    }
+
+    #[test]
+    fn mcp_check_passes_with_no_servers_and_with_resolvable_bearers() {
+        let fixture = Fixture::new(Arc::new(MemoryKeyring::default()));
+        fixture.write_global("(version: 1, model: \"openai/gpt-5.6\")");
+        let report = fixture.run();
+        let mcp = check(&report, "mcp");
+        assert_eq!(mcp.status, Status::Ok, "{mcp:#?}");
+        assert_eq!(mcp.summary, "none declared");
+
+        fixture.write_global(
+            r#"(version: 1, model: "openai/gpt-5.6", mcp: {
+                "local": Stdio(command: "executor", args: ["mcp"]),
+                "open": Http(url: "https://open.example.test/mcp"),
+                "linear": Http(url: "https://mcp.linear.test/mcp", bearer: Stored("linear/default")),
+            })"#,
+        );
+        fixture
+            .store
+            .set_with_metadata(
+                "linear/default",
+                b"lin_test",
+                false,
+                None,
+                Some("https://mcp.linear.test/mcp"),
+            )
+            .unwrap();
+        let report = fixture.run();
+        let mcp = check(&report, "mcp");
+        assert_eq!(mcp.status, Status::Ok, "{mcp:#?}");
+        assert_eq!(mcp.summary, "3 declared; every bearer resolves");
+    }
+
+    #[test]
+    fn mcp_check_warns_about_an_unregistered_stored_bearer_without_failing() {
+        let fixture = Fixture::new(Arc::new(MemoryKeyring::default()));
+        fixture.write_global(
+            r#"(version: 1, model: "openai/gpt-5.6", mcp: {
+                "linear": Http(url: "https://mcp.linear.test/mcp", bearer: Stored("linear/default"), allow: ["create_issue"]),
+            })"#,
+        );
+        let report = fixture.run();
+        let mcp = check(&report, "mcp");
+        assert_eq!(mcp.status, Status::Warn, "{mcp:#?}");
+        assert_eq!(
+            mcp.summary,
+            "linear: credential `linear/default` is not registered"
+        );
+        let remedy = mcp.remedy.as_deref().unwrap();
+        assert!(remedy.contains("qq auth set linear/default"), "{remedy}");
+        assert!(remedy.contains("runs proceed"), "{remedy}");
+        // A warning: the failure count only reflects the missing model
+        // credential (OPENAI_API_KEY may legitimately be set in the shell).
+        assert!(
+            !report
+                .checks
+                .iter()
+                .any(|check| check.name == "mcp" && check.status == Status::Fail)
+        );
+
+        // Two failures list each server under one warning.
+        fixture.write_global(
+            r#"(version: 1, model: "openai/gpt-5.6", mcp: {
+                "linear": Http(url: "https://mcp.linear.test/mcp", bearer: Stored("linear/default")),
+                "github": Http(url: "https://mcp.github.test/mcp", bearer: Env("QQ_DOCTOR_TEST_UNSET_GITHUB_TOKEN")),
+            })"#,
+        );
+        let report = fixture.run();
+        let mcp = check(&report, "mcp");
+        assert_eq!(mcp.status, Status::Warn, "{mcp:#?}");
+        assert_eq!(mcp.summary, "2 of 2 servers cannot authenticate");
+        assert_eq!(mcp.details.len(), 2, "{mcp:#?}");
+        assert!(
+            mcp.details[0].starts_with(
+                "github: environment variable `QQ_DOCTOR_TEST_UNSET_GITHUB_TOKEN` is not set;"
+            ),
+            "{mcp:#?}"
+        );
+        assert!(
+            mcp.details[1].contains("qq auth set linear/default"),
+            "{mcp:#?}"
+        );
+    }
+
+    #[test]
+    fn mcp_check_names_the_endpoint_when_the_stored_bearer_is_bound_elsewhere() {
+        let fixture = Fixture::new(Arc::new(MemoryKeyring::default()));
+        fixture.write_global(
+            r#"(version: 1, model: "openai/gpt-5.6", mcp: {
+                "linear": Http(url: "https://MCP.Linear.test:443/mcp/", bearer: Stored("linear/default")),
+            })"#,
+        );
+        fixture
+            .store
+            .set_with_metadata(
+                "linear/default",
+                b"lin_test",
+                false,
+                None,
+                Some("https://other.example.test"),
+            )
+            .unwrap();
+        let report = fixture.run();
+        let mcp = check(&report, "mcp");
+        assert_eq!(mcp.status, Status::Warn, "{mcp:#?}");
+        assert_eq!(
+            mcp.summary,
+            "linear: credential `linear/default` is bound to a different endpoint"
+        );
+        let remedy = mcp.remedy.as_deref().unwrap();
+        assert!(
+            remedy.contains("qq auth set linear/default --endpoint https://mcp.linear.test/mcp/"),
+            "{remedy}"
+        );
     }
 }

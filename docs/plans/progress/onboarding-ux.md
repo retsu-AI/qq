@@ -6,18 +6,19 @@ below, newest last.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| OB0 | Audit, plan, user guide, community files, P0 error text | In review | `feat/eng-875-onboarding-ux` | ENG-875; ENG-859 shipped separately as #119 |
+| OB0 | Audit, plan, user guide, community files, P0 error text | Shipped (#128) | `feat/eng-875-onboarding-ux` | ENG-875; ENG-859 shipped separately as #119 |
 | OB1 | TUI opens without a model | Shipped (#136) | `feat/eng-860-tui-without-model` | ENG-860; shares the branch with OB2 |
 | OB2 | TUI opens without a credential; empty state names the remedy | Shipped (#136) | `feat/eng-860-tui-without-model` | ENG-876; shares the branch with OB1 |
 | OB3 | Request-time credential errors name provider and remedy; `GOOGLE_API_KEY` alias | Shipped (#137) | `fix/eng-877-request-credential-errors` | ENG-877 |
 | OB4 | `qq doctor` | Shipped (#138) | `feat/eng-878-doctor` | ENG-878 |
-| OB5 | `qq init`; `config paths` marks existing files | Planned | | ENG-879 |
-| OB6 | `install.sh`, Homebrew tap, Nix package, binstall | In review | `feat/eng-880-install-paths` | ENG-880; tap repo + `HOMEBREW_TAP_TOKEN` are owner setup |
+| OB5 | `qq init`; `config paths` marks existing files | Shipped (#147) | `feat/eng-879-init` | ENG-879 |
+| OB6 | `install.sh`, Homebrew tap, Nix package, binstall | Shipped (#139) | `feat/eng-880-install-paths` | ENG-880; tap repo + `HOMEBREW_TAP_TOKEN` are owner setup |
 | OB7 | In-TUI trust prompt | Planned | | ENG-881; needs ADR + protocol row in root |
-| OB8 | First-session guidance; `qq run` denial hint | Planned | | ENG-882 |
-| OB9 | Missing MCP credential degrades the server | Planned | | ENG-861 |
+| OB8 | First-session guidance; `qq run` denial hint | Shipped (#146) | `feat/eng-882-first-session-guidance` | ENG-882 |
+| OB9 | Missing MCP credential degrades the server | Shipped (#148) | `fix/eng-861-mcp-credential-degrade` | ENG-861 |
 | OB10 | Docs-truth test; CHANGELOG at release | Planned | | ENG-883 |
-| OB11 | Wiki mirror workflow | Planned | | ENG-884 |
+| OB11 | Wiki mirror workflow | Superseded by OB12 | | ENG-884 |
+| OB12 | Docs website from `docs/guide/`, GitHub Pages | In review | `feat/eng-896-docs-website` | ENG-896 |
 
 ## Entries
 
@@ -105,3 +106,123 @@ to `retsu-AI/qq` (binstall derives `{ repo }` from it). `cargo xtask
 homebrew-formula` (4 tests) + a guarded `homebrew` release job; untestable
 until the tap and token exist. Homebrew and `nix run github:` are documented
 but not exercised against the remote.
+
+### 2026-09-23 — OB8 first-session guidance in review
+
+Branch `feat/eng-882-first-session-guidance` off `main` (v0.1.4). Three
+render-time changes, no new state and no protocol change. (a) The empty
+transcript branch in `view/transcript.rs` shows `Try one of these:` with
+`/models`, `/approval`, `/skills` (spelling and title read from
+`commands::COMMANDS`, so the text cannot drift) and `@path — mention a file
+in your prompt` when `app.sessions.len() == 1` and the focused session's
+`prompt_history` is empty; `record_prompt` runs synchronously on Enter, so
+the cell is gone in the next frame. Other empty sessions keep `Ask QQ to
+begin this session.`; the configured-provider remedy paints above the list
+when present. (b) The composer rule's help hint reads `? help` in compose
+mode with an empty composer and `F1 help` otherwise; the swap is local to
+the right-side loop in `chrome::composer_rule`, `hints_for` is unchanged.
+(c) `RunEnd.denied_calls` counts `ToolCallFinished` events of this run with
+`ToolCallState::Denied`; in text mode under `--approval read-only` with a
+non-zero count, `run` prints `held calls were denied under --approval
+read-only; rerun with --approval auto to allow workspace edits` on stderr
+after the answer/error and before the resume hint. Exit status unchanged;
+JSONL prints nothing. Tests: 3 qq-tui view tests (first session shows the
+cell and drops it on Enter; second session says Ask QQ; remedy stays above),
+2 existing rule tests updated for `? help` + a `F1 help`-after-typing
+assertion, 4 headless tests (hint order vs resume hint; silent under auto;
+silent in JSONL; silent with no denials); 34 goldens re-recorded, every
+diff is the `F1 help` → `? help` swap on the rule. Gates: fmt, clippy `-D
+warnings`, `cargo test -p qq-tui` (321 + 6 goldens), `cargo test -p qq --bin
+qq headless` (46) green. Docs: `guide/tui.md` (layout diagram, rule bullet,
+"Your first session"), `guide/headless.md` (denial hint under the approval
+table). Follow-up: no golden scene covers a first empty session; add one if
+the cell's layout changes. Also marked OB0 (#128) and OB6 (#139) shipped.
+
+### 2026-09-23 — OB5 `qq init` in review
+
+Branch `feat/eng-879-init` off `main` (v0.1.4). New `src/init.rs`:
+`init::run(paths, cwd, args, chooser, stdout)` takes injected `ConfigPaths`,
+an optional `BufRead` chooser (stdin when it is a terminal; `None` makes a
+missing `--model` the `ModelRequired` error), and the output stream, so the
+tests run against a temp tree. Writes `<global>/config.ron` (dir 0700, file
+0600 on unix) or `<cwd>/.qq/config.ron` with `--project`, from a commented
+RON template with the route escaped; `create_new` unless `--force`, with
+`AlreadyExists` mapped to its own variant. The written file is validated
+through `ConfigLoader::check` (a project file pending trust is accepted as
+the documented state; anything else is `InitError::Invalid` naming the
+path). Output: `wrote PATH (model: ROUTE)`, then `next:` (`qq auth login
+PROVIDER  # or export VAR`, the browser sign-in for `openai-codex`, the AWS
+chain for `bedrock*`, a `providers:` declaration otherwise), `then: qq`, and
+for `--project` a `qq trust` note. Chooser lists the five `LOGIN_PROVIDERS`
+(shared with `qq auth login`; a test pins the two lists together) with example routes and accepts a number or a full route.
+`qq config paths` gained a `global config:` row, pads labels, and appends
+`(exists)` / `(missing)` to every path. Tests: 15 in `init::tests` + 1 CLI
+parse test. Gates green: fmt, clippy `-D warnings`, `cargo test -p qq --bin
+qq` (209). Manual: global, `--project`, second run, `--force`, bad route,
+unknown provider, codex, bedrock, and the pty chooser (`2`) all behave as
+documented. Docs: `guide/quickstart.md` § 2 uses `qq init` (the awk/heredoc
+is gone), `guide/configuration.md`, `guide/cli.md` (new `qq init` section,
+`paths` row), `guide/troubleshooting.md`, `README.md`. No `qq-config`
+change; no hot-path or protocol impact.
+
+### 2026-09-23 — OB9 MCP credential degrade in review
+
+Branch `fix/eng-861-mcp-credential-degrade` off `main` (v0.1.4). An HTTP
+server whose `Stored`/`Env` bearer does not resolve no longer fails plan
+compilation for the workspace (`RuntimeBuildError::Auth` →
+`RunFailureKind::Authentication`); it degrades like a connection failure.
+`qq-mcp`: `McpTransportSettings::Http { bearer: McpBearer }` with
+`None | Token(String) | Unavailable { reason }`; `connect` returns the reason
+without building a transport; `ServerHandle::tools()` returns `Err(String)`
+and `McpCatalog::unavailable` is `Vec<McpUnavailable { server, reason }>`.
+`src/mcp.rs::resolve_server` matches the `AuthError` exhaustively for the
+variants `resolve_with_endpoint` produces (`StoredCredentialNotRegistered`,
+`StoredCredentialMissing`, `EndpointMismatch`/`EndpointRequired`,
+`InvalidEndpoint`, `KeyringUnavailable`, `Environment*`) and words the
+reason as problem + remedy via `BearerFailure`, shared with the new `qq
+doctor` `mcp` check (warn, not fail; `none declared` when empty). Readiness:
+`` unavailable MCP servers: linear (credential `linear/default` is not
+registered; run `qq auth set linear/default`) ``. Re-resolution after `qq
+auth set` verified by test: the registry key carries the credential epoch,
+which the store advances on `set_with_metadata`; a fresh
+`registry_for_snapshot` under the new epoch is a different manager that
+connects with the stored token (`plan` sources already fingerprint the
+credential index, `runtime.rs:1160,1397`). Tests: qq-mcp 1 (declared but
+unavailable, sibling unaffected, `Unavailable` call), qq bin `mcp` 2
+(regression + conformance availability subset for an unresolved bearer),
+`doctor` 3 (+1 skip assertion). Docs: `guide/mcp.md`,
+`guide/troubleshooting.md`, `guide/cli.md` doctor table, `design/tools.md`.
+No hot-path change: resolution runs once per registry miss on the compile
+thread. Gates: fmt, clippy `-D warnings`, `cargo test -p qq-mcp`, `-p qq
+--bin qq mcp|doctor`, `-p qq-core hosts`.
+
+### 2026-09-23 — OB12 docs website in review
+
+Branch `feat/eng-896-docs-website` off `main`. The v0-designed Astro 5 +
+Starlight site lands under `website/`, stripped of its sandbox artifacts
+(`dist/`, `.astro/`, the preview-proxy Vite hack, the root pnpm workspace
+wrapper) and of every placeholder page. Content is not copied:
+`scripts/sync-docs.mjs` generates `src/content/docs/docs/*.md` from
+`docs/guide/*.md` before each build (title from the H1, description from
+`sidebar.json`, `editUrl` back to the guide, sibling links → relative routes,
+links out of `docs/guide/` → GitHub) and fails on a guide without a sidebar
+entry, a sidebar entry without a guide, or a link to a missing guide. It
+also copies the reviewed `install.sh` to `public/` so the landing page's
+`curl … | sh` is the real installer, and reads the workspace version from
+`Cargo.toml` for the release label. Generated files are gitignored.
+`scripts/check-links.mjs` walks `dist/` after the build and fails on any
+unresolved internal href or fragment (447 checked). Sidebar: the 11 real
+guides in four groups; the eight v0 routes with no guide (agents, sessions,
+skills, environment, keybindings, protocol, enterprise, changelog) are
+dropped rather than shipped as stubs; the two landing links that pointed at
+them now go to `tui#sessions` and `headless#qq-serve`. Landing claims were
+checked against the guide (Alt-A/Alt-D, verdict table, NEEDS YOU/WORKING/
+IDLE/DONE, `12% ctx $0.04`, SQLite, Windows, MIT) and the fake star count
+was removed. Deployment: `retsu-ai.github.io/qq` (base `/qq/`), decided
+over a custom domain and over Vercel — no new account, PR previews not
+needed for docs. `.github/workflows/website.yml` builds on PRs touching
+`website/`, `docs/guide/`, `install.sh`, or `Cargo.toml` and deploys from
+`main` with `actions/deploy-pages`. The site is installed and run with `nub` (already in the Nix shell); CI uses `nubjs/setup-nub`, not Nix, so the job stays at seconds. OB11
+(wiki mirror) is superseded. Follow-ups: OB10's docs-truth test now also
+protects the site; a custom domain is two lines in `site.config.mjs` plus
+`public/CNAME`; the eight dropped topics are candidate guides.

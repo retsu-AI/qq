@@ -1,0 +1,8 @@
+---
+// Overrides Starlight PageTitle to add a quiet breadcrumb and frontmatter description.
+import { href } from '../../site.config.mjs';
+const { title, description } = Astro.locals.starlightRoute.entry.data;
+---
+<div class="doc-breadcrumb font-mono"><a href={href('docs/')}>Docs</a><span aria-hidden="true">/</span><span>{title}</span></div>
+<h1 id="_top" class="font-sans">{title}</h1>
+{description && <p class="doc-description">{description}</p>}
