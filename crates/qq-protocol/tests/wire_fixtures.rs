@@ -14,20 +14,20 @@
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use qq_protocol::{
-    AgentPlanDigest, AgentProfileId, AgentProfileSummary, ApprovalDecision, ApprovalGrant,
-    ApprovalMode, BudgetExhaustion, BudgetLimitKind, CAPABILITIES_VERSION, CapabilitiesRequest,
-    CapabilitySupport, CommandId, CommandOutcome, CommandReceipt, CommandRequest, ContentHash,
-    Correlation, CredentialEpoch, EventCapabilities, EventCursor, FetchPreview, FinalOutput,
-    GenerationCapabilities, InputPart, InputPartKind, InstructionHash, LimitCapabilities,
-    MessageId, MessageRole, MessageSnapshot, MessageState, ModelSelection, OutputContract,
-    PROTOCOL_VERSION, PackSummary, PromptCacheCapabilities, PromptVersion, Question,
-    QuestionPreview, ResolvedModel, ResolvedModelVersion, RunActivity, RunFailure, RunFailureKind,
-    RunId, RunLimits, RunOutcome, RunPause, RunPlanIdentity, RunPromptIdentity, RunSnapshot,
-    RunStatus, ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind, SessionEvent,
-    SessionEventEnvelope, SessionId, SessionStatus, SessionSummary, ShellCommandPreview,
-    ShellVerdict, SkillCapabilities, SteeringCapabilities, StoreId, TokenUsage, ToolCallId,
-    ToolCallSnapshot, ToolCallState, ToolCapabilities, ToolExposure, ToolHostSummary, WorkspaceId,
-    WorkspaceToolCapabilities,
+    AgentPlanDigest, AgentProfileId, AgentProfileSummary, ApprovalDecision, ApprovalDelegate,
+    ApprovalGrant, ApprovalMode, ApprovalResolution, BudgetExhaustion, BudgetLimitKind,
+    CAPABILITIES_VERSION, CapabilitiesRequest, CapabilitySupport, CommandId, CommandOutcome,
+    CommandReceipt, CommandRequest, ContentHash, Correlation, CredentialEpoch, DelegateIdentity,
+    EventCapabilities, EventCursor, FetchPreview, FinalOutput, GenerationCapabilities, InputPart,
+    InputPartKind, InstructionHash, LimitCapabilities, MessageId, MessageRole, MessageSnapshot,
+    MessageState, ModelSelection, OutputContract, PROTOCOL_VERSION, PackSummary,
+    PromptCacheCapabilities, PromptVersion, Question, QuestionPreview, ResolvedModel,
+    ResolvedModelVersion, RunActivity, RunFailure, RunFailureKind, RunId, RunLimits, RunOutcome,
+    RunPause, RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus, ServerCapabilities,
+    ServerInfo, SessionCommand, SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionId,
+    SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict, SkillCapabilities,
+    SteeringCapabilities, StoreId, TokenUsage, ToolCallId, ToolCallSnapshot, ToolCallState,
+    ToolCapabilities, ToolExposure, ToolHostSummary, WorkspaceId, WorkspaceToolCapabilities,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -69,6 +69,7 @@ fn summary() -> SessionSummary {
         model: Some("openai/gpt-5.6".to_owned()),
         profile: AgentProfileId::new("review").unwrap(),
         approval_mode: ApprovalMode::ReadOnly,
+        approval_delegate: None,
         reasoning_effort: None,
         correlation: correlation(&[("thread", "t-1")]),
         context_tokens: Some(1200),
@@ -207,7 +208,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 27);
+    assert_eq!(PROTOCOL_VERSION, 28);
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
@@ -396,6 +397,17 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             },
         ),
     );
+    // Version 28: the session off switch for the approval delegate.
+    check(
+        "command_set_approval_delegate",
+        &command(
+            0x28,
+            SessionCommand::SetApprovalDelegate {
+                session_id,
+                delegate: Some(ApprovalDelegate::Off),
+            },
+        ),
+    );
 
     let receipt = |byte: u8, sequence: u64, outcome: CommandOutcome| CommandReceipt {
         command_id: CommandId::from_bytes([byte; 16]),
@@ -461,6 +473,17 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             CommandOutcome::SessionEffortSet {
                 session_id,
                 effort: Some(qq_reasoning::ReasoningEffort::Xhigh),
+            },
+        ),
+    );
+    check(
+        "receipt_approval_delegate_set",
+        &receipt(
+            0x28,
+            15,
+            CommandOutcome::ApprovalDelegateSet {
+                session_id,
+                delegate: Some(ApprovalDelegate::Off),
             },
         ),
     );
@@ -561,6 +584,43 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 edit: None,
                 question: None,
                 fetch: None,
+            },
+        ),
+    );
+    // Version 28: a reviewer resolution names the delegate that wrote it.
+    check(
+        "event_tool_approval_resolved_by_jev",
+        &envelope(
+            23,
+            SessionEvent::ToolApprovalResolved {
+                tool_call: ToolCallSnapshot {
+                    id: ToolCallId::from_bytes([6; 16]),
+                    session_id,
+                    run_id,
+                    turn_ordinal: 1,
+                    call_ordinal: 1,
+                    provider_call_id: "call_0".to_owned(),
+                    name: "shell".to_owned(),
+                    arguments: r#"{"command":"rm -r target"}"#.to_owned(),
+                    state: ToolCallState::Requested,
+                    result: None,
+                    is_error: false,
+                    display: None,
+                },
+                resolution: ApprovalResolution::ApprovedByReviewer,
+                delegate: Some(DelegateIdentity::Jev),
+            },
+        ),
+    );
+    // Version 28: a delegate passed the hold to the human and said why.
+    check(
+        "event_tool_approval_escalated",
+        &envelope(
+            24,
+            SessionEvent::ToolApprovalEscalated {
+                tool_call_id: ToolCallId::from_bytes([6; 16]),
+                delegate: Some(DelegateIdentity::Reviewer),
+                reason: "the command deletes a directory the task never mentioned".to_owned(),
             },
         ),
     );

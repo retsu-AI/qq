@@ -100,3 +100,7 @@ Markdown so the same files can be mirrored to the GitHub wiki or a docs site.
 
 Jev: [review and direction](design/jev-runtime-review-2026-09-18.md),
 [opt-in runbook](runbooks/jev.md), [implementation plan](plans/jev-opt-in.md).
+Delegated approval, including Jev as an approval delegate:
+[as built](design/tools.md#approval-policy), [ADR-0041](adr/0041-jev-delegated-approval.md),
+[operator guide](guide/permissions.md#who-decides-a-held-call),
+[receipt](plans/progress/delegated-approval.md).

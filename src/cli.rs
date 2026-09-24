@@ -122,6 +122,13 @@ pub enum Command {
     /// server, workspace. Exit status 0 when nothing fails, 1 otherwise.
     Doctor(DoctorArgs),
 
+    /// Write a starter config.ron with your model.
+    ///
+    /// Writes the global file by default, or `.qq/config.ron` in the current
+    /// directory with `--project`. Pass `--model PROVIDER/MODEL` to skip the
+    /// chooser; without it and without a terminal on stdin the command fails.
+    Init(InitArgs),
+
     /// Print the version with the compatibility contracts this build speaks.
     Version,
 }
@@ -131,6 +138,22 @@ pub struct DoctorArgs {
     /// Print the report as one JSON object instead of text.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    /// Write `.qq/config.ron` in the current directory instead of the global
+    /// file. A project file that sets `model` is loaded after `qq trust`.
+    #[arg(long)]
+    pub project: bool,
+
+    /// The PROVIDER/MODEL route to write instead of choosing interactively.
+    #[arg(long, value_name = "PROVIDER/MODEL")]
+    pub model: Option<String>,
+
+    /// Overwrite an existing config.ron.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -734,6 +757,36 @@ mod tests {
             Some(Command::Doctor(DoctorArgs { json: true }))
         ));
         assert!(Cli::try_parse_from(["qq", "doctor", "extra"]).is_err());
+    }
+
+    #[test]
+    fn parses_init_with_optional_project_model_and_force() {
+        assert!(matches!(
+            Cli::try_parse_from(["qq", "init"]).unwrap().command,
+            Some(Command::Init(InitArgs {
+                project: false,
+                model: None,
+                force: false,
+            }))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "qq",
+                "init",
+                "--project",
+                "--model",
+                "openai/gpt-5.6",
+                "--force"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Init(InitArgs {
+                project: true,
+                model: Some(model),
+                force: true,
+            })) if model == "openai/gpt-5.6"
+        ));
+        assert!(Cli::try_parse_from(["qq", "init", "extra"]).is_err());
     }
 
     #[test]

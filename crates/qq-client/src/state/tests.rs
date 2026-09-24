@@ -72,6 +72,7 @@ fn summary(id: SessionId) -> SessionSummary {
         profile: qq_protocol::AgentProfileId::default(),
         reasoning_effort: None,
         approval_mode: qq_protocol::ApprovalMode::default(),
+        approval_delegate: None,
         correlation: qq_protocol::Correlation::default(),
         last_outcome: None,
         context_tokens: None,
@@ -289,6 +290,172 @@ fn the_live_tail_is_sanitized_by_the_surface_supplied_function() {
         context(&[]),
     );
     assert_eq!(plain[&session_id].live.tail, "abc d");
+}
+
+#[test]
+fn a_reviewer_resolution_records_who_settled_the_call_and_evicts_with_it() {
+    // DA6: the row can say "approved by jev" because the reducer keeps the
+    // settlement beside the call's timing; a human once-approval says nothing;
+    // the settlement leaves with the body like every other per-call datum.
+    let session_id = SessionId::from_bytes([3; 16]);
+    let run_id = RunId::from_bytes([4; 16]);
+    let mut store = SessionStore::default();
+    store.upsert_summary(summary(session_id), &[], 0);
+    store.warm_empty(session_id);
+    let call = |id: u8, state: ToolCallState| ToolCallSnapshot {
+        id: ToolCallId::from_bytes([id; 16]),
+        session_id,
+        run_id,
+        turn_ordinal: 0,
+        call_ordinal: u16::from(id),
+        provider_call_id: format!("call_{id}"),
+        name: "shell".to_owned(),
+        arguments: String::new(),
+        state,
+        result: None,
+        is_error: false,
+        display: None,
+    };
+    store.reduce_event(
+        &envelope(
+            1,
+            session_id,
+            SessionEvent::ToolApprovalResolved {
+                tool_call: call(7, ToolCallState::Requested),
+                resolution: qq_protocol::ApprovalResolution::ApprovedByReviewer,
+                delegate: Some(qq_protocol::DelegateIdentity::Jev),
+            },
+        ),
+        context(&[]),
+    );
+    store.reduce_event(
+        &envelope(
+            2,
+            session_id,
+            SessionEvent::ToolApprovalResolved {
+                tool_call: call(8, ToolCallState::Requested),
+                resolution: qq_protocol::ApprovalResolution::ApprovedOnce,
+                delegate: None,
+            },
+        ),
+        context(&[]),
+    );
+    let timing = &store[&session_id].tool_timing;
+    let by_jev = timing[&ToolCallId::from_bytes([7; 16])].settled.unwrap();
+    assert_eq!(by_jev.label().as_deref(), Some("approved by jev"));
+    assert_eq!(by_jev.delegate, Some(qq_protocol::DelegateIdentity::Jev));
+    let by_human = timing[&ToolCallId::from_bytes([8; 16])].settled.unwrap();
+    assert_eq!(by_human.label(), None, "a once-approval needs no remark");
+    // A reviewer resolution from a pre-28 server (no `delegate`) still reads
+    // as the reviewer model's.
+    let legacy = ApprovalSettlement {
+        resolution: qq_protocol::ApprovalResolution::DeniedByReviewer,
+        delegate: None,
+    };
+    assert_eq!(legacy.label().as_deref(), Some("denied by reviewer"));
+
+    store.body_mut(&session_id).unwrap().evict_body();
+    assert!(store[&session_id].tool_timing.is_empty());
+}
+
+#[test]
+fn an_escalation_lands_on_the_pending_holds_preview_and_nowhere_else() {
+    // DA6: the prompt says why a delegate passed. The reason is kept beside
+    // the hold's preview only while the call is awaiting approval; an
+    // escalation for a call that is not pending (a client already answered)
+    // is ignored, and the preview leaves with the hold.
+    let session_id = SessionId::from_bytes([3; 16]);
+    let run_id = RunId::from_bytes([4; 16]);
+    let mut store = SessionStore::default();
+    store.upsert_summary(summary(session_id), &[], 0);
+    store.warm_empty(session_id);
+    let call = |state: ToolCallState| ToolCallSnapshot {
+        id: ToolCallId::from_bytes([7; 16]),
+        session_id,
+        run_id,
+        turn_ordinal: 0,
+        call_ordinal: 0,
+        provider_call_id: "call_0".to_owned(),
+        name: "shell".to_owned(),
+        arguments: String::new(),
+        state,
+        result: None,
+        is_error: false,
+        display: None,
+    };
+    store.reduce_event(
+        &envelope(
+            1,
+            session_id,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: call(ToolCallState::AwaitingApproval),
+                shell: Some(Box::new(qq_protocol::ShellCommandPreview {
+                    command: "git push".to_owned(),
+                    cwd: None,
+                    verdict: None,
+                    reasons: Vec::new(),
+                })),
+                edit: None,
+                question: None,
+                fetch: None,
+            },
+        ),
+        context(&[]),
+    );
+    store.reduce_event(
+        &envelope(
+            2,
+            session_id,
+            SessionEvent::ToolApprovalEscalated {
+                tool_call_id: ToolCallId::from_bytes([7; 16]),
+                delegate: Some(qq_protocol::DelegateIdentity::Jev),
+                reason: "unsure".to_owned(),
+            },
+        ),
+        context(&[]),
+    );
+    let preview = &store[&session_id].approval_previews[&ToolCallId::from_bytes([7; 16])];
+    assert_eq!(
+        preview.escalated,
+        Some(ApprovalEscalation {
+            delegate: Some(qq_protocol::DelegateIdentity::Jev),
+            reason: "unsure".to_owned(),
+        })
+    );
+    assert_eq!(
+        preview.shell.as_ref().map(|shell| shell.command.as_str()),
+        Some("git push"),
+        "the escalation joins the preview rather than replacing it"
+    );
+
+    // The human answers; the hold and its preview are gone, and a late
+    // escalation (the delegate's clock firing after the race was lost)
+    // creates nothing.
+    store.reduce_event(
+        &envelope(
+            3,
+            session_id,
+            SessionEvent::ToolApprovalResolved {
+                tool_call: call(ToolCallState::Requested),
+                resolution: qq_protocol::ApprovalResolution::ApprovedOnce,
+                delegate: None,
+            },
+        ),
+        context(&[]),
+    );
+    store.reduce_event(
+        &envelope(
+            4,
+            session_id,
+            SessionEvent::ToolApprovalEscalated {
+                tool_call_id: ToolCallId::from_bytes([7; 16]),
+                delegate: None,
+                reason: "late".to_owned(),
+            },
+        ),
+        context(&[]),
+    );
+    assert!(store[&session_id].approval_previews.is_empty());
 }
 
 #[test]

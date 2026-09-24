@@ -49,6 +49,7 @@ written.
 - [ADR-0038: session retention — archive by session, never by row; receipts and cursors outlive their sessions](0038-session-retention.md) — Proposed (ENG-803).
 - [ADR-0039: a run compacts its own turns at a safe boundary with a run-scoped marker](0039-in-run-compaction.md) — Accepted (ENG-793, #92).
 - [ADR-0040: two-phase retry ownership — the provider owns sends, the run owns turns and settles `paused`](0040-two-phase-retry-ownership.md) — Accepted (run-reliability RR4); supersedes ADR-0005 in part.
+- [ADR-0041: Jev as an approval delegate, for held calls only](0041-jev-delegated-approval.md) — Accepted (delegated-approval DA5, ENG-862); supersedes ADR-0030's "never authorizes side effects" for the `jev_approval` lane only.
 
 - [ADR-0042: optimize verified task efficiency, not individual turn size](0042-verified-task-efficiency.md) — Proposed (token-efficiency TE0).
 

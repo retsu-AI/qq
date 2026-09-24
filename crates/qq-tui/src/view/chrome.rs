@@ -69,16 +69,27 @@ pub(super) fn top_row(app: &App, width: usize) -> Line {
                 (!profile.is_default()).then(|| (format!("as {}", profile.as_str()), accent()))
             }
             // `auto` is the default; the badge names anything stricter or
-            // looser so the user always knows what a held call means.
+            // looser so the user always knows what a held call means. A
+            // session delegate override rides along: `ask · delegate on`,
+            // `auto · delegate off`.
             StatusItem::ApprovalMode => {
                 let mode = focused.map_or(app.approval_mode, |session| session.approval_mode);
-                (mode != ApprovalMode::Auto).then(|| {
+                let delegate = focused.and_then(|session| session.approval_delegate);
+                (mode != ApprovalMode::Auto || delegate.is_some()).then(|| {
                     let style = if mode == ApprovalMode::Full {
                         warning()
                     } else {
                         muted()
                     };
-                    (approval_mode_label(mode).to_owned(), style)
+                    let text = match delegate {
+                        Some(delegate) => format!(
+                            "{} · delegate {}",
+                            approval_mode_label(mode),
+                            delegate.as_str()
+                        ),
+                        None => approval_mode_label(mode).to_owned(),
+                    };
+                    (text, style)
                 })
             }
             // Omission is the unremarkable case; the badge names an explicit pin.
@@ -246,13 +257,24 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
 
     let mut right = Line::default();
     for (command, label) in hints_for(app) {
-        let Some(chord) = app.chord_label(command) else {
-            continue;
+        // `?` on an empty composer opens help too, and is the cheaper key
+        // to discover; the hint names it while it works and falls back to
+        // the chord once typing has started.
+        let chord = if command == crate::commands::Command::OpenHelp
+            && app.mode() == Mode::Compose
+            && app.composer.text.is_empty()
+        {
+            "?".to_owned()
+        } else {
+            let Some(chord) = app.chord_label(command) else {
+                continue;
+            };
+            compact_chord(&chord)
         };
         if !right.is_empty() {
             right.push("  ", muted());
         }
-        right.push(compact_chord(&chord), accent());
+        right.push(chord, accent());
         right.push(format!(" {label}"), muted());
     }
     rule_with(left, right, width)
@@ -313,6 +335,7 @@ fn hints_for(app: &App) -> Vec<(crate::commands::Command, &'static str)> {
         | Mode::Profiles
         | Mode::ApprovalModes
         | Mode::Effort
+        | Mode::Delegate
         | Mode::Skills
         | Mode::Themes
         | Mode::Sessions

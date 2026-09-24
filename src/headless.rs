@@ -19,11 +19,12 @@ use std::{
 use futures_util::StreamExt;
 use qq_core::{SessionRuntime, SessionRuntimeError};
 use qq_protocol::{
-    ApprovalDecision, ApprovalGrant, ApprovalMode, BudgetLimitKind, CommandId, CommandOutcome,
-    CommandReceipt, ContentHash, HeadlessOutcome, HeadlessRecordRef, HeadlessTrial, InputPart,
-    MessageId, MessageRole, ModelSelection, RunId, RunLimits, RunOutcome, RunPromptIdentity,
-    SessionAccounting, SessionCommand, SessionEvent, SessionEventEnvelope, SessionId,
-    ShellCommandPreview, SnapshotRequest, SubscribeRequest, TokenUsage, ToolCallState, WorkspaceId,
+    ApprovalDecision, ApprovalGrant, ApprovalMode, ApprovalResolution, BudgetLimitKind, CommandId,
+    CommandOutcome, CommandReceipt, ContentHash, HeadlessOutcome, HeadlessRecordRef, HeadlessTrial,
+    InputPart, MessageId, MessageRole, ModelSelection, RunId, RunLimits, RunOutcome,
+    RunPromptIdentity, SessionAccounting, SessionCommand, SessionEvent, SessionEventEnvelope,
+    SessionId, ShellCommandPreview, SnapshotRequest, SubscribeRequest, TokenUsage, ToolCallState,
+    WorkspaceId,
 };
 pub use qq_protocol::{HeadlessApproval, HeadlessStatus};
 use sha2::{Digest, Sha256};
@@ -33,10 +34,11 @@ use tokio::time::Instant;
 /// before the invocation gives up and reports a harness failure.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 /// How long an `auto` headless run holds an escalated approval open for the
-/// configured reviewer before denying it. Covers the reviewer's own 10s
-/// request timeout with margin. The reviewer's `approve` and `deny` both
-/// settle the call themselves; this deny is the unattended answer to an
-/// `escalate`, a reviewer timeout, or an outage, so the run never stalls.
+/// configured delegate before denying it. Covers the delegate chain's own
+/// bound (Jev 5 s, then the reviewer model 10 s) with margin. A delegate's
+/// `approve` and `deny` both settle the call themselves; this deny is the
+/// unattended answer to an `escalate`, a delegate timeout, or an outage, so
+/// the run never stalls. Without a delegate configured the deny is immediate.
 const REVIEWER_DENY_GRACE: Duration = Duration::from_secs(20);
 /// Steering lines buffered between stdin and the run. Beyond this the reader
 /// waits; the runtime's own per-run pending bound refuses the rest anyway.
@@ -263,6 +265,9 @@ struct RunEnd {
     final_output: Option<Box<qq_protocol::FinalOutput>>,
     /// Accumulated text of the last assistant message: the final answer.
     answer: String,
+    /// Tool calls of this run that settled as denied. Under `read-only`
+    /// that is every held call, which is what the closing hint explains.
+    denied_calls: usize,
 }
 
 impl RunEnd {
@@ -276,6 +281,7 @@ impl RunEnd {
             audit: None,
             final_output: None,
             answer: String::new(),
+            denied_calls: 0,
         }
     }
 }
@@ -411,6 +417,7 @@ pub async fn run(
         audit,
         final_output,
         answer,
+        denied_calls,
     } = end;
     let outcome = HeadlessOutcome {
         status,
@@ -459,6 +466,15 @@ pub async fn run(
                     let _ = writeln!(stderr, "error: {message}");
                 }
             }
+        }
+        // A first `qq run` that only read when it meant to edit is the most
+        // common surprise of the read-only default; name the flag that
+        // changes it. JSONL consumers already see each denied call's state.
+        if options.approval == HeadlessApproval::ReadOnly && denied_calls > 0 {
+            let _ = writeln!(
+                stderr,
+                "held calls were denied under --approval read-only; rerun with --approval auto to allow workspace edits"
+            );
         }
     } else if let Some(message) = &outcome.message {
         let _ = writeln!(stderr, "error: {message}");
@@ -690,6 +706,7 @@ async fn stream_run(
     let mut answer = String::new();
     let mut answer_message: Option<MessageId> = None;
     let mut answer_truncated = false;
+    let mut denied_calls: usize = 0;
     let text = options.format == HeadlessFormat::Text;
 
     loop {
@@ -805,7 +822,46 @@ async fn stream_run(
                             );
                         }
                     }
+                    // A delegate settled a held call: say which one, so the
+                    // operator reading the log can tell Jev's decision from
+                    // the reviewer model's and from their own allowlist.
+                    SessionEvent::ToolApprovalResolved {
+                        tool_call,
+                        resolution:
+                            resolution @ (ApprovalResolution::ApprovedByReviewer
+                            | ApprovalResolution::DeniedByReviewer),
+                        delegate,
+                    } if ours && text => {
+                        let verdict = match resolution {
+                            ApprovalResolution::ApprovedByReviewer => "approved",
+                            _ => "denied",
+                        };
+                        let _ = writeln!(
+                            stderr,
+                            "[tool] {} {verdict} by {}",
+                            tool_call.name,
+                            delegate.unwrap_or_default().as_str()
+                        );
+                    }
+                    // The delegate passed: say why, so the unattended deny that
+                    // follows (or the allowlist answer) reads as a consequence.
+                    SessionEvent::ToolApprovalEscalated {
+                        delegate, reason, ..
+                    } if ours && text => {
+                        let _ = match delegate {
+                            Some(delegate) => writeln!(
+                                stderr,
+                                "[tool] {} passed to the human: {}",
+                                delegate.as_str(),
+                                concise(reason)
+                            ),
+                            None => writeln!(stderr, "[tool] {}", concise(reason)),
+                        };
+                    }
                     SessionEvent::ToolCallFinished { tool_call } if ours => {
+                        if tool_call.state == ToolCallState::Denied {
+                            denied_calls += 1;
+                        }
                         if text {
                             let verdict = match tool_call.state {
                                 ToolCallState::Completed => "ok",
@@ -991,6 +1047,7 @@ async fn stream_run(
                             audit,
                             final_output: final_output.clone(),
                             answer,
+                            denied_calls,
                         });
                     }
                     _ => {}
@@ -3352,6 +3409,148 @@ mod tests {
         // Both continuations are shown: the interactive one comes first
         // because it is the one a person at a terminal wants.
         assert!(stderr.contains(&format!("\n  qq --session {session_id}\n")));
+    }
+
+    const DENIAL_HINT: &str = "held calls were denied under --approval read-only; rerun with --approval auto to allow workspace edits";
+
+    #[tokio::test]
+    async fn text_read_only_denials_end_with_the_approval_auto_hint_before_the_resume_hint() {
+        let fixture = fixture(MutatingProvider::new).await;
+        let mut options = options(&fixture.workspace);
+        options.format = HeadlessFormat::Text;
+        options.resume_hint = true;
+
+        let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(
+            status,
+            HeadlessStatus::Completed,
+            "the hint never changes the exit status"
+        );
+        assert_eq!(stdout, "done\n", "the hint stays off stdout");
+        assert!(stderr.contains("[tool] write_file denied"), "{stderr}");
+        let hint_at = stderr
+            .find(DENIAL_HINT)
+            .unwrap_or_else(|| panic!("no denial hint in:\n{stderr}"));
+        let session_id = workspace_snapshot(&fixture).await.sessions[0].id;
+        let resume = crate::cli::resume_hint(session_id);
+        assert!(stderr.ends_with(&resume), "{stderr}");
+        assert!(
+            hint_at < stderr.len() - resume.len(),
+            "the denial hint precedes the resume hint:\n{stderr}"
+        );
+        assert_eq!(stderr.matches(DENIAL_HINT).count(), 1, "{stderr}");
+    }
+
+    /// A reviewer that approves everything and says Jev decided.
+    struct JevApproves;
+
+    impl qq_core::ApprovalReviewer for JevApproves {
+        fn review(&self, _request: qq_core::ReviewRequest) -> qq_core::ReviewFuture {
+            Box::pin(async {
+                qq_core::ReviewVerdict::free(qq_core::ReviewDecision::Approve)
+                    .by(qq_core::DelegateIdentity::Jev)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_delegated_approval_names_the_delegate_in_jsonl_and_text() {
+        // DA6: a supervisor reading the stream can tell Jev's decision from
+        // the reviewer model's and from the operator's allowlist without the
+        // store: the resolution record carries `delegate`, and text mode says
+        // `approved by jev`.
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let workspace = root.join("work");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let workspace = std::fs::canonicalize(&workspace).unwrap();
+        for name in ["scratch0", "scratch1"] {
+            std::fs::create_dir_all(workspace.join(name)).unwrap();
+        }
+        let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+        runtime_options.approval_reviewer = Some(Arc::new(JevApproves));
+        let sessions = SessionRuntime::open(
+            runtime_options,
+            Arc::new(ProviderLoader(|| DangerousShellProvider {
+                turn: Mutex::new(0),
+            })),
+        )
+        .await
+        .unwrap();
+        let fixture = Fixture {
+            sessions,
+            workspace,
+            _directory: directory,
+        };
+
+        let mut options = options(&fixture.workspace);
+        options.approval = HeadlessApproval::Auto;
+        options.reviewer_configured = true;
+        let (status, stdout, _) =
+            run_to_end(&fixture, options.clone(), std::future::pending()).await;
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        let resolutions: Vec<&serde_json::Value> = event_records(&records)
+            .into_iter()
+            .filter(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
+            .map(|record| &record["envelope"]["event"])
+            .collect();
+        assert!(!resolutions.is_empty(), "{stdout}");
+        assert!(resolutions.iter().all(|event| {
+            event["resolution"] == "approved_by_reviewer" && event["delegate"] == "jev"
+        }));
+        assert!(
+            finished_tool_calls(&records)
+                .iter()
+                .all(|call| call["state"] == "completed")
+        );
+
+        options.format = HeadlessFormat::Text;
+        let (status, _, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+        assert_eq!(status, HeadlessStatus::Completed);
+        assert!(stderr.contains("[tool] shell approved by jev"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn the_denial_hint_is_silent_under_auto() {
+        // `auto` executes the same calls: nothing to explain.
+        let fixture = fixture(MutatingProvider::new).await;
+        let mut options = options(&fixture.workspace);
+        options.format = HeadlessFormat::Text;
+        options.approval = HeadlessApproval::Auto;
+
+        let (status, _, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        assert!(!stderr.contains(DENIAL_HINT), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn the_denial_hint_is_silent_in_jsonl_where_records_carry_the_denials() {
+        let fixture = fixture(MutatingProvider::new).await;
+        let options = options(&fixture.workspace);
+
+        let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        let calls = finished_tool_calls(&records);
+        assert!(!calls.is_empty());
+        assert!(calls.iter().all(|call| call["state"] == "denied"));
+        assert!(!stderr.contains(DENIAL_HINT), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn the_denial_hint_is_silent_when_read_only_denied_nothing() {
+        let fixture = fixture(|| TextProvider).await;
+        let mut options = options(&fixture.workspace);
+        options.format = HeadlessFormat::Text;
+
+        let (status, _, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::Completed);
+        assert!(!stderr.contains(DENIAL_HINT), "{stderr}");
     }
 
     #[tokio::test]

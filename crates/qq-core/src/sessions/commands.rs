@@ -165,9 +165,10 @@ pub(super) fn create_child_run(
                 id, workspace_id, parent_id, owner_run_id, spawned_by_tool_call_id, title,
                 status, queued_prompts, model, max_output_tokens, organization, approval_mode,
                 created_at_ms, updated_at_ms, depth, root_run_id, purpose, profile, model_is_fallback,
-                reasoning_effort
+                reasoning_effort, approval_delegate
              ) VALUES (?1, ?2, ?3, ?4, ?10, ?5, 'queued', 1, ?6, ?7, ?8, ?11, ?9, ?9, ?12, ?13, ?14, ?15, ?16,
-                (SELECT reasoning_effort FROM sessions WHERE id = ?3))",
+                (SELECT reasoning_effort FROM sessions WHERE id = ?3),
+                (SELECT approval_delegate FROM sessions WHERE id = ?3))",
             params![
                 session_id.to_string(),
                 workspace_id.to_string(),
@@ -462,8 +463,9 @@ pub(super) fn execute_command(
                         id, workspace_id, parent_id, title, status, model,
                         max_output_tokens, organization, approval_mode,
                         created_at_ms, updated_at_ms, profile, correlation_json, depth,
-                        root_run_id, model_is_fallback, reasoning_effort
-                     ) VALUES (?1, ?2, ?3, 'New session', 'idle', ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                        root_run_id, model_is_fallback, reasoning_effort, approval_delegate
+                     ) VALUES (?1, ?2, ?3, 'New session', 'idle', ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                        (SELECT approval_delegate FROM sessions WHERE id = ?3))",
                     params![
                         session_id.to_string(),
                         workspace_id.to_string(),
@@ -1135,6 +1137,7 @@ pub(super) fn execute_command(
                     SessionEvent::ToolApprovalResolved {
                         tool_call,
                         resolution,
+                        delegate: None,
                     },
                 )?;
                 (
@@ -1189,6 +1192,53 @@ pub(super) fn execute_command(
                     command_id,
                     committed_through: event.cursor,
                     outcome: CommandOutcome::ApprovalModeSet { session_id, mode },
+                },
+                false,
+            )
+        }
+        SessionCommand::SetApprovalDelegate {
+            session_id,
+            delegate,
+        } => {
+            let workspace_id = session_workspace(&transaction, session_id)?;
+            // The mode stays the ceiling, so no authority check: this only
+            // chooses who answers inside it, and every value asks at least
+            // as much of a human as the configured choice could.
+            let updated = transaction.execute(
+                "UPDATE sessions SET approval_delegate = ?2, updated_at_ms = ?3 WHERE id = ?1",
+                params![
+                    session_id.to_string(),
+                    approval_delegate_column(delegate),
+                    now
+                ],
+            )?;
+            if updated != 1 {
+                return Err(SessionRuntimeError::SessionNotFound);
+            }
+            // Read by the gate at each held call, so a running session's next
+            // hold already honors it; the summary carries it to every client.
+            let summary = load_session_summary(&transaction, session_id)?;
+            let event = append_event(
+                &transaction,
+                EventContext::for_session(
+                    store_id,
+                    workspace_id,
+                    session_id,
+                    Some(command_id),
+                    now,
+                ),
+                SessionEvent::SessionUpdated {
+                    session: Box::new(summary),
+                },
+            )?;
+            (
+                CommandReceipt {
+                    command_id,
+                    committed_through: event.cursor,
+                    outcome: CommandOutcome::ApprovalDelegateSet {
+                        session_id,
+                        delegate,
+                    },
                 },
                 false,
             )
