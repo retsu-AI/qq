@@ -1,5 +1,13 @@
 # Latest model support (ENG-885)
 
+## Delegated review and implementation
+
+- Read-only agent reviewed the outstanding blockers and a second pass reviewed the diff. Implemented endpoint/version/auth-kind replay origin hashing (no credential material persisted), pre-decode replay size check, incremental bounded history-turn decoding, and live effort precedence over implicit bundled ladders.
+- Added captured SSE → replay → subsequent request acceptance test and changed-origin rejection. Reviewer claim of a prefix mismatch disproved by this regression: capture hashes the prior request, not the generated assistant response. Explicit configured ladders retain precedence intentionally.
+- Final workspace tests, all-target/all-feature Clippy, formatting and whitespace checks passed. Workspace build and minimal-provider tests passed before the final test-only addition. Provider compiler benchmark: 476 ns recipe, 407 ns Google, 270 ns Mantle, 80 ns Mantle dispatch; informational, no baseline comparison.
+- Not yet complete: full tool-loop/restart acceptance, complete history/context bound audit, message lifecycle audit, explicit provider-default versus inheritance, capability audit and CI/PR metadata reconciliation. Draft status remains required.
+
+
 ## Stack conflict resolution
 
 - Merged current origin/main through all three branches without rewriting history. Preserved upstream delegated approval changes and historical v28 fixtures. Effort now uses protocol 29 / store 37; replay uses store 38, superseding earlier numbers below.

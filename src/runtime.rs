@@ -1337,21 +1337,33 @@ impl RuntimeFactory {
                 snapshot.model().as_str().to_owned(),
             ));
         }
+        let live_efforts = snapshot
+            .providers()
+            .get(snapshot.model().provider())
+            .and_then(|provider| {
+                if provider
+                    .models()
+                    .get(snapshot.model().model())
+                    .is_some_and(|metadata| metadata.explicitly_configured())
+                {
+                    return None;
+                }
+                self.inner
+                    .discovery
+                    .cached(
+                        snapshot.model().provider(),
+                        provider,
+                        &self.inner.credentials,
+                    )
+                    .and_then(|models| {
+                        models
+                            .iter()
+                            .find(|model| model.id == snapshot.model().model())
+                            .and_then(|model| model.efforts.clone())
+                    })
+            });
         if let Some(effort) = snapshot.reasoning_effort()
-            && let Some(provider) = snapshot.providers().get(snapshot.model().provider())
-            && !provider
-                .models()
-                .get(snapshot.model().model())
-                .is_some_and(|metadata| metadata.explicitly_configured())
-            && let Some(models) = self.inner.discovery.cached(
-                snapshot.model().provider(),
-                provider,
-                &self.inner.credentials,
-            )
-            && let Some(levels) = models
-                .iter()
-                .find(|model| model.id == snapshot.model().model())
-                .and_then(|model| model.efforts.as_ref())
+            && let Some(levels) = &live_efforts
             && !levels.contains(&effort)
         {
             return Err(RuntimeBuildError::ReasoningEffortNotAdvertised {
@@ -1364,6 +1376,7 @@ impl RuntimeFactory {
         // here, not a provider 400 mid-turn. An empty ladder advertises nothing
         // and is not checked: unknown is not the same as unsupported.
         if let Some(effort) = snapshot.reasoning_effort()
+            && live_efforts.is_none()
             && let Some(metadata) = snapshot
                 .providers()
                 .get(snapshot.model().provider())

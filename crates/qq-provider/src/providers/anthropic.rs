@@ -53,6 +53,7 @@ pub(crate) enum AnthropicAuth {
 pub(crate) struct AnthropicMessages {
     pub(crate) exchange: HttpExchange,
     endpoint: reqwest::Url,
+    replay_origin: String,
     headers: Arc<HeaderMap>,
 }
 
@@ -146,11 +147,31 @@ impl AnthropicMessages {
         authorizer: RequestAuthorizer,
         anthropic_version: &str,
     ) -> Result<Self, ProviderError> {
+        let auth_kind = match &auth {
+            AnthropicAuth::NoAuth => "none",
+            AnthropicAuth::XApiKey(_) => "x-api-key",
+            AnthropicAuth::Bearer(_) => "bearer",
+            AnthropicAuth::Header(name, _) => name.as_str(),
+        };
+        use sha2::Digest;
+        let replay_origin = format!(
+            "{:x}",
+            sha2::Sha256::digest(
+                serde_json::to_vec(&(
+                    "anthropic-messages-v1",
+                    endpoint.as_str(),
+                    anthropic_version,
+                    auth_kind
+                ))
+                .expect("serializable origin")
+            )
+        );
         let (headers, redactions) = build_headers(auth, static_headers, anthropic_version)?;
 
         Ok(Self {
             exchange: HttpExchange::new(client, authorizer, Arc::from(redactions)),
             endpoint,
+            replay_origin,
             headers: Arc::new(headers),
         })
     }
@@ -170,14 +191,16 @@ impl Provider for AnthropicMessages {
         let endpoint = self.endpoint.clone();
         let headers = self.headers.clone();
 
+        let origin = self.replay_origin.clone();
         with_restart(&self.exchange, move |ledger| {
+            let origin = origin.clone();
             let exchange = exchange.clone();
             let endpoint = endpoint.clone();
             let headers = headers.clone();
             let request = request.clone();
             Box::pin(try_stream! {
                 let limits = StreamLimits::new(request.max_output_tokens());
-                let body = MessagesRequest::from(&request);
+                let body = MessagesRequest::with_origin(&request, &origin);
                 let mut sse = sse_exchange(
                     &exchange,
                     (endpoint, HeaderMap::clone(&headers)),
@@ -293,7 +316,7 @@ impl Provider for AnthropicMessages {
                         DecodedEvent::Completed => {
                             if incomplete.is_none() && replay.has_thinking {
                                 replay.validate()?;
-                                let turn = ReplayTurn { prefix: prefix_digest(&body), content: replay.blocks.into_values().collect() };
+                                let turn = ReplayTurn { origin: origin.clone(), prefix: prefix_digest(&body), content: replay.blocks.into_values().collect() };
                                 let data = serde_json::to_string(&turn).map_err(|_| ProviderError::Protocol("could not encode Anthropic continuation".into()))?;
                                 yield ProviderEvent::Replay { data: data.into() };
                             }
@@ -421,6 +444,12 @@ struct AnthropicOutputConfig {
 
 impl<'a> From<&'a ModelRequest> for MessagesRequest<'a> {
     fn from(request: &'a ModelRequest) -> Self {
+        Self::with_origin(request, "test-origin")
+    }
+}
+
+impl<'a> MessagesRequest<'a> {
+    fn with_origin(request: &'a ModelRequest, origin: &str) -> Self {
         let mut tools: Vec<AnthropicTool<'a>> =
             request.tools().iter().map(AnthropicTool::from).collect();
         if let Some(last) = tools.last_mut() {
@@ -455,7 +484,9 @@ impl<'a> From<&'a ModelRequest> for MessagesRequest<'a> {
         let mut prefix = ReplayPrefix::new(&body);
         for (message, mut wire) in request.messages().iter().zip(projected) {
             if let Some(data) = message.replay()
+                && data.len() <= 16 * 1024 * 1024
                 && let Ok(turn) = serde_json::from_str::<ReplayTurn>(data)
+                && turn.origin == origin
                 && turn.prefix == prefix.digest()
                 && turn.matches_visible(&wire)
             {
@@ -630,6 +661,7 @@ impl ReplayCapture {
 
 #[derive(Serialize, Deserialize)]
 struct ReplayTurn {
+    origin: String,
     prefix: String,
     content: Vec<serde_json::Value>,
 }
@@ -1844,6 +1876,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn captured_signed_stream_replays_in_the_next_request() {
+        let body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"private\",\"signature\":\"signed\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"answer\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let server = LoopbackServer::sse(body);
+        let provider = AnthropicMessages::with_endpoint(
+            &format!("{}/v1/messages", server.base_url),
+            AnthropicAuth::NoAuth,
+            [],
+            true,
+        )
+        .unwrap();
+        let request = test_request();
+        let events = provider.stream(request.clone()).collect::<Vec<_>>().await;
+        let replay = events
+            .into_iter()
+            .map(Result::unwrap)
+            .find_map(|event| match event {
+                ProviderEvent::Replay { data } => Some(data),
+                _ => None,
+            })
+            .expect("completed signed stream emits replay");
+        server.capture();
+        let mut history = request.messages().to_vec();
+        history.push(Message::assistant("answer").with_replay(replay));
+        history.push(Message::user("continue"));
+        let next = ModelRequest::new(request.model(), history, 128);
+        let wire =
+            serde_json::to_value(MessagesRequest::with_origin(&next, &provider.replay_origin))
+                .unwrap();
+        assert_eq!(wire["messages"][1]["content"][0]["signature"], "signed");
+        let wire =
+            serde_json::to_value(MessagesRequest::with_origin(&next, "other-origin")).unwrap();
+        assert_eq!(wire["messages"][1]["content"][0]["type"], "text");
+    }
+
+    #[tokio::test]
     async fn streams_tool_calls_with_attributed_arguments_to_completion() {
         let body = concat!(
             "event: content_block_start\n",
@@ -2050,6 +2125,7 @@ mod tests {
             serde_json::json!({"type":"text","text":"answer"}),
         ];
         let replay = serde_json::to_string(&ReplayTurn {
+            origin: "test-origin".into(),
             prefix: prefix_digest(&body),
             content: blocks.clone(),
         })
@@ -2062,6 +2138,12 @@ mod tests {
             history.clone(),
             request.max_output_tokens(),
         );
+        let wire = serde_json::to_value(MessagesRequest::with_origin(
+            &continuation,
+            "different-origin",
+        ))
+        .unwrap();
+        assert_eq!(wire["messages"][1]["content"][0]["type"], "text");
         let wire = serde_json::to_value(MessagesRequest::from(&continuation)).unwrap();
         assert_eq!(
             wire["messages"][request.messages().len()]["content"],
@@ -2080,6 +2162,7 @@ mod tests {
     fn replay_rejects_changed_visible_content_model_and_user_role() {
         let request = test_request();
         let replay = serde_json::to_string(&ReplayTurn {
+            origin: "test-origin".into(),
             prefix: prefix_digest(&MessagesRequest::from(&request)),
             content: vec![
                 serde_json::json!({"type":"thinking","thinking":"","signature":"opaque"}),

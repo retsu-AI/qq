@@ -880,12 +880,19 @@ pub(super) fn search_session_history(
                 run_hits.push(HistoryMatch { citation, excerpt });
             }
         };
-        let turns = turns_statement
-            .query_map([&run_id], |row| {
-                Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        for (turn_ordinal, content_json) in turns {
+        let mut turns = turns_statement.query([&run_id])?;
+        while let Some(row) = turns.next()? {
+            let turn_ordinal: u32 = row.get(0)?;
+            let raw = row
+                .get_ref(1)?
+                .as_str()
+                .map_err(|_| SessionRuntimeError::CONSTRAINT)?;
+            if raw.len() > HISTORY_SCAN_BUDGET_BYTES.saturating_sub(scanned) {
+                truncated = true;
+                break 'prompts;
+            }
+            scanned += raw.len();
+            let content_json = raw.to_owned();
             let results = results_statement
                 .query_map(params![&run_id, turn_ordinal], |row| {
                     Ok((
