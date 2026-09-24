@@ -38,6 +38,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | [`run-snapshots.md`](./run-snapshots.md) | Proposed: reversible mutating-run state |
 | [`mid-run-compaction.md`](./mid-run-compaction.md) | Compact and continue one run at a safe turn boundary (audit F03, ENG-793). MRC-0..3 shipped (#92, ADR-0039); open: MRC-4 surfaces, MRC-5 live evidence |
 | [`lsp-diagnostics.md`](./lsp-diagnostics.md) | Proposed: diagnostics integration |
+| [`security-kernel.md`](./security-kernel.md) | Axiom fail-closed guarantees as library code inside `qq-core`/`qq-mcp` (ADR-0042): hash-linked audit export (SK1), MCP tool-set pinning and quarantine (SK2), approval ledger and bound commit (SK3). SK0 in review |
 | [`templates/`](./templates/) | Slice header, pre-flight, receipt, PR body; review checklist |
 | [`progress/`](./progress/) | One ledger per plan, root ledger, decisions needed, gate evidence |
 
