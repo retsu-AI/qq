@@ -13,7 +13,7 @@ of their models.
 | --- | --- | --- | --- |
 | `openai` | `qq auth login openai` | `OPENAI_API_KEY` | Responses API |
 | `anthropic` | `qq auth login anthropic` | `ANTHROPIC_API_KEY` | Messages API; prompt caching used automatically |
-| `google` | `qq auth login google` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` (`GEMINI_API_KEY` wins when both are set) | key sent in the `x-goog-api-key` header, never the URL |
+| `google` | `qq auth login google` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` (`GEMINI_API_KEY` wins when both are set) | key sent in the `x-goog-api-key` header, never the URL; tool schemas are reduced to Gemini's schema subset (unsupported JSON Schema keywords such as `additionalProperties`, `$ref`, and `oneOf` are dropped) so MCP tools with rich schemas still declare |
 | `xai` | `qq auth login xai` or `qq auth login xai --oauth` | `XAI_API_KEY` | OAuth uses a device code and refreshes itself |
 | `openai-codex` | `qq auth login openai-codex` | — | ChatGPT Plus/Pro/Business subscription; opens the browser |
 | `bedrock` | AWS credential chain | `AWS_PROFILE`, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, web identity, container credentials | Converse API; needs a `region`, see below |

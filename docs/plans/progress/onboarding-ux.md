@@ -301,3 +301,43 @@ and the next launch does not prompt; `qq ask` still exits with the
 (#156). No hot-path change: the scan runs once per prompt on the blocking
 pool. Follow-up: a remote client with ADR-0015 enrollment could be offered a
 server-side trust command.
+
+### 2026-09-24 — follow-ups (ENG-897, ENG-898) in review
+
+Branch `chore/eng-897-eng-898-onboarding-followups` off `main`. ENG-897:
+every tool-using run on `google/*` failed with HTTP 400 `Unknown name
+"additionalProperties"` because the Google codec sent each `ToolSpec`
+schema verbatim and Gemini's `Schema` is a restricted OpenAPI subset.
+`ToolSpecInner` now caches a Gemini-shaped schema in a `OnceLock`
+(`gemini_parameters()`, `qq-provider/src/model.rs`) that strips the
+unsupported keywords (`additionalProperties`, `$schema`, `$ref`, `$defs`,
+`oneOf`, `allOf`, `const`, `exclusiveMinimum`, … ) from the root and every
+schema under `properties`, `items`, and `anyOf`; only `FunctionDeclaration`
+consumes it, so OpenAI and Anthropic bodies are byte-identical and
+equality/`wire_size_hint` stay on the original text. Four built-in `enum`
+properties in `qq-core/src/tools/specs.rs` gained `"type": "string"`, which
+moves the built-in schema fingerprint golden in `tools.rs`
+(`built_in_tool_declarations_keep_their_order_and_schema_identity`).
+Tests: `model.rs` 2 (computed once and pointer-shared across clones;
+nothing-to-strip is text-identical), `google.rs` 1 (nested
+`additionalProperties`/`$schema`/`oneOf` gone from the captured
+`parameters`, still present in the OpenAI and Anthropic bodies). Bench
+`provider_encode` google: 389–404 us/iter before, 404 us/iter after (steady
+state unchanged; the first request parses each schema once), body 1139321 →
+1138393 bytes. ENG-898: `ToolHostSummary.message` was carried to the TUI
+and read by nothing. `App` now raises the reason as a warning on the
+composer rule when a capability document arrives, once per distinct message
+(re-fetching the same document does not re-nag; a healthy document clears
+the memory so a later regression warns again), and `/skills` shows `MCP:
+<reason>` under its search row. Tests: `app/tests.rs` 1, `view/tests.rs` 1
+(+1 negative assertion). Docs: `guide/providers.md` google row,
+`guide/troubleshooting.md` new HTTP 400 entry, `guide/mcp.md` § When a
+server is unavailable. Housekeeping: `website/tsconfig.json` comment says
+when to revert the inlined preset (a nub release after 0.9.3; not yet);
+`onboarding-ux.md` gains a "Candidate guides" table for the eight dropped
+site routes, all not scheduled; `AGENTS.md` Linear team `DEV` → `ENG` and
+branch examples; `runbooks/local-dev.md` recommends `CARGO_TARGET_DIR` for
+`.worktrees/` (no repo `.cargo/config.toml`, which would redirect CI caches;
+`nix/dev-shells.nix` does not set it). Gates: fmt, clippy `-D warnings`,
+`cargo test --workspace`, `cargo test -p qq-provider --no-default-features
+--features test-support`.

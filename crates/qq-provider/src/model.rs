@@ -1,6 +1,6 @@
 //! Provider-neutral request, event, usage, and error vocabulary.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use qq_reasoning::{ReasoningEffort, ReasoningKind};
 use serde_json::value::RawValue;
@@ -168,6 +168,11 @@ struct ToolSpecInner {
     name: String,
     description: String,
     input_schema: Box<RawValue>,
+    // Gemini's `Schema` is a restricted OpenAPI subset that rejects unknown
+    // JSON Schema keywords with HTTP 400. The reduced form is derived from
+    // `input_schema` on the first Google request and cached so the encode
+    // hot path stays parse-free; it is never part of equality.
+    gemini_schema: OnceLock<Box<RawValue>>,
 }
 
 // `RawValue` has no `PartialEq`; two schemas are equal when their compact
@@ -177,6 +182,71 @@ impl PartialEq for ToolSpecInner {
         self.name == other.name
             && self.description == other.description
             && self.input_schema.get() == other.input_schema.get()
+    }
+}
+
+/// JSON Schema keywords absent from Gemini's `Schema`; any of these anywhere
+/// in a tool's parameters fails the whole request.
+const GEMINI_UNSUPPORTED_SCHEMA_KEYWORDS: &[&str] = &[
+    "additionalProperties",
+    "$schema",
+    "$id",
+    "$ref",
+    "$defs",
+    "$comment",
+    "definitions",
+    "oneOf",
+    "allOf",
+    "not",
+    "const",
+    "examples",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "patternProperties",
+    "additionalItems",
+    "dependencies",
+    "if",
+    "then",
+    "else",
+    "contentMediaType",
+    "contentEncoding",
+    "readOnly",
+    "writeOnly",
+    "deprecated",
+];
+
+/// Removes every unsupported keyword from a schema and from the schemas it
+/// nests under `properties`, `items`, and `anyOf`. Keys of the `properties`
+/// map are property names, not keywords, so they are never removed; values
+/// such as `default`, `enum`, and `example` are data and left untouched.
+fn strip_gemini_unsupported_keywords(schema: &mut serde_json::Value) {
+    let serde_json::Value::Object(object) = schema else {
+        return;
+    };
+    object.retain(|key, _| !GEMINI_UNSUPPORTED_SCHEMA_KEYWORDS.contains(&key.as_str()));
+    for (key, value) in object.iter_mut() {
+        match key.as_str() {
+            "properties" => {
+                if let serde_json::Value::Object(properties) = value {
+                    for property in properties.values_mut() {
+                        strip_gemini_unsupported_keywords(property);
+                    }
+                }
+            }
+            "items" | "anyOf" => match value {
+                serde_json::Value::Array(schemas) => {
+                    for nested in schemas {
+                        strip_gemini_unsupported_keywords(nested);
+                    }
+                }
+                serde_json::Value::Object(_) => strip_gemini_unsupported_keywords(value),
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::String(_) => {}
+            },
+            _ => {}
+        }
     }
 }
 
@@ -207,6 +277,7 @@ impl ToolSpec {
                 name: name.into(),
                 description: description.into(),
                 input_schema,
+                gemini_schema: OnceLock::new(),
             }),
         }
     }
@@ -225,6 +296,27 @@ impl ToolSpec {
     #[must_use]
     pub fn input_schema(&self) -> &RawValue {
         &self.inner.input_schema
+    }
+
+    /// The schema reduced to Gemini's `Schema` subset, computed once per spec
+    /// and shared by every clone. Only the Google codec consumes this; every
+    /// other provider keeps `input_schema` verbatim.
+    pub(crate) fn gemini_parameters(&self) -> &RawValue {
+        self.inner.gemini_schema.get_or_init(|| {
+            let original = self.inner.input_schema.get();
+            match serde_json::from_str::<serde_json::Value>(original) {
+                Ok(mut schema) => {
+                    strip_gemini_unsupported_keywords(&mut schema);
+                    // A `Value` always has a JSON encoding (see `ToolSpec::new`).
+                    serde_json::value::to_raw_value(&schema)
+                        .expect("a serde_json::Value always encodes as JSON")
+                }
+                // `from_raw` accepted a `RawValue`, which `serde_json` already
+                // validated as JSON; an unparsable schema cannot be improved
+                // here, so send it as declared and let the provider report it.
+                Err(_) => self.inner.input_schema.clone(),
+            }
+        })
     }
 }
 
@@ -559,6 +651,62 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(spec, raw);
+    }
+
+    #[test]
+    fn gemini_parameters_are_computed_once_and_shared_by_clones() {
+        let spec = ToolSpec::new(
+            "edit_file",
+            "Edits",
+            serde_json::json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"old": {"type": "string", "const": "x"}},
+                            "additionalProperties": false,
+                        },
+                    },
+                    "mode": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+                },
+                "required": ["edits"],
+                "additionalProperties": false,
+            }),
+        );
+        let first = spec.gemini_parameters();
+        let shared = spec.clone();
+        let second = shared.gemini_parameters();
+        assert!(std::ptr::eq(first, second));
+        assert_eq!(
+            first.get(),
+            r#"{"properties":{"edits":{"items":{"properties":{"old":{"type":"string"}},"type":"object"},"type":"array"},"mode":{}},"required":["edits"],"type":"object"}"#
+        );
+        // The provider-neutral schema is untouched, as is equality.
+        assert!(spec.input_schema().get().contains("additionalProperties"));
+        assert_eq!(spec, spec.clone());
+    }
+
+    #[test]
+    fn gemini_parameters_keep_a_schema_with_nothing_to_strip() {
+        let spec = ToolSpec::new(
+            "read_file",
+            "Reads",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "file"},
+                    "mode": {"type": "string", "enum": ["a", "b"], "default": "a"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "either": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+                },
+                "required": ["path"],
+            }),
+        );
+        assert_eq!(spec.gemini_parameters().get(), spec.input_schema().get());
     }
 
     #[test]

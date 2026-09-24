@@ -197,6 +197,25 @@ analytics, or third-party script. The landing page claims nothing the guide
 does not say.
 **Docs:** `website/README.md`, `runbooks/website.md`, `guide/install.md`.
 
+### Candidate guides
+
+The v0 site design carried eight routes with no guide behind them; OB12
+dropped them rather than ship stubs. Each is a possible `docs/guide/` page,
+listed here with what it would cover and where the material already lives.
+All are **not scheduled**: none has a Linear issue, and none is a
+prerequisite for the slices above.
+
+| Topic | Page would cover | Material |
+| --- | --- | --- |
+| Agents, profiles, packs | What an agent profile is, how profiles select models/tools/prompts, how packs bundle profiles, skills, and commands for a workspace | `design/architecture.md`; `guide/configuration.md#profiles` and `#packs` |
+| Sessions | Lifecycle, parents and children, resume/attach, cleanup of empty sessions | `guide/tui.md` § Sessions already covers it; fold into the TUI page or split when it outgrows a section |
+| Skills and commands | Authoring `.qq/commands/*.md` and `.qq/skills/*/SKILL.md`, progressive disclosure, `/skills`, how a run loads one | `design/tools.md`; `guide/tui.md`; `guide/configuration.md#workspace-commands-and-skills` |
+| Environment variables | One reference table: every variable QQ reads, what it overrides, and its precedence against config | Enumerated by the OB10 docs-truth test; today scattered across `guide/configuration.md#environment-variables`, `guide/providers.md`, `guide/headless.md` |
+| Keybindings | A one-page cheat sheet grouped by mode (compose, transcript, pickers, approval) | `guide/tui.md` command tables |
+| Server and protocol | `qq serve`, discovery, the HTTP/SSE routes, envelopes, versioning, writing a client | `design/protocol.md`; `guide/headless.md#qq-serve` |
+| Enterprise / managed and org config | The managed configuration layer, `qq org`, what a policy can pin, how a team ships one config | `guide/configuration.md` managed layer and `policy`; `qq org` in `guide/cli.md` |
+| Changelog | Render `CHANGELOG.md` on the site once OB10's release step generates it | `CHANGELOG.md` (from OB10); `runbooks/release.md` |
+
 ## Decisions carried
 
 | Decision | Where recorded |

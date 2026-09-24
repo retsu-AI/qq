@@ -4841,6 +4841,53 @@ fn skills_picker_groups_commands_before_skills_with_sources() {
     );
     let audit_row = rows.iter().find(|row| row.contains("/audit")).unwrap();
     assert!(audit_row.contains("explicit only"), "{audit_row}");
+    assert!(!text.contains("MCP:"), "{text}");
+}
+
+/// ENG-898: the skills picker names the degraded MCP server whose tools it
+/// cannot list.
+#[test]
+fn skills_picker_shows_a_degraded_mcp_host_under_the_search_row() {
+    let mut app = app_with_messages(0);
+    let mut capabilities = fixtures::steering_capabilities();
+    capabilities.workspace_tools = Some(qq_protocol::WorkspaceToolCapabilities {
+        catalog_digest: qq_protocol::ContentHash::from_bytes([5; 32]),
+        exposure: qq_protocol::ToolExposure::Full,
+        hosts: vec![qq_protocol::ToolHostSummary {
+            name: "mcp".to_owned(),
+            generation: 1,
+            tool_count: 0,
+            ready: false,
+            message: Some("unavailable MCP servers: linear (connection refused)".to_owned()),
+        }],
+        excluded_tools: 0,
+        skills: qq_protocol::SkillCapabilities {
+            digest: qq_protocol::ContentHash::from_bytes([6; 32]),
+            indexed: 1,
+            disclosed: 1,
+            truncated: false,
+            entries: vec![qq_protocol::SkillSummary {
+                name: "ship".to_owned(),
+                kind: qq_protocol::GuidanceKind::Command,
+                source: ".qq/commands/ship.md".to_owned(),
+                description: "Ship the current branch.".to_owned(),
+                disclosed: true,
+            }],
+        },
+    });
+    app.apply_client_update(ClientUpdate::Capabilities(std::sync::Arc::new(
+        capabilities,
+    )));
+    app.open_skills();
+    let frame = FrameRenderer::default().frame_and_commit(&mut app, 100, 16);
+    let rows = squashed_rows(&frame);
+    let text = rows.join("\n");
+    let search = text.find("search:").unwrap();
+    let mcp = text
+        .find("MCP: unavailable MCP servers: linear (connection refused)")
+        .unwrap_or_else(|| panic!("{text}"));
+    let ship = text.find("/ship").unwrap();
+    assert!(search < mcp && mcp < ship, "{text}");
 }
 
 #[test]

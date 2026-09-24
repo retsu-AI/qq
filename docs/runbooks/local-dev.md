@@ -65,9 +65,24 @@ Use one worktree per writing agent:
 git worktree add ../qq-<slice> -b <type>/<linear-id>-<slice>-<short> origin/main
 ```
 
-Each worktree builds into its own `target/`. Perf recordings go under that
-worktree's `target/qq-perf/` and are never committed. Remove with
+Each worktree builds into its own `target/` by default. Perf recordings go
+under that worktree's `target/qq-perf/` and are never committed. Remove with
 `git worktree remove ../qq-<slice>` when the slice merges.
+
+With several worktrees (for example under `.worktrees/`), a full workspace
+build per checkout costs tens of gigabytes. Share one build cache instead by
+exporting, in each worktree's shell,
+
+```sh
+export CARGO_TARGET_DIR=<main-checkout>/target
+```
+
+so every checkout reuses the same compiled dependencies. Concurrent builds
+then serialize on the target directory's lock (cargo waits for the other
+build to finish rather than corrupting it), and a checkout on a different
+commit recompiles only the workspace crates that differ. This is a personal
+setting: the repository ships no `.cargo/config.toml` for it because that
+would also redirect CI caches, and the Nix development shell does not set it.
 
 ## Never commit
 

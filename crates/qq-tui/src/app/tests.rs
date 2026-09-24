@@ -4249,6 +4249,65 @@ fn skills_picker_lists_indexed_guidance_and_accepts_like_completion() {
     assert_eq!(app.composer.text, "/ship ");
 }
 
+/// ENG-898: a degraded MCP server's reason reaches the rule once per distinct
+/// message; healthy hosts and repeated documents stay quiet.
+#[test]
+fn degraded_tool_hosts_warn_once_per_distinct_reason() {
+    const REASON: &str = "unavailable MCP servers: linear (credential `linear/default` is not \
+                          registered; run `qq auth set linear/default`)";
+    let with_hosts = |hosts: Vec<qq_protocol::ToolHostSummary>| {
+        let mut capabilities = std::sync::Arc::unwrap_or_clone(capabilities_with_skills());
+        capabilities.workspace_tools.as_mut().unwrap().hosts = hosts;
+        std::sync::Arc::new(capabilities)
+    };
+    let degraded = || {
+        with_hosts(vec![qq_protocol::ToolHostSummary {
+            name: "mcp".to_owned(),
+            generation: 1,
+            tool_count: 0,
+            ready: false,
+            message: Some(REASON.to_owned()),
+        }])
+    };
+    let healthy = || {
+        with_hosts(vec![qq_protocol::ToolHostSummary {
+            name: "mcp".to_owned(),
+            generation: 2,
+            tool_count: 12,
+            ready: true,
+            message: None,
+        }])
+    };
+
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    app.apply_client_update(ClientUpdate::Capabilities(healthy()));
+    assert_eq!(app.visible_status(), None);
+    assert_eq!(app.tool_host_warning(), None);
+
+    app.apply_client_update(ClientUpdate::Capabilities(degraded()));
+    assert_eq!(app.visible_status(), Some((REASON, NoticeLevel::Warning)));
+    assert_eq!(app.tool_host_warning().as_deref(), Some(REASON));
+
+    // Another notice takes the rule; the same document arriving again
+    // (a catalog refresh) does not reclaim it.
+    app.set_info("something else".to_owned());
+    app.apply_client_update(ClientUpdate::Capabilities(degraded()));
+    assert_eq!(
+        app.visible_status(),
+        Some(("something else", NoticeLevel::Info))
+    );
+
+    // Recovery clears the memory, so a later regression warns again.
+    app.apply_client_update(ClientUpdate::Capabilities(healthy()));
+    assert_eq!(
+        app.visible_status(),
+        Some(("something else", NoticeLevel::Info))
+    );
+    app.apply_client_update(ClientUpdate::Capabilities(degraded()));
+    assert_eq!(app.visible_status(), Some((REASON, NoticeLevel::Warning)));
+}
+
 #[test]
 fn composer_finds_the_mention_token_at_the_cursor() {
     let mut composer = Composer::default();
