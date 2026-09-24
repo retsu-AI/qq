@@ -3786,6 +3786,82 @@ fn effort_picker_sets_the_focused_idle_session_effort_and_refuses_running_ones()
 }
 
 #[test]
+fn delegate_picker_switches_the_focused_session_off_and_reports_the_receipt() {
+    // DA6: `/delegate` → `off` sends `set_approval_delegate` for the focused
+    // session (running or not: the gate reads it at the next hold) and the
+    // receipt says what changed. Rows: configured, by_mode, on, off.
+    let (mut app, _, _, _) = running_app();
+    let focused = app.focused().unwrap();
+    app.execute(Command::OpenDelegate);
+    for _ in 0..3 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    let [ClientRequest::Command(request)] = requests.as_slice() else {
+        panic!("expected one set-approval-delegate command")
+    };
+    assert!(matches!(
+        &request.command,
+        SessionCommand::SetApprovalDelegate {
+            session_id,
+            delegate: Some(qq_protocol::ApprovalDelegate::Off),
+        } if *session_id == focused
+    ));
+    assert!(app.overlay.is_none());
+
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Ok(qq_protocol::CommandReceipt {
+            command_id: request.command_id,
+            outcome: CommandOutcome::ApprovalDelegateSet {
+                session_id: focused,
+                delegate: Some(qq_protocol::ApprovalDelegate::Off),
+            },
+            committed_through: fixtures::cursor(2),
+        }),
+    });
+    assert_eq!(
+        app.status.as_deref(),
+        Some("delegate off: every held call now waits for you")
+    );
+
+    // Choosing what the session already has sends nothing.
+    let mut session = app.sessions.get(&focused).unwrap().summary.clone();
+    session.approval_delegate = Some(qq_protocol::ApprovalDelegate::Off);
+    app.sessions.get_mut(&focused).unwrap().summary = session;
+    app.execute(Command::OpenDelegate);
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    assert!(requests.is_empty(), "the picker opens on the active row");
+    assert_eq!(
+        app.status.as_deref(),
+        Some("session already uses delegate off")
+    );
+}
+
+#[test]
+fn delegate_picker_needs_a_focused_session() {
+    // There is no "next session" default for the delegate: the switch is
+    // about a session that exists and may already be running.
+    let mut app = App::new(TuiOptions::default());
+    let mut empty = snapshot();
+    empty.sessions.clear();
+    empty.focused = None;
+    app.apply_snapshot(empty);
+    let (_, requests) = app.execute(Command::OpenDelegate).split();
+    assert!(requests.is_empty());
+    assert!(app.overlay.is_none());
+    assert!(
+        app.status.as_deref().unwrap().contains("focus a session"),
+        "{:?}",
+        app.status
+    );
+}
+
+#[test]
 fn effort_chosen_without_a_focused_session_applies_to_the_next_create() {
     let selection = ModelSelection {
         model_is_fallback: false,

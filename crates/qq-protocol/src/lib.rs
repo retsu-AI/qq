@@ -47,13 +47,13 @@ pub use plan::{
 };
 pub use qq_reasoning::{ReasoningEffort, ReasoningEvent, ReasoningKind};
 pub use sessions::{
-    AccountingTotal, ApprovalDecision, ApprovalGrant, ApprovalMode, ApprovalResolution,
-    AuditOutcome, AuditRecord, BudgetExhaustion, BudgetLimitKind, COMMAND_ROUTES,
-    CapabilitySupport, CheckpointOutcome, CheckpointPhase, CheckpointSpend, ChildAuthority,
-    CommandOutcome, CommandReceipt, CommandRequest, ContentHash, ContentHashError,
+    AccountingTotal, ApprovalDecision, ApprovalDelegate, ApprovalGrant, ApprovalMode,
+    ApprovalResolution, AuditOutcome, AuditRecord, BudgetExhaustion, BudgetLimitKind,
+    COMMAND_ROUTES, CapabilitySupport, CheckpointOutcome, CheckpointPhase, CheckpointSpend,
+    ChildAuthority, CommandOutcome, CommandReceipt, CommandRequest, ContentHash, ContentHashError,
     ContextSourceOutcome, ContextSourceRecord, CursorError, DEFAULT_OUTPUT_REPAIR_TURNS,
-    EditPreview, EventCursor, FetchPreview, FinalOutput, GenerationCapabilities, GuidanceIdentity,
-    GuidanceKind, InstructionHash, InstructionHashError, MAX_INCLUDED_SESSIONS,
+    DelegateIdentity, EditPreview, EventCursor, FetchPreview, FinalOutput, GenerationCapabilities,
+    GuidanceIdentity, GuidanceKind, InstructionHash, InstructionHashError, MAX_INCLUDED_SESSIONS,
     MAX_OUTPUT_ERROR_BYTES, MAX_OUTPUT_REPAIR_TURNS, MAX_OUTPUT_SCHEMA_BYTES,
     MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MessageRole, MessageSnapshot, MessageState,
     ModelCatalogRequest, ModelDescriptor, ModelPricing, ModelPricingTier, ModelSelection,
@@ -67,7 +67,7 @@ pub use sessions::{
     ToolExposure, WorkspaceGrantOutcome, WorkspaceSnapshot, WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 27;
+pub const PROTOCOL_VERSION: u16 = 28;
 
 /// Most retries one turn may spend on a transient provider fault after the
 /// stream has started; a completed turn resets the count. Exhaustion settles
@@ -78,12 +78,13 @@ pub const MAX_TURN_RETRIES: u16 = 5;
 /// Slash commands owned by interactive clients rather than the shared
 /// runtime. Keeping this vocabulary in the transport-neutral protocol avoids
 /// a client/runtime drift where one side forwards a name the other reserves.
-pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 22] = [
+pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 23] = [
     "/help",
     "/commands",
     "/models",
     "/profile",
     "/approval",
+    "/delegate",
     "/effort",
     "/skills",
     "/sessions",

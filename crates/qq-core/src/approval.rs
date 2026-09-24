@@ -46,50 +46,17 @@ pub(crate) const UNATTENDED_QUESTION_RESULT: &str =
     "No user is available to answer questions in this run; decide without asking.";
 pub(crate) const DECLINED_QUESTION_RESULT: &str =
     "The user declined to answer; proceed with your best judgement.";
+/// Prefix of the `tool_approval_escalated` reason when a delegate's `deny`
+/// was advice rather than a verdict (under `ask`).
+pub(crate) const ADVISORY_DENIAL_PREFIX: &str = "the delegate would deny:";
+/// The `tool_approval_escalated` reason when the delegate's own clock ran
+/// out before it answered.
+pub(crate) const DELEGATE_TIMED_OUT_REASON: &str = "the delegate did not answer within its window";
 
-/// Whether a session's held calls go to the configured delegate (the approval
-/// reviewer) before a human is asked. The mode stays the ceiling: this only
-/// chooses who settles the calls the mode already holds. `read-only` and
-/// `full` hold nothing that a delegate may decide, so the choice is inert
-/// there.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ApprovalDelegate {
-    /// Configuration said nothing: `auto` and `supervised` consult the
-    /// reviewer, `ask` asks the human. This is the behavior every session
-    /// had before the choice existed.
-    #[default]
-    ByMode,
-    /// Consult the reviewer under `ask` as well as `auto` and `supervised`.
-    On,
-    /// Never consult the reviewer; every held call waits for a human.
-    Off,
-}
-
-impl ApprovalDelegate {
-    /// Whether a call the given mode holds is offered to the reviewer first.
-    #[must_use]
-    pub const fn consults_reviewer(self, mode: ApprovalMode) -> bool {
-        match (mode, self) {
-            (ApprovalMode::ReadOnly | ApprovalMode::Full, _) => false,
-            (ApprovalMode::Auto | ApprovalMode::Supervised, Self::ByMode | Self::On) => true,
-            (ApprovalMode::Auto | ApprovalMode::Supervised, Self::Off) => false,
-            (ApprovalMode::Ask, Self::On) => true,
-            (ApprovalMode::Ask, Self::ByMode | Self::Off) => false,
-        }
-    }
-
-    /// Whether a reviewer `Deny` settles the call. Under `auto` and
-    /// `supervised` the reviewer is the delegate for what those modes hold;
-    /// under `ask` the operator asked to decide everything, so a denial is
-    /// advice and the human still decides.
-    #[must_use]
-    pub const fn deny_is_final(mode: ApprovalMode) -> bool {
-        match mode {
-            ApprovalMode::Auto | ApprovalMode::Supervised => true,
-            ApprovalMode::Ask | ApprovalMode::ReadOnly | ApprovalMode::Full => false,
-        }
-    }
-}
+/// Who settles a session's held calls before a human is asked. The wire
+/// type (`qq_protocol::ApprovalDelegate`) is the one source: the mode stays
+/// the ceiling and this only chooses who decides inside it.
+pub use qq_protocol::ApprovalDelegate;
 
 /// The model-facing prefix of a reviewer denial. Final under `supervised`
 /// (every held call of a write child) and under `auto` (the dangerous-shaped

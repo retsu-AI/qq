@@ -95,6 +95,7 @@ press `Enter`, press a number to pick an option, or `Esc` to decline.
 | model | `/models` | the focused session, or the default for the next `/new`; `Ctrl-N` inside the picker creates a session with the highlighted model |
 | agent profile | `/profile` | the focused idle session, or the default for new sessions; top row shows `as NAME` |
 | approval mode | `/approval` | the focused session from its next held call, or the default for new sessions |
+| approval delegate | `/delegate` | the focused session from its next held call, running or not: `configured` (the workspace's `approval_delegate`), `by_mode`, `on`, or `off` — the "stop delegating" switch. Nothing is written to config; children spawned afterwards inherit it. Top row shows `MODE · delegate off` while an override is set |
 | reasoning effort | `/effort` | the focused idle session's next run, or the default for new sessions; rows are the levels the model's catalog entry advertises (plus `default` and `none`), or every level when it advertises none; a pin outside an advertised ladder fails the run at plan time naming the accepted levels |
 | theme | `/theme` | live preview; `Enter` keeps it for the session, `Esc` restores; the notice shows the `tui.ron` line to make it permanent |
 
@@ -179,7 +180,7 @@ searchable palette that runs the highlighted command on `Enter`.
 | cancel run | | `Ctrl-X`, `Esc Esc` |
 | interrupt and steer | | `Alt-S` |
 | queue draft / edit queued | | `Ctrl-Enter`, `Ctrl-Q` / `Alt-Up` |
-| model / profile / approval / theme | `/models`, `/profile`, `/approval`, `/theme` | |
+| model / profile / approval / delegate / theme | `/models`, `/profile`, `/approval`, `/delegate`, `/theme` | |
 | skills and commands | `/skills` | |
 | tool detail / select call | | `Ctrl-O` / `Ctrl-Up`, `Ctrl-Down` |
 | reasoning | | `Alt-R` |

@@ -405,27 +405,22 @@ pub struct ReviewSpend {
     pub cost_usd_nanos: Option<u64>,
 }
 
-/// Which delegate produced a verdict. The embedding application selects the
-/// implementation; the store records the identity on every grant a delegate
-/// writes so an audit can tell them apart. `qq-core` does not know what
-/// either delegate is beyond this name.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum DelegateIdentity {
-    /// The configured `reviewer_model`.
-    #[default]
-    Reviewer,
-    /// TypeSafe Jev, when the operator opted it in as an approver.
-    Jev,
-}
+/// Which delegate produced a verdict. The wire type
+/// (`qq_protocol::DelegateIdentity`) is the one source: the embedding
+/// application selects the implementation, the store records the identity on
+/// every grant a delegate writes, and `tool_approval_resolved` carries it so
+/// a supervisor can tell the two apart from the stream. `qq-core` does not
+/// know what either delegate is beyond this name.
+pub use qq_protocol::DelegateIdentity;
 
-impl DelegateIdentity {
-    /// The `session_grants.source` value a grant from this delegate carries.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Reviewer => "delegate",
-            Self::Jev => "jev",
-        }
+/// The `session_grants.source` value a grant from this delegate carries.
+/// `delegate` predates Jev as a second writer and is kept for the rows
+/// already stored.
+#[must_use]
+pub(super) const fn delegate_grant_source(delegate: DelegateIdentity) -> &'static str {
+    match delegate {
+        DelegateIdentity::Reviewer => "delegate",
+        DelegateIdentity::Jev => "jev",
     }
 }
 

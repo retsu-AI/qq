@@ -1420,6 +1420,7 @@ fn tool_metrics_are_right_aligned_to_the_content_width() {
                 started_at_ms: Some(1_000),
                 last_output_at_ms: None,
                 finished_at_ms: None,
+                settled: None,
             },
             now_ms: 3_400,
         },
@@ -1451,6 +1452,7 @@ fn narrow_tool_rows_drop_the_duration_then_the_metric_before_the_verb() {
                 started_at_ms: Some(1_000),
                 last_output_at_ms: None,
                 finished_at_ms: Some(1_400),
+                settled: None,
             },
             now_ms: 3_400,
         },
@@ -3514,6 +3516,7 @@ fn expanded_call_rows(call: &ToolCallSnapshot, width: usize) -> Vec<Line> {
             timing: ToolCallTiming {
                 started_at_ms: Some(43_451_000),
                 finished_at_ms: Some(43_454_000),
+                settled: None,
                 last_output_at_ms: None,
             },
             now_ms: 43_454_000,
@@ -5106,6 +5109,7 @@ fn a_tool_row_reuses_its_panel_across_frames_and_relays_out_on_a_new_width() {
             timing: ToolCallTiming {
                 started_at_ms: Some(43_451_000),
                 finished_at_ms: Some(43_454_000),
+                settled: None,
                 last_output_at_ms: None,
             },
             now_ms,

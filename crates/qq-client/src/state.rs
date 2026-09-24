@@ -15,9 +15,9 @@ use std::{
 };
 
 use qq_protocol::{
-    AgentProfileId, EditPreview, FetchPreview, MessageId, MessageRole, MessageSnapshot,
-    MessageState, ModelDescriptor, QuestionPreview, RunActivity, RunId, RunOutcome,
-    RunPlanIdentity, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
+    AgentProfileId, ApprovalResolution, DelegateIdentity, EditPreview, FetchPreview, MessageId,
+    MessageRole, MessageSnapshot, MessageState, ModelDescriptor, QuestionPreview, RunActivity,
+    RunId, RunOutcome, RunPlanIdentity, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
     ShellCommandPreview, SnapshotRequest, TokenUsage, ToolCallId, ToolCallSnapshot, ToolCallState,
     WorkspaceId,
 };
@@ -680,14 +680,53 @@ pub struct RunStats {
 }
 
 /// When a tool call started, last produced output, and finished, from the
-/// `occurred_at_ms` of the events that carried those transitions. Historical
-/// calls loaded from a snapshot have none of this until the protocol records
-/// call timing; the rows then show no wall-clock time rather than a guess.
+/// `occurred_at_ms` of the events that carried those transitions, and how
+/// its approval was settled. Historical calls loaded from a snapshot have
+/// none of this until the protocol records call timing; the rows then show no
+/// wall-clock time rather than a guess.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ToolCallTiming {
     pub started_at_ms: Option<u64>,
     pub last_output_at_ms: Option<u64>,
     pub finished_at_ms: Option<u64>,
+    /// How the hold was settled, from `tool_approval_resolved`. `None` for a
+    /// call that was never held or whose resolution predates the body load.
+    pub settled: Option<ApprovalSettlement>,
+}
+
+/// Who settled a held call and how, so a surface can say "approved by Jev"
+/// rather than only "approved".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApprovalSettlement {
+    pub resolution: ApprovalResolution,
+    /// The delegate that wrote a reviewer resolution; `None` for a human,
+    /// timeout, or answer, and for a reviewer resolution from a server that
+    /// predates protocol 28.
+    pub delegate: Option<DelegateIdentity>,
+}
+
+impl ApprovalSettlement {
+    /// A short label for the row: `approved by jev`, `denied by reviewer`,
+    /// `approved for session`, `denied by timeout`. `None` for resolutions
+    /// that need no remark (a once-approval by the human, an answer).
+    #[must_use]
+    pub fn label(self) -> Option<String> {
+        match self.resolution {
+            ApprovalResolution::ApprovedOnce | ApprovalResolution::Answered => None,
+            ApprovalResolution::ApprovedForSession => Some("approved for session".to_owned()),
+            ApprovalResolution::ApprovedForWorkspace => Some("approved for workspace".to_owned()),
+            ApprovalResolution::ApprovedByReviewer => Some(format!(
+                "approved by {}",
+                self.delegate.unwrap_or_default().as_str()
+            )),
+            ApprovalResolution::Denied => Some("denied by you".to_owned()),
+            ApprovalResolution::DeniedTimeout => Some("denied by timeout".to_owned()),
+            ApprovalResolution::DeniedByReviewer => Some(format!(
+                "denied by {}",
+                self.delegate.unwrap_or_default().as_str()
+            )),
+        }
+    }
 }
 
 /// Cheap per-session liveness reduced from every event, whether or not the
@@ -718,6 +757,17 @@ pub struct ApprovalPreview {
     /// Present when the held call is `fetch`: the URL and the host a grant
     /// would name.
     pub fetch: Option<FetchPreview>,
+    /// Why the hold reached the human after a delegate was consulted, from
+    /// `tool_approval_escalated`: the delegate (or `None` when its clock ran
+    /// out) and its bounded reason. Absent while no delegate has answered.
+    pub escalated: Option<ApprovalEscalation>,
+}
+
+/// A delegate declined to settle the hold; the prompt says why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalEscalation {
+    pub delegate: Option<DelegateIdentity>,
+    pub reason: String,
 }
 
 /// One session as the client sees it: the summary every surface lists, and

@@ -74,8 +74,10 @@ may authorize one bounded class of side effect, and exactly how.
    audit can tell them apart. The gate reads both as exact-match delegate
    rows; the per-run cap counts both. The resolution vocabulary on the wire
    is unchanged: `approved_by_reviewer` and `denied_by_reviewer` cover both
-   delegates. DA6 decides whether the event gains a delegate field and
-   whether that is a `PROTOCOL_VERSION` bump.
+   delegates. DA6 (protocol 28) added the identity beside them as an
+   optional `delegate` field on `tool_approval_resolved`, and an advisory
+   `tool_approval_escalated` event carrying the delegate and its reason when
+   it passes; `DelegateIdentity` moved to `qq-protocol` as the one source.
 
 7. **Spend and clocks.** Jev's own clock is 5 s (the model reviewer's is
    10 s). Its spend is charged to the reviewed run through the same

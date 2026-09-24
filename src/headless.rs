@@ -19,11 +19,12 @@ use std::{
 use futures_util::StreamExt;
 use qq_core::{SessionRuntime, SessionRuntimeError};
 use qq_protocol::{
-    ApprovalDecision, ApprovalGrant, ApprovalMode, BudgetLimitKind, CommandId, CommandOutcome,
-    CommandReceipt, ContentHash, HeadlessOutcome, HeadlessRecordRef, HeadlessTrial, InputPart,
-    MessageId, MessageRole, ModelSelection, RunId, RunLimits, RunOutcome, RunPromptIdentity,
-    SessionAccounting, SessionCommand, SessionEvent, SessionEventEnvelope, SessionId,
-    ShellCommandPreview, SnapshotRequest, SubscribeRequest, TokenUsage, ToolCallState, WorkspaceId,
+    ApprovalDecision, ApprovalGrant, ApprovalMode, ApprovalResolution, BudgetLimitKind, CommandId,
+    CommandOutcome, CommandReceipt, ContentHash, HeadlessOutcome, HeadlessRecordRef, HeadlessTrial,
+    InputPart, MessageId, MessageRole, ModelSelection, RunId, RunLimits, RunOutcome,
+    RunPromptIdentity, SessionAccounting, SessionCommand, SessionEvent, SessionEventEnvelope,
+    SessionId, ShellCommandPreview, SnapshotRequest, SubscribeRequest, TokenUsage, ToolCallState,
+    WorkspaceId,
 };
 pub use qq_protocol::{HeadlessApproval, HeadlessStatus};
 use sha2::{Digest, Sha256};
@@ -820,6 +821,42 @@ async fn stream_run(
                                 concise(&tool_call.arguments),
                             );
                         }
+                    }
+                    // A delegate settled a held call: say which one, so the
+                    // operator reading the log can tell Jev's decision from
+                    // the reviewer model's and from their own allowlist.
+                    SessionEvent::ToolApprovalResolved {
+                        tool_call,
+                        resolution:
+                            resolution @ (ApprovalResolution::ApprovedByReviewer
+                            | ApprovalResolution::DeniedByReviewer),
+                        delegate,
+                    } if ours && text => {
+                        let verdict = match resolution {
+                            ApprovalResolution::ApprovedByReviewer => "approved",
+                            _ => "denied",
+                        };
+                        let _ = writeln!(
+                            stderr,
+                            "[tool] {} {verdict} by {}",
+                            tool_call.name,
+                            delegate.unwrap_or_default().as_str()
+                        );
+                    }
+                    // The delegate passed: say why, so the unattended deny that
+                    // follows (or the allowlist answer) reads as a consequence.
+                    SessionEvent::ToolApprovalEscalated {
+                        delegate, reason, ..
+                    } if ours && text => {
+                        let _ = match delegate {
+                            Some(delegate) => writeln!(
+                                stderr,
+                                "[tool] {} passed to the human: {}",
+                                delegate.as_str(),
+                                concise(reason)
+                            ),
+                            None => writeln!(stderr, "[tool] {}", concise(reason)),
+                        };
                     }
                     SessionEvent::ToolCallFinished { tool_call } if ours => {
                         if tool_call.state == ToolCallState::Denied {
@@ -3403,6 +3440,76 @@ mod tests {
             "the denial hint precedes the resume hint:\n{stderr}"
         );
         assert_eq!(stderr.matches(DENIAL_HINT).count(), 1, "{stderr}");
+    }
+
+    /// A reviewer that approves everything and says Jev decided.
+    struct JevApproves;
+
+    impl qq_core::ApprovalReviewer for JevApproves {
+        fn review(&self, _request: qq_core::ReviewRequest) -> qq_core::ReviewFuture {
+            Box::pin(async {
+                qq_core::ReviewVerdict::free(qq_core::ReviewDecision::Approve)
+                    .by(qq_core::DelegateIdentity::Jev)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_delegated_approval_names_the_delegate_in_jsonl_and_text() {
+        // DA6: a supervisor reading the stream can tell Jev's decision from
+        // the reviewer model's and from the operator's allowlist without the
+        // store: the resolution record carries `delegate`, and text mode says
+        // `approved by jev`.
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let workspace = root.join("work");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let workspace = std::fs::canonicalize(&workspace).unwrap();
+        for name in ["scratch0", "scratch1"] {
+            std::fs::create_dir_all(workspace.join(name)).unwrap();
+        }
+        let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+        runtime_options.approval_reviewer = Some(Arc::new(JevApproves));
+        let sessions = SessionRuntime::open(
+            runtime_options,
+            Arc::new(ProviderLoader(|| DangerousShellProvider {
+                turn: Mutex::new(0),
+            })),
+        )
+        .await
+        .unwrap();
+        let fixture = Fixture {
+            sessions,
+            workspace,
+            _directory: directory,
+        };
+
+        let mut options = options(&fixture.workspace);
+        options.approval = HeadlessApproval::Auto;
+        options.reviewer_configured = true;
+        let (status, stdout, _) =
+            run_to_end(&fixture, options.clone(), std::future::pending()).await;
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        let resolutions: Vec<&serde_json::Value> = event_records(&records)
+            .into_iter()
+            .filter(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
+            .map(|record| &record["envelope"]["event"])
+            .collect();
+        assert!(!resolutions.is_empty(), "{stdout}");
+        assert!(resolutions.iter().all(|event| {
+            event["resolution"] == "approved_by_reviewer" && event["delegate"] == "jev"
+        }));
+        assert!(
+            finished_tool_calls(&records)
+                .iter()
+                .all(|call| call["state"] == "completed")
+        );
+
+        options.format = HeadlessFormat::Text;
+        let (status, _, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+        assert_eq!(status, HeadlessStatus::Completed);
+        assert!(stderr.contains("[tool] shell approved by jev"), "{stderr}");
     }
 
     #[tokio::test]

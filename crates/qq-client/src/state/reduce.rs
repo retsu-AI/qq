@@ -12,8 +12,8 @@ use qq_protocol::{
 };
 
 use super::{
-    ApprovalPreview, ModelOption, SessionStore, SessionView, body_request, plan_label,
-    tool_call_state_is_terminal,
+    ApprovalEscalation, ApprovalPreview, ApprovalSettlement, ModelOption, SessionStore,
+    SessionView, body_request, plan_label, tool_call_state_is_terminal,
 };
 
 /// Characters of the compaction summary shown in its notice.
@@ -256,12 +256,34 @@ impl SessionStore {
                                 edit: edit.clone(),
                                 question: question.as_deref().cloned(),
                                 fetch: fetch.as_deref().cloned(),
+                                escalated: None,
                             },
                         );
                     }
                     session.live.note_tool_call(tool_call);
                 }
                 self.upsert_tool_call(tool_call.clone());
+            }
+            // A delegate handed the hold to the human: keep why beside the
+            // preview so the prompt can say so. Advisory; the hold itself is
+            // unchanged, and a preview-less hold gets one to carry it.
+            SessionEvent::ToolApprovalEscalated {
+                tool_call_id,
+                delegate,
+                reason,
+            } => {
+                if let Some(session) = self.get_mut(&session_id)
+                    && session.live.awaiting_approval.contains(tool_call_id)
+                {
+                    session
+                        .approval_previews
+                        .entry(*tool_call_id)
+                        .or_default()
+                        .escalated = Some(ApprovalEscalation {
+                        delegate: *delegate,
+                        reason: reason.clone(),
+                    });
+                }
             }
             // Live tool output chunks are display-only: they feed the bounded
             // tail under a running call's line, and the call's authoritative
@@ -292,6 +314,18 @@ impl SessionStore {
                         SessionEvent::ToolCallFinished { .. } => {
                             timing.finished_at_ms = Some(envelope.occurred_at_ms);
                             view.runs.entry(tool_call.run_id).or_default().tool_calls += 1;
+                        }
+                        // Who settled the hold, so the row can say so once the
+                        // call has run.
+                        SessionEvent::ToolApprovalResolved {
+                            resolution,
+                            delegate,
+                            ..
+                        } => {
+                            timing.settled = Some(ApprovalSettlement {
+                                resolution: *resolution,
+                                delegate: *delegate,
+                            });
                         }
                         _ => {}
                     }

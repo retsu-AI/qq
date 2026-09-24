@@ -15,8 +15,8 @@ use async_stream::stream;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use qq_protocol::{
-    AgentProfileId, ApprovalDecision, CapabilitiesRequest, CommandId, CommandReceipt,
-    CommandRequest, Correlation, EventCursor, InputPart, MAX_CAPABILITIES_BYTES,
+    AgentProfileId, ApprovalDecision, ApprovalDelegate, CapabilitiesRequest, CommandId,
+    CommandReceipt, CommandRequest, Correlation, EventCursor, InputPart, MAX_CAPABILITIES_BYTES,
     MAX_ERROR_BODY_BYTES, MAX_EVENT_BYTES, MAX_MODEL_CATALOG_BYTES, MAX_REQUEST_BYTES,
     MAX_SNAPSHOT_BYTES, MAX_SSE_WIRE_EVENT_BYTES, ModelCatalogRequest, ModelDescriptor,
     ReasoningEffort, RunId, RunLimits, ServerCapabilities, SessionCommand, SessionEventEnvelope,
@@ -227,6 +227,23 @@ impl SessionClient {
         self.command(
             fresh_command_id()?,
             SessionCommand::SetSessionEffort { session_id, effort },
+        )
+        .await
+    }
+
+    /// Overrides who settles the session's held calls for the rest of the
+    /// session; `None` restores the configured `approval_delegate`.
+    pub async fn set_approval_delegate(
+        &self,
+        session_id: SessionId,
+        delegate: Option<ApprovalDelegate>,
+    ) -> Result<CommandReceipt, ClientError> {
+        self.command(
+            fresh_command_id()?,
+            SessionCommand::SetApprovalDelegate {
+                session_id,
+                delegate,
+            },
         )
         .await
     }

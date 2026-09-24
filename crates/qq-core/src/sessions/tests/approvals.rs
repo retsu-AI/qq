@@ -97,6 +97,7 @@ async fn denial_returns_a_tool_error_and_the_run_still_completes() {
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::Denied,
+            ..
         } if tool_call.state == ToolCallState::Denied && tool_call.is_error
     )));
     assert!(
@@ -226,6 +227,7 @@ async fn unresolved_approvals_are_denied_by_timeout_with_a_distinct_error() {
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::DeniedTimeout,
+            ..
         } if tool_call.state == ToolCallState::Denied
     )));
     assert!(matches!(
@@ -343,7 +345,7 @@ async fn an_oversized_session_grant_approves_the_call_once_instead_of_failing() 
         SessionEvent::ToolCallFinished { tool_call }
             if tool_call.state == ToolCallState::Completed
     )));
-    let (_, grants) = harness
+    let (_, grants, _) = harness
         .runtime
         .inner
         .store
@@ -399,7 +401,7 @@ async fn an_oversized_session_grant_approves_the_call_once_instead_of_failing() 
             ..
         }
     ));
-    let (_, grants) = full
+    let (_, grants, _) = full
         .runtime
         .inner
         .store
@@ -1376,7 +1378,7 @@ async fn a_delegate_approval_records_an_exact_command_grant_and_nothing_wider() 
             .count(),
         3
     );
-    let (_, grants) = harness
+    let (_, grants, _) = harness
         .runtime
         .inner
         .store
@@ -1446,7 +1448,7 @@ async fn a_delegate_host_grant_covers_the_exact_host_only() {
         "the exact host is covered; a subdomain is a different host"
     );
     assert_eq!(consulted.lock().unwrap().len(), 2);
-    let (_, grants) = harness
+    let (_, grants, _) = harness
         .runtime
         .inner
         .store
@@ -1535,7 +1537,7 @@ async fn a_jev_approval_records_a_grant_row_that_names_jev_and_still_matches_exa
             ),
         ]
     );
-    let (_, grants) = harness
+    let (_, grants, _) = harness
         .runtime
         .inner
         .store
@@ -1623,7 +1625,7 @@ async fn a_delegate_grant_that_cannot_be_stored_still_approves_the_call_once() {
             .count(),
         2
     );
-    let (_, grants) = harness
+    let (_, grants, _) = harness
         .runtime
         .inner
         .store
@@ -1762,6 +1764,7 @@ async fn a_reviewer_denial_is_final_under_auto_and_no_human_is_asked() {
             SessionEvent::ToolApprovalResolved {
                 tool_call,
                 resolution: ApprovalResolution::DeniedByReviewer,
+                ..
             } => Some(tool_call.clone()),
             _ => None,
         })
@@ -1817,6 +1820,126 @@ async fn a_reviewer_denial_is_final_under_auto_and_no_human_is_asked() {
         ),
         "a settled denial is not reopened by a late approval"
     );
+}
+
+#[tokio::test]
+async fn a_reviewer_escalation_is_published_with_its_reason_before_the_human_is_asked() {
+    // DA6: when the delegate passes, the hold gets a `tool_approval_escalated`
+    // event naming the delegate and its bounded reason, so the prompt can say
+    // why it reached the human. The hold itself is unchanged: the same call is
+    // still `awaiting_approval` and the human's answer settles it.
+    let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Escalate {
+        reason: "the task brief never mentions pushing".to_owned(),
+    }));
+    let mut harness = approval_harness_with_reviewer(
+        ApprovalMode::Auto,
+        "__test_shell",
+        r#"{"command":"git push origin main"}"#,
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+        None,
+        Some(reviewer),
+    )
+    .await;
+    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    let escalated = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = harness.events.next().await.unwrap().unwrap();
+            if let SessionEvent::ToolApprovalEscalated {
+                tool_call_id,
+                delegate,
+                reason,
+            } = &event.event
+            {
+                break (*tool_call_id, *delegate, reason.clone());
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        escalated,
+        (
+            tool_call.id,
+            Some(DelegateIdentity::Reviewer),
+            "the task brief never mentions pushing".to_owned()
+        )
+    );
+    respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        tool_call.id,
+        ApprovalDecision::ApproveOnce,
+    )
+    .await
+    .unwrap();
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolApprovalResolved {
+            resolution: ApprovalResolution::ApprovedOnce,
+            delegate: None,
+            ..
+        }
+    )));
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolCallFinished { tool_call }
+            if tool_call.state == ToolCallState::Completed
+    )));
+}
+
+#[tokio::test]
+async fn an_advisory_denial_under_ask_is_published_as_an_escalation_naming_the_delegate() {
+    // DA6 on DA3: under `ask` with the delegate on, a `deny` is advice. The
+    // prompt learns it was advice, and from whom, through the escalation.
+    let (reviewer, _) = StubReviewer::immediate(
+        ReviewVerdict::free(ReviewDecision::Deny {
+            reason: "would overwrite history".to_owned(),
+        })
+        .by(DelegateIdentity::Jev),
+    );
+    let mut harness = approval_harness_with_delegate(
+        ApprovalMode::Ask,
+        "__test_shell",
+        r#"{"command":"git push origin main"}"#,
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+        None,
+        Some(reviewer),
+        approval::ApprovalDelegate::On,
+    )
+    .await;
+    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    let escalated = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = harness.events.next().await.unwrap().unwrap();
+            if let SessionEvent::ToolApprovalEscalated {
+                delegate, reason, ..
+            } = &event.event
+            {
+                break (*delegate, reason.clone());
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(escalated.0, Some(DelegateIdentity::Jev));
+    assert!(
+        escalated.1.starts_with(approval::ADVISORY_DENIAL_PREFIX)
+            && escalated.1.ends_with("would overwrite history"),
+        "{}",
+        escalated.1
+    );
+    respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        tool_call.id,
+        ApprovalDecision::Deny,
+    )
+    .await
+    .unwrap();
+    let _ = collect_through_finished(&mut harness.events).await;
 }
 
 #[tokio::test]
@@ -1904,8 +2027,25 @@ async fn a_reviewer_that_never_answers_is_cut_off_by_its_own_clock_not_the_human
     )
     .await;
     let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    // Well past the delegate's clock, well inside the human's.
-    tokio::time::sleep(delegate_wait * 3).await;
+    // Well past the delegate's clock, well inside the human's. The cut-off
+    // is published as an escalation with no delegate identity (DA6).
+    let cut_off = tokio::time::timeout(delegate_wait * 3, async {
+        loop {
+            let event = harness.events.next().await.unwrap().unwrap();
+            if let SessionEvent::ToolApprovalEscalated {
+                delegate, reason, ..
+            } = &event.event
+            {
+                break (*delegate, reason.clone());
+            }
+        }
+    })
+    .await
+    .expect("the delegate cut-off is published");
+    assert_eq!(
+        cut_off,
+        (None, approval::DELEGATE_TIMED_OUT_REASON.to_owned())
+    );
     let receipt = respond_approval(
         &harness.runtime,
         harness.run_id,
@@ -2217,6 +2357,7 @@ async fn the_delegate_off_withdraws_the_reviewer_under_auto() {
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::Denied,
+            ..
         } if tool_call.state == ToolCallState::Denied
     )));
     assert!(
@@ -2258,6 +2399,235 @@ async fn full_mode_executes_without_the_reviewer_even_with_the_delegate_on() {
         SessionEvent::ToolCallFinished { tool_call }
             if tool_call.state == ToolCallState::Completed
     )));
+}
+
+#[tokio::test]
+async fn the_session_off_switch_withdraws_the_reviewer_at_the_next_hold_without_a_restart() {
+    // DA6: `set_approval_delegate` is the session's "stop delegating" switch.
+    // The runtime is configured with the delegate on (ByMode under auto asks
+    // the reviewer). Run 1 shows the reviewer settling a hold; the operator
+    // then switches the delegate off for the session and run 2's hold comes
+    // to the human instead, with nothing rewritten and nothing restarted.
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+    let mut harness = scripted_runs_harness_with(
+        ApprovalMode::Auto,
+        vec![
+            vec![(
+                "__test_shell",
+                r#"{"command":"git push origin main"}"#.to_owned(),
+            )],
+            vec![(
+                "__test_shell",
+                r#"{"command":"git push origin release"}"#.to_owned(),
+            )],
+        ],
+        None,
+        Some(reviewer),
+    )
+    .await;
+    submit_prompt(&harness, "push").await;
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert_eq!(consulted.lock().unwrap().len(), 1);
+    // The reviewer's resolution names the delegate on the wire (protocol 28).
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolApprovalResolved {
+            resolution: ApprovalResolution::ApprovedByReviewer,
+            delegate: Some(DelegateIdentity::Reviewer),
+            ..
+        }
+    )));
+
+    let receipt = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetApprovalDelegate {
+                session_id: harness.session_id,
+                delegate: Some(approval::ApprovalDelegate::Off),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::ApprovalDelegateSet {
+            session_id: harness.session_id,
+            delegate: Some(approval::ApprovalDelegate::Off),
+        }
+    );
+    // Published as a summary update carrying the override, so every client
+    // renders it; the receipt commits through that event.
+    let updated = harness.events.next().await.unwrap().unwrap();
+    assert_eq!(updated.cursor, receipt.committed_through);
+    assert!(matches!(
+        &updated.event,
+        SessionEvent::SessionUpdated { session }
+            if session.id == harness.session_id
+                && session.approval_delegate == Some(approval::ApprovalDelegate::Off)
+    ));
+
+    let run_id = submit_prompt(&harness, "push again").await;
+    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    // Give a would-be review a moment to happen; it must not.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        consulted.lock().unwrap().len(),
+        1,
+        "with the session delegate off the reviewer is not asked"
+    );
+    respond_approval(
+        &harness.runtime,
+        run_id,
+        tool_call.id,
+        ApprovalDecision::ApproveOnce,
+    )
+    .await
+    .unwrap();
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolApprovalResolved {
+            resolution: ApprovalResolution::ApprovedOnce,
+            delegate: None,
+            ..
+        }
+    )));
+
+    // Clearing the override restores the configured choice: the next hold
+    // goes back to the reviewer.
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetApprovalDelegate {
+                session_id: harness.session_id,
+                delegate: None,
+            },
+        )
+        .await
+        .unwrap();
+    let updated = harness.events.next().await.unwrap().unwrap();
+    assert!(matches!(
+        &updated.event,
+        SessionEvent::SessionUpdated { session }
+            if session.id == harness.session_id && session.approval_delegate.is_none()
+    ));
+    let (_, grants, delegate) = harness
+        .runtime
+        .inner
+        .store
+        .approval_policy(harness.session_id)
+        .await
+        .unwrap();
+    assert!(delegate.is_none());
+    assert!(grants.delegate.commands.contains("git push origin main"));
+}
+
+#[tokio::test]
+async fn a_session_delegate_override_reaches_the_reviewer_under_ask_and_children_inherit_it() {
+    // DA6: the override widens as well as narrows. Configured `by-mode`
+    // under `ask` asks the human; `set_approval_delegate: on` for the session
+    // routes the hold to the reviewer, and a child spawned afterwards starts
+    // with the same override.
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+    let mut harness = scripted_runs_harness_with(
+        ApprovalMode::Ask,
+        vec![vec![(
+            "__test_shell",
+            r#"{"command":"git commit -m x"}"#.to_owned(),
+        )]],
+        None,
+        Some(reviewer),
+    )
+    .await;
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetApprovalDelegate {
+                session_id: harness.session_id,
+                delegate: Some(approval::ApprovalDelegate::On),
+            },
+        )
+        .await
+        .unwrap();
+    let _ = harness.events.next().await.unwrap().unwrap();
+    submit_prompt(&harness, "commit").await;
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert_eq!(consulted.lock().unwrap().len(), 1);
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolApprovalResolved {
+            resolution: ApprovalResolution::ApprovedByReviewer,
+            ..
+        }
+    )));
+
+    let child = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CreateSession {
+                workspace_id: harness.workspace_id,
+                parent_id: Some(harness.session_id),
+                model: ModelSelection {
+                    model_is_fallback: false,
+                    model: Some("test/model".to_owned()),
+                    max_output_tokens: Some(256),
+                    organization: None,
+                },
+                approval_mode: ApprovalMode::Ask,
+                profile: AgentProfileId::default(),
+                reasoning_effort: None,
+                correlation: Correlation::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::SessionCreated {
+        session_id: child_id,
+    } = child.outcome
+    else {
+        panic!("unexpected receipt")
+    };
+    let (_, _, delegate) = harness
+        .runtime
+        .inner
+        .store
+        .approval_policy(child_id)
+        .await
+        .unwrap();
+    assert_eq!(delegate, Some(approval::ApprovalDelegate::On));
+}
+
+#[tokio::test]
+async fn setting_the_delegate_on_an_unknown_session_is_refused() {
+    let harness = approval_harness(
+        ApprovalMode::Auto,
+        "__test_mutate",
+        "{}",
+        0,
+        DEFAULT_APPROVAL_TIMEOUT,
+    )
+    .await;
+    let error = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetApprovalDelegate {
+                session_id: SessionId::generate().unwrap(),
+                delegate: Some(approval::ApprovalDelegate::Off),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, SessionRuntimeError::SessionNotFound),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -3112,6 +3482,7 @@ async fn ask_user_holds_under_read_only_and_the_answers_become_the_result() {
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::Answered,
+            ..
         } if tool_call.state == ToolCallState::Completed && !tool_call.is_error
     )));
     // Nothing executed: no start, no finish beyond the resolution.
@@ -3173,6 +3544,7 @@ async fn declining_a_question_settles_it_as_answered_with_the_decline_text() {
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::Answered,
+            ..
         } if tool_call.result.as_deref() == Some(approval::DECLINED_QUESTION_RESULT)
     )));
     // A second answer is the idempotent replay of the first.
@@ -3212,6 +3584,7 @@ async fn an_unanswered_question_times_out_like_an_approval() {
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::DeniedTimeout,
+            ..
         } if tool_call.state == ToolCallState::Denied
     )));
 }
@@ -3307,7 +3680,7 @@ async fn fetch_holds_with_a_host_preview_and_a_host_grant_covers_the_next_call()
             call.result
         );
     }
-    let (_, grants) = harness
+    let (_, grants, _) = harness
         .runtime
         .inner
         .store

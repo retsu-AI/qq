@@ -8,12 +8,12 @@ dated entries appended below, newest last.
 | --- | --- | --- | --- | --- |
 | — | Grant storage rule: a grant that cannot be stored approves once and never fails the command | Merged | [#125](https://github.com/retsu-AI/qq/pull/125) | Removes `InvalidApprovalGrant`; the 400 string cannot be produced |
 | DA1 | Reviewer `Deny` is final under `auto`; escalation restarts the human wait | Merged | [#133](https://github.com/retsu-AI/qq/pull/133) | Independent review done (touches `sessions/`) |
-| DA2 | Delegate clock separate from the human wait; no server deadline for an interactive hold; `approval_timeout_seconds` | In review | `feat/eng-862-da2-two-clocks`, [#150](https://github.com/retsu-AI/qq/pull/150) | Ships RR9's minimum; RR9 (ENG-871) row updated in the same PR. Independent review needed |
+| DA2 | Delegate clock separate from the human wait; no server deadline for an interactive hold; `approval_timeout_seconds` | Merged | [#150](https://github.com/retsu-AI/qq/pull/150) | Ships RR9's minimum; RR9 (ENG-871) row updated in the same PR |
 | DA3 | `approval_delegate: by-mode\|on\|off` says who settles a held call | Merged | [#143](https://github.com/retsu-AI/qq/pull/143) | No protocol bump; not part of the plan digest |
 | DA4 | Delegate grants are exact-command or exact-host, session-scoped, never written to config | Merged | [#135](https://github.com/retsu-AI/qq/pull/135) | Store schema 34 → 35 |
 | DA5 | `jev_approval` typed approve/deny/abstain; ADR-0041 | Merged | [#144](https://github.com/retsu-AI/qq/pull/144) | ADR-0041 accepted. `source = 'jev'` on delegate grant rows |
-| DA6 | TUI delegate rendering, session off switch, headless delegate identity, runbook | Planned | | Inputs: DA3, DA5 (both merged). Decides the `approved_by_reviewer` field question |
-| docs | Plan, target contract, ledger | In review | `docs/eng-862-delegated-approval`, [#123](https://github.com/retsu-AI/qq/pull/123), stacked on DA2 | Merge after #150; retarget to `main` then |
+| DA6 | Surfaces: `tool_approval_resolved.delegate`, `tool_approval_escalated`, `set_approval_delegate` (`/delegate`), TUI "who decided", headless `approved by jev` | In review | `feat/eng-862-da6-delegate-surfaces` | `PROTOCOL_VERSION` 27 → 28; store schema 35 → 36. Target contract deleted; this plan closes with it |
+| docs | Plan, target contract, ledger | Merged | [#123](https://github.com/retsu-AI/qq/pull/123) | |
 
 ## Entries
 
@@ -306,3 +306,82 @@ by the first of these. Gates: `cargo test --workspace`, fmt, clippy
 
 Shipped: #125, DA1, DA3, DA4, DA5. In review: DA2 (#150), docs (#123, stacked
 on DA2). Open: DA6.
+
+### 2026-09-23 — DA2 and docs merged
+
+[#150](https://github.com/retsu-AI/qq/pull/150) and [#123](https://github.com/retsu-AI/qq/pull/123)
+are on `main`, in that order.
+
+### 2026-09-24 — DA6 in review: surfaces and the off switch
+
+Branch `feat/eng-862-da6-delegate-surfaces`, against `main`. The plan asked
+DA6 to decide the `approved_by_reviewer` field question. Decision: **yes, a
+protocol change**, because a supervisor reading a headless stream cannot
+otherwise tell Jev's decision from `reviewer_model`'s, and the plan's own
+acceptance ("headless output names the delegate on the approval event")
+requires it. `PROTOCOL_VERSION` 27 → 28; the root ledger row records the
+shared-file change. Store schema 35 → 36.
+
+- **Wire.** `qq_protocol::ApprovalDelegate { ByMode, On, Off }` and
+  `DelegateIdentity { Reviewer, Jev }` are now protocol types (`by_mode` /
+  `on` / `off`, `reviewer` / `jev`); `qq-core` re-exports them instead of
+  owning duplicates. `tool_approval_resolved` gains optional
+  `delegate` beside `approved_by_reviewer` / `denied_by_reviewer`, absent
+  for human, timeout, and answer resolutions. New advisory event
+  `tool_approval_escalated { tool_call_id, delegate?, reason }` when a
+  delegate passes: an `escalate`, a non-final `deny` under `ask` (reason
+  prefixed `the delegate would deny:`), or the delegate clock running out
+  (`delegate` absent, reason `the delegate did not answer within its
+  window`). Written only while the call is still awaiting approval, so a
+  lost race publishes nothing. New command `set_approval_delegate
+  { session_id, delegate? }` on `/v1/sessions/approval-delegate` with
+  outcome `approval_delegate_set`; new optional
+  `SessionSummary.approval_delegate`. `/delegate` reserved as a client slash
+  command. Goldens under `v28/` (three new: the command, the receipt, the
+  Jev-attributed resolution, the escalation) and `headless/v28/`; harbor
+  trace fixtures bumped to 28.
+- **Store.** Schema 36 adds nullable `sessions.approval_delegate`.
+  `load_approval_policy` returns it beside the mode and grants; the gate
+  applies `session_override.unwrap_or(configured)` at each hold, so the
+  switch takes effect at the next held call of a running session with no
+  restart and no config write. Spawned children (both `CreateSession` with a
+  parent and the model's `spawn_agent`) inherit the parent's override.
+  `set_approval_delegate` has no authority check: the mode is the ceiling
+  and every value asks at least as much of a human as the configured choice.
+- **TUI.** `/delegate` picker (rows `configured`, `by_mode`, `on`, `off`;
+  needs a focused session; running sessions allowed). Status badge reads
+  `MODE · delegate off` while an override is set. The client keeps who
+  settled each call beside its timing (`ApprovalSettlement`, evicted with the
+  body); the expanded call detail shows `approved by jev` /
+  `approved for session` / `denied by you`, and a delegate denial's row
+  state reads `denied by jev` or `denied by reviewer`. The approval block
+  shows the escalation reason (`reviewer passed to you: …` or `delegate
+  timed out: …`). Receipt notices name the delegate.
+- **Headless.** JSONL carries the fields through the envelope. Text mode
+  prints `[tool] NAME approved by jev` and `[tool] reviewer passed to the
+  human: …`.
+- **Docs.** `tools.md` § Approval Policy (session override paragraph, wire
+  identity), `protocol.md` (version 28, route, command section, resolution
+  text), `guide/tui.md`, `guide/permissions.md` ("Stop delegating for this
+  session", "Seeing who decided"), ADR-0041 § 6.
+  `docs/design/delegated-approval.md` deleted: every section is now as-built
+  in `tools.md` / `protocol.md` / ADR-0041, as the plan required.
+
+Tests: core `the_session_off_switch_withdraws_the_reviewer_at_the_next_hold_without_a_restart`,
+`a_session_delegate_override_reaches_the_reviewer_under_ask_and_children_inherit_it`,
+`setting_the_delegate_on_an_unknown_session_is_refused`,
+`a_reviewer_escalation_is_published_with_its_reason_before_the_human_is_asked`,
+`an_advisory_denial_under_ask_is_published_as_an_escalation_naming_the_delegate`,
+and the delegate-clock test now asserts the cut-off escalation; protocol
+round-trips and goldens; client `a_reviewer_resolution_records_who_settled_the_call_and_evicts_with_it`,
+`an_escalation_lands_on_the_pending_holds_preview_and_nowhere_else`; TUI
+`delegate_picker_switches_the_focused_session_off_and_reports_the_receipt`,
+`delegate_picker_needs_a_focused_session`; headless
+`a_delegated_approval_names_the_delegate_in_jsonl_and_text`; migrations
+re-pinned to 36. Gates: `cargo test --workspace`, fmt, clippy `-D warnings`.
+
+Plan acceptance 3 (one week of real use after DA4: no `denied_timeout` with
+a client attached; humans answer fewer prompts than delegates settle) is
+not measurable yet; DA2 removed the default deadline four days ago. Record
+the counts here when the week is up. Everything else in "Acceptance for the
+plan" is met with this slice.

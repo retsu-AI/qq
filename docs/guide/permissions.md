@@ -92,6 +92,29 @@ with `QQ_APPROVAL_DELEGATE=on|off`. In a project file it needs trust like
 any other sensitive key. `jev_approval` works the same way
 (`QQ_JEV_APPROVAL=on|off`); a stored key with it off is never read.
 
+### Stop delegating for this session
+
+If a delegate is approving things you would rather see, `/delegate` in the
+TUI (or `set_approval_delegate` on the wire) changes who settles the focused
+session's held calls for the rest of that session: `off` brings every held
+call to you, `on` or `by_mode` widen or restore delegation, and `configured`
+clears the override. It takes effect at the session's next held call — a
+running session included — and rewrites nothing: your `.qq/config.ron` and
+the next session are unchanged. Children the session spawns afterwards start
+with the same choice. The mode is still the ceiling: no value here lets the
+model do more than the mode allows.
+
+### Seeing who decided
+
+A settled call says who settled it. In the TUI the expanded call detail
+reads `approved by jev` or `approved by reviewer` beside its timing, and a
+delegate's denial shows as `denied by jev` / `denied by reviewer` on the
+row; your own decisions read `approved for session`, `denied by you`, or
+nothing for a plain once-approval. In `qq run --format text` the log line is
+`[tool] NAME approved by jev`; in JSONL the `tool_approval_resolved` event
+carries `"delegate": "jev"` or `"reviewer"`. When a delegate abstains and
+the prompt reaches you, the prompt's reason line says why.
+
 ## What the shell classifier decides
 
 Before policy sees a command, QQ parses it with a real bash grammar and
