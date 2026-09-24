@@ -2,8 +2,8 @@ use super::*;
 use crate::{
     commands::Category,
     input::{
-        ApprovalModeRow, CommandRow, DelegateRow, EffortRow, ModelRow, Overlay, ProfileRow,
-        SessionRow, SkillRow, ThemeRow,
+        ApprovalModeRow, CommandRow, DelegateRow, EffortRow, JevModeRow, ModelRow, Overlay,
+        ProfileRow, SessionRow, SkillRow, ThemeRow,
     },
     picker::{Picker, PickerItem},
 };
@@ -382,6 +382,43 @@ pub(super) fn delegate_picker(app: &App, width: usize, height: usize) -> Vec<Lin
             );
             line.push(row.summary, muted());
             if row.delegate == current {
+                line.push("  active", accent());
+            }
+            out.push(finish_row(line, selected, width));
+        },
+    )
+}
+
+/// Jev mode picker: how much of Jev the focused session uses from its next
+/// run. `configured` restores the workspace settings. The rung in effect is
+/// marked.
+pub(super) fn jev_mode_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
+    let Some(Overlay::JevMode(picker)) = &app.overlay else {
+        return fit_height(Vec::new(), height);
+    };
+    let current = app
+        .focused()
+        .and_then(|session_id| app.sessions.get(&session_id))
+        .and_then(|session| session.summary.jev_mode);
+    picker_frame(
+        picker,
+        PickerChrome {
+            title: "JEV MODE",
+            hint: "how much of Jev this session uses; Enter applies from the next run, Esc closes",
+            placeholder: "configured, low, medium, high, max, ultrajev",
+            question: None,
+            empty: "  No matching mode.",
+        },
+        width,
+        height,
+        |row: &JevModeRow, selected, out| {
+            let mut line = cursor_prefix(selected);
+            line.push(
+                format!("{:<11}", row.label),
+                if selected { normal().bold() } else { normal() },
+            );
+            line.push(row.summary, muted());
+            if row.mode == current {
                 line.push("  active", accent());
             }
             out.push(finish_row(line, selected, width));

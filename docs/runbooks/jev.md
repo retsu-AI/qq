@@ -153,7 +153,9 @@ above instead of toggling them one by one (ADR-0042, protocol 29):
 `set_jev_mode` on `POST /v1/sessions/jev-mode`, with `mode` set to `low`,
 `medium`, `high`, `max`, or `ultrajev`, or omitted to clear the pin. The
 summary field `jev_mode` carries the pin on every `session_updated` and
-snapshot, so each surface renders the same state from the reducer.
+snapshot, so each surface renders the same state from the reducer. In the
+TUI, `/jev` opens the same ladder for the focused session (`configured`
+clears the pin) and the top row shows `jev max` while a rung is set.
 
 | mode | routing | review | approval delegate |
 | --- | --- | --- | --- |

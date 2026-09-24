@@ -6,8 +6,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use qq_protocol::{
-    AgentProfileId, ApprovalDelegate, ApprovalMode, GuidanceKind, ModelDescriptor, ModelSelection,
-    ReasoningEffort, ServerCapabilities, SessionCommand, SessionId, SessionStatus,
+    AgentProfileId, ApprovalDelegate, ApprovalMode, GuidanceKind, JevMode, ModelDescriptor,
+    ModelSelection, ReasoningEffort, ServerCapabilities, SessionCommand, SessionId, SessionStatus,
 };
 
 use super::{App, PendingIntent, ProviderRemedy};
@@ -15,10 +15,10 @@ use crate::{
     commands::{Command, SlashAction},
     effect::{Effects, Redraw},
     input::{
-        ApprovalModeRow, CommandRow, DelegateRow, EffortRow, HistoryRow, ModelRow, Overlay,
-        PickerOutcome, ProfileRow, SessionConfirm, SessionRow, SkillRow, ThemeRow,
+        ApprovalModeRow, CommandRow, DelegateRow, EffortRow, HistoryRow, JevModeRow, ModelRow,
+        Overlay, PickerOutcome, ProfileRow, SessionConfirm, SessionRow, SkillRow, ThemeRow,
         approval_mode_label, approval_mode_row, command_rows, delegate_label, delegate_row,
-        effort_label, effort_row,
+        effort_label, effort_row, jev_mode_label, jev_mode_row,
     },
     picker::Picker,
     theme::Theme,
@@ -85,6 +85,12 @@ impl App {
                     return Effects::none();
                 };
                 self.accept_delegate(delegate)
+            }
+            (PickerOutcome::Accept, Overlay::JevMode(picker)) => {
+                let Some(mode) = picker.current().map(|row| row.mode) else {
+                    return Effects::none();
+                };
+                self.accept_jev_mode(mode)
             }
             (PickerOutcome::Accept, Overlay::Skills(picker)) => {
                 let Some((name, kind)) = picker
@@ -562,6 +568,57 @@ impl App {
                 self.set_warning(
                     "focus a session to choose who settles its held approvals".to_owned(),
                 );
+                Effects::redraw(Redraw::Immediate)
+            }
+        }
+    }
+
+    // --- jev mode ---
+
+    /// How much of Jev the focused session uses. The runtime reads it when it
+    /// claims the session's next run, so it can be chosen while a run is
+    /// active; that run keeps the plan it compiled. There is no "next
+    /// session" default: the mode belongs to a session that exists.
+    pub(crate) fn open_jev_mode(&mut self) -> Effects {
+        let Some(session) = self
+            .focused()
+            .and_then(|session_id| self.sessions.get(&session_id))
+        else {
+            self.set_warning("focus a session to choose its Jev mode".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        let current = session.summary.jev_mode;
+        let rows: Vec<JevModeRow> = std::iter::once(None)
+            .chain(JevMode::ALL.into_iter().map(Some))
+            .map(jev_mode_row)
+            .collect();
+        let mut picker = Picker::with_items(rows);
+        if let Some(index) = picker.items().iter().position(|row| row.mode == current) {
+            picker.select_item(index);
+        }
+        self.overlay = Some(Overlay::JevMode(picker));
+        Effects::redraw(Redraw::Immediate)
+    }
+
+    fn accept_jev_mode(&mut self, mode: Option<JevMode>) -> Effects {
+        self.overlay = None;
+        let focused = self
+            .focused()
+            .and_then(|session_id| self.sessions.get(&session_id).map(|s| (session_id, s)));
+        match focused {
+            Some((_, session)) if session.summary.jev_mode == mode => {
+                self.set_info(format!(
+                    "session already uses jev mode {}",
+                    jev_mode_label(mode)
+                ));
+                Effects::redraw(Redraw::Immediate)
+            }
+            Some((session_id, _)) => self.send(
+                PendingIntent::SetJevMode { session_id },
+                SessionCommand::SetJevMode { session_id, mode },
+            ),
+            None => {
+                self.set_warning("focus a session to choose its Jev mode".to_owned());
                 Effects::redraw(Redraw::Immediate)
             }
         }

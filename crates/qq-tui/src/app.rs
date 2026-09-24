@@ -26,7 +26,10 @@ use crate::{
     commands::{self, Command, SlashAction, SlashEntry},
     composer::Composer,
     effect::{Effect, Effects, PendingSubmit, Redraw, SubmitTarget},
-    input::{Mode, Overlay, SessionConfirm, approval_mode_label, delegate_label, effort_label},
+    input::{
+        Mode, Overlay, SessionConfirm, approval_mode_label, delegate_label, effort_label,
+        jev_mode_label,
+    },
     picker::Picker,
     terminal,
     theme::Theme,
@@ -254,6 +257,9 @@ enum PendingIntent {
         session_id: SessionId,
     },
     SetDelegate {
+        session_id: SessionId,
+    },
+    SetJevMode {
         session_id: SessionId,
     },
     Delete {
@@ -637,6 +643,18 @@ impl App {
                                     },
                                 );
                             }
+                            CommandOutcome::JevModeSet { session_id, mode } => {
+                                self.set_info_for(
+                                    Some(*session_id),
+                                    match mode {
+                                        None => "jev mode cleared: the configured Jev settings apply from the next run".to_owned(),
+                                        Some(_) => format!(
+                                            "session jev mode set to {} from the next run",
+                                            jev_mode_label(*mode)
+                                        ),
+                                    },
+                                );
+                            }
                             CommandOutcome::SessionDeleted { .. } => {
                                 self.set_warning("session deleted".to_owned());
                             }
@@ -1012,6 +1030,7 @@ impl App {
             | Some(PendingIntent::SetApprovalMode { session_id })
             | Some(PendingIntent::SetEffort { session_id })
             | Some(PendingIntent::SetDelegate { session_id })
+            | Some(PendingIntent::SetJevMode { session_id })
             | Some(PendingIntent::Delete { session_id }) => Some(*session_id),
             Some(PendingIntent::Approval { tool_call_id }) => self
                 .sessions
@@ -1087,6 +1106,7 @@ impl App {
             | Mode::ApprovalModes
             | Mode::Effort
             | Mode::Delegate
+            | Mode::Jev
             | Mode::Skills
             | Mode::Themes
             | Mode::Commands
@@ -1415,6 +1435,7 @@ impl App {
             Command::OpenApprovalModes => self.open_approval_modes(),
             Command::OpenEffort => self.open_effort(),
             Command::OpenDelegate => self.open_delegate(),
+            Command::OpenJevMode => self.open_jev_mode(),
             Command::OpenSkills => self.open_skills(),
             Command::OpenThemes => self.open_themes(),
             Command::OpenSessions => self.open_sessions(),
@@ -2580,6 +2601,7 @@ impl App {
                 | PendingIntent::SetApprovalMode { .. }
                 | PendingIntent::SetEffort { .. }
                 | PendingIntent::SetDelegate { .. }
+                | PendingIntent::SetJevMode { .. }
                 | PendingIntent::Delete { .. }
                 | PendingIntent::Prune => None,
             })

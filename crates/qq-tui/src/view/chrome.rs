@@ -98,6 +98,11 @@ pub(super) fn top_row(app: &App, width: usize) -> Line {
                     focused.map_or(app.reasoning_effort, |session| session.reasoning_effort);
                 effort.map(|effort| (format!("effort {}", effort_label(Some(effort))), accent()))
             }
+            // The configured Jev capabilities are the unremarkable case; the
+            // badge names a session's explicit rung.
+            StatusItem::Jev => focused
+                .and_then(|session| session.jev_mode)
+                .map(|mode| (format!("jev {}", jev_mode_label(Some(mode))), accent())),
             StatusItem::Context => match app.focused_context_usage() {
                 Some((tokens, limit)) if limit > 0 => {
                     let percent = u128::from(tokens) * 100 / u128::from(limit);
@@ -336,6 +341,7 @@ fn hints_for(app: &App) -> Vec<(crate::commands::Command, &'static str)> {
         | Mode::ApprovalModes
         | Mode::Effort
         | Mode::Delegate
+        | Mode::Jev
         | Mode::Skills
         | Mode::Themes
         | Mode::Sessions
