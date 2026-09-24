@@ -28,9 +28,8 @@ export default defineConfig({
       // Starlight prefixes the base itself.
       favicon: '/favicon.svg',
       customCss: ['./src/styles/custom.css'],
-      // Generated pages carry their own editUrl pointing at docs/guide; this
-      // covers the landing page and anything else authored in the site.
-      editLink: { baseUrl: `${site.github}/edit/main/website/` },
+      // Every generated page carries an editUrl into docs/guide; the two
+      // authored pages (landing, 404) opt out, so no default base is needed.
       // Pages are generated at build time, so Git dates would describe the
       // generator's output, not the guide; the edit link is the provenance.
       lastUpdated: false,

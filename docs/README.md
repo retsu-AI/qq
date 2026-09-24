@@ -83,7 +83,8 @@ evidence.
 
 Task-oriented pages for people using QQ, amended in the same PR as the
 behavior they describe: [`guide/README.md`](guide/README.md). Plain
-Markdown so the same files can be mirrored to the GitHub wiki or a docs site.
+Markdown; the site at <https://retsu-ai.github.io/qq/> is generated from
+these files at build time ([`runbooks/website.md`](runbooks/website.md)).
 
 ## Conventions
 

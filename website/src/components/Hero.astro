@@ -16,7 +16,7 @@ const isLanding = Astro.locals.starlightRoute.entry.data.template === 'splash';
     <div class="hero-copy">
       <a class="release-label font-mono" href={`${site.github}/releases`}><span class="version">{site.version}</span><span>Open source. Written in Rust.</span><Icon name="right-arrow" size="16" /></a>
       <h1 id="_top" class="hero-title">AI coding agents<br />in one binary.</h1>
-      <p class="hero-description">A terminal UI, a headless runner, and a local server. One runtime, readable approvals, and a durable record of everything your agent did.</p>
+      <p class="hero-description">A terminal UI, a headless runner, and a local server, sharing one runtime. Every action passes a policy you can read, and every event is kept, so sessions survive restarts and many agents can run at once.</p>
       <div class="hero-actions"><a class="action-primary" href="#install"><Icon name="download" size="18" />Install QQ</a><a class="action-secondary" href={href('docs/')}>Read the docs <Icon name="right-arrow" size="18" /></a></div>
       <InstallTabs />
     </div>

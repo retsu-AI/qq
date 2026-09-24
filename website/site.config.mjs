@@ -12,7 +12,7 @@ export const site = {
   github: 'https://github.com/retsu-AI/qq',
   version: `v${generated.version}`,
   description:
-    'AI coding agents in one binary. An interactive terminal, a headless runner, and a local server — with readable approvals and a durable record.',
+    'AI coding agents in one binary. A terminal UI, a headless runner, and a local server sharing one runtime; every action passes a policy you can read, every event is kept.',
 };
 
 // Mirrors docs/guide/install.md; keep the two in step.
