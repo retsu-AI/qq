@@ -77,3 +77,14 @@ a separate ADR. This inventory introduces none.
 No savings percentage, adaptive router, new cache, context policy or delegation
 default is established by this document. The first experiment can legitimately
 conclude that the existing behavior is cheaper.
+
+## Offline report coverage
+
+`cargo xtask eval report` includes `efficiency_coverage` schema version 1.
+Existing cost/token fields remain Harbor agent aggregates, labelled
+`harbor_agent_only`; they are not complete verified-task billing. The report
+explicitly records missing external-verifier usage, request-level lineage and
+potential failed-stream usage. `verified_task_cost_complete` remains false.
+Duplicate Harbor trial IDs across directories are rejected rather than charged
+twice; distinct retry IDs remain distinct attempts. No runtime telemetry or
+provider request shape changes are involved.
