@@ -7,7 +7,7 @@ guarantees: `retsu-AI/axiom-rs` `ARCHITECTURE.md` (read-only design record).
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | SK0 | ADR-0042, plan, ledger | In review | `devin/1790291851-security-kernel-adr` | Docs only; ADR-0042 reserved in `root.md` |
-| SK1 | Hash-linked events + audit export/verify (A3) | In review | `devin/1790291851-audit-chain` | Schema 36 → 37; stacked on SK0 |
+| SK1 | Hash-linked events + audit export/verify (A3) | In review | `devin/1790292004-audit-chain` | Schema 36 → 37; stacked on SK0 |
 | SK2 | MCP tool-set digest pin + drift quarantine (A2) | Planned | — | `pin` on the server declaration |
 | SK3 | Approval ledger: recorded authority, bound commit, at-most-once (A1) | Planned | — | Schema 37 → 38 |
 
