@@ -24,7 +24,7 @@ use tokio::{
 
 use crate::{
     ClientPort, ClientRequest, ClientUpdate,
-    app::{App, TuiError},
+    app::{App, TrustResolver, TuiError},
     effect::{Effect, Effects, Redraw},
     view::FrameRenderer,
 };
@@ -37,7 +37,11 @@ const ANIMATION_INTERVAL: Duration = Duration::from_millis(crate::app::ANIMATION
 /// when it ended (`None` when the user never had one, or exited on a signal
 /// before the loop started). The terminal is restored before this returns,
 /// so the caller may print to the ordinary screen.
-pub async fn run<P>(client: P, app: App) -> Result<Option<SessionId>, TuiError>
+pub async fn run<P>(
+    client: P,
+    app: App,
+    trust: Option<TrustResolver>,
+) -> Result<Option<SessionId>, TuiError>
 where
     P: ClientPort,
 {
@@ -59,7 +63,10 @@ where
         output,
         terminal::size,
         shutdown,
-        external_editor,
+        Hooks {
+            editor: external_editor,
+            trust,
+        },
     )
     .await?;
     drop(terminal);
@@ -130,6 +137,14 @@ pub(crate) enum EditorError {
 pub(crate) type EditorFuture =
     std::pin::Pin<Box<dyn Future<Output = Result<Option<String>, EditorError>> + Send>>;
 
+/// The blocking work the loop delegates outside the app: an external editor
+/// for the draft and, when this client owns the server, the trust prompt's
+/// answer. Both suspend the loop while they run.
+pub(crate) struct Hooks<X> {
+    pub(crate) editor: X,
+    pub(crate) trust: Option<TrustResolver>,
+}
+
 /// The event loop with every terminal dependency injected so it runs without a
 /// TTY in tests and benchmarks. Returns the final application state so callers
 /// can inspect it after the loop exits.
@@ -143,7 +158,7 @@ pub(crate) async fn run_loop<P, E, W, S, F, X>(
     mut output: W,
     mut size: S,
     shutdown: F,
-    mut editor: X,
+    hooks: Hooks<X>,
 ) -> Result<App, TuiError>
 where
     P: ClientPort,
@@ -153,6 +168,10 @@ where
     F: Future<Output = io::Result<()>>,
     X: FnMut(String) -> EditorFuture,
 {
+    let Hooks {
+        mut editor,
+        mut trust,
+    } = hooks;
     tokio::pin!(shutdown);
     let mut renderer = FrameRenderer::default();
     let mut frame_tick = interval(FRAME_INTERVAL);
@@ -285,6 +304,24 @@ where
                     output.write_all(&bytes).await?;
                     output.flush().await?;
                 }
+                Effect::ResolveTrust(choice) => {
+                    // The root writes the trust state (or admits the files
+                    // for this process) off the executor and computes what
+                    // now loads; nothing else is useful meanwhile, so the
+                    // loop waits like it does for the editor. Client updates
+                    // queue in the channel and drain afterwards.
+                    let outcome = match trust.as_mut() {
+                        Some(resolve) => resolve(choice).await,
+                        None => Err(
+                            "this client is attached to a server on another host; run `qq trust` there"
+                                .to_owned(),
+                        ),
+                    };
+                    match outcome {
+                        Ok(resolved) => queue.extend(app.apply_trust_resolved(choice, resolved)),
+                        Err(reason) => queue.extend(app.note_trust_failure(&reason)),
+                    }
+                }
                 Effect::Quit => quit = true,
             }
         }
@@ -321,8 +358,9 @@ fn apply_send_failure(
             result: Err(error),
         },
         ClientRequest::Snapshot(_) => ClientUpdate::SnapshotFailed(error),
-        // A refresh that never left keeps the document the app already has.
-        ClientRequest::Capabilities => return Effects::none(),
+        // A refresh that never left keeps the document (or catalog) the app
+        // already has.
+        ClientRequest::Capabilities | ClientRequest::Models(_) => return Effects::none(),
     };
     app.apply_client_update(update)
 }

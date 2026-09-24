@@ -1564,6 +1564,144 @@ fn project_trust_gates_sensitive_changes_and_ignores_safe_edits() {
 }
 
 #[test]
+fn pending_trust_scans_without_writing_and_declarations_name_what_is_admitted() {
+    // OB7: the TUI prompt reads the pending set before the user decides.
+    let tree = TempTree::new();
+    let config = tree.write(
+        "work/.qq/config.ron",
+        r#"(
+            version: 1,
+            model: "anthropic/claude-sonnet-5",
+            providers: {
+                "gateway": Custom(connection: (base_url: "https://gw.example/v1", api: OpenAiResponses, auth: Bearer(Stored("gateway/default"))), models: {"m": (name: "M")}),
+                "openai": OpenAi(api_key: Env("OPENAI_API_KEY")),
+            },
+            mcp: {
+                "linear": Http(url: "https://mcp.linear.app/mcp", bearer: Some(Stored("linear/default"))),
+                "executor": Stdio(command: "executor", args: ["mcp", "--token", "not-shown"]),
+            },
+            packs: {"reviewer": Pack(path: "packs/reviewer")},
+            policy: (allow_tools: ["read_file", "list_files"], allow_shell_prefixes: ["cargo test", "cargo fmt", Remove("rm")], allow_hosts: ["docs.rs"]),
+        )"#,
+    );
+    let request = LoadRequest::new(tree.path("work"));
+    let loader = tree.loader();
+
+    let pending = loader.pending_trust(&request).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].source().path(), Some(config.as_path()));
+    let rendered: Vec<String> = pending[0]
+        .declarations()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        rendered,
+        [
+            "model anthropic/claude-sonnet-5",
+            "provider gateway (custom)",
+            "provider openai (openai)",
+            "MCP executor → executor",
+            "MCP linear → https://mcp.linear.app/mcp",
+            "packs: reviewer",
+            "grants: 2 tools, 2 shell prefixes, 1 host",
+        ]
+    );
+    // Nothing secret-shaped and no argument list leaks into the prompt.
+    let joined = rendered.join("\n");
+    assert!(!joined.contains("not-shown"), "{joined}");
+    assert!(!joined.contains("gateway/default"), "{joined}");
+    assert!(!joined.contains("OPENAI_API_KEY"), "{joined}");
+
+    // Read-only: the same files are pending on the next scan and the load
+    // still fails, and the pending entry equals what the load reports.
+    assert_eq!(loader.pending_trust(&request).unwrap(), pending);
+    let ConfigError::TrustRequired {
+        pending: from_load, ..
+    } = loader.load_for_client(&request).unwrap_err()
+    else {
+        panic!("expected TrustRequired");
+    };
+    assert_eq!(from_load, pending);
+    assert!(!tree.path("data/trust.ron").exists());
+
+    // Granting records exactly the scanned set and clears it.
+    assert_eq!(loader.grant_pending_trust(&request).unwrap(), pending);
+    assert!(loader.pending_trust(&request).unwrap().is_empty());
+}
+
+#[test]
+fn process_trust_admits_pending_files_without_writing_and_repends_on_edit() {
+    // OB7 "this session": the request carries path + digest; the load
+    // succeeds, the durable state is untouched, and a change to the
+    // sensitive content invalidates the grant.
+    let tree = TempTree::new();
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6", max_output_tokens: 10)"#,
+    );
+    let request = LoadRequest::new(tree.path("work"));
+    let loader = tree.loader();
+    let pending = loader.pending_trust(&request).unwrap();
+    assert_eq!(pending.len(), 1);
+    let grants: Vec<ProcessTrust> = pending
+        .iter()
+        .map(|item| ProcessTrust {
+            path: item.source().path().unwrap().to_owned(),
+            digest: item.digest().to_owned(),
+        })
+        .collect();
+
+    assert!(matches!(
+        loader.load_for_client(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    let trusted = request.clone().with_process_trust(grants.clone());
+    let snapshot = loader.load_for_client(&trusted).unwrap();
+    assert_eq!(
+        snapshot.model().map(|route| route.as_str()),
+        Some("openai/gpt-5.6")
+    );
+    assert_eq!(snapshot.max_output_tokens(), 10);
+    assert!(loader.pending_trust(&trusted).unwrap().is_empty());
+    // Nothing durable: the plain request still needs trust and no state
+    // file was written.
+    assert!(matches!(
+        loader.load_for_client(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    assert!(!tree.path("data/trust.ron").exists());
+
+    // A safe edit keeps the digest; a sensitive edit re-pends.
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6", max_output_tokens: 20)"#,
+    );
+    assert_eq!(
+        loader
+            .load_for_client(&trusted)
+            .unwrap()
+            .max_output_tokens(),
+        20
+    );
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, model: "openai/gpt-6-astra", max_output_tokens: 20)"#,
+    );
+    assert!(matches!(
+        loader.load_for_client(&trusted),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    assert_eq!(loader.pending_trust(&trusted).unwrap().len(), 1);
+
+    // `qq trust` after a session grant still records the file durably.
+    let granted = loader.grant_pending_trust(&trusted).unwrap();
+    assert_eq!(granted.len(), 1);
+    assert!(tree.path("data/trust.ron").exists());
+    assert!(loader.load_for_client(&request).is_ok());
+}
+
+#[test]
 fn literal_secret_scope_and_debug_output_are_safe() {
     let tree = TempTree::new();
     tree.write(

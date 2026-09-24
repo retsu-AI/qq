@@ -703,6 +703,46 @@ pub(super) fn approval_block(app: &App, width: usize) -> Vec<Line> {
 /// Diff rows an inline approval shows before offering to scroll.
 const MAX_APPROVAL_DIFF_ROWS: usize = 12;
 
+/// The trust prompt drawn in the empty transcript when the project's
+/// configuration declares sensitive sections no trust record covers: the
+/// title, each pending file with what it declares, and the three answers.
+/// Same shape as the approval block so the two decisions read alike.
+pub(super) fn trust_block(app: &App, width: usize) -> Vec<Line> {
+    let mut lines = Vec::new();
+    let mut title = Line::styled("  ◇ ", warning());
+    title.push(
+        "this project's configuration needs your trust",
+        warning().bold(),
+    );
+    lines.push(truncate_line(title, width));
+    for notice in &app.pending_trust {
+        let mut path = Line::styled("    ", muted());
+        path.push(
+            elide_path(&notice.path, width.saturating_sub(4)),
+            normal().bold(),
+        );
+        lines.push(truncate_line(path, width));
+        for declaration in &notice.declarations {
+            let mut line = Line::styled("      ", muted());
+            line.push(declaration.as_str(), normal());
+            lines.push(truncate_line(line, width));
+        }
+    }
+    let mut choices = Line::styled("    ", muted());
+    for (index, (key, label)) in [("t", "trust"), ("s", "this session"), ("q", "quit")]
+        .into_iter()
+        .enumerate()
+    {
+        if index > 0 {
+            choices.push("   ", muted());
+        }
+        choices.push(key, accent().bold());
+        choices.push(format!(" {label}"), muted());
+    }
+    lines.push(truncate_line(choices, width));
+    lines
+}
+
 /// Prompt-history search: newest first, fuzzy filtered by what the user types.
 pub(super) fn history_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(picker) = app.history_picker() else {

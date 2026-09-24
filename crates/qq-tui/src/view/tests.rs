@@ -2939,6 +2939,111 @@ fn empty_state_names_the_missing_credential_for_the_configured_model() {
 }
 
 #[test]
+fn an_untrusted_project_renders_the_trust_block_and_nothing_else_to_do() {
+    // OB7: the empty transcript is the prompt; the composer is disabled with
+    // its own placeholder; the rule offers help only, like an approval; the
+    // OB1 `/models` guidance waits until the configuration has loaded.
+    let mut app = empty_workspace_app(TuiOptions {
+        pending_trust: vec![
+            crate::PendingTrustNotice {
+                path: "/home/me/repo/.qq/config.ron".to_owned(),
+                declarations: vec![
+                    "model anthropic/claude-sonnet-5".to_owned(),
+                    "MCP linear → https://mcp.linear.app/mcp".to_owned(),
+                    "MCP executor → executor".to_owned(),
+                    "provider gateway (custom)".to_owned(),
+                    "grants: 2 tools, 3 shell prefixes".to_owned(),
+                ],
+            },
+            crate::PendingTrustNotice {
+                path: "/home/me/repo/sub/.qq/config.d/10-team.ron".to_owned(),
+                declarations: vec!["packs: reviewer".to_owned()],
+            },
+        ],
+        ..TuiOptions::default()
+    });
+    let mut renderer = FrameRenderer::default();
+    let frame = renderer.frame_and_commit(&mut app, 100, 18);
+    let rows = frame_rows(&frame);
+    let header = rows
+        .iter()
+        .position(|row| row.contains("◇ this project's configuration needs your trust"))
+        .unwrap_or_else(|| panic!("no trust header in:\n{}", rows.join("\n")));
+    let header_style = frame[header]
+        .spans
+        .iter()
+        .find(|span| span.text.contains("needs your trust"))
+        .map(|span| span.style)
+        .expect("header span");
+    assert_eq!(header_style, warning().bold());
+    let expected = [
+        "    /home/me/repo/.qq/config.ron",
+        "      model anthropic/claude-sonnet-5",
+        "      MCP linear → https://mcp.linear.app/mcp",
+        "      MCP executor → executor",
+        "      provider gateway (custom)",
+        "      grants: 2 tools, 3 shell prefixes",
+        "    /home/me/repo/sub/.qq/config.d/10-team.ron",
+        "      packs: reviewer",
+        "    t trust   s this session   q quit",
+    ];
+    for (offset, text) in expected.iter().enumerate() {
+        assert_eq!(
+            rows[header + 1 + offset].trim_end(),
+            *text,
+            "row {} of:\n{}",
+            header + 1 + offset,
+            rows.join("\n")
+        );
+    }
+    let joined = rows.join("\n");
+    assert!(
+        !joined.contains("creates the first session"),
+        "no Alt-N hint before trust:\n{joined}"
+    );
+    assert!(
+        !joined.contains("choose a model with /models"),
+        "no model guidance before trust:\n{joined}"
+    );
+    let rule = rows.len() - 2;
+    assert!(rows[rule].contains("F1 help"), "{:?}", rows[rule]);
+    assert!(!rows[rule].contains("commands"), "{:?}", rows[rule]);
+    assert!(
+        rows[rule + 1].starts_with(" ✎ Answer the trust prompt above"),
+        "{:?}",
+        rows[rule + 1]
+    );
+
+    // Resolved: the block is gone, the notice names the count, and the OB1
+    // guidance takes over.
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Char('t'),
+        KeyModifiers::NONE,
+    )));
+    app.apply_trust_resolved(
+        crate::TrustChoice::Persist,
+        crate::TrustResolved {
+            trusted: vec![
+                "/home/me/repo/.qq/config.ron".to_owned(),
+                "/home/me/repo/sub/.qq/config.d/10-team.ron".to_owned(),
+            ],
+            ..crate::TrustResolved::default()
+        },
+    );
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 18));
+    let joined = rows.join("\n");
+    assert!(!joined.contains("needs your trust"), "{joined}");
+    assert!(joined.contains("trusted 2 files"), "{joined}");
+    assert!(joined.contains("creates the first session."), "{joined}");
+    assert!(rows[0].contains("no model"), "{:?}", rows[0]);
+    assert!(
+        rows[rows.len() - 1].starts_with(" › Ask QQ..."),
+        "{:?}",
+        rows[rows.len() - 1]
+    );
+}
+
+#[test]
 fn a_client_without_a_model_shows_no_model_and_the_picker_hint() {
     // OB1: `(version: 1)`. Top row says `no model`; the composer rule says
     // where to get one; the empty state still offers Alt-N.

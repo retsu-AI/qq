@@ -13,7 +13,7 @@ below, newest last.
 | OB4 | `qq doctor` | Shipped (#138) | `feat/eng-878-doctor` | ENG-878 |
 | OB5 | `qq init`; `config paths` marks existing files | Shipped (#147) | `feat/eng-879-init` | ENG-879 |
 | OB6 | `install.sh`, Homebrew tap, Nix package, binstall | Shipped (#139) | `feat/eng-880-install-paths` | ENG-880; tap repo + `HOMEBREW_TAP_TOKEN` are owner setup |
-| OB7 | In-TUI trust prompt | Planned | | ENG-881; needs ADR + protocol row in root |
+| OB7 | In-TUI trust prompt | In review | `feat/eng-881-tui-trust-prompt` | ENG-881; ADR-0042, no protocol change |
 | OB8 | First-session guidance; `qq run` denial hint | Shipped (#146) | `feat/eng-882-first-session-guidance` | ENG-882 |
 | OB9 | Missing MCP credential degrades the server | Shipped (#148) | `fix/eng-861-mcp-credential-degrade` | ENG-861 |
 | OB10 | Docs-truth test; CHANGELOG at release | In review | `feat/eng-883-docs-truth` | ENG-883 |
@@ -258,3 +258,46 @@ xtask 5. Gates: fmt, clippy `-D warnings`, `cargo test --workspace`, `cargo
 xtask release --help` green. Docs: `runbooks/release.md` (changelog step and
 section), `runbooks/website.md`, `guide/cli.md`. OB12 marked shipped (#156).
 No hot-path or protocol change.
+
+### 2026-09-24 — OB7 in-TUI trust prompt in review
+
+Branch `feat/eng-881-tui-trust-prompt` off `main` (#156). Decision in
+ADR-0042: client-side prompt fed by root-computed data, **no protocol
+change** (`PROTOCOL_VERSION` stays 28); the plan's "needs a protocol
+addition" note is superseded. `qq-config`: `ConfigLoader::pending_trust`
+(read-only scan shared with `grant_pending_trust` via
+`scan_pending_trust`), `PendingTrust::declarations()` built by
+`Document::sensitive_declarations` (`TrustDeclaration`: route, provider
+name+kind, MCP name+command/url, grant counts, pack ids; never a secret,
+argument, or env value), and `LoadRequest::with_process_trust(Vec<ProcessTrust>)`
+admitted into the in-memory `TrustState` at load (no write). Root:
+`RuntimeFactory::trust_for_process` / `process_trust` (mutex on the inner),
+applied in `request_for_workspace`; `PlanKey.process_trust:
+Option<ProcessTrustFingerprint>` (SHA-256 of sorted path+digest) so a
+pre-grant compile is never served after `s`; `resolve_trust(Persist |
+Session)` runs the same `grant_pending_trust` as `qq trust` or the process
+grant, then reloads and recomputes `TuiModelState` (extracted from
+`interactive()` so startup and post-trust agree). `interactive()` matches
+`TrustRequired` only on its own load, opens the TUI with
+`TuiOptions.pending_trust`, and passes a `TrustResolver` that refuses with
+"run `qq trust` on the server host" when `server::reserve` returned
+`Existing`. `qq-tui`: `Mode::Trust` (after overlays, before approval),
+`t`/`s` → `Effect::ResolveTrust`, `q`/Esc → quit, other keys swallowed;
+`trust_block` in the empty transcript (approval-block style),
+`ComposerMode::Trust` placeholder `✎ Answer the trust prompt above`, rule
+`F1 help` only; `apply_trust_resolved` installs model/catalog/remedies,
+notices `trusted N file(s)` / `trusted for this session`, and re-requests
+`Capabilities` + the new client-internal `ClientRequest::Models`. Tests: 2
+qq-config, 3 qq bin (plan key, resolve both choices, plan-cache slot), 5
+qq-tui (2 app, 1 view, 2 loop). Gates green: fmt, clippy `-D warnings`,
+`cargo test --workspace` (qq-config 100, qq bin 229, qq-tui 328). Manual
+pty smoke in an isolated `HOME` with `.qq/config.ron` declaring a model, an
+HTTP MCP server, and one grant: the block paints with three declaration
+lines; `s` clears it, shows `trusted for this session`, the OB2 remedy
+takes over, no `trust.ron`; `t` writes `trust.ron` with the file's digest
+and the next launch does not prompt; `qq ask` still exits with the
+`TrustRequired` text. Docs: `guide/permissions.md`, `guide/tui.md`,
+`guide/troubleshooting.md`, `design/tools.md`. Also marked OB12 shipped
+(#156). No hot-path change: the scan runs once per prompt on the blocking
+pool. Follow-up: a remote client with ADR-0015 enrollment could be offered a
+server-side trust command.

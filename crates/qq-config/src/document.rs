@@ -23,7 +23,7 @@ use super::{
     MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES, McpServerConfig, McpTransport,
     ModelMetadata, ModelPricing, ModelRoute, PolicyGrants, ProfileApprovalMode, ProviderAccess,
     ProviderApi, ProviderConfig, ProviderKind, RuntimeOverrides, SecretRef, SourceIdentity,
-    SourceKind, SourceReport, WorkspaceGrant,
+    SourceKind, SourceReport, TrustDeclaration, WorkspaceGrant,
 };
 
 pub(super) fn deserialize_unique_btree_map<'de, D, K, V>(
@@ -825,6 +825,121 @@ impl Document {
             }
         }
         sections
+    }
+
+    /// What the sensitive sections declare, as the trust prompt shows them:
+    /// routes, provider names and kinds, MCP servers with their command or
+    /// URL, grant counts, pack ids. Never a secret, an argument list, or an
+    /// environment value; those stay in the file for the user to read.
+    pub(super) fn sensitive_declarations(&self) -> Vec<TrustDeclaration> {
+        let mut declarations = Vec::new();
+        let route = |field: &StringField, key: &'static str| match field {
+            StringField::Set(route) => Some(TrustDeclaration::Route {
+                key,
+                route: route.clone(),
+            }),
+            StringField::Clear => Some(TrustDeclaration::Other(key)),
+            StringField::Missing => None,
+        };
+        declarations.extend(route(&self.organization, "organization"));
+        declarations.extend(route(&self.model, "model"));
+        declarations.extend(route(&self.worker_model, "worker_model"));
+        declarations.extend(route(&self.reviewer_model, "reviewer_model"));
+        if self.delegation.is_present() {
+            declarations.push(TrustDeclaration::Other("delegation"));
+        }
+        if self.audit.is_present() {
+            declarations.push(TrustDeclaration::Other("audit"));
+        }
+        if self.jev_review.is_present() {
+            declarations.push(TrustDeclaration::Other("jev_review"));
+        }
+        if self.jev_routing.is_present() {
+            declarations.push(TrustDeclaration::Other("jev_routing"));
+        }
+        if self.jev_approval.is_present() {
+            declarations.push(TrustDeclaration::Other("jev_approval"));
+        }
+        if self.approval_delegate.is_present() {
+            declarations.push(TrustDeclaration::Other("approval_delegate"));
+        }
+        if self.reasoning_effort.is_present() {
+            declarations.push(TrustDeclaration::Other("reasoning_effort"));
+        }
+        match &self.providers {
+            Field::Missing => {}
+            Field::Clear => declarations.push(TrustDeclaration::Other("providers")),
+            Field::Set(providers) => {
+                for (name, patch) in &providers.0 {
+                    let kind = match patch {
+                        ProviderEntryPatch::OpenAi { .. } => "openai",
+                        ProviderEntryPatch::OpenAiCodex { .. } => "openai-codex",
+                        ProviderEntryPatch::Anthropic { .. } => "anthropic",
+                        ProviderEntryPatch::Google { .. } => "google",
+                        ProviderEntryPatch::XAi { .. } => "xai",
+                        ProviderEntryPatch::LiteLlm { .. } => "litellm",
+                        ProviderEntryPatch::AmazonBedrock { .. } => "bedrock",
+                        ProviderEntryPatch::AmazonBedrockMantle { .. } => "bedrock-mantle",
+                        ProviderEntryPatch::Custom { .. } => "custom",
+                        ProviderEntryPatch::Remove => "removed",
+                    };
+                    declarations.push(TrustDeclaration::Provider {
+                        name: name.clone(),
+                        kind,
+                    });
+                }
+            }
+        }
+        match &self.mcp {
+            Field::Missing => {}
+            Field::Clear => declarations.push(TrustDeclaration::Other("mcp")),
+            Field::Set(servers) => {
+                for (name, patch) in &servers.0 {
+                    declarations.push(match patch {
+                        McpServerPatch::Stdio { command, .. } => TrustDeclaration::McpStdio {
+                            name: name.clone(),
+                            command: command.clone(),
+                        },
+                        McpServerPatch::Http { url, .. } => TrustDeclaration::McpHttp {
+                            name: name.clone(),
+                            url: url.clone(),
+                        },
+                        McpServerPatch::Remove => {
+                            TrustDeclaration::McpRemoved { name: name.clone() }
+                        }
+                    });
+                }
+            }
+        }
+        if self.profiles.is_present() {
+            declarations.push(TrustDeclaration::Other("profiles"));
+        }
+        match &self.packs {
+            Field::Missing => {}
+            Field::Clear => declarations.push(TrustDeclaration::Other("packs")),
+            Field::Set(packs) => {
+                declarations.push(TrustDeclaration::Packs(packs.0.keys().cloned().collect()));
+            }
+        }
+        if let Some(policy) = &self.policy
+            && policy.has_grants()
+        {
+            let count = |entries: &Option<Vec<GrantEntry>>| {
+                entries.as_ref().map_or(0, |entries| {
+                    entries
+                        .iter()
+                        .filter(|entry| matches!(entry, GrantEntry::Allow(_)))
+                        .count()
+                })
+            };
+            declarations.push(TrustDeclaration::Grants {
+                tools: count(&policy.allow_tools),
+                shell_prefixes: count(&policy.allow_shell_prefixes),
+                hosts: count(&policy.allow_hosts),
+                env: count(&policy.shell_env),
+            });
+        }
+        declarations
     }
 
     /// Explicit pack declarations, for the loader to resolve against the

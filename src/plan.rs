@@ -59,6 +59,47 @@ pub struct PlanKey {
     pub jev_routing: Option<bool>,
     pub approval_delegate: Option<qq_config::ApprovalDelegateSetting>,
     pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
+    /// Fingerprint of the request's process-scoped trust grants, so a plan
+    /// compiled while a project file was untrusted (its sensitive sections
+    /// withheld) is not served after the user trusts it for the session.
+    /// `None` when the request carries no such grant.
+    pub process_trust: Option<ProcessTrustFingerprint>,
+}
+
+/// SHA-256 over the sorted `(path, digest)` grants of a request. Paths and
+/// digests are not secrets, but the key is compared often and cloned into
+/// cache slots; a fixed 32 bytes keeps that cheap however many files a
+/// project declares.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ProcessTrustFingerprint([u8; 32]);
+
+impl ProcessTrustFingerprint {
+    /// `None` for an empty grant set so a request without process trust keys
+    /// exactly as before.
+    #[must_use]
+    pub fn of(grants: &[qq_config::ProcessTrust]) -> Option<Self> {
+        use sha2::Digest as _;
+        if grants.is_empty() {
+            return None;
+        }
+        let mut hasher = sha2::Sha256::new();
+        for grant in grants {
+            hasher.update(grant.path.as_os_str().as_encoded_bytes());
+            hasher.update([0]);
+            hasher.update(grant.digest.as_bytes());
+            hasher.update([0]);
+        }
+        Some(Self(hasher.finalize().into()))
+    }
+}
+
+impl std::fmt::Debug for ProcessTrustFingerprint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in &self.0[..4] {
+            write!(formatter, "{byte:02x}")?;
+        }
+        formatter.write_str("…")
+    }
 }
 
 impl std::fmt::Debug for PlanKey {
@@ -73,6 +114,7 @@ impl std::fmt::Debug for PlanKey {
                 "explicit_config_content",
                 &self.explicit_config_content.as_ref().map(|_| "<redacted>"),
             )
+            .field("process_trust", &self.process_trust)
             .finish()
     }
 }
@@ -600,7 +642,40 @@ mod tests {
             jev_routing: None,
             approval_delegate: None,
             reasoning_effort: None,
+            process_trust: None,
         }
+    }
+
+    #[test]
+    fn plan_keys_differ_when_process_trust_differs() {
+        // OB7: a "this session" grant changes which sensitive sections load,
+        // so it must change the cache slot too; otherwise a plan compiled
+        // while the project file was withheld would be served after the
+        // grant. An empty grant set keys exactly as no grant.
+        let workspace = Path::new("/tmp/qq-plan-key");
+        let plain = key(workspace, "openai/gpt-5.6");
+        let grant = |digest: &str| qq_config::ProcessTrust {
+            path: workspace.join(".qq/config.ron"),
+            digest: digest.to_owned(),
+        };
+        let trusted = PlanKey {
+            process_trust: ProcessTrustFingerprint::of(&[grant("a".repeat(64).as_str())]),
+            ..key(workspace, "openai/gpt-5.6")
+        };
+        let retrusted = PlanKey {
+            process_trust: ProcessTrustFingerprint::of(&[grant("b".repeat(64).as_str())]),
+            ..key(workspace, "openai/gpt-5.6")
+        };
+        assert_eq!(ProcessTrustFingerprint::of(&[]), None);
+        assert_ne!(plain, trusted);
+        assert_ne!(trusted, retrusted);
+        assert_eq!(
+            trusted,
+            PlanKey {
+                process_trust: ProcessTrustFingerprint::of(&[grant("a".repeat(64).as_str())]),
+                ..key(workspace, "openai/gpt-5.6")
+            }
+        );
     }
 
     /// Compiles an embedded plan for `workspace`; `model` varies the digest.
