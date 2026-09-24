@@ -1,0 +1,34 @@
+[
+  {
+    "label": "Getting started",
+    "items": [
+      { "page": "index", "label": "Introduction", "description": "What QQ is, the two things it needs, and where its files live." },
+      { "page": "install", "label": "Install", "description": "Install script, Homebrew, Nix, cargo binstall, release archives, or build from source." },
+      { "page": "quickstart", "label": "Quickstart", "description": "From an installed qq to a working agent: a credential, a model, and a first session." }
+    ]
+  },
+  {
+    "label": "Using QQ",
+    "items": [
+      { "page": "providers", "label": "Providers and credentials", "description": "Connect OpenAI, Anthropic, Google, xAI, Codex, Bedrock, or a gateway, and where credentials are kept." },
+      { "page": "permissions", "label": "Permissions and trust", "description": "What the agent may do without asking, approval modes, and trusting project configuration." },
+      { "page": "tui", "label": "The TUI", "description": "The interactive terminal: layout, sessions, approvals, commands, and keys." },
+      { "page": "headless", "label": "Headless: ask, run, serve", "description": "Run agents from scripts and CI with qq ask, qq run, and qq serve; exit codes and JSONL output." },
+      { "page": "mcp", "label": "MCP servers", "description": "Give the agent more tools with Model Context Protocol servers over stdio or HTTP." }
+    ]
+  },
+  {
+    "label": "Reference",
+    "items": [
+      { "page": "configuration", "label": "Configuration", "description": "Every setting in config.ron: files and precedence, models, providers, policy, MCP, profiles." },
+      { "page": "cli", "label": "CLI", "description": "Every qq command and flag." }
+    ]
+  },
+  {
+    "label": "Help",
+    "items": [
+      { "page": "troubleshooting", "label": "Troubleshooting", "description": "Error messages you may see, what they mean, and the fix." },
+      { "page": "faq", "label": "FAQ", "description": "Short answers to common questions about QQ." }
+    ]
+  }
+]

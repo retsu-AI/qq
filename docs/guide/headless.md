@@ -32,6 +32,12 @@ to stdout.
 | `auto` | edits inside the workspace, safe shell (`allow` verdict or a grant), MCP and granted hosts run; `prompt`-verdict shell is denied; `forbidden` refused |
 | `full` | everything except `forbidden` shell shapes |
 
+Under `read-only`, when at least one held call was denied, a text-mode run
+ends with `held calls were denied under --approval read-only; rerun with
+--approval auto to allow workspace edits` on stderr (after the answer, before
+the resume hint). The exit status is unchanged; JSONL output carries no hint
+because each denied call is already in its `tool_call_finished` record.
+
 Between `auto` and `full`, grant exactly what the task needs:
 
 ```sh

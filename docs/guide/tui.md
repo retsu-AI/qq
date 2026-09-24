@@ -17,7 +17,7 @@ works against a server started with `qq serve`, locally or remote.
  │                           │
  │                           │  The test expected seconds but the parser…
  ─────────────────────────────────────────────────────────────────────────────────────────
- running · 12s · first token 0.8s                        ^? help  ^K commands  ^O detail
+ running · 12s · first token 0.8s                         ? help  ^K commands  ^O detail
  › Ask QQ...
 ```
 
@@ -34,7 +34,8 @@ works against a server started with `qq serve`, locally or remote.
   output tail, an MCP call its arguments). `Ctrl-O` folds finished blocks
   to one row each; `Alt-R` shows or hides reasoning.
 - **Rule**: running activity, elapsed time, time to first token, or the last
-  notice; key hints for the current state at the right.
+  notice; key hints for the current state at the right. The help hint reads
+  `? help` while the composer is empty and `F1 help` once you have typed.
 - **Composer**: type and press `Enter`. `Shift-Enter` or `Alt-Enter` inserts
   a newline. `Alt-E` or `/editor` opens the draft in `$EDITOR`.
 
@@ -94,6 +95,7 @@ press `Enter`, press a number to pick an option, or `Esc` to decline.
 | model | `/models` | the focused session, or the default for the next `/new`; `Ctrl-N` inside the picker creates a session with the highlighted model |
 | agent profile | `/profile` | the focused idle session, or the default for new sessions; top row shows `as NAME` |
 | approval mode | `/approval` | the focused session from its next held call, or the default for new sessions |
+| approval delegate | `/delegate` | the focused session from its next held call, running or not: `configured` (the workspace's `approval_delegate`), `by_mode`, `on`, or `off` — the "stop delegating" switch. Nothing is written to config; children spawned afterwards inherit it. Top row shows `MODE · delegate off` while an override is set |
 | reasoning effort | `/effort` | the focused idle session's next run, or the default for new sessions; rows are the levels the model's catalog entry advertises (plus `default` and `none`), or every level when it advertises none; a pin outside an advertised ladder fails the run at plan time naming the accepted levels |
 | theme | `/theme` | live preview; `Enter` keeps it for the session, `Esc` restores; the notice shows the `tui.ron` line to make it permanent |
 
@@ -119,6 +121,23 @@ run` refuse to start.
   session.`; `Alt-N` repeats the same line as a warning. Add the credential
   in another terminal and start `qq` again — the credential check runs at
   startup.
+
+## Your first session
+
+The first session in a workspace opens with a short list in the transcript:
+
+```
+  Try one of these:
+    /models    choose a model
+    /approval  choose an approval mode
+    /skills    list workspace commands and skills
+    @path      mention a file in your prompt
+```
+
+It disappears as soon as you send your first prompt and never shows for a
+second session; those read `Ask QQ to begin this session.` instead. When the
+configured provider still needs a credential, that remedy is printed above
+the list.
 
 ## Prompts
 
@@ -161,7 +180,7 @@ searchable palette that runs the highlighted command on `Enter`.
 | cancel run | | `Ctrl-X`, `Esc Esc` |
 | interrupt and steer | | `Alt-S` |
 | queue draft / edit queued | | `Ctrl-Enter`, `Ctrl-Q` / `Alt-Up` |
-| model / profile / approval / theme | `/models`, `/profile`, `/approval`, `/theme` | |
+| model / profile / approval / delegate / theme | `/models`, `/profile`, `/approval`, `/delegate`, `/theme` | |
 | skills and commands | `/skills` | |
 | tool detail / select call | | `Ctrl-O` / `Ctrl-Up`, `Ctrl-Down` |
 | reasoning | | `Alt-R` |

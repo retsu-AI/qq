@@ -481,16 +481,23 @@ fn jev_is_off_by_default_and_can_be_explicitly_disabled() {
     let bare = tree.loader().load(&tree.request()).unwrap();
     assert_eq!(bare.jev_review(), JevReviewMode::Off);
     assert!(!bare.jev_routing());
+    assert!(!bare.jev_approval());
     assert!(bare.provenance().jev_review().is_none());
+    assert!(bare.provenance().jev_approval().is_none());
 
-    let enabled = tree
-        .request()
-        .with_explicit_content(r#"(version: 1, jev_review: final, jev_routing: true)"#);
+    let enabled = tree.request().with_explicit_content(
+        r#"(version: 1, jev_review: final, jev_routing: true, jev_approval: true)"#,
+    );
     let snapshot = tree.loader().load(&enabled).unwrap();
     assert_eq!(snapshot.jev_review(), JevReviewMode::Final);
     assert!(snapshot.jev_routing());
+    assert!(snapshot.jev_approval());
     assert_eq!(
         snapshot.provenance().jev_review().unwrap().kind(),
+        SourceKind::Inline
+    );
+    assert_eq!(
+        snapshot.provenance().jev_approval().unwrap().kind(),
         SourceKind::Inline
     );
 
@@ -501,16 +508,231 @@ fn jev_is_off_by_default_and_can_be_explicitly_disabled() {
                 RuntimeOverrides::new()
                     .with_model("openai/test-model")
                     .with_jev_review(JevReviewMode::Off)
-                    .with_jev_routing(false),
+                    .with_jev_routing(false)
+                    .with_jev_approval(false),
             ),
         )
         .unwrap();
     assert_eq!(disabled.jev_review(), JevReviewMode::Off);
     assert!(!disabled.jev_routing());
+    assert!(!disabled.jev_approval());
     assert_eq!(
         disabled.provenance().jev_review().unwrap().kind(),
         SourceKind::Runtime
     );
+    assert_eq!(
+        disabled.provenance().jev_approval().unwrap().kind(),
+        SourceKind::Runtime
+    );
+}
+
+#[test]
+fn jev_approval_is_independent_of_review_and_routing_and_requires_trust() {
+    // DA5 / ADR-0041: a third Jev capability. Turning it on enables neither
+    // review nor routing; a project file or profile that sets it is sensitive.
+    let tree = TempTree::new();
+    let alone = tree
+        .loader()
+        .load(
+            &tree
+                .request()
+                .with_explicit_content(r#"(version: 1, jev_approval: true)"#),
+        )
+        .unwrap();
+    assert!(alone.jev_approval());
+    assert_eq!(alone.jev_review(), JevReviewMode::Off);
+    assert!(!alone.jev_routing());
+
+    tree.write(
+        "work/qq.ron",
+        r#"(version: 1, jev_approval: true,
+        profiles: { "hands-off": Profile(approval_mode: ask, jev_approval: true) })"#,
+    );
+    let request = tree.request();
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    tree.loader().grant_pending_trust(&request).unwrap();
+    let trusted = tree.loader().load(&request).unwrap();
+    assert!(trusted.jev_approval());
+    assert_eq!(
+        trusted.profile("hands-off").unwrap().jev_approval(),
+        Some(true)
+    );
+    assert!(
+        trusted
+            .source_reports()
+            .iter()
+            .any(|report| report.touched().contains(&ConfigKey::JevApproval))
+    );
+    tree.write("work/qq.ron", r#"(version: 1, jev_approval: false)"#);
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+}
+
+#[test]
+fn approval_timeout_is_absent_by_default_and_bounded_when_set() {
+    // DA2 / RR9: absent is no server deadline. A set value reaches the
+    // snapshot as a duration, is bounded, and needs no trust because it only
+    // shortens a wait.
+    let tree = TempTree::new();
+    let bare = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(bare.approval_timeout(), None);
+    assert!(bare.provenance().approval_timeout().is_none());
+
+    let bounded = tree
+        .loader()
+        .load(
+            &tree
+                .request()
+                .with_explicit_content(r#"(version: 1, approval_timeout_seconds: 120)"#),
+        )
+        .unwrap();
+    assert_eq!(
+        bounded.approval_timeout(),
+        Some(std::time::Duration::from_secs(120))
+    );
+    assert_eq!(
+        bounded.provenance().approval_timeout().unwrap().kind(),
+        SourceKind::Inline
+    );
+
+    // An untrusted project file may set it: it adds no authority.
+    tree.write(
+        "work/qq.ron",
+        r#"(version: 1, approval_timeout_seconds: 30)"#,
+    );
+    let project = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(
+        project.approval_timeout(),
+        Some(std::time::Duration::from_secs(30))
+    );
+
+    for (document, fragment) in [
+        ("(version: 1, approval_timeout_seconds: 0)", "at least 1"),
+        (
+            "(version: 1, approval_timeout_seconds: 86401)",
+            "at most 86400",
+        ),
+    ] {
+        let clean = TempTree::new();
+        let error = clean
+            .loader()
+            .load(&clean.request().with_explicit_content(document))
+            .unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::InvalidApprovalTimeout(message) if message.contains(fragment)),
+            "{document}: {error}"
+        );
+    }
+}
+
+#[test]
+fn approval_delegate_is_absent_by_default_and_reads_on_off_from_every_layer() {
+    // DA3: absent means the mode's own default; the snapshot reports `None`
+    // so the composition root can tell "never said" from "said off".
+    let tree = TempTree::new();
+    let bare = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(bare.approval_delegate(), None);
+    assert!(bare.provenance().approval_delegate().is_none());
+
+    let on = tree
+        .loader()
+        .load(
+            &tree
+                .request()
+                .with_explicit_content(r#"(version: 1, approval_delegate: on)"#),
+        )
+        .unwrap();
+    assert_eq!(on.approval_delegate(), Some(ApprovalDelegateSetting::On));
+    assert_eq!(
+        on.provenance().approval_delegate().unwrap().kind(),
+        SourceKind::Inline
+    );
+
+    // A runtime override wins over the document and is reported as such.
+    let off = tree
+        .loader()
+        .load(
+            &tree
+                .request()
+                .with_explicit_content(r#"(version: 1, approval_delegate: on)"#)
+                .with_overrides(
+                    RuntimeOverrides::new()
+                        .with_model("openai/test-model")
+                        .with_approval_delegate(ApprovalDelegateSetting::Off),
+                ),
+        )
+        .unwrap();
+    assert_eq!(off.approval_delegate(), Some(ApprovalDelegateSetting::Off));
+    assert_eq!(
+        off.provenance().approval_delegate().unwrap().kind(),
+        SourceKind::Runtime
+    );
+
+    // Only `on` and `off` parse, in the document and in the environment form.
+    assert!(matches!(
+        tree.loader().load(
+            &tree
+                .request()
+                .with_explicit_content("(version: 1, approval_delegate: maybe)")
+        ),
+        Err(ConfigError::Parse { .. })
+    ));
+    assert!(matches!(
+        "maybe".parse::<ApprovalDelegateSetting>(),
+        Err(ConfigError::InvalidJevSetting { .. })
+    ));
+    assert_eq!(
+        "on".parse::<ApprovalDelegateSetting>().unwrap(),
+        ApprovalDelegateSetting::On
+    );
+}
+
+#[test]
+fn approval_delegate_in_a_workspace_file_or_profile_requires_trust() {
+    // DA3: the delegate choice widens who may settle a hold, so a project
+    // file that sets it is a sensitive declaration exactly like `jev_routing`.
+    let tree = TempTree::new();
+    tree.write(
+        "work/qq.ron",
+        r#"(version: 1, approval_delegate: on,
+        profiles: { "strict": Profile(approval_mode: ask, approval_delegate: off) })"#,
+    );
+    let request = tree.request();
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    tree.loader().grant_pending_trust(&request).unwrap();
+    let trusted = tree.loader().load(&request).unwrap();
+    assert_eq!(
+        trusted.approval_delegate(),
+        Some(ApprovalDelegateSetting::On)
+    );
+    assert_eq!(
+        trusted.profile("strict").unwrap().approval_delegate(),
+        Some(ApprovalDelegateSetting::Off)
+    );
+    assert_eq!(
+        trusted.profile("default").unwrap().approval_delegate(),
+        None
+    );
+    assert!(
+        trusted
+            .source_reports()
+            .iter()
+            .any(|report| report.touched().contains(&ConfigKey::ApprovalDelegate))
+    );
+    // Changing the value invalidates the trust the same way.
+    tree.write("work/qq.ron", r#"(version: 1, approval_delegate: off)"#);
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
 }
 
 #[test]

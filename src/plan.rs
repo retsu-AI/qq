@@ -57,6 +57,7 @@ pub struct PlanKey {
     pub explicit_config_content: Option<String>,
     pub jev_review: Option<qq_config::JevReviewMode>,
     pub jev_routing: Option<bool>,
+    pub approval_delegate: Option<qq_config::ApprovalDelegateSetting>,
     pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
 }
 
@@ -597,6 +598,7 @@ mod tests {
             explicit_config_content: None,
             jev_review: None,
             jev_routing: None,
+            approval_delegate: None,
             reasoning_effort: None,
         }
     }

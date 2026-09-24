@@ -31,7 +31,8 @@ sources`, `qq auth list` for the detail behind any one line
 
 QQ found no `model:` in any configuration layer and no `--model` /
 `QQ_MODEL`. The message lists every way to set one and names your global
-config path. Pick a route from [Providers](providers.md#built-in-models);
+config path. `qq init --model PROVIDER/MODEL` writes that file; pick a
+route from [Providers](providers.md#built-in-models);
 [Quickstart § 2](quickstart.md#2-tell-qq-which-model-to-use) shows the
 one-time setup. Only `qq ask` and `qq run` stop here; bare `qq` opens the
 TUI and asks with `/models` instead.
@@ -136,6 +137,11 @@ PROVIDER` when the name is `PROVIDER/default`). If the reference came from a
 repository's committed config, that config should use `Env(...)` or live in a
 local, uncommitted fragment ([MCP › Where to declare it](mcp.md#where-to-declare-it)).
 
+For a provider this fails the run. For an MCP server's `bearer` it only
+degrades that server: the run proceeds and the catalog reports
+`unavailable MCP servers: NAME (credential `…` is not registered; run `qq
+auth set …`)` (see below); `qq doctor` warns about it under `mcp`.
+
 ### `credential `…` is registered in keyring, but its secret is missing`
 
 The index knows the name but the keyring entry is gone (a keyring reset, a
@@ -186,15 +192,23 @@ grant specific extras with `--allow-shell` / `--allow-tool` / `--allow-host`.
 
 The shell classifier refuses some shapes under every mode — `rm -rf` outside
 the workspace, `sudo`, `git push --force`, `curl … | sh`, writes to `~/.ssh`
-or `/etc`. Run it yourself, or if the classifier is wrong for a benign
-command, approve for the session with the exact string (prefix grants do
-not lift `forbidden`). Rules: [Permissions](permissions.md#what-the-shell-classifier-decides).
+or `/etc`. A prefix grant does not lift that. A grant that quotes the exact
+command string does, and only when that string fits a session grant (at most
+256 bytes); a longer command cannot be blessed this way. Otherwise run it
+yourself. Rules:
+[Permissions](permissions.md#what-the-shell-classifier-decides).
 
 ### `unavailable MCP servers: …`
 
-The named server did not start or connect. The run continues without it.
-Check the `command` is on `PATH` (stdio) or the `url` and `bearer` (HTTP);
-`eager: true` surfaces the failure at startup instead of first use.
+The named server did not start, connect, or authenticate; the reason follows
+its name in parentheses. The run continues without it, and calls to its
+tools return an unavailable error to the model. For a stdio server check the
+`command` is on `PATH`; for HTTP check the `url`. When the reason names a
+credential (`credential `linear/default` is not registered; run `qq auth set
+linear/default``, or the environment variable for `Env(...)`), run the
+command it names — the next run picks the credential up without a restart.
+`qq doctor` reports the same finding under `mcp`; `eager: true` surfaces a
+connection failure at startup instead of first use.
 
 ### `configuration working directory is invalid: …`
 

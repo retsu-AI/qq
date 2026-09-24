@@ -281,7 +281,7 @@ fn validates_server_declarations() {
         let mut bad_url = settings("web");
         bad_url.transport = McpTransportSettings::Http {
             url: url.to_owned(),
-            bearer: None,
+            bearer: McpBearer::None,
         };
         assert_eq!(
             McpManager::new(vec![bad_url]).err(),
@@ -650,4 +650,65 @@ async fn stdio_spawn_failures_become_call_errors_over_the_real_transport() {
     let outcome = manager.call("mcp__srv__echo", "{}", not_cancelled()).await;
     assert!(outcome.is_error);
     assert!(outcome.content.contains("could not start MCP server"));
+}
+
+#[tokio::test]
+async fn an_unresolvable_bearer_keeps_the_server_declared_but_unavailable() {
+    // The composition root could not resolve the configured credential. The
+    // server keeps its grants and name, contributes no tools, and every call
+    // is a typed `Unavailable` carrying the resolution failure verbatim. A
+    // healthy sibling is unaffected.
+    let reason = "credential `linear/default` is not registered; run `qq auth set linear/default`";
+    let mut degraded = settings("linear");
+    degraded.transport = McpTransportSettings::Http {
+        url: "https://mcp.linear.test/mcp".to_owned(),
+        bearer: McpBearer::Unavailable {
+            reason: reason.to_owned(),
+        },
+    };
+    degraded.allow = vec!["create_issue".to_owned()];
+    let healthy = Fixture::new(&["echo"]);
+    // No test connector on the degraded handle: the real `connect` path is
+    // what must refuse before any transport is built.
+    let mut sibling = ServerHandle::new(settings("srv"));
+    sibling.connector = Some(healthy.connector());
+    let manager = McpManager {
+        servers: BTreeMap::from([
+            ("linear".to_owned(), Arc::new(ServerHandle::new(degraded))),
+            ("srv".to_owned(), Arc::new(sibling)),
+        ]),
+        grants: vec!["mcp__linear__create_issue".to_owned()],
+    };
+    assert_eq!(manager.config_grants(), ["mcp__linear__create_issue"]);
+
+    let catalog = manager.catalog().await;
+    assert_eq!(
+        catalog.unavailable,
+        [McpUnavailable {
+            server: "linear".to_owned(),
+            reason: reason.to_owned(),
+        }]
+    );
+    assert_eq!(
+        catalog
+            .tools
+            .iter()
+            .map(|tool| tool.spec.name())
+            .collect::<Vec<_>>(),
+        ["mcp__srv__echo"]
+    );
+    assert!(manager.catalog_is_current(catalog.generation));
+
+    let outcome = manager
+        .call("mcp__linear__create_issue", "{}", not_cancelled())
+        .await;
+    assert_eq!(outcome.failure, Some(McpCallFailure::Unavailable));
+    assert!(outcome.is_error);
+    assert_eq!(outcome.content, reason);
+
+    let sibling = manager
+        .call("mcp__srv__echo", r#"{"text":"alive"}"#, not_cancelled())
+        .await;
+    assert_eq!(sibling.content, "alive");
+    assert!(!sibling.is_error);
 }

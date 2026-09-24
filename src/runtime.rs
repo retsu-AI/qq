@@ -1,5 +1,6 @@
 //! Application configuration to model-runtime composition.
 
+mod approval;
 mod routing;
 
 use std::{
@@ -709,11 +710,13 @@ impl RuntimeFactory {
         };
         if snapshot.jev_review() != qq_config::JevReviewMode::Off
             || snapshot.jev_routing()
+            || snapshot.jev_approval()
             || matches!(
                 std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref(),
                 Some("final" | "enforce")
             )
             || std::env::var("QQ_JEV_ROUTING").ok().as_deref() == Some("on")
+            || std::env::var("QQ_JEV_APPROVAL").ok().as_deref() == Some("on")
         {
             return Err(invalid(
                 "enabled Jev capabilities require external inference; use the ordinary profile",
@@ -1159,6 +1162,7 @@ impl RuntimeFactory {
             explicit_config_content: request.explicit_content().map(str::to_owned),
             jev_review: request.overrides().jev_review(),
             jev_routing: request.overrides().jev_routing(),
+            approval_delegate: request.overrides().approval_delegate(),
             reasoning_effort: request.overrides().reasoning_effort(),
         };
         let lookup = self.inner.plans.load(&key, || {
@@ -1288,6 +1292,16 @@ impl RuntimeFactory {
                 {
                     overrides = overrides.with_jev_routing(enabled);
                 }
+                if request.overrides().jev_approval().is_none()
+                    && let Some(enabled) = profile.jev_approval()
+                {
+                    overrides = overrides.with_jev_approval(enabled);
+                }
+                if request.overrides().approval_delegate().is_none()
+                    && let Some(setting) = profile.approval_delegate()
+                {
+                    overrides = overrides.with_approval_delegate(setting);
+                }
                 let snapshot = self.load(&request.clone().with_overrides(overrides))?;
                 if !configuration_sources.contains(snapshot.sources()) {
                     configuration_sources.push(snapshot.sources().clone());
@@ -1389,6 +1403,7 @@ impl RuntimeFactory {
         let audit = audit_policy(snapshot.audit());
         let shell = shell_policy(snapshot.policy());
         let network = network_policy(snapshot.policy());
+        let approval_delegate = approval_delegate(snapshot.approval_delegate());
         let mut profile =
             AgentProfile::new(provider, descriptor, resolved_model, workspace.to_owned())
                 .with_spawn_model_routes(spawn_model_routes)
@@ -1396,6 +1411,7 @@ impl RuntimeFactory {
                 .with_audit(audit)
                 .with_shell_policy(shell)
                 .with_network_policy(network)
+                .with_approval_delegate(approval_delegate)
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone());
@@ -2282,9 +2298,9 @@ the workspace owns, reinstalling dependencies, editing source files); escalate a
 externally visible, credential-touching, system-level, or ambiguous (force-pushing shared \
 branches, sudo, piped installers, writes outside the workspace). (2) necessity — when a task \
 brief is given, the action must be plausibly necessary for that task; deny actions clearly \
-outside it. Your deny is final under every mode you are consulted for: the agent receives \
-it as a tool error and no human is asked. Escalate when you are unsure; a human decides \
-escalations. \
+outside it. Under auto and supervised your deny is final: the agent receives it as a tool \
+error and no human is asked. Under ask your deny escalates to the human with your reason. \
+Escalate when you are unsure; a human decides escalations. \
 Reply with exactly one JSON object on one line and nothing else: \
 {\"verdict\":\"approve\"} or {\"verdict\":\"escalate\",\"reason\":\"...\"} \
 or {\"verdict\":\"deny\",\"reason\":\"...\"}.";
@@ -2309,9 +2325,11 @@ async fn collect_reviewer_verdict(
             qq_protocol::ApprovalMode::Auto => {
                 "auto root session: only dangerous-shaped shell and ungranted hosts are held for you"
             }
-            qq_protocol::ApprovalMode::ReadOnly
-            | qq_protocol::ApprovalMode::Ask
-            | qq_protocol::ApprovalMode::Full => "root session",
+            qq_protocol::ApprovalMode::Ask => {
+                "ask root session: every ungranted mutation is held; the operator opted you in, \
+                 and your deny is advice here (the human is still asked)"
+            }
+            qq_protocol::ApprovalMode::ReadOnly | qq_protocol::ApprovalMode::Full => "root session",
         }
     );
     match request.origin {
@@ -2412,6 +2430,7 @@ async fn collect_reviewer_verdict(
                         usage: None,
                         cost_usd_nanos: None,
                     },
+                    delegate: qq_core::DelegateIdentity::Reviewer,
                 };
             }
             None => break,
@@ -2420,6 +2439,7 @@ async fn collect_reviewer_verdict(
     ReviewVerdict {
         decision: parse_reviewer_decision(&text),
         spend,
+        delegate: qq_core::DelegateIdentity::Reviewer,
     }
 }
 
@@ -2525,16 +2545,41 @@ pub struct RuntimeHandler {
 }
 
 impl RuntimeHandler {
+    /// [`Self::open_with`] with no server-side approval deadline: the
+    /// interactive default.
+    #[cfg(test)]
     pub async fn open(factory: RuntimeFactory) -> Result<Self, RuntimeHandlerError> {
+        Self::open_with(factory, None).await
+    }
+
+    /// Opens the durable runtime with the server-side approval wait chosen
+    /// by the caller: `None` is no deadline (the interactive default); a
+    /// headless supervisor passes what its configuration asked for.
+    pub async fn open_with(
+        factory: RuntimeFactory,
+        approval_timeout: Option<std::time::Duration>,
+    ) -> Result<Self, RuntimeHandlerError> {
         factory.validate_isolated_tui_qa_state()?;
         let database_path = factory.inner.config.session_database_path()?;
         // The factory is both the runtime loader and the workspace grant
         // authority: config grants seed each new session's grant set, and
         // approve-for-workspace promotions write back through the loader's
         // configuration layer.
+        // The approval delegate chain: Jev first when the held call's
+        // workspace opted it in (`jev_approval`, trust-gated), then that
+        // workspace's `reviewer_model`, then the human. Both speak
+        // `ReviewDecision`; qq-core learns neither. Whether Jev is consulted
+        // is decided per hold from the workspace configuration, so one handle
+        // serves every workspace and a missing key falls through at the first
+        // hold rather than refusing startup.
+        let reviewer: Arc<dyn ApprovalReviewer> = Arc::new(approval::JevApprovalReviewer::new(
+            factory.clone(),
+            Arc::new(ModelApprovalReviewer::new(factory.clone())),
+        ));
         let options = SessionRuntimeOptions::new(database_path)
+            .with_approval_timeout(approval_timeout)
             .with_grant_authority(Arc::new(factory.clone()))
-            .with_approval_reviewer(Arc::new(ModelApprovalReviewer::new(factory.clone())));
+            .with_approval_reviewer(reviewer);
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
         Ok(Self { durable, factory })
     }
@@ -2877,6 +2922,18 @@ const fn delegation_role(role: qq_config::DelegationRole) -> qq_protocol::Delega
         qq_config::DelegationRole::Fast => qq_protocol::DelegationRole::Fast,
         qq_config::DelegationRole::Balanced => qq_protocol::DelegationRole::Balanced,
         qq_config::DelegationRole::Strong => qq_protocol::DelegationRole::Strong,
+    }
+}
+
+/// Translates the configured delegate choice: absent means the mode's own
+/// default, so a configuration that never mentions it behaves as before.
+const fn approval_delegate(
+    setting: Option<qq_config::ApprovalDelegateSetting>,
+) -> qq_core::ApprovalDelegate {
+    match setting {
+        None => qq_core::ApprovalDelegate::ByMode,
+        Some(qq_config::ApprovalDelegateSetting::On) => qq_core::ApprovalDelegate::On,
+        Some(qq_config::ApprovalDelegateSetting::Off) => qq_core::ApprovalDelegate::Off,
     }
 }
 
@@ -3457,7 +3514,7 @@ mod tests {
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Default)]
-    struct MemoryKeyring(Mutex<BTreeMap<String, Vec<u8>>>);
+    pub(super) struct MemoryKeyring(Mutex<BTreeMap<String, Vec<u8>>>);
 
     impl KeyringBackend for MemoryKeyring {
         fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
@@ -3487,7 +3544,7 @@ mod tests {
         }
     }
 
-    struct PanicKeyring;
+    pub(super) struct PanicKeyring;
 
     impl KeyringBackend for PanicKeyring {
         fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
@@ -3503,12 +3560,12 @@ mod tests {
         }
     }
 
-    struct RuntimeFixture {
+    pub(super) struct RuntimeFixture {
         root: PathBuf,
     }
 
     impl RuntimeFixture {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -3527,7 +3584,7 @@ mod tests {
             Self { root }
         }
 
-        fn path(&self, relative: impl AsRef<Path>) -> PathBuf {
+        pub(super) fn path(&self, relative: impl AsRef<Path>) -> PathBuf {
             self.root.join(relative)
         }
 
@@ -3537,7 +3594,10 @@ mod tests {
             )))
         }
 
-        fn factory_with_credentials(&self, credentials: CredentialStore) -> RuntimeFactory {
+        pub(super) fn factory_with_credentials(
+            &self,
+            credentials: CredentialStore,
+        ) -> RuntimeFactory {
             RuntimeFactory::new(
                 ConfigLoader::new(ConfigPaths::new(
                     self.path("global"),
@@ -6808,6 +6868,7 @@ mod tests {
             explicit_config_content: None,
             jev_review: None,
             jev_routing: None,
+            approval_delegate: None,
             reasoning_effort: None,
         };
         let (first, _) = factory
@@ -7562,6 +7623,67 @@ mod tests {
             factory.plan_for(&unsupported),
             Err(RuntimeBuildError::UnsupportedReasoningEffort(_))
         ));
+    }
+
+    #[test]
+    fn approval_delegate_reaches_the_plan_from_config_profile_and_override() {
+        // DA3: the composition root translates the setting and nothing else
+        // does. Absent is `ByMode` (unchanged behavior); a profile may say
+        // otherwise; an explicit override wins over both; and none of it
+        // enters the plan digest, because who is asked is not what the model
+        // may do.
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let request = fixture.request(r#"(
+            version: 1, model: "custom/test",
+            profiles: {
+                "strict": Profile(approval_mode: ask, approval_delegate: off),
+                "hands-off": Profile(approval_mode: ask, approval_delegate: on),
+            },
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test": (name: "test") }) },
+        )"#);
+        let default = factory.plan_for(&request).unwrap();
+        assert_eq!(
+            default.approval_delegate(),
+            qq_core::ApprovalDelegate::ByMode
+        );
+        let strict = factory
+            .plan_for_profile(&request, &AgentProfileId::new("strict").unwrap())
+            .unwrap();
+        assert_eq!(strict.approval_delegate(), qq_core::ApprovalDelegate::Off);
+        let hands_off = factory
+            .plan_for_profile(&request, &AgentProfileId::new("hands-off").unwrap())
+            .unwrap();
+        assert_eq!(hands_off.approval_delegate(), qq_core::ApprovalDelegate::On);
+        let overridden = request.clone().with_overrides(
+            request
+                .overrides()
+                .clone()
+                .with_approval_delegate(qq_config::ApprovalDelegateSetting::Off),
+        );
+        let overridden_plan = factory
+            .plan_for_profile(&overridden, &AgentProfileId::new("hands-off").unwrap())
+            .unwrap();
+        assert_eq!(
+            overridden_plan.approval_delegate(),
+            qq_core::ApprovalDelegate::Off
+        );
+        // Same profile, different delegate: the digest is unchanged because
+        // who is asked is not plan identity.
+        assert_eq!(
+            hands_off.digest(),
+            overridden_plan.digest(),
+            "the delegate choice is not plan identity"
+        );
+        // The cache keys on the override, so the profile's plan is not
+        // returned for the overridden request.
+        assert_eq!(
+            factory
+                .plan_for_profile(&request, &AgentProfileId::new("hands-off").unwrap())
+                .unwrap()
+                .approval_delegate(),
+            qq_core::ApprovalDelegate::On
+        );
     }
 
     /// A pin outside a route's advertised ladder fails at plan time with the

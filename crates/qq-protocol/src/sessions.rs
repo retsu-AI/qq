@@ -320,6 +320,82 @@ impl ChildAuthority {
     }
 }
 
+/// Who settles the calls an approval mode holds, before a human is asked
+/// (protocol 28). The mode stays the ceiling: this only chooses who decides
+/// inside it. `read_only` and `full` hold nothing a delegate may decide, so
+/// the choice is inert there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDelegate {
+    /// `auto` and `supervised` consult the reviewer, `ask` asks the human:
+    /// the behavior every session had before the choice existed.
+    #[default]
+    ByMode,
+    /// Consult the reviewer under `ask` as well as `auto` and `supervised`.
+    On,
+    /// Never consult the reviewer; every held call waits for a human.
+    Off,
+}
+
+impl ApprovalDelegate {
+    /// Whether a call the given mode holds is offered to the reviewer first.
+    #[must_use]
+    pub const fn consults_reviewer(self, mode: ApprovalMode) -> bool {
+        match (mode, self) {
+            (ApprovalMode::ReadOnly | ApprovalMode::Full, _) => false,
+            (ApprovalMode::Auto | ApprovalMode::Supervised, Self::ByMode | Self::On) => true,
+            (ApprovalMode::Auto | ApprovalMode::Supervised, Self::Off) => false,
+            (ApprovalMode::Ask, Self::On) => true,
+            (ApprovalMode::Ask, Self::ByMode | Self::Off) => false,
+        }
+    }
+
+    /// Whether a reviewer `Deny` settles the call. Under `auto` and
+    /// `supervised` the reviewer is the delegate for what those modes hold;
+    /// under `ask` the operator asked to decide everything, so a denial is
+    /// advice and the human still decides.
+    #[must_use]
+    pub const fn deny_is_final(mode: ApprovalMode) -> bool {
+        match mode {
+            ApprovalMode::Auto | ApprovalMode::Supervised => true,
+            ApprovalMode::Ask | ApprovalMode::ReadOnly | ApprovalMode::Full => false,
+        }
+    }
+
+    /// The wire spelling, which is also what clients show.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ByMode => "by_mode",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// Which delegate settled a held call (protocol 28): the configured
+/// `reviewer_model`, or TypeSafe Jev when the operator opted it in as an
+/// approver. Carried on `tool_approval_resolved` for the reviewer
+/// resolutions so a supervisor can tell them apart from the stream.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegateIdentity {
+    #[default]
+    Reviewer,
+    Jev,
+}
+
+impl DelegateIdentity {
+    /// The wire spelling, which is also what clients show.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reviewer => "reviewer",
+            Self::Jev => "jev",
+        }
+    }
+}
+
 /// A client's answer to one pending tool approval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -537,6 +613,16 @@ pub enum SessionCommand {
         session_id: SessionId,
         mode: ApprovalMode,
     },
+    /// Overrides who settles this session's held calls for the rest of the
+    /// session (protocol 28), without rewriting configuration or restarting
+    /// the server. `None` clears the override and the configured
+    /// `approval_delegate` applies again. Read at the next held call, so a
+    /// running session changes too; spawned children inherit it.
+    SetApprovalDelegate {
+        session_id: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delegate: Option<ApprovalDelegate>,
+    },
     /// Repoints the session's model. Takes effect when the next run is
     /// claimed; a run already executing keeps the model it started with.
     SetSessionModel {
@@ -595,6 +681,7 @@ impl SessionCommand {
             Self::CancelRun { .. } => SessionCommandKind::CancelRun,
             Self::RespondToolApproval { .. } => SessionCommandKind::RespondToolApproval,
             Self::SetApprovalMode { .. } => SessionCommandKind::SetApprovalMode,
+            Self::SetApprovalDelegate { .. } => SessionCommandKind::SetApprovalDelegate,
             Self::SetSessionModel { .. } => SessionCommandKind::SetSessionModel,
             Self::SetSessionProfile { .. } => SessionCommandKind::SetSessionProfile,
             Self::SetSessionEffort { .. } => SessionCommandKind::SetSessionEffort,
@@ -618,6 +705,7 @@ pub enum SessionCommandKind {
     CancelRun,
     RespondToolApproval,
     SetApprovalMode,
+    SetApprovalDelegate,
     SetSessionModel,
     SetSessionProfile,
     SetSessionEffort,
@@ -629,7 +717,7 @@ pub enum SessionCommandKind {
 
 impl SessionCommandKind {
     /// Every command this protocol revision routes, in declaration order.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::ResolveWorkspace,
         Self::CreateSession,
         Self::SubmitPrompt,
@@ -637,6 +725,7 @@ impl SessionCommandKind {
         Self::CancelRun,
         Self::RespondToolApproval,
         Self::SetApprovalMode,
+        Self::SetApprovalDelegate,
         Self::SetSessionModel,
         Self::SetSessionProfile,
         Self::SetSessionEffort,
@@ -659,6 +748,7 @@ impl SessionCommandKind {
             | Self::SubmitPrompt
             | Self::SteerRun
             | Self::SetApprovalMode
+            | Self::SetApprovalDelegate
             | Self::SetSessionModel
             | Self::SetSessionProfile
             | Self::SetSessionEffort
@@ -684,6 +774,7 @@ impl SessionCommandKind {
             Self::CancelRun => "/v1/runs/cancel",
             Self::RespondToolApproval => "/v1/tools/approvals",
             Self::SetApprovalMode => "/v1/sessions/approval-mode",
+            Self::SetApprovalDelegate => "/v1/sessions/approval-delegate",
             Self::SetSessionModel => "/v1/sessions/model",
             Self::SetSessionProfile => "/v1/sessions/profile",
             Self::SetSessionEffort => "/v1/sessions/effort",
@@ -697,8 +788,8 @@ impl SessionCommandKind {
 
 /// Every command route this protocol revision serves, in [`SessionCommandKind::ALL`]
 /// order. Routes are wire data: changing one is a protocol change.
-pub const COMMAND_ROUTES: [(SessionCommandKind, &str); 14] = {
-    let mut routes = [(SessionCommandKind::ResolveWorkspace, ""); 14];
+pub const COMMAND_ROUTES: [(SessionCommandKind, &str); 15] = {
+    let mut routes = [(SessionCommandKind::ResolveWorkspace, ""); 15];
     let mut index = 0;
     while index < SessionCommandKind::ALL.len() {
         let kind = SessionCommandKind::ALL[index];
@@ -757,6 +848,13 @@ pub enum CommandOutcome {
     ApprovalModeSet {
         session_id: SessionId,
         mode: ApprovalMode,
+    },
+    /// The session's delegate override after `set_approval_delegate`
+    /// (protocol 28); `None` means the configured choice applies.
+    ApprovalDelegateSet {
+        session_id: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delegate: Option<ApprovalDelegate>,
     },
     SessionModelSet {
         session_id: SessionId,
@@ -1167,6 +1265,11 @@ pub struct SessionSummary {
     /// created with by the shipped clients.
     #[serde(default)]
     pub approval_mode: ApprovalMode,
+    /// Session override of who settles held calls, set by
+    /// `set_approval_delegate` (protocol 28). Absent means the configured
+    /// `approval_delegate` (or its `by_mode` default) applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_delegate: Option<ApprovalDelegate>,
     /// Explicit reasoning effort for the session's next run. Absent means the
     /// compiled plan's configured or profile choice. Added in protocol 26;
     /// omitted on historical summaries.
@@ -1805,6 +1908,23 @@ pub enum SessionEvent {
     ToolApprovalResolved {
         tool_call: ToolCallSnapshot,
         resolution: ApprovalResolution,
+        /// Which delegate wrote an `approved_by_reviewer` or
+        /// `denied_by_reviewer` resolution (protocol 28). Absent for every
+        /// human, timeout, and answer resolution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delegate: Option<DelegateIdentity>,
+    },
+    /// A delegate declined to settle a held call and the hold now waits for
+    /// a human (protocol 28): an `escalate`, a non-final `deny` under `ask`,
+    /// or the delegate's own clock running out (`delegate` absent). Advisory:
+    /// the hold's state is unchanged and `tool_approval_requested` already
+    /// described the call. `reason` is bounded and lets the prompt say why
+    /// the delegate did not decide.
+    ToolApprovalEscalated {
+        tool_call_id: ToolCallId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delegate: Option<DelegateIdentity>,
+        reason: String,
     },
     /// The follow-through of an approve-for-workspace decision: the attempt
     /// to persist the grant into the workspace configuration finished.
@@ -2024,6 +2144,7 @@ mod tests {
                 SessionCommandKind::SubmitPrompt,
                 SessionCommandKind::SteerRun,
                 SessionCommandKind::SetApprovalMode,
+                SessionCommandKind::SetApprovalDelegate,
                 SessionCommandKind::SetSessionModel,
                 SessionCommandKind::SetSessionProfile,
                 SessionCommandKind::SetSessionEffort,
@@ -2396,13 +2517,64 @@ mod tests {
         let resolved = SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::DeniedTimeout,
+            delegate: None,
         };
         let encoded = serde_json::to_value(&resolved).unwrap();
         assert_eq!(encoded["type"], "tool_approval_resolved");
         assert_eq!(encoded["resolution"], "denied_timeout");
+        assert!(
+            encoded.get("delegate").is_none(),
+            "a human or timeout resolution names no delegate"
+        );
         assert_eq!(
             serde_json::from_value::<SessionEvent>(encoded).unwrap(),
             resolved
+        );
+        // Protocol 28: a reviewer resolution says which delegate wrote it.
+        let SessionEvent::ToolApprovalResolved { tool_call, .. } = resolved else {
+            unreachable!()
+        };
+        let by_jev = SessionEvent::ToolApprovalResolved {
+            tool_call,
+            resolution: ApprovalResolution::ApprovedByReviewer,
+            delegate: Some(DelegateIdentity::Jev),
+        };
+        let encoded = serde_json::to_value(&by_jev).unwrap();
+        assert_eq!(encoded["resolution"], "approved_by_reviewer");
+        assert_eq!(encoded["delegate"], "jev");
+        assert_eq!(
+            serde_json::to_value(DelegateIdentity::Reviewer).unwrap(),
+            "reviewer"
+        );
+        assert_eq!(
+            serde_json::from_value::<SessionEvent>(encoded).unwrap(),
+            by_jev
+        );
+        // Protocol 28: a delegate that passed says why; a timed-out delegate
+        // has no identity.
+        let escalated = SessionEvent::ToolApprovalEscalated {
+            tool_call_id: id(7),
+            delegate: Some(DelegateIdentity::Reviewer),
+            reason: "outside the task".to_owned(),
+        };
+        let encoded = serde_json::to_value(&escalated).unwrap();
+        assert_eq!(encoded["type"], "tool_approval_escalated");
+        assert_eq!(encoded["delegate"], "reviewer");
+        assert_eq!(encoded["reason"], "outside the task");
+        assert_eq!(
+            serde_json::from_value::<SessionEvent>(encoded).unwrap(),
+            escalated
+        );
+        let timed_out = SessionEvent::ToolApprovalEscalated {
+            tool_call_id: id(7),
+            delegate: None,
+            reason: "the delegate did not answer".to_owned(),
+        };
+        let encoded = serde_json::to_value(&timed_out).unwrap();
+        assert!(encoded.get("delegate").is_none());
+        assert_eq!(
+            serde_json::from_value::<SessionEvent>(encoded).unwrap(),
+            timed_out
         );
 
         let command = SessionCommand::RespondToolApproval {
@@ -2588,6 +2760,48 @@ mod tests {
         let session_id = id::<SessionId>(3);
         let workspace_id = id::<WorkspaceId>(2);
 
+        // Protocol 28: the session off switch for the approval delegate.
+        let set_delegate = SessionCommand::SetApprovalDelegate {
+            session_id,
+            delegate: Some(ApprovalDelegate::Off),
+        };
+        let encoded = serde_json::to_value(&set_delegate).unwrap();
+        assert_eq!(encoded["type"], "set_approval_delegate");
+        assert_eq!(encoded["delegate"], "off");
+        assert_eq!(
+            serde_json::to_value(ApprovalDelegate::ByMode).unwrap(),
+            "by_mode"
+        );
+        assert_eq!(
+            serde_json::from_value::<SessionCommand>(encoded).unwrap(),
+            set_delegate
+        );
+        let clear_delegate = SessionCommand::SetApprovalDelegate {
+            session_id,
+            delegate: None,
+        };
+        let encoded = serde_json::to_value(&clear_delegate).unwrap();
+        assert!(encoded.get("delegate").is_none());
+        assert_eq!(
+            serde_json::from_value::<SessionCommand>(encoded).unwrap(),
+            clear_delegate
+        );
+        assert_eq!(
+            set_delegate.kind().route(),
+            "/v1/sessions/approval-delegate"
+        );
+        let delegate_set = CommandOutcome::ApprovalDelegateSet {
+            session_id,
+            delegate: Some(ApprovalDelegate::On),
+        };
+        let encoded = serde_json::to_value(&delegate_set).unwrap();
+        assert_eq!(encoded["type"], "approval_delegate_set");
+        assert_eq!(encoded["delegate"], "on");
+        assert_eq!(
+            serde_json::from_value::<CommandOutcome>(encoded).unwrap(),
+            delegate_set
+        );
+
         let set_effort = SessionCommand::SetSessionEffort {
             session_id,
             effort: Some(qq_reasoning::ReasoningEffort::Xhigh),
@@ -2721,6 +2935,7 @@ mod tests {
                 model: Some("test/model".to_owned()),
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
+                approval_delegate: None,
                 reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: None,
@@ -2781,6 +2996,7 @@ mod tests {
                 model: Some("test/model-b".to_owned()),
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
+                approval_delegate: None,
                 reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: Some(12_500),
@@ -2840,6 +3056,7 @@ mod tests {
                 model: Some("test/model".to_owned()),
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
+                approval_delegate: None,
                 reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: None,
@@ -3073,6 +3290,7 @@ mod tests {
                 model: Some("test/model".to_owned()),
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
+                approval_delegate: None,
                 reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: Some(16),
@@ -3291,8 +3509,13 @@ mod tests {
         // the `paused` run outcome and status.
         // Version 27 adds optional session reasoning_effort, set_session_effort,
         // and session_effort_set.
-        // Version 28 adds the `max` effort value.
-        assert_eq!(crate::PROTOCOL_VERSION, 28);
+        // Version 28 adds the approval delegate surfaces: `delegate` on
+        // `tool_approval_resolved` for the reviewer resolutions, the advisory
+        // `tool_approval_escalated` event, `set_approval_delegate` /
+        // `approval_delegate_set`, and the optional
+        // `SessionSummary.approval_delegate` override. Older clients reject
+        // the new command, outcome, event tag, and summary field.
+        assert_eq!(crate::PROTOCOL_VERSION, 29);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
@@ -3400,7 +3623,7 @@ mod tests {
             serde_json::to_value(SessionCommandKind::SetSessionProfile).unwrap(),
             "set_session_profile"
         );
-        assert_eq!(SessionCommandKind::ALL.len(), 14);
+        assert_eq!(SessionCommandKind::ALL.len(), 15);
 
         let create = SessionCommand::CreateSession {
             workspace_id: id(2),
@@ -3527,6 +3750,7 @@ mod tests {
                 model: None,
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
+                approval_delegate: None,
                 reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: None,

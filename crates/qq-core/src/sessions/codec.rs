@@ -231,6 +231,26 @@ pub(super) fn parse_approval_mode(value: &str) -> Result<ApprovalMode, SessionRu
     }
 }
 
+/// NULL is no session override: the configured `approval_delegate` applies.
+/// A stored value is the session's own choice for the rest of the session.
+pub(super) fn parse_approval_delegate(
+    encoded: Option<&str>,
+) -> Result<Option<qq_protocol::ApprovalDelegate>, SessionRuntimeError> {
+    match encoded {
+        None => Ok(None),
+        Some("by_mode") => Ok(Some(qq_protocol::ApprovalDelegate::ByMode)),
+        Some("on") => Ok(Some(qq_protocol::ApprovalDelegate::On)),
+        Some("off") => Ok(Some(qq_protocol::ApprovalDelegate::Off)),
+        Some(_) => Err(SessionRuntimeError::CODEC),
+    }
+}
+
+pub(super) fn approval_delegate_column(
+    delegate: Option<qq_protocol::ApprovalDelegate>,
+) -> Option<&'static str> {
+    delegate.map(qq_protocol::ApprovalDelegate::as_str)
+}
+
 /// NULL is omission (provider/config defaults). A stored value is the session's
 /// explicit pin for the next claim.
 pub(super) fn parse_reasoning_effort(
