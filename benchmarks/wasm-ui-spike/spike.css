@@ -1,0 +1,20 @@
+:root { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #ddd; background: #111; }
+body { margin: 0; }
+.spike { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+.spike.embedded { height: 100%; min-height: 420px; }
+.status { display: flex; gap: 1.5rem; padding: 0.5rem 0.75rem; background: #1b1b1b; border-bottom: 1px solid #333; }
+.status b { color: #8fd; }
+.status .fw { color: #fc8; }
+.status .err { color: #f77; }
+.body { display: grid; grid-template-columns: 280px 1fr; min-height: 0; }
+.sessions { border-right: 1px solid #333; overflow: auto; }
+.sessions .group { padding: 0.4rem 0.75rem 0.1rem; color: #888; font-size: 11px; letter-spacing: 0.08em; }
+.sessions .row { padding: 0.3rem 0.75rem; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sessions .row:hover { background: #222; }
+.sessions .row.focused { background: #263; }
+.sessions .row .tail { color: #777; }
+.transcript { overflow: auto; padding: 0.75rem; }
+.msg { margin: 0 0 0.75rem; white-space: pre-wrap; word-break: break-word; }
+.msg .role { color: #8fd; }
+.msg.user .role { color: #fc8; }
+.msg.streaming .role::after { content: " ▌"; color: #6f6; }

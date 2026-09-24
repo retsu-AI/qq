@@ -39,8 +39,8 @@ may append a **request** row; only root changes a request's status.
 | 0014 | Typed final output contract | speed-first HC3 | Accepted (merged in #33) |
 | 0015 | Remote client authentication: pairing-code enrollment, per-client credentials | multi-surface S2 | Proposed: `docs/adr/0015-pairing-code-client-enrollment.md` |
 | 0016 | Remote exposure: loopback default, TLS required off loopback, `tailscale serve` front | multi-surface S4 | Reserved |
-| 0017 | Client UI stack: Rust/WASM, framework chosen by the W1 spike | multi-surface W1/U1 | Reserved |
-| 0018 | `apps/` as a separate Cargo workspace | multi-surface U1 | Reserved |
+| 0017 | Client UI stack: Rust/WASM, framework chosen by the W1 spike | multi-surface W1/U1 | Proposed 2026-09-24: `docs/adr/0017-client-ui-stack.md`; spike in `benchmarks/wasm-ui-spike/`; recommends Leptos 0.8 behind a framework-neutral remote contract; awaits founder decision |
+| 0018 | `apps/` as a separate Cargo workspace | multi-surface U1 | Proposed 2026-09-24: `docs/adr/0018-apps-workspace.md` |
 | 0019 | Spill handles as durable session state; masked inline, exact on explicit read | tool-layer T4 | Accepted (merged in #36) |
 | 0020 | Shell `Forbidden` as a policy decision with a CST classifier and self-tested rules | tool-layer T6 | Accepted (merged in #40) |
 | 0021 | `Interactive` and `Network` effect classes | tool-layer T8/T9 | Accepted (`Interactive` merged in #49; `Network` amended in T9 PR) |
