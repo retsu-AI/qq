@@ -32,6 +32,7 @@ const CODEX_MODELS_CLIENT_VERSION: &str = "0.156.1";
 pub(crate) struct DiscoveredModel {
     pub(crate) id: String,
     pub(crate) name: Option<String>,
+    pub(crate) efforts: Option<Vec<qq_provider::ReasoningEffort>>,
 }
 
 pub(crate) struct ModelDiscovery {
@@ -120,6 +121,25 @@ impl ModelDiscovery {
             }
         }
         models
+    }
+
+    pub(crate) fn cached(
+        &self,
+        provider_id: &str,
+        provider: &ProviderConfig,
+        credentials: &CredentialStore,
+    ) -> Option<Vec<DiscoveredModel>> {
+        let qq_config::ProviderAccess::Http(access) = provider.access()? else {
+            return None;
+        };
+        let auth = resolve_auth(access, credentials)?;
+        let key = cache_key(&self.cache_key, provider_id, provider.kind(), access, &auth)?;
+        self.cache
+            .lock()
+            .ok()?
+            .iter()
+            .find(|entry| entry.key == key && entry.expires_at > Instant::now())
+            .and_then(|entry| entry.models.clone())
     }
 
     fn fetch(
@@ -506,7 +526,25 @@ fn parse_models(
                 !name.is_empty() && name.len() <= 512 && !name.chars().any(char::is_control)
             })
             .map(str::to_owned);
+        let efforts = entry
+            .get("supported_reasoning_levels")
+            .and_then(serde_json::Value::as_array)
+            .map(|levels| {
+                let mut efforts = Vec::new();
+                for level in levels {
+                    if let Some(value) = level.get("effort").and_then(serde_json::Value::as_str)
+                        && let Some(effort) = qq_provider::ReasoningEffort::ALL
+                            .into_iter()
+                            .find(|effort| effort.as_str() == value)
+                        && !efforts.contains(&effort)
+                    {
+                        efforts.push(effort);
+                    }
+                }
+                efforts
+            });
         models.push(DiscoveredModel {
+            efforts,
             id: id.to_owned(),
             name,
         });
@@ -640,6 +678,7 @@ mod tests {
         assert_eq!(
             models,
             [DiscoveredModel {
+                efforts: None,
                 id: "gpt-6-astra".to_owned(),
                 name: Some("GPT-6 Astra".to_owned()),
             }]
@@ -698,6 +737,7 @@ mod tests {
         assert_eq!(
             first,
             [DiscoveredModel {
+                efforts: None,
                 id: "live-model".to_owned(),
                 name: Some("Live model".to_owned())
             }]
@@ -744,6 +784,30 @@ mod tests {
             models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
             ["claude-opus-5-5", "claude-sonnet-5"]
         );
+    }
+
+    #[test]
+    fn discovery_keeps_exact_supported_efforts_without_inventing_unknown_levels() {
+        let body = serde_json::json!({"models": [
+            {"slug":"gpt-6-sol","supported_reasoning_levels":[{"effort":"low"},{"effort":"max"},{"effort":"future"},{"effort":"low"}]},
+            {"slug":"unknown"},
+            {"slug":"unsupported","supported_reasoning_levels":[]}
+        ]});
+        let models = parse_models(
+            &body,
+            ProviderKind::OpenAiCodex,
+            ProviderApi::OpenAiResponses,
+        )
+        .unwrap();
+        assert_eq!(
+            models[0].efforts,
+            Some(vec![
+                qq_provider::ReasoningEffort::Low,
+                qq_provider::ReasoningEffort::Max
+            ])
+        );
+        assert_eq!(models[1].efforts, None);
+        assert_eq!(models[2].efforts, Some(vec![]));
     }
 
     #[test]

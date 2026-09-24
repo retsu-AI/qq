@@ -493,7 +493,12 @@ impl RuntimeFactory {
                     model: model_id.clone(),
                     name: metadata.name().map(str::to_owned),
                     context_window: metadata.context_window(),
-                    reasoning_efforts: metadata.reasoning_efforts().to_vec(),
+                    reasoning_efforts: discovered
+                        .get(provider_id)
+                        .and_then(|models| models.iter().find(|model| &model.id == model_id))
+                        .and_then(|model| model.efforts.clone())
+                        .filter(|_| !metadata.explicitly_configured())
+                        .unwrap_or_else(|| metadata.reasoning_efforts().to_vec()),
                     selection: qq_protocol::ModelSelection {
                         model_is_fallback: false,
                         model: Some(format!("{provider_id}/{model_id}")),
@@ -521,7 +526,7 @@ impl RuntimeFactory {
                         model: model.id.clone(),
                         name: model.name.clone(),
                         context_window: None,
-                        reasoning_efforts: Vec::new(),
+                        reasoning_efforts: model.efforts.clone().unwrap_or_default(),
                         selection: qq_protocol::ModelSelection {
                             model_is_fallback: false,
                             model: Some(format!("{provider_id}/{}", model.id)),
@@ -1317,6 +1322,29 @@ impl RuntimeFactory {
             return Err(RuntimeBuildError::UnsupportedReasoningEffort(
                 snapshot.model().as_str().to_owned(),
             ));
+        }
+        if let Some(effort) = snapshot.reasoning_effort()
+            && let Some(provider) = snapshot.providers().get(snapshot.model().provider())
+            && !provider
+                .models()
+                .get(snapshot.model().model())
+                .is_some_and(|metadata| metadata.explicitly_configured())
+            && let Some(models) = self.inner.discovery.cached(
+                snapshot.model().provider(),
+                provider,
+                &self.inner.credentials,
+            )
+            && let Some(levels) = models
+                .iter()
+                .find(|model| model.id == snapshot.model().model())
+                .and_then(|model| model.efforts.as_ref())
+            && !levels.contains(&effort)
+        {
+            return Err(RuntimeBuildError::ReasoningEffortNotAdvertised {
+                model: snapshot.model().as_str().to_owned(),
+                effort,
+                advertised: levels.clone(),
+            });
         }
         // A pin outside the route's advertised ladder is a configuration error
         // here, not a provider 400 mid-turn. An empty ladder advertises nothing
@@ -5960,10 +5988,12 @@ mod tests {
             "custom".to_owned(),
             vec![
                 DiscoveredModel {
+                    efforts: None,
                     id: "configured".to_owned(),
                     name: Some("Vendor name".to_owned()),
                 },
                 DiscoveredModel {
+                    efforts: None,
                     id: "live".to_owned(),
                     name: Some("Live name".to_owned()),
                 },
@@ -6010,6 +6040,7 @@ mod tests {
         let live = BTreeMap::from([(
             "openai-codex".to_owned(),
             vec![DiscoveredModel {
+                efforts: None,
                 id: "gpt-6-sol".to_owned(),
                 name: Some("GPT-6 Sol".to_owned()),
             }],
