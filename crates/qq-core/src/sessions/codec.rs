@@ -234,6 +234,7 @@ pub(super) fn parse_reasoning_effort(
         Some("medium") => Ok(Some(qq_provider::ReasoningEffort::Medium)),
         Some("high") => Ok(Some(qq_provider::ReasoningEffort::High)),
         Some("xhigh") => Ok(Some(qq_provider::ReasoningEffort::Xhigh)),
+        Some("max") => Ok(Some(qq_provider::ReasoningEffort::Max)),
         Some(_) => Err(SessionRuntimeError::CODEC),
     }
 }

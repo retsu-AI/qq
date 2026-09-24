@@ -3291,7 +3291,8 @@ mod tests {
         // the `paused` run outcome and status.
         // Version 27 adds optional session reasoning_effort, set_session_effort,
         // and session_effort_set.
-        assert_eq!(crate::PROTOCOL_VERSION, 27);
+        // Version 28 adds the `max` effort value.
+        assert_eq!(crate::PROTOCOL_VERSION, 28);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

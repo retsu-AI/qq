@@ -319,6 +319,7 @@ fn effort_string(effort: crate::ReasoningEffort) -> &'static str {
         crate::ReasoningEffort::Medium => "medium",
         crate::ReasoningEffort::High => "high",
         crate::ReasoningEffort::Xhigh => "xhigh",
+        crate::ReasoningEffort::Max => "max",
     }
 }
 

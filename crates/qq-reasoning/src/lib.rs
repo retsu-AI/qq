@@ -33,17 +33,19 @@ pub enum ReasoningEffort {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 impl ReasoningEffort {
     /// Every effort value, lowest to highest.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::None,
         Self::Minimal,
         Self::Low,
         Self::Medium,
         Self::High,
         Self::Xhigh,
+        Self::Max,
     ];
 
     #[must_use]
@@ -55,6 +57,7 @@ impl ReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Max => "max",
         }
     }
 }

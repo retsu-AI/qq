@@ -15,7 +15,7 @@ const CHAT_DONE: &str = concat!(
     "data: [DONE]\n\n",
 );
 
-fn efforts() -> [(ReasoningEffort, &'static str); 6] {
+fn efforts() -> [(ReasoningEffort, &'static str); 7] {
     [
         (ReasoningEffort::None, "none"),
         (ReasoningEffort::Minimal, "minimal"),
@@ -23,6 +23,7 @@ fn efforts() -> [(ReasoningEffort, &'static str); 6] {
         (ReasoningEffort::Medium, "medium"),
         (ReasoningEffort::High, "high"),
         (ReasoningEffort::Xhigh, "xhigh"),
+        (ReasoningEffort::Max, "max"),
     ]
 }
 
@@ -241,6 +242,34 @@ async fn actual_retry_preserves_effort_in_every_openai_request() {
     }
 }
 
+#[tokio::test]
+async fn anthropic_efforts_use_output_config_and_default_is_omitted() {
+    for effort in [
+        None,
+        Some(ReasoningEffort::Low),
+        Some(ReasoningEffort::Medium),
+        Some(ReasoningEffort::High),
+        Some(ReasoningEffort::Xhigh),
+        Some(ReasoningEffort::Max),
+    ] {
+        let server = LoopbackServer::respond_sequence(vec![(200, Some("text/event-stream"), vec![b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_vec()])]);
+        let requests = send(
+            server,
+            HttpProtocol::AnthropicMessages,
+            HttpAuth::ApiKey("test".into()),
+            effort,
+            AttemptPolicy::new(1, Duration::ZERO, Duration::ZERO, Duration::from_secs(1)),
+        )
+        .await;
+        let body = requests[0].json_body();
+        match effort {
+            Some(effort) => assert_eq!(body["output_config"]["effort"], effort.as_str()),
+            None => assert!(body.get("output_config").is_none()),
+        }
+        assert!(body.get("thinking").is_none());
+    }
+}
+
 struct PanicCredentials;
 
 impl RequestCredentialProvider for PanicCredentials {
@@ -277,7 +306,7 @@ async fn unsupported_http_adapters_reject_before_auth_or_transport() {
         let events = provider
             .stream(
                 ModelRequest::new("test-model", vec![Message::user("hello")], 64)
-                    .with_reasoning_effort(ReasoningEffort::Low),
+                    .with_reasoning_effort(ReasoningEffort::None),
             )
             .collect::<Vec<_>>()
             .await;

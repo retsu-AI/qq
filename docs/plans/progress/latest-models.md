@@ -1,5 +1,16 @@
 # Latest model support (ENG-885)
 
+## Effort implementation session
+
+- In progress: shared Max value, Anthropic output_config.effort encoding, per-model Claude ladders and GPT-6 Sol/Luna Max.
+- Picker now offers only advertised choices plus default; unknown models no longer receive an invented global ladder. Explicit none is no longer prepended to Claude choices.
+- Stacked branch `feat/eng-885-model-efforts` targets `feat/eng-885-latest-models` (PR 142).
+- Protocol 28 fixtures generated, historical fixtures retained; store schema 36 gates older readers and decodes Max. All 49 migration tests pass.
+- Added bounded Anthropic pagination and authoritative listing, with two-page wire regression.
+- Final workspace tests, all-target/all-feature Clippy, formatting and build pass.
+- Discovery capability import, explicit provider-default versus configured inheritance semantics, complete model metadata audit and Opus 5.5 signed replay remain unfinished. Stack is partial and must remain draft.
+
+
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
 | ENG-885.1 | GPT-6 catalogs and authoritative Codex discovery | In review | [PR 142](https://github.com/retsu-AI/qq/pull/142) | Preserve explicit models and offline fallback |
