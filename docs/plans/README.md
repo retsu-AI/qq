@@ -36,6 +36,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | [`supervised-delegation.md`](./supervised-delegation.md) | Continuation, roster, supervised children, audit; D6b open |
 | [`multi-surface-clients.md`](./multi-surface-clients.md) | Web, desktop, and mobile clients over many headless servers. W1, W2, S1, S3 shipped; open: S2 enrollment, S4 exposure, W3, then U/D/M |
 | [`run-snapshots.md`](./run-snapshots.md) | Proposed: reversible mutating-run state |
+| [`kern-primitives.md`](./kern-primitives.md) | Port of Kern's runtime primitives (ADR-0042): K1 journaled patch transactions with rollback and crash recovery, K2 Merkle workspace index and `.qqignore`, K3 digest-only prompt manifest event and `/prompt` view |
 | [`mid-run-compaction.md`](./mid-run-compaction.md) | Compact and continue one run at a safe turn boundary (audit F03, ENG-793). MRC-0..3 shipped (#92, ADR-0039); open: MRC-4 surfaces, MRC-5 live evidence |
 | [`lsp-diagnostics.md`](./lsp-diagnostics.md) | Proposed: diagnostics integration |
 | [`templates/`](./templates/) | Slice header, pre-flight, receipt, PR body; review checklist |
@@ -69,6 +70,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | Continuation on truncation, delegation roster, supervised write children, final-answer audit, paired evaluation | `supervised-delegation.md` |
 | Web, desktop, mobile clients; remote server readiness (identity, enrollment, CORS, TLS, workspace catalog) | `multi-surface-clients.md` |
 | Reversible mutating-run state | `run-snapshots.md` |
+| Journaled edits, workspace Merkle index, prompt manifest | `kern-primitives.md` |
 | Mid-run compaction and continuation | `mid-run-compaction.md` |
 | Diagnostics integration | `lsp-diagnostics.md` |
 | First-run and configuration UX, user guide, install paths, community files | `onboarding-ux.md` |
