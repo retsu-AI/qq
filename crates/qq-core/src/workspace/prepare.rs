@@ -188,6 +188,9 @@ pub(crate) async fn prepare_workspace(
         if cancelled.is_cancelled() {
             return Err(WorkspacePreparationError::Cancelled);
         }
+        // Torn transactions are unwound before any tool sees the tree; each
+        // outcome is recorded in its journal, which is the durable report.
+        let _recovered = super::transaction::recover(&workspace);
         let instructions = super::instructions::load(&workspace, &cancelled)?;
         Ok((workspace, instructions))
     })

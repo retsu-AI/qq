@@ -84,6 +84,11 @@ pub use sessions::{
     WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 pub use workspace::skills::{MAX_INDEXED_SKILLS, MAX_SKILL_DESCRIPTION_BYTES};
+pub use workspace::transaction::{
+    Conflict as TransactionConflict, Journal as TransactionJournal, JournalWrite,
+    MAX_RETAINED_TRANSACTIONS, TransactionRestoreError, TransactionStatus, list_transactions,
+    reapply_transaction, rollback_transaction,
+};
 pub use workspace::{SkillEntry, SkillIndex, SkillKind};
 
 pub type RunStream = Pin<Box<dyn Stream<Item = RunEvent> + Send + 'static>>;

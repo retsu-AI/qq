@@ -1,17 +1,16 @@
 use std::{
     collections::BTreeMap,
-    io::Write as _,
     path::{Path, PathBuf},
-    sync::{
-        PoisonError,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::PoisonError,
 };
 
 use qq_protocol::ToolCallDisplay;
 use serde::Deserialize;
 
-use crate::workspace::{FileState, FileStateUpdate, Workspace, content_hash};
+use crate::workspace::{
+    FileState, FileStateUpdate, StagedWrite, Workspace, content_hash, is_transaction_path,
+    run_transaction,
+};
 
 use super::{
     dispatch::{ToolCancellation, ToolOutput},
@@ -23,34 +22,6 @@ pub(super) const MAX_EDIT_FILE_BYTES: u64 = MAX_READ_SCAN_BYTES;
 pub(super) const MAX_EDITS: usize = 32;
 /// Per-file side of the unified diff carried as the UI payload.
 pub(super) const MAX_DIFF_BYTES: usize = 256 * 1024;
-static TEMP_FILE_ORDINAL: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(test)]
-struct ApplyHook {
-    workspace: PathBuf,
-    entered: tokio::sync::oneshot::Sender<()>,
-    release: std::sync::mpsc::Receiver<()>,
-}
-
-#[cfg(test)]
-static APPLY_HOOKS: std::sync::Mutex<Vec<ApplyHook>> = std::sync::Mutex::new(Vec::new());
-
-#[cfg(test)]
-pub(crate) fn hold_tool_apply(
-    workspace: &Path,
-) -> (
-    tokio::sync::oneshot::Receiver<()>,
-    std::sync::mpsc::Sender<()>,
-) {
-    let (entered, entered_rx) = tokio::sync::oneshot::channel();
-    let (release, release_rx) = std::sync::mpsc::channel();
-    APPLY_HOOKS.lock().unwrap().push(ApplyHook {
-        workspace: workspace.to_owned(),
-        entered,
-        release: release_rx,
-    });
-    (entered_rx, release)
-}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -213,6 +184,12 @@ pub(super) fn edit_file(
         };
         let key = path.to_string_lossy().into_owned();
         if !planned.contains_key(&key) {
+            if is_transaction_path(&path) {
+                return ToolOutput::error(format!(
+                    "edit {index}: path_reserved: {} is QQ's transaction journal",
+                    edit.path
+                ));
+            }
             if !workspace.root().is_file(&path) {
                 return ToolOutput::error(format!("edit {index}: not_a_file: {}", edit.path));
             }
@@ -306,8 +283,8 @@ pub(super) fn edit_file(
         return result;
     }
 
-    // Phase 2, under the apply lock: re-hash every file, then temp+rename
-    // each in path order. A rename failure midway is reported honestly.
+    // Phase 2, under the apply lock: re-hash every file, then write them all
+    // as one journaled transaction. A failure midway rolls the batch back.
     let guard = workspace
         .apply_lock()
         .lock()
@@ -315,7 +292,9 @@ pub(super) fn edit_file(
     if cancelled.is_cancelled() {
         return ToolOutput::error("tool execution was cancelled");
     }
-    for file in planned.values() {
+    let mut writes: Vec<StagedWrite> = Vec::with_capacity(planned.len());
+    let mut hashes: Vec<String> = Vec::with_capacity(planned.len());
+    for file in planned.values_mut() {
         let current = match read_editable(workspace, &file.path) {
             Ok(current) => current,
             Err(error) => return ToolOutput::error(error),
@@ -326,38 +305,32 @@ pub(super) fn edit_file(
                 file.key
             ));
         }
+        hashes.push(content_hash(file.text.as_bytes()));
+        writes.push(StagedWrite {
+            path: file.path.clone(),
+            before: Some(std::mem::take(&mut file.original.bytes)),
+            after: std::mem::take(&mut file.text).into_bytes(),
+            permissions: Some(file.original.permissions.clone()),
+        });
     }
-    let mut applied: Vec<String> = Vec::with_capacity(planned.len());
+    let receipt = match run_transaction(workspace, "edit_file", &writes) {
+        Ok(receipt) => receipt,
+        Err(error) => return ToolOutput::error(error.to_string()),
+    };
+    drop(guard);
     let mut updates: Vec<FileStateUpdate> = Vec::with_capacity(planned.len());
-    let mut text = format!("edit ok files={} edits={edits_total}\n", planned.len());
-    for file in planned.values() {
-        if let Err(error) = apply_atomically(
-            workspace,
-            &file.path,
-            file.text.as_bytes(),
-            Some(file.original.permissions.clone()),
-        ) {
-            drop(guard);
-            for update in updates {
-                file_state.record(update.path, update.hash);
-            }
-            return ToolOutput::error(format!(
-                "partial_apply: applied=[{}] failed={} ({error}); the applied files are written, the rest are untouched",
-                applied.join(","),
-                file.key
-            ));
-        }
-        let hash = content_hash(file.text.as_bytes());
+    let mut text = format!(
+        "edit ok files={} edits={edits_total} tx:{}\n",
+        planned.len(),
+        receipt.short()
+    );
+    for (file, hash) in planned.values().zip(hashes) {
         push_file_line(&mut text, file, &hash);
-        applied.push(file.key.clone());
+        file_state.record(file.key.clone(), hash.clone());
         updates.push(FileStateUpdate {
             path: file.key.clone(),
             hash,
         });
-    }
-    drop(guard);
-    for update in &updates {
-        file_state.record(update.path.clone(), update.hash.clone());
     }
     let mut result = ToolOutput::success(text);
     result.file_states = updates;
@@ -733,69 +706,6 @@ pub(super) fn read_editable(workspace: &Workspace, path: &Path) -> Result<Editab
         bytes,
         permissions: metadata.permissions(),
     })
-}
-
-/// Writes `bytes` to a temporary file in the target's directory through the
-/// workspace capability, preserves permissions when replacing an existing
-/// file, and renames into place so readers never observe a partial write.
-pub(super) fn apply_atomically(
-    workspace: &Workspace,
-    path: &Path,
-    bytes: &[u8],
-    permissions: Option<cap_std::fs::Permissions>,
-) -> Result<(), String> {
-    let temp_name = format!(
-        ".qq-apply-{}-{}.tmp",
-        std::process::id(),
-        TEMP_FILE_ORDINAL.fetch_add(1, Ordering::Relaxed),
-    );
-    let temp_path = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join(&temp_name),
-        _ => PathBuf::from(&temp_name),
-    };
-    let mut options = cap_std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    let mut temp = workspace
-        .root()
-        .open_with(&temp_path, &options)
-        .map_err(|error| format!("could not create a temporary file: {error}"))?;
-    let written = temp
-        .write_all(bytes)
-        .and_then(|()| temp.sync_all())
-        .map_err(|error| format!("could not write the temporary file: {error}"));
-    drop(temp);
-    #[cfg(test)]
-    {
-        let hook = {
-            let mut hooks = APPLY_HOOKS.lock().unwrap();
-            hooks
-                .iter()
-                .position(|hook| hook.workspace == workspace.path())
-                .map(|index| hooks.remove(index))
-        };
-        if let Some(hook) = hook {
-            let _ = hook.entered.send(());
-            let _ = hook.release.recv();
-        }
-    }
-    let applied = written
-        .and_then(|()| match permissions {
-            Some(permissions) => workspace
-                .root()
-                .set_permissions(&temp_path, permissions)
-                .map_err(|error| format!("could not preserve file permissions: {error}")),
-            None => Ok(()),
-        })
-        .and_then(|()| {
-            workspace
-                .root()
-                .rename(&temp_path, workspace.root(), path)
-                .map_err(|error| format!("could not apply the change: {error}"))
-        });
-    if applied.is_err() {
-        let _ = workspace.root().remove_file(&temp_path);
-    }
-    applied
 }
 
 #[cfg(test)]

@@ -701,12 +701,13 @@ currency (a recorded read of this exact content, or `if_hash` equal to the
 12-hex hash `read_file`'s header shows — the proof an `@`-mentioned file
 needs), and apply every edit in memory in order, so later edits see earlier
 results. A replacement whose match lands inside text an earlier edit wrote
-is `conflicting_edits{a, b}`: the model is rewriting its own edit. Phase 2,
-under `apply_lock` for microseconds: re-hash every file, then temp+rename
-each in path order. A rename failure midway is reported as
-`partial_apply{applied, failed}` — the applied files are written and their
-new hashes recorded, the rest are untouched. `dry_run` runs phase 1 only
-and returns the same result shape plus the diff.
+is `conflicting_edits{a, b}`: the model is rewriting its own edit. Phase 2
+is one journaled transaction (below): under `apply_lock` for microseconds,
+re-hash every file, then temp+rename each in path order. A rename failure
+midway rolls the already-applied files back in reverse order and reports
+`tx:<id8> failed at <path>: <error>; every applied file was restored`; no
+new hash is recorded. `dry_run` runs phase 1 only and returns the same
+result shape plus the diff.
 
 **Matching cascade** (`tools/matching.rs`). Each strategy is tried in order
 and the first with exactly one match wins; more than one match at any level
@@ -731,7 +732,8 @@ exists to prevent. Every non-exact match is named in the result
 the closest line (`closest L<n> distance=0.08`) and a three-line excerpt so
 the retry needs no read.
 
-**Result.** `edit ok files=2 edits=3` then one line per file in path order:
+**Result.** `edit ok files=2 edits=3 tx:<id8>` then one line per file in
+path order:
 `<path> h:<new12> L96 -1+1 | L140 -0+6 via=indent_flexible` (`x3` marks a
 `replace_all` count). The unified diff of what changed on disk — not of
 what the model asked — rides in `ui_payload` for every file; the approval
@@ -739,12 +741,13 @@ preview renders the request grouped by path with anchors as context.
 Failures abort the whole batch and name the edit index: `not_read`,
 `stale_file`, `not_found`, `ambiguous`, `disproportionate`,
 `conflicting_edits`, `invalid_edit`, `invalid_if_hash`, `too_large`,
-`not_utf8`, `not_a_file`, `path_*`, `partial_apply`.
+`not_utf8`, `not_a_file`, `path_*`, `path_reserved` (anything under
+`.qq/transactions/`), and the transaction failures above.
 
 **`write_file`** creates missing parents (≤ 8 components, never through
 `..`), refuses an existing file under `create_only` (`exists`), accepts
 `if_hash` as currency proof without a prior read, and answers
-`write <path> created|replaced bytes= lines= h:<new12>`. When the new
+`write <path> created|replaced bytes= lines= h:<new12> tx:<id8>`. When the new
 content keeps more than 80 % of the old file's lines (line LCS, both under
 4 000 lines) the header adds `hint=use_edit_file`: the rewrite would have
 cost a fraction of the tokens as an edit. Rejected: `append` (an
@@ -774,6 +777,52 @@ model re-reads and reconciles, exactly as a human would after a rebase.
 This is the same progression `product.md` already commits to: concurrent
 sessions share a checkout safely at file granularity now; editing subagents
 get isolated worktrees later. Worktree orchestration stays deferred.
+
+### Journaled Transactions
+
+Every batch `edit_file` or `write_file` lands is one transaction
+(`workspace/transaction.rs`, ADR-0042 § 1), the Rust port of Kern's
+receipt-backed patches. Before the first rename, the before- and
+after-bytes of every file are staged as content-addressed blobs under
+`.qq/transactions/<id>/blobs/<sha256>` and a journal is written as
+`applying` with the planned writes (`path`, `before_hash`, `after_hash`; a
+`None` before-hash is a created file). Each rename appends the path to
+`completed` and
+re-persists the journal; the last write closes it as `complete`. Journal
+and blob writes are temp + `fsync` + rename (+ directory `fsync` on Unix),
+through the workspace `Dir` capability, so a symlink under `.qq/` cannot
+redirect them. Ids are `<unix ms>-<16 hex>`, so a directory listing is
+chronological; tool results carry the first eight hex digits as `tx:<id8>`.
+
+The journal is the only source of truth for undo — it never consults the
+session's file-state map:
+
+- **Failure midway.** The completed writes are restored from their before
+  blobs in reverse order (`rolling_back`), then the journal is closed
+  `rolled_back` with the failing path and error; nothing is left half
+  applied. A file the rollback cannot restore (changed underneath, or an
+  I/O error) is left as is and the journal is `failed` with the conflict.
+- **Crash recovery.** A journal found `applying` or `rolling_back` when the
+  workspace is next prepared (session start, `plan` compilation) is a torn
+  transaction: a planned write whose file already carries `after_hash` is
+  counted as landed, then the transaction is rolled back before any tool
+  runs. The outcome is written into the journal; a journal that does not
+  parse is left in place for inspection, and an empty transaction directory
+  is removed.
+- **Rewind / fast-forward.** `qq_core::rollback_transaction(workspace, id)`
+  restores every completed file to its before blob (a created file is
+  removed); `reapply_transaction` restores the after blobs (`rolled_back`
+  → `complete`). Both are fail-closed: a file whose current hash is not
+  the one the journal expects (`after_hash` for rollback, `before_hash`
+  for reapply) is reported as a conflict and left alone. `plans/run-
+  snapshots.md` builds rewind on these two operations; shell-driven
+  mutations stay with the shadow-repository snapshot.
+- **Retention.** After each commit the oldest finished transactions are
+  pruned until at most 64 remain; a `failed` journal counts toward the
+  bound but is never pruned, since it is evidence a user may still need.
+- **Containment.** `.qq/transactions/` is reserved: `edit_file` and
+  `write_file` refuse paths below it (`path_reserved`), and a symlink
+  pointing into it is rejected by the usual no-follow resolution.
 
 ## Shell Execution
 

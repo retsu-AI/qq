@@ -3130,10 +3130,9 @@ async fn completed_edits_persist_a_display_diff_the_model_context_never_carries(
     // The model-facing result stays the compact summary; the diff rides
     // in the display payload only.
     assert!(
-        edited
-            .result
-            .as_deref()
-            .is_some_and(|result| result.starts_with("edit ok files=1 edits=1\nnote.txt h:")),
+        edited.result.as_deref().is_some_and(|result| {
+            result.starts_with("edit ok files=1 edits=1 tx:") && result.contains("\nnote.txt h:")
+        }),
         "{:?}",
         edited.result
     );
@@ -3185,7 +3184,7 @@ async fn completed_edits_persist_a_display_diff_the_model_context_never_carries(
     assert!(
         tool_results
             .iter()
-            .any(|content| content.starts_with("edit ok files=1 edits=1\n")),
+            .any(|content| content.starts_with("edit ok files=1 edits=1 tx:")),
         "{tool_results:?}"
     );
     assert!(

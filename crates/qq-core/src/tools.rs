@@ -69,11 +69,11 @@ pub mod bench_support {
         }
     }
 }
+#[cfg(test)]
+pub(crate) use crate::workspace::hold_tool_apply;
 pub(crate) use dispatch::{
     SpillRecord, ToolDrainError, ToolOutput, ToolTasks, bounded_result, execute,
 };
-#[cfg(test)]
-pub(crate) use edit::hold_tool_apply;
 #[cfg(test)]
 pub(crate) use output::MAX_MODEL_TEXT_BYTES;
 pub(crate) use output::{ResultRecall, TurnOutputBudget, finalize_spill_marker, header_line};
@@ -171,6 +171,24 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    /// Drops the ` tx:<id8>` token from a result header so the rest can be
+    /// compared exactly; the id is random per transaction.
+    fn strip_transaction_token(text: &str) -> String {
+        let (header, rest) = text.split_once('\n').unwrap_or((text, ""));
+        let header: Vec<&str> = header
+            .split(' ')
+            .filter(|token| !token.starts_with("tx:"))
+            .collect();
+        format!("{}\n{rest}", header.join(" "))
+    }
+
+    fn transaction_token(text: &str) -> &str {
+        text.lines()
+            .next()
+            .and_then(|header| header.split(' ').find(|token| token.starts_with("tx:")))
+            .unwrap_or_else(|| panic!("no tx token in {text}"))
+    }
 
     fn run_tool(
         workspace: &Workspace,
@@ -1763,10 +1781,11 @@ mod tests {
             fs::read_to_string(directory.path().join("b.rs")).unwrap(),
             b_after
         );
-        // Header, then one line per file in path order with a change per edit
-        // (line numbers as of that edit) and via= for the non-exact one.
+        // Header (with the transaction id), then one line per file in path
+        // order with a change per edit (line numbers as of that edit) and
+        // via= for the non-exact one.
         assert_eq!(
-            edited.model_text,
+            strip_transaction_token(&edited.model_text),
             format!(
                 "edit ok files=2 edits=4\na.rs h:{} L3 -1+1 | L4 +0+2 | L1 -0+1\nb.rs h:{} L2 -1+2 via=indent_flexible\n",
                 &content_hash(a_after.as_bytes())[..12],
@@ -1976,7 +1995,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_rename_failure_midway_reports_partial_apply_and_records_what_landed() {
+    fn a_rename_failure_midway_rolls_back_the_files_already_applied() {
         use std::os::unix::fs::PermissionsExt as _;
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("a.txt"), "alpha\n").unwrap();
@@ -2012,23 +2031,175 @@ mod tests {
         .unwrap();
         assert!(result.is_error);
         assert!(
-            result
-                .model_text
-                .starts_with("partial_apply: applied=[a.txt] failed=locked/b.txt"),
+            result.model_text.starts_with("tx:")
+                && result.model_text.contains("failed at locked/b.txt:")
+                && result
+                    .model_text
+                    .ends_with("every applied file was restored"),
             "{}",
             result.model_text
         );
+        // The first file had been renamed into place; the rollback put its
+        // original bytes back, so the recorded read hash is still current.
         assert_eq!(
             fs::read_to_string(directory.path().join("a.txt")).unwrap(),
-            "ALPHA\n"
+            "alpha\n"
         );
         assert_eq!(
             fs::read_to_string(directory.path().join("locked/b.txt")).unwrap(),
             "beta\n"
         );
-        // The applied file's new hash is recorded so a retry of the rest
-        // does not trip the staleness guard on it.
-        assert_eq!(state.recorded("a.txt"), Some(content_hash(b"ALPHA\n")));
+        assert_eq!(state.recorded("a.txt"), Some(content_hash(b"alpha\n")));
+        let journals = crate::list_transactions(directory.path()).unwrap();
+        assert_eq!(journals.len(), 1);
+        assert_eq!(journals[0].status, crate::TransactionStatus::RolledBack);
+        assert!(journals[0].completed.is_empty());
+    }
+
+    #[test]
+    fn writes_and_edits_journal_transactions_that_roll_back_and_reapply_by_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("a.txt"), "alpha\nbeta\n").unwrap();
+        let workspace = Workspace::open(root).unwrap();
+        let state = FileState::default();
+        run_tool(&workspace, &state, "read_file", r#"{"path":"a.txt"}"#);
+
+        let edited = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma"}]}"#,
+        );
+        assert!(!edited.is_error, "{}", edited.model_text);
+        let written = run_tool(
+            &workspace,
+            &state,
+            "write_file",
+            r#"{"path":"deep/er/new.txt","content":"fresh\n"}"#,
+        );
+        assert!(!written.is_error, "{}", written.model_text);
+        let edit_token = transaction_token(&edited.model_text);
+        let write_token = transaction_token(&written.model_text);
+        assert_eq!(edit_token.len(), "tx:".len() + 8, "{edit_token}");
+        assert_ne!(edit_token, write_token);
+
+        let journals = crate::list_transactions(root).unwrap();
+        assert_eq!(journals.len(), 2);
+        assert_eq!(journals[0].tool, "edit_file");
+        assert_eq!(journals[1].tool, "write_file");
+        assert!(journals[0].id.contains(&edit_token[3..]));
+        assert!(journals[1].id.contains(&write_token[3..]));
+        assert_eq!(
+            journals[1].planned[0],
+            crate::JournalWrite {
+                path: "deep/er/new.txt".to_owned(),
+                before_hash: None,
+                after_hash: content_hash(b"fresh\n"),
+            }
+        );
+
+        // Rewind both, newest first, then fast-forward both again.
+        crate::rollback_transaction(root, &journals[1].id).unwrap();
+        crate::rollback_transaction(root, &journals[0].id).unwrap();
+        assert!(!root.join("deep/er/new.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("a.txt")).unwrap(),
+            "alpha\nbeta\n"
+        );
+        crate::reapply_transaction(root, &journals[0].id).unwrap();
+        crate::reapply_transaction(root, &journals[1].id).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("a.txt")).unwrap(),
+            "alpha\ngamma\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("deep/er/new.txt")).unwrap(),
+            "fresh\n"
+        );
+    }
+
+    #[test]
+    fn the_transaction_directory_is_reserved_and_symlinks_into_it_are_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("a.txt"), "alpha\n").unwrap();
+        let workspace = Workspace::open(root).unwrap();
+        let state = FileState::default();
+        run_tool(&workspace, &state, "read_file", r#"{"path":"a.txt"}"#);
+        // Commit one transaction so the journal exists to be targeted.
+        let edited = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.txt","old":"alpha","new":"beta"}]}"#,
+        );
+        assert!(!edited.is_error, "{}", edited.model_text);
+        let id = crate::list_transactions(root).unwrap()[0].id.clone();
+        let journal = format!(".qq/transactions/{id}/journal.json");
+
+        for (arguments, code) in [
+            (
+                format!(r#"{{"path":"{journal}","content":"{{}}"}}"#),
+                "path_reserved",
+            ),
+            (
+                r#"{"path":".qq/transactions/evil/journal.json","content":"{}"}"#.to_owned(),
+                "path_reserved",
+            ),
+            (
+                r#"{"path":".qq/transactions","content":"x"}"#.to_owned(),
+                "path_reserved",
+            ),
+        ] {
+            let refused = run_tool(&workspace, &state, "write_file", &arguments);
+            assert!(refused.is_error, "{arguments}");
+            assert!(
+                refused.model_text.starts_with(code),
+                "{arguments}: {}",
+                refused.model_text
+            );
+        }
+        run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            &format!(r#"{{"path":"{journal}"}}"#),
+        );
+        let refused = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            &format!(r#"{{"edits":[{{"path":"{journal}","old":"complete","new":"applying"}}]}}"#),
+        );
+        assert!(
+            refused.model_text.starts_with("edit 0: path_reserved"),
+            "{}",
+            refused.model_text
+        );
+
+        // A symlink component pointing into the journal is a containment
+        // escape, refused before the reserved-path check would even run.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join(".qq/transactions"), root.join("alias")).unwrap();
+            let refused = run_tool(
+                &workspace,
+                &state,
+                "write_file",
+                &format!(r#"{{"path":"alias/{id}/journal.json","content":"{{}}"}}"#),
+            );
+            assert!(refused.is_error, "{}", refused.model_text);
+            assert!(
+                !refused.model_text.starts_with("write ok"),
+                "{}",
+                refused.model_text
+            );
+        }
+        assert_eq!(
+            crate::list_transactions(root).unwrap()[0].status,
+            crate::TransactionStatus::Complete
+        );
     }
 
     #[test]
@@ -2047,7 +2218,7 @@ mod tests {
         );
         assert!(!edited.is_error, "{}", edited.model_text);
         assert_eq!(
-            edited.model_text,
+            strip_transaction_token(&edited.model_text),
             format!(
                 "edit ok files=1 edits=1\na.txt h:{} L2 -1+1\n",
                 &content_hash(b"alpha\ngamma\n")[..12]

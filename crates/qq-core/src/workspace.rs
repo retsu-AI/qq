@@ -5,6 +5,7 @@ mod guidance;
 mod instructions;
 mod prepare;
 pub mod skills;
+pub mod transaction;
 
 pub use access::WorkspacePathError;
 pub(crate) use access::{Workspace, blocking_permits};
@@ -28,3 +29,8 @@ pub(crate) use prepare::{
 #[cfg(test)]
 pub(crate) use prepare::{hold_blocking_preparation, pause_blocking_preparation};
 pub use skills::{SkillEntry, SkillIndex, SkillKind};
+#[cfg(test)]
+pub(crate) use transaction::hold_tool_apply;
+pub(crate) use transaction::{
+    StagedWrite, is_reserved as is_transaction_path, run as run_transaction,
+};

@@ -608,6 +608,7 @@ impl CompiledAgentPlan {
                 path: workspace.clone(),
                 source,
             })?;
+        let _recovered = crate::workspace::transaction::recover(&opened);
         let cancelled = crate::RunCancellation::new();
         let (instructions, mut sources) =
             crate::workspace::load_instructions_with_sources(&opened, &cancelled)?;

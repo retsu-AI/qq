@@ -108,11 +108,34 @@ other policy knobs.
   Snapshot creation emits no events — it is internal bookkeeping until a
   client asks.
 
+## Relationship To Patch Transactions
+
+ADR-0042 (K1, `docs/plans/kern-primitives.md`) journals every `edit_file` and
+`write_file` application under `.qq/transactions/<id>/` with before- and
+after-blobs keyed by content hash. That ledger is the per-call restore point
+this plan wanted from post-mutation checkpoints, without a shadow repository:
+
+- **Rewind** is rolling transactions back in reverse order; **fast-forward**
+  is re-applying them in order. Both are fail-closed: a file whose current
+  hash is not the one the journal expects is a conflict and is left alone.
+- Transactions cover only what built-in tools wrote. State produced by shell
+  commands (generated files, `cargo fmt`, package installs) is invisible to
+  them, so the whole-tree run-start snapshot remains the shadow repository's
+  job (decision 10 in `progress/decisions-needed.md`).
+- `WorkspaceIndex` (K2) is the dirty-scan primitive this plan described:
+  hash comparison against the previous snapshot's manifest, over the same
+  ignore rules the tools use.
+- `RestoreSnapshot { run_id, point }` should resolve `point` to a transaction
+  id when the run's mutations were all journaled, and to a shadow commit
+  otherwise. The command/event names above are unchanged.
+
 ## Sequencing
 
 Independent of MCP (`docs/design/tools.md`); the two share no files. The
-natural order inside this workstream:
+natural order inside this workstream, after K1 lands:
 
-1. Shadow store: create/open, dirty scan, snapshot commit, retention.
-2. Runtime hooks: lazy run-start snapshot, post-mutation checkpoints.
-3. Restore command, file-state refresh, TUI/CLI surface.
+1. Restore over the transaction ledger: reverse rollback, forward re-apply,
+   file-state refresh, TUI/CLI surface.
+2. Shadow store for run-start whole-tree snapshots: create/open, dirty scan
+   via `WorkspaceIndex`, snapshot commit, retention.
+3. Runtime hooks: lazy run-start snapshot before the first shell call.
