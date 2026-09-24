@@ -1,5 +1,12 @@
 # Latest model support (ENG-885)
 
+## Stack conflict resolution
+
+- Merged current origin/main through all three branches without rewriting history. Preserved upstream delegated approval changes and historical v28 fixtures. Effort now uses protocol 29 / store 37; replay uses store 38, superseding earlier numbers below.
+- Resolved schema, protocol commentary and capability fixture conflicts; generated v29 fixtures and updated Harbor traces.
+- Passed protocol tests, migration tests (49 passed, 1 ignored), replay regressions (4 passed), Harbor fixtures, formatting and whitespace checks.
+- Local replay review changes preserved. Remaining correctness and effort blockers are not resolved merely by removing merge conflicts.
+
 ## Opus replay implementation
 
 - Branch `feat/eng-885-opus-replay` stacks on effort PR 154; live Codex effort commit 1b164d9 pushed to that parent.
@@ -49,4 +56,12 @@
 - `cargo bench -p qq-core --bench plan_compile`: 23,485 ns compile; 2,313 ns descriptor digest. Informational only; no pre-change baseline captured, so no regression claim.
 - No live inference or account-specific availability verification. Pricing remains unknown; Codex context uses conservative existing 272K convention; `max` effort remains unsupported.
 - Opus 5.5 deferred to a separate durable replay slice: complete signature/redacted-block capture, ordered persistence, restart/tool-loop tests, byte bounds, incompatible-provider projection, and compaction/prefix invalidation. This PR must not close ENG-885.
+
+## Merge-readiness review continuation
+
+- Reviewed all three live PR descriptions and obtained independent read-only reviews of adapter replay, core persistence, and effort discovery. GitHub reports #154 mergeable=false; #142/#157 mergeable=true. Draft status remains appropriate.
+- Working-tree fixes replace repeated full-prefix hashing with a length-framed incremental SHA-256 chain (including model identity), require replay visible blocks to equal the current assistant projection, and refuse captured signed replay with unclosed/unsigned blocks or invalid delta/stop lifecycle.
+- Added regressions for changed visible content/model/role and invalid signed-block lifecycle. `cargo test -p qq-provider replay`: 4 passed. Earlier `cargo test -p qq-provider anthropic`: 28 unit and 4 interface passed. `cargo fmt --all` completed.
+- Previously failing focused wall-clock budget test passed this session without changing that test; this is not evidence that the timing race is fixed. Workspace gates and benchmarks have not been rerun for these edits.
+- Still blocked on bounded history reads, full origin/transport binding, end-to-end tool-loop/restart acceptance, effort precedence/default semantics, stack conflict resolution, CI/review feedback collection, and final verification. Changes are not pushed or claimed merge-ready.
 
