@@ -1,0 +1,16 @@
+---
+// Extends Starlight Footer to retain edit links, last-updated, and pagination in docs.
+import Default from '@astrojs/starlight/components/Footer.astro';
+import SiteTitle from './SiteTitle.astro';
+import { site, href } from '../../site.config.mjs';
+const isLanding = Astro.locals.starlightRoute.entry.id === '' || Astro.locals.starlightRoute.entry.id === 'index';
+const links = [
+  ['Docs', href('docs/')], ['GitHub', site.github], ['Releases', `${site.github}/releases`],
+  ['Discussions', `${site.github}/discussions`], ['Security', `${site.github}/security/policy`], ['MIT', `${site.github}/blob/main/LICENSE`],
+];
+---
+{!isLanding && <Default><slot /></Default>}
+<footer class:list={['qq-footer', { 'landing-footer': isLanding }]} data-pagefind-ignore>
+  <div class="footer-brand"><SiteTitle /><span>Small binary. Clear boundaries.</span></div>
+  <div class="footer-bottom"><nav aria-label="Footer">{links.map(([label, url]) => <a href={url}>{label}</a>)}</nav><span class="font-mono">{site.version}</span></div>
+</footer>

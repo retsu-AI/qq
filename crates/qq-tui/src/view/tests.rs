@@ -1420,6 +1420,7 @@ fn tool_metrics_are_right_aligned_to_the_content_width() {
                 started_at_ms: Some(1_000),
                 last_output_at_ms: None,
                 finished_at_ms: None,
+                settled: None,
             },
             now_ms: 3_400,
         },
@@ -1451,6 +1452,7 @@ fn narrow_tool_rows_drop_the_duration_then_the_metric_before_the_verb() {
                 started_at_ms: Some(1_000),
                 last_output_at_ms: None,
                 finished_at_ms: Some(1_400),
+                settled: None,
             },
             now_ms: 3_400,
         },
@@ -1924,14 +1926,21 @@ fn refreshed_chrome_shows_identity_status_and_session_metrics() {
     assert!(rows[0].contains("50% ctx"), "{:?}", rows[0]);
     assert_eq!(frame[0].spans[0].style, brand().bold());
     // Rule then composer: the bottom two rows. The rule carries the hints so
-    // no row is spent on them, and an idle session shows no state chip.
+    // no row is spent on them, and an idle session shows no state chip. An
+    // empty composer names `?` for help; typing swaps in the chord.
     assert!(rows[10].starts_with('─'), "{:?}", rows[10]);
-    assert!(rows[10].contains("F1 help"), "{:?}", rows[10]);
+    assert!(rows[10].contains("? help"), "{:?}", rows[10]);
+    assert!(!rows[10].contains("F1 help"), "{:?}", rows[10]);
     assert!(rows[10].contains("^K commands"), "{:?}", rows[10]);
     assert!(!rows[10].contains("idle"), "{:?}", rows[10]);
     assert!(rows[11].starts_with(" › Ask QQ..."), "{:?}", rows[11]);
     // Rows 1..=9 are transcript: nine body rows out of twelve.
     assert!(rows[1..10].iter().any(|row| row.contains("row 0")));
+
+    app.composer.text = "h".to_owned();
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 12));
+    assert!(rows[10].contains("F1 help"), "{:?}", rows[10]);
+    assert!(!rows[10].contains("? help"), "{:?}", rows[10]);
 }
 
 #[test]
@@ -2953,6 +2962,113 @@ fn a_client_without_a_model_shows_no_model_and_the_picker_hint() {
 }
 
 #[test]
+fn the_first_session_offers_try_these_until_the_first_prompt() {
+    // OB8: one session, nothing said yet. The transcript names the commands
+    // a new user wants first, spelled from the command table.
+    let mut app = app_with_messages(0);
+    app.layout.rail = crate::view::PanePref::Hidden;
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 14));
+    let header = rows
+        .iter()
+        .position(|row| row.contains("Try one of these:"))
+        .unwrap_or_else(|| panic!("no try-these cell in:\n{}", rows.join("\n")));
+    assert!(
+        squash(&rows[header + 1]).contains("/models choose a model"),
+        "{:?}",
+        rows[header + 1]
+    );
+    assert!(
+        squash(&rows[header + 2]).contains("/approval choose an approval mode"),
+        "{:?}",
+        rows[header + 2]
+    );
+    assert!(
+        squash(&rows[header + 3]).contains("/skills list workspace commands and skills"),
+        "{:?}",
+        rows[header + 3]
+    );
+    assert!(
+        squash(&rows[header + 4]).contains("@path mention a file in your prompt"),
+        "{:?}",
+        rows[header + 4]
+    );
+    assert!(!rows.iter().any(|row| row.contains("Ask QQ to begin")));
+
+    // Enter records the prompt synchronously: the cell is gone in the very
+    // next frame, before the server acknowledges anything.
+    app.composer.text = "hello".to_owned();
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 14));
+    assert!(
+        !rows.iter().any(|row| row.contains("Try one of these:")),
+        "{}",
+        rows.join("\n")
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("YOU  pending")),
+        "{}",
+        rows.join("\n")
+    );
+}
+
+#[test]
+fn a_second_empty_session_says_ask_qq_instead_of_try_these() {
+    let (mut app, _, other) = app_with_two_sessions(0);
+    app.layout.rail = crate::view::PanePref::Hidden;
+    app.focus_session(other);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 14));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Ask QQ to begin this session.")),
+        "{}",
+        rows.join("\n")
+    );
+    assert!(!rows.iter().any(|row| row.contains("Try one of these:")));
+}
+
+#[test]
+fn the_try_these_cell_keeps_the_credential_remedy_above_it() {
+    // A first session whose configured provider still lacks a credential
+    // shows the remedy first: the commands below are useless until it is
+    // fixed, and the rule already repeats it.
+    let summary = fixtures::session_summary(SESSION);
+    let mut app = App::new(TuiOptions {
+        model: ModelSelection {
+            model_is_fallback: true,
+            model: Some("openai/gpt-5.6".to_owned()),
+            max_output_tokens: Some(8_192),
+            organization: None,
+        },
+        unauthenticated_providers: vec![crate::ProviderRemedy {
+            provider: "openai".to_owned(),
+            remedy: "run qq auth login openai or set OPENAI_API_KEY".to_owned(),
+        }],
+        ..TuiOptions::default()
+    });
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        sessions: vec![summary.clone()],
+        focused: Some(fixtures::session_snapshot(summary)),
+        ..fixtures::workspace_snapshot()
+    }));
+    app.layout.rail = crate::view::PanePref::Hidden;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 14));
+    let remedy = rows
+        .iter()
+        .position(|row| row.contains("openai needs a credential"))
+        .unwrap_or_else(|| panic!("no remedy line in:\n{}", rows.join("\n")));
+    assert!(
+        rows[remedy + 1].contains("Try one of these:"),
+        "{:?}",
+        rows[remedy + 1]
+    );
+}
+
+#[test]
 fn model_picker_renders_needs_credential_rows_when_nothing_is_authenticated() {
     let mut app = empty_workspace_app(TuiOptions {
         unauthenticated_providers: vec![
@@ -3400,6 +3516,7 @@ fn expanded_call_rows(call: &ToolCallSnapshot, width: usize) -> Vec<Line> {
             timing: ToolCallTiming {
                 started_at_ms: Some(43_451_000),
                 finished_at_ms: Some(43_454_000),
+                settled: None,
                 last_output_at_ms: None,
             },
             now_ms: 43_454_000,
@@ -4436,7 +4553,7 @@ fn the_composer_rule_carries_run_telemetry_notices_and_hints_in_priority_order()
     }
     let rule = rule_at(&mut app, 100);
     assert!(rule.contains("generating 4.2s  ttft 0.6s"), "{rule}");
-    assert!(rule.contains("F1 help"), "{rule}");
+    assert!(rule.contains("? help"), "{rule}");
     assert!(rule.contains("─"), "{rule}");
 
     // Committed turns and their running cost join the rule as the run goes.
@@ -4464,13 +4581,13 @@ fn the_composer_rule_carries_run_telemetry_notices_and_hints_in_priority_order()
     app.apply_notice(None, crate::app::NoticeLevel::Info, "saved".to_owned());
     let rule = rule_at(&mut app, 100);
     assert!(rule.starts_with(" saved "), "{rule}");
-    assert!(!rule.contains("F1 help"), "{rule}");
+    assert!(!rule.contains(" help"), "{rule}");
     app.status = None;
 
     // Cramped: status outranks hints, and some rule always shows.
     let rule = rule_at(&mut app, 40);
     assert!(rule.contains("generating"), "{rule}");
-    assert!(!rule.contains("F1 help"), "{rule}");
+    assert!(!rule.contains(" help"), "{rule}");
     assert!(rule.contains("────"), "{rule}");
 }
 
@@ -4992,6 +5109,7 @@ fn a_tool_row_reuses_its_panel_across_frames_and_relays_out_on_a_new_width() {
             timing: ToolCallTiming {
                 started_at_ms: Some(43_451_000),
                 finished_at_ms: Some(43_454_000),
+                settled: None,
                 last_output_at_ms: None,
             },
             now_ms,

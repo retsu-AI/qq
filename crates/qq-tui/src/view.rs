@@ -253,6 +253,7 @@ impl FrameRenderer {
                     Mode::Profiles => profile_picker(app, slot_width, body_height),
                     Mode::ApprovalModes => approval_mode_picker(app, slot_width, body_height),
                     Mode::Effort => effort_picker(app, slot_width, body_height),
+                    Mode::Delegate => delegate_picker(app, slot_width, body_height),
                     Mode::Skills => skill_picker(app, slot_width, body_height),
                     Mode::Themes => theme_picker(app, slot_width, body_height),
                     Mode::Sessions => session_picker(app, slot_width, body_height),

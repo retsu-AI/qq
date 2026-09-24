@@ -25,18 +25,19 @@ script, pipe it: `printenv OPENAI_API_KEY | qq auth login openai`.
 Once, for every project:
 
 ```sh
-mkdir -p "$(qq config paths | awk '/^global:/ {print $2}')"
-cat > "$(qq config paths | awk '/^global:/ {print $2}')/config.ron" <<'EOF'
-(
-    version: 1,
-    model: "openai/gpt-5.6",
-)
-EOF
+qq init --model openai/gpt-5.6
+# wrote ~/.config/qq/config.ron (model: openai/gpt-5.6)
 qq config check     # configuration is valid (model: openai/gpt-5.6)
 ```
 
-Or for one project, in `<repo>/.qq/config.ron` with the same content, or for
-one command with `--model openai/gpt-5.6` or `QQ_MODEL=openai/gpt-5.6`.
+Plain `qq init` lists the built-in providers and asks which one; `--force`
+replaces a file that is already there. The file it writes is short and
+commented, so editing it later needs no reference.
+
+Or for one project, `qq init --project` writes `<repo>/.qq/config.ron`
+(then `qq trust` in that directory, as for any project file that sets
+`model`), or for one command with `--model openai/gpt-5.6` or
+`QQ_MODEL=openai/gpt-5.6`.
 
 `qq doctor` confirms everything before the first run: configuration, model,
 credential, and server, one line each, with the fix next to anything that

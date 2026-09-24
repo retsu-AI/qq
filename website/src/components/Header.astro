@@ -1,0 +1,18 @@
+---
+// Overrides Starlight Header to share one compact navigation across landing and docs.
+import Search from '@astrojs/starlight/components/Search.astro';
+import ThemeSelect from '@astrojs/starlight/components/ThemeSelect.astro';
+import { Icon } from '@astrojs/starlight/components';
+import SiteTitle from './SiteTitle.astro';
+import { site, href } from '../../site.config.mjs';
+const isDocs = Astro.locals.starlightRoute.hasSidebar;
+---
+<div class="qq-header font-sans">
+  <div class="brand-group"><SiteTitle /><span class="brand-divider" aria-hidden="true">/</span><span class="brand-caption">the agent runtime</span></div>
+  <div class="header-search"><Search /></div>
+  <nav class="header-links" aria-label="Primary">
+    <a href={href('docs/')} aria-current={isDocs ? 'true' : undefined}>Docs</a>
+    <a class="github-link" href={site.github}><Icon name="github" size="17" /><span>GitHub</span></a>
+    <div class="theme-control"><ThemeSelect /></div>
+  </nav>
+</div>

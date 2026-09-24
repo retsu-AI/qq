@@ -35,6 +35,6 @@
                                                                                             │
                                                                                             │
                                                                                             │
- ◇ Deploy helper needs approval  Ctrl-G jump  Alt-A/Alt-D answer ────────────────────── F1 help  ^K commands  ^O detail
+ ◇ Deploy helper needs approval  Ctrl-G jump  Alt-A/Alt-D answer ─────────────────────── ? help  ^K commands  ^O detail
  › Ask QQ...
 

@@ -50,7 +50,7 @@ use runtime::{
     ToolGateFuture, TurnBlock, render_history_matches, render_tool_result,
 };
 
-pub use approval::shell_prefix_matches;
+pub use approval::{ApprovalDelegate, shell_prefix_matches};
 pub use cancellation::RunCancellation;
 pub use context_source::{
     ContextBudget, ContextBundle, ContextCache, ContextFetchFuture, ContextItem, ContextRequest,
@@ -71,8 +71,8 @@ pub use runtime::{
     MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
 };
 pub use sessions::{
-    ApprovalReviewer, CheckpointSelection, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime,
-    MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN,
+    ApprovalReviewer, CheckpointSelection, DelegateIdentity, GrantPromotionFuture, GrantSeedFuture,
+    LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN,
     MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT, MAX_GRANT_BYTES, MAX_PENDING_PROMPTS,
     MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES,
     MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent,
@@ -759,6 +759,8 @@ pub struct Runtime {
     pub(crate) shell: Arc<runtime::ShellPolicy>,
     pub(crate) network: Arc<tools::network::NetworkPolicy>,
     pub(crate) turn_recovery: TurnRecoveryPolicy,
+    /// Who settles the calls the session's approval mode holds.
+    pub(crate) approval_delegate: approval::ApprovalDelegate,
 }
 
 impl Runtime {
@@ -809,6 +811,7 @@ impl Runtime {
             shell: Arc::new(runtime::ShellPolicy::default()),
             network: Arc::new(tools::network::NetworkPolicy::default()),
             turn_recovery: TurnRecoveryPolicy::default(),
+            approval_delegate: approval::ApprovalDelegate::default(),
         })
     }
 
@@ -817,6 +820,15 @@ impl Runtime {
     #[must_use]
     pub const fn with_turn_recovery(mut self, policy: TurnRecoveryPolicy) -> Self {
         self.turn_recovery = policy;
+        self
+    }
+
+    /// Sets who settles held approvals: the configured reviewer under the
+    /// modes that consult it, or a human for everything. Inert without a
+    /// reviewer installed on the session runtime.
+    #[must_use]
+    pub const fn with_approval_delegate(mut self, delegate: approval::ApprovalDelegate) -> Self {
+        self.approval_delegate = delegate;
         self
     }
 
