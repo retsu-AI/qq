@@ -1,8 +1,20 @@
 # Ledger — delegated approval
 
-Plan: [`../delegated-approval.md`](../delegated-approval.md).
-Only the agent working this plan edits this file. Current state on top;
-dated entries appended below, newest last.
+**Closed 2026-09-24.** The plan (`docs/plans/delegated-approval.md`,
+ENG-862) shipped in full and was deleted, as it required; this ledger is the
+receipt. The durable text is [`../../design/tools.md`](../../design/tools.md)
+§ Approval Policy, [`../../design/protocol.md`](../../design/protocol.md)
+(version 28), [ADR-0041](../../adr/0041-jev-delegated-approval.md), and the
+operator guide [`../../guide/permissions.md`](../../guide/permissions.md)
+§ "Who decides a held call".
+
+What the plan set out to do: an operator who opts in stops babysitting
+ordinary side effects. A configured delegate — Jev when `jev_approval: on`
+and a key is stored, otherwise `reviewer_model`, otherwise the human —
+settles the calls the approval mode already holds, inside that mode's
+ceiling. `Forbidden`, blocked hosts, managed `deny_*`, and `ask_user` never
+reach a delegate. An attached interactive client is not denied by a server
+timer. The five modes are unchanged; `full` is not widened.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
@@ -12,8 +24,44 @@ dated entries appended below, newest last.
 | DA3 | `approval_delegate: by-mode\|on\|off` says who settles a held call | Merged | [#143](https://github.com/retsu-AI/qq/pull/143) | No protocol bump; not part of the plan digest |
 | DA4 | Delegate grants are exact-command or exact-host, session-scoped, never written to config | Merged | [#135](https://github.com/retsu-AI/qq/pull/135) | Store schema 34 → 35 |
 | DA5 | `jev_approval` typed approve/deny/abstain; ADR-0041 | Merged | [#144](https://github.com/retsu-AI/qq/pull/144) | ADR-0041 accepted. `source = 'jev'` on delegate grant rows |
-| DA6 | Surfaces: `tool_approval_resolved.delegate`, `tool_approval_escalated`, `set_approval_delegate` (`/delegate`), TUI "who decided", headless `approved by jev` | In review | `feat/eng-862-da6-delegate-surfaces` | `PROTOCOL_VERSION` 27 → 28; store schema 35 → 36. Target contract deleted; this plan closes with it |
+| DA6 | Surfaces: `tool_approval_resolved.delegate`, `tool_approval_escalated`, `set_approval_delegate` (`/delegate`), TUI "who decided", headless `approved by jev` | Merged | [#152](https://github.com/retsu-AI/qq/pull/152) | `PROTOCOL_VERSION` 27 → 28; store schema 35 → 36. Target contract deleted |
 | docs | Plan, target contract, ledger | Merged | [#123](https://github.com/retsu-AI/qq/pull/123) | |
+| close | Blocked-host regression test with a delegate wired; plan deleted; indexes | Merged | `chore/eng-862-close-out` | Closes plan acceptance 2 and 5 |
+
+### Plan acceptance
+
+1. Every slice's tests and the workspace gates green — **met** (no slice
+   touched `qq-provider`).
+2. `Forbidden` and blocked-host refusals have a regression test with a
+   delegate configured that asserts no delegate call — **met**:
+   `a_delegate_grant_never_lifts_forbidden_and_a_forbidden_call_never_reaches_the_reviewer`
+   (DA4) and `a_blocked_host_never_reaches_the_delegate_even_when_one_would_approve`
+   (close-out; `auto`, `approval_delegate: on`, a Jev-attributed reviewer
+   that would approve). Jev-in-front is `jev_http_contract_decides_and_never_reaches_the_reviewer_on_a_confident_answer`
+   (DA5).
+3. One week of real use after DA4: no `denied_timeout` on a session that had
+   a client attached, and a human answers fewer approval prompts than a
+   delegate settles — **open until 2026-09-30** (DA2 removed the default
+   deadline on the 23rd). Record here as a dated entry with these two counts
+   over the live store:
+
+   ```sql
+   -- holds settled by the server clock; the store does not record client
+   -- attachment, and since DA2 this can only be non-zero where
+   -- approval_timeout_seconds is configured, so the count stands in
+   SELECT count(*) FROM tool_calls WHERE approval_resolution = 'denied_timeout';
+   -- who settled the holds: human (approved_once, approved_for_*, denied)
+   -- against delegate (approved_by_reviewer, denied_by_reviewer)
+   SELECT approval_resolution, count(*) FROM tool_calls
+     WHERE approval_resolution IS NOT NULL
+     GROUP BY approval_resolution;
+   ```
+
+   No regression in `Forbidden` refusals: `tool_calls.result LIKE
+   'forbidden:%'` still denies with no `tool_approval_requested`.
+4. ADR-0041 accepted; `tools.md` and `architecture.md` amended;
+   `design/delegated-approval.md` deleted — **met** (DA5, DA6).
+5. The plan is deleted; the ledger remains — **met** (close-out).
 
 ## Entries
 
@@ -22,8 +70,9 @@ dated entries appended below, newest last.
 Tracked by [ENG-862](https://linear.app/retsu-ai/issue/ENG-862/docsplans-delegated-approval-jev-then-a-reviewer-then-the-human).
 No code. The operator asked for an opt-in where Jev decides held approvals and
 a model decides them when Jev is not configured, with stricter modes for
-operators who want to be asked. Research recorded in the plan and in
-[`../../design/delegated-approval.md`](../../design/delegated-approval.md).
+operators who want to be asked. Research recorded in the plan and in the
+target contract `docs/design/delegated-approval.md` (both since deleted; the
+as-built text is `docs/design/tools.md` § Approval Policy).
 
 Facts checked against the tree before writing:
 
@@ -385,3 +434,26 @@ a client attached; humans answer fewer prompts than delegates settle) is
 not measurable yet; DA2 removed the default deadline four days ago. Record
 the counts here when the week is up. Everything else in "Acceptance for the
 plan" is met with this slice.
+
+### 2026-09-24 — DA6 merged; plan closed
+
+[#152](https://github.com/retsu-AI/qq/pull/152) is on `main`. Close-out on
+`chore/eng-862-close-out`:
+
+- Plan acceptance 2 had only the `Forbidden` half under test with a delegate
+  wired. Added `a_blocked_host_never_reaches_the_delegate_even_when_one_would_approve`:
+  `auto`, `approval_delegate: on`, a reviewer that would approve and names
+  Jev; a link-local `fetch` is denied with no `tool_approval_requested`,
+  `_resolved`, or `_escalated`, the reviewer is never consulted, and no
+  delegate host grant is recorded.
+- `docs/plans/delegated-approval.md` deleted per its own acceptance 5; the
+  goal, slice table, and acceptance checklist moved to the head of this
+  ledger so it stands alone. Index rows in `docs/plans/README.md` and
+  `docs/plans/progress/README.md` updated; `docs/README.md` already points at
+  the as-built text.
+- The plan's DA6 row asked for `docs/runbooks/delegated-approval.md`. Not
+  written: the operator procedure is `guide/permissions.md` § "Who decides a
+  held call" (setting, session switch, seeing who decided) and
+  `runbooks/jev.md` § "Jev as the approval delegate" covers the Jev lane.
+
+Open: acceptance 3 only, measurable from 2026-09-30. Nothing to build.
