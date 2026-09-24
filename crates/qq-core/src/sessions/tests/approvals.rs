@@ -3715,3 +3715,60 @@ async fn fetch_to_a_blocked_host_is_denied_under_full_without_a_hold() {
                 })
     )));
 }
+
+#[tokio::test]
+async fn a_blocked_host_never_reaches_the_delegate_even_when_one_would_approve() {
+    // Plan acceptance 2, host half: under `auto` an ungranted host is exactly
+    // the kind of call the delegate settles, so this is where a permissive
+    // delegate could matter. It must not: a private or link-local host is
+    // refused before the hold that consults any delegate, the reviewer sees
+    // nothing, and no `tool_approval_requested` is published for a client to
+    // answer either.
+    let (reviewer, consulted) = StubReviewer::immediate(
+        ReviewVerdict::free(ReviewDecision::Approve).by(DelegateIdentity::Jev),
+    );
+    let mut harness = approval_harness_with_delegate(
+        ApprovalMode::Auto,
+        "fetch",
+        r#"{"url":"http://169.254.169.254/latest/meta-data/"}"#,
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+        None,
+        Some(reviewer),
+        approval::ApprovalDelegate::On,
+    )
+    .await;
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(
+        !observed.iter().any(|event| matches!(
+            event.event,
+            SessionEvent::ToolApprovalRequested { .. }
+                | SessionEvent::ToolApprovalResolved { .. }
+                | SessionEvent::ToolApprovalEscalated { .. }
+        )),
+        "a blocked host is refused before any hold"
+    );
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolCallFinished { tool_call }
+            if tool_call.state == ToolCallState::Denied
+                && tool_call.result.as_deref().is_some_and(|result| {
+                    result.starts_with("fetch refused: host 169.254.169.254 resolves to a private")
+                })
+    )));
+    assert!(
+        consulted.lock().unwrap().is_empty(),
+        "a blocked host never reaches the delegate"
+    );
+    let (_, grants, _) = harness
+        .runtime
+        .inner
+        .store
+        .approval_policy(harness.session_id)
+        .await
+        .unwrap();
+    assert!(
+        grants.delegate.hosts.is_empty(),
+        "nothing was approved, so nothing was recorded: {grants:?}"
+    );
+}

@@ -99,4 +99,4 @@ Jev: [review and direction](design/jev-runtime-review-2026-09-18.md),
 Delegated approval, including Jev as an approval delegate:
 [as built](design/tools.md#approval-policy), [ADR-0041](adr/0041-jev-delegated-approval.md),
 [operator guide](guide/permissions.md#who-decides-a-held-call),
-[plan and ledger](plans/delegated-approval.md).
+[receipt](plans/progress/delegated-approval.md).
