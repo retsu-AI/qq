@@ -2199,6 +2199,7 @@ async fn a_write_child_runs_supervised_and_the_reviewer_adjudicates_each_action(
             SessionEvent::ToolApprovalResolved {
                 tool_call,
                 resolution,
+                ..
             } if tool_call.session_id == child_session.id => {
                 Some((tool_call.name.clone(), *resolution))
             }
@@ -2303,6 +2304,7 @@ async fn a_reviewer_denial_is_final_for_a_supervised_child_and_is_durable() {
             SessionEvent::ToolApprovalResolved {
                 tool_call,
                 resolution: ApprovalResolution::DeniedByReviewer,
+                ..
             } => Some(tool_call.clone()),
             _ => None,
         })

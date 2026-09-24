@@ -373,19 +373,29 @@ pub(super) fn insert_seed_grants(
     Ok(())
 }
 
+/// The session's mode, its grants, and its delegate override (`None` when
+/// the configured `approval_delegate` applies).
 pub(super) fn load_approval_policy(
     connection: &mut Connection,
     session_id: SessionId,
-) -> Result<(ApprovalMode, approval::SessionGrants), SessionRuntimeError> {
-    let mode = connection
+) -> Result<
+    (
+        ApprovalMode,
+        approval::SessionGrants,
+        Option<approval::ApprovalDelegate>,
+    ),
+    SessionRuntimeError,
+> {
+    let (mode, delegate) = connection
         .query_row(
-            "SELECT approval_mode FROM sessions WHERE id = ?1",
+            "SELECT approval_mode, approval_delegate FROM sessions WHERE id = ?1",
             [session_id.to_string()],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .optional()?
         .ok_or(SessionRuntimeError::SessionNotFound)?;
     let mode = parse_approval_mode(&mode)?;
+    let delegate = parse_approval_delegate(delegate.as_deref())?;
     let mut statement = connection
         .prepare("SELECT kind, value, source FROM session_grants WHERE session_id = ?1")?;
     let rows = statement
@@ -417,7 +427,7 @@ pub(super) fn load_approval_policy(
             _ => return Err(SessionRuntimeError::CONSTRAINT),
         }
     }
-    Ok((mode, grants))
+    Ok((mode, grants, delegate))
 }
 
 pub(super) fn deny_tool_call(
@@ -617,7 +627,14 @@ pub(super) fn resolve_approval_by_reviewer(
                 "INSERT OR IGNORE INTO session_grants(
                          session_id, kind, value, created_at_ms, source, run_id
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![session, kind, value, now, delegate.as_str(), run],
+                params![
+                    session,
+                    kind,
+                    value,
+                    now,
+                    super::runtime::delegate_grant_source(delegate),
+                    run
+                ],
             )?;
         }
     }
@@ -628,6 +645,7 @@ pub(super) fn resolve_approval_by_reviewer(
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::ApprovedByReviewer,
+            delegate: Some(delegate),
         },
     )?;
     transaction.commit()?;
@@ -643,6 +661,7 @@ pub(super) fn deny_approval_by_reviewer(
     identity: RunIdentity,
     tool_call_id: ToolCallId,
     message: &str,
+    delegate: DelegateIdentity,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
@@ -699,6 +718,44 @@ pub(super) fn deny_approval_by_reviewer(
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::DeniedByReviewer,
+            delegate: Some(delegate),
+        },
+    )?;
+    transaction.commit()?;
+    Ok(Some(event))
+}
+
+/// A delegate handed the hold to the human: records why, without touching
+/// the call. `Ok(None)` when the call is no longer awaiting approval (a
+/// client resolution won the race), in which case nothing is published.
+pub(super) fn escalate_tool_approval(
+    connection: &mut Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+    tool_call_id: ToolCallId,
+    delegate: Option<DelegateIdentity>,
+    reason: &str,
+) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    let awaiting: bool = transaction
+        .query_row(
+            "SELECT state = 'awaiting_approval' AND approval_resolution IS NULL
+             FROM tool_calls WHERE id = ?1 AND run_id = ?2",
+            params![tool_call_id.to_string(), identity.run_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !awaiting {
+        return Ok(None);
+    }
+    let event = append_event(
+        &transaction,
+        EventContext::for_run(store_id, identity, now_ms()),
+        SessionEvent::ToolApprovalEscalated {
+            tool_call_id,
+            delegate,
+            reason: reason.to_owned(),
         },
     )?;
     transaction.commit()?;
@@ -838,6 +895,7 @@ pub(super) fn conclude_tool_approval(
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::DeniedTimeout,
+            delegate: None,
         },
     )?;
     transaction.commit()?;

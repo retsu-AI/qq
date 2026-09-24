@@ -50,7 +50,7 @@ migration; historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 26
+PROTOCOL_VERSION = 28
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -181,6 +181,19 @@ values a catalog route advertises, lowest to highest, and is omitted when empty.
 Clients shape an effort picker from it; the runtime rejects a pin outside a
 non-empty ladder at plan time. Empty means "not advertised", not "unsupported".
 No fixture changes: every current golden has an empty ladder.
+
+Version 28 adds the approval-delegate surfaces (delegated-approval DA6,
+ADR-0041): optional `delegate` (`reviewer` | `jev`) on
+`tool_approval_resolved` beside `approved_by_reviewer` /
+`denied_by_reviewer`, so a supervisor can tell which delegate settled a call
+from the stream alone; `set_approval_delegate` / `approval_delegate_set` on
+`/v1/sessions/approval-delegate`, the session's own override of who settles
+its held calls (`by_mode` | `on` | `off`, or absent to clear); and the
+optional `SessionSummary.approval_delegate` that carries the override. Every
+field is optional and omitted when absent; the version moves because older
+clients reject the new command, outcome, and summary field. Golden fixtures
+live under `crates/qq-protocol/tests/fixtures/v28/`; `v23`–`v27` are retained
+decode-only.
 
 Clients and servers must agree on this value.
 
@@ -374,6 +387,7 @@ POST /v1/models
 POST /v1/sessions
 POST /v1/sessions/prompts
 POST /v1/sessions/approval-mode
+POST /v1/sessions/approval-delegate
 POST /v1/sessions/model
 POST /v1/sessions/profile
 POST /v1/sessions/delete
@@ -894,14 +908,19 @@ Resolution values: `approved_once`, `approved_for_session`,
 `denied_by_reviewer`, `answered`. `answered` settles an `ask_user` hold: the
 call is `completed` and its `result` is the rendered questions and answers
 (or the decline text). The reviewer resolutions are written by the configured
-`reviewer_model` without a human, for the calls `auto` holds (dangerous-shaped
-shell, ungranted hosts) and for every held call of a `supervised` child:
-`approved_by_reviewer` executes the call; `denied_by_reviewer` is final under
-both modes and the model receives the reviewer's reason as a tool error. A
-reviewer `escalate` leaves the hold open for a client, whose wait starts at
-the escalation. The hold (`tool_approval_requested`) is always published
-before the reviewer is consulted, so a client may still answer first; the
-first durable resolution wins. Reviewer spend is charged to the reviewed run.
+delegate without a human — Jev when `jev_approval` is on, otherwise
+`reviewer_model` (ADR-0041) — for the calls `auto` holds (dangerous-shaped
+shell, ungranted hosts), for every held call of a `supervised` child, and
+under `ask` when `approval_delegate` is `on`: `approved_by_reviewer` executes
+the call; `denied_by_reviewer` is final under `auto` and `supervised` and the
+model receives the reviewer's reason as a tool error. The
+`tool_approval_resolved` *event* (not the command outcome) carries
+`delegate: "reviewer" | "jev"` beside these two resolutions (protocol 28) and
+omits it for every other resolution. A reviewer `escalate` leaves the hold
+open for a client, whose wait starts at the escalation. The hold
+(`tool_approval_requested`) is always published before the reviewer is
+consulted, so a client may still answer first; the first durable resolution
+wins. Reviewer spend is charged to the reviewed run.
 
 Approval modes are `read_only`, `supervised`, `ask`, `auto` (default), and
 `full`. `supervised` is never advertised for root sessions and cannot be set by
@@ -965,6 +984,42 @@ Outcome:
   "type": "approval_mode_set",
   "session_id": "...",
   "mode": "auto"
+}
+```
+
+### `POST /v1/sessions/approval-delegate`
+
+```json
+{
+  "command_id": "...",
+  "command": {
+    "type": "set_approval_delegate",
+    "session_id": "...",
+    "delegate": "off"
+  }
+}
+```
+
+Protocol 28. Overrides, for the rest of this session, who settles the calls
+the mode holds: `by_mode` (the reviewer under `auto` and `supervised`, the
+human under `ask`), `on` (the reviewer under `ask` too), or `off` (every held
+call waits for a human — the "stop delegating" switch). Omitting `delegate`
+clears the override so the workspace's configured `approval_delegate` applies
+again. The mode stays the ceiling, so there is no authority check: no value
+lets the model do more than the mode allows. Like the mode, the override is
+read when each approval is evaluated, so it applies to a running session's
+next held call without a restart and without touching `.qq/config.ron`.
+Spawned children start with the parent's override. The command commits and
+publishes a `session_updated` event whose summary carries
+`approval_delegate` (omitted when no override is set).
+
+Outcome:
+
+```json
+{
+  "type": "approval_delegate_set",
+  "session_id": "...",
+  "delegate": "off"
 }
 ```
 

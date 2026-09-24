@@ -39,7 +39,7 @@ impl ToolGate for SessionToolGate {
         let network = Arc::clone(&self.network);
         let delegate = self.delegate;
         Box::pin(async move {
-            let (mode, grants) = match inner
+            let (mode, grants, session_delegate) = match inner
                 .store
                 .approval_policy(claimed.identity.session_id)
                 .await
@@ -47,6 +47,10 @@ impl ToolGate for SessionToolGate {
                 Ok(policy) => policy,
                 Err(error) => return approval_persistence_failure(error),
             };
+            // The session's own choice (`set_approval_delegate`) wins over the
+            // configured one for the rest of the session; read here, at the
+            // hold, so it applies to the next held call without a restart.
+            let delegate = session_delegate.unwrap_or(delegate);
             let class = approval::classify(call.effect, &call.name, &call.arguments, &network);
             match approval::evaluate(mode, &call.name, &class, &grants) {
                 approval::PolicyDecision::Execute => GateDecision::Execute,
@@ -300,7 +304,12 @@ impl ToolGate for SessionToolGate {
                                             );
                                             match inner
                                                 .store
-                                                .deny_approval_by_reviewer(&claimed, call.id, message.clone())
+                                                .deny_approval_by_reviewer(
+                                                    &claimed,
+                                                    call.id,
+                                                    message.clone(),
+                                                    verdict.delegate,
+                                                )
                                                 .await
                                             {
                                                 Ok(Some(_)) => {
@@ -315,8 +324,37 @@ impl ToolGate for SessionToolGate {
                                         }
                                         // Escalate, or a non-final Deny: the
                                         // human's wait starts here, on the
-                                        // remaining select arms.
-                                        ReviewDecision::Escalate { .. } | ReviewDecision::Deny { .. } => {
+                                        // remaining select arms. The
+                                        // escalation is published so the
+                                        // prompt can say why the delegate did
+                                        // not decide; a failed write changes
+                                        // nothing about the hold.
+                                        ReviewDecision::Escalate { reason } => {
+                                            let _ = inner
+                                                .store
+                                                .escalate_tool_approval(
+                                                    &claimed,
+                                                    call.id,
+                                                    Some(verdict.delegate),
+                                                    truncate_utf8(reason, MAX_REVIEW_REASON_BYTES),
+                                                )
+                                                .await;
+                                            deadline = human_deadline(inner.approval_timeout);
+                                        }
+                                        ReviewDecision::Deny { reason } => {
+                                            let _ = inner
+                                                .store
+                                                .escalate_tool_approval(
+                                                    &claimed,
+                                                    call.id,
+                                                    Some(verdict.delegate),
+                                                    format!(
+                                                        "{} {}",
+                                                        approval::ADVISORY_DENIAL_PREFIX,
+                                                        truncate_utf8(reason, MAX_REVIEW_REASON_BYTES)
+                                                    ),
+                                                )
+                                                .await;
                                             deadline = human_deadline(inner.approval_timeout);
                                         }
                                     }
@@ -326,6 +364,15 @@ impl ToolGate for SessionToolGate {
                                 // asked, exactly as for an `Escalate`.
                                 () = tokio::time::sleep_until(delegate_deadline) => {
                                     review = None;
+                                    let _ = inner
+                                        .store
+                                        .escalate_tool_approval(
+                                            &claimed,
+                                            call.id,
+                                            None,
+                                            approval::DELEGATE_TIMED_OUT_REASON.to_owned(),
+                                        )
+                                        .await;
                                     deadline = human_deadline(inner.approval_timeout);
                                 }
                             }

@@ -43,11 +43,6 @@ below is for people changing QQ.
   (27 % of prompt runs failed, 73 % of those by harness policy), how Codex,
   OpenCode, Pi, and fx keep runs alive, and findings R01–R12 (research; owned
   by `plans/run-reliability.md`).
-- [`delegated-approval.md`](design/delegated-approval.md) — target contract for
-  an opt-in delegate that settles held approvals. Mostly absorbed into
-  `tools.md` § Approval Policy; what remains is DA6 of
-  [`plans/delegated-approval.md`](plans/delegated-approval.md). Deleted when
-  DA6 ships.
 
 ## Decisions — `adr/`
 
@@ -102,5 +97,6 @@ Markdown so the same files can be mirrored to the GitHub wiki or a docs site.
 Jev: [review and direction](design/jev-runtime-review-2026-09-18.md),
 [opt-in runbook](runbooks/jev.md), [implementation plan](plans/jev-opt-in.md).
 Delegated approval, including Jev as an approval delegate:
-[target contract](design/delegated-approval.md),
-[plan](plans/delegated-approval.md).
+[as built](design/tools.md#approval-policy), [ADR-0041](adr/0041-jev-delegated-approval.md),
+[operator guide](guide/permissions.md#who-decides-a-held-call),
+[plan and ledger](plans/delegated-approval.md).

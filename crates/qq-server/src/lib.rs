@@ -800,6 +800,7 @@ async fn session_command(
         | SessionCommand::CancelRun { .. }
         | SessionCommand::RespondToolApproval { .. }
         | SessionCommand::SetApprovalMode { .. }
+        | SessionCommand::SetApprovalDelegate { .. }
         | SessionCommand::SetSessionModel { .. }
         | SessionCommand::SetSessionProfile { .. }
         | SessionCommand::SetSessionEffort { .. }
@@ -2236,6 +2237,10 @@ mod tests {
             SessionCommandKind::SetApprovalMode => SessionCommand::SetApprovalMode {
                 session_id,
                 mode: ApprovalMode::Full,
+            },
+            SessionCommandKind::SetApprovalDelegate => SessionCommand::SetApprovalDelegate {
+                session_id,
+                delegate: Some(qq_protocol::ApprovalDelegate::Off),
             },
             SessionCommandKind::SetSessionModel => SessionCommand::SetSessionModel {
                 session_id,

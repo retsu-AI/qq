@@ -1100,6 +1100,17 @@ of the plan digest: it changes who is asked, never what the model may do.
 `Forbidden` shapes, blocked hosts, managed `deny_*`, and `ask_user` never
 reach the reviewer under any setting.
 
+A session may override the configured choice for the rest of that session:
+`set_approval_delegate` (protocol 28; `/delegate` in the TUI) stores
+`by_mode`, `on`, or `off` on the session, or clears it back to the
+configuration. The gate reads the override with the mode at each held call,
+so it applies to a running session's next hold without a restart and without
+rewriting `.qq/config.ron`; `off` is the "stop delegating" switch. Spawned
+children start with the parent's override. The mode stays the ceiling, so no
+authority check applies: every value asks at least as much of a human as the
+configured choice could. The override is `SessionSummary.approval_delegate`,
+absent when none is set.
+
 "The reviewer" in the table is a chain (ADR-0041). With `jev_approval: true`
 and a stored TypeSafe key, Jev is asked first: one typed `choice` over
 `approve` / `deny` / `abstain` against the approval preview (command or diff,
@@ -1113,9 +1124,12 @@ to the human, with the reason attached to the escalation. Jev is never failed
 open to approve. Whether Jev is consulted is the held call's workspace
 configuration, read per hold and cached per credential epoch; a stored key
 with `jev_approval` off is never read (ADR-0030). `ReviewVerdict` names the
-delegate that decided, and a delegate-recorded grant row carries it as
-`source = 'jev'` or `source = 'delegate'` (§ Grant Lifetimes); the wire
-resolution stays `approved_by_reviewer` / `denied_by_reviewer` for both.
+delegate that decided; a delegate-recorded grant row carries it as
+`source = 'jev'` or `source = 'delegate'` (§ Grant Lifetimes), and the
+`tool_approval_resolved` event carries it as `delegate: jev | reviewer`
+beside `approved_by_reviewer` / `denied_by_reviewer` (protocol 28), so a
+supervisor can tell the two apart from the stream alone. Human, timeout, and
+answer resolutions carry no `delegate`.
 
 Decision by effect class before grants (ADR-0021):
 
