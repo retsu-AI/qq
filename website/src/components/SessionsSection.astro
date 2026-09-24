@@ -1,0 +1,17 @@
+---
+import { Icon } from '@astrojs/starlight/components';
+import Kbd from './Kbd.astro';
+import { href } from '../../site.config.mjs';
+---
+<section class="landing-section split-section" aria-labelledby="agents">
+  <div class="section-copy"><p class="section-eyebrow">KEEP THE WORK IN VIEW</p><h2 id="agents">Many agents, one screen.</h2><p>Sessions are grouped by what needs your attention, not when you opened them. Unread counts make the next decision easy to find.</p><p>Use <Kbd>Alt</Kbd> + <Kbd>A</Kbd> or <Kbd>Alt</Kbd> + <Kbd>D</Kbd> to approve or deny another session without leaving yours. Delegate with a visible roster and a bounded depth.</p><a class="section-link" href={href('docs/tui/#sessions')}>Work with sessions <Icon name="right-arrow" size="18" /></a></div>
+  <div class="session-mock" aria-label="Example multi-agent session sidebar">
+    <div class="session-top"><span>~/my-project</span><span>4 sessions</span></div>
+    <div class="session-columns"><div class="session-sidebar">
+      <div class="session-group"><div class="session-group-title needs-you">NEEDS YOU <span>1</span></div><div class="session-row">◇ Add dry-run flag <span class="count">[1]</span></div></div>
+      <div class="session-group"><div class="session-group-title">WORKING <span>1</span></div><div class="session-row active">› Review the parser</div></div>
+      <div class="session-group"><div class="session-group-title">IDLE <span>1</span></div><div class="session-row">· Update the docs</div></div>
+      <div class="session-group"><div class="session-group-title">DONE <span>1</span></div><div class="session-row">✓ Fix edge cases</div></div>
+    </div><div class="session-detail"><span>Review the parser</span><p>Checking error paths and argument handling.</p><div class="roster">DELEGATION ROSTER<div><span class="ok">✓</span> inspect-args</div><div><span class="working">●</span> review-tests</div><div>depth 1 / 3 <span class="sr-only">in this example</span></div></div></div></div>
+  </div>
+</section>

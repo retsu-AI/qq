@@ -76,6 +76,8 @@ evidence.
   to extend it.
 - [`release.md`](runbooks/release.md) — `cargo xtask release`, the tag-driven
   release workflow, targets, and `qq --version`.
+- [`website.md`](runbooks/website.md) — how the docs site is generated from
+  `guide/`, built, checked, and deployed to GitHub Pages.
 
 ## User guide — `guide/`
 

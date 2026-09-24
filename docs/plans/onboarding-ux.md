@@ -6,7 +6,7 @@
 **Linear:** [ENG-875](https://linear.app/retsu-ai/issue/ENG-875) (parent);
 per slice: OB0 ENG-859 (#119) + this PR, OB1 ENG-860, OB2 ENG-876, OB3
 ENG-877, OB4 ENG-878, OB5 ENG-879, OB6 ENG-880, OB7 ENG-881, OB8 ENG-882,
-OB9 ENG-861, OB10 ENG-883, OB11 ENG-884.
+OB9 ENG-861, OB10 ENG-883, OB11 ENG-884 (superseded by OB12), OB12 ENG-896.
 
 ## Goal
 
@@ -47,7 +47,8 @@ Acceptance for the plan as a whole (the fresh-machine script in
 | OB8 | First-session guidance: a one-time "try these" cell and a `? for help` footer hint; `qq run` denial notice suggests `--approval auto` (O18, O19) | `crates/qq-tui/src/view/transcript.rs`, `src/headless.rs` | Planned |
 | OB9 | Degrade an MCP server whose `Stored(...)` bearer is unregistered (ENG-861) | `src/mcp.rs`, `crates/qq-mcp` | Planned |
 | OB10 | Docs CI: a test that every `Document` key, `PolicyPatch` key, env var, `CommandSpec` slash name, and `ConfigCommand` appears in `docs/guide/`; CHANGELOG generated from Conventional Commits at release | `xtask/`, `tests/`, `.github/workflows/ci.yml`, `docs/runbooks/release.md` | Planned |
-| OB11 | Wiki mirror: a release-time job pushes `docs/guide/` to the GitHub Wiki with a `_Sidebar.md`; decide on a docs site when the guide exceeds what a wiki renders well | `.github/workflows/`, `docs/guide/_Sidebar.md` | Planned |
+| OB11 | Wiki mirror: a release-time job pushes `docs/guide/` to the GitHub Wiki with a `_Sidebar.md`; decide on a docs site when the guide exceeds what a wiki renders well | `.github/workflows/`, `docs/guide/_Sidebar.md` | Superseded by OB12 |
+| OB12 | Docs website: an Astro/Starlight site under `website/` whose documentation pages are generated from `docs/guide/` at build time, with a landing page, search, and the real `install.sh`; built on every PR that touches it or the guide, deployed to GitHub Pages from `main` | `website/`, `.github/workflows/website.yml`, `nix/dev-shells.nix` | In review |
 
 Dependencies: OB1 → OB2 (both change `interactive()`); OB2 → OB8; OB5 and
 OB4 are independent; OB6 is independent of code; OB7 needs a protocol
@@ -175,8 +176,24 @@ since the last tag.
 
 ### OB11 — Wiki mirror
 
-**Acceptance:** on release, a workflow pushes `docs/guide/*.md` to the wiki
-repository with generated `_Sidebar.md`; pages keep working relative links.
+Superseded by OB12: a site renders the guide better than the wiki and can
+carry a landing page and search; keeping both would mean two publishing
+paths for one source.
+
+### OB12 — Docs website
+
+**Acceptance:** `website/` builds a static Astro + Starlight site.
+`docs/guide/*.md` is the only source of the documentation pages: a build
+step generates them (frontmatter from an H1 and a sidebar manifest, relative
+links rewritten to routes, links leaving `docs/guide/` pointed at GitHub) and
+fails when the manifest and the guide disagree. The site serves the reviewed
+`install.sh` so the landing page's one-line install is real. A post-build
+check fails on any unresolved internal link or fragment. CI builds the site
+on every PR touching `website/`, `docs/guide/`, `install.sh`, or
+`Cargo.toml`; pushes to `main` deploy to GitHub Pages. No client framework,
+analytics, or third-party script. The landing page claims nothing the guide
+does not say.
+**Docs:** `website/README.md`, `runbooks/website.md`, `guide/install.md`.
 
 ## Decisions carried
 

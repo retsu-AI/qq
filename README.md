@@ -7,12 +7,15 @@ sub-agents. Every mutating action passes an explicit approval policy — a
 real bash parser grades each command — and every event is stored in SQLite,
 so sessions survive restarts and many agents can run at once.
 
+Documentation: <https://retsu-ai.github.io/qq/> (the same pages as
+[`docs/guide/`](docs/guide/README.md)).
+
 ## Install
 
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/retsu-AI/qq/main/install.sh | sh
+curl -fsSL https://retsu-ai.github.io/qq/install.sh | sh
 ```
 
 The script picks the archive for your machine, verifies it against the

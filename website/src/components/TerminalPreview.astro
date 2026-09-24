@@ -1,0 +1,23 @@
+---
+import ApprovalPrompt from './ApprovalPrompt.astro';
+interface Props { compact?: boolean; }
+const { compact = false } = Astro.props;
+---
+<div class:list={['terminal', { 'docs-terminal': compact }]} aria-label="Example QQ terminal session">
+  <div class="terminal-titlebar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>qq — ~/my-project</span><span class="terminal-type">zsh</span></div>
+  <div class="terminal-content">
+    {!compact && <>
+      <div class="terminal-launch"><span class="terminal-prompt" aria-hidden="true">›</span><span class="typed-command">qq</span><span class="terminal-cursor" aria-hidden="true"></span></div>
+      <div class="terminal-workspace"><span>my-project</span><span class="model">anthropic/claude-sonnet-5</span></div>
+      <p class="terminal-request"><span class="terminal-prompt">›</span> Add a --dry-run flag and a test.</p>
+      <p class="terminal-response">I’ll check the parser, then add the flag.</p>
+      <div class="tool-rows">
+        <div class="tool-row"><span class="dot" aria-hidden="true">●</span><span>Read</span><span class="file">src/parser.rs</span><span class="time">0.1s</span></div>
+        <div class="tool-row"><span class="dot" aria-hidden="true">●</span><span>Edit</span><span class="file">src/parser.rs <span class="diff">+4 −1</span></span><span class="time">0.3s</span></div>
+        <div class="tool-row"><span class="dot" aria-hidden="true">●</span><span>Shell</span><span class="file">cargo test</span><span class="time">4.1s</span></div>
+      </div>
+    </>}
+    <ApprovalPrompt />
+  </div>
+  {!compact && <div class="terminal-status"><span><span class="status-dot">◇</span> waiting for you</span><span>12% ctx · $0.04</span></div>}
+</div>

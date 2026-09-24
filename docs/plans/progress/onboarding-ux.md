@@ -11,13 +11,14 @@ below, newest last.
 | OB2 | TUI opens without a credential; empty state names the remedy | Shipped (#136) | `feat/eng-860-tui-without-model` | ENG-876; shares the branch with OB1 |
 | OB3 | Request-time credential errors name provider and remedy; `GOOGLE_API_KEY` alias | Shipped (#137) | `fix/eng-877-request-credential-errors` | ENG-877 |
 | OB4 | `qq doctor` | Shipped (#138) | `feat/eng-878-doctor` | ENG-878 |
-| OB5 | `qq init`; `config paths` marks existing files | In review | `feat/eng-879-init` | ENG-879 |
+| OB5 | `qq init`; `config paths` marks existing files | Shipped (#147) | `feat/eng-879-init` | ENG-879 |
 | OB6 | `install.sh`, Homebrew tap, Nix package, binstall | Shipped (#139) | `feat/eng-880-install-paths` | ENG-880; tap repo + `HOMEBREW_TAP_TOKEN` are owner setup |
 | OB7 | In-TUI trust prompt | Planned | | ENG-881; needs ADR + protocol row in root |
-| OB8 | First-session guidance; `qq run` denial hint | In review | `feat/eng-882-first-session-guidance` | ENG-882 |
-| OB9 | Missing MCP credential degrades the server | In review | `fix/eng-861-mcp-credential-degrade` | ENG-861 |
+| OB8 | First-session guidance; `qq run` denial hint | Shipped (#146) | `feat/eng-882-first-session-guidance` | ENG-882 |
+| OB9 | Missing MCP credential degrades the server | Shipped (#148) | `fix/eng-861-mcp-credential-degrade` | ENG-861 |
 | OB10 | Docs-truth test; CHANGELOG at release | Planned | | ENG-883 |
-| OB11 | Wiki mirror workflow | Planned | | ENG-884 |
+| OB11 | Wiki mirror workflow | Superseded by OB12 | | ENG-884 |
+| OB12 | Docs website from `docs/guide/`, GitHub Pages | In review | `feat/eng-896-docs-website` | ENG-896 |
 
 ## Entries
 
@@ -194,3 +195,34 @@ unavailable, sibling unaffected, `Unavailable` call), qq bin `mcp` 2
 No hot-path change: resolution runs once per registry miss on the compile
 thread. Gates: fmt, clippy `-D warnings`, `cargo test -p qq-mcp`, `-p qq
 --bin qq mcp|doctor`, `-p qq-core hosts`.
+
+### 2026-09-23 — OB12 docs website in review
+
+Branch `feat/eng-896-docs-website` off `main`. The v0-designed Astro 5 +
+Starlight site lands under `website/`, stripped of its sandbox artifacts
+(`dist/`, `.astro/`, the preview-proxy Vite hack, the root pnpm workspace
+wrapper) and of every placeholder page. Content is not copied:
+`scripts/sync-docs.mjs` generates `src/content/docs/docs/*.md` from
+`docs/guide/*.md` before each build (title from the H1, description from
+`sidebar.json`, `editUrl` back to the guide, sibling links → relative routes,
+links out of `docs/guide/` → GitHub) and fails on a guide without a sidebar
+entry, a sidebar entry without a guide, or a link to a missing guide. It
+also copies the reviewed `install.sh` to `public/` so the landing page's
+`curl … | sh` is the real installer, and reads the workspace version from
+`Cargo.toml` for the release label. Generated files are gitignored.
+`scripts/check-links.mjs` walks `dist/` after the build and fails on any
+unresolved internal href or fragment (447 checked). Sidebar: the 11 real
+guides in four groups; the eight v0 routes with no guide (agents, sessions,
+skills, environment, keybindings, protocol, enterprise, changelog) are
+dropped rather than shipped as stubs; the two landing links that pointed at
+them now go to `tui#sessions` and `headless#qq-serve`. Landing claims were
+checked against the guide (Alt-A/Alt-D, verdict table, NEEDS YOU/WORKING/
+IDLE/DONE, `12% ctx $0.04`, SQLite, Windows, MIT) and the fake star count
+was removed. Deployment: `retsu-ai.github.io/qq` (base `/qq/`), decided
+over a custom domain and over Vercel — no new account, PR previews not
+needed for docs. `.github/workflows/website.yml` builds on PRs touching
+`website/`, `docs/guide/`, `install.sh`, or `Cargo.toml` and deploys from
+`main` with `actions/deploy-pages`. `nix/dev-shells.nix` adds `pnpm`. OB11
+(wiki mirror) is superseded. Follow-ups: OB10's docs-truth test now also
+protects the site; a custom domain is two lines in `site.config.mjs` plus
+`public/CNAME`; the eight dropped topics are candidate guides.

@@ -1,0 +1,12 @@
+---
+import { Icon } from '@astrojs/starlight/components';
+import { href } from '../../site.config.mjs';
+---
+<section class="landing-section split-section" aria-labelledby="approval">
+  <div class="section-copy"><p class="section-eyebrow">A POLICY, NOT A LEAP OF FAITH</p><h2 id="approval">Approval you can read.</h2><p>A real bash parser grades every shell command: <code>allow</code>, <code>prompt</code>, or <code>forbidden</code>. You see what will run, where, and why it needs you.</p><p>Forbidden means forbidden. No approval mode overrides it.</p><a class="section-link" href={href('docs/permissions/')}>Understand the policy <Icon name="right-arrow" size="18" /></a></div>
+  <div class="policy-table-wrap" tabindex="0" role="region" aria-label="Shell command approval examples"><table class="policy-table"><thead><tr><th>verdict</th><th>example</th><th>under auto</th></tr></thead><tbody>
+    <tr><td class="allow">● allow</td><td><code>cargo test<br />git status · rg TODO</code></td><td class="outcome">runs</td></tr>
+    <tr><td class="prompt">◇ prompt</td><td><code>npm install x<br />git push · rm -rf build/</code></td><td class="outcome">asks</td></tr>
+    <tr><td class="forbidden">× forbidden</td><td><code>sudo … · curl … | sh<br />git push --force</code></td><td class="outcome">refused</td></tr>
+  </tbody></table></div>
+</section>

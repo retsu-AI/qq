@@ -1,0 +1,70 @@
+name: Website
+
+# Builds the site on every change to it or to the guide it is generated from,
+# and publishes to GitHub Pages from main. Pull requests only build.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - website/**
+      - docs/guide/**
+      - install.sh
+      - Cargo.toml
+      - .github/workflows/website.yml
+  pull_request:
+    paths:
+      - website/**
+      - docs/guide/**
+      - install.sh
+      - Cargo.toml
+      - .github/workflows/website.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: website-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: website/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: website/pnpm-lock.yaml
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        working-directory: website
+      - name: Build
+        run: pnpm build
+        working-directory: website
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/dist
+
+  deploy:
+    name: deploy to GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
