@@ -680,6 +680,9 @@ struct TrialSummary {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct EvalReport {
     efficiency_coverage: EfficiencyCoverage,
+    reported_agent_cost_usd: f64,
+    agent_cost_unknown_attempts: u64,
+    agent_tokens_unknown_attempts: u64,
     harbor_config_hash: String,
     harbor_lock_hash: String,
     launch_manifest_hash: String,
@@ -731,6 +734,11 @@ fn record_trial_identity(
     id: &str,
     trial: &str,
 ) -> Result<(), EvalError> {
+    if id.trim().is_empty() {
+        return Err(EvalError::Invalid(format!(
+            "trial {trial} has an empty trial id"
+        )));
+    }
     if let Some(previous) = identities.get(id) {
         return Err(EvalError::Invalid(format!(
             "duplicate trial id {id} in {previous} and {trial}; refusing to double-count an exported attempt"
@@ -1048,6 +1056,15 @@ fn report_job(job: &Path) -> Result<EvalReport, EvalError> {
     }
     Ok(EvalReport {
         efficiency_coverage: EfficiencyCoverage::new(),
+        reported_agent_cost_usd: trials.iter().filter_map(|trial| trial.cost_usd).sum(),
+        agent_cost_unknown_attempts: trials
+            .iter()
+            .filter(|trial| trial.cost_usd.is_none())
+            .count() as u64,
+        agent_tokens_unknown_attempts: trials
+            .iter()
+            .filter(|trial| trial.total_tokens.is_none())
+            .count() as u64,
         harbor_config_hash,
         harbor_lock_hash,
         launch_manifest_hash,
@@ -2287,6 +2304,13 @@ mod tests {
     }
 
     #[test]
+    fn empty_trial_identity_cannot_hide_duplicate_exports() {
+        let mut identities = BTreeMap::new();
+        assert!(record_trial_identity(&mut identities, "  ", "first").is_err());
+        assert!(identities.is_empty());
+    }
+
+    #[test]
     fn launch_plan_defaults_to_full_approval_and_the_host_release_binary() {
         let repository = Path::new("/repo");
         let plan = launch_plan(
@@ -2624,6 +2648,9 @@ mod tests {
         let report = report_job(directory.path()).unwrap();
 
         assert_eq!(report.attempts, 2);
+        assert!((report.reported_agent_cost_usd - 0.30).abs() < f64::EPSILON);
+        assert_eq!(report.agent_cost_unknown_attempts, 0);
+        assert_eq!(report.agent_tokens_unknown_attempts, 0);
         assert_eq!(report.harbor_config_hash.len(), 64);
         assert_eq!(report.passes, 1);
         assert_eq!(report.mean_reward, 0.5);
@@ -2714,6 +2741,10 @@ mod tests {
 
         let report = report_job(directory.path()).unwrap();
 
+        assert_eq!(report.reported_agent_cost_usd, 0.0);
+        assert_eq!(report.agent_cost_unknown_attempts, 1);
+        assert_eq!(report.agent_tokens_unknown_attempts, 1);
+        assert_eq!(report.cost_usd_per_pass, None);
         assert_eq!(report.identity, None);
         assert_eq!(report.harness_failure_rate, 1.0);
         assert!(!report.trials[0].identity_observed);

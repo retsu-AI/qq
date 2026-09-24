@@ -6,7 +6,7 @@ is assigned per slice. [Plan](../token-efficiency.md).
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | TE0 | Research, roadmap, proposed ADR and tracker | In review | [#141](https://github.com/retsu-AI/qq/pull/141) / [ENG-887](https://linear.app/retsu-ai/issue/ENG-887) | Docs only; baseline `8089a0e` |
-| TE1 | Task-tree efficiency report | In progress | [ENG-888](https://linear.app/retsu-ai/issue/ENG-888) | Offline first; no paid-run authorization |
+| TE1 | Task-tree efficiency report | In progress | [ENG-888](https://linear.app/retsu-ai/issue/ENG-888) / [#158](https://github.com/retsu-AI/qq/pull/158) | Offline first; no paid-run authorization |
 | TE2 | Tool-schema ergonomics | Planned | [ENG-889](https://linear.app/retsu-ai/issue/ENG-889) | Reconcile ENG-872; no duplicate coercion work |
 | TE3 | Bounded discovery guidance | Planned | [ENG-890](https://linear.app/retsu-ai/issue/ENG-890) | Depends on existing ENG-812 evaluation |
 | TE4 | Compact diagnostic output | Planned | [ENG-891](https://linear.app/retsu-ai/issue/ENG-891) | One measured format; reuse T13 fixtures |
@@ -70,3 +70,13 @@ is assigned per slice. [Plan](../token-efficiency.md).
   (711 passed, 9 failed, 3 ignored). No causality or clean baseline claimed.
 - No push/PR: workflow forbids pushing red. Remaining TE1 acceptance is still
   TE1.2; TE2–TE8 not implemented. No paid runs or authority changes.
+
+### 2026-09-24 — TE1 draft publication and missing-usage visibility
+
+- User explicitly requested a PR despite the recorded red workspace gate.
+  Opened draft #158 against #141's branch; no merge-readiness claim.
+- Added reported agent-cost subtotal and counts of attempts with unknown cost
+  and token usage. Subtotal is not a complete total; existing per-pass metrics
+  remain null for incomplete coverage or zero successes. Empty trial IDs reject.
+- Focused eval tests: 17 passed, including report fixture assertions for complete
+  and unknown accounting. Targeted xtask Clippy passed. Full TE1 remains open.
