@@ -35,6 +35,9 @@ reserve ADR numbers in `docs/plans/progress/root.md`.
 - `xtask/`: repository automation; invoke it with `cargo xtask`. Releases are
   cut with `cargo xtask release X.Y.Z` in a PR, then `cargo xtask release
   --tag` on the merged `main` (see `docs/runbooks/release.md`).
+- `website/`: the landing page and docs site (Astro + Starlight), generated
+  from `docs/guide/` at build time and deployed to GitHub Pages; run with
+  `nub` (see `docs/runbooks/website.md`). Edit the guide, not the site.
 
 Keep dependencies pointed toward the narrow protocol and provider interfaces.
 The root package is the composition root and translates external configuration

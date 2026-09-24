@@ -1,0 +1,13 @@
+---
+title: Page not found
+description: This route does not exist. Return to the QQ documentation.
+editUrl: false
+pagefind: false
+---
+
+import { LinkCard } from '@astrojs/starlight/components';
+import { href } from '../../../site.config.mjs';
+
+The page may have moved, or the address may contain a typo.
+
+<LinkCard title="Back to the documentation" description="Find installation, configuration, and usage guides." href={href('docs/')} />
