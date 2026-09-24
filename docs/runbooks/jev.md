@@ -146,6 +146,33 @@ wider. `Forbidden` shell shapes, blocked hosts, managed denies, and
 Spend counts against the run's budget as reviewer spend. Inspect the setting
 with `qq config show` and `qq config explain jev_approval`.
 
+## The Jev mode ladder
+
+A session can pin one rung of a five-step ladder over the three Jev roles
+above instead of toggling them one by one (ADR-0042, protocol 29):
+`set_jev_mode` on `POST /v1/sessions/jev-mode`, with `mode` set to `low`,
+`medium`, `high`, `max`, or `ultrajev`, or omitted to clear the pin. The
+summary field `jev_mode` carries the pin on every `session_updated` and
+snapshot, so each surface renders the same state from the reducer.
+
+| mode | routing | review | approval delegate |
+| --- | --- | --- | --- |
+| `low` | on | off | off |
+| `medium` | on | final | off |
+| `high` | on | enforce | off |
+| `max` | on | enforce | by_mode |
+| `ultrajev` | on | enforce | on |
+
+The rung is read when the next run is claimed and never rewrites an active
+run's plan. It sits between configuration and explicit selections: it
+overrides the workspace's `jev_routing` / `jev_review` / `approval_delegate`
+values, while a spawned child's resolved routing and checkpoint policy still
+win over the rung it inherits from its parent. A rung never widens Jev
+consent (the credential and trust gates above still apply) or the approval
+mode's ceiling. When a rung's roles need Jev and no `typesafe-jev` credential
+is stored, the next run fails closed with a configuration error, exactly as
+`jev_routing: true` would.
+
 Explicit effort can be pinned independently of Jev in trusted configuration:
 
 ```ron

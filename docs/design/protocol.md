@@ -50,7 +50,7 @@ migration; historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 28
+PROTOCOL_VERSION = 29
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -194,6 +194,19 @@ field is optional and omitted when absent; the version moves because older
 clients reject the new command, outcome, and summary field. Golden fixtures
 live under `crates/qq-protocol/tests/fixtures/v28/`; `v23`–`v27` are retained
 decode-only.
+
+Version 29 adds the Jev mode switcher (ADR-0042): `set_jev_mode` /
+`jev_mode_set` on `/v1/sessions/jev-mode`, the session's own rung on the Jev
+ladder (`low` | `medium` | `high` | `max` | `ultrajev`, or absent to clear), and
+the optional `SessionSummary.jev_mode` that carries it. The mode is opaque to
+the protocol: the composition root maps each rung onto the existing Jev
+roles (task routing, checkpoint review, approval delegate) when the next run
+is claimed. The regular model switcher is unchanged: `set_session_model` and
+`set_session_effort` remain the provider-neutral model and reasoning-effort
+controls. Every field is optional and omitted when absent; the version moves
+because older clients reject the new command, outcome, and summary field.
+Golden fixtures live under `crates/qq-protocol/tests/fixtures/v29/`;
+`v23`–`v28` are retained decode-only.
 
 Clients and servers must agree on this value.
 
@@ -388,6 +401,7 @@ POST /v1/sessions
 POST /v1/sessions/prompts
 POST /v1/sessions/approval-mode
 POST /v1/sessions/approval-delegate
+POST /v1/sessions/jev-mode
 POST /v1/sessions/model
 POST /v1/sessions/profile
 POST /v1/sessions/delete
@@ -1020,6 +1034,42 @@ Outcome:
   "type": "approval_delegate_set",
   "session_id": "...",
   "delegate": "off"
+}
+```
+
+### `POST /v1/sessions/jev-mode`
+
+```json
+{
+  "command_id": "...",
+  "command": {
+    "type": "set_jev_mode",
+    "session_id": "...",
+    "mode": "high"
+  }
+}
+```
+
+Protocol 29 (ADR-0042). Pins, for the rest of this session, how much of Jev
+the runtime composes in: `low` | `medium` | `high` | `max` | `ultrajev`, lowest
+to highest. Omitting `mode` clears the pin so the workspace's configured
+`jev_routing`, `jev_review`, and `approval_delegate` apply again. The value is
+opaque on the wire; the composition root maps each rung onto those three
+settings when the next run is claimed, so an active run keeps the plan it
+started with. A pin never widens Jev consent or the approval mode's ceiling,
+and a rung whose roles need Jev fails the next run closed when Jev is not
+configured. Spawned children start with the parent's pin, and a child's
+resolved routing/checkpoint policy still wins over it. The command commits and
+publishes a `session_updated` event whose summary carries `jev_mode` (omitted
+when no pin is set).
+
+Outcome:
+
+```json
+{
+  "type": "jev_mode_set",
+  "session_id": "...",
+  "mode": "high"
 }
 ```
 

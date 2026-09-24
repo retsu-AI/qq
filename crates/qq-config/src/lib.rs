@@ -2015,10 +2015,13 @@ impl std::str::FromStr for JevReviewMode {
 /// ceiling; this only chooses whether the configured `reviewer_model` is
 /// consulted before a human. Absent from configuration, `auto` and
 /// `supervised` consult the reviewer and `ask` does not; that is what every
-/// session did before the setting existed.
+/// session did before the setting existed; `by_mode` names that default
+/// explicitly so a higher-precedence layer can restore it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDelegateSetting {
+    /// The default: consult the reviewer under `auto` and `supervised` only.
+    ByMode,
     /// Consult the reviewer under `ask` as well as `auto` and `supervised`.
     On,
     /// Never consult the reviewer; every held call waits for a human.
@@ -2029,6 +2032,7 @@ impl ApprovalDelegateSetting {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::ByMode => "by_mode",
             Self::On => "on",
             Self::Off => "off",
         }
@@ -2040,10 +2044,11 @@ impl std::str::FromStr for ApprovalDelegateSetting {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
+            "by_mode" => Ok(Self::ByMode),
             "on" => Ok(Self::On),
             "off" => Ok(Self::Off),
             _ => Err(ConfigError::InvalidJevSetting {
-                setting: "QQ_APPROVAL_DELEGATE (on, off)",
+                setting: "QQ_APPROVAL_DELEGATE (by_mode, on, off)",
                 value: value.to_owned(),
             }),
         }

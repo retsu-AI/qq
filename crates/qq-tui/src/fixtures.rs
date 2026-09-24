@@ -67,6 +67,7 @@ pub fn session_summary(id: SessionId) -> SessionSummary {
         approval_mode: ApprovalMode::Auto,
         approval_delegate: None,
         reasoning_effort: None,
+        jev_mode: None,
         correlation: Correlation::default(),
         context_tokens: None,
         accounting: None,

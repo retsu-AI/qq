@@ -64,6 +64,7 @@ may append a **request** row; only root changes a request's status.
 | 0039 | In-run compaction: run-scoped marker, owned summarizer run, no session slot | ENG-793 (F03), #92 | Accepted 2026-09-20: `docs/adr/0039-in-run-compaction.md`; supersedes the plan's Durable Protocol |
 | 0040 | Two-phase retry ownership: provider owns pre-event sends, the run owns post-event turn recovery and `Paused`; supersedes ADR-0005 in part | run-reliability RR4 | Accepted 2026-09-21: `docs/adr/0040-two-phase-retry-ownership.md`; `PROTOCOL_VERSION` 25 → 26 |
 | 0041 | Jev as an approval delegate for held calls only; supersedes ADR-0030's "never authorizes side effects" for the `jev_approval` lane | delegated-approval DA5 (ENG-862) | Accepted 2026-09-23: `docs/adr/0041-jev-delegated-approval.md`; no protocol or schema change |
+| 0042 | Two session switchers: the regular model/effort switch is the existing `set_session_model` / `set_session_effort`; a five-mode `JevMode` session override (`low`–`ultrajev`) resolves at the composition root to `jev_routing` / `jev_review` / `approval_delegate`, never a TypeSafe request parameter | integration plan § 2 item 9 (model switcher workstream) | Proposed 2026-09-24: `docs/adr/0042-session-model-and-jev-mode-switchers.md`; `PROTOCOL_VERSION` 28 → 29, store schema 36 → 37; ladder rows are a founder decision |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -134,7 +135,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0042. Reserve here before opening a PR that adds an ADR.
+Next free number: 0043. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -152,6 +153,7 @@ Next free number: 0042. Reserve here before opening a PR that adds an ADR.
 | 2026-09-20 | tui-redesign | `docs/plans/README.md`, `docs/README.md`, `docs/design/architecture.md` § repository map (`qq-tui` bullet) | Plan row and priority entry for `tui-redesign.md`. The `docs/README.md` index entry and a one-sentence `architecture.md` pointer to `docs/design/layout.md` were made in the L1 PR (index and pointer only; no boundary change) | Partly done (L1) |
 | 2026-09-21 | run-reliability RR4 | root `Cargo.toml`, `Cargo.lock` (RR5: `httpdate = "1"` workspace row, already in the lock via hyper); `crates/qq-protocol` `PROTOCOL_VERSION` 25 → 26 (`run_turn_retrying`, `paused`); `docs/adr/README.md`; `docs/design/architecture.md` § run loop | Turn recovery per ADR-0040 | Done in the RR4 PR |
 | 2026-09-24 | delegated-approval DA6 (ENG-862) | `crates/qq-protocol` `PROTOCOL_VERSION` 27 → 28 (`tool_approval_resolved.delegate`, `tool_approval_escalated`, `set_approval_delegate` / `approval_delegate_set`, `SessionSummary.approval_delegate`, `/delegate` reserved); `docs/README.md` and `docs/plans/README.md` rows (target contract deleted, plan closed) | The delegate identity must be on the stream for a supervisor to tell Jev from `reviewer_model`; the plan's acceptance requires it | Done in the DA6 PR |
+| 2026-09-24 | model-switcher (ADR-0042) | `crates/qq-protocol` `PROTOCOL_VERSION` 28 → 29 (`JevMode`, `set_jev_mode` / `jev_mode_set`, `SessionSummary.jev_mode`, `/jev` reserved); `docs/adr/README.md` row. Open PRs #154/#157 also bump to 29 for the Anthropic effort work; whichever lands second rebases to 30 | Every surface must reduce one persisted Jev mode from the same `session_updated` | Open in the ADR-0042 PR |
 
 Shared files: root `Cargo.toml` and `Cargo.lock` version bumps,
 `rust-toolchain.toml`, `flake.nix`, `.github/workflows/*`,

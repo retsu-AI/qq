@@ -79,6 +79,7 @@ fn summary(status: SessionStatus, active: bool) -> SessionSummary {
         profile: AgentProfileId::new("default").unwrap(),
         approval_mode: ApprovalMode::Auto,
         approval_delegate: None,
+        jev_mode: None,
         reasoning_effort: None,
         correlation: Correlation::default(),
         context_tokens: None,
@@ -327,7 +328,7 @@ fn assert_well_formed<'a>(
 
 #[test]
 fn current_version_streams_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 28);
+    assert_eq!(PROTOCOL_VERSION, 29);
 
     let stream = |trial: HeadlessTrial, events: Vec<HeadlessRecord>, outcome: HeadlessOutcome| {
         let mut stream = Vec::with_capacity(events.len() + 2);

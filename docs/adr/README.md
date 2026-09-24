@@ -50,6 +50,7 @@ written.
 - [ADR-0039: a run compacts its own turns at a safe boundary with a run-scoped marker](0039-in-run-compaction.md) — Accepted (ENG-793, #92).
 - [ADR-0040: two-phase retry ownership — the provider owns sends, the run owns turns and settles `paused`](0040-two-phase-retry-ownership.md) — Accepted (run-reliability RR4); supersedes ADR-0005 in part.
 - [ADR-0041: Jev as an approval delegate, for held calls only](0041-jev-delegated-approval.md) — Accepted (delegated-approval DA5, ENG-862); supersedes ADR-0030's "never authorizes side effects" for the `jev_approval` lane only.
+- [ADR-0042: two session switchers — the model, and how much Jev does](0042-session-model-and-jev-mode-switchers.md) — Proposed (integration plan § 2 item 9); `JevMode` ladder rows are a founder decision.
 
 ## When to write one
 
