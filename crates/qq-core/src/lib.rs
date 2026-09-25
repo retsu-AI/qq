@@ -83,6 +83,12 @@ pub use sessions::{
     SlashCommandError, SpawnModelValidationFuture, TaskRouter, TaskRoutingFuture,
     WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
+/// Merkle index over the workspace tree the tools see: the change-detection
+/// primitive for run-snapshot checkpoints (`docs/plans/run-snapshots.md`).
+pub use workspace::index::{
+    IndexBudget, IndexDiff, IndexError, IndexOutcome, IndexStop, IndexedDirectory, IndexedFile,
+    PartialIndex, WorkspaceIndex,
+};
 pub use workspace::skills::{MAX_INDEXED_SKILLS, MAX_SKILL_DESCRIPTION_BYTES};
 pub use workspace::{SkillEntry, SkillIndex, SkillKind};
 

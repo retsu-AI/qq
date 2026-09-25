@@ -167,13 +167,18 @@ Design, sized to that gap:
 The dirty scan the shadow store needs ("which files changed since the
 last snapshot") is a walk over the same tree the tools see, comparing
 size and mtime against the previous manifest and hashing only the
-candidates. The primitive is a Merkle index over the `search`/`tree`
-walker with an incremental `refresh` that reuses the previous index's
-hashes for entries whose size and mtime are unchanged, and a `diff` into
-sorted added/modified/deleted paths. It carries no chunking or search
-structure — the shadow store is its only planned consumer — and a
-budget-stopped build is a distinct `Partial` type with no root hash to
-misread as a statement about the whole tree.
+candidates. `qq_core::WorkspaceIndex` (`workspace/index.rs`) is that
+primitive: a Merkle index over the `search`/`tree` walker with an
+incremental `refresh` that reuses the previous index's hash for every
+file whose size and mtime are unchanged (and whose mtime is strictly
+older than the previous walk, git's guard against a same-tick edit), and
+a `diff` into sorted added/modified/deleted paths. It carries no chunking
+or search structure — the shadow store is its only planned consumer —
+and a budget-stopped build is `IndexOutcome::Partial`, a distinct type
+with no root hash to misread as a statement about the whole tree.
+`cargo bench -p qq-core --bench workspace_index` records the cold build,
+the quiet refresh, the one-edit refresh, and the diff over the
+`search_walk` 10k-file fixture; the quiet refresh must reuse every hash.
 
 ## Sequencing
 

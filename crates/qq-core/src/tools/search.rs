@@ -269,7 +269,7 @@ impl Walker<'_> {
                     }
                     self.visit_dir(&child.path, depth + 1)?;
                 }
-                EntryKind::File { size } => {
+                EntryKind::File { size, .. } => {
                     if child.ignored
                         || !self.filter.admits_file(&child.path)
                         || self
@@ -857,6 +857,7 @@ fn run(walker: &mut Walker<'_>, root: &str) -> Result<(), String> {
                     path: root.to_owned(),
                     kind: EntryKind::File {
                         size: metadata.len(),
+                        modified: None,
                     },
                     ignored: false,
                 };

@@ -320,7 +320,7 @@ fn render(nodes: &[Node], index: usize, indent: usize, out: &mut String) {
                 }
             }
         }
-        EntryKind::File { size } => {
+        EntryKind::File { size, .. } => {
             out.push_str(&node.child.name);
             push_size(out, size);
             out.push('\n');
@@ -355,7 +355,7 @@ fn render_children(nodes: &[Node], children: &[usize], indent: usize, out: &mut 
                 flush(&mut packed, out);
                 render(nodes, child_index, indent, out);
             }
-            EntryKind::File { size } => {
+            EntryKind::File { size, .. } => {
                 let mut cell = child.child.name.clone();
                 push_size(&mut cell, size);
                 if !packed.is_empty() && packed.len() + 2 + cell.len() > PACK_WIDTH {

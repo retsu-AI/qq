@@ -198,3 +198,27 @@ per directory listed. `search_walk` A/B (20 iterations, dev box):
 `content_absent_10k_full_scan` 20.3 → 18.1 ms, `references_10k_full_scan`
 20.1 → 20.2 ms, `names_10k` 1.98 → 2.00 ms, `tree_depth2` (200 dirs)
 4.82 → 5.03 ms; the tree case is the extra probe, the rest is noise.
+
+### 2026-09-25 — workspace index (GitHub #172 follow-up)
+
+`workspace/index.rs`: `WorkspaceIndex::build`/`refresh`/`diff` over the
+`search`/`tree` walker, reworked from the contribution in #172. Dropped:
+per-file line chunking (no consumer; `tool-layer.md` Non-Goals excludes a
+persistent search index), hex-`String` hashes (now `qq_protocol::ContentHash`,
+32 bytes), the `root_hash` on a budget-stopped build (now
+`IndexOutcome::Partial`, which cannot be diffed). Added: incremental
+`refresh` with a size+mtime gate and git's same-tick guard;
+`EntryKind::File` carries `modified` from the `metadata` call the walker
+already makes. Directory hash covers child *names*, not paths, so a moved
+subtree keeps its hash (the original's comment claimed this and the code
+did not). Pinned root hash recomputed independently in Python.
+Bench `workspace_index` (10k files / 17.6 MB, 20 iterations × 3 runs, dev
+box), original → reworked: `build_10k` 52.0 → 26.1 ms median;
+`diff_10k_one_modified` 73 → 35 µs; new `refresh_10k_quiet` 6.8 ms with
+`reused=10000 bytes_read=0`; `refresh_10k_one_edit` 7.3 ms. `search_walk`
+unchanged (the `modified` field is read from metadata the walk already
+fetched). Tests: 10 (pinned root, ancestor propagation, moved subtree,
+sorted diff, `.qqignore`, refresh reuse / same-size change / racy mtime /
+no mtime, refresh with adds and deletes, partial on each budget axis,
+symlinks, missing root). No consumer yet; run-snapshots § Change Detection
+names it.

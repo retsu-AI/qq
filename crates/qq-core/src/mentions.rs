@@ -222,7 +222,7 @@ fn expand_file(
                 EntryKind::Dir if depth < MAX_EXPANSION_DEPTH => {
                     pending.push((child.path, depth + 1))
                 }
-                EntryKind::File { size }
+                EntryKind::File { size, .. }
                     if size <= MAX_INPUT_FILE_BYTES as u64
                         && filter
                             .as_ref()

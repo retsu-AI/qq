@@ -2,6 +2,7 @@ mod access;
 mod bounded_read;
 mod file_state;
 mod guidance;
+pub mod index;
 mod instructions;
 mod prepare;
 pub mod skills;
