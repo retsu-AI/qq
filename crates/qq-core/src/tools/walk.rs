@@ -6,7 +6,7 @@
 //! whether each child is excluded. Traversal order and bounds are the calling
 //! tool's business; this module owns what "ignored" means.
 
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use ignore::{
     Match,
@@ -30,13 +30,19 @@ pub(super) const GENERATED_DIRECTORIES: [&str; 7] = [
 ];
 
 /// Largest file whose contents a read-side tool scans.
-pub(super) const MAX_FILE_SCAN_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const MAX_FILE_SCAN_BYTES: u64 = 4 * 1024 * 1024;
 /// Bytes inspected for a NUL to call a file binary.
 pub(super) const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EntryKind {
-    File { size: u64 },
+    File {
+        size: u64,
+        /// Modification time, when the filesystem reports one. Read from
+        /// the same `metadata` call that yields `size`, so it is free for
+        /// callers that compare it and ignored by the rest.
+        modified: Option<SystemTime>,
+    },
     Dir,
     Symlink,
     Other,
@@ -55,7 +61,7 @@ pub(crate) struct Child {
 }
 
 impl Child {
-    pub(super) const fn is_dir(&self) -> bool {
+    pub(crate) const fn is_dir(&self) -> bool {
         matches!(self.kind, EntryKind::Dir)
     }
 
@@ -85,7 +91,7 @@ pub(crate) enum ListError {
 
 /// Why a scan stopped before the subtree was exhausted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StopReason {
+pub(crate) enum StopReason {
     Entries,
     Bytes,
     Time,
@@ -241,14 +247,17 @@ pub(crate) fn list_children(
         } else if file_type.is_dir() {
             EntryKind::Dir
         } else if file_type.is_file() {
-            let size = entry
-                .metadata()
-                .map_err(|source| ListError::Inspect {
-                    path: join(dir, &name),
-                    source,
-                })?
-                .len();
-            EntryKind::File { size }
+            let metadata = entry.metadata().map_err(|source| ListError::Inspect {
+                path: join(dir, &name),
+                source,
+            })?;
+            EntryKind::File {
+                size: metadata.len(),
+                modified: metadata
+                    .modified()
+                    .ok()
+                    .map(cap_std::time::SystemTime::into_std),
+            }
         } else {
             EntryKind::Other
         };
@@ -351,19 +360,19 @@ pub(super) fn looks_binary(bytes: &[u8]) -> bool {
 }
 
 /// Shared scan accounting for read-side walks: entry, byte, and time bounds.
-pub(super) struct ScanBudget {
-    pub(super) entries: usize,
+pub(crate) struct ScanBudget {
+    pub(crate) entries: usize,
     max_entries: usize,
-    pub(super) bytes: u64,
+    pub(crate) bytes: u64,
     max_bytes: u64,
     deadline: Instant,
     pub(super) skipped_large: usize,
     pub(super) skipped_binary: usize,
-    pub(super) unreadable: usize,
+    pub(crate) unreadable: usize,
 }
 
 impl ScanBudget {
-    pub(super) fn new(max_entries: usize, max_bytes: u64, deadline: Instant) -> Self {
+    pub(crate) fn new(max_entries: usize, max_bytes: u64, deadline: Instant) -> Self {
         Self {
             entries: 0,
             max_entries,
@@ -377,7 +386,7 @@ impl ScanBudget {
     }
 
     /// Charges one directory entry; the clock is consulted every 64 entries.
-    pub(super) fn charge_entry(&mut self) -> Option<StopReason> {
+    pub(crate) fn charge_entry(&mut self) -> Option<StopReason> {
         self.entries += 1;
         if self.entries >= self.max_entries {
             return Some(StopReason::Entries);
@@ -388,7 +397,7 @@ impl ScanBudget {
         None
     }
 
-    pub(super) fn charge_bytes(&mut self, bytes: u64) -> Option<StopReason> {
+    pub(crate) fn charge_bytes(&mut self, bytes: u64) -> Option<StopReason> {
         self.bytes = self.bytes.saturating_add(bytes);
         if self.bytes >= self.max_bytes {
             return Some(StopReason::Bytes);

@@ -534,6 +534,24 @@ restricting descent.
 Both tools are `ReadOnly`, run concurrently, and are prunable; a pruned
 stub keeps the header, so the match count and cursor survive.
 
+**Workspace index.** `qq_core::WorkspaceIndex` (`workspace/index.rs`) is
+not a tool; it is the embedding API behind the same walker, so the tree it
+hashes is exactly the tree `search` and `tree` show the model — same
+ignore stack (`.qqignore` included), same generated-directory list,
+symlinks never followed. `build` hashes every regular file with SHA-256
+and every directory over its children in walk order (`kind\0name\0digest\n`
+under a versioned tag; names, not paths, so a moved subtree keeps its
+hash). `refresh` against a previous index reuses a file's hash when its
+size and mtime are unchanged and the mtime is older than the previous
+walk, so a checkpoint on a quiet tree is a walk with no reads. Both run
+inside an `IndexBudget` (defaults: `search`'s 50 000 entries, 64 MiB, 5 s)
+and a build the budget ends is `IndexOutcome::Partial`, which has no root
+hash and cannot be diffed. `diff` merges two complete indexes' sorted file
+lists into sorted `added`/`modified`/`deleted` paths. Its consumer is the
+run-snapshot dirty scan (`docs/plans/run-snapshots.md` § Change
+Detection). Blocking: call it through the runtime's bounded blocking pool,
+never on a Tokio worker.
+
 ### Reading Files
 
 `read_file` reads the whole file (to the 4 MiB scan cap) once, hashes it,
