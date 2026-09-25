@@ -471,7 +471,7 @@ impl<'a> From<&'a ToolSpec> for FunctionDeclaration<'a> {
         Self {
             name: tool.name(),
             description: tool.description(),
-            parameters: tool.input_schema(),
+            parameters: tool.gemini_parameters(),
         }
     }
 }
@@ -942,6 +942,100 @@ mod tests {
                     "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
                 }]}],
                 "generationConfig": {"maxOutputTokens": 128},
+            })
+        );
+    }
+
+    /// ENG-897: Gemini's `Schema` rejects JSON Schema keywords such as
+    /// `additionalProperties` (HTTP 400 `Unknown name`), which every built-in
+    /// tool declares. The Google body must carry the reduced schema while
+    /// other codecs keep the declaration verbatim.
+    #[tokio::test]
+    async fn reduces_tool_schemas_to_the_gemini_subset_without_touching_other_codecs() {
+        let body = "data: {\"candidates\":[{\"finishReason\":\"STOP\",\"index\":0}]}\n\n";
+        let server = LoopbackServer::sse(body);
+        let endpoint = server.base_url.clone();
+        let provider = GoogleGenerateContent::with_client(
+            crate::http::build_direct_client().unwrap(),
+            validate_endpoint(&endpoint, true).unwrap(),
+            EndpointKind::Base,
+            GoogleAuth::NoAuth,
+            [],
+        )
+        .map(GoogleGenerateContent::single_shot)
+        .unwrap();
+        let request = ModelRequest::new("gemini-test", vec![Message::user("edit it")], 128)
+            .with_tools(vec![ToolSpec::new(
+                "edit_file",
+                "Edits one file",
+                json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "description": "Apply edits",
+                    "properties": {
+                        "path": {"type": "string", "description": "Workspace path"},
+                        "mode": {"type": "string", "enum": ["replace", "insert"], "default": "replace"},
+                        "limit": {"type": "integer", "minimum": 1},
+                        "edits": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {"old": {"type": "string"}, "new": {"type": "string"}},
+                                "required": ["old", "new"],
+                                "additionalProperties": false,
+                            },
+                        },
+                        "anchor": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+                    },
+                    "required": ["path", "edits"],
+                    "additionalProperties": false,
+                }),
+            )]);
+
+        let openai = String::from_utf8(crate::test_support::encode_body(
+            crate::HttpProtocol::OpenAiResponses,
+            &request,
+        ))
+        .unwrap();
+        let anthropic = String::from_utf8(crate::test_support::encode_body(
+            crate::HttpProtocol::AnthropicMessages,
+            &request,
+        ))
+        .unwrap();
+        assert_eq!(openai.matches("additionalProperties").count(), 2);
+        assert_eq!(anthropic.matches("additionalProperties").count(), 2);
+        assert!(openai.contains("$schema") && openai.contains("oneOf"));
+        assert!(anthropic.contains("$schema") && anthropic.contains("oneOf"));
+
+        let events = provider.stream(request).collect::<Vec<_>>().await;
+        assert!(matches!(
+            &events[..],
+            [Ok(ProviderEvent::Completed { usage: None })]
+        ));
+        let captured = server.capture();
+        assert!(!captured.body().contains("additionalProperties"));
+        assert!(!captured.body().contains("$schema"));
+        assert!(!captured.body().contains("oneOf"));
+        assert_eq!(
+            captured.json_body()["tools"][0]["functionDeclarations"][0]["parameters"],
+            json!({
+                "type": "object",
+                "description": "Apply edits",
+                "properties": {
+                    "path": {"type": "string", "description": "Workspace path"},
+                    "mode": {"type": "string", "enum": ["replace", "insert"], "default": "replace"},
+                    "limit": {"type": "integer", "minimum": 1},
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"old": {"type": "string"}, "new": {"type": "string"}},
+                            "required": ["old", "new"],
+                        },
+                    },
+                    "anchor": {},
+                },
+                "required": ["path", "edits"],
             })
         );
     }

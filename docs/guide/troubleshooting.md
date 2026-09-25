@@ -31,7 +31,8 @@ sources`, `qq auth list` for the detail behind any one line
 
 QQ found no `model:` in any configuration layer and no `--model` /
 `QQ_MODEL`. The message lists every way to set one and names your global
-config path. Pick a route from [Providers](providers.md#built-in-models);
+config path. `qq init --model PROVIDER/MODEL` writes that file; pick a
+route from [Providers](providers.md#built-in-models);
 [Quickstart § 2](quickstart.md#2-tell-qq-which-model-to-use) shows the
 one-time setup. Only `qq ask` and `qq run` stop here; bare `qq` opens the
 TUI and asks with `/models` instead.
@@ -39,9 +40,14 @@ TUI and asks with `/models` instead.
 ### `project configuration needs your trust before it is used: …`
 
 A file under this repository declares something sensitive (a model,
-providers, MCP servers, grants). Read the listed file(s), then run
-`qq trust` in that directory. You will see this again after any edit to a
-trusted file, including one that arrived with `git pull`.
+providers, MCP servers, grants). Only `qq ask`, `qq run`, and `qq serve`
+print this and stop; bare `qq` opens the TUI on a prompt that lists each
+file and what it declares, with `t` (trust, as `qq trust` would), `s` (this
+session only), and `q`. For the headless commands, read the listed file(s),
+then run `qq trust` in that directory. You will see this again after any
+edit to a trusted file's sensitive sections, including one that arrived with
+`git pull`. A TUI attached to a server on another host also prints this;
+run `qq trust` on that host.
 [Permissions › Project trust](permissions.md#project-trust).
 
 ### `model route must use provider/model syntax: "…"`
@@ -136,6 +142,11 @@ PROVIDER` when the name is `PROVIDER/default`). If the reference came from a
 repository's committed config, that config should use `Env(...)` or live in a
 local, uncommitted fragment ([MCP › Where to declare it](mcp.md#where-to-declare-it)).
 
+For a provider this fails the run. For an MCP server's `bearer` it only
+degrades that server: the run proceeds and the catalog reports
+`unavailable MCP servers: NAME (credential `…` is not registered; run `qq
+auth set …`)` (see below); `qq doctor` warns about it under `mcp`.
+
 ### `credential `…` is registered in keyring, but its secret is missing`
 
 The index knows the name but the keyring entry is gone (a keyring reset, a
@@ -186,15 +197,31 @@ grant specific extras with `--allow-shell` / `--allow-tool` / `--allow-host`.
 
 The shell classifier refuses some shapes under every mode — `rm -rf` outside
 the workspace, `sudo`, `git push --force`, `curl … | sh`, writes to `~/.ssh`
-or `/etc`. Run it yourself, or if the classifier is wrong for a benign
-command, approve for the session with the exact string (prefix grants do
-not lift `forbidden`). Rules: [Permissions](permissions.md#what-the-shell-classifier-decides).
+or `/etc`. A prefix grant does not lift that. A grant that quotes the exact
+command string does, and only when that string fits a session grant (at most
+256 bytes); a longer command cannot be blessed this way. Otherwise run it
+yourself. Rules:
+[Permissions](permissions.md#what-the-shell-classifier-decides).
 
 ### `unavailable MCP servers: …`
 
-The named server did not start or connect. The run continues without it.
-Check the `command` is on `PATH` (stdio) or the `url` and `bearer` (HTTP);
-`eager: true` surfaces the failure at startup instead of first use.
+The named server did not start, connect, or authenticate; the reason follows
+its name in parentheses. The run continues without it, and calls to its
+tools return an unavailable error to the model. For a stdio server check the
+`command` is on `PATH`; for HTTP check the `url`. When the reason names a
+credential (`credential `linear/default` is not registered; run `qq auth set
+linear/default``, or the environment variable for `Env(...)`), run the
+command it names — the next run picks the credential up without a restart.
+`qq doctor` reports the same finding under `mcp`; `eager: true` surfaces a
+connection failure at startup instead of first use.
+
+### `provider returned HTTP 400: Invalid JSON payload received. Unknown name "additionalProperties"…`
+
+A `google/*` model rejected a tool declaration. Gemini accepts only a subset
+of JSON Schema; QQ now strips the unsupported keywords from every tool schema
+(built-in and MCP) before declaring it, so this no longer happens on a
+current build. If you still see it, `qq version` and the `Unknown name` in
+the message identify the keyword to report.
 
 ### `configuration working directory is invalid: …`
 

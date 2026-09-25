@@ -49,6 +49,27 @@ pub const DEFAULT_MCP_CALL_TIMEOUT_SECONDS: u64 = 60;
 pub const MAX_MCP_CALL_TIMEOUT_SECONDS: u64 = 600;
 pub const DEFAULT_MCP_MAX_CONCURRENT_CALLS: u32 = 4;
 pub const MAX_MCP_MAX_CONCURRENT_CALLS: u32 = 64;
+/// Longest server-side approval wait a configuration may set (24 h). Absent
+/// is no deadline; this bounds what "a deadline" may mean.
+pub const MAX_APPROVAL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
+
+/// Every environment variable [`LoadRequest::from_process_env`] reads, in
+/// the order it reads them. Provider credential variables are not here: they
+/// are resolved at request time and listed by
+/// [`provider_credential_variables`].
+pub const ENVIRONMENT_VARIABLES: [&str; 8] = [
+    "QQ_CONFIG",
+    "QQ_CONFIG_CONTENT",
+    "QQ_MODEL",
+    "QQ_ORGANIZATION",
+    "QQ_JEV_CHECKPOINTS",
+    "QQ_JEV_ROUTING",
+    "QQ_JEV_APPROVAL",
+    "QQ_APPROVAL_DELEGATE",
+];
+
+pub use document::{DOCUMENT_FIELD_NAMES, POLICY_FIELD_NAMES};
+pub use providers::provider_credential_variables;
 
 /// All process-dependent inputs captured before a configuration load begins.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -57,6 +78,16 @@ pub struct LoadRequest {
     explicit_path: Option<PathBuf>,
     explicit_content: Option<String>,
     overrides: RuntimeOverrides,
+    process_trust: Vec<ProcessTrust>,
+}
+
+/// One project file trusted for this process only: the TUI's "this
+/// session" answer. Applied on top of the durable trust state at load time
+/// and never written to disk, so the next launch asks again.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProcessTrust {
+    pub path: PathBuf,
+    pub digest: String,
 }
 
 impl LoadRequest {
@@ -74,26 +105,53 @@ impl LoadRequest {
         cwd: impl Into<PathBuf>,
         max_output_tokens: Option<u32>,
     ) -> Result<Self, ConfigError> {
+        // Every name is taken from `ENVIRONMENT_VARIABLES` by position so the
+        // published list and what is actually read cannot drift apart.
+        let [
+            config,
+            config_content,
+            model,
+            organization,
+            jev_checkpoints,
+            jev_routing,
+            jev_approval,
+            approval_delegate,
+        ] = ENVIRONMENT_VARIABLES;
         let mut request = Self::new(cwd);
-        request.explicit_path = optional_environment("QQ_CONFIG")?.map(PathBuf::from);
-        request.explicit_content = optional_environment("QQ_CONFIG_CONTENT")?;
-        request.overrides.model = optional_environment("QQ_MODEL")?;
-        request.overrides.organization = optional_environment("QQ_ORGANIZATION")?;
+        request.explicit_path = optional_environment(config)?.map(PathBuf::from);
+        request.explicit_content = optional_environment(config_content)?;
+        request.overrides.model = optional_environment(model)?;
+        request.overrides.organization = optional_environment(organization)?;
         request.overrides.max_output_tokens = max_output_tokens;
-        if let Some(value) = optional_environment("QQ_JEV_CHECKPOINTS")? {
+        if let Some(value) = optional_environment(jev_checkpoints)? {
             request.overrides.jev_review = Some(value.parse()?);
         }
-        if let Some(value) = optional_environment("QQ_JEV_ROUTING")? {
+        if let Some(value) = optional_environment(jev_routing)? {
             request.overrides.jev_routing = Some(match value.as_str() {
                 "on" => true,
                 "off" => false,
                 _ => {
                     return Err(ConfigError::InvalidJevSetting {
-                        setting: "QQ_JEV_ROUTING",
+                        setting: jev_routing,
                         value,
                     });
                 }
             });
+        }
+        if let Some(value) = optional_environment(jev_approval)? {
+            request.overrides.jev_approval = Some(match value.as_str() {
+                "on" => true,
+                "off" => false,
+                _ => {
+                    return Err(ConfigError::InvalidJevSetting {
+                        setting: jev_approval,
+                        value,
+                    });
+                }
+            });
+        }
+        if let Some(value) = optional_environment(approval_delegate)? {
+            request.overrides.approval_delegate = Some(value.parse()?);
         }
         Ok(request)
     }
@@ -119,6 +177,24 @@ impl LoadRequest {
     pub fn with_overrides(mut self, overrides: RuntimeOverrides) -> Self {
         self.overrides = overrides;
         self
+    }
+
+    /// Trust these project files (by canonical path and sensitive digest)
+    /// for loads made with this request, without recording them. A file
+    /// whose sensitive content has since changed is pending again: the
+    /// digest no longer matches.
+    #[must_use]
+    pub fn with_process_trust(mut self, mut grants: Vec<ProcessTrust>) -> Self {
+        grants.sort();
+        grants.dedup();
+        self.process_trust = grants;
+        self
+    }
+
+    /// The process-scoped trust grants this request carries, sorted.
+    #[must_use]
+    pub fn process_trust(&self) -> &[ProcessTrust] {
+        &self.process_trust
     }
 
     #[must_use]
@@ -159,6 +235,7 @@ impl fmt::Debug for LoadRequest {
                 &self.explicit_content.as_ref().map(|_| "<redacted>"),
             )
             .field("overrides", &self.overrides)
+            .field("process_trust", &self.process_trust)
             .finish()
     }
 }
@@ -178,6 +255,8 @@ pub struct RuntimeOverrides {
     max_output_tokens: Option<u32>,
     jev_review: Option<JevReviewMode>,
     jev_routing: Option<bool>,
+    jev_approval: Option<bool>,
+    approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
 }
 
@@ -253,12 +332,36 @@ impl RuntimeOverrides {
         self.jev_routing
     }
 
+    #[must_use]
+    pub const fn with_jev_approval(mut self, enabled: bool) -> Self {
+        self.jev_approval = Some(enabled);
+        self
+    }
+
+    #[must_use]
+    pub const fn jev_approval(&self) -> Option<bool> {
+        self.jev_approval
+    }
+
+    #[must_use]
+    pub const fn with_approval_delegate(mut self, setting: ApprovalDelegateSetting) -> Self {
+        self.approval_delegate = Some(setting);
+        self
+    }
+
+    #[must_use]
+    pub const fn approval_delegate(&self) -> Option<ApprovalDelegateSetting> {
+        self.approval_delegate
+    }
+
     fn is_empty(&self) -> bool {
         self.organization.is_none()
             && self.model.is_none()
             && self.max_output_tokens.is_none()
             && self.jev_review.is_none()
             && self.jev_routing.is_none()
+            && self.jev_approval.is_none()
+            && self.approval_delegate.is_none()
             && self.reasoning_effort.is_none()
     }
 }
@@ -441,6 +544,15 @@ impl ConfigLoader {
         request: &LoadRequest,
     ) -> Result<Vec<PendingTrust>, ConfigError> {
         loader::grant_pending_trust(self, request)
+    }
+
+    /// The project sources under the request's directory whose sensitive
+    /// content no trust record covers, root first. Read-only: the same scan
+    /// [`Self::grant_pending_trust`] performs before it writes, so a prompt
+    /// can show exactly what a grant would accept. Process-scoped trust on
+    /// the request counts as a record.
+    pub fn pending_trust(&self, request: &LoadRequest) -> Result<Vec<PendingTrust>, ConfigError> {
+        loader::pending_trust(self, request)
     }
 
     pub fn enroll_organization(
@@ -1406,6 +1518,9 @@ pub enum ConfigKey {
     Audit,
     JevReview,
     JevRouting,
+    JevApproval,
+    ApprovalDelegate,
+    ApprovalTimeout,
     ReasoningEffort,
     MaxOutputTokens,
     Providers,
@@ -1461,6 +1576,9 @@ pub struct ConfigProvenance {
     audit: Option<SourceIdentity>,
     jev_review: Option<SourceIdentity>,
     jev_routing: Option<SourceIdentity>,
+    jev_approval: Option<SourceIdentity>,
+    approval_delegate: Option<SourceIdentity>,
+    approval_timeout: Option<SourceIdentity>,
     reasoning_effort: Option<SourceIdentity>,
     max_output_tokens: Option<SourceIdentity>,
     providers: BTreeMap<String, SourceIdentity>,
@@ -1526,6 +1644,21 @@ impl ConfigProvenance {
     }
 
     #[must_use]
+    pub const fn jev_approval(&self) -> Option<&SourceIdentity> {
+        self.jev_approval.as_ref()
+    }
+
+    #[must_use]
+    pub const fn approval_delegate(&self) -> Option<&SourceIdentity> {
+        self.approval_delegate.as_ref()
+    }
+
+    #[must_use]
+    pub const fn approval_timeout(&self) -> Option<&SourceIdentity> {
+        self.approval_timeout.as_ref()
+    }
+
+    #[must_use]
     pub const fn audit(&self) -> Option<&SourceIdentity> {
         self.audit.as_ref()
     }
@@ -1573,14 +1706,21 @@ pub struct PendingTrust {
     source: SourceIdentity,
     digest: String,
     sections: Vec<&'static str>,
+    declarations: Vec<TrustDeclaration>,
 }
 
 impl PendingTrust {
-    fn new(source: SourceIdentity, digest: String, sections: Vec<&'static str>) -> Self {
+    fn new(
+        source: SourceIdentity,
+        digest: String,
+        sections: Vec<&'static str>,
+        declarations: Vec<TrustDeclaration>,
+    ) -> Self {
         Self {
             source,
             digest,
             sections,
+            declarations,
         }
     }
 
@@ -1601,6 +1741,100 @@ impl PendingTrust {
     pub fn sections(&self) -> &[&'static str] {
         &self.sections
     }
+
+    /// What those sections declare, one entry per route, provider, MCP
+    /// server, grant group, or pack list, for a prompt that shows the user
+    /// what they are about to admit. Carries names, commands, URLs, and
+    /// counts only; never a secret.
+    #[must_use]
+    pub fn declarations(&self) -> &[TrustDeclaration] {
+        &self.declarations
+    }
+}
+
+/// One thing a pending project file declares, as the trust prompt lists it.
+/// Secrets, argument lists, and environment values never appear here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrustDeclaration {
+    /// `model`, `worker_model`, `reviewer_model`, or `organization` set to a
+    /// value.
+    Route { key: &'static str, route: String },
+    /// A provider entry. `kind` is the preset id (`openai`, `custom`, …) or
+    /// `removed` for a `Remove` patch.
+    Provider { name: String, kind: &'static str },
+    /// An MCP server that runs a command.
+    McpStdio { name: String, command: String },
+    /// An MCP server reached over HTTP.
+    McpHttp { name: String, url: String },
+    /// An MCP server an earlier layer declared that this file removes.
+    McpRemoved { name: String },
+    /// Approval grants, counted per list (`Remove(...)` entries are not
+    /// counted: they narrow authority).
+    Grants {
+        tools: usize,
+        shell_prefixes: usize,
+        hosts: usize,
+        env: usize,
+    },
+    /// Agent packs by id.
+    Packs(Vec<String>),
+    /// A sensitive key whose value has no short rendering (`profiles`,
+    /// `delegation`, `Clear` on a route, …).
+    Other(&'static str),
+}
+
+impl fmt::Display for TrustDeclaration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Route { key, route } => write!(formatter, "{key} {route}"),
+            Self::Provider { name, kind } => write!(formatter, "provider {name} ({kind})"),
+            Self::McpStdio { name, command } => write!(formatter, "MCP {name} → {command}"),
+            Self::McpHttp { name, url } => write!(formatter, "MCP {name} → {url}"),
+            Self::McpRemoved { name } => write!(formatter, "MCP {name} removed"),
+            Self::Grants {
+                tools,
+                shell_prefixes,
+                hosts,
+                env,
+            } => {
+                formatter.write_str("grants:")?;
+                let mut first = true;
+                for (count, noun) in [
+                    (*tools, "tool"),
+                    (*shell_prefixes, "shell prefix"),
+                    (*hosts, "host"),
+                    (*env, "env var"),
+                ] {
+                    if count == 0 {
+                        continue;
+                    }
+                    let plural = match (count, noun) {
+                        (1, _) => "",
+                        (_, "shell prefix") => "es",
+                        _ => "s",
+                    };
+                    write!(
+                        formatter,
+                        "{}{count} {noun}{plural}",
+                        if first { " " } else { ", " }
+                    )?;
+                    first = false;
+                }
+                if first {
+                    formatter.write_str(" none added")?;
+                }
+                Ok(())
+            }
+            Self::Packs(ids) => {
+                formatter.write_str("packs: ")?;
+                if ids.is_empty() {
+                    return formatter.write_str("none");
+                }
+                formatter.write_str(&ids.join(", "))
+            }
+            Self::Other(key) => formatter.write_str(key),
+        }
+    }
 }
 
 /// A fully merged, validated configuration. All fields are read-only to callers.
@@ -1614,6 +1848,9 @@ pub struct ConfigSnapshot {
     audit: AuditConfig,
     jev_review: JevReviewMode,
     jev_routing: bool,
+    jev_approval: bool,
+    approval_delegate: Option<ApprovalDelegateSetting>,
+    approval_timeout: Option<std::time::Duration>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
@@ -1642,6 +1879,9 @@ pub struct ClientSnapshot {
     audit: AuditConfig,
     jev_review: JevReviewMode,
     jev_routing: bool,
+    jev_approval: bool,
+    approval_delegate: Option<ApprovalDelegateSetting>,
+    approval_timeout: Option<std::time::Duration>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
     providers: BTreeMap<String, ProviderConfig>,
@@ -1661,6 +1901,13 @@ impl ClientSnapshot {
     #[must_use]
     pub const fn model(&self) -> Option<&ModelRoute> {
         self.model.as_ref()
+    }
+
+    /// The server-side approval wait, or `None` for no deadline. See
+    /// [`ConfigSnapshot::approval_timeout`].
+    #[must_use]
+    pub const fn approval_timeout(&self) -> Option<std::time::Duration> {
+        self.approval_timeout
     }
 
     #[must_use]
@@ -1933,6 +2180,45 @@ impl std::str::FromStr for JevReviewMode {
     }
 }
 
+/// Who settles the approvals a session's mode holds. The mode stays the
+/// ceiling; this only chooses whether the configured `reviewer_model` is
+/// consulted before a human. Absent from configuration, `auto` and
+/// `supervised` consult the reviewer and `ask` does not; that is what every
+/// session did before the setting existed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDelegateSetting {
+    /// Consult the reviewer under `ask` as well as `auto` and `supervised`.
+    On,
+    /// Never consult the reviewer; every held call waits for a human.
+    Off,
+}
+
+impl ApprovalDelegateSetting {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl std::str::FromStr for ApprovalDelegateSetting {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "on" => Ok(Self::On),
+            "off" => Ok(Self::Off),
+            _ => Err(ConfigError::InvalidJevSetting {
+                setting: "QQ_APPROVAL_DELEGATE (on, off)",
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
 /// Per-session approval policy a profile may preselect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1954,6 +2240,8 @@ pub struct AgentProfileConfig {
     approval_mode: Option<ProfileApprovalMode>,
     jev_review: Option<JevReviewMode>,
     jev_routing: Option<bool>,
+    jev_approval: Option<bool>,
+    approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     /// Set when this profile came from an agent pack rather than `profiles`.
     pack: Option<PackProfileRef>,
@@ -2022,6 +2310,16 @@ impl AgentProfileConfig {
         self.jev_routing
     }
 
+    #[must_use]
+    pub const fn jev_approval(&self) -> Option<bool> {
+        self.jev_approval
+    }
+
+    #[must_use]
+    pub const fn approval_delegate(&self) -> Option<ApprovalDelegateSetting> {
+        self.approval_delegate
+    }
+
     /// The pack resources this profile carries, when it came from a pack.
     #[must_use]
     pub const fn pack(&self) -> Option<&PackProfileRef> {
@@ -2065,6 +2363,29 @@ impl ConfigSnapshot {
     #[must_use]
     pub const fn jev_routing(&self) -> bool {
         self.jev_routing
+    }
+
+    /// Whether Jev is the approval delegate. Off by default; a stored key
+    /// enables nothing by itself (ADR-0030, ADR-0041).
+    #[must_use]
+    pub const fn jev_approval(&self) -> bool {
+        self.jev_approval
+    }
+
+    /// The explicit delegate choice, or `None` when the mode's own default
+    /// applies (reviewer under `auto` and `supervised`, human under `ask`).
+    #[must_use]
+    pub const fn approval_delegate(&self) -> Option<ApprovalDelegateSetting> {
+        self.approval_delegate
+    }
+
+    /// How long a held call may wait for a client before the server denies
+    /// it, from `approval_timeout_seconds`. `None` (the default) is no server
+    /// deadline: an interactive hold waits for the client, the run deadline,
+    /// or cancellation. A supervisor that wants a bound sets one.
+    #[must_use]
+    pub const fn approval_timeout(&self) -> Option<std::time::Duration> {
+        self.approval_timeout
     }
 
     #[must_use]
@@ -2349,6 +2670,8 @@ pub enum ConfigError {
     InvalidDelegation(String),
     #[error("audit settings are invalid: {0}")]
     InvalidAudit(String),
+    #[error("approval timeout is invalid: {0}")]
+    InvalidApprovalTimeout(String),
     #[error("managed policy {rule} was violated: {message}")]
     PolicyViolation { rule: &'static str, message: String },
     #[error("TUI settings are invalid: {message}")]

@@ -1,5 +1,6 @@
 //! Application configuration to model-runtime composition.
 
+mod approval;
 mod routing;
 
 use std::{
@@ -15,8 +16,8 @@ use qq_auth::{
 };
 use qq_config::{
     AwsAuth, BedrockAuth, ClientSnapshot, ConfigError, ConfigLoader, ConfigSnapshot, EndpointMode,
-    HttpAccess, HttpCredential, LoadRequest, PromotionOutcome, ProviderAccess, ProviderApi,
-    ProviderAuth, ProviderConfig, RuntimeOverrides, WorkspaceGrant,
+    HttpAccess, HttpCredential, LoadRequest, ProcessTrust, PromotionOutcome, ProviderAccess,
+    ProviderApi, ProviderAuth, ProviderConfig, RuntimeOverrides, WorkspaceGrant,
 };
 use qq_core::{
     ApprovalReviewer, CheckpointFuture, CheckpointOutcome, CheckpointRequest, CheckpointReviewer,
@@ -105,6 +106,41 @@ pub struct ProviderRemedy {
     pub remedy: String,
 }
 
+/// Everything the interactive client derives from one loaded configuration.
+/// See [`RuntimeFactory::tui_model_state`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TuiModelState {
+    /// The configured route as a selection, or the default when none.
+    pub configured_model: ModelSelection,
+    /// `configured_model` when the catalog lists it, so bare `qq` can create
+    /// the first session with it.
+    pub model: Option<ModelSelection>,
+    /// The TUI's client default: `model`, or the configured route when only
+    /// its credential is missing (so the remedy can be named), or none.
+    pub tui_model: ModelSelection,
+    pub models: Vec<ModelDescriptor>,
+    pub unauthenticated_providers: Vec<ProviderRemedy>,
+    /// The server-side approval wait the configuration sets, if any.
+    pub approval_timeout: Option<std::time::Duration>,
+}
+
+/// How the user answered the trust prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrustResolution {
+    /// Record the pending files durably, as `qq trust` does.
+    Persist,
+    /// Admit them for this process only.
+    Session,
+}
+
+/// A resolved trust prompt: which files were trusted and the client state
+/// the now-loadable configuration provides.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustGranted {
+    pub trusted: Vec<String>,
+    pub state: TuiModelState,
+}
+
 #[derive(Clone)]
 pub struct RuntimeFactory {
     inner: Arc<RuntimeFactoryInner>,
@@ -118,6 +154,11 @@ struct RuntimeFactoryInner {
     discovery: ModelDiscovery,
     mcp: crate::mcp::McpRegistryCache,
     plans: PlanCache,
+    /// Project files trusted for this process only (the TUI's "this
+    /// session"). Applied to every load request this factory builds and
+    /// folded into the plan key so a compile from before the grant is not
+    /// served after it. Never written to the trust state.
+    process_trust: std::sync::Mutex<Vec<ProcessTrust>>,
 }
 
 #[derive(Clone)]
@@ -228,7 +269,141 @@ impl RuntimeFactory {
                 discovery: ModelDiscovery::new()?,
                 mcp: crate::mcp::McpRegistryCache::new(),
                 plans: PlanCache::new(PlanCacheLimits::default()),
+                process_trust: std::sync::Mutex::new(Vec::new()),
             }),
+        })
+    }
+
+    /// Trust these project files for the rest of this process: every load
+    /// request the factory builds for a workspace carries them, and the plan
+    /// key changes so cached compiles from before the grant are not served.
+    /// Nothing is written; the next `qq` asks again. A poisoned lock is
+    /// treated as "unavailable" and reported so the caller can say so.
+    pub fn trust_for_process(&self, grants: Vec<ProcessTrust>) -> Result<(), RuntimeBuildError> {
+        let mut process_trust = self
+            .inner
+            .process_trust
+            .lock()
+            .map_err(|_| RuntimeBuildError::CacheUnavailable)?;
+        process_trust.extend(grants);
+        process_trust.sort();
+        process_trust.dedup();
+        Ok(())
+    }
+
+    /// The process-scoped grants in effect, sorted. Empty when none.
+    pub fn process_trust(&self) -> Result<Vec<ProcessTrust>, RuntimeBuildError> {
+        self.inner
+            .process_trust
+            .lock()
+            .map(|grants| grants.clone())
+            .map_err(|_| RuntimeBuildError::CacheUnavailable)
+    }
+
+    /// What the interactive client needs from a loaded configuration: the
+    /// configured route (if any), whether it is usable as the client default,
+    /// the catalog, the credential remedies, and the server's approval wait.
+    /// Blocking: probes credentials. Computed at startup and again after the
+    /// trust prompt is answered, so both paths agree.
+    pub fn tui_model_state(
+        &self,
+        snapshot: &ClientSnapshot,
+        request: &LoadRequest,
+    ) -> TuiModelState {
+        let models = self.client_model_options(snapshot);
+        let unauthenticated_providers = self.unauthenticated_providers(snapshot);
+        // Without a configured model there is no client default: the TUI
+        // shows `no model`, the composer notice points at `/models`, and the
+        // first session is created from the picker.
+        let configured_model = snapshot
+            .model()
+            .map_or_else(ModelSelection::default, |route| ModelSelection {
+                model_is_fallback: request.overrides().model().is_none(),
+                model: Some(route.as_str().to_owned()),
+                max_output_tokens: Some(snapshot.max_output_tokens()),
+                organization: snapshot.organization().map(str::to_owned),
+            });
+        let model = (configured_model.model.is_some()
+            && models
+                .iter()
+                .any(|option| option.selection.model == configured_model.model))
+        .then(|| configured_model.clone());
+        // The TUI's client default. An unusable route is normally withheld so
+        // Alt-N asks for a model; a route whose provider merely lacks a
+        // credential is kept so the empty state and Alt-N can name it.
+        let configured_provider_unauthenticated = configured_model
+            .model
+            .as_deref()
+            .and_then(|route| route.split_once('/'))
+            .is_some_and(|(provider, _)| {
+                unauthenticated_providers
+                    .iter()
+                    .any(|remedy| remedy.provider == provider)
+            });
+        let tui_model = match &model {
+            Some(model) => model.clone(),
+            None if configured_provider_unauthenticated => configured_model.clone(),
+            None => ModelSelection::default(),
+        };
+        TuiModelState {
+            configured_model,
+            model,
+            tui_model,
+            models,
+            unauthenticated_providers,
+            approval_timeout: snapshot.approval_timeout(),
+        }
+    }
+
+    /// Answer the TUI's trust prompt. `Persist` records every pending file
+    /// exactly as `qq trust` does; `Session` admits them for this process
+    /// only. Either way the configuration is then loaded and the client's
+    /// model state recomputed. Blocking: trust-state I/O, the load, and
+    /// credential probes. An empty pending set with `Session` is not an
+    /// error: the files were trusted meanwhile (another `qq trust`) and the
+    /// load simply succeeds.
+    pub fn resolve_trust(
+        &self,
+        request: &LoadRequest,
+        choice: TrustResolution,
+    ) -> Result<TrustGranted, RuntimeBuildError> {
+        let trusted: Vec<String> = match choice {
+            TrustResolution::Persist => self
+                .inner
+                .config
+                .grant_pending_trust(request)?
+                .iter()
+                .map(|item| item.source().label().to_owned())
+                .collect(),
+            TrustResolution::Session => {
+                let pending = self.inner.config.pending_trust(request)?;
+                let mut grants = Vec::with_capacity(pending.len());
+                let mut labels = Vec::with_capacity(pending.len());
+                for item in &pending {
+                    let Some(path) = item.source().path() else {
+                        // Pending trust is only ever a project file; a
+                        // virtual source here is a loader invariant break,
+                        // not something the user can act on.
+                        return Err(RuntimeBuildError::Config(ConfigError::TrustRequired {
+                            pending: pending.clone(),
+                            reports: Vec::new(),
+                        }));
+                    };
+                    grants.push(ProcessTrust {
+                        path: path.to_owned(),
+                        digest: item.digest().to_owned(),
+                    });
+                    labels.push(item.source().label().to_owned());
+                }
+                self.trust_for_process(grants)?;
+                labels
+            }
+        };
+        let request = request.clone().with_process_trust(self.process_trust()?);
+        let snapshot = self.load_for_client(&request)?;
+        Ok(TrustGranted {
+            trusted,
+            state: self.tui_model_state(&snapshot, &request),
         })
     }
 
@@ -677,15 +852,20 @@ impl RuntimeFactory {
     ) -> Result<LoadRequest, RuntimeBuildError> {
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(workspace)?;
-        if self.is_isolated_tui_qa() {
+        let request = if self.is_isolated_tui_qa() {
             let mut overrides = RuntimeOverrides::new();
             if let Some(max_output_tokens) = max_output_tokens {
                 overrides = overrides.with_max_output_tokens(max_output_tokens);
             }
-            Ok(LoadRequest::new(workspace).with_overrides(overrides))
+            LoadRequest::new(workspace).with_overrides(overrides)
         } else {
-            Ok(LoadRequest::from_process_env(workspace, max_output_tokens)?)
+            LoadRequest::from_process_env(workspace, max_output_tokens)?
+        };
+        let process_trust = self.process_trust()?;
+        if process_trust.is_empty() {
+            return Ok(request);
         }
+        Ok(request.with_process_trust(process_trust))
     }
 
     fn validate_tui_qa_snapshot(&self, snapshot: &ConfigSnapshot) -> Result<(), RuntimeBuildError> {
@@ -694,11 +874,13 @@ impl RuntimeFactory {
         };
         if snapshot.jev_review() != qq_config::JevReviewMode::Off
             || snapshot.jev_routing()
+            || snapshot.jev_approval()
             || matches!(
                 std::env::var("QQ_JEV_CHECKPOINTS").ok().as_deref(),
                 Some("final" | "enforce")
             )
             || std::env::var("QQ_JEV_ROUTING").ok().as_deref() == Some("on")
+            || std::env::var("QQ_JEV_APPROVAL").ok().as_deref() == Some("on")
         {
             return Err(invalid(
                 "enabled Jev capabilities require external inference; use the ordinary profile",
@@ -1122,7 +1304,9 @@ impl RuntimeFactory {
             explicit_config_content: request.explicit_content().map(str::to_owned),
             jev_review: request.overrides().jev_review(),
             jev_routing: request.overrides().jev_routing(),
+            approval_delegate: request.overrides().approval_delegate(),
             reasoning_effort: request.overrides().reasoning_effort(),
+            process_trust: crate::plan::ProcessTrustFingerprint::of(request.process_trust()),
         };
         let lookup = self.inner.plans.load(&key, || {
             self.compile_generation(request, profile, &workspace, progress)
@@ -1251,6 +1435,16 @@ impl RuntimeFactory {
                 {
                     overrides = overrides.with_jev_routing(enabled);
                 }
+                if request.overrides().jev_approval().is_none()
+                    && let Some(enabled) = profile.jev_approval()
+                {
+                    overrides = overrides.with_jev_approval(enabled);
+                }
+                if request.overrides().approval_delegate().is_none()
+                    && let Some(setting) = profile.approval_delegate()
+                {
+                    overrides = overrides.with_approval_delegate(setting);
+                }
                 let snapshot = self.load(&request.clone().with_overrides(overrides))?;
                 if !configuration_sources.contains(snapshot.sources()) {
                     configuration_sources.push(snapshot.sources().clone());
@@ -1310,6 +1504,7 @@ impl RuntimeFactory {
         let audit = audit_policy(snapshot.audit());
         let shell = shell_policy(snapshot.policy());
         let network = network_policy(snapshot.policy());
+        let approval_delegate = approval_delegate(snapshot.approval_delegate());
         let mut profile =
             AgentProfile::new(provider, descriptor, resolved_model, workspace.to_owned())
                 .with_spawn_model_routes(spawn_model_routes)
@@ -1317,6 +1512,7 @@ impl RuntimeFactory {
                 .with_audit(audit)
                 .with_shell_policy(shell)
                 .with_network_policy(network)
+                .with_approval_delegate(approval_delegate)
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone());
@@ -2201,9 +2397,9 @@ the workspace owns, reinstalling dependencies, editing source files); escalate a
 externally visible, credential-touching, system-level, or ambiguous (force-pushing shared \
 branches, sudo, piped installers, writes outside the workspace). (2) necessity — when a task \
 brief is given, the action must be plausibly necessary for that task; deny actions clearly \
-outside it. Your deny is final under every mode you are consulted for: the agent receives \
-it as a tool error and no human is asked. Escalate when you are unsure; a human decides \
-escalations. \
+outside it. Under auto and supervised your deny is final: the agent receives it as a tool \
+error and no human is asked. Under ask your deny escalates to the human with your reason. \
+Escalate when you are unsure; a human decides escalations. \
 Reply with exactly one JSON object on one line and nothing else: \
 {\"verdict\":\"approve\"} or {\"verdict\":\"escalate\",\"reason\":\"...\"} \
 or {\"verdict\":\"deny\",\"reason\":\"...\"}.";
@@ -2228,9 +2424,11 @@ async fn collect_reviewer_verdict(
             qq_protocol::ApprovalMode::Auto => {
                 "auto root session: only dangerous-shaped shell and ungranted hosts are held for you"
             }
-            qq_protocol::ApprovalMode::ReadOnly
-            | qq_protocol::ApprovalMode::Ask
-            | qq_protocol::ApprovalMode::Full => "root session",
+            qq_protocol::ApprovalMode::Ask => {
+                "ask root session: every ungranted mutation is held; the operator opted you in, \
+                 and your deny is advice here (the human is still asked)"
+            }
+            qq_protocol::ApprovalMode::ReadOnly | qq_protocol::ApprovalMode::Full => "root session",
         }
     );
     match request.origin {
@@ -2331,6 +2529,7 @@ async fn collect_reviewer_verdict(
                         usage: None,
                         cost_usd_nanos: None,
                     },
+                    delegate: qq_core::DelegateIdentity::Reviewer,
                 };
             }
             None => break,
@@ -2339,6 +2538,7 @@ async fn collect_reviewer_verdict(
     ReviewVerdict {
         decision: parse_reviewer_decision(&text),
         spend,
+        delegate: qq_core::DelegateIdentity::Reviewer,
     }
 }
 
@@ -2444,16 +2644,41 @@ pub struct RuntimeHandler {
 }
 
 impl RuntimeHandler {
+    /// [`Self::open_with`] with no server-side approval deadline: the
+    /// interactive default.
+    #[cfg(test)]
     pub async fn open(factory: RuntimeFactory) -> Result<Self, RuntimeHandlerError> {
+        Self::open_with(factory, None).await
+    }
+
+    /// Opens the durable runtime with the server-side approval wait chosen
+    /// by the caller: `None` is no deadline (the interactive default); a
+    /// headless supervisor passes what its configuration asked for.
+    pub async fn open_with(
+        factory: RuntimeFactory,
+        approval_timeout: Option<std::time::Duration>,
+    ) -> Result<Self, RuntimeHandlerError> {
         factory.validate_isolated_tui_qa_state()?;
         let database_path = factory.inner.config.session_database_path()?;
         // The factory is both the runtime loader and the workspace grant
         // authority: config grants seed each new session's grant set, and
         // approve-for-workspace promotions write back through the loader's
         // configuration layer.
+        // The approval delegate chain: Jev first when the held call's
+        // workspace opted it in (`jev_approval`, trust-gated), then that
+        // workspace's `reviewer_model`, then the human. Both speak
+        // `ReviewDecision`; qq-core learns neither. Whether Jev is consulted
+        // is decided per hold from the workspace configuration, so one handle
+        // serves every workspace and a missing key falls through at the first
+        // hold rather than refusing startup.
+        let reviewer: Arc<dyn ApprovalReviewer> = Arc::new(approval::JevApprovalReviewer::new(
+            factory.clone(),
+            Arc::new(ModelApprovalReviewer::new(factory.clone())),
+        ));
         let options = SessionRuntimeOptions::new(database_path)
+            .with_approval_timeout(approval_timeout)
             .with_grant_authority(Arc::new(factory.clone()))
-            .with_approval_reviewer(Arc::new(ModelApprovalReviewer::new(factory.clone())));
+            .with_approval_reviewer(reviewer);
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
         Ok(Self { durable, factory })
     }
@@ -2796,6 +3021,18 @@ const fn delegation_role(role: qq_config::DelegationRole) -> qq_protocol::Delega
         qq_config::DelegationRole::Fast => qq_protocol::DelegationRole::Fast,
         qq_config::DelegationRole::Balanced => qq_protocol::DelegationRole::Balanced,
         qq_config::DelegationRole::Strong => qq_protocol::DelegationRole::Strong,
+    }
+}
+
+/// Translates the configured delegate choice: absent means the mode's own
+/// default, so a configuration that never mentions it behaves as before.
+const fn approval_delegate(
+    setting: Option<qq_config::ApprovalDelegateSetting>,
+) -> qq_core::ApprovalDelegate {
+    match setting {
+        None => qq_core::ApprovalDelegate::ByMode,
+        Some(qq_config::ApprovalDelegateSetting::On) => qq_core::ApprovalDelegate::On,
+        Some(qq_config::ApprovalDelegateSetting::Off) => qq_core::ApprovalDelegate::Off,
     }
 }
 
@@ -3376,7 +3613,7 @@ mod tests {
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Default)]
-    struct MemoryKeyring(Mutex<BTreeMap<String, Vec<u8>>>);
+    pub(super) struct MemoryKeyring(Mutex<BTreeMap<String, Vec<u8>>>);
 
     impl KeyringBackend for MemoryKeyring {
         fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
@@ -3406,7 +3643,7 @@ mod tests {
         }
     }
 
-    struct PanicKeyring;
+    pub(super) struct PanicKeyring;
 
     impl KeyringBackend for PanicKeyring {
         fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
@@ -3422,12 +3659,12 @@ mod tests {
         }
     }
 
-    struct RuntimeFixture {
+    pub(super) struct RuntimeFixture {
         root: PathBuf,
     }
 
     impl RuntimeFixture {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -3446,7 +3683,7 @@ mod tests {
             Self { root }
         }
 
-        fn path(&self, relative: impl AsRef<Path>) -> PathBuf {
+        pub(super) fn path(&self, relative: impl AsRef<Path>) -> PathBuf {
             self.root.join(relative)
         }
 
@@ -3456,7 +3693,10 @@ mod tests {
             )))
         }
 
-        fn factory_with_credentials(&self, credentials: CredentialStore) -> RuntimeFactory {
+        pub(super) fn factory_with_credentials(
+            &self,
+            credentials: CredentialStore,
+        ) -> RuntimeFactory {
             RuntimeFactory::new(
                 ConfigLoader::new(ConfigPaths::new(
                     self.path("global"),
@@ -5882,6 +6122,143 @@ mod tests {
     }
 
     #[test]
+    fn trust_prompt_persist_records_like_qq_trust_and_session_grants_only_this_process() {
+        // OB7: both answers make the configuration load and yield the same
+        // client model state a trusted start would; only `Persist` writes.
+        let fixture = RuntimeFixture::new();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        );
+        credentials
+            .set("openai/default", "test-secret", false)
+            .unwrap();
+        fs::create_dir_all(fixture.path("work/.qq")).unwrap();
+        fs::write(
+            fixture.path("work/.qq/config.ron"),
+            r#"(version: 1, model: "openai/gpt-5.6", mcp: {"tool": Stdio(command: "tool")})"#,
+        )
+        .unwrap();
+        let request = LoadRequest::new(fs::canonicalize(fixture.path("work")).unwrap());
+
+        // Session: the load succeeds through this factory only; the trust
+        // state file is never written and a fresh factory still asks.
+        let factory = fixture.factory_with_credentials(credentials.clone());
+        let pending = match factory.load_for_client(&request) {
+            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { pending, .. })) => pending,
+            other => panic!("expected TrustRequired, got {other:?}"),
+        };
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0]
+                .declarations()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["model openai/gpt-5.6", "MCP tool → tool"]
+        );
+        let granted = factory
+            .resolve_trust(&request, TrustResolution::Session)
+            .unwrap();
+        assert_eq!(granted.trusted, [pending[0].source().label().to_owned()]);
+        assert_eq!(
+            granted.state.tui_model.model.as_deref(),
+            Some("openai/gpt-5.6")
+        );
+        assert!(granted.state.model.is_some(), "credential present: usable");
+        assert!(!fixture.path("data/trust.ron").exists());
+        // The factory's own request path (what the embedded server uses for
+        // `models`, `capabilities`, and plans) carries the grant.
+        let workspace = request.cwd().to_owned();
+        let served = factory
+            .models_for(&ModelCatalogRequest {
+                workspace: workspace.display().to_string(),
+                selection: ModelSelection::default(),
+            })
+            .unwrap();
+        assert!(!served.is_empty());
+        assert_eq!(factory.process_trust().unwrap().len(), 1);
+        let fresh = fixture.factory_with_credentials(credentials.clone());
+        assert!(matches!(
+            fresh.load_for_client(&request),
+            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
+        ));
+
+        // Persist: recorded on disk, so a fresh factory loads too.
+        let granted = fresh
+            .resolve_trust(&request, TrustResolution::Persist)
+            .unwrap();
+        assert_eq!(granted.trusted.len(), 1);
+        assert!(fixture.path("data/trust.ron").exists());
+        assert!(
+            fixture
+                .factory_with_credentials(credentials)
+                .load_for_client(&request)
+                .is_ok()
+        );
+        // Persist with nothing pending is not an error: the load runs and
+        // the answer names no file.
+        let again = fresh
+            .resolve_trust(&request, TrustResolution::Persist)
+            .unwrap();
+        assert!(again.trusted.is_empty());
+    }
+
+    #[test]
+    fn a_session_trust_grant_is_a_new_plan_cache_slot() {
+        // A plan compiled while the project file was withheld must not be
+        // served after `s`: the grant is in the key.
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        fs::write(
+            fixture.path("global/config.ron"),
+            r#"(version: 1, model: "custom/test-model", providers: {
+                "custom": Custom(connection: (base_url: "http://localhost/v1", api: OpenAiChatCompletions, auth: NoAuth),
+                models: {"test-model": (name: "Test model")})
+            })"#,
+        )
+        .unwrap();
+        fs::create_dir_all(fixture.path("work/.qq")).unwrap();
+        fs::write(
+            fixture.path("work/.qq/config.ron"),
+            r#"(version: 1, max_output_tokens: 64, policy: (allow_tools: ["read_file"]))"#,
+        )
+        .unwrap();
+        let workspace = fs::canonicalize(fixture.path("work")).unwrap();
+        // Before trust the plan path fails outright.
+        let before = factory.request_for_workspace(&workspace, None).unwrap();
+        assert!(matches!(
+            factory.plan_for(&before),
+            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
+        ));
+        factory
+            .resolve_trust(&LoadRequest::new(&workspace), TrustResolution::Session)
+            .unwrap();
+        let after = factory.request_for_workspace(&workspace, None).unwrap();
+        assert_eq!(after.process_trust().len(), 1);
+        let (plan, lookup) = factory
+            .plan_with_lookup(&after, &AgentProfileId::default())
+            .unwrap();
+        assert_eq!(lookup, PlanLookup::Compiled);
+        // The whole file applies once trusted: its safe key was withheld
+        // together with the grant while the file was pending.
+        assert_eq!(plan.resolved_model().max_output_tokens, 64);
+        assert_eq!(
+            factory
+                .plan_with_lookup(&after, &AgentProfileId::default())
+                .unwrap()
+                .1,
+            PlanLookup::Hit
+        );
+        // The pre-grant key is a different slot: a lookup without the grant
+        // still fails rather than serving the trusted plan.
+        assert!(matches!(
+            factory.plan_for(&before),
+            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
+        ));
+    }
+
+    #[test]
     fn catalog_merges_live_ids_without_overriding_configured_metadata() {
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
@@ -6677,7 +7054,9 @@ mod tests {
             explicit_config_content: None,
             jev_review: None,
             jev_routing: None,
+            approval_delegate: None,
             reasoning_effort: None,
+            process_trust: None,
         };
         let (first, _) = factory
             .inner
@@ -7431,6 +7810,67 @@ mod tests {
             factory.plan_for(&unsupported),
             Err(RuntimeBuildError::UnsupportedReasoningEffort(_))
         ));
+    }
+
+    #[test]
+    fn approval_delegate_reaches_the_plan_from_config_profile_and_override() {
+        // DA3: the composition root translates the setting and nothing else
+        // does. Absent is `ByMode` (unchanged behavior); a profile may say
+        // otherwise; an explicit override wins over both; and none of it
+        // enters the plan digest, because who is asked is not what the model
+        // may do.
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let request = fixture.request(r#"(
+            version: 1, model: "custom/test",
+            profiles: {
+                "strict": Profile(approval_mode: ask, approval_delegate: off),
+                "hands-off": Profile(approval_mode: ask, approval_delegate: on),
+            },
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test": (name: "test") }) },
+        )"#);
+        let default = factory.plan_for(&request).unwrap();
+        assert_eq!(
+            default.approval_delegate(),
+            qq_core::ApprovalDelegate::ByMode
+        );
+        let strict = factory
+            .plan_for_profile(&request, &AgentProfileId::new("strict").unwrap())
+            .unwrap();
+        assert_eq!(strict.approval_delegate(), qq_core::ApprovalDelegate::Off);
+        let hands_off = factory
+            .plan_for_profile(&request, &AgentProfileId::new("hands-off").unwrap())
+            .unwrap();
+        assert_eq!(hands_off.approval_delegate(), qq_core::ApprovalDelegate::On);
+        let overridden = request.clone().with_overrides(
+            request
+                .overrides()
+                .clone()
+                .with_approval_delegate(qq_config::ApprovalDelegateSetting::Off),
+        );
+        let overridden_plan = factory
+            .plan_for_profile(&overridden, &AgentProfileId::new("hands-off").unwrap())
+            .unwrap();
+        assert_eq!(
+            overridden_plan.approval_delegate(),
+            qq_core::ApprovalDelegate::Off
+        );
+        // Same profile, different delegate: the digest is unchanged because
+        // who is asked is not plan identity.
+        assert_eq!(
+            hands_off.digest(),
+            overridden_plan.digest(),
+            "the delegate choice is not plan identity"
+        );
+        // The cache keys on the override, so the profile's plan is not
+        // returned for the overridden request.
+        assert_eq!(
+            factory
+                .plan_for_profile(&request, &AgentProfileId::new("hands-off").unwrap())
+                .unwrap()
+                .approval_delegate(),
+            qq_core::ApprovalDelegate::On
+        );
     }
 
     /// A pin outside a route's advertised ladder fails at plan time with the

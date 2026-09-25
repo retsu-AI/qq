@@ -48,3 +48,10 @@ is assigned per slice. [Plan](../token-efficiency.md).
 - Existing D6b/T13/cache/tool-selection/reliability owners linked as related work,
   not duplicated or reparented. Slice inputs are explicit in the plan.
 - Added issue/PR links to plan and ledger; original checkout remains untouched.
+
+### 2026-09-25 — repair parent stack against main
+
+- Merged origin/main `536a817`, preserving accepted ADR-0041/0042.
+- Renumbered proposed efficiency ADR to 0043 and updated live references;
+  historical reservation entries above describe their original context.
+- Parent #141 conflict resolved without altering implementation behavior.

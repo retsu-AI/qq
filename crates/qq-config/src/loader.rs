@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ClientSnapshot, ConfigError, ConfigLoader, ConfigPaths, ConfigSnapshot, ConfigSources,
-    LoadRequest, MAX_CONFIG_BYTES, PendingTrust, SourceIdentity, SourceKind, SourceReport,
-    SourceStatus,
+    LoadRequest, MAX_CONFIG_BYTES, PendingTrust, ProcessTrust, SourceIdentity, SourceKind,
+    SourceReport, SourceStatus,
     document::{Document, MergeState},
     managed::MdmConfiguration,
     remote,
@@ -78,7 +78,11 @@ pub(super) fn load_for_client(
     probes.record(&request.cwd);
     let cwd = canonical_working_directory(&request.cwd)?;
     probes.record(&cwd);
-    let trust = TrustState::load(&loader.paths, probes)?;
+    let mut trust = TrustState::load(&loader.paths, probes)?;
+    // "This session" grants live only in this request; the durable state on
+    // disk is untouched and the next process asks again.
+    trust.admit_process_trust(request.process_trust());
+    let trust = trust;
     let mdm = read_mdm_document(loader)?;
     let organization = selected_organization(loader, request, &cwd, &trust, mdm.as_ref(), probes)?;
     let (mut merged, compiled_report) = MergeState::compiled();
@@ -409,6 +413,18 @@ fn apply_organization_candidate(
     Ok(())
 }
 
+pub(super) fn pending_trust(
+    loader: &ConfigLoader,
+    request: &LoadRequest,
+) -> Result<Vec<PendingTrust>, ConfigError> {
+    let cwd = canonical_working_directory(&request.cwd)?;
+    let mut probes = Probes::default();
+    let probes = &mut probes;
+    let mut trust = TrustState::load(&loader.paths, probes)?;
+    trust.admit_process_trust(request.process_trust());
+    scan_pending_trust(&cwd, &trust, probes)
+}
+
 pub(super) fn grant_pending_trust(
     loader: &ConfigLoader,
     request: &LoadRequest,
@@ -417,10 +433,35 @@ pub(super) fn grant_pending_trust(
     let _state_lock = TrustStateLock::acquire(&loader.paths)?;
     let mut probes = Probes::default();
     let probes = &mut probes;
+    // The durable state alone: a process-scoped grant must not stop `qq
+    // trust` (or the TUI's persist choice) from recording the file.
     let mut trust = TrustState::load(&loader.paths, probes)?;
-    let mut pending = Vec::new();
+    let pending = scan_pending_trust(&cwd, &trust, probes)?;
 
-    for directory in project_directories(&cwd, probes) {
+    if !pending.is_empty() {
+        for item in &pending {
+            trust.insert(
+                item.source()
+                    .path()
+                    .expect("pending project trust always has a path")
+                    .to_owned(),
+                item.digest().to_owned(),
+            );
+        }
+        trust.save(&loader.paths)?;
+    }
+    Ok(pending)
+}
+
+/// Every project configuration file from the VCS root down to `cwd` whose
+/// sensitive digest `trust` does not cover, in load order.
+fn scan_pending_trust(
+    cwd: &Path,
+    trust: &TrustState,
+    probes: &mut Probes,
+) -> Result<Vec<PendingTrust>, ConfigError> {
+    let mut pending = Vec::new();
+    for directory in project_directories(cwd, probes) {
         let mut candidates = Vec::new();
         if let Some(candidate) =
             discover_file(directory.join("qq.ron"), SourceKind::Project, false, probes)?
@@ -446,22 +487,10 @@ pub(super) fn grant_pending_trust(
                 .expect("project file sources always have a canonical path");
             if !trust.contains(path, &digest) {
                 let sections = document.sensitive_sections();
-                pending.push(PendingTrust::new(source, digest, sections));
+                let declarations = document.sensitive_declarations();
+                pending.push(PendingTrust::new(source, digest, sections, declarations));
             }
         }
-    }
-
-    if !pending.is_empty() {
-        for item in &pending {
-            trust.insert(
-                item.source()
-                    .path()
-                    .expect("pending project trust always has a path")
-                    .to_owned(),
-                item.digest().to_owned(),
-            );
-        }
-        trust.save(&loader.paths)?;
     }
     Ok(pending)
 }
@@ -707,6 +736,7 @@ fn apply_document(
             source.clone(),
             digest,
             document.sensitive_sections(),
+            document.sensitive_declarations(),
         ));
         SourceStatus::PartiallyAppliedPendingTrust
     } else {
@@ -1174,6 +1204,15 @@ impl TrustState {
     pub(super) fn insert(&mut self, path: PathBuf, digest: String) {
         if !self.contains(&path, &digest) {
             self.records.push(TrustRecord { path, digest });
+        }
+    }
+
+    /// Admit process-scoped grants as if recorded. Only meaningful on a
+    /// state that is never saved: callers that write (`grant_pending_trust`)
+    /// load without them.
+    pub(super) fn admit_process_trust(&mut self, grants: &[ProcessTrust]) {
+        for grant in grants {
+            self.insert(grant.path.clone(), grant.digest.clone());
         }
     }
 

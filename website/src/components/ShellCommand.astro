@@ -1,0 +1,39 @@
+---
+interface Props { command: string; prompt?: boolean; }
+const { command, prompt = true } = Astro.props;
+---
+<qq-copy class="shell-command" data-command={command}>
+  {prompt && <span class="shell-prompt font-mono" aria-hidden="true">$</span>}
+  <code>{command}</code>
+  <button class="copy-button" type="button" aria-label="Copy command"><span class="copy-icon" aria-hidden="true"></span></button>
+  <span class="sr-only copy-status" role="status" aria-live="polite"></span>
+</qq-copy>
+<script>
+  class QQCopy extends HTMLElement {
+    connectedCallback() {
+      const button = this.querySelector<HTMLButtonElement>('button')!;
+      const status = this.querySelector<HTMLElement>('.copy-status')!;
+      button.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(this.dataset.command || '');
+          button.dataset.copied = '';
+          button.setAttribute('aria-label', 'Command copied');
+          status.textContent = 'Command copied to clipboard.';
+          window.setTimeout(() => {
+            delete button.dataset.copied;
+            button.setAttribute('aria-label', 'Copy command');
+            status.textContent = '';
+          }, 2500);
+        } catch {
+          const range = document.createRange();
+          range.selectNodeContents(this.querySelector('code')!);
+          const selection = window.getSelection();
+          selection?.removeAllRanges();
+          selection?.addRange(range);
+          status.textContent = 'Command selected. Use your keyboard copy shortcut.';
+        }
+      });
+    }
+  }
+  if (!customElements.get('qq-copy')) customElements.define('qq-copy', QQCopy);
+</script>

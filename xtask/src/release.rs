@@ -2,11 +2,11 @@
 //! result.
 //!
 //! `main` only accepts pull requests and merges rewrite commit SHAs, so a
-//! release is two steps: `cargo xtask release X.Y.Z` commits the bump on the
-//! current branch for a PR, and `cargo xtask release --tag` on the merged
-//! `main` creates `vX.Y.Z` from the manifest. The release workflow refuses a
-//! tag whose version differs from the manifest or whose commit is not on
-//! `main`. Nothing is pushed here.
+//! release is two steps: `cargo xtask release X.Y.Z` commits the bump and a
+//! new `CHANGELOG.md` section on the current branch for a PR, and `cargo
+//! xtask release --tag` on the merged `main` creates `vX.Y.Z` from the
+//! manifest. The release workflow refuses a tag whose version differs from
+//! the manifest or whose commit is not on `main`. Nothing is pushed here.
 
 use std::{
     env, fmt, io,
@@ -17,13 +17,17 @@ use std::{
 use clap::Args;
 use thiserror::Error;
 
+mod changelog;
+
 #[derive(Debug, Args)]
 pub struct ReleaseArgs {
     /// Version to release, e.g. `0.2.0`. Must be greater than the current
-    /// workspace version. Bumps and commits on the current branch.
+    /// workspace version. Bumps, writes the `CHANGELOG.md` section from the
+    /// Conventional Commit subjects since the last tag, and commits on the
+    /// current branch.
     #[arg(required_unless_present = "tag", conflicts_with = "tag")]
     version: Option<String>,
-    /// Update `Cargo.toml` and `Cargo.lock` but do not commit.
+    /// Update `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md` but do not commit.
     #[arg(long, conflicts_with = "tag")]
     no_commit: bool,
     /// Tag the checked-out `main` with the manifest version. Run after the
@@ -164,15 +168,40 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
     // entries without touching dependency resolution.
     cargo(&root, &["update", "--workspace", "--offline"])?;
 
+    // The changelog is read from git before anything is committed, so the
+    // bump commit itself is never listed.
+    let subjects = changelog::subjects_since_last_tag(&root)?;
+    let section = changelog::render_section(requested, &changelog::today_utc(), &subjects);
+    let changelog_path = root.join(changelog::FILE_NAME);
+    let existing = match std::fs::read_to_string(&changelog_path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(ReleaseError::Read {
+                path: changelog_path,
+                source,
+            });
+        }
+    };
+    std::fs::write(
+        &changelog_path,
+        changelog::prepend_section(existing.as_deref(), &section),
+    )
+    .map_err(|source| ReleaseError::Write {
+        path: changelog_path.clone(),
+        source,
+    })?;
+
     if args.no_commit {
         println!("bumped {current} -> {requested} (not committed)");
+        println!("  {} entries in {}", subjects.len(), changelog::FILE_NAME);
         return Ok(());
     }
 
     let message = format!("chore(release): v{requested}");
     git(
         &root,
-        &["add", "Cargo.toml", "Cargo.lock"],
+        &["add", "Cargo.toml", "Cargo.lock", changelog::FILE_NAME],
         Stdio::inherit(),
     )?
     .success_or("git", "add")?;
@@ -180,6 +209,11 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
 
     println!("bumped {current} -> {requested}");
     println!("  commit: {message}");
+    println!(
+        "  {}: {} entries under \"## {requested}\"",
+        changelog::FILE_NAME,
+        subjects.len()
+    );
     println!("next: push this branch, open a PR titled \"{message}\", merge it, then");
     println!("      git switch main && git pull --ff-only && cargo xtask release --tag");
     Ok(())

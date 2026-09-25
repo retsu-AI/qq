@@ -1,0 +1,13 @@
+{
+  "command_id": "17171717171717171717171717171717",
+  "committed_through": {
+    "store_id": "01010101010101010101010101010101",
+    "workspace_id": "02020202020202020202020202020202",
+    "sequence": 13
+  },
+  "outcome": {
+    "type": "session_profile_set",
+    "session_id": "03030303030303030303030303030303",
+    "profile": "fast"
+  }
+}

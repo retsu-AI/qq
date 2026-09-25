@@ -11,14 +11,17 @@ use std::{
 use qq_auth as auth;
 use qq_client as client;
 use qq_config as config;
-use qq_protocol::{ModelSelection, RunCommand, RunEvent};
+use qq_protocol::{RunCommand, RunEvent};
 use qq_server as server;
 
 mod advisory;
 mod catalog;
 mod cli;
+#[cfg(test)]
+mod docs_truth;
 mod doctor;
 mod headless;
+mod init;
 mod mcp;
 mod output;
 mod plan;
@@ -66,6 +69,7 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         Some(cli::Command::Doctor(args)) => {
             return doctor_command(args, &overrides).await;
         }
+        Some(cli::Command::Init(args)) => run_blocking_command(move || init_command(args)).await?,
         Some(cli::Command::Version) => print!("{}", version_report()),
         None => interactive(&overrides, cli.session, cli.tui_qa_root).await?,
     }
@@ -358,7 +362,7 @@ async fn prepare_headless(
         max_output_tokens: Some(snapshot.max_output_tokens()),
         organization: snapshot.organization().map(str::to_owned),
     };
-    let handler = runtime::RuntimeHandler::open(factory)
+    let handler = runtime::RuntimeHandler::open_with(factory, snapshot.approval_timeout())
         .await
         .map_err(|error| match error {
             runtime::RuntimeHandlerError::Build(error) => invalid(error.to_string()),
@@ -414,8 +418,25 @@ async fn serve(bind: std::net::SocketAddr, allow_origins: &[String]) -> Result<(
             println!("qq server already running at {}", connection.address());
         }
         server::ReserveOutcome::Reserved(reservation) => {
+            let factory = runtime::RuntimeFactory::system()?;
+            // The server's own configuration decides the approval wait for
+            // every session it serves: a server-side control like the Jev
+            // settings, not one a client forwards. Absent is no deadline. A
+            // configuration that does not load yet (no model, untrusted
+            // project) still serves; it simply has no bound.
+            let request = config::LoadRequest::from_current_process(None)?;
+            let approval_timeout = {
+                let factory = factory.clone();
+                tokio::task::spawn_blocking(move || {
+                    factory
+                        .load_for_client(&request)
+                        .ok()
+                        .and_then(|snapshot| snapshot.approval_timeout())
+                })
+                .await?
+            };
             let handler =
-                Arc::new(runtime::RuntimeHandler::open(runtime::RuntimeFactory::system()?).await?);
+                Arc::new(runtime::RuntimeHandler::open_with(factory, approval_timeout).await?);
             let identity = handler.server_identity(None);
             let server = match reservation.start(handler.clone(), identity) {
                 Ok(server) => server,
@@ -506,18 +527,29 @@ async fn interactive(
     let environment = InteractiveEnvironment::open(overrides, tui_qa_root)?;
     let factory = environment.factory;
     let request = environment.request;
+    let environment_request = request.clone();
     let loader = environment.config;
     let server_paths = environment.server_paths;
     let workspace = environment.workspace;
-    let model_is_fallback = request.overrides().model().is_none();
     let config_factory = factory.clone();
     // Read once, here: neither `qq-config` nor `qq-tui` consults the
     // environment, they take the answer as a value.
     let truecolor = truecolor_support(std::env::var_os("COLORTERM").as_deref());
-    let (snapshot, tui, themes, models, unauthenticated) = tokio::task::spawn_blocking(move || {
+    let (loaded, tui, themes) = tokio::task::spawn_blocking(move || {
         // The client load tolerates a missing model: the TUI opens and
-        // routes to `/models`. Headless paths keep `load`.
-        let snapshot = config_factory.load_for_client(&request)?;
+        // routes to `/models`. Headless paths keep `load`. An untrusted
+        // project opens the TUI too, on the trust prompt; every other
+        // failure still exits with its message.
+        let loaded = match config_factory.load_for_client(&request) {
+            Ok(snapshot) => Ok(config_factory.tui_model_state(&snapshot, &request)),
+            Err(runtime::RuntimeBuildError::Config(config::ConfigError::TrustRequired {
+                pending,
+                ..
+            })) => Err(pending),
+            Err(error) => return Err(error),
+        };
+        // TUI settings and themes are not trust-gated: `.qq/tui.ron` and
+        // `.qq/themes/` declare nothing sensitive.
         let (tui_snapshot, tui) = load_tui_config(&loader, request.cwd())?;
         let themes = load_tui_themes(
             &loader,
@@ -525,64 +557,57 @@ async fn interactive(
             tui_snapshot.settings().theme(),
             truecolor,
         )?;
-        let models = config_factory.client_model_options(&snapshot);
-        let unauthenticated = config_factory.unauthenticated_providers(&snapshot);
-        Ok::<_, runtime::RuntimeBuildError>((snapshot, tui, themes, models, unauthenticated))
+        Ok::<_, runtime::RuntimeBuildError>((loaded, tui, themes))
     })
     .await??;
+    let (model_state, pending_trust) = match loaded {
+        Ok(state) => (state, Vec::new()),
+        Err(pending) => (
+            runtime::TuiModelState::default(),
+            pending
+                .iter()
+                .map(|item| qq_tui::PendingTrustNotice {
+                    path: item.source().label().to_owned(),
+                    declarations: item
+                        .declarations()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                })
+                .collect(),
+        ),
+    };
+    let runtime::TuiModelState {
+        configured_model,
+        model,
+        tui_model,
+        models,
+        unauthenticated_providers,
+        approval_timeout,
+    } = model_state;
     let models = models
         .into_iter()
         .map(Into::into)
         .collect::<Vec<qq_tui::ModelOption>>();
-    let unauthenticated_providers: Vec<qq_tui::ProviderRemedy> = unauthenticated
+    let unauthenticated_providers = unauthenticated_providers
         .into_iter()
-        .map(|remedy| qq_tui::ProviderRemedy {
-            provider: remedy.provider,
-            remedy: remedy.remedy,
-        })
+        .map(tui_provider_remedy)
         .collect();
     let workspace_root = workspace.clone();
-    // Without a configured model there is no client default: the TUI shows
-    // `no model`, the composer notice points at `/models`, and the first
-    // session is created from the picker.
-    let configured_model = snapshot
-        .model()
-        .map_or_else(ModelSelection::default, |route| ModelSelection {
-            model_is_fallback,
-            model: Some(route.as_str().to_owned()),
-            max_output_tokens: Some(snapshot.max_output_tokens()),
-            organization: snapshot.organization().map(str::to_owned),
-        });
-    let model = (configured_model.model.is_some()
-        && models
-            .iter()
-            .any(|option| option.selection.model == configured_model.model))
-    .then_some(configured_model.clone());
-    // The TUI's client default. An unusable route is normally withheld so
-    // Alt-N asks for a model; a route whose provider merely lacks a credential
-    // is kept so the empty state and Alt-N can name that credential.
-    let configured_provider_unauthenticated = configured_model
-        .model
-        .as_deref()
-        .and_then(|route| route.split_once('/'))
-        .is_some_and(|(provider, _)| {
-            unauthenticated_providers
-                .iter()
-                .any(|remedy| remedy.provider == provider)
-        });
-    let tui_model = match &model {
-        Some(model) => model.clone(),
-        None if configured_provider_unauthenticated => configured_model.clone(),
-        None => ModelSelection::default(),
-    };
 
     // The TUI paints its first frame before the server is reserved or the
     // embedded runtime opened; the port connects on the loop's first recv
     // and the embedded handle comes back through the channel for shutdown.
+    // Whether this process owns the server is known only then; the trust
+    // resolver reads it because trust is a decision about files on the host
+    // that runs the server.
+    let owns_server = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (embedded_tx, mut embedded_rx) = tokio::sync::oneshot::channel::<EmbeddedRuntime>();
     let connect = {
         let model = model.clone();
         let server_paths = server_paths.clone();
+        let factory = factory.clone();
+        let owns_server = Arc::clone(&owns_server);
         async move {
             factory
                 .validate_isolated_tui_qa_state()
@@ -604,8 +629,9 @@ async fn interactive(
             {
                 server::ReserveOutcome::Existing(connection) => (connection, initial(false)),
                 server::ReserveOutcome::Reserved(reservation) => {
+                    owns_server.store(true, std::sync::atomic::Ordering::Release);
                     let handler = Arc::new(
-                        runtime::RuntimeHandler::open(factory.clone())
+                        runtime::RuntimeHandler::open_with(factory.clone(), approval_timeout)
                             .await
                             .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?,
                     );
@@ -644,6 +670,50 @@ async fn interactive(
             .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))
         }
     };
+    // `t` records the pending files exactly as `qq trust` does; `s` admits
+    // them for this process only. Both run on the blocking pool (trust state
+    // I/O, configuration load, credential probes) and hand back what the
+    // now-loadable configuration provides. The server the loop connected to
+    // must be ours: a remote server's files cannot be read or trusted here.
+    let trust: qq_tui::TrustResolver = {
+        let factory = factory.clone();
+        let request = environment_request.clone();
+        Box::new(move |choice| {
+            let factory = factory.clone();
+            let request = request.clone();
+            let owns_server = Arc::clone(&owns_server);
+            Box::pin(async move {
+                if !owns_server.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(
+                        "this client is attached to a server it does not own; run `qq trust` on the server host"
+                            .to_owned(),
+                    );
+                }
+                tokio::task::spawn_blocking(move || {
+                    let choice = match choice {
+                        qq_tui::TrustChoice::Persist => runtime::TrustResolution::Persist,
+                        qq_tui::TrustChoice::Session => runtime::TrustResolution::Session,
+                    };
+                    let granted = factory
+                        .resolve_trust(&request, choice)
+                        .map_err(|error| error.to_string())?;
+                    Ok(qq_tui::TrustResolved {
+                        trusted: granted.trusted,
+                        model: granted.state.tui_model,
+                        models: granted.state.models.into_iter().map(Into::into).collect(),
+                        unauthenticated_providers: granted
+                            .state
+                            .unauthenticated_providers
+                            .into_iter()
+                            .map(tui_provider_remedy)
+                            .collect(),
+                    })
+                })
+                .await
+                .map_err(|_| "trust resolution stopped unexpectedly".to_owned())?
+            })
+        })
+    };
     let result = qq_tui::run(
         qq_tui::LazyPort::new(connect),
         qq_tui::TuiOptions {
@@ -653,7 +723,9 @@ async fn interactive(
             unauthenticated_providers,
             themes,
             workspace_root: Some(workspace_root),
+            pending_trust,
         },
+        Some(trust),
     )
     .await;
 
@@ -674,6 +746,13 @@ struct InteractiveEnvironment {
     request: config::LoadRequest,
     server_paths: server::ServerPaths,
     workspace: PathBuf,
+}
+
+fn tui_provider_remedy(remedy: runtime::ProviderRemedy) -> qq_tui::ProviderRemedy {
+    qq_tui::ProviderRemedy {
+        provider: remedy.provider,
+        remedy: remedy.remedy,
+    }
 }
 
 impl InteractiveEnvironment {
@@ -864,21 +943,29 @@ fn config_command(
     let loader = config::ConfigLoader::system()?;
     match command {
         cli::ConfigCommand::Paths => {
-            println!("global:  {}", loader.paths().global_dir().display());
-            println!(
-                "global TUI: {}",
-                loader.paths().global_dir().join("tui.ron").display()
-            );
-            println!("data:    {}", loader.paths().data_dir().display());
-            println!("managed: {}", loader.paths().managed_dir().display());
-            println!(
-                "organizations: {}",
-                loader.paths().organizations_file().display()
-            );
-            println!(
-                "organization cache: {}",
-                loader.paths().organizations_cache_dir().display()
-            );
+            let paths = loader.paths();
+            let rows: [(&str, PathBuf); 7] = [
+                ("global", paths.global_dir().to_path_buf()),
+                ("global config", paths.global_dir().join("config.ron")),
+                ("global TUI", paths.global_dir().join("tui.ron")),
+                ("data", paths.data_dir().to_path_buf()),
+                ("managed", paths.managed_dir().to_path_buf()),
+                ("organizations", paths.organizations_file()),
+                ("organization cache", paths.organizations_cache_dir()),
+            ];
+            let width = rows
+                .iter()
+                .map(|(label, _)| label.len() + 1)
+                .max()
+                .unwrap_or(0);
+            for (label, path) in &rows {
+                let state = if path.exists() { "exists" } else { "missing" };
+                println!(
+                    "{:<width$} {} ({state})",
+                    format!("{label}:"),
+                    path.display()
+                );
+            }
         }
         cli::ConfigCommand::Sources => {
             let request = overrides.load_request()?;
@@ -952,6 +1039,9 @@ fn config_command(
                     "audit" => snapshot.provenance().audit(),
                     "jev_review" => snapshot.provenance().jev_review(),
                     "jev_routing" => snapshot.provenance().jev_routing(),
+                    "jev_approval" => snapshot.provenance().jev_approval(),
+                    "approval_delegate" => snapshot.provenance().approval_delegate(),
+                    "approval_timeout" => snapshot.provenance().approval_timeout(),
                     "reasoning_effort" => snapshot.provenance().reasoning_effort(),
                     "max_output_tokens" => snapshot.provenance().max_output_tokens(),
                     _ => field
@@ -1048,6 +1138,19 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
     );
     println!("jev_review: {}", snapshot.jev_review().as_str());
     println!("jev_routing: {}", snapshot.jev_routing());
+    println!("jev_approval: {}", snapshot.jev_approval());
+    println!(
+        "approval_delegate: {}",
+        snapshot
+            .approval_delegate()
+            .map_or("by_mode", config::ApprovalDelegateSetting::as_str)
+    );
+    println!(
+        "approval_timeout_seconds: {}",
+        snapshot
+            .approval_timeout()
+            .map_or("none".to_owned(), |timeout| timeout.as_secs().to_string())
+    );
     println!(
         "reasoning_effort: {}",
         serde_json::to_string(&snapshot.reasoning_effort()).expect("effort is serializable")
@@ -1114,6 +1217,9 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
                     config::ProfileApprovalMode::Full => "full",
                 };
                 parts.push(format!("approval_mode={mode}"));
+            }
+            if let Some(delegate) = profile.approval_delegate() {
+                parts.push(format!("approval_delegate={}", delegate.as_str()));
             }
             if let Some(tokens) = profile.max_output_tokens() {
                 parts.push(format!("max_output_tokens={tokens}"));
@@ -1343,6 +1449,26 @@ async fn doctor_command(
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// `qq init`. Runs on a blocking thread: it reads one line from stdin when
+/// choosing interactively and writes one file.
+fn init_command(args: cli::InitArgs) -> Result<(), Box<dyn Error>> {
+    let paths = config::ConfigPaths::system()?;
+    let cwd = std::env::current_dir()?;
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    let result = if stdin.is_terminal() {
+        let mut chooser = stdin.lock();
+        init::run(&paths, &cwd, args, Some(&mut chooser), &mut stdout)
+    } else {
+        init::run(&paths, &cwd, args, None::<&mut io::Empty>, &mut stdout)
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn auth_command(command: cli::AuthCommand) -> Result<(), Box<dyn Error>> {
@@ -1746,6 +1872,12 @@ mod tests {
             (
                 r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "http://localhost:9080/v1", api: OpenAiResponses, auth: NoAuth, headers: {"authorization": "secret"}), models: { "test-model": (name: "Test model") }) })"#,
                 "no static headers",
+            ),
+            // DA5: Jev as approver is a Jev capability like review and
+            // routing; the credential-free fixture rejects it the same way.
+            (
+                r#"(version: 1, model: "custom/test-model", jev_approval: true, providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test-model": (name: "Test model") }) })"#,
+                "enabled Jev capabilities",
             ),
         ];
         for (document, expected) in cases {

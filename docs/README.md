@@ -80,12 +80,15 @@ evidence.
   to extend it.
 - [`release.md`](runbooks/release.md) — `cargo xtask release`, the tag-driven
   release workflow, targets, and `qq --version`.
+- [`website.md`](runbooks/website.md) — how the docs site is generated from
+  `guide/`, built, checked, and deployed to GitHub Pages.
 
 ## User guide — `guide/`
 
 Task-oriented pages for people using QQ, amended in the same PR as the
 behavior they describe: [`guide/README.md`](guide/README.md). Plain
-Markdown so the same files can be mirrored to the GitHub wiki or a docs site.
+Markdown; the site at <https://retsu-ai.github.io/qq/> is generated from
+these files at build time ([`runbooks/website.md`](runbooks/website.md)).
 
 ## Conventions
 
@@ -100,3 +103,7 @@ Markdown so the same files can be mirrored to the GitHub wiki or a docs site.
 
 Jev: [review and direction](design/jev-runtime-review-2026-09-18.md),
 [opt-in runbook](runbooks/jev.md), [implementation plan](plans/jev-opt-in.md).
+Delegated approval, including Jev as an approval delegate:
+[as built](design/tools.md#approval-policy), [ADR-0041](adr/0041-jev-delegated-approval.md),
+[operator guide](guide/permissions.md#who-decides-a-held-call),
+[receipt](plans/progress/delegated-approval.md).

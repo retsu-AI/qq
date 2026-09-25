@@ -373,19 +373,29 @@ pub(super) fn insert_seed_grants(
     Ok(())
 }
 
+/// The session's mode, its grants, and its delegate override (`None` when
+/// the configured `approval_delegate` applies).
 pub(super) fn load_approval_policy(
     connection: &mut Connection,
     session_id: SessionId,
-) -> Result<(ApprovalMode, approval::SessionGrants), SessionRuntimeError> {
-    let mode = connection
+) -> Result<
+    (
+        ApprovalMode,
+        approval::SessionGrants,
+        Option<approval::ApprovalDelegate>,
+    ),
+    SessionRuntimeError,
+> {
+    let (mode, delegate) = connection
         .query_row(
-            "SELECT approval_mode FROM sessions WHERE id = ?1",
+            "SELECT approval_mode, approval_delegate FROM sessions WHERE id = ?1",
             [session_id.to_string()],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .optional()?
         .ok_or(SessionRuntimeError::SessionNotFound)?;
     let mode = parse_approval_mode(&mode)?;
+    let delegate = parse_approval_delegate(delegate.as_deref())?;
     let mut statement = connection
         .prepare("SELECT kind, value, source FROM session_grants WHERE session_id = ?1")?;
     let rows = statement
@@ -405,19 +415,19 @@ pub(super) fn load_approval_policy(
             }
             ("human", "shell_prefix") => grants.shell_prefixes.push(value),
             ("human", "host") => grants.hosts.push(value),
-            // A delegate row is an exact string; the kinds it may hold are
-            // the two the gate can match exactly. Anything else in the table
-            // is a write this code never made.
-            ("delegate", "shell_prefix") => {
+            // A delegate row is an exact string whichever delegate wrote it;
+            // the kinds it may hold are the two the gate can match exactly.
+            // Anything else in the table is a write this code never made.
+            ("delegate" | "jev", "shell_prefix") => {
                 grants.delegate.commands.insert(value);
             }
-            ("delegate", "host") => {
+            ("delegate" | "jev", "host") => {
                 grants.delegate.hosts.insert(value);
             }
             _ => return Err(SessionRuntimeError::CONSTRAINT),
         }
     }
-    Ok((mode, grants))
+    Ok((mode, grants, delegate))
 }
 
 pub(super) fn deny_tool_call(
@@ -550,15 +560,17 @@ pub(crate) const MAX_DELEGATE_GRANTS_PER_RUN: u32 = 64;
 /// a session grant (non-empty, within `MAX_GRANT_BYTES`, session under
 /// `MAX_SESSION_GRANTS`) and this run is under `MAX_DELEGATE_GRANTS_PER_RUN`.
 /// A grant that does not fit is dropped and the call still executes once:
-/// the storage rule never fails an approval. The row is marked
-/// `source = 'delegate'`, so the gate reads it as an exact match only and
-/// the workspace promotion path never sees it.
+/// the storage rule never fails an approval. The row's `source` names the
+/// delegate (`delegate` for the reviewer model, `jev` for Jev), so the gate
+/// reads it as an exact match only, the workspace promotion path never sees
+/// it, and an audit can tell the two delegates apart.
 pub(super) fn resolve_approval_by_reviewer(
     connection: &mut Connection,
     store_id: StoreId,
     identity: RunIdentity,
     tool_call_id: ToolCallId,
     grant: Option<DelegateGrant>,
+    delegate: DelegateIdentity,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
@@ -601,7 +613,7 @@ pub(super) fn resolve_approval_by_reviewer(
                 )?;
                 let run_total: u32 = transaction.query_row(
                     "SELECT COUNT(*) FROM session_grants
-                     WHERE session_id = ?1 AND source = 'delegate' AND run_id = ?2",
+                     WHERE session_id = ?1 AND source IN ('delegate', 'jev') AND run_id = ?2",
                     params![session, run],
                     |row| row.get(0),
                 )?;
@@ -614,8 +626,15 @@ pub(super) fn resolve_approval_by_reviewer(
             transaction.execute(
                 "INSERT OR IGNORE INTO session_grants(
                          session_id, kind, value, created_at_ms, source, run_id
-                     ) VALUES (?1, ?2, ?3, ?4, 'delegate', ?5)",
-                params![session, kind, value, now, run],
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    session,
+                    kind,
+                    value,
+                    now,
+                    super::runtime::delegate_grant_source(delegate),
+                    run
+                ],
             )?;
         }
     }
@@ -626,6 +645,7 @@ pub(super) fn resolve_approval_by_reviewer(
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::ApprovedByReviewer,
+            delegate: Some(delegate),
         },
     )?;
     transaction.commit()?;
@@ -641,6 +661,7 @@ pub(super) fn deny_approval_by_reviewer(
     identity: RunIdentity,
     tool_call_id: ToolCallId,
     message: &str,
+    delegate: DelegateIdentity,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
@@ -697,6 +718,44 @@ pub(super) fn deny_approval_by_reviewer(
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::DeniedByReviewer,
+            delegate: Some(delegate),
+        },
+    )?;
+    transaction.commit()?;
+    Ok(Some(event))
+}
+
+/// A delegate handed the hold to the human: records why, without touching
+/// the call. `Ok(None)` when the call is no longer awaiting approval (a
+/// client resolution won the race), in which case nothing is published.
+pub(super) fn escalate_tool_approval(
+    connection: &mut Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+    tool_call_id: ToolCallId,
+    delegate: Option<DelegateIdentity>,
+    reason: &str,
+) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    let awaiting: bool = transaction
+        .query_row(
+            "SELECT state = 'awaiting_approval' AND approval_resolution IS NULL
+             FROM tool_calls WHERE id = ?1 AND run_id = ?2",
+            params![tool_call_id.to_string(), identity.run_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !awaiting {
+        return Ok(None);
+    }
+    let event = append_event(
+        &transaction,
+        EventContext::for_run(store_id, identity, now_ms()),
+        SessionEvent::ToolApprovalEscalated {
+            tool_call_id,
+            delegate,
+            reason: reason.to_owned(),
         },
     )?;
     transaction.commit()?;
@@ -836,6 +895,7 @@ pub(super) fn conclude_tool_approval(
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::DeniedTimeout,
+            delegate: None,
         },
     )?;
     transaction.commit()?;

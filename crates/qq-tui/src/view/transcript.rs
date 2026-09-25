@@ -947,6 +947,12 @@ impl TranscriptCache {
             ..VirtualBody::default()
         };
         let Some(session_id) = session_id else {
+            // An untrusted project has nothing else to show: the prompt is
+            // the whole empty state until it is answered.
+            if !app.pending_trust.is_empty() {
+                body.extend_owned(trust_block(app, width));
+                return body;
+            }
             // A configured model whose provider has no credential is the one
             // state Alt-N cannot fix; name the credential first so the next
             // command is obvious.
@@ -1003,10 +1009,39 @@ impl TranscriptCache {
             ));
         }
         if body.is_empty() {
-            body.push_line(Line::styled(
-                "  Ask QQ to begin this session.",
-                muted().italic(),
-            ));
+            // The first session in a workspace is the one screen a new user
+            // sees with nothing to learn from; name the commands they will
+            // want first. A pure render-time predicate: `record_prompt` runs
+            // synchronously on Enter, so the cell is gone before the pending
+            // prompt paints, and a second session never shows it.
+            let first_session = app.sessions.len() == 1 && session.prompt_history.is_empty();
+            if first_session {
+                if let Some(remedy) = app.configured_provider_remedy() {
+                    body.push_line(Line::styled(format!("  {}", remedy.message()), warning()));
+                }
+                body.push_line(Line::styled("  Try one of these:", muted().bold()));
+                for command in [
+                    crate::commands::Command::OpenModels,
+                    crate::commands::Command::OpenApprovalModes,
+                    crate::commands::Command::OpenSkills,
+                ] {
+                    let spec = crate::commands::spec(command);
+                    let Some(spelling) = spec.slash.first() else {
+                        continue;
+                    };
+                    let mut line = Line::styled(format!("    {spelling:<11}"), accent());
+                    line.push(spec.title, muted());
+                    body.push_line(line);
+                }
+                let mut line = Line::styled(format!("    {:<11}", "@path"), accent());
+                line.push("mention a file in your prompt", muted());
+                body.push_line(line);
+            } else {
+                body.push_line(Line::styled(
+                    "  Ask QQ to begin this session.",
+                    muted().italic(),
+                ));
+            }
         }
         body
     }

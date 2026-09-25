@@ -3,7 +3,8 @@
 QQ separates two questions:
 
 - **Trust** — may this project's configuration influence QQ at all?
-  Answered once per file content with `qq trust`.
+  Answered once per file content, in the TUI when it opens or with
+  `qq trust`.
 - **Approval** — may the agent take this action right now? Answered by the
   session's approval mode, the grants in effect, and, when neither decides,
   you.
@@ -14,7 +15,34 @@ A repository can ship `.qq/config.ron`, `qq.ron`, `.qq/config.d/*.ron`, and
 `.qq/packs/`. Those files can declare providers, MCP servers that run
 commands, sub-agent rosters, and grants that let tools run without asking.
 QQ therefore refuses to load a project file that declares anything sensitive
-until you have accepted that exact content:
+until you have accepted that exact content.
+
+Bare `qq` opens the TUI and asks, listing each pending file and what it
+declares:
+
+```
+◇ this project's configuration needs your trust
+  /home/you/repo/.qq/config.ron
+    model anthropic/claude-sonnet-5
+    MCP linear → https://mcp.linear.app/mcp
+    MCP executor → executor
+    grants: 2 tools, 3 shell prefixes
+  t trust   s this session   q quit
+```
+
+- `t` records the files exactly as `qq trust` does; the next launch does
+  not ask.
+- `s` loads them for this process only. Nothing is written; the next `qq`
+  asks again. Runs you start in this TUI (and the embedded server that
+  serves them) see the trusted configuration.
+- `q` (or `Esc`) leaves without loading them.
+
+Only names, commands, URLs, and counts are shown; open the file for the
+rest. The prompt appears only when this `qq` owns the server: a client
+attached to a server on another host cannot read or record trust for that
+host's files and sees the error below instead.
+
+`qq ask`, `qq run`, and `qq serve` do not prompt; they exit:
 
 ```
 error: project configuration needs your trust before it is used:
@@ -25,8 +53,9 @@ sections (providers, MCP servers, grants, model) load only after that.
 
 Sensitive means any of: `model`, `worker_model`, `reviewer_model`,
 `organization`, `providers`, `mcp`, `packs`, `profiles`, `delegation`,
-`audit`, `jev_review`, `jev_routing`, `reasoning_effort`, or a `policy`
-grant (`allow_tools`, `allow_shell_prefixes`, `allow_hosts`, `shell_env`).
+`audit`, `jev_review`, `jev_routing`, `jev_approval`, `approval_delegate`,
+`reasoning_effort`, or a `policy` grant (`allow_tools`,
+`allow_shell_prefixes`, `allow_hosts`, `shell_env`).
 A project file that only sets `policy.exposed_tools` or `max_output_tokens`
 loads without trust.
 
@@ -36,10 +65,11 @@ trusted /home/you/repo/.qq/config.ron
   declares: model, policy.allow_tools, policy.allow_shell_prefixes
 ```
 
-Trust is recorded as a digest of the file in your data directory, not in
-the repository. Any edit to a trusted file — yours or from `git pull` —
-makes QQ ask again. `qq config sources` shows `pending trust:` lines for
-files awaiting your decision.
+Trust is recorded as a digest of the file's sensitive sections in your data
+directory, not in the repository. Any edit to a sensitive section of a
+trusted file — yours or from `git pull` — makes QQ ask again (in the TUI, or
+as the error above); a session-only grant expires the same way. `qq config
+sources` shows `pending trust:` lines for files awaiting your decision.
 
 Nothing in your global configuration needs trust: you wrote it.
 
@@ -63,6 +93,56 @@ your own session. `full` is authority over the workspace, not the machine:
 
 `qq run` defaults to `read_only` because nobody is there to answer. Pass
 `--approval auto` for a run that may edit.
+
+## Who decides a held call
+
+The mode says what is held. `approval_delegate` says who settles it when a
+delegate is configured; without one, every held call is yours. The delegate
+is Jev when `jev_approval: true` and a TypeSafe key is stored, otherwise
+`reviewer_model`; when Jev abstains or is unavailable the reviewer model is
+asked next, then you.
+
+| Profile | Set | What happens |
+| --- | --- | --- |
+| default | nothing | `auto` and `supervised` holds go to the reviewer first; `ask` holds come to you |
+| hands-off | `approval_delegate: on` | `ask` holds go to the reviewer too. Its approve runs the call; its deny still comes to you, with the reason, and your wait starts then |
+| strict | `approval_delegate: off` | every held call comes to you, even under `auto`, even with a reviewer configured |
+
+Under `auto` and `supervised` a reviewer deny is final: the model gets the
+reason as a tool error and you are not asked. Under `ask` you asked to decide
+everything, so a reviewer deny is advice and the prompt still appears. A
+reviewer `escalate`, timeout, or outage always comes to you. `forbidden`
+shell shapes, private or denied hosts, and `ask_user` questions never go to
+the reviewer.
+
+Set it at the top level, in a profile
+(`Profile(approval_mode: ask, approval_delegate: on)`), or for one process
+with `QQ_APPROVAL_DELEGATE=on|off`. In a project file it needs trust like
+any other sensitive key. `jev_approval` works the same way
+(`QQ_JEV_APPROVAL=on|off`); a stored key with it off is never read.
+
+### Stop delegating for this session
+
+If a delegate is approving things you would rather see, `/delegate` in the
+TUI (or `set_approval_delegate` on the wire) changes who settles the focused
+session's held calls for the rest of that session: `off` brings every held
+call to you, `on` or `by_mode` widen or restore delegation, and `configured`
+clears the override. It takes effect at the session's next held call — a
+running session included — and rewrites nothing: your `.qq/config.ron` and
+the next session are unchanged. Children the session spawns afterwards start
+with the same choice. The mode is still the ceiling: no value here lets the
+model do more than the mode allows.
+
+### Seeing who decided
+
+A settled call says who settled it. In the TUI the expanded call detail
+reads `approved by jev` or `approved by reviewer` beside its timing, and a
+delegate's denial shows as `denied by jev` / `denied by reviewer` on the
+row; your own decisions read `approved for session`, `denied by you`, or
+nothing for a plain once-approval. In `qq run --format text` the log line is
+`[tool] NAME approved by jev`; in JSONL the `tool_approval_resolved` event
+carries `"delegate": "jev"` or `"reviewer"`. When a delegate abstains and
+the prompt reaches you, the prompt's reason line says why.
 
 ## What the shell classifier decides
 
@@ -91,8 +171,8 @@ y once   a session   w workspace   n deny
 | Key | Effect | Lifetime |
 | --- | --- | --- |
 | `y` | run this call | once |
-| `a` | run this and every later call of the same shape in this session | until the session ends |
-| `w` | write the grant into `.qq/config.ron` and run | every session in this workspace |
+| `a` | run this and every later call of the same shape in this session, when the grant fits | until the session ends |
+| `w` | write the grant into `.qq/config.ron` and run, when the grant fits | every session in this workspace |
 | `n` | deny; the model receives the denial as a tool error and continues | — |
 | `Shift-Y` / `Shift-N` | decide and then steer the run with a note | — |
 | `Esc` | leave the prompt open; `Ctrl-G` jumps back to it | — |
@@ -104,12 +184,34 @@ approving `cargo test` covers `cargo test -p anything` but never
 `cargo test | sh` — a command containing `|`, `;`, `&`, redirection, or
 substitution matches only a grant that quotes it exactly.
 
+A session grant is at most 256 bytes, and a session holds at most 256 of
+them. When the command is longer than that, or the session is already at the
+cap, `a` and `w` are not offered: the call is approved once, nothing is
+recorded, and the status says why. A grant that cannot be stored never fails
+the approval.
+
+A `forbidden` verdict is the exception to "same shape". A prefix grant never
+lifts it. A grant that quotes the exact command string does, which is why the
+byte cap matters: a command longer than 256 bytes cannot be blessed, under
+any mode, including `full`.
+
 Edits show a diff; `fetch` shows the URL and whether a grant covers the
 host; MCP calls show the server, tool, and arguments.
 
 When several sessions run at once, `Alt-A` / `Alt-D` approve or deny the
 oldest waiting call in another session without leaving yours, and
 `/attention` lists everything waiting.
+
+A prompt waits for you. There is no server-side timer that denies it while
+you are away: the hold ends when you answer, when the run's own deadline
+(`--max-duration` or `RunLimits`) cancels the run, or when you cancel. If
+you want a bound anyway — a shared server, an unattended supervisor — set
+`approval_timeout_seconds` in configuration and the call is denied
+`denied_timeout` after that many seconds, counted from when you were
+actually asked (after the delegate answered or was cut off, not from when
+the delegate was consulted). `qq run` has nobody to ask and never waits on
+you: an `auto` hold is denied immediately, or after the delegate has had its
+20 s when one is configured.
 
 ## Grants in configuration
 

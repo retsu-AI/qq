@@ -6,18 +6,19 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use qq_protocol::{
-    AgentProfileId, ApprovalMode, GuidanceKind, ModelDescriptor, ModelSelection, ReasoningEffort,
-    ServerCapabilities, SessionCommand, SessionId, SessionStatus,
+    AgentProfileId, ApprovalDelegate, ApprovalMode, GuidanceKind, ModelDescriptor, ModelSelection,
+    ReasoningEffort, ServerCapabilities, SessionCommand, SessionId, SessionStatus,
 };
 
-use super::{App, PendingIntent, ProviderRemedy};
+use super::{App, ModelOption, PendingIntent, ProviderRemedy};
 use crate::{
     commands::{Command, SlashAction},
     effect::{Effects, Redraw},
     input::{
-        ApprovalModeRow, CommandRow, EffortRow, HistoryRow, ModelRow, Overlay, PickerOutcome,
-        ProfileRow, SessionConfirm, SessionRow, SkillRow, ThemeRow, approval_mode_label,
-        approval_mode_row, command_rows, effort_label, effort_row,
+        ApprovalModeRow, CommandRow, DelegateRow, EffortRow, HistoryRow, ModelRow, Overlay,
+        PickerOutcome, ProfileRow, SessionConfirm, SessionRow, SkillRow, ThemeRow,
+        approval_mode_label, approval_mode_row, command_rows, delegate_label, delegate_row,
+        effort_label, effort_row,
     },
     picker::Picker,
     theme::Theme,
@@ -78,6 +79,12 @@ impl App {
                     return Effects::none();
                 };
                 self.accept_effort(effort)
+            }
+            (PickerOutcome::Accept, Overlay::Delegate(picker)) => {
+                let Some(delegate) = picker.current().map(|row| row.delegate) else {
+                    return Effects::none();
+                };
+                self.accept_delegate(delegate)
             }
             (PickerOutcome::Accept, Overlay::Skills(picker)) => {
                 let Some((name, kind)) = picker
@@ -221,7 +228,17 @@ impl App {
         models: Vec<ModelDescriptor>,
         selected_model: Option<ModelSelection>,
     ) {
-        self.models = models.into_iter().map(Into::into).collect();
+        self.apply_model_options(models.into_iter().map(Into::into).collect(), selected_model);
+    }
+
+    /// [`Self::apply_models`] for a catalog the composition root computed
+    /// (startup options, a resolved trust prompt) rather than the server.
+    pub(super) fn apply_model_options(
+        &mut self,
+        models: Vec<ModelOption>,
+        selected_model: Option<ModelSelection>,
+    ) {
+        self.models = models;
         self.models.sort_by(|left, right| {
             (&left.provider, &left.name, &left.model).cmp(&(
                 &right.provider,
@@ -488,6 +505,73 @@ impl App {
                     "new sessions will use effort {}",
                     effort_label(effort)
                 ));
+                Effects::redraw(Redraw::Immediate)
+            }
+        }
+    }
+
+    // --- delegate ---
+
+    /// Who settles the focused session's held calls. Unlike effort, this is
+    /// read by the gate at each hold, so it applies to a running session and
+    /// needs one: with nothing focused there is nothing to switch off.
+    pub(crate) fn open_delegate(&mut self) -> Effects {
+        let Some(session) = self
+            .focused()
+            .and_then(|session_id| self.sessions.get(&session_id))
+        else {
+            self.set_warning("focus a session to choose who settles its held approvals".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        let current = session.summary.approval_delegate;
+        let rows: Vec<DelegateRow> = [
+            None,
+            Some(ApprovalDelegate::ByMode),
+            Some(ApprovalDelegate::On),
+            Some(ApprovalDelegate::Off),
+        ]
+        .into_iter()
+        .map(delegate_row)
+        .collect();
+        let mut picker = Picker::with_items(rows);
+        if let Some(index) = picker
+            .items()
+            .iter()
+            .position(|row| row.delegate == current)
+        {
+            picker.select_item(index);
+        }
+        self.overlay = Some(Overlay::Delegate(picker));
+        Effects::redraw(Redraw::Immediate)
+    }
+
+    /// Apply `delegate` to the focused session for the rest of the session.
+    /// The runtime reads it at the next held call, so a running session
+    /// changes too; a hold already waiting on you is unaffected either way.
+    fn accept_delegate(&mut self, delegate: Option<ApprovalDelegate>) -> Effects {
+        self.overlay = None;
+        let focused = self
+            .focused()
+            .and_then(|session_id| self.sessions.get(&session_id).map(|s| (session_id, s)));
+        match focused {
+            Some((_, session)) if session.summary.approval_delegate == delegate => {
+                self.set_info(format!(
+                    "session already uses delegate {}",
+                    delegate_label(delegate)
+                ));
+                Effects::redraw(Redraw::Immediate)
+            }
+            Some((session_id, _)) => self.send(
+                PendingIntent::SetDelegate { session_id },
+                SessionCommand::SetApprovalDelegate {
+                    session_id,
+                    delegate,
+                },
+            ),
+            None => {
+                self.set_warning(
+                    "focus a session to choose who settles its held approvals".to_owned(),
+                );
                 Effects::redraw(Redraw::Immediate)
             }
         }

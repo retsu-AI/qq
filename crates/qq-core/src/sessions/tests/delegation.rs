@@ -2199,6 +2199,7 @@ async fn a_write_child_runs_supervised_and_the_reviewer_adjudicates_each_action(
             SessionEvent::ToolApprovalResolved {
                 tool_call,
                 resolution,
+                ..
             } if tool_call.session_id == child_session.id => {
                 Some((tool_call.name.clone(), *resolution))
             }
@@ -2273,6 +2274,7 @@ async fn a_reviewer_denial_is_final_for_a_supervised_child_and_is_durable() {
             }),
             cost_usd_nanos: Some(0),
         },
+        delegate: DelegateIdentity::Reviewer,
     });
     let child_requests = Arc::new(StdMutex::new(Vec::new()));
     let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
@@ -2302,6 +2304,7 @@ async fn a_reviewer_denial_is_final_for_a_supervised_child_and_is_durable() {
             SessionEvent::ToolApprovalResolved {
                 tool_call,
                 resolution: ApprovalResolution::DeniedByReviewer,
+                ..
             } => Some(tool_call.clone()),
             _ => None,
         })

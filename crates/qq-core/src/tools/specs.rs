@@ -111,7 +111,7 @@ impl BuiltInTool {
                         "ranges": { "type": "array", "maxItems": 8, "items": { "type": "string", "pattern": "^[0-9]+(-[0-9]*)?$" } },
                         "offset": { "type": "integer", "minimum": 1 },
                         "limit": { "type": "integer", "minimum": 1, "maximum": MAX_READ_LINES, "default": 200 },
-                        "mode": { "enum": ["lines", "outline", "info"], "default": "lines" },
+                        "mode": { "type": "string", "enum": ["lines", "outline", "info"], "default": "lines" },
                         "if_changed_since": { "type": "string", "pattern": "^h:[0-9a-f]{12}$" }
                     },
                     "required": ["path"],
@@ -140,9 +140,9 @@ impl BuiltInTool {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "minLength": 1, "maxLength": MAX_QUERY_BYTES },
-                        "mode": { "enum": ["content", "names", "definition", "references"], "default": "content" },
+                        "mode": { "type": "string", "enum": ["content", "names", "definition", "references"], "default": "content" },
                         "regex": { "type": "boolean", "default": false },
-                        "case": { "enum": ["sensitive", "insensitive", "smart"], "default": "smart" },
+                        "case": { "type": "string", "enum": ["sensitive", "insensitive", "smart"], "default": "smart" },
                         "path": { "type": "string" },
                         "include": { "type": "array", "maxItems": MAX_GLOBS, "items": { "type": "string", "maxLength": MAX_GLOB_BYTES } },
                         "exclude": { "type": "array", "maxItems": MAX_GLOBS, "items": { "type": "string", "maxLength": MAX_GLOB_BYTES } },
@@ -294,7 +294,7 @@ impl BuiltInTool {
                     "type": "object",
                     "properties": {
                         "url": { "type": "string", "minLength": 1, "maxLength": MAX_URL_BYTES },
-                        "method": { "enum": ["GET", "HEAD"], "default": "GET" }
+                        "method": { "type": "string", "enum": ["GET", "HEAD"], "default": "GET" }
                     },
                     "required": ["url"],
                     "additionalProperties": false

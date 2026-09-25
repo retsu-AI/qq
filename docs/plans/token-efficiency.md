@@ -5,7 +5,7 @@ behavior or savings established. [Ledger](progress/token-efficiency.md).
 **Baseline:** `8089a0e`. **Tracker:** [ENG-886](https://linear.app/retsu-ai/issue/ENG-886), project `qq`,
 team `ENG`. Planning PR: [#141](https://github.com/retsu-AI/qq/pull/141).
 **Research:** [current mechanisms and hypotheses](../design/token-efficiency.md).
-**Decision:** [ADR-0042 (Proposed)](../adr/0042-verified-task-efficiency.md).
+**Decision:** [ADR-0043 (Proposed)](../adr/0043-verified-task-efficiency.md).
 
 ## Goal and non-goals
 
@@ -41,7 +41,7 @@ an unbounded rewrite. All production changes amend their as-built design docs.
 
 | ID | Deliverable | Inputs | Owned paths / docs | Acceptance |
 | --- | --- | --- | --- | --- |
-| TE0 | Baseline, roadmap, proposed decision, tracker links | Source/tracker inventory | This plan, design inventory, ADR-0042, indexes, ledger | Links, ownership, scope and tracker reviewed; no implementation claims |
+| TE0 | Baseline, roadmap, proposed decision, tracker links | Source/tracker inventory | This plan, design inventory, ADR-0043, indexes, ledger | Links, ownership, scope and tracker reviewed; no implementation claims |
 | TE1 | Task-tree efficiency report and offline fixtures | TE0 | `xtask/src/eval.rs`, existing accounting under `crates/qq-core/src/`, `benchmarks/arms/`; design inventory | Deduplicated usage/outcomes, unknowns and category overlap tested; fixed-suite baseline |
 | TE2 | Model-facing tool-schema ergonomics | TE1; RR10 ownership reconciliation | `crates/qq-core/src/tools/`, schema assembly in `src/`; `design/tools.md` | Reproduced contract failures, valid-call compatibility, no weakened mutation/approval validation; paired invalid-call rate |
 | TE3 | Bounded discovery briefs and task-shaped delegation guidance | TE1 and D6b/ENG-812 receipt | Existing delegation prompts/config in `src/`, `crates/qq-core/src/sessions/subagents.rs`, `benchmarks/arms/`; delegation docs | Brief/result bounds and no recursion escalation; per-class economics measured before default changes |
@@ -207,5 +207,5 @@ their boundary reviews pass. TE8 follows a demonstrated recurring workflow.
 The program is complete when each hypothesis has an accepted measurement-backed
 implementation or a recorded drop decision, not when all mechanisms exist.
 Update Linear and ledgers per slice, amend as-built design only for shipped
-behavior, and collapse this plan when closed. Proposed ADR-0042 does not
+behavior, and collapse this plan when closed. Proposed ADR-0043 does not
 preapprove later authority, schema, model-routing or default-policy changes.

@@ -69,16 +69,27 @@ pub(super) fn top_row(app: &App, width: usize) -> Line {
                 (!profile.is_default()).then(|| (format!("as {}", profile.as_str()), accent()))
             }
             // `auto` is the default; the badge names anything stricter or
-            // looser so the user always knows what a held call means.
+            // looser so the user always knows what a held call means. A
+            // session delegate override rides along: `ask · delegate on`,
+            // `auto · delegate off`.
             StatusItem::ApprovalMode => {
                 let mode = focused.map_or(app.approval_mode, |session| session.approval_mode);
-                (mode != ApprovalMode::Auto).then(|| {
+                let delegate = focused.and_then(|session| session.approval_delegate);
+                (mode != ApprovalMode::Auto || delegate.is_some()).then(|| {
                     let style = if mode == ApprovalMode::Full {
                         warning()
                     } else {
                         muted()
                     };
-                    (approval_mode_label(mode).to_owned(), style)
+                    let text = match delegate {
+                        Some(delegate) => format!(
+                            "{} · delegate {}",
+                            approval_mode_label(mode),
+                            delegate.as_str()
+                        ),
+                        None => approval_mode_label(mode).to_owned(),
+                    };
+                    (text, style)
                 })
             }
             // Omission is the unremarkable case; the badge names an explicit pin.
@@ -246,13 +257,24 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
 
     let mut right = Line::default();
     for (command, label) in hints_for(app) {
-        let Some(chord) = app.chord_label(command) else {
-            continue;
+        // `?` on an empty composer opens help too, and is the cheaper key
+        // to discover; the hint names it while it works and falls back to
+        // the chord once typing has started.
+        let chord = if command == crate::commands::Command::OpenHelp
+            && app.mode() == Mode::Compose
+            && app.composer.text.is_empty()
+        {
+            "?".to_owned()
+        } else {
+            let Some(chord) = app.chord_label(command) else {
+                continue;
+            };
+            compact_chord(&chord)
         };
         if !right.is_empty() {
             right.push("  ", muted());
         }
-        right.push(compact_chord(&chord), accent());
+        right.push(chord, accent());
         right.push(format!(" {label}"), muted());
     }
     rule_with(left, right, width)
@@ -306,13 +328,14 @@ fn hints_for(app: &App) -> Vec<(crate::commands::Command, &'static str)> {
                 hints.push((Command::OpenSessions, "sessions"));
             }
         }
-        Mode::Approval => {
+        Mode::Approval | Mode::Trust => {
             hints.push((Command::OpenHelp, "help"));
         }
         Mode::Models
         | Mode::Profiles
         | Mode::ApprovalModes
         | Mode::Effort
+        | Mode::Delegate
         | Mode::Skills
         | Mode::Themes
         | Mode::Sessions
@@ -356,6 +379,8 @@ pub(crate) enum ComposerMode {
     Queue,
     /// An approval owns input; the composer is disabled.
     Approval,
+    /// The trust prompt owns input; the composer is disabled.
+    Trust,
 }
 
 impl ComposerMode {
@@ -364,7 +389,7 @@ impl ComposerMode {
             Self::Send => "›",
             Self::Steer => "↦",
             Self::Queue => "⇥",
-            Self::Approval => "✎",
+            Self::Approval | Self::Trust => "✎",
         }
     }
 
@@ -374,7 +399,13 @@ impl ComposerMode {
             Self::Steer => "Steer the run...",
             Self::Queue => "Queue for after this run...",
             Self::Approval => "Answer the approval above",
+            Self::Trust => "Answer the trust prompt above",
         }
+    }
+
+    /// Whether the composer accepts text at all.
+    const fn disabled(self) -> bool {
+        matches!(self, Self::Approval | Self::Trust)
     }
 }
 
@@ -429,7 +460,7 @@ pub(super) fn composer(
     let glyph_style = match mode {
         ComposerMode::Send => accent().bold(),
         ComposerMode::Steer | ComposerMode::Queue => warning().bold(),
-        ComposerMode::Approval => muted(),
+        ComposerMode::Approval | ComposerMode::Trust => muted(),
     };
     let gutter = format!(" {} ", mode.glyph());
     // A free-text question uses the composer for the answer, so its caret
@@ -448,7 +479,7 @@ pub(super) fn composer(
             },
             muted().italic(),
         );
-        let caret = (mode != ComposerMode::Approval || answering).then_some((3, 0));
+        let caret = (!mode.disabled() || answering).then_some((3, 0));
         return (vec![truncate_line(line, width)], caret);
     }
 
@@ -529,7 +560,7 @@ pub(super) fn composer(
     for row in &mut wrapped {
         *row = truncate_line(std::mem::take(row), width);
     }
-    if mode == ComposerMode::Approval {
+    if mode.disabled() {
         caret = None;
     }
     (wrapped, caret)

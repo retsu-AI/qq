@@ -6,10 +6,11 @@ QQ is a single static binary. Pick one route; every route ends with the same
 ## Install script (Linux, macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/retsu-AI/qq/main/install.sh | sh
+curl -fsSL https://retsu-ai.github.io/qq/install.sh | sh
 ```
 
-The script detects your OS and CPU, downloads the matching archive from the
+The same script is in the repository as `install.sh`; the site serves the
+copy from the latest `main`. The script detects your OS and CPU, downloads the matching archive from the
 latest [GitHub release](https://github.com/retsu-AI/qq/releases), verifies it
 against that release's `SHA256SUMS`, and installs `qq` into `~/.local/bin`.
 It never uses `sudo`; if the directory is not on your `PATH`, it prints the
@@ -20,7 +21,7 @@ with a pointer to the releases page.
 Pin a version or change the directory with flags or environment variables:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/retsu-AI/qq/main/install.sh | sh -s -- --version 0.1.3 --dir /opt/qq/bin
+curl -fsSL https://retsu-ai.github.io/qq/install.sh | sh -s -- --version 0.1.3 --dir /opt/qq/bin
 QQ_VERSION=0.1.3 QQ_INSTALL_DIR="$HOME/bin" sh install.sh
 ```
 
