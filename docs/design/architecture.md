@@ -1285,7 +1285,7 @@ Application configuration types must not leak into `qq-core`.
 | Native tools | Static Rust registration | Build/startup | Direct dispatch | Fully trusted; capability-scoped execution |
 | General tools | MCP and the embedded `ExternalToolHost` | Startup catalog; call on demand | One selected adapter call | MCP process/HTTP boundary or trusted embedder |
 | Context/memory | Typed bounded `ContextSource` | Plan compile plus pre-turn fetch | No per-delta hook | Time/byte/token budgets; explicit fail policy |
-| Jev review | Typed `CheckpointReviewer` | Trusted `jev_review` setting/profile, default off | `final`: final candidate only; `enforce`: each tool result and final candidate | Fixed endpoint/model/policy; bounded evidence; fail closed; durable correlated status |
+| Jev review | Typed `CheckpointReviewer` | Trusted `jev_review` setting/profile, default off | `final`: final candidate only; `enforce`: each tool result and final candidate | Fixed endpoint/model/policy; bounded evidence; durable correlated verdicts; unavailable/red exhaustion can complete (RR3) |
 | Jev approval | Typed `ApprovalReviewer`, composed ahead of `reviewer_model` | Trusted `jev_approval` setting/profile, default off | Only a call the approval mode already holds; one typed yes/no/abstain, 5 s bound | Fixed endpoint/model/policy; bounded masked preview; falls through to the reviewer model then the human, never approves on failure (ADR-0041) |
 | Observers | Durable SSE/outbox | Subscription | Post-commit only | Cannot affect authoritative execution |
 | Process execution | Local implementation plus one real sandbox adapter (deferred sandbox adapter) | Startup | Direct selected backend | Explicit filesystem/network/process capabilities |
@@ -1305,7 +1305,9 @@ Review activation is independent of credential storage. Environment/runtime
 choices override named profiles and top-level settings; workspace/profile changes
 participate in the trust fingerprint and compiled cache identity. Off runs create
 no reviewer client or evidence projection. `final` preserves normal tool batching;
-`enforce` retains the strict one-executable-call-per-turn contract.
+`enforce` retains the one-executable-call-per-turn contract. Both modes use the
+verdict-as-evidence policy below; neither requires a supported verdict for
+completion. The mode name specifies review coverage, not fail-closed verification.
 
 Review uses the latest user task, all its text blocks and subsequently applied
 steering. Earlier user context and tool observations enter a bounded selection:
@@ -1313,8 +1315,9 @@ at most 32 items and 16 KiB, with 2 KiB excerpts marked with source IDs and mask
 content hashes. Final requests select recent observations within the 24 KiB
 payload allowance and state that omissions are not proof. Oversized tasks and
 final candidates are recorded as unreviewed and the run completes; large
-history alone does not permanently disable completion. Strict individual tool requests still require their full bounded
-arguments/result. There is no cross-request verdict cache.
+history alone does not permanently disable completion. Individual tool requests
+still require their full bounded arguments/result; oversized requests record an
+unavailable outcome and continue. There is no cross-request verdict cache.
 
 Cancellation does not wait for remote review: when a tool result is already durable but its checkpoint is not, the
 session durably records a local `unavailable`/not-performed checkpoint before
@@ -1324,7 +1327,8 @@ was durably recorded; it does not claim whether remote work started. A nominal
 completion with such a pending result fails closed. Direct automation preserves answer-only stdout and writes
 human-readable checkpoint notices to stderr.
 The `LoadedRuntime` adapter preserves the reviewer when compiling an embedded
-runtime into a session plan, so every execution surface shares the same gate.
+runtime into a session plan, so every execution surface shares the same review
+and durable-settlement policy.
 A parent receives a `spawn_agent` result only after the child final checkpoint
 and child terminal outcome are durable; the parent then checkpoints that tool
 result before its next model turn.
