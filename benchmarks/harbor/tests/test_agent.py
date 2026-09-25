@@ -13,6 +13,39 @@ from unittest import mock
 from qq_harbor.agent import QQAgent
 
 
+class VersionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        logs = tempfile.TemporaryDirectory()
+        self.addCleanup(logs.cleanup)
+        self.agent = QQAgent(Path(logs.name))
+
+    def test_current_revision_annotated_output_returns_the_package_version(self) -> None:
+        self.assertEqual(
+            self.agent.parse_version("qq 0.1.4 (291440a 2026-09-25)\n"), "0.1.4"
+        )
+
+    def test_plain_legacy_output_returns_the_package_version(self) -> None:
+        self.assertEqual(self.agent.parse_version("qq 0.1.4\n"), "0.1.4")
+
+    def test_revision_metadata_and_semver_suffixes_are_preserved_separately(self) -> None:
+        for output, expected in (
+            ("qq 0.1.4 (291440a-dirty 2026-09-25)", "0.1.4"),
+            ("qq 0.1.4 (unknown unknown)", "0.1.4"),
+            ("qq 1.2.3-rc.1+build.7 (abcdef1 2026-09-25)", "1.2.3-rc.1+build.7"),
+        ):
+            with self.subTest(output=output):
+                self.assertEqual(self.agent.parse_version(output), expected)
+
+    def test_unexpected_output_never_guesses_a_version(self) -> None:
+        for output in (
+            "", " ", "qq", "2026-09-25)", "qq 2026-09-25", "qq 0.1",
+            "other 0.1.4", "qq 00.1.4", "qq 0.1.4 unexpected",
+            "qq 0.1.4 (unterminated", "qq 0.1.4\nwarning: unexpected output",
+        ):
+            with self.subTest(output=output):
+                self.assertEqual(self.agent.parse_version(output), "")
+
+
 class BuildCommandTests(unittest.TestCase):
     def _agent(self, **kwargs: object) -> QQAgent:
         logs_dir = Path(tempfile.mkdtemp())

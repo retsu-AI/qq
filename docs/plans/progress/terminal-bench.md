@@ -35,3 +35,15 @@ required first; that evaluation is now tool-layer T13 and still owns the
 keep/reject decision for T10 (`terminal`). R8's warm-path items other than
 prompt-cache determinism shipped through speed-first H14/H18/H22.2. No R
 slice in progress.
+
+
+### 2026-09-25 — ENG-815 Harbor version identity regression
+
+TB-pilot prerequisite, branch `fix/eng-815-harbor-version-parser`, in progress.
+Actual accepted291440a Linux binary in Ubuntu24.04 reports
+`qq 0.1.4 (291440a 2026-09-25)`, but the pinned Harbor adapter records
+`2026-09-25)` because it selects the final token. Test-first coverage captures
+the exact output, legacy plain output, revision/semver suffixes and malformed
+responses. No agent/model run, credential or accepted source identity changed.
+Runtime evidence is retained in the manager's September25
+`qq-jev-evidence/colima-prerequisite-20260925/` directory.
