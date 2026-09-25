@@ -1,0 +1,62 @@
+name: Apps
+
+# The web surfaces in apps/ are a separate Cargo workspace (ADR-0018) built for
+# wasm32 by Trunk. Runs when they or the two kernel crates they depend on
+# change.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/**
+      - crates/qq-client/**
+      - crates/qq-protocol/**
+      - .github/workflows/apps.yml
+  pull_request:
+    paths:
+      - apps/**
+      - crates/qq-client/**
+      - crates/qq-protocol/**
+      - .github/workflows/apps.yml
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  TRUNK_VERSION: 0.21.14
+
+jobs:
+  apps:
+    name: fmt, clippy, tests, build, size gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: apps
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml at the repo root pins the toolchain and the
+      # wasm32-unknown-unknown target for this workspace too.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: apps
+          workspaces: apps
+      - name: Install Trunk
+        run: |
+          curl -sSfL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /usr/local/bin trunk
+          trunk --version
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Clippy (wasm32)
+        run: cargo clippy --workspace --locked --target wasm32-unknown-unknown --all-targets -- -D warnings
+      - name: Tests (native)
+        run: cargo test --workspace --locked
+      - name: Build
+        run: ./build.sh release
+      - name: Size gate
+        run: ./size-gate.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apps-dist
+          path: apps/dist
+          retention-days: 7

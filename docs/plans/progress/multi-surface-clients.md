@@ -17,7 +17,8 @@ dated entries appended below, newest last.
 | S6 | `server` configuration | Planned | | |
 | TB | Tracer bullet gate | Planned | | Lead runs; `g-multi-surface-tb.md` |
 | ADR-0017/0018 | UI stack spike + ADRs | In review | `devin/*-adr-0017-ui-stack-spike` | Leptos accepted by founder 2026-09-24 |
-| U1–U7 | Web app | Planned | | ADR-0017, ADR-0018 |
+| U1 | `apps/` workspace, shell, remote contract, CI, size gate, PWA | In review | `devin/*-u1-apps-shell` | Leptos per ADR-0017; stacks on the ADR PR |
+| U2–U7 | Web app | Planned | | U2 needs W3 |
 | D1–D3 | Desktop shell | Planned | | |
 | M1–M3 | Mobile | Planned | | |
 
@@ -155,3 +156,43 @@ Docs: `docs/adr/0017-client-ui-stack.md`, `docs/adr/0018-apps-workspace.md`,
 ADR index, `root.md` allocation rows.
 Open: founder accept/override of ADR-0017; W3 (`qq-client::servers`) is the
 next slice and unblocks U1's shell Overview.
+
+### 2026-09-24 — U1 scaffold: `apps/` workspace, shell, Sessions remote stub
+
+Shipped `apps/` as its own Cargo workspace (ADR-0018): `qq-ui-common`
+(framework-neutral; `compat` protocol range + `IncompatibleServer` message,
+`probe` authenticated `/v1/health` → `ServerConnection` with credential-free
+errors, `remote` contract types `RemoteConfig`/`RemoteManifest` with bounds),
+`qq-shell` (Leptos 0.8 CSR: top bar of remotes from `remotes.json`, `#/<name>`
+routing, in-memory server list ≤ 16 via URL + credential, dynamic
+`import()` of remotes through `window.qqShell.importRemote`, mount/unmount
+with a generation guard so a stale load never mounts), `qq-sessions` (the
+first remote: exports `mount(root, configJson)` / `unmount()`, renders the
+bound servers; U3–U5 fill it in). Static: `index.html`, `manifest.webmanifest`,
+`sw.js` (same-origin GET, network-first, ≤ 64 entries), `icon.svg`.
+`build.sh` lays out `dist/` (hashed shell) + `dist/remotes/<name>/` (unhashed,
+independently deployable); `size-gate.sh` enforces 600 KB gzip per artifact
+(wasm + glue). CI: `.github/workflows/apps.yml` (fmt, wasm32 clippy, native
+tests, build, gate, `apps-dist` artifact), path-filtered to `apps/`,
+`qq-client`, `qq-protocol`.
+Tests: 8 native in `qq-ui-common` (compat older/newer/current; probe refuses
+bad address / credential / plaintext non-loopback before any request; error
+text never carries the credential; config/manifest round-trip, contract,
+bounds, duplicates). Manual in Chrome over CDP against `qq serve` + a fake
+protocol-27 server: refusal message, 401 message, connect, remote mount
+through the contract, remove → remote re-mounted with 0 servers, unknown
+remote → empty outlet, manifest served, service worker registered.
+Gates: shell 182 KB wasm + 7.6 KB glue = 190 KB gzip; sessions 44 + 5.6 =
+50 KB gzip; budget 600 KB each. The shell does not yet link `qq-client`
+(W3 adds it), so expect the shell to grow toward the spike's ~380 KB.
+Deviations: `qq-ui-common` does not depend on `qq-client` yet (nothing to
+use); plan's `apps/web/` path is `apps/shell` + `apps/sessions` per
+ADR-0018. Shell server state is in-memory and per-tab until U2/W3; the
+credential reaches a remote only through the in-memory `mount` config.
+Standalone remote pages (`apps/sessions/index.html`) exist for development
+only. Leptos's `UnmountHandle<M>` names a private state type, so the remote
+keeps it as `Box<dyn Any>`.
+Docs: `apps/README.md`; this ledger.
+Open: founder ADR-0017 decision (a Dioxus override changes `apps/shell` and
+`apps/sessions` internals only; `qq-ui-common`, `remotes.json`, the contract,
+CI and the gate stay); W3 next.

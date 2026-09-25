@@ -1,0 +1,272 @@
+:root {
+  color-scheme: dark;
+  --bg: #101418;
+  --panel: #171c22;
+  --line: #262d36;
+  --text: #e6e9ee;
+  --muted: #8b95a3;
+  --accent: #7dd3fc;
+  --live: #4ade80;
+  --error: #f87171;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+  color: var(--accent);
+}
+
+.hidden {
+  display: none !important;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  height: 44px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.brand {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 700;
+  font-size: 18px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.remotes {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+}
+
+.nav-link {
+  padding: 6px 12px;
+  border-radius: 6px;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.nav-link:hover {
+  color: var(--text);
+}
+
+.nav-link.selected {
+  color: var(--text);
+  background: var(--line);
+}
+
+.nav-note {
+  color: var(--muted);
+}
+
+.protocol {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.frame {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  min-height: 0;
+}
+
+.servers {
+  border-right: 1px solid var(--line);
+  padding: 16px;
+  overflow: auto;
+}
+
+.servers h2,
+.remote-bar h1 {
+  margin: 0 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.server-list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+}
+
+.server,
+.bound-servers li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  column-gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+
+.server-name {
+  font-weight: 600;
+}
+
+.server-meta {
+  grid-column: 2 / -1;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.dot.live {
+  background: var(--live);
+}
+
+.connect {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.connect label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.connect input {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.connect input:focus {
+  outline: 1px solid var(--accent);
+}
+
+button {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--line);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+button[disabled] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+button.link {
+  padding: 2px 6px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+button.link:hover {
+  color: var(--error);
+}
+
+.error {
+  margin: 0;
+  color: var(--error);
+  min-height: 1.2em;
+  line-height: 1.4;
+}
+
+.note,
+.empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.outlet-frame {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 16px 20px;
+  overflow: auto;
+}
+
+.outlet-status {
+  margin: 0 0 12px;
+  color: var(--muted);
+}
+
+.outlet {
+  flex: 1;
+  min-height: 0;
+}
+
+.welcome {
+  max-width: 560px;
+  color: var(--muted);
+}
+
+.welcome h1 {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--accent);
+}
+
+/* The Sessions remote renders inside .outlet and shares this sheet when
+   hosted; standalone it loads the same file. */
+.remote-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.remote-bar .count {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bound-servers {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  max-width: 480px;
+}
