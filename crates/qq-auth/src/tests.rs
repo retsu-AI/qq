@@ -349,10 +349,15 @@ fn codex_request_provider(
 }
 
 fn callback(port: u16, query: &str) -> String {
+    callback_after_connect_delay(port, query, Duration::ZERO)
+}
+
+fn callback_after_connect_delay(port: u16, query: &str, delay: Duration) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
+    thread::sleep(delay);
     write!(
         stream,
         "GET /auth/callback?{query} HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"
@@ -1061,8 +1066,20 @@ fn codex_login_routes_a_realistic_oversized_bundle_to_windows_protection() {
 
     let completion_store = store.clone();
     let completion = thread::spawn(move || login.complete(&completion_store, "default", false));
-    let response = callback(port, "code=authorization-code&state=known-state");
-    assert!(response.starts_with("HTTP/1.1 200"));
+    // The accepted socket must be made blocking independently of the
+    // nonblocking listener; let the server accept before sending to exercise
+    // BSD-family platforms where that mode may otherwise be inherited.
+    let response = callback_after_connect_delay(
+        port,
+        "code=authorization-code&state=known-state",
+        Duration::from_millis(50),
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "unexpected callback status: {}; body: {}",
+        response.lines().next().unwrap_or("<empty>"),
+        response.split("\r\n\r\n").nth(1).unwrap_or("<empty>")
+    );
 
     assert_eq!(
         completion.join().unwrap().unwrap(),
