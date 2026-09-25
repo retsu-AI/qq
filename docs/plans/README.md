@@ -39,6 +39,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | [`run-snapshots.md`](./run-snapshots.md) | Proposed: reversible mutating-run state |
 | [`mid-run-compaction.md`](./mid-run-compaction.md) | Compact and continue one run at a safe turn boundary (audit F03, ENG-793). MRC-0..3 shipped (#92, ADR-0039); open: MRC-4 surfaces, MRC-5 live evidence |
 | [`lsp-diagnostics.md`](./lsp-diagnostics.md) | Proposed: diagnostics integration |
+| [`jev-usefulness.md`](./jev-usefulness.md) | Proposed (ENG-938): make opt-in Jev decisions reliable — effective consent, root task context, delegate-vs-human hold lifecycle, per-attempt receipts, precision-safe parsing, then a narrow pilot and paired qualification. JU0 in review; JU1–JU8 unstarted. Companion: [`jev-pr-comparison-2026-09-25.md`](./jev-pr-comparison-2026-09-25.md) |
 | [`templates/`](./templates/) | Slice header, pre-flight, receipt, PR body; review checklist |
 | [`progress/`](./progress/) | One ledger per plan, root ledger, decisions needed, gate evidence |
 
@@ -79,6 +80,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | Reference audit of Codex, OpenCode, Pi, and fx; findings F01–F28 | [`../design/harness-scale-audit-2026-09-16.md`](../design/harness-scale-audit-2026-09-16.md) (research, not a plan; F03–F28 unowned) |
 | Shared files, dependency and toolchain bumps, ADR numbering | [`progress/root.md`](./progress/root.md) |
 | Cross-cutting efficiency accounting and new evidence/context experiments; D6b/T13/cache retain their owners | [`token-efficiency.md`](token-efficiency.md) |
+| Usefulness of opt-in Jev: approval consent/lifecycle repairs, decision receipts, pilot and qualification; ENG-809/811/815 keep paid runs | [`jev-usefulness.md`](jev-usefulness.md) (proposed; ADR-0046 proposed) |
 
 ## Conventions
 

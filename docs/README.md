@@ -107,3 +107,9 @@ Delegated approval, including Jev as an approval delegate:
 [as built](design/tools.md#approval-policy), [ADR-0041](adr/0041-jev-delegated-approval.md),
 [operator guide](guide/permissions.md#who-decides-a-held-call),
 [receipt](plans/progress/delegated-approval.md).
+
+Proposed follow-up (ENG-938): [usefulness plan](plans/jev-usefulness.md),
+[pinned delegation audit](design/jev-delegation-audit-2026-09-25.md),
+[comparison with drafts 187/189](plans/jev-pr-comparison-2026-09-25.md),
+[qualification procedure](runbooks/jev-qualification.md). Runtime changes and
+live evaluation remain separate acceptance decisions.

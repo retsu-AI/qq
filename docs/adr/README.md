@@ -53,6 +53,7 @@ written.
 - [ADR-0042: the in-TUI trust prompt is client-side, resolved by the composition root; no protocol change](0042-in-tui-trust-prompt.md) — Accepted (onboarding-ux OB7, ENG-881).
 
 - [ADR-0043: optimize verified task efficiency, not individual turn size](0043-verified-task-efficiency.md) — Proposed (token-efficiency TE0).
+- [ADR-0046: explicit Jev consent and a durable held-approval lifecycle](0046-explicit-jev-consent-and-approval-lifecycle.md) — Proposed (jev-usefulness JU0, ENG-938); would supersede ADR-0041 §§ 5–7 when implemented. 0044/0045 are proposed in draft #187 and are not adopted here.
 
 ## When to write one
 
