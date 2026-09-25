@@ -416,7 +416,6 @@ async fn child_final_checkpoint_is_durable_before_parent_spawn_result() {
     let reviewed = Arc::new(StdMutex::new(Vec::new()));
     let mut harness = spawn_harness_with_loader(
         Arc::new(CheckpointQueueLoader {
-            strict: false,
             inner: QueueLoader {
                 routed: vec![("test/child", child)],
                 queue: StdMutex::new(vec![parent]),
@@ -2052,7 +2051,6 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
     };
     let parent_run = RunId::generate().unwrap();
     let parent = ClaimedRun {
-        jev_mode: None,
         checkpoint: None,
         routing: None,
         identity: RunIdentity {
@@ -5135,164 +5133,5 @@ async fn child_duration_is_reduced_by_preflight_and_prior_children() {
             durations[1] < durations[0],
             "later children inherit the remaining clock: {durations:?}"
         );
-    }
-}
-#[tokio::test]
-async fn strict_child_verification_is_durable_before_parent_spawn_result() {
-    let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
-        requests: Arc::new(StdMutex::new(Vec::new())),
-        script: vec![(
-            "spawn_agent",
-            r#"{"task":"survey","model":"test/child"}"#.to_owned(),
-        )],
-        turn: StdMutex::new(0),
-    });
-    let child: Arc<dyn Provider> = Arc::new(StaticTextProvider);
-    let reviewed = Arc::new(StdMutex::new(Vec::new()));
-    let mut harness = spawn_harness_with_loader(
-        Arc::new(CheckpointQueueLoader {
-            strict: true,
-            inner: QueueLoader {
-                routed: vec![("test/child", child)],
-                queue: StdMutex::new(vec![parent]),
-            },
-            reviewed: Arc::clone(&reviewed),
-        }),
-        8,
-    )
-    .await;
-    let receipt = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SubmitPrompt {
-                session_id: harness.session_id,
-                input: vec![InputPart::text("delegate")],
-                limits: RunLimits {
-                    max_model_turns: Some(10),
-                    max_duration_ms: Some(10_000),
-                    ..RunLimits::default()
-                },
-                correlation: Correlation::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-    let CommandOutcome::PromptQueued {
-        run_id: parent_run, ..
-    } = receipt.outcome
-    else {
-        panic!("queued")
-    };
-    let observed = collect_until_run_finished(&mut harness.events, parent_run).await;
-
-    let child_run = observed
-        .iter()
-        .find_map(|event| match &event.event {
-            SessionEvent::PromptQueued { session, run, .. }
-                if session.parent_id == Some(harness.session_id) =>
-            {
-                Some(run.id)
-            }
-            _ => None,
-        })
-        .expect("spawn creates a child run");
-    let child_checkpoint = observed
-        .iter()
-        .position(|event| {
-            matches!(
-                event,
-                SessionEventEnvelope {
-                    run_id: Some(run_id),
-                    event: SessionEvent::CheckpointReviewed {
-                        phase: qq_protocol::CheckpointPhase::FinalCandidate,
-                        outcome: qq_protocol::CheckpointOutcome::Supported,
-                        ..
-                    },
-                    ..
-                } if *run_id == child_run
-            )
-        })
-        .expect("child final checkpoint is durable");
-    let child_finished = observed
-        .iter()
-        .position(|event| {
-            matches!(
-                event.event,
-                SessionEvent::RunFinished { run_id, .. } if run_id == child_run
-            )
-        })
-        .expect("child settles");
-    let parent_spawn_result = observed
-        .iter()
-        .position(|event| {
-            matches!(
-                &event.event,
-                SessionEvent::ToolCallFinished { tool_call }
-                    if tool_call.run_id == parent_run && tool_call.name == "spawn_agent"
-            )
-        })
-        .expect("parent receives the spawn result");
-    let parent_tool_checkpoint = observed
-        .iter()
-        .position(|event| {
-            matches!(
-                event,
-                SessionEventEnvelope {
-                    run_id: Some(run_id),
-                    event: SessionEvent::CheckpointReviewed {
-                        phase: qq_protocol::CheckpointPhase::ToolResult,
-                        outcome: qq_protocol::CheckpointOutcome::Supported,
-                        ..
-                    },
-                    ..
-                } if *run_id == parent_run
-            )
-        })
-        .expect("parent spawn result is checkpointed");
-    let parent_final_checkpoint = observed
-        .iter()
-        .rposition(|event| {
-            matches!(
-                event,
-                SessionEventEnvelope {
-                    run_id: Some(run_id),
-                    event: SessionEvent::CheckpointReviewed {
-                        phase: qq_protocol::CheckpointPhase::FinalCandidate,
-                        outcome: qq_protocol::CheckpointOutcome::Supported,
-                        ..
-                    },
-                    ..
-                } if *run_id == parent_run
-            )
-        })
-        .expect("parent final candidate is checkpointed");
-    let parent_finished = observed
-        .iter()
-        .position(|event| {
-            matches!(
-                event.event,
-                SessionEvent::RunFinished { run_id, .. } if run_id == parent_run
-            )
-        })
-        .expect("parent settles");
-
-    assert!(child_checkpoint < child_finished);
-    assert!(child_finished < parent_spawn_result);
-    assert!(parent_spawn_result < parent_tool_checkpoint);
-    assert!(parent_tool_checkpoint < parent_final_checkpoint);
-    assert!(parent_final_checkpoint < parent_finished);
-    assert_eq!(
-        reviewed
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|request| request.phase == CheckpointPhase::FinalCandidate)
-            .count(),
-        2
-    );
-    for id in [child_run, parent_run] {
-        assert!(observed.iter().any(|e| matches!(&e.event, SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, verification: Some(v), .. } if *run_id == id && v.state == qq_protocol::VerificationState::Verified)));
     }
 }

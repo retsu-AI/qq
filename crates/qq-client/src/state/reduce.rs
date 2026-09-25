@@ -423,15 +423,8 @@ impl SessionStore {
                 });
             }
             SessionEvent::CheckpointStarted {
-                correlation,
-                phase,
-                run_id,
-                verification,
-                ..
+                correlation, phase, ..
             } => {
-                if let Some(view) = self.body_mut(&session_id) {
-                    view.runs.entry(*run_id).or_default().verification = verification.clone();
-                }
                 effects.push(StateEffect::Notice {
                     session: Some(session_id),
                     level: NoticeLevel::Info,
@@ -445,21 +438,13 @@ impl SessionStore {
                 outcome,
                 feedback,
                 spend,
-                run_id,
-                verification,
                 ..
             } => {
-                if let Some(view) = self.body_mut(&session_id) {
-                    view.runs.entry(*run_id).or_default().verification = verification.clone();
-                }
                 let supported = matches!(outcome, qq_protocol::CheckpointOutcome::Supported);
-                let unavailable = matches!(outcome, qq_protocol::CheckpointOutcome::Unavailable);
                 effects.push(StateEffect::Notice {
                     session: Some(session_id),
                     level: if supported {
                         NoticeLevel::Info
-                    } else if unavailable {
-                        NoticeLevel::Warning
                     } else {
                         NoticeLevel::Error
                     },
@@ -619,7 +604,6 @@ impl SessionStore {
                 run_id,
                 outcome,
                 usage,
-                verification,
                 ..
             } => {
                 let shown = context.focused == Some(session_id);
@@ -647,7 +631,6 @@ impl SessionStore {
                 let stats = view.runs.entry(*run_id).or_default();
                 stats.finished_at_ms = Some(envelope.occurred_at_ms);
                 stats.outcome = Some(outcome.clone());
-                stats.verification = verification.clone();
                 stats.usage = *usage;
                 stats.cost_usd_nanos = match (cost_before, cost_after) {
                     (Some(before), Some(after)) => Some(after.saturating_sub(before)),

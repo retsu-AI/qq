@@ -1507,11 +1507,10 @@ impl Store {
     pub(super) async fn record_checkpoint_started(
         &self,
         claimed: &ClaimedRun,
-        verification: Option<Box<qq_protocol::VerificationRecord>>,
         correlation: String,
         phase: qq_protocol::CheckpointPhase,
         tool_call_id: Option<qq_protocol::ToolCallId>,
-    ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+    ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
@@ -1519,7 +1518,6 @@ impl Store {
                 connection,
                 store_id,
                 identity,
-                verification,
                 correlation,
                 phase,
                 tool_call_id,
@@ -1533,7 +1531,7 @@ impl Store {
         claimed: &ClaimedRun,
         review: streaming::CheckpointRecord,
         accounting: Option<RunAccounting>,
-    ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+    ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {

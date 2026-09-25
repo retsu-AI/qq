@@ -388,19 +388,3 @@ quiet-host full-suite acceptance remains unresolved. Stop shared-host reruns
 here; a quiet host or explicit lead decision is needed to close this gate.
 No source change follows the independently reviewed implementation. Latest
 hosted CI 35409246345 passed at dbb3da8. Live Jev quality/savings remain unclaimed.
-
-### 2026-09-25 — ENG-791 restored OAuth callback repair
-
-Separate branch `fix/eng-791-oauth-callback` from current main `c6df04bf`;
-reviewed documentation branch remains preserved at `27c1bff6`.
-Full workspace qualification exposed the same macOS callback race repaired in
-historical `08909d72e02ecae738898eca17c099a25d196088` but absent from current
-main. Reused that exact socket fix and delayed-write fixture; did not replace
-current auth code or credentials. Test-only `ee19930` fails with connection reset
-before the fix; restored blocking mode gives 50/50 auth tests passing. Added a
-connected-client-with-no-bytes case to verify the existing login deadline still
-bounds the blocking read and no credential is stored. Final workspace gates
-and independent exact-head auth review follow. No live OAuth login or provider
-call, credential access change, strict JEV policy, publication or release.
-Raw logs and historical patch: Startup Manager's
-`reviews/retsu-weekly-audit-2026-09-25/qq-jev-evidence/`.

@@ -337,51 +337,6 @@ pub enum ApprovalDelegate {
     Off,
 }
 
-/// How much of a session Jev is asked to decide (protocol 31, ADR-0044). A
-/// ladder over the three independent Jev capabilities — task routing,
-/// checkpoint review, and the approval delegate — that the composition root
-/// resolves at plan compile time; each step asks Jev to decide strictly more.
-/// Provider-neutral wire data: never a TypeSafe request parameter, a model
-/// alias, or a reasoning effort. Absent means the configured and profile
-/// values apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum JevMode {
-    Low,
-    Medium,
-    High,
-    Max,
-    Ultrajev,
-}
-
-impl JevMode {
-    /// Every mode, lowest to highest; the order a picker shows.
-    pub const ALL: [Self; 5] = [
-        Self::Low,
-        Self::Medium,
-        Self::High,
-        Self::Max,
-        Self::Ultrajev,
-    ];
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::Max => "max",
-            Self::Ultrajev => "ultrajev",
-        }
-    }
-
-    /// The wire spelling back to a mode; `None` for anything else.
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|mode| mode.as_str() == value)
-    }
-}
-
 impl ApprovalDelegate {
     /// Whether a call the given mode holds is offered to the reviewer first.
     #[must_use]
@@ -689,15 +644,6 @@ pub enum SessionCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<qq_reasoning::ReasoningEffort>,
     },
-    /// Sets or clears how much of the session Jev decides (protocol 31). Takes
-    /// effect when the next run is claimed, like the model and effort; a run
-    /// already executing keeps the plan it compiled. `None` restores the
-    /// configured/profile Jev capabilities. Spawned children inherit it.
-    SetJevMode {
-        session_id: SessionId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mode: Option<JevMode>,
-    },
     /// Deletes an idle session and every row it owns. Refused while the
     /// session has an active run; the client cancels first.
     DeleteSession {
@@ -739,7 +685,6 @@ impl SessionCommand {
             Self::SetSessionModel { .. } => SessionCommandKind::SetSessionModel,
             Self::SetSessionProfile { .. } => SessionCommandKind::SetSessionProfile,
             Self::SetSessionEffort { .. } => SessionCommandKind::SetSessionEffort,
-            Self::SetJevMode { .. } => SessionCommandKind::SetJevMode,
             Self::DeleteSession { .. } => SessionCommandKind::DeleteSession,
             Self::PruneSessions { .. } => SessionCommandKind::PruneSessions,
             Self::CompactSession { .. } => SessionCommandKind::CompactSession,
@@ -764,7 +709,6 @@ pub enum SessionCommandKind {
     SetSessionModel,
     SetSessionProfile,
     SetSessionEffort,
-    SetJevMode,
     DeleteSession,
     PruneSessions,
     CompactSession,
@@ -773,7 +717,7 @@ pub enum SessionCommandKind {
 
 impl SessionCommandKind {
     /// Every command this protocol revision routes, in declaration order.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 15] = [
         Self::ResolveWorkspace,
         Self::CreateSession,
         Self::SubmitPrompt,
@@ -785,7 +729,6 @@ impl SessionCommandKind {
         Self::SetSessionModel,
         Self::SetSessionProfile,
         Self::SetSessionEffort,
-        Self::SetJevMode,
         Self::DeleteSession,
         Self::PruneSessions,
         Self::CompactSession,
@@ -809,7 +752,6 @@ impl SessionCommandKind {
             | Self::SetSessionModel
             | Self::SetSessionProfile
             | Self::SetSessionEffort
-            | Self::SetJevMode
             | Self::CompactSession => true,
             Self::CancelRun
             | Self::RespondToolApproval
@@ -836,7 +778,6 @@ impl SessionCommandKind {
             Self::SetSessionModel => "/v1/sessions/model",
             Self::SetSessionProfile => "/v1/sessions/profile",
             Self::SetSessionEffort => "/v1/sessions/effort",
-            Self::SetJevMode => "/v1/sessions/jev-mode",
             Self::DeleteSession => "/v1/sessions/delete",
             Self::PruneSessions => "/v1/sessions/prune",
             Self::CompactSession => "/v1/sessions/compact",
@@ -847,8 +788,8 @@ impl SessionCommandKind {
 
 /// Every command route this protocol revision serves, in [`SessionCommandKind::ALL`]
 /// order. Routes are wire data: changing one is a protocol change.
-pub const COMMAND_ROUTES: [(SessionCommandKind, &str); 16] = {
-    let mut routes = [(SessionCommandKind::ResolveWorkspace, ""); 16];
+pub const COMMAND_ROUTES: [(SessionCommandKind, &str); 15] = {
+    let mut routes = [(SessionCommandKind::ResolveWorkspace, ""); 15];
     let mut index = 0;
     while index < SessionCommandKind::ALL.len() {
         let kind = SessionCommandKind::ALL[index];
@@ -927,13 +868,6 @@ pub enum CommandOutcome {
         session_id: SessionId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<qq_reasoning::ReasoningEffort>,
-    },
-    /// The session's Jev mode after `set_jev_mode` (protocol 31); `None`
-    /// means the configured capabilities apply.
-    JevModeSet {
-        session_id: SessionId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mode: Option<JevMode>,
     },
     SessionDeleted {
         session_id: SessionId,
@@ -1027,18 +961,6 @@ pub struct RunLimits {
 }
 
 impl RunLimits {
-    /// Whether caller resources independently bound strict verification work.
-    #[must_use]
-    pub const fn has_verification_bound(&self) -> bool {
-        self.max_duration_ms.is_some()
-            || self.max_model_turns.is_some()
-            || self.max_tool_calls.is_some()
-            || self.max_total_tokens.is_some()
-            || self.max_input_tokens.is_some()
-            || self.max_output_tokens.is_some()
-            || self.max_cost_usd_nanos.is_some()
-    }
-
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.max_duration_ms.is_none()
@@ -1353,10 +1275,6 @@ pub struct SessionSummary {
     /// omitted on historical summaries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<qq_reasoning::ReasoningEffort>,
-    /// How much of the session Jev decides, set by `set_jev_mode` (protocol
-    /// 31). Absent means the configured and profile Jev capabilities apply.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jev_mode: Option<JevMode>,
     #[serde(default, skip_serializing_if = "Correlation::is_empty")]
     pub correlation: Correlation,
     /// Input-token total of the latest measured prompt turn for this
@@ -1377,57 +1295,9 @@ pub struct SessionSummary {
     pub last_outcome: Option<RunOutcome>,
 }
 
-/// Durable strict verification, separate from advisory audit and output shape.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VerificationRecord {
-    pub reviewer: String,
-    pub state: VerificationState,
-    pub phase: Option<CheckpointPhase>,
-    pub correlation: Option<String>,
-    pub tool_call_id: Option<ToolCallId>,
-    pub outcome: Option<CheckpointOutcome>,
-    pub reason: String,
-    pub basis_sha256: Option<String>,
-    pub evidence_generation: u64,
-    pub review_count: u64,
-    pub open_correction: Option<String>,
-    pub correction_generation: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VerificationState {
-    Pending,
-    Verified,
-    Unresolved,
-    Unavailable,
-}
-
-impl VerificationRecord {
-    pub fn pending(reviewer: String) -> Self {
-        Self {
-            reviewer,
-            state: VerificationState::Pending,
-            phase: None,
-            correlation: None,
-            tool_call_id: None,
-            outcome: None,
-            reason: String::new(),
-            basis_sha256: None,
-            evidence_generation: 0,
-            review_count: 0,
-            open_correction: None,
-            correction_generation: None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunSnapshot {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verification: Option<Box<VerificationRecord>>,
     pub id: RunId,
     pub session_id: SessionId,
     pub status: RunStatus,
@@ -2090,16 +1960,12 @@ pub enum SessionEvent {
         decision: Box<RoutingDecision>,
     },
     CheckpointStarted {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        verification: Option<Box<VerificationRecord>>,
         run_id: RunId,
         correlation: String,
         phase: CheckpointPhase,
         tool_call_id: Option<ToolCallId>,
     },
     CheckpointReviewed {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        verification: Option<Box<VerificationRecord>>,
         run_id: RunId,
         correlation: String,
         phase: CheckpointPhase,
@@ -2151,8 +2017,6 @@ pub enum SessionEvent {
         context_tokens: Option<u64>,
     },
     RunFinished {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        verification: Option<Box<VerificationRecord>>,
         session: Box<SessionSummary>,
         run_id: RunId,
         outcome: RunOutcome,
@@ -2284,7 +2148,6 @@ mod tests {
                 SessionCommandKind::SetSessionModel,
                 SessionCommandKind::SetSessionProfile,
                 SessionCommandKind::SetSessionEffort,
-                SessionCommandKind::SetJevMode,
                 SessionCommandKind::CompactSession,
             ]
         );
@@ -2939,48 +2802,6 @@ mod tests {
             delegate_set
         );
 
-        // Protocol 31: the Jev mode ladder.
-        let set_jev = SessionCommand::SetJevMode {
-            session_id,
-            mode: Some(JevMode::Ultrajev),
-        };
-        let encoded = serde_json::to_value(&set_jev).unwrap();
-        assert_eq!(encoded["type"], "set_jev_mode");
-        assert_eq!(encoded["mode"], "ultrajev");
-        assert_eq!(
-            serde_json::from_value::<SessionCommand>(encoded).unwrap(),
-            set_jev
-        );
-        let clear_jev = SessionCommand::SetJevMode {
-            session_id,
-            mode: None,
-        };
-        let encoded = serde_json::to_value(&clear_jev).unwrap();
-        assert!(encoded.get("mode").is_none());
-        assert_eq!(
-            serde_json::from_value::<SessionCommand>(encoded).unwrap(),
-            clear_jev
-        );
-        assert_eq!(set_jev.kind().route(), "/v1/sessions/jev-mode");
-        assert!(set_jev.kind().creates_work());
-        for mode in JevMode::ALL {
-            assert_eq!(serde_json::to_value(mode).unwrap(), mode.as_str());
-            assert_eq!(JevMode::parse(mode.as_str()), Some(mode));
-        }
-        assert_eq!(JevMode::parse("xhigh"), None);
-        assert!(JevMode::Low < JevMode::Medium && JevMode::Max < JevMode::Ultrajev);
-        let jev_set = CommandOutcome::JevModeSet {
-            session_id,
-            mode: Some(JevMode::Low),
-        };
-        let encoded = serde_json::to_value(&jev_set).unwrap();
-        assert_eq!(encoded["type"], "jev_mode_set");
-        assert_eq!(encoded["mode"], "low");
-        assert_eq!(
-            serde_json::from_value::<CommandOutcome>(encoded).unwrap(),
-            jev_set
-        );
-
         let set_effort = SessionCommand::SetSessionEffort {
             session_id,
             effort: Some(qq_reasoning::ReasoningEffort::Xhigh),
@@ -3115,7 +2936,6 @@ mod tests {
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
                 approval_delegate: None,
-                jev_mode: None,
                 reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: None,
@@ -3177,7 +2997,6 @@ mod tests {
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
                 approval_delegate: None,
-                jev_mode: None,
                 reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: Some(12_500),
@@ -3222,7 +3041,6 @@ mod tests {
         let workspace_id = id::<WorkspaceId>(2);
         let session_id = id::<SessionId>(3);
         let event = SessionEvent::RunFinished {
-            verification: None,
             session: Box::new(SessionSummary {
                 model_is_fallback: false,
                 activity: None,
@@ -3239,7 +3057,6 @@ mod tests {
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
                 approval_delegate: None,
-                jev_mode: None,
                 reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: None,
@@ -3458,7 +3275,6 @@ mod tests {
         );
 
         let finished = SessionEvent::RunFinished {
-            verification: None,
             session: Box::new(SessionSummary {
                 model_is_fallback: false,
                 activity: None,
@@ -3475,7 +3291,6 @@ mod tests {
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
                 approval_delegate: None,
-                jev_mode: None,
                 reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: Some(16),
@@ -3505,7 +3320,6 @@ mod tests {
         );
 
         let run = RunSnapshot {
-            verification: None,
             id: id(4),
             session_id: id(3),
             status: RunStatus::Completed,
@@ -3701,11 +3515,7 @@ mod tests {
         // `approval_delegate_set`, and the optional
         // `SessionSummary.approval_delegate` override. Older clients reject
         // the new command, outcome, event tag, and summary field.
-        // Version 31 adds the Jev mode switch (ADR-0044): `JevMode`,
-        // `set_jev_mode` / `jev_mode_set`, the optional
-        // `SessionSummary.jev_mode` override, and the reserved `/jev` slash
-        // command.
-        assert_eq!(crate::PROTOCOL_VERSION, 32);
+        assert_eq!(crate::PROTOCOL_VERSION, 30);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
@@ -3813,7 +3623,7 @@ mod tests {
             serde_json::to_value(SessionCommandKind::SetSessionProfile).unwrap(),
             "set_session_profile"
         );
-        assert_eq!(SessionCommandKind::ALL.len(), 16);
+        assert_eq!(SessionCommandKind::ALL.len(), 15);
 
         let create = SessionCommand::CreateSession {
             workspace_id: id(2),
@@ -3941,7 +3751,6 @@ mod tests {
                 profile: AgentProfileId::default(),
                 approval_mode: ApprovalMode::Auto,
                 approval_delegate: None,
-                jev_mode: None,
                 reasoning_effort: None,
                 correlation: Correlation::default(),
                 context_tokens: None,

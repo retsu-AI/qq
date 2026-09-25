@@ -87,8 +87,6 @@ pub struct HeadlessTrial {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeadlessOutcome {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verification: Option<Box<crate::VerificationRecord>>,
     pub status: HeadlessStatus,
     pub exit_code: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -272,7 +270,6 @@ mod tests {
             usage: None,
             estimated_cost_usd_nanos: None,
             prompt_identity: None,
-            verification: None,
             audit: None,
             final_output: None,
         }

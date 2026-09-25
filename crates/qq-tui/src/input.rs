@@ -10,8 +10,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use qq_protocol::{
-    AgentProfileId, ApprovalDelegate, ApprovalMode, GuidanceKind, JevMode, ReasoningEffort,
-    SessionId,
+    AgentProfileId, ApprovalDelegate, ApprovalMode, GuidanceKind, ReasoningEffort, SessionId,
 };
 
 use crate::{
@@ -117,22 +116,6 @@ impl PickerItem for DelegateRow {
     }
 }
 
-/// A row in the Jev mode picker: one rung of the session's Jev ladder, or
-/// `None` to restore the configured Jev capabilities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct JevModeRow {
-    pub mode: Option<JevMode>,
-    pub label: &'static str,
-    pub summary: &'static str,
-}
-
-impl PickerItem for JevModeRow {
-    fn search_text<'a>(&'a self, out: &mut Vec<&'a str>) {
-        out.push(self.label);
-        out.push(self.summary);
-    }
-}
-
 /// A row in the skills picker: one indexed command or skill document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SkillRow {
@@ -212,9 +195,6 @@ pub(crate) enum Overlay {
     /// Who settles the focused session's held calls for the rest of the
     /// session: the configured choice, or an override.
     Delegate(Picker<DelegateRow>),
-    /// How much of Jev the focused session uses from its next run: the
-    /// configured capabilities, or one rung of the ladder.
-    JevMode(Picker<JevModeRow>),
     /// The workspace's indexed commands and skills. Enter puts a command in
     /// the composer for its arguments or submits a skill.
     Skills(Picker<SkillRow>),
@@ -250,7 +230,6 @@ pub(crate) enum Mode {
     ApprovalModes,
     Effort,
     Delegate,
-    Jev,
     Skills,
     Themes,
     Sessions,
@@ -322,7 +301,6 @@ impl Overlay {
             Self::ApprovalModes(_) => Mode::ApprovalModes,
             Self::Effort(_) => Mode::Effort,
             Self::Delegate(_) => Mode::Delegate,
-            Self::JevMode(_) => Mode::Jev,
             Self::Skills(_) => Mode::Skills,
             Self::Themes { .. } => Mode::Themes,
             Self::Sessions { .. } => Mode::Sessions,
@@ -369,7 +347,6 @@ impl Overlay {
             Self::ApprovalModes(picker) => dispatch(picker, key),
             Self::Effort(picker) => dispatch(picker, key),
             Self::Delegate(picker) => dispatch(picker, key),
-            Self::JevMode(picker) => dispatch(picker, key),
             Self::Skills(picker) => dispatch(picker, key),
             Self::Themes { picker, .. } => dispatch(picker, key),
             Self::Sessions { picker, .. } => dispatch(picker, key),
@@ -386,7 +363,6 @@ impl Overlay {
             Self::ApprovalModes(picker) => picker.push_query(text),
             Self::Effort(picker) => picker.push_query(text),
             Self::Delegate(picker) => picker.push_query(text),
-            Self::JevMode(picker) => picker.push_query(text),
             Self::Skills(picker) => picker.push_query(text),
             Self::Themes { picker, .. } => picker.push_query(text),
             Self::Sessions { picker, .. } => picker.push_query(text),
@@ -500,34 +476,6 @@ pub(crate) const fn delegate_row(delegate: Option<ApprovalDelegate>) -> Delegate
     DelegateRow {
         delegate,
         label: delegate_label(delegate),
-        summary,
-    }
-}
-
-/// What `/jev` and the status row call a session's Jev mode. `None` is the
-/// unremarkable configured choice.
-pub(crate) const fn jev_mode_label(mode: Option<JevMode>) -> &'static str {
-    match mode {
-        None => "configured",
-        Some(mode) => mode.as_str(),
-    }
-}
-
-/// Every Jev mode with the one-line meaning the picker shows. Order is
-/// configured first, then the ladder from least to most Jev. The wording
-/// follows the composition root's rung table (`docs/runbooks/jev.md`).
-pub(crate) const fn jev_mode_row(mode: Option<JevMode>) -> JevModeRow {
-    let summary = match mode {
-        None => "use the workspace's jev_routing, jev_review, and approval_delegate settings",
-        Some(JevMode::Low) => "routing only; checkpoint and delegation defaults off",
-        Some(JevMode::Medium) => "routing and a final-checkpoint review",
-        Some(JevMode::High) => "routing, tool and final-answer reviews",
-        Some(JevMode::Max) => "high; configured reviewer for auto and supervised holds",
-        Some(JevMode::Ultrajev) => "max; configured reviewer for ask holds too",
-    };
-    JevModeRow {
-        mode,
-        label: jev_mode_label(mode),
         summary,
     }
 }

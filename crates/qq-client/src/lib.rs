@@ -16,11 +16,11 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use qq_protocol::{
     AgentProfileId, ApprovalDecision, ApprovalDelegate, CapabilitiesRequest, CommandId,
-    CommandReceipt, CommandRequest, Correlation, EventCursor, InputPart, JevMode,
-    MAX_CAPABILITIES_BYTES, MAX_ERROR_BODY_BYTES, MAX_EVENT_BYTES, MAX_MODEL_CATALOG_BYTES,
-    MAX_REQUEST_BYTES, MAX_SNAPSHOT_BYTES, MAX_SSE_WIRE_EVENT_BYTES, ModelCatalogRequest,
-    ModelDescriptor, ReasoningEffort, RunId, RunLimits, ServerCapabilities, SessionCommand,
-    SessionEventEnvelope, SessionId, SnapshotRequest, ToolCallId, WorkspaceId, WorkspaceSnapshot,
+    CommandReceipt, CommandRequest, Correlation, EventCursor, InputPart, MAX_CAPABILITIES_BYTES,
+    MAX_ERROR_BODY_BYTES, MAX_EVENT_BYTES, MAX_MODEL_CATALOG_BYTES, MAX_REQUEST_BYTES,
+    MAX_SNAPSHOT_BYTES, MAX_SSE_WIRE_EVENT_BYTES, ModelCatalogRequest, ModelDescriptor,
+    ReasoningEffort, RunId, RunLimits, ServerCapabilities, SessionCommand, SessionEventEnvelope,
+    SessionId, SnapshotRequest, ToolCallId, WorkspaceId, WorkspaceSnapshot,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -227,20 +227,6 @@ impl SessionClient {
         self.command(
             fresh_command_id()?,
             SessionCommand::SetSessionEffort { session_id, effort },
-        )
-        .await
-    }
-
-    /// Sets how much of the session Jev decides from the next run on;
-    /// `None` restores the configured Jev capabilities.
-    pub async fn set_jev_mode(
-        &self,
-        session_id: SessionId,
-        mode: Option<JevMode>,
-    ) -> Result<CommandReceipt, ClientError> {
-        self.command(
-            fresh_command_id()?,
-            SessionCommand::SetJevMode { session_id, mode },
         )
         .await
     }
@@ -872,24 +858,12 @@ mod tests {
             SessionCommand::DeleteSession { session_id },
             SessionCommand::PruneSessions { workspace_id },
             SessionCommand::CompactSession { session_id },
-            SessionCommand::SetJevMode {
-                session_id,
-                mode: Some(JevMode::Max),
-            },
         ] {
             let command_id = CommandId::from_bytes([9; 16]);
             let receipt = client.command(command_id, command.clone()).await.unwrap();
             assert_eq!(receipt.command_id, command_id);
             assert_eq!(commands.lock().unwrap().last().unwrap().command, command);
         }
-        client.set_jev_mode(session_id, None).await.unwrap();
-        assert_eq!(
-            commands.lock().unwrap().last().unwrap().command,
-            SessionCommand::SetJevMode {
-                session_id,
-                mode: None,
-            }
-        );
 
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let response = http
@@ -903,7 +877,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
-        assert_eq!(commands.lock().unwrap().len(), 6);
+        assert_eq!(commands.lock().unwrap().len(), 4);
 
         server.shutdown().await.unwrap();
     }

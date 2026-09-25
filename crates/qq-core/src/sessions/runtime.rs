@@ -292,10 +292,6 @@ impl RoutingSelection {
 #[derive(Debug, Clone)]
 pub struct RuntimeLoadRequest {
     pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
-    /// The session's Jev mode at claim time, opaque to core: the loader
-    /// decides what each rung enables. `None` leaves the configured and
-    /// profile Jev capabilities.
-    pub jev_mode: Option<qq_protocol::JevMode>,
     pub checkpoint: Option<CheckpointSelection>,
     pub routing: Option<RoutingSelection>,
     pub workspace: String,

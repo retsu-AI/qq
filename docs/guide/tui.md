@@ -97,7 +97,6 @@ press `Enter`, press a number to pick an option, or `Esc` to decline.
 | approval mode | `/approval` | the focused session from its next held call, or the default for new sessions |
 | approval delegate | `/delegate` | the focused session from its next held call, running or not: `configured` (the workspace's `approval_delegate`), `by_mode`, `on`, or `off` — the "stop delegating" switch. Nothing is written to config; children spawned afterwards inherit it. Top row shows `MODE · delegate off` while an override is set |
 | reasoning effort | `/effort` | the focused idle session's next run, or the default for new sessions; rows are the levels the model's catalog entry advertises (plus `default` and `none`), or every level when it advertises none; a pin outside an advertised ladder fails the run at plan time naming the accepted levels |
-| Jev mode | `/jev` | how much of Jev (TypeSafe's model) the focused session uses from its next run, running or not — an active run keeps the plan it compiled: `configured` (the workspace's `jev_routing`, `jev_review`, and `approval_delegate`), or one rung `low`, `medium`, `high`, `max`, `ultrajev` (see the [Jev runbook](../runbooks/jev.md) for what each rung enables). Nothing is written to config; children spawned afterwards inherit it. The picker marks the saved choice `selected`; the top row shows `jev max` for that pin, not the policy of an already-running task. Every surface sees the same choice through the session summary |
 | theme | `/theme` | live preview; `Enter` keeps it for the session, `Esc` restores; the notice shows the `tui.ron` line to make it permanent |
 
 `/models` lists only models your credentials unlock. When no built-in
@@ -213,7 +212,7 @@ searchable palette that runs the highlighted command on `Enter`.
 | cancel run | | `Ctrl-X`, `Esc Esc` |
 | interrupt and steer | | `Alt-S` |
 | queue draft / edit queued | | `Ctrl-Enter`, `Ctrl-Q` / `Alt-Up` |
-| model / profile / approval / delegate / Jev mode / theme | `/models`, `/profile`, `/approval`, `/delegate`, `/jev`, `/theme` | |
+| model / profile / approval / delegate / theme | `/models`, `/profile`, `/approval`, `/delegate`, `/theme` | |
 | skills and commands | `/skills` | |
 | tool detail / select call | | `Ctrl-O` / `Ctrl-Up`, `Ctrl-Down` |
 | reasoning | | `Alt-R` |

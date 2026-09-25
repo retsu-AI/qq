@@ -1469,27 +1469,6 @@ pub(super) fn run_completion_line(
         qq_protocol::RunOutcome::Failed { .. } => ("✕", failure()),
     };
     let mut parts: Vec<String> = Vec::with_capacity(4);
-    let (glyph, style) = if stats
-        .verification
-        .as_ref()
-        .is_some_and(|v| v.state == qq_protocol::VerificationState::Unavailable)
-    {
-        ("◌", warning())
-    } else {
-        (glyph, style)
-    };
-    if let Some(record) = &stats.verification {
-        parts.push(
-            match record.state {
-                qq_protocol::VerificationState::Verified => "verified",
-                qq_protocol::VerificationState::Unresolved => "verification unresolved",
-                qq_protocol::VerificationState::Unavailable => "verification unavailable",
-                qq_protocol::VerificationState::Pending => "verification pending",
-            }
-            .to_owned(),
-        );
-    }
-
     if let (Some(started), Some(finished)) = (stats.started_at_ms, stats.finished_at_ms) {
         parts.push(format_duration_ms(finished.saturating_sub(started)));
     }

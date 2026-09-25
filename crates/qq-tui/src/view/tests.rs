@@ -3403,7 +3403,6 @@ fn a_finished_run_ends_with_a_completion_line_and_a_running_one_does_not() {
     // The run started at the fixture's occurred_at_ms (1) and finishes here;
     // duration comes from the envelopes, tokens from usage.
     app.apply_client_update(event(SessionEvent::RunFinished {
-        verification: None,
         session: Box::new(summary),
         run_id,
         outcome: qq_protocol::RunOutcome::Completed,
@@ -4201,7 +4200,6 @@ fn the_sidebar_groups_sessions_by_what_the_user_should_do() {
         done_id,
         done_run,
         SessionEvent::RunFinished {
-            verification: None,
             session: Box::new(done),
             run_id: done_run,
             outcome: qq_protocol::RunOutcome::Completed,
@@ -4323,7 +4321,6 @@ fn app_with_every_rail_group() -> (App, [SessionId; 5]) {
             id,
             run,
             SessionEvent::RunFinished {
-                verification: None,
                 session: Box::new(summary),
                 run_id: run,
                 outcome: qq_protocol::RunOutcome::Completed,
@@ -4792,45 +4789,6 @@ fn approval_mode_picker_and_badge_name_the_mode_in_effect() {
 }
 
 #[test]
-fn jev_mode_picker_labels_next_run_selection_without_claiming_jev_approval() {
-    let mut app = app_with_messages(0);
-    app.connection = crate::ConnectionState::Live;
-    // The configured capabilities are the default and show no badge.
-    let plain = frame_rows(&[top_row(&app, 80)])[0].clone();
-    assert!(!plain.contains("jev "), "{plain}");
-
-    let session = app.sessions.get_mut(&app.focused().unwrap()).unwrap();
-    session.summary.jev_mode = Some(qq_protocol::JevMode::Max);
-    let badged = frame_rows(&[top_row(&app, 80)])[0].clone();
-    assert!(badged.contains("jev max"), "{badged}");
-
-    app.open_jev_mode();
-    let frame = FrameRenderer::default().frame_and_commit(&mut app, 160, 14);
-    let rows = squashed_rows(&frame);
-    let text = rows.join("\n");
-    assert!(text.contains("JEV MODE"), "{text}");
-    for label in ["configured", "low", "medium", "high", "max", "ultrajev"] {
-        assert!(
-            rows.iter().any(|row| row.contains(label)),
-            "{label} missing from {text}"
-        );
-    }
-    let max = rows
-        .iter()
-        .find(|row| row.contains("supervised holds"))
-        .unwrap();
-    assert!(max.contains("selected"), "{max}");
-    assert!(max.contains("configured reviewer"), "{max}");
-    assert!(!text.contains("Jev settles"), "{text}");
-    let ultra = rows.iter().find(|row| row.contains("ultrajev")).unwrap();
-    assert!(!ultra.contains("selected"), "{ultra}");
-    assert!(
-        !text.contains("  active"),
-        "a saved setting is not the current run policy: {text}"
-    );
-}
-
-#[test]
 fn skills_picker_groups_commands_before_skills_with_sources() {
     let mut app = app_with_messages(0);
     let mut capabilities = fixtures::steering_capabilities();
@@ -5035,7 +4993,6 @@ fn the_completion_line_names_the_plan_and_an_overridden_route() {
     summary.status = SessionStatus::Idle;
     summary.active_run_id = None;
     app.apply_client_update(event(SessionEvent::RunFinished {
-        verification: None,
         session: Box::new(summary),
         run_id,
         outcome: qq_protocol::RunOutcome::Completed,

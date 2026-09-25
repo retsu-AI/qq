@@ -115,27 +115,6 @@ impl Provider for McpTurnProvider {
 
 struct McpLoader {
     calls: Arc<Mutex<Vec<(String, String)>>>,
-    strict: bool,
-}
-
-struct StrictReviewer;
-impl qq_core::CheckpointReviewer for StrictReviewer {
-    fn identity(&self) -> &'static str {
-        "mcp-fixture/strict"
-    }
-    fn review(&self, request: qq_core::CheckpointRequest) -> qq_core::CheckpointFuture {
-        if request.tool.is_some() {
-            assert_eq!(request.tool.as_deref(), Some(MCP_TOOL));
-        }
-        Box::pin(async {
-            qq_core::CheckpointVerdict {
-                outcome: qq_core::CheckpointOutcome::Supported,
-                confidence: Some(1.0),
-                feedback: "fixture output supports the claim".into(),
-                spend: qq_protocol::CheckpointSpend::default(),
-            }
-        })
-    }
 }
 
 impl RuntimeLoader for McpLoader {
@@ -143,7 +122,6 @@ impl RuntimeLoader for McpLoader {
         let registry = Arc::new(PingRegistry {
             calls: Arc::clone(&self.calls),
         });
-        let strict = self.strict;
         Box::pin(async move {
             let runtime = Runtime::new(
                 McpTurnProvider {
@@ -157,11 +135,6 @@ impl RuntimeLoader for McpLoader {
                 kind: RunFailureKind::Configuration,
                 message: error.to_string(),
             })?;
-            let runtime = if strict {
-                runtime.with_checkpoint_reviewer(Arc::new(StrictReviewer))
-            } else {
-                runtime
-            };
             LoadedRuntime::compile_blocking(
                 &runtime,
                 ResolvedModel {
@@ -202,24 +175,13 @@ async fn command(runtime: &SessionRuntime, command: SessionCommand) -> CommandOu
         .outcome
 }
 
-async fn submit_prompt(
-    runtime: &SessionRuntime,
-    session_id: qq_protocol::SessionId,
-    strict: bool,
-) -> RunId {
+async fn submit_prompt(runtime: &SessionRuntime, session_id: qq_protocol::SessionId) -> RunId {
     let outcome = command(
         runtime,
         SessionCommand::SubmitPrompt {
             session_id,
             input: vec![qq_protocol::InputPart::text("ping the server".to_owned())],
-            limits: if strict {
-                qq_protocol::RunLimits {
-                    max_model_turns: Some(8),
-                    ..qq_protocol::RunLimits::default()
-                }
-            } else {
-                qq_protocol::RunLimits::default()
-            },
+            limits: qq_protocol::RunLimits::default(),
             correlation: qq_protocol::Correlation::default(),
             output: None,
         },
@@ -260,21 +222,11 @@ fn approval_request(events: &[SessionEvent]) -> Option<&ToolCallSnapshot> {
 
 #[tokio::test]
 async fn ask_mode_gates_mcp_calls_and_an_exact_name_grant_auto_approves() {
-    mcp_approval_case(false).await;
-}
-
-#[tokio::test]
-async fn strict_mcp_results_are_checkpointed_after_the_original_approval_gate() {
-    mcp_approval_case(true).await;
-}
-
-async fn mcp_approval_case(strict: bool) {
     let directory = tempfile::tempdir().unwrap();
     let calls = Arc::new(Mutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
         Arc::new(McpLoader {
-            strict,
             calls: Arc::clone(&calls),
         }),
     )
@@ -323,7 +275,7 @@ async fn mcp_approval_case(strict: bool) {
 
     // First run: ask mode must hold the MCP call for approval, and
     // approve-for-session must record the exact-name grant before executing.
-    let first_run = submit_prompt(&runtime, session_id, strict).await;
+    let first_run = submit_prompt(&runtime, session_id).await;
     let requested = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let envelope = events.next().await.unwrap().unwrap();
@@ -364,7 +316,6 @@ async fn mcp_approval_case(strict: bool) {
     ));
 
     let observed = collect_run(&mut events, first_run).await;
-    assert_checkpoint_order(&observed, strict);
     assert!(observed.iter().any(|event| matches!(
         event,
         SessionEvent::ToolCallFinished { tool_call }
@@ -383,9 +334,8 @@ async fn mcp_approval_case(strict: bool) {
 
     // Second run: the recorded exact-name grant auto-approves without a
     // prompt, and the MCP result is indistinguishable from a built-in's.
-    let second_run = submit_prompt(&runtime, session_id, strict).await;
+    let second_run = submit_prompt(&runtime, session_id).await;
     let observed = collect_run(&mut events, second_run).await;
-    assert_checkpoint_order(&observed, strict);
     assert!(
         approval_request(&observed).is_none(),
         "the session grant must cover the second call"
@@ -404,60 +354,4 @@ async fn mcp_approval_case(strict: bool) {
         })
     ));
     assert_eq!(calls.lock().unwrap().len(), 2);
-    runtime.shutdown().await.unwrap();
-}
-
-fn assert_checkpoint_order(events: &[SessionEvent], strict: bool) {
-    let starts = events
-        .iter()
-        .enumerate()
-        .filter(|(_, event)| {
-            matches!(
-                event,
-                SessionEvent::CheckpointStarted {
-                    phase: qq_protocol::CheckpointPhase::ToolResult,
-                    ..
-                }
-            )
-        })
-        .map(|(i, _)| i)
-        .collect::<Vec<_>>();
-    let reviews = events
-        .iter()
-        .enumerate()
-        .filter(|(_, event)| {
-            matches!(
-                event,
-                SessionEvent::CheckpointReviewed {
-                    phase: qq_protocol::CheckpointPhase::ToolResult,
-                    ..
-                }
-            )
-        })
-        .map(|(i, _)| i)
-        .collect::<Vec<_>>();
-    assert_eq!(starts.len(), usize::from(strict));
-    assert_eq!(reviews.len(), usize::from(strict));
-    if strict {
-        let result = events
-            .iter()
-            .position(|e| matches!(e, SessionEvent::ToolCallFinished { .. }))
-            .unwrap();
-        let next_turn = events
-            .iter()
-            .position(|e| {
-                matches!(
-                    e,
-                    SessionEvent::ModelTurnCompleted {
-                        turn_ordinal: 2,
-                        ..
-                    }
-                )
-            })
-            .unwrap();
-        assert!(result < starts[0] && starts[0] < reviews[0] && reviews[0] < next_turn);
-        assert!(
-            matches!(events.last(), Some(SessionEvent::RunFinished { outcome: RunOutcome::Completed, verification: Some(v), .. }) if v.state == qq_protocol::VerificationState::Verified)
-        );
-    }
 }

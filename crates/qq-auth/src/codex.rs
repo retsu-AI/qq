@@ -310,13 +310,6 @@ impl CodexLogin {
             }
             match self.listener.accept() {
                 Ok((mut stream, _)) => {
-                    // BSD-family platforms may propagate O_NONBLOCK from the
-                    // listener to an accepted socket. The callback reader is
-                    // deadline-bounded with socket timeouts and must wait for
-                    // a browser that connected just before writing its request.
-                    stream
-                        .set_nonblocking(false)
-                        .map_err(|_| CodexAuthError::CallbackFailed)?;
                     stream
                         .set_read_timeout(Some(CALLBACK_IO_TIMEOUT))
                         .map_err(|_| CodexAuthError::CallbackFailed)?;

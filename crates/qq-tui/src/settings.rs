@@ -166,8 +166,6 @@ pub enum StatusItem {
     ApprovalMode,
     /// The reasoning effort pin in effect, shown only when one is set.
     Effort,
-    /// The focused session's Jev mode, shown only when one is set.
-    Jev,
     Context,
     Cost,
     Workspace,
@@ -175,14 +173,13 @@ pub enum StatusItem {
 }
 
 impl StatusItem {
-    /// The default status line: model, profile, approval mode, effort, Jev
-    /// mode, context occupancy, cost.
-    pub const DEFAULT: [Self; 7] = [
+    /// The default status line: model, profile, approval mode, context
+    /// occupancy, cost.
+    pub const DEFAULT: [Self; 6] = [
         Self::Model,
         Self::Profile,
         Self::ApprovalMode,
         Self::Effort,
-        Self::Jev,
         Self::Context,
         Self::Cost,
     ];

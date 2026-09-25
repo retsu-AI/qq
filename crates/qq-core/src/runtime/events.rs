@@ -131,7 +131,6 @@ pub(crate) enum RuntimeEvent {
         spill: Option<crate::tools::SpillRecord>,
     },
     CheckpointStarted {
-        verification: Option<Box<qq_protocol::VerificationRecord>>,
         correlation: String,
         phase: qq_protocol::CheckpointPhase,
         tool_call_id: Option<ToolCallId>,

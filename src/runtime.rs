@@ -473,7 +473,6 @@ impl RuntimeFactory {
                 RuntimeLoadRequest {
                     model: decision.model.clone(),
                     reasoning_effort: decision.reasoning_effort,
-                    jev_mode: None,
                     routing: Some(qq_core::RoutingSelection::RouterIdentity(
                         router.identity().to_owned(),
                     )),
@@ -2223,13 +2222,6 @@ impl RuntimeLoader for RuntimeFactory {
                 let mut load =
                     factory.request_for_workspace(&workspace, request.model.max_output_tokens)?;
                 let mut overrides = load.overrides().clone();
-                if let Some(mode) = request.jev_mode {
-                    let rung = jev_mode_rung(mode);
-                    overrides = overrides
-                        .with_jev_routing(rung.routing)
-                        .with_jev_review(rung.review)
-                        .with_approval_delegate(rung.approval_delegate);
-                }
                 if let Some(selection) = &request.routing {
                     let enabled = match selection {
                         qq_core::RoutingSelection::Disabled => false,
@@ -2254,9 +2246,6 @@ impl RuntimeLoader for RuntimeFactory {
                                 }
                                 "typesafe/jev-1.13.0/criteria-2026-09-18.1/enforce" => {
                                     qq_config::JevReviewMode::Enforce
-                                }
-                                "typesafe/jev-1.13.0/criteria-2026-09-18.1/strict" => {
-                                    qq_config::JevReviewMode::Strict
                                 }
                                 _ => {
                                     return Err(RuntimeBuildError::InheritedCheckpoint(
@@ -3143,55 +3132,9 @@ const fn approval_delegate(
     setting: Option<qq_config::ApprovalDelegateSetting>,
 ) -> qq_core::ApprovalDelegate {
     match setting {
-        None | Some(qq_config::ApprovalDelegateSetting::ByMode) => {
-            qq_core::ApprovalDelegate::ByMode
-        }
+        None => qq_core::ApprovalDelegate::ByMode,
         Some(qq_config::ApprovalDelegateSetting::On) => qq_core::ApprovalDelegate::On,
         Some(qq_config::ApprovalDelegateSetting::Off) => qq_core::ApprovalDelegate::Off,
-    }
-}
-
-/// What one rung of the session Jev ladder enables (ADR-0044 § 2). Every rung
-/// is expressed in the three existing Jev capabilities, so a mode is exactly
-/// the runtime overrides an operator could have set by hand; `jev_approval`
-/// consent is deliberately not among them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct JevModeRung {
-    routing: bool,
-    review: qq_config::JevReviewMode,
-    approval_delegate: qq_config::ApprovalDelegateSetting,
-}
-
-/// The ladder table. Monotone: each rung asks Jev to decide strictly more
-/// than the one below. Changing a row is a composition-root decision.
-const fn jev_mode_rung(mode: qq_protocol::JevMode) -> JevModeRung {
-    use qq_config::{ApprovalDelegateSetting as Delegate, JevReviewMode as Review};
-    match mode {
-        qq_protocol::JevMode::Low => JevModeRung {
-            routing: true,
-            review: Review::Off,
-            approval_delegate: Delegate::Off,
-        },
-        qq_protocol::JevMode::Medium => JevModeRung {
-            routing: true,
-            review: Review::Final,
-            approval_delegate: Delegate::Off,
-        },
-        qq_protocol::JevMode::High => JevModeRung {
-            routing: true,
-            review: Review::Enforce,
-            approval_delegate: Delegate::Off,
-        },
-        qq_protocol::JevMode::Max => JevModeRung {
-            routing: true,
-            review: Review::Enforce,
-            approval_delegate: Delegate::ByMode,
-        },
-        qq_protocol::JevMode::Ultrajev => JevModeRung {
-            routing: true,
-            review: Review::Enforce,
-            approval_delegate: Delegate::On,
-        },
     }
 }
 
@@ -3406,16 +3349,12 @@ impl CheckpointReviewer for TypeSafeCheckpointReviewer {
             qq_config::JevReviewMode::Enforce => {
                 "typesafe/jev-1.13.0/criteria-2026-09-18.1/enforce"
             }
-            qq_config::JevReviewMode::Strict => "typesafe/jev-1.13.0/criteria-2026-09-18.1/strict",
             qq_config::JevReviewMode::Off => unreachable!("disabled reviewers are not constructed"),
         }
     }
 
     fn reviews_tools(&self) -> bool {
-        matches!(
-            self.mode,
-            qq_config::JevReviewMode::Enforce | qq_config::JevReviewMode::Strict
-        )
+        self.mode == qq_config::JevReviewMode::Enforce
     }
 
     fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
@@ -3749,7 +3688,6 @@ impl RuntimeBuildError {
 
 #[cfg(test)]
 mod tests {
-    mod strict_verification;
     use std::{
         collections::BTreeMap,
         fs,
@@ -5535,7 +5473,6 @@ mod tests {
                 RuntimeLoadRequest {
                     routing: None,
                     reasoning_effort: None,
-                    jev_mode: None,
                     checkpoint: None,
                     workspace: workspace.display().to_string(),
                     model: ModelSelection {
@@ -6129,7 +6066,6 @@ mod tests {
             RuntimeLoadRequest {
                 routing: None,
                 reasoning_effort: None,
-                jev_mode: None,
                 checkpoint: None,
                 workspace: workspace.display().to_string(),
                 model: ModelSelection::default(),
@@ -7945,7 +7881,6 @@ mod tests {
         let request = RuntimeLoadRequest {
             routing: None,
             reasoning_effort: None,
-            jev_mode: None,
             workspace,
             model: ModelSelection::default(),
             profile: AgentProfileId::default(),
@@ -7960,7 +7895,6 @@ mod tests {
             RuntimeLoadRequest {
                 routing: None,
                 reasoning_effort: None,
-                jev_mode: None,
                 checkpoint: Some(qq_core::CheckpointSelection::ReviewerIdentity(
                     "unknown/reviewer".into(),
                 )),
@@ -8383,7 +8317,6 @@ mod tests {
             routing: Some(qq_core::RoutingSelection::Disabled),
             checkpoint: None,
             reasoning_effort: None,
-            jev_mode: None,
             workspace: fs::canonicalize(fixture.path("work"))
                 .unwrap()
                 .display()
@@ -8494,191 +8427,6 @@ mod tests {
                 .descriptor()
                 .checkpoint
                 .is_none()
-        );
-    }
-
-    /// ADR-0044: the session's Jev mode is one table in the composition root.
-    /// Each rung enables the three Jev roles as documented, an inherited
-    /// child selection still wins over the rung, and a rung without a Jev
-    /// credential fails closed like any other Jev opt-in.
-    #[tokio::test]
-    async fn jev_mode_rungs_map_onto_the_jev_roles_at_load() {
-        use qq_protocol::JevMode;
-        let fixture = RuntimeFixture::new();
-        let config = r#"(
-            version: 1, model: "custom/test",
-            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test": (name: "test") }) },
-        )"#;
-        fs::write(fixture.path("global/config.ron"), config).unwrap();
-        let workspace = fs::canonicalize(fixture.path("work"))
-            .unwrap()
-            .display()
-            .to_string();
-        let request = |mode: Option<JevMode>| RuntimeLoadRequest {
-            routing: None,
-            checkpoint: None,
-            reasoning_effort: None,
-            jev_mode: mode,
-            workspace: workspace.clone(),
-            model: ModelSelection::default(),
-            profile: AgentProfileId::default(),
-        };
-
-        // No credential: the configured plan (no Jev) still loads, but every
-        // rung asks for Jev and is refused rather than silently degraded.
-        let unkeyed = fixture.factory();
-        assert!(
-            RuntimeLoader::load(&unkeyed, request(None))
-                .await
-                .unwrap()
-                .router
-                .is_none()
-        );
-        for mode in JevMode::ALL {
-            let error = match RuntimeLoader::load(&unkeyed, request(Some(mode))).await {
-                Ok(_) => panic!("{} enabled Jev without a credential", mode.as_str()),
-                Err(error) => error,
-            };
-            assert_eq!(
-                error.kind,
-                RunFailureKind::Configuration,
-                "{}",
-                mode.as_str()
-            );
-        }
-
-        let store = CredentialStore::with_backend(
-            CredentialPaths::new(fixture.path("data")),
-            Arc::new(MemoryKeyring::default()),
-        );
-        store
-            .set_with_metadata(
-                "typesafe-jev",
-                b"test-key",
-                false,
-                Some("typesafe-jev"),
-                Some("https://api.typesafe.ai"),
-            )
-            .unwrap();
-        let factory = fixture.factory_with_credentials(store);
-        let configured = RuntimeLoader::load(&factory, request(None)).await.unwrap();
-        assert!(configured.router.is_none());
-        assert!(configured.plan.descriptor().checkpoint.is_none());
-        assert_eq!(
-            configured.plan.approval_delegate(),
-            qq_core::ApprovalDelegate::ByMode
-        );
-
-        let expected = [
-            (JevMode::Low, None, qq_core::ApprovalDelegate::Off),
-            (
-                JevMode::Medium,
-                Some("/final"),
-                qq_core::ApprovalDelegate::Off,
-            ),
-            (
-                JevMode::High,
-                Some("/enforce"),
-                qq_core::ApprovalDelegate::Off,
-            ),
-            (
-                JevMode::Max,
-                Some("/enforce"),
-                qq_core::ApprovalDelegate::ByMode,
-            ),
-            (
-                JevMode::Ultrajev,
-                Some("/enforce"),
-                qq_core::ApprovalDelegate::On,
-            ),
-        ];
-        let mut digests = Vec::new();
-        for (mode, review_suffix, delegate) in expected {
-            let loaded = RuntimeLoader::load(&factory, request(Some(mode)))
-                .await
-                .unwrap();
-            let descriptor = loaded.plan.descriptor();
-            assert_eq!(
-                descriptor.routing.as_deref(),
-                Some(routing::ROUTER_IDENTITY),
-                "{}",
-                mode.as_str()
-            );
-            assert!(loaded.router.is_some(), "{}", mode.as_str());
-            match review_suffix {
-                None => assert!(descriptor.checkpoint.is_none(), "{}", mode.as_str()),
-                Some(suffix) => assert!(
-                    descriptor
-                        .checkpoint
-                        .as_deref()
-                        .is_some_and(|identity| identity.ends_with(suffix)),
-                    "{}: {:?}",
-                    mode.as_str(),
-                    descriptor.checkpoint
-                ),
-            }
-            assert_eq!(
-                loaded.plan.approval_delegate(),
-                delegate,
-                "{}",
-                mode.as_str()
-            );
-            digests.push(loaded.plan.digest());
-        }
-        // Routing and review are plan identity; the delegate is not, so the
-        // three `enforce` rungs share one compiled plan.
-        assert_ne!(digests[0], digests[1]);
-        assert_ne!(digests[1], digests[2]);
-        assert_eq!(digests[2], digests[3]);
-        assert_eq!(digests[3], digests[4]);
-
-        // A child's inherited selections are explicit and win over the rung.
-        let inherited = RuntimeLoader::load(
-            &factory,
-            RuntimeLoadRequest {
-                routing: Some(qq_core::RoutingSelection::Disabled),
-                checkpoint: Some(qq_core::CheckpointSelection::Disabled),
-                ..request(Some(JevMode::Ultrajev))
-            },
-        )
-        .await
-        .unwrap();
-        assert!(inherited.router.is_none());
-        assert!(inherited.plan.descriptor().checkpoint.is_none());
-        assert_eq!(
-            inherited.plan.approval_delegate(),
-            qq_core::ApprovalDelegate::On
-        );
-    }
-
-    #[test]
-    fn jev_mode_rungs_are_monotone() {
-        use qq_protocol::JevMode;
-        let rungs = JevMode::ALL.map(jev_mode_rung);
-        assert!(rungs.iter().all(|rung| rung.routing));
-        let review_rank = |mode: qq_config::JevReviewMode| match mode {
-            qq_config::JevReviewMode::Off => 0,
-            qq_config::JevReviewMode::Final => 1,
-            qq_config::JevReviewMode::Enforce => 2,
-            qq_config::JevReviewMode::Strict => 3,
-        };
-        let delegate_rank = |setting: qq_config::ApprovalDelegateSetting| match setting {
-            qq_config::ApprovalDelegateSetting::Off => 0,
-            qq_config::ApprovalDelegateSetting::ByMode => 1,
-            qq_config::ApprovalDelegateSetting::On => 2,
-        };
-        for pair in rungs.windows(2) {
-            assert!(review_rank(pair[0].review) <= review_rank(pair[1].review));
-            assert!(
-                delegate_rank(pair[0].approval_delegate)
-                    <= delegate_rank(pair[1].approval_delegate)
-            );
-        }
-        assert_eq!(rungs[0].review, qq_config::JevReviewMode::Off);
-        assert_eq!(rungs[4].review, qq_config::JevReviewMode::Enforce);
-        assert_eq!(
-            rungs[4].approval_delegate,
-            qq_config::ApprovalDelegateSetting::On
         );
     }
 

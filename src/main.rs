@@ -141,17 +141,6 @@ async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Err
     let load = overrides.load_request()?;
     let compiler = factory.clone();
     let mut plan = tokio::task::spawn_blocking(move || compiler.plan_for(&load)).await??;
-    // `ask` has no finite task-budget flags. Reject before optional routing can
-    // dispatch a provider request; bounded Strict runs use the durable path.
-    if plan
-        .descriptor()
-        .checkpoint
-        .as_ref()
-        .is_some_and(|reviewer| reviewer.ends_with("/strict"))
-    {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput,
-            "Strict verification requires an explicit finite run limit; use qq run with --timeout-seconds, --max-turns, or another task budget").into());
-    }
     if plan.descriptor().routing.is_some() {
         eprintln!("[jev] routing pending: selecting model and effort");
         let (selected, decision) = factory.route_direct(plan, prompt.clone()).await;

@@ -50,7 +50,7 @@ migration; historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 31
+PROTOCOL_VERSION = 28
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -194,23 +194,6 @@ field is optional and omitted when absent; the version moves because older
 clients reject the new command, outcome, and summary field. Golden fixtures
 live under `crates/qq-protocol/tests/fixtures/v28/`; `v23`–`v27` are retained
 decode-only.
-
-Version 29 added model-specific effort capabilities, including `max`.
-Version 30 added explicit provider-default effort, distinct from inheritance.
-Their historical wire fixtures remain unchanged.
-
-Version 31 adds the Jev mode switcher (ADR-0044): `set_jev_mode` /
-`jev_mode_set` on `/v1/sessions/jev-mode`, the session's own rung on the Jev
-ladder (`low` | `medium` | `high` | `max` | `ultrajev`, or absent to clear), and
-the optional `SessionSummary.jev_mode` that carries it. The mode is opaque to
-the protocol: the composition root maps each rung onto the existing Jev
-roles (task routing, checkpoint review, approval delegate) when the next run
-is claimed. The regular model switcher is unchanged: `set_session_model` and
-`set_session_effort` remain the provider-neutral model and reasoning-effort
-controls. Every field is optional and omitted when absent; the version moves
-because older clients reject the new command, outcome, and summary field.
-Golden fixtures live under `crates/qq-protocol/tests/fixtures/v31/`;
-`v23`–`v30` are retained decode-only.
 
 Clients and servers must agree on this value.
 
@@ -405,7 +388,6 @@ POST /v1/sessions
 POST /v1/sessions/prompts
 POST /v1/sessions/approval-mode
 POST /v1/sessions/approval-delegate
-POST /v1/sessions/jev-mode
 POST /v1/sessions/model
 POST /v1/sessions/profile
 POST /v1/sessions/delete
@@ -1038,42 +1020,6 @@ Outcome:
   "type": "approval_delegate_set",
   "session_id": "...",
   "delegate": "off"
-}
-```
-
-### `POST /v1/sessions/jev-mode`
-
-```json
-{
-  "command_id": "...",
-  "command": {
-    "type": "set_jev_mode",
-    "session_id": "...",
-    "mode": "high"
-  }
-}
-```
-
-Protocol 31 (ADR-0044). Pins, for the rest of this session, how much of Jev
-the runtime composes in: `low` | `medium` | `high` | `max` | `ultrajev`, lowest
-to highest. Omitting `mode` clears the pin so the workspace's configured
-`jev_routing`, `jev_review`, and `approval_delegate` apply again. The value is
-opaque on the wire; the composition root maps each rung onto those three
-settings when the next run is claimed, so an active run keeps the plan it
-started with. A pin never widens Jev consent or the approval mode's ceiling,
-and a rung whose roles need Jev fails the next run closed when Jev is not
-configured. Spawned children start with the parent's pin, and a child's
-resolved routing/checkpoint policy still wins over it. The command commits and
-publishes a `session_updated` event whose summary carries `jev_mode` (omitted
-when no pin is set).
-
-Outcome:
-
-```json
-{
-  "type": "jev_mode_set",
-  "session_id": "...",
-  "mode": "high"
 }
 ```
 
@@ -2129,22 +2075,3 @@ Model selections and session summaries carry optional `model_is_fallback`
 opted-in routing. False preserves explicit and legacy choices as pins. Schema 32
 persists the flag; model changes and reconnect snapshots retain it. A TUI model
 pick clears it. This field does not enable Jev or grant access to any model.
-
-## Protocol 32: Strict verification (ADR-0045)
-
-`RunSnapshot.verification`, checkpoint events' optional `verification`,
-`RunFinished.verification`, and `HeadlessOutcome.verification` carry an optional
-`VerificationRecord`. Absence is historical or non-strict, never inferred support.
-The record has reviewer identity, state (`pending`, `verified`, `unresolved`,
-`unavailable`), latest phase/correlation/tool ID/outcome/reason, masked typed
-`basis_sha256`, evidence generation, review count, open correction and its generation.
-Checkpoint records commit with events. A supported final receipt remains pending
-until `Verified` is committed in the same transaction as `Completed`.
-`verification_unresolved` and `verification_unavailable` are distinct failure kinds.
-Cancellation/budget/interruption retain their outcomes and a non-verified record.
-Schema41 adds nullable `runs.verification_json`; prior rows remain NULL.
-Existing modes and protocol31 Jev ladder selection retain their semantics.
-
-Store schema 41 also retains an internal per-tool verification receipt marker.
-Strict recovery closes each retained or interrupted unreviewed tool locally,
-without scanning the workspace event journal or repeating remote assessment.

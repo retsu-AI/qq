@@ -33,9 +33,6 @@ pub(crate) enum Command {
     /// the session: the configured delegate, or an override such as `off`
     /// ("stop delegating"). Read at the next held call; no restart.
     OpenDelegate,
-    /// Choose how much of Jev the focused session uses from its next run:
-    /// the configured capabilities, or one rung `low` … `ultrajev`.
-    OpenJevMode,
     /// List the workspace's commands and skills as the server indexes them.
     OpenSkills,
     OpenThemes,
@@ -152,7 +149,7 @@ macro_rules! spec {
 
 /// Presentation order is invocation frequency within a category, and the
 /// palette shows categories in this order too.
-pub(crate) const COMMANDS: [CommandSpec; 42] = [
+pub(crate) const COMMANDS: [CommandSpec; 41] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -320,13 +317,6 @@ pub(crate) const COMMANDS: [CommandSpec; 42] = [
         "choose who settles held approvals",
         Model,
         ["/delegate"],
-        []
-    ),
-    spec!(
-        OpenJevMode,
-        "choose the session's Jev mode",
-        Model,
-        ["/jev"],
         []
     ),
     spec!(

@@ -28,9 +28,9 @@ CHILD_RUN = "af" * 16
 
 QQ_VERSION = "0.1.0"
 # Keep generated trace identity aligned with qq_protocol::PROTOCOL_VERSION.
-# Traces need not contain every optional event, but they must identify the
-# current wire contract. test_atif.py checks this against the Rust source.
-PROTOCOL_VERSION = 32
+# Version 23 adds checkpoint_reviewed; traces need not contain that optional
+# event, but they must identify the wire contract their envelopes target.
+PROTOCOL_VERSION = 23
 MODEL = {"model": "anthropic/claude-sonnet-4-5", "max_output_tokens": 32000}
 PROMPT_IDENTITY = {
     "version": 7,

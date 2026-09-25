@@ -251,23 +251,6 @@ pub(super) fn approval_delegate_column(
     delegate.map(qq_protocol::ApprovalDelegate::as_str)
 }
 
-/// NULL is no session override: the configured Jev capabilities apply. A
-/// stored value is the session's ladder step for its next run claim.
-pub(super) fn parse_jev_mode(
-    encoded: Option<&str>,
-) -> Result<Option<qq_protocol::JevMode>, SessionRuntimeError> {
-    match encoded {
-        None => Ok(None),
-        Some(value) => qq_protocol::JevMode::parse(value)
-            .map(Some)
-            .ok_or(SessionRuntimeError::CODEC),
-    }
-}
-
-pub(super) fn jev_mode_column(mode: Option<qq_protocol::JevMode>) -> Option<&'static str> {
-    mode.map(qq_protocol::JevMode::as_str)
-}
-
 /// NULL is omission (provider/config defaults). A stored value is the session's
 /// explicit pin for the next claim.
 pub(super) fn parse_reasoning_effort(

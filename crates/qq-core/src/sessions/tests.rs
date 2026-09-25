@@ -21,7 +21,6 @@ mod replay_identity;
 mod runs;
 mod settlement;
 mod streaming;
-mod strict_verification;
 
 use std::sync::Mutex as StdMutex;
 
@@ -2004,7 +2003,6 @@ fn denial_capacity_fixture(
         resolved_input: None,
         profile: AgentProfileId::default(),
         reasoning_effort: None,
-        jev_mode: None,
         approval_mode: ApprovalMode::default(),
         depth: 0,
         root_run_id: run_id,
@@ -4032,7 +4030,6 @@ impl RuntimeLoader for QueueLoader {
 }
 
 struct CheckpointQueueLoader {
-    strict: bool,
     inner: QueueLoader,
     reviewed: Arc<StdMutex<Vec<CheckpointRequest>>>,
 }
@@ -4047,17 +4044,9 @@ impl RuntimeLoader for CheckpointQueueLoader {
             .collect::<Vec<_>>();
         let provider = self.inner.next_provider(&request);
         let reviewed = Arc::clone(&self.reviewed);
-        let strict = self.strict;
         Box::pin(async move {
-            struct Supports(Arc<StdMutex<Vec<CheckpointRequest>>>, bool);
+            struct Supports(Arc<StdMutex<Vec<CheckpointRequest>>>);
             impl CheckpointReviewer for Supports {
-                fn identity(&self) -> &'static str {
-                    if self.1 {
-                        "test/strict"
-                    } else {
-                        "custom/enforce"
-                    }
-                }
                 fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
                     self.0.lock().unwrap().push(request);
                     Box::pin(std::future::ready(CheckpointVerdict {
@@ -4074,7 +4063,7 @@ impl RuntimeLoader for CheckpointQueueLoader {
                     loaded_runtime(
                         runtime
                             .with_spawn_model_routes(spawn_model_routes)
-                            .with_checkpoint_reviewer(Arc::new(Supports(reviewed, strict))),
+                            .with_checkpoint_reviewer(Arc::new(Supports(reviewed))),
                         &request.workspace,
                         None,
                     )

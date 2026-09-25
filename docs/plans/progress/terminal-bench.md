@@ -35,37 +35,3 @@ required first; that evaluation is now tool-layer T13 and still owns the
 keep/reject decision for T10 (`terminal`). R8's warm-path items other than
 prompt-cache determinism shipped through speed-first H14/H18/H22.2. No R
 slice in progress.
-
-
-### 2026-09-25 — ENG-815 Harbor version identity regression
-
-TB-pilot prerequisite, branch `fix/eng-815-harbor-version-parser`, in progress.
-Actual accepted291440a Linux binary in Ubuntu24.04 reports
-`qq 0.1.4 (291440a 2026-09-25)`, but the pinned Harbor adapter records
-`2026-09-25)` because it selects the final token. Test-first coverage captures
-the exact output, legacy plain output, revision/semver suffixes and malformed
-responses. No agent/model run, credential or accepted source identity changed.
-Runtime evidence is retained in the manager's September25
-`qq-jev-evidence/colima-prerequisite-20260925/` directory.
-
-### 2026-09-25 — ENG-815 Harbor version parser locally verified
-
-Test-first commit `2b08bb9` reproduces the actual annotated version failure.
-The parser now extracts the package version from recognized QQ output and
-returns empty for unexpected output instead of guessing a date or token.
-Native Harbor 0.20.0: focused version tests 4/4 and full adapter/ATIF suite
-24/24 pass; retained real Linux stdout reads back as `0.1.4`. Python AST and
-diff whitespace checks pass. Evidence: manager `qq-jev-evidence/harbor-version-repair-20260925/`.
-Rust source is unchanged from accepted `291440a`; its prior workspace gates
-are baseline evidence, not rerun checks on this Python-only candidate.
-Independent final-head review and publication remain manager-owned. No live
-agent/model run, provider call, hosted CI, merge or release is claimed.
-
-### 2026-09-25 — ENG-815 independent-review counterexamples repaired
-
-Review of5eed43f requested changes: numeric prerelease leading zero and
-one-field/blank annotation were accepted. Added all three negatives; focused
-red run fails exactly those cases, then corrected grammar. Native Harbor0.20.0
-focused4/4 and full24/24 pass; AST/diff checks pass. No Rust source changes.
-New candidate requires independent review; prior5eed43f is not accepted.
-Evidence: manager harbor-version-repair-20260925/followup/.

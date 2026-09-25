@@ -173,26 +173,16 @@ pub(super) fn settle_run(
     accounting: Option<RunAccounting>,
     cause: SettlementCause,
 ) -> Result<RunSettled, SessionRuntimeError> {
-    let row = transaction
-        .query_row(
-            "SELECT outcome_json IS NOT NULL, verification_json FROM runs WHERE id = ?1",
-            [claimed.identity.run_id.to_string()],
-            |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<String>>(1)?)),
-        )
-        .optional()?;
-    let Some((false, verification_json)) = row else {
+    let already_settled = run_is_settled(transaction, claimed.identity.run_id)?;
+    if already_settled {
         return Ok(None);
-    };
-    let mut verification: Option<Box<qq_protocol::VerificationRecord>> = verification_json
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()?;
+    }
     let now = now_ms();
     let caused_by = match cause {
         SettlementCause::Executor => Some(claimed.identity.command_id),
         SettlementCause::Recovery => None,
     };
-    let mut outcome = cancellation_wins(transaction, claimed.identity.run_id, outcome)?;
+    let outcome = cancellation_wins(transaction, claimed.identity.run_id, outcome)?;
     interrupt_active_tool_calls(
         transaction,
         store_id,
@@ -201,114 +191,6 @@ pub(super) fn settle_run(
         caused_by,
         now,
     )?;
-    if let Some(record) = &mut verification {
-        let unreviewed_tools = {
-            let mut statement = transaction.prepare_cached(
-                "SELECT id FROM tool_calls WHERE run_id = ?1 AND verification_reviewed = 0 ORDER BY turn_ordinal, call_ordinal")?;
-            statement
-                .query_map([claimed.identity.run_id.to_string()], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let supported_final = unreviewed_tools.is_empty()
-            && record.phase == Some(qq_protocol::CheckpointPhase::FinalCandidate)
-            && record.outcome == Some(qq_protocol::CheckpointOutcome::Supported)
-            && record.open_correction.is_none()
-            && record.basis_sha256.is_some();
-        if matches!(outcome, RunOutcome::Completed) && supported_final {
-            record.state = qq_protocol::VerificationState::Verified;
-        } else {
-            if matches!(outcome, RunOutcome::Completed) {
-                outcome = RunOutcome::Failed { failure: RunFailure {
-                    kind: if record.state == qq_protocol::VerificationState::Unavailable {
-                        RunFailureKind::VerificationUnavailable
-                    } else { RunFailureKind::VerificationUnresolved },
-                    message: "Strict completion requires a supported final checkpoint with no pending obligation".into(),
-                }};
-            }
-            if record.outcome.is_none() && record.correlation.is_some() {
-                record.outcome = Some(qq_protocol::CheckpointOutcome::Unavailable);
-                record.state = qq_protocol::VerificationState::Unavailable;
-                record.reason = "Run ended before a checkpoint verdict was durably recorded; remote spend remains unknown".into();
-                append_event(
-                    transaction,
-                    EventContext::for_run(store_id, claimed.identity, now),
-                    SessionEvent::CheckpointReviewed {
-                        verification: Some(record.clone()),
-                        run_id: claimed.identity.run_id,
-                        correlation: record.correlation.clone().expect("checked"),
-                        phase: record.phase.expect("started phase"),
-                        tool_call_id: record.tool_call_id,
-                        outcome: qq_protocol::CheckpointOutcome::Unavailable,
-                        confidence_basis_points: None,
-                        feedback: record.reason.clone(),
-                        spend: Some(qq_protocol::CheckpointSpend::default()),
-                    },
-                )?;
-            }
-            let reviewed_tool = record.tool_call_id.filter(|_| record.outcome.is_some());
-            for encoded_id in unreviewed_tools {
-                let tool_call_id = parse_id::<ToolCallId>(&encoded_id)?;
-                if reviewed_tool != Some(tool_call_id) {
-                    record.phase = Some(qq_protocol::CheckpointPhase::ToolResult);
-                    record.correlation = Some(format!("tool:{tool_call_id}"));
-                    record.tool_call_id = Some(tool_call_id);
-                    record.basis_sha256 = None;
-                    record.outcome = None;
-                    record.state = qq_protocol::VerificationState::Pending;
-                    record.reason.clear();
-                    record.review_count = record.review_count.saturating_add(1);
-                    append_event(
-                        transaction,
-                        EventContext::for_run(store_id, claimed.identity, now),
-                        SessionEvent::CheckpointStarted {
-                            verification: Some(record.clone()),
-                            run_id: claimed.identity.run_id,
-                            correlation: record
-                                .correlation
-                                .clone()
-                                .expect("local tool correlation"),
-                            phase: qq_protocol::CheckpointPhase::ToolResult,
-                            tool_call_id: Some(tool_call_id),
-                        },
-                    )?;
-                    record.outcome = Some(qq_protocol::CheckpointOutcome::Unavailable);
-                    record.state = qq_protocol::VerificationState::Unavailable;
-                    record.reason = "Run ended before this retained tool result could be assessed; no reviewer request was dispatched".into();
-                    append_event(
-                        transaction,
-                        EventContext::for_run(store_id, claimed.identity, now),
-                        SessionEvent::CheckpointReviewed {
-                            verification: Some(record.clone()),
-                            run_id: claimed.identity.run_id,
-                            correlation: record
-                                .correlation
-                                .clone()
-                                .expect("local tool correlation"),
-                            phase: qq_protocol::CheckpointPhase::ToolResult,
-                            tool_call_id: Some(tool_call_id),
-                            outcome: qq_protocol::CheckpointOutcome::Unavailable,
-                            confidence_basis_points: None,
-                            feedback: record.reason.clone(),
-                            spend: None,
-                        },
-                    )?;
-                }
-                transaction.execute(
-                    "UPDATE tool_calls SET verification_reviewed = 1 WHERE id = ?1",
-                    [encoded_id],
-                )?;
-            }
-            if record.state != qq_protocol::VerificationState::Unresolved {
-                record.state = qq_protocol::VerificationState::Unavailable;
-            }
-        }
-    }
-    let verification_json = verification
-        .as_deref()
-        .map(serde_json::to_string)
-        .transpose()?;
     let (run_status, message_state) = outcome_states(&outcome);
     let outcome_json = serde_json::to_string(&outcome)?;
     let usage = accounting.as_ref().and_then(|accounting| accounting.usage);
@@ -383,7 +265,7 @@ pub(super) fn settle_run(
                      WHEN ?9 THEN estimated_cost_usd_nanos ELSE ?6
                  END,
                  context_tokens = CASE WHEN ?8 THEN ?7 ELSE context_tokens END,
-                 final_output_json = ?10, verification_json = ?11
+                 final_output_json = ?10
              WHERE id = ?1 AND outcome_json IS NULL",
         params![
             claimed.identity.run_id.to_string(),
@@ -396,7 +278,6 @@ pub(super) fn settle_run(
             saw_turn,
             preserve_run_accounting,
             final_output_json,
-            verification_json,
         ],
     )?;
     let context_tokens = run_context_tokens(transaction, claimed.identity.run_id)?;
@@ -444,7 +325,6 @@ pub(super) fn settle_run(
         transaction,
         context,
         SessionEvent::RunFinished {
-            verification,
             session: Box::new(summary),
             run_id: claimed.identity.run_id,
             outcome,
@@ -532,7 +412,6 @@ pub(super) fn finish_queued_run_with_outcome(
         transaction,
         EventContext::for_run_ids(store_id, workspace_id, session_id, run_id, None, now),
         SessionEvent::RunFinished {
-            verification: None,
             session: Box::new(summary),
             run_id,
             outcome,
@@ -758,7 +637,6 @@ pub(super) fn settle_panicked_execution(
                 resolved_input: None,
                 profile: original.profile.clone(),
                 reasoning_effort: original.reasoning_effort,
-                jev_mode: original.jev_mode,
                 approval_mode: original.approval_mode,
                 depth: original.depth,
                 root_run_id: original.root_run_id,
@@ -1210,7 +1088,6 @@ pub(super) fn recover_interrupted_runs(
             resolved_input: None,
             profile: AgentProfileId::default(),
             reasoning_effort: None,
-            jev_mode: None,
             approval_mode: ApprovalMode::default(),
             depth: 0,
             root_run_id: run_id,

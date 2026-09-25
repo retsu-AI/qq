@@ -67,7 +67,6 @@ pub fn session_summary(id: SessionId) -> SessionSummary {
         approval_mode: ApprovalMode::Auto,
         approval_delegate: None,
         reasoning_effort: None,
-        jev_mode: None,
         correlation: Correlation::default(),
         context_tokens: None,
         accounting: None,
@@ -117,7 +116,6 @@ pub fn tool_call(id: ToolCallId, session_id: SessionId, name: &str) -> ToolCallS
 #[must_use]
 pub fn run(id: RunId, session_id: SessionId, status: RunStatus) -> RunSnapshot {
     RunSnapshot {
-        verification: None,
         id,
         session_id,
         status,
