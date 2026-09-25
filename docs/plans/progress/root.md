@@ -500,3 +500,17 @@ Raw receipts: external strict-implementation-20260925/falsification. Owned
 `target/strict-falsification-20260925` and `/private/tmp/qq-strict-falsification-20260925`
 are retained for manager/reviewer reruns until final disposition, then removed.
 No live provider qualification, Strict push, PR, merge, hosted CI or release.
+
+### 2026-09-25 — ENG-791 feedback attribution: In review / local ready
+Owner: Startup writer `01a0d95e-d2ce-7350-9a9a-125f78a1be6a`; manager owns publication.
+Branch: `fix/eng-791-feedback-attribution-stack`; draft base `bdd90fb8d3e66f2a027e81afe23fd14ae1a58b48`.
+Tested source: `77a45ed4e3691bbd125ba356e58a879d0653851c`; tree `8c328b471db371388443b811cd236edc96c64415`.
+Both main-based repair commits are included; remote JEV choices/scores and QQ policy are reported separately.
+Both 0.7 thresholds, aggregation, spend, request and RR3 settlement are unchanged.
+Pinned Rust/Cargo 1.97.1: `cargo test --workspace` passed 1,917 tests, zero failed, five existing ignores.
+`cargo test -p qq typesafe_checkpoint`: four passed; both named RR3 filters in `qq-core`: one passed each.
+`cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo build --workspace`: passed.
+Independent exact-stack source review accepted; report SHA256 `dd9176e70e1f0835df8b2f05fed0846059917badb4020c87511c4589f9a8d1a2`.
+Preserved evidence: `/Users/romanmondello/Developer/agent-cloud-operations/reviews/retsu-weekly-audit-2026-09-25/qq-jev-evidence/feedback-draft187-stack-20260925/`.
+Full bundle restores exact tested identity; source, raw logs and native binary retained; owned build/temp outputs removed.
+Matched off/Strict product-value evidence and owner approval remain open; no push, PR update, merge or release in this unit.
