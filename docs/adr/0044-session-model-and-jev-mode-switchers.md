@@ -146,9 +146,10 @@ profile value, with `approval_delegate` alone switchable per session
   settled unavailable reviews and red reviews after two corrective redirects
   can complete; pending durable checkpoint settlement still blocks nominal
   completion. The ladder does not introduce a supported-verdict gate.
-- Integration uses ADR-0043 because ADR-0042 already records the accepted
-  in-TUI trust prompt. Protocol29/30 and store37/38/39 retain their existing
-  effort/continuation meanings and fixtures; the mode uses protocol31/store40.
+- This decision is ADR-0044 because ADR-0042 already records the accepted
+  in-TUI trust prompt and ADR-0043 records verified task efficiency.
+  Protocol29/30 and store37/38/39 retain their existing effort/continuation
+  meanings and fixtures; the mode uses protocol31/store40.
 
 ## Alternatives
 
