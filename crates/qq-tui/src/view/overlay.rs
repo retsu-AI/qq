@@ -391,8 +391,8 @@ pub(super) fn delegate_picker(app: &App, width: usize, height: usize) -> Vec<Lin
 }
 
 /// Jev mode picker: how much of Jev the focused session uses from its next
-/// run. `configured` restores the workspace settings. The rung in effect is
-/// marked.
+/// run. `configured` restores the workspace settings. The saved selection
+/// is marked, without claiming that an active run has changed policy.
 pub(super) fn jev_mode_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(Overlay::JevMode(picker)) = &app.overlay else {
         return fit_height(Vec::new(), height);
@@ -420,7 +420,7 @@ pub(super) fn jev_mode_picker(app: &App, width: usize, height: usize) -> Vec<Lin
             );
             line.push(row.summary, muted());
             if row.mode == current {
-                line.push("  active", accent());
+                line.push("  selected", accent());
             }
             out.push(finish_row(line, selected, width));
         },

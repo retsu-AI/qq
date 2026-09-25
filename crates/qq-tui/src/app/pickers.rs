@@ -610,7 +610,7 @@ impl App {
         match focused {
             Some((_, session)) if session.summary.jev_mode == mode => {
                 self.set_info(format!(
-                    "session already uses jev mode {}",
+                    "session jev mode already selected for the next run: {}",
                     jev_mode_label(mode)
                 ));
                 Effects::redraw(Redraw::Immediate)

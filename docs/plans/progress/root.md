@@ -430,3 +430,8 @@ Integration clarification: the historical model-switcher request above used
 protocol29/store37 and called its ADR0042. Current reservations are
 protocol31/store40/ADR0043; main's prior IDs and accepted trust ADR remain intact.
 The existing ladder is preserved under manager direction, not a new strict policy.
+
+Picker regression reproduced at c5a5836: the saved max row displayed
+“Jev settles ... active”. Repair labels the next-run pin “selected” and
+describes the configured reviewer; workspace Jev consent and /delegate
+overrides remain unchanged. Full integration checks and independent review pending.

@@ -519,11 +519,11 @@ pub(crate) const fn jev_mode_label(mode: Option<JevMode>) -> &'static str {
 pub(crate) const fn jev_mode_row(mode: Option<JevMode>) -> JevModeRow {
     let summary = match mode {
         None => "use the workspace's jev_routing, jev_review, and approval_delegate settings",
-        Some(JevMode::Low) => "routing only; no checkpoint review, no delegated approvals",
+        Some(JevMode::Low) => "routing only; checkpoint and delegation defaults off",
         Some(JevMode::Medium) => "routing and a final-checkpoint review",
-        Some(JevMode::High) => "routing and enforced checkpoint review",
-        Some(JevMode::Max) => "high, and Jev settles auto and supervised holds",
-        Some(JevMode::Ultrajev) => "max, and Jev settles ask holds too",
+        Some(JevMode::High) => "routing, tool and final-answer reviews",
+        Some(JevMode::Max) => "high; configured reviewer for auto and supervised holds",
+        Some(JevMode::Ultrajev) => "max; configured reviewer for ask holds too",
     };
     JevModeRow {
         mode,

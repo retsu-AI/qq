@@ -212,11 +212,13 @@ Explicit effort can be pinned independently of Jev in trusted configuration:
 )
 ```
 
-Values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`. Omission
+Values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`,
+subject to the selected model. `default` explicitly lets the provider choose. Omission
 preserves provider defaults; top-level `Clear` removes an inherited setting.
 Profile values override top-level settings; explicit runtime overrides win.
 In the TUI, `/effort` pins the focused session (or the default for new sessions);
-`default` restores configured/profile omission. `qq config show` and
+`configured` restores configured/profile inheritance; `default` overrides it
+with the provider default. `qq config show` and
 `qq config explain reasoning_effort` expose the configured value and source. Unsupported adapter families reject the choice before credential lookup.
 Remote model restrictions still apply. This is a pinned choice, not automatic
 routing; it makes no speed or quality promise.

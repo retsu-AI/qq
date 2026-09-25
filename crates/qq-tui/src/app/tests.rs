@@ -3933,7 +3933,7 @@ fn jev_mode_picker_switches_the_focused_session_and_reports_the_receipt() {
     assert!(requests.is_empty(), "the picker opens on the active row");
     assert_eq!(
         app.status.as_deref(),
-        Some("session already uses jev mode ultrajev")
+        Some("session jev mode already selected for the next run: ultrajev")
     );
 
     // `configured` clears the override, and the receipt says so.
