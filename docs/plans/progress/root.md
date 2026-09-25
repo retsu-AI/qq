@@ -482,3 +482,21 @@ failures exposed table-less historical fixtures; schema41 now uses the establish
 conditional table migration. Full gates, performance and independent review pending.
 Evidence: external qq-jev-evidence/strict-implementation-20260925; owned output
 `target/strict-20260925` and task-specific /private/tmp directories expire after review.
+
+
+### 2026-09-25 — ENG-791 Strict independent-review proof follow-up
+
+Independent pinned d7ee926 review found no blocking source defect and requested
+explicit zero-router/zero-provider admission proof. Test-only additions cover
+unbounded durable admission and public `qq ask`, each with a dispatching control;
+retained tool-result kinds, MCP approval ordering, unchanged repair permissions,
+task/tool overflow, original budget limits, and loopback transport failures.
+Production runtime is unchanged. Full workspace: 1,915 passed, 0 failed, 5 existing
+measurement/gallery ignores; formatting, all-target/all-feature Clippy and build
+pass. Local Website gate passes with Node24.13.0/nub0.9.3: Astro check has
+zero diagnostics, 14 pages built, and all 476 rendered internal links resolve.
+Exact-successor independent test-delta review remains pending.
+Raw receipts: external strict-implementation-20260925/falsification. Owned
+`target/strict-falsification-20260925` and `/private/tmp/qq-strict-falsification-20260925`
+are retained for manager/reviewer reruns until final disposition, then removed.
+No live provider qualification, Strict push, PR, merge, hosted CI or release.

@@ -21,6 +21,7 @@ mod replay_identity;
 mod runs;
 mod settlement;
 mod streaming;
+mod strict_verification;
 
 use std::sync::Mutex as StdMutex;
 

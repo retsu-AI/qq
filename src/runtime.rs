@@ -3749,6 +3749,7 @@ impl RuntimeBuildError {
 
 #[cfg(test)]
 mod tests {
+    mod strict_verification;
     use std::{
         collections::BTreeMap,
         fs,
