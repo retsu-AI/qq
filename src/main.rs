@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    collections::BTreeMap,
     error::Error,
     io::{self, IsTerminal, Read},
     path::{Path, PathBuf},
@@ -49,7 +50,7 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
 
     match cli.command {
         Some(cli::Command::Ask { prompt }) => ask(prompt, &overrides).await?,
-        Some(cli::Command::Run(args)) => return Ok(headless_run(args, &overrides).await),
+        Some(cli::Command::Run(args)) => return Ok(headless_run(*args, &overrides).await),
         Some(cli::Command::Serve {
             bind,
             allow_origins,
@@ -119,6 +120,18 @@ impl CliOverrides {
             cwd,
             self.max_output_tokens,
         )?)
+    }
+
+    fn captured_load_request_in(
+        &self,
+        cwd: &Path,
+    ) -> Result<config::LoadRequest, config::ConfigError> {
+        let mut values = config::RuntimeOverrides::new();
+        if let Some(max_output_tokens) = self.max_output_tokens {
+            values = values.with_max_output_tokens(max_output_tokens);
+        }
+        let request = config::LoadRequest::new(cwd).with_overrides(values);
+        self.apply(request)
     }
 
     fn apply(
@@ -231,12 +244,167 @@ async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode 
 
 type HeadlessSetupError = (headless::HeadlessStatus, String);
 
+#[derive(Clone, Debug)]
+struct RunStatePaths {
+    config: PathBuf,
+    data: PathBuf,
+    workspace: PathBuf,
+}
+
+fn validate_run_state_root(
+    requested_root: &Path,
+    requested_workspace: Option<&Path>,
+    resume: bool,
+) -> Result<RunStatePaths, String> {
+    let root = std::fs::canonicalize(requested_root).map_err(|error| {
+        format!(
+            "could not resolve --state-root {}: {error}",
+            requested_root.display()
+        )
+    })?;
+    if root != requested_root {
+        return Err(format!(
+            "--state-root must already be canonical: expected {}",
+            root.display()
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(&root)
+        .map_err(|error| format!("could not inspect --state-root {}: {error}", root.display()))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("--state-root must be a real directory".to_owned());
+    }
+
+    #[cfg(unix)]
+    let (owner, private_directory) = {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        (metadata.uid(), metadata.permissions().mode() & 0o077 == 0)
+    };
+    #[cfg(unix)]
+    if !private_directory {
+        return Err("--state-root must not grant group or other permissions".to_owned());
+    }
+
+    let required = ["config", "data", "workspace", "artifacts"];
+    let mut canonical = BTreeMap::new();
+    for name in required {
+        let path = root.join(name);
+        let child_metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            format!("--state-root requires an existing {name}/ directory: {error}")
+        })?;
+        if !child_metadata.is_dir()
+            || child_metadata.file_type().is_symlink()
+            || std::fs::canonicalize(&path).ok().as_ref() != Some(&path)
+        {
+            return Err(format!(
+                "--state-root {name}/ must be a real canonical directory"
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+            if child_metadata.uid() != owner || child_metadata.permissions().mode() & 0o077 != 0 {
+                return Err(format!(
+                    "--state-root {name}/ must have the root owner and private permissions"
+                ));
+            }
+        }
+        canonical.insert(name, path);
+    }
+    let config = canonical.remove("config").unwrap();
+    let data = canonical.remove("data").unwrap();
+    let workspace = canonical.remove("workspace").unwrap();
+    let config_file = config.join("config.ron");
+    let config_metadata = std::fs::symlink_metadata(&config_file).map_err(|error| {
+        format!("--state-root requires an existing config/config.ron file: {error}")
+    })?;
+    if !config_metadata.is_file()
+        || config_metadata.file_type().is_symlink()
+        || std::fs::canonicalize(&config_file).ok().as_ref() != Some(&config_file)
+    {
+        return Err("--state-root config/config.ron must be a real canonical file".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        if config_metadata.uid() != owner || config_metadata.permissions().mode() & 0o077 != 0 {
+            return Err(
+                "--state-root config/config.ron must have the root owner and private permissions"
+                    .to_owned(),
+            );
+        }
+    }
+    if let Some(requested) = requested_workspace {
+        let requested = std::fs::canonicalize(requested).map_err(|error| {
+            format!(
+                "could not resolve --workspace {}: {error}",
+                requested.display()
+            )
+        })?;
+        if requested != workspace {
+            return Err("--workspace must be the --state-root workspace/ directory".to_owned());
+        }
+    }
+    if !resume && data.join("sessions.sqlite3").exists() {
+        return Err(
+            "fresh --state-root run refused an existing data/sessions.sqlite3; use --session to resume"
+                .to_owned(),
+        );
+    }
+
+    let system = config::ConfigPaths::system().map_err(|error| error.to_string())?;
+    for system_path in [system.global_dir(), system.data_dir()] {
+        let system_path =
+            std::fs::canonicalize(system_path).unwrap_or_else(|_| system_path.to_path_buf());
+        if root.starts_with(&system_path) || system_path.starts_with(&root) {
+            return Err(format!(
+                "--state-root overlaps QQ system state at {}",
+                system_path.display()
+            ));
+        }
+    }
+    Ok(RunStatePaths {
+        config,
+        data,
+        workspace,
+    })
+}
+
 /// Resolves configuration for a headless run. Every rejection happens here,
 /// before a session exists or the prompt is submitted.
 async fn prepare_headless(
     args: cli::RunArgs,
     overrides: &CliOverrides,
 ) -> Result<(qq_core::SessionRuntime, headless::HeadlessOptions), HeadlessSetupError> {
+    prepare_headless_with_factory(
+        args,
+        overrides,
+        |run_state, workspace, load| match run_state {
+            None => runtime::RuntimeFactory::system(),
+            Some(paths) => runtime::RuntimeFactory::run_state(
+                config::ConfigLoader::system()?
+                    .for_run_state(paths.config.clone(), paths.data.clone()),
+                auth::CredentialStore::system()?,
+                workspace.to_path_buf(),
+                paths.config.clone(),
+                load.clone(),
+            ),
+        },
+    )
+    .await
+}
+
+async fn prepare_headless_with_factory<Factory>(
+    args: cli::RunArgs,
+    overrides: &CliOverrides,
+    factory_builder: Factory,
+) -> Result<(qq_core::SessionRuntime, headless::HeadlessOptions), HeadlessSetupError>
+where
+    Factory: FnOnce(
+        Option<&RunStatePaths>,
+        &Path,
+        &config::LoadRequest,
+    ) -> Result<runtime::RuntimeFactory, runtime::RuntimeBuildError>,
+{
     let invalid = |message: String| (headless::HeadlessStatus::InvalidConfiguration, message);
     let harness = |message: String| (headless::HeadlessStatus::HarnessFailure, message);
 
@@ -246,20 +414,32 @@ async fn prepare_headless(
         .correlation()
         .map_err(|error| invalid(format!("invalid --correlation: {error}")))?;
 
-    let workspace = match args.workspace {
-        Some(path) => path,
-        None => std::env::current_dir().map_err(|error| {
+    let run_state = args
+        .state_root
+        .as_deref()
+        .map(|root| {
+            validate_run_state_root(root, args.workspace.as_deref(), args.session.is_some())
+        })
+        .transpose()
+        .map_err(invalid)?;
+    let workspace = if let Some(paths) = &run_state {
+        paths.workspace.clone()
+    } else {
+        let workspace = match args.workspace.as_ref() {
+            Some(path) => path.clone(),
+            None => std::env::current_dir().map_err(|error| {
+                invalid(format!(
+                    "could not determine the current directory: {error}"
+                ))
+            })?,
+        };
+        std::fs::canonicalize(&workspace).map_err(|error| {
             invalid(format!(
-                "could not determine the current directory: {error}"
+                "could not resolve the workspace directory {}: {error}",
+                workspace.display()
             ))
-        })?,
+        })?
     };
-    let workspace = std::fs::canonicalize(&workspace).map_err(|error| {
-        invalid(format!(
-            "could not resolve the workspace directory {}: {error}",
-            workspace.display()
-        ))
-    })?;
 
     let max_cost_usd_nanos = match args.max_cost_usd {
         None => None,
@@ -320,9 +500,13 @@ async fn prepare_headless(
         }
     };
 
-    let factory = runtime::RuntimeFactory::system().map_err(|error| invalid(error.to_string()))?;
-    let load = overrides
-        .load_request_in(&workspace)
+    let load = if run_state.is_some() {
+        overrides.captured_load_request_in(&workspace)
+    } else {
+        overrides.load_request_in(&workspace)
+    }
+    .map_err(|error| invalid(error.to_string()))?;
+    let factory = factory_builder(run_state.as_ref(), &workspace, &load)
         .map_err(|error| invalid(error.to_string()))?;
     let model_is_fallback = load.overrides().model().is_none();
     let config_factory = factory.clone();
@@ -2282,7 +2466,114 @@ mod tests {
         let Some(cli::Command::Run(args)) = parsed.command else {
             panic!("expected a run command");
         };
-        args
+        *args
+    }
+
+    fn run_state_tree() -> tempfile::TempDir {
+        let directory = private_tempdir();
+        for name in ["config", "data", "workspace", "artifacts"] {
+            let path = directory.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+        let config = directory.path().join("config/config.ron");
+        std::fs::write(
+            &config,
+            r#"(version: 1, model: "custom/test", providers: {"custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: {"test": (name: "Test")})})"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        directory
+    }
+
+    #[test]
+    fn run_state_cli_and_root_validation_are_opt_in_and_fail_closed() {
+        let directory = run_state_tree();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let root_arg = root.to_str().unwrap();
+        let args = run_args("task", &["--state-root", root_arg]);
+        assert_eq!(args.state_root.as_deref(), Some(root.as_path()));
+        let validated = validate_run_state_root(&root, None, false).unwrap();
+        assert_eq!(validated.workspace, root.join("workspace"));
+        assert_eq!(validated.config, root.join("config"));
+        assert_eq!(validated.data, root.join("data"));
+
+        std::fs::write(root.join("data/sessions.sqlite3"), b"existing").unwrap();
+        assert!(
+            validate_run_state_root(&root, None, false)
+                .unwrap_err()
+                .contains("fresh --state-root")
+        );
+        assert!(validate_run_state_root(&root, None, true).is_ok());
+
+        let outside = private_tempdir();
+        assert!(
+            validate_run_state_root(&root, Some(outside.path()), true)
+                .unwrap_err()
+                .contains("--workspace must be")
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_run_state_uses_the_injected_backend_and_relocated_session_store() {
+        let directory = run_state_tree();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let root_arg = root.to_str().unwrap();
+        let args = run_args(
+            "task",
+            &[
+                "--state-root",
+                root_arg,
+                "--max-turns",
+                "1",
+                "--timeout-seconds",
+                "5",
+            ],
+        );
+        for name in ["original-data", "managed", "credentials"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(root.join(name), std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+        }
+        let (runtime, options) = prepare_headless_with_factory(
+            args,
+            &CliOverrides::default(),
+            |paths, workspace, load| {
+                let paths = paths.expect("state root");
+                runtime::RuntimeFactory::run_state(
+                    config::ConfigLoader::new(config::ConfigPaths::new(
+                        paths.config.clone(),
+                        root.join("original-data"),
+                        root.join("managed"),
+                    ))
+                    .for_run_state(paths.config.clone(), paths.data.clone()),
+                    auth::CredentialStore::with_backend(
+                        auth::CredentialPaths::new(root.join("credentials")),
+                        Arc::new(PanicKeyring),
+                    ),
+                    workspace.to_path_buf(),
+                    paths.config.clone(),
+                    load.clone(),
+                )
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(options.workspace, root.join("workspace"));
+        assert!(root.join("data/sessions.sqlite3").exists());
+        drop(runtime);
     }
 
     /// The output schema is read and compiled before any configuration or

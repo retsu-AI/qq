@@ -15,9 +15,10 @@ use qq_auth::{
     resolve_provider_credential_with_aliases,
 };
 use qq_config::{
-    AwsAuth, BedrockAuth, ClientSnapshot, ConfigError, ConfigLoader, ConfigSnapshot, EndpointMode,
-    HttpAccess, HttpCredential, LoadRequest, ProcessTrust, PromotionOutcome, ProviderAccess,
-    ProviderApi, ProviderAuth, ProviderConfig, RuntimeOverrides, WorkspaceGrant,
+    AwsAuth, BedrockAuth, ClientSnapshot, ConfigError, ConfigKey, ConfigLoader, ConfigSnapshot,
+    ConfigSources, EndpointMode, HttpAccess, HttpCredential, LoadRequest, ProcessTrust,
+    PromotionOutcome, ProviderAccess, ProviderApi, ProviderAuth, ProviderConfig, RuntimeOverrides,
+    SourceIdentity, SourceKind, WorkspaceGrant,
 };
 use qq_core::{
     ApprovalReviewer, CheckpointFuture, CheckpointOutcome, CheckpointRequest, CheckpointReviewer,
@@ -165,6 +166,15 @@ struct RuntimeFactoryInner {
 enum RuntimeMode {
     Standard,
     IsolatedTuiQa { root: PathBuf, workspace: PathBuf },
+    RunState(RunStateScope),
+}
+
+#[derive(Clone)]
+struct RunStateScope {
+    workspace: PathBuf,
+    config_dir: PathBuf,
+    request: LoadRequest,
+    admitted_sources: ConfigSources,
 }
 
 fn validate_tui_qa_tree(path: &Path) -> Result<(), String> {
@@ -211,6 +221,139 @@ fn validate_tui_qa_tree(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn run_state_source_allowed(source: &SourceIdentity, config_dir: &Path) -> bool {
+    match source.kind() {
+        SourceKind::Compiled | SourceKind::Runtime => true,
+        SourceKind::Global | SourceKind::Explicit => source
+            .path()
+            .is_some_and(|path| path.starts_with(config_dir)),
+        SourceKind::Remote
+        | SourceKind::Project
+        | SourceKind::Managed
+        | SourceKind::Mdm
+        | SourceKind::Inline
+        | SourceKind::TrustState => false,
+    }
+}
+
+fn run_state_effective_source<'a>(
+    snapshot: &'a ConfigSnapshot,
+    key: &ConfigKey,
+) -> Option<&'a SourceIdentity> {
+    snapshot
+        .source_reports()
+        .iter()
+        .rev()
+        .find(|report| report.touched().iter().any(|candidate| candidate == key))
+        .map(qq_config::SourceReport::source)
+}
+
+fn validate_run_state_source(
+    source: Option<&SourceIdentity>,
+    config_dir: &Path,
+    consumer: &str,
+) -> Result<(), RuntimeBuildError> {
+    if source.is_some_and(|source| run_state_source_allowed(source, config_dir)) {
+        return Ok(());
+    }
+    Err(RuntimeBuildError::InvalidRunState {
+        reason: format!(
+            "effective {consumer} was introduced outside the captured run configuration"
+        ),
+    })
+}
+
+/// Enumerates every effective route that can resolve credentials, construct a
+/// reviewer, expose tools, start MCP/subprocess work, or reach another
+/// service. Administrator and organization policy still merge normally; a
+/// policy result that introduces one of these consumers is rejected rather
+/// than silently overridden.
+fn validate_run_state_sources(
+    snapshot: &ConfigSnapshot,
+    config_dir: &Path,
+) -> Result<(), RuntimeBuildError> {
+    let provenance = snapshot.provenance();
+    validate_run_state_source(provenance.model(), config_dir, "model route")?;
+    validate_run_state_source(
+        provenance.provider(snapshot.model().provider()),
+        config_dir,
+        "selected provider",
+    )?;
+    if snapshot.worker_model().is_some() {
+        validate_run_state_source(provenance.worker_model(), config_dir, "worker model")?;
+    }
+    if snapshot.reviewer_model().is_some() {
+        validate_run_state_source(
+            provenance.reviewer_model(),
+            config_dir,
+            "approval reviewer model",
+        )?;
+    }
+    if snapshot.jev_review() != qq_config::JevReviewMode::Off {
+        validate_run_state_source(provenance.jev_review(), config_dir, "Jev review")?;
+    }
+    if snapshot.jev_routing() {
+        validate_run_state_source(provenance.jev_routing(), config_dir, "Jev routing")?;
+    }
+    if snapshot.jev_approval() {
+        validate_run_state_source(provenance.jev_approval(), config_dir, "Jev approval")?;
+    }
+    if snapshot.approval_delegate().is_some() {
+        validate_run_state_source(
+            provenance.approval_delegate(),
+            config_dir,
+            "approval delegate",
+        )?;
+    }
+    if !snapshot.delegation().roster().is_empty() {
+        validate_run_state_source(provenance.delegation(), config_dir, "delegation route")?;
+    }
+    if snapshot.audit().mode() != qq_config::AuditMode::Off {
+        validate_run_state_source(provenance.audit(), config_dir, "audit route")?;
+    }
+    for name in snapshot.mcp_servers().keys() {
+        validate_run_state_source(
+            run_state_effective_source(snapshot, &ConfigKey::McpServer(name.clone())),
+            config_dir,
+            &format!("MCP server {name:?}"),
+        )?;
+    }
+    for name in snapshot.profiles().keys() {
+        validate_run_state_source(
+            provenance.profile(name),
+            config_dir,
+            &format!("agent profile {name:?}"),
+        )?;
+    }
+    for name in snapshot.packs().keys() {
+        validate_run_state_source(
+            provenance.pack(name),
+            config_dir,
+            &format!("agent pack {name:?}"),
+        )?;
+    }
+    for (name, source) in provenance.grant_tools() {
+        validate_run_state_source(Some(source), config_dir, &format!("tool grant {name:?}"))?;
+    }
+    for (prefix, source) in provenance.grant_shell_prefixes() {
+        validate_run_state_source(Some(source), config_dir, &format!("shell grant {prefix:?}"))?;
+    }
+    let policy_has_process_or_service_consumers = snapshot
+        .policy()
+        .exposed_tools()
+        .is_some_and(|tools| !tools.is_empty())
+        || !snapshot.policy().allow_hosts().is_empty()
+        || !snapshot.policy().shell_env().is_empty();
+    if policy_has_process_or_service_consumers {
+        validate_run_state_source(
+            run_state_effective_source(snapshot, &ConfigKey::Policy),
+            config_dir,
+            "tool, host, or subprocess policy",
+        )?;
+    }
+    Ok(())
+}
+
 impl RuntimeFactory {
     pub fn system() -> Result<Self, RuntimeBuildError> {
         Self::new(ConfigLoader::system()?, CredentialStore::system()?)
@@ -252,6 +395,39 @@ impl RuntimeFactory {
                 root: root.to_owned(),
                 workspace,
             },
+        )
+    }
+
+    /// Builds a headless factory whose configuration inputs and effective
+    /// credential/process consumers are fixed before provider compilation or
+    /// credential-store access. The ordinary credential store remains the
+    /// execution backend; callers can inject a fake backend for nonsecret
+    /// tests without changing the production path.
+    pub(crate) fn run_state(
+        config: ConfigLoader,
+        credentials: CredentialStore,
+        workspace: PathBuf,
+        config_dir: PathBuf,
+        request: LoadRequest,
+    ) -> Result<Self, RuntimeBuildError> {
+        if request.cwd() != workspace || request.has_explicit_content() {
+            return Err(RuntimeBuildError::InvalidRunState {
+                reason: "the captured request must use the run workspace and a file-backed configuration"
+                    .to_owned(),
+            });
+        }
+        let snapshot = config.load(&request)?;
+        validate_run_state_sources(&snapshot, &config_dir)?;
+        let admitted_sources = snapshot.sources().clone();
+        Self::with_mode(
+            config,
+            credentials,
+            RuntimeMode::RunState(RunStateScope {
+                workspace,
+                config_dir,
+                request,
+                admitted_sources,
+            }),
         )
     }
 
@@ -410,10 +586,13 @@ impl RuntimeFactory {
     pub fn load(&self, request: &LoadRequest) -> Result<ConfigSnapshot, RuntimeBuildError> {
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(request.cwd())?;
+        self.validate_run_state_workspace(request.cwd())?;
+        self.validate_run_state_inputs()?;
         let snapshot = self.inner.config.load(request)?;
         if self.is_isolated_tui_qa() {
             self.validate_tui_qa_snapshot(&snapshot)?;
         }
+        self.validate_run_state_snapshot(&snapshot)?;
         Ok(snapshot)
     }
 
@@ -427,6 +606,7 @@ impl RuntimeFactory {
     ) -> Result<ClientSnapshot, RuntimeBuildError> {
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(request.cwd())?;
+        self.validate_run_state_workspace(request.cwd())?;
         if self.is_isolated_tui_qa() {
             let snapshot = self.inner.config.load(request)?;
             self.validate_tui_qa_snapshot(&snapshot)?;
@@ -868,7 +1048,14 @@ impl RuntimeFactory {
     ) -> Result<LoadRequest, RuntimeBuildError> {
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(workspace)?;
-        let request = if self.is_isolated_tui_qa() {
+        self.validate_run_state_workspace(workspace)?;
+        let request = if let RuntimeMode::RunState(scope) = &self.inner.mode {
+            let mut overrides = scope.request.overrides().clone();
+            if let Some(max_output_tokens) = max_output_tokens {
+                overrides = overrides.with_max_output_tokens(max_output_tokens);
+            }
+            scope.request.clone().with_overrides(overrides)
+        } else if self.is_isolated_tui_qa() {
             let mut overrides = RuntimeOverrides::new();
             if let Some(max_output_tokens) = max_output_tokens {
                 overrides = overrides.with_max_output_tokens(max_output_tokens);
@@ -882,6 +1069,45 @@ impl RuntimeFactory {
             return Ok(request);
         }
         Ok(request.with_process_trust(process_trust))
+    }
+
+    fn validate_run_state_workspace(&self, workspace: &Path) -> Result<(), RuntimeBuildError> {
+        let RuntimeMode::RunState(scope) = &self.inner.mode else {
+            return Ok(());
+        };
+        if workspace != scope.workspace {
+            return Err(RuntimeBuildError::InvalidRunState {
+                reason: format!(
+                    "workspace `{}` is outside the captured run state",
+                    workspace.display()
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_run_state_snapshot(
+        &self,
+        snapshot: &ConfigSnapshot,
+    ) -> Result<(), RuntimeBuildError> {
+        let RuntimeMode::RunState(scope) = &self.inner.mode else {
+            return Ok(());
+        };
+        validate_run_state_sources(snapshot, &scope.config_dir)?;
+        Ok(())
+    }
+
+    fn validate_run_state_inputs(&self) -> Result<(), RuntimeBuildError> {
+        let RuntimeMode::RunState(scope) = &self.inner.mode else {
+            return Ok(());
+        };
+        if !scope.admitted_sources.is_current() {
+            return Err(RuntimeBuildError::InvalidRunState {
+                reason: "a captured configuration, policy, organization, trust, or workspace source changed after run admission"
+                    .to_owned(),
+            });
+        }
+        Ok(())
     }
 
     fn validate_tui_qa_snapshot(&self, snapshot: &ConfigSnapshot) -> Result<(), RuntimeBuildError> {
@@ -1374,6 +1600,14 @@ impl RuntimeFactory {
         workspace: &Path,
         progress: Option<&qq_core::RuntimeLoadProgress>,
     ) -> Result<CompiledGeneration, RuntimeBuildError> {
+        // Run-scoped loads must finish the full policy merge and consumer
+        // admission before even credential metadata is inspected. Standard
+        // mode retains its established ordering.
+        let admitted_snapshot = if matches!(self.inner.mode, RuntimeMode::RunState(_)) {
+            Some(self.load(request)?)
+        } else {
+            None
+        };
         // The credential index is fingerprinted before secrets are read so a
         // rotation racing this compile is observed on the next lookup.
         if let Some(progress) = progress {
@@ -1385,7 +1619,10 @@ impl RuntimeFactory {
         if let Some(progress) = progress {
             progress.set(qq_core::RuntimeLoadStage::LoadingConfiguration);
         }
-        let snapshot = self.load(request)?;
+        let snapshot = match admitted_snapshot {
+            Some(snapshot) => snapshot,
+            None => self.load(request)?,
+        };
         let mut configuration_sources = vec![snapshot.sources().clone()];
         // A named profile supplies defaults beneath the request's explicit
         // overrides. Resolving it needs the merged configuration, so the load
@@ -3698,6 +3935,8 @@ pub enum RuntimeBuildError {
     },
     #[error("isolated TUI QA profile is invalid: {reason}")]
     InvalidTuiQaProfile { reason: String },
+    #[error("run-scoped configuration is invalid: {reason}")]
+    InvalidRunState { reason: String },
 }
 
 impl RuntimeBuildError {
@@ -3737,7 +3976,8 @@ impl RuntimeBuildError {
             | Self::UnsupportedReasoningEffort(_)
             | Self::ReasoningEffortNotAdvertised { .. }
             | Self::JevClientUnavailable
-            | Self::InvalidTuiQaProfile { .. } => RunFailureKind::Configuration,
+            | Self::InvalidTuiQaProfile { .. }
+            | Self::InvalidRunState { .. } => RunFailureKind::Configuration,
             Self::UnauthenticatedProvider(_) => RunFailureKind::Authentication,
             Self::Runtime(_)
             | Self::UnknownProvider(_)
@@ -3755,6 +3995,7 @@ impl RuntimeBuildError {
 
 #[cfg(test)]
 mod tests {
+    mod run_state;
     mod strict_verification;
     use std::{
         collections::BTreeMap,

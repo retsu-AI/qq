@@ -107,8 +107,11 @@ pub(super) fn load_for_client(
     }
 
     if let Some(organization) = organization
-        && let Some((document, source)) =
-            remote::load_cached_if_enrolled(&loader.paths, &organization, probes)?
+        && let Some((document, source)) = remote::load_cached_if_enrolled(
+            &loader.organization_read_paths(),
+            &organization,
+            probes,
+        )?
     {
         apply_document(document, source, &trust, &mut merged, &mut report, probes)?;
     }
@@ -277,7 +280,7 @@ fn selected_organization(
     mdm: Option<&MdmDocument>,
     probes: &mut Probes,
 ) -> Result<Option<String>, ConfigError> {
-    let mut organization = remote::selected(&loader.paths, probes)?;
+    let mut organization = remote::selected(&loader.organization_read_paths(), probes)?;
     let mut seen = BTreeSet::new();
 
     for candidate in discover_layer_directory(

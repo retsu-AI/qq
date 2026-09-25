@@ -269,6 +269,14 @@ pub(super) fn list(paths: &ConfigPaths) -> Result<Vec<OrganizationEnrollment>, C
     Ok(OrganizationState::load(paths, &mut Probes::default())?.metadata())
 }
 
+/// Lists enrollment metadata without creating the organization lock. Run
+/// scopes use this for their inherited read-only organization source.
+pub(super) fn list_read_only(
+    paths: &ConfigPaths,
+) -> Result<Vec<OrganizationEnrollment>, ConfigError> {
+    Ok(OrganizationState::load(paths, &mut Probes::default())?.metadata())
+}
+
 pub(super) fn selected(
     paths: &ConfigPaths,
     probes: &mut Probes,
