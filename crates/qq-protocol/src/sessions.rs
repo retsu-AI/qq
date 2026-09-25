@@ -337,7 +337,7 @@ pub enum ApprovalDelegate {
     Off,
 }
 
-/// How much of a session Jev is asked to decide (protocol 31, ADR-0043). A
+/// How much of a session Jev is asked to decide (protocol 31, ADR-0044). A
 /// ladder over the three independent Jev capabilities — task routing,
 /// checkpoint review, and the approval delegate — that the composition root
 /// resolves at plan compile time; each step asks Jev to decide strictly more.
@@ -3632,7 +3632,7 @@ mod tests {
         // `approval_delegate_set`, and the optional
         // `SessionSummary.approval_delegate` override. Older clients reject
         // the new command, outcome, event tag, and summary field.
-        // Version 31 adds the Jev mode switch (ADR-0043): `JevMode`,
+        // Version 31 adds the Jev mode switch (ADR-0044): `JevMode`,
         // `set_jev_mode` / `jev_mode_set`, the optional
         // `SessionSummary.jev_mode` override, and the reserved `/jev` slash
         // command.

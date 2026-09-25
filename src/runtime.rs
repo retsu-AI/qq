@@ -3148,7 +3148,7 @@ const fn approval_delegate(
     }
 }
 
-/// What one rung of the session Jev ladder enables (ADR-0043 § 2). Every rung
+/// What one rung of the session Jev ladder enables (ADR-0044 § 2). Every rung
 /// is expressed in the three existing Jev capabilities, so a mode is exactly
 /// the runtime overrides an operator could have set by hand; `jev_approval`
 /// consent is deliberately not among them.
@@ -8489,7 +8489,7 @@ mod tests {
         );
     }
 
-    /// ADR-0043: the session's Jev mode is one table in the composition root.
+    /// ADR-0044: the session's Jev mode is one table in the composition root.
     /// Each rung enables the three Jev roles as documented, an inherited
     /// child selection still wins over the rung, and a rung without a Jev
     /// credential fails closed like any other Jev opt-in.

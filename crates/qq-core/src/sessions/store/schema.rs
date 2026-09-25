@@ -1229,7 +1229,7 @@ pub(in crate::sessions) fn open_database(
             [],
         )?;
     }
-    // 40: the per-session Jev mode (`set_jev_mode`, ADR-0043). NULL
+    // 40: the per-session Jev mode (`set_jev_mode`, ADR-0044). NULL
     // restores configured capabilities; the pin is read at the next claim.
     if schema_version.as_deref() != Some("40") {
         let transaction = connection.transaction()?;

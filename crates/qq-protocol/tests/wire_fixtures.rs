@@ -409,7 +409,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             },
         ),
     );
-    // Version 31: the Jev mode ladder (ADR-0043).
+    // Version 31: the Jev mode ladder (ADR-0044).
     check(
         "command_set_jev_mode",
         &command(

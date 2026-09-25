@@ -137,7 +137,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0045. Reserve here before opening a PR that adds an ADR.
+Next free number: 0046. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -451,3 +451,18 @@ Main dc07e29 occupies ADR0043 for token efficiency. The proposed local session
 switcher decision moves to ADR0044; historical ledger receipts retain their
 original IDs. Protocol31/store40 remain unchanged. Accepted291440a and parser
 5eed43f are preserved on their prior branches.
+
+### 2026-09-25 — ENG-791 Strict verification started
+
+Sole writer: Startup task01a0d95e-d2ce-7350-9a9a-125f78a1be6a. Branch
+`feat/eng-791-strict-verification`, base integration8e07295 includes main dc07e29.
+Reserve ADR0045, protocol32, store41 (current local31/40; main30/39).
+Owned surface: config/runtime/core checkpoint and session persistence, protocol,
+headless/output, associated fixtures/tests and documentation. Existing modes
+and ladder unchanged. Explicit existing finite run bound required; no replacement
+correction cap or optional max_checkpoint_reviews. Manager owns publication and
+independent final-head review. Spec digest2911cb7e40d0242e34995e159ca52f2b572f1cf9a043c973ed69543423ea5354.
+Acceptance: typed unavailable/unresolved vs supported-only atomic completion,
+fresh evidence, budget/cancel/restart/child/accounting semantics, compatibility,
+workspace checks and exact-head review. Baseline: accepted291440a gates and
+red-first Strict tests; no live provider calls.
