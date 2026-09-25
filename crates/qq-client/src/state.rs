@@ -448,7 +448,7 @@ impl SessionStore {
     /// placed after its run's last message so live order matches snapshots.
     pub fn push_message(&mut self, message: MessageSnapshot) {
         let Some(messages) = self
-            .get_mut(&message.session_id)
+            .body_mut(&message.session_id)
             .and_then(|session| session.messages.as_mut())
         else {
             return;
@@ -519,7 +519,7 @@ impl SessionStore {
     /// transaction as the turn's tool calls, without a dedicated event.
     fn complete_streamed_turns(&mut self, session_id: SessionId, run_id: RunId, through_turn: u32) {
         let Some(messages) = self
-            .get_mut(&session_id)
+            .body_mut(&session_id)
             .and_then(|session| session.messages.as_mut())
         else {
             return;
