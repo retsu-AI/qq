@@ -219,3 +219,13 @@ Public standard-runner minutes are free, but cache-cost qualification returned
 HTTP402 on the storage-limit API. Preserve the candidate locally pending that
 publication dependency and final non-author review. Live-provider and original
 mandatory-verdict acceptance remain unproved.
+
+### 2026-09-25 — RR3 independent review correction
+
+Reviewer `jev_contract_review` inspected `0004e719` against `c6df04bf`, including
+the runtime, v0.1.4 ancestry and raw focused-test logs. Request changes: the root
+ledger prematurely said review was recorded here. An append-only root correction
+now distinguishes local qualification from the separately retained review.
+Contract wording and evidence otherwise passed its review. Report:
+Startup Manager's `reviews/retsu-weekly-audit-2026-09-25/qq-jev-evidence/independent-review.md`.
+Final successor review remains pending; no runtime bytes changed after the tests.
