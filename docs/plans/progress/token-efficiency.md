@@ -55,3 +55,13 @@ is assigned per slice. [Plan](../token-efficiency.md).
 - Renumbered proposed efficiency ADR to 0043 and updated live references;
   historical reservation entries above describe their original context.
 - Parent #141 conflict resolved without altering implementation behavior.
+
+### 2026-09-25 — fix CI streaming-index regression
+
+- CI run 36149197597 passed fmt/Clippy but failed the client streaming-index
+  test. Replaced allocator-address assertion with direct cache retention check;
+  reproduced failure deterministically before the fix.
+- `push_message` and `complete_streamed_turns` now use body-only mutation,
+  preserving the derived tree index. No tree-summary mutation is bypassed.
+- Passed all 22 client tests, workspace Clippy, full parallel workspace tests,
+  workspace build and formatting. No serial-test workaround required.
