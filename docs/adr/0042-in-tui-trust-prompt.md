@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-09-24
 **Deciders:** onboarding-ux OB7 (ENG-881)
-**Implements:** [`onboarding-ux.md` § OB7](../plans/progress/onboarding-ux.md#2026-09-24-ob7-in-tui-trust-prompt-in-review); [`tools.md` § trust](../design/tools.md)
+**Implements:** [`onboarding-ux.md` § OB7](../plans/progress/onboarding-ux.md#2026-09-24--ob7-in-tui-trust-prompt-in-review); [`tools.md` § trust](../design/tools.md)
 
 ## Context
 
