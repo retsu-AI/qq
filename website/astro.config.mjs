@@ -3,6 +3,9 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import { site, href } from './site.config.mjs';
 
+// Copied to public/_fonts by scripts/sync-docs.mjs; stable names so they can be preloaded.
+const preloadedFonts = ['inter-latin-wght-normal.woff2', 'jetbrains-mono-latin-400-normal.woff2'];
+
 // The sidebar and the generated pages share one manifest; scripts/sync-docs.mjs
 // fails the build if the manifest and docs/guide disagree.
 const sidebar = JSON.parse(readFileSync(new URL('./sidebar.json', import.meta.url), 'utf8')).map(
@@ -49,6 +52,12 @@ export default defineConfig({
       },
       head: [
         { tag: 'meta', attrs: { name: 'theme-color', content: '#141720' } },
+        // The two fonts every page paints with; discovered from CSS otherwise,
+        // one round-trip later than the HTML.
+        ...preloadedFonts.map((file) => ({
+          tag: 'link',
+          attrs: { rel: 'preload', as: 'font', type: 'font/woff2', crossorigin: 'anonymous', href: href(`_fonts/${file}`) },
+        })),
         { tag: 'meta', attrs: { property: 'og:image', content: new URL(href('og-image.png'), site.url).href } },
         { tag: 'meta', attrs: { name: 'twitter:card', content: 'summary_large_image' } },
       ],

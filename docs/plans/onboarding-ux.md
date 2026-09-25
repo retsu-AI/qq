@@ -1,6 +1,6 @@
 # Onboarding UX: from `git clone` to a working agent in one minute
 
-**Status:** Active from 2026-09-22. Ledger:
+**Status:** Complete 2026-09-25 (all slices shipped; see the ledger's closing entry). Ledger:
 [`progress/onboarding-ux.md`](progress/onboarding-ux.md). Research:
 [`../design/onboarding-audit-2026-09-22.md`](../design/onboarding-audit-2026-09-22.md).
 **Linear:** [ENG-875](https://linear.app/retsu-ai/issue/ENG-875) (parent);
@@ -36,17 +36,17 @@ Acceptance for the plan as a whole (the fresh-machine script in
 
 | ID | Slice | Owned paths | Status |
 | --- | --- | --- | --- |
-| OB0 | Audit, plan, user guide skeleton, community files, small P0 error fixes (O01, O05, O07, O08, O12; O03 plan-time half) | `docs/guide/`, `docs/design/onboarding-audit-*`, `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `.github/ISSUE_TEMPLATE/`, `.github/pull_request_template.md`, `src/main.rs`, `src/cli.rs`, `crates/qq-config/src/lib.rs`, `crates/qq-auth/src/lib.rs` | In review |
-| OB1 | Open the TUI without a model; route to `/models` (ENG-860) | `src/main.rs`, `src/runtime.rs`, `crates/qq-config` (model-optional load), `crates/qq-tui` empty-state | Planned |
-| OB2 | Open the TUI without a credential; empty state names the provider, env var, and `qq auth login`; `/models` lists unauthenticated built-ins as `needs credential` (O02, O19) | `src/main.rs`, `src/runtime.rs`, `crates/qq-tui/src/app/pickers.rs`, `view/transcript.rs`, `view/sidebar.rs` | Planned |
-| OB3 | Request-time credential errors name provider and remedy (O03 request-time half; O16 `GOOGLE_API_KEY` alias) | `crates/qq-provider/src/request_auth.rs`, `crates/qq-auth`, `crates/qq-config/src/providers.rs` | Planned |
-| OB4 | `qq doctor`: config, model, credential, keyring, server, workspace trust, in one screen with remediation per line (O09, O10) | `src/cli.rs`, `src/main.rs` (new `doctor.rs`) | Planned |
-| OB5 | `qq init [--global]`: write a commented `config.ron` with the provider the user picks, refuse to overwrite; `qq config paths` marks existing files (O06, O10) | `src/cli.rs`, `src/main.rs`, `docs/guide/configuration.md` | Planned |
-| OB6 | Install: `install.sh` for the release archives, Homebrew tap formula, Nix flake `packages.qq` + `apps.default`, cargo-binstall metadata; README leads with them (O04, O20) | `install.sh`, `flake.nix`, `nix/`, `Cargo.toml` `[package.metadata.binstall]`, `.github/workflows/release.yml`, `docs/guide/install.md`, `docs/runbooks/release.md` | Planned |
-| OB7 | In-TUI trust prompt: an untrusted project opens the TUI with a hold that lists what the configuration declares; Trust / This session / Quit (O01, O17; ADR-0042) | `crates/qq-tui`, `crates/qq-client`, `crates/qq-config`, `src/main.rs`, `src/runtime.rs`, `src/plan.rs`, `docs/design/tools.md` | In review |
-| OB8 | First-session guidance: a one-time "try these" cell and a `? for help` footer hint; `qq run` denial notice suggests `--approval auto` (O18, O19) | `crates/qq-tui/src/view/transcript.rs`, `src/headless.rs` | Planned |
-| OB9 | Degrade an MCP server whose `Stored(...)` bearer is unregistered (ENG-861) | `src/mcp.rs`, `crates/qq-mcp` | Planned |
-| OB10 | Docs CI: a test that every `Document` key, `PolicyPatch` key, env var, `CommandSpec` slash name, and `ConfigCommand` appears in `docs/guide/`; CHANGELOG generated from Conventional Commits at release | `xtask/`, `tests/`, `.github/workflows/ci.yml`, `docs/runbooks/release.md` | Planned |
+| OB0 | Audit, plan, user guide skeleton, community files, small P0 error fixes (O01, O05, O07, O08, O12; O03 plan-time half) | `docs/guide/`, `docs/design/onboarding-audit-*`, `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `.github/ISSUE_TEMPLATE/`, `.github/pull_request_template.md`, `src/main.rs`, `src/cli.rs`, `crates/qq-config/src/lib.rs`, `crates/qq-auth/src/lib.rs` | Shipped |
+| OB1 | Open the TUI without a model; route to `/models` (ENG-860) | `src/main.rs`, `src/runtime.rs`, `crates/qq-config` (model-optional load), `crates/qq-tui` empty-state | Shipped |
+| OB2 | Open the TUI without a credential; empty state names the provider, env var, and `qq auth login`; `/models` lists unauthenticated built-ins as `needs credential` (O02, O19) | `src/main.rs`, `src/runtime.rs`, `crates/qq-tui/src/app/pickers.rs`, `view/transcript.rs`, `view/sidebar.rs` | Shipped |
+| OB3 | Request-time credential errors name provider and remedy (O03 request-time half; O16 `GOOGLE_API_KEY` alias) | `crates/qq-provider/src/request_auth.rs`, `crates/qq-auth`, `crates/qq-config/src/providers.rs` | Shipped |
+| OB4 | `qq doctor`: config, model, credential, keyring, server, workspace trust, in one screen with remediation per line (O09, O10) | `src/cli.rs`, `src/main.rs` (new `doctor.rs`) | Shipped |
+| OB5 | `qq init [--global]`: write a commented `config.ron` with the provider the user picks, refuse to overwrite; `qq config paths` marks existing files (O06, O10) | `src/cli.rs`, `src/main.rs`, `docs/guide/configuration.md` | Shipped |
+| OB6 | Install: `install.sh` for the release archives, Homebrew tap formula, Nix flake `packages.qq` + `apps.default`, cargo-binstall metadata; README leads with them (O04, O20) | `install.sh`, `flake.nix`, `nix/`, `Cargo.toml` `[package.metadata.binstall]`, `.github/workflows/release.yml`, `docs/guide/install.md`, `docs/runbooks/release.md` | Shipped |
+| OB7 | In-TUI trust prompt: an untrusted project opens the TUI with a hold that lists what the configuration declares; Trust / This session / Quit (O01, O17; ADR-0042) | `crates/qq-tui`, `crates/qq-client`, `crates/qq-config`, `src/main.rs`, `src/runtime.rs`, `src/plan.rs`, `docs/design/tools.md` | Shipped |
+| OB8 | First-session guidance: a one-time "try these" cell and a `? for help` footer hint; `qq run` denial notice suggests `--approval auto` (O18, O19) | `crates/qq-tui/src/view/transcript.rs`, `src/headless.rs` | Shipped |
+| OB9 | Degrade an MCP server whose `Stored(...)` bearer is unregistered (ENG-861) | `src/mcp.rs`, `crates/qq-mcp` | Shipped |
+| OB10 | Docs CI: a test that every `Document` key, `PolicyPatch` key, env var, `CommandSpec` slash name, and `ConfigCommand` appears in `docs/guide/`; CHANGELOG generated from Conventional Commits at release | `xtask/`, `tests/`, `.github/workflows/ci.yml`, `docs/runbooks/release.md` | Shipped |
 | OB11 | Wiki mirror: a release-time job pushes `docs/guide/` to the GitHub Wiki with a `_Sidebar.md`; decide on a docs site when the guide exceeds what a wiki renders well | `.github/workflows/`, `docs/guide/_Sidebar.md` | Superseded by OB12 |
 | OB12 | Docs website: an Astro/Starlight site under `website/` whose documentation pages are generated from `docs/guide/` at build time, with a landing page, search, and the real `install.sh`; built on every PR that touches it or the guide, deployed to GitHub Pages from `main` | `website/`, `.github/workflows/website.yml` | Shipped (#156) |
 

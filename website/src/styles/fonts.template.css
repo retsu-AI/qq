@@ -1,0 +1,38 @@
+/* Self-hosted fonts from the fontsource packages, Latin subsets only, served
+   from public/_fonts under stable names so the page head can preload them
+   (scripts/sync-docs.mjs copies the files and fills in __BASE__ from
+   site.config.mjs when it writes src/generated/fonts.css). `swap` shows text immediately in
+   the metric-matched fallback below. */
+@font-face {
+  font-family: 'Inter Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('__BASE__/_fonts/inter-latin-wght-normal.woff2') format('woff2-variations');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url('__BASE__/_fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url('__BASE__/_fonts/jetbrains-mono-latin-500-normal.woff2') format('woff2');
+}
+
+/* Inter's fallback, metric-matched, so prose keeps its line breaks when the
+   web font arrives (otherwise a docs page shifts ~0.2 CLS on a cold load).
+   Adjustments are Inter vs. Arial/Liberation Sans, the common local sans. */
+@font-face {
+  font-family: 'Inter Fallback';
+  src: local('Arial'), local('Liberation Sans'), local('Helvetica Neue'), local('Helvetica');
+  size-adjust: 107%;
+  ascent-override: 90%;
+  descent-override: 22.5%;
+  line-gap-override: 0%;
+}
