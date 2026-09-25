@@ -8817,6 +8817,179 @@ mod tests {
         }
     }
 
+    // Exact synthetic-only real-service responses retained in the September 25 qualification.
+    fn recorded_low_confidence_responses() -> [serde_json::Value; 2] {
+        [
+            serde_json::json!({
+                "model": "jev-1.13.0",
+                "answers": {
+                    "consistency": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "confidence": 0.83,
+                        "probabilities": {
+                            "supported": 0.88,
+                            "partially_supported": 0.07,
+                            "contradicted": 0.02,
+                            "insufficient_evidence": 0.03
+                        }
+                    },
+                    "direct_evidence": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "confidence": 0.75,
+                        "probabilities": {
+                            "supported": 0.81,
+                            "partially_supported": 0.1,
+                            "contradicted": 0.03,
+                            "insufficient_evidence": 0.06
+                        }
+                    },
+                    "task_coverage": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "confidence": 0.57,
+                        "probabilities": {
+                            "supported": 0.68,
+                            "partially_supported": 0.25,
+                            "contradicted": 0.03,
+                            "insufficient_evidence": 0.04
+                        }
+                    }
+                },
+                "usage": {
+                    "input_tokens": 1182,
+                    "output_tokens": 173
+                }
+            }),
+            serde_json::json!({
+                "model": "jev-1.13.0",
+                "answers": {
+                    "consistency": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "confidence": 0.48,
+                        "probabilities": {
+                            "contradicted": 0.24,
+                            "partially_supported": 0.14,
+                            "insufficient_evidence": 0.01,
+                            "supported": 0.61
+                        }
+                    },
+                    "direct_evidence": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "confidence": 0.5,
+                        "probabilities": {
+                            "contradicted": 0.21,
+                            "partially_supported": 0.15,
+                            "insufficient_evidence": 0.01,
+                            "supported": 0.63
+                        }
+                    },
+                    "task_coverage": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "confidence": 0.36,
+                        "probabilities": {
+                            "contradicted": 0.21,
+                            "partially_supported": 0.26,
+                            "insufficient_evidence": 0.01,
+                            "supported": 0.52
+                        }
+                    }
+                },
+                "usage": {
+                    "input_tokens": 1194,
+                    "output_tokens": 173
+                }
+            }),
+        ]
+    }
+
+    #[test]
+    fn typesafe_checkpoint_feedback_separates_remote_choices_from_local_policy() {
+        let expected = [
+            [
+                "task_coverage: remote choice=supported, selected_probability=0.68, distribution_confidence=0.57; QQ policy=insufficient_evidence",
+                "direct_evidence: remote choice=supported, selected_probability=0.81, distribution_confidence=0.75; QQ policy=supported",
+                "consistency: remote choice=supported, selected_probability=0.88, distribution_confidence=0.83; QQ policy=supported",
+            ],
+            [
+                "task_coverage: remote choice=supported, selected_probability=0.52, distribution_confidence=0.36; QQ policy=insufficient_evidence",
+                "direct_evidence: remote choice=supported, selected_probability=0.63, distribution_confidence=0.5; QQ policy=insufficient_evidence",
+                "consistency: remote choice=supported, selected_probability=0.61, distribution_confidence=0.48; QQ policy=insufficient_evidence",
+            ],
+        ];
+        for (value, criteria) in recorded_low_confidence_responses()
+            .into_iter()
+            .zip(expected)
+        {
+            let verdict = parse_typesafe_checkpoint(&value);
+            assert_eq!(verdict.outcome, CheckpointOutcome::InsufficientEvidence);
+            for criterion in criteria {
+                assert!(verdict.feedback.contains(criterion), "{}", verdict.feedback);
+            }
+            assert!(
+                verdict
+                    .feedback
+                    .contains("QQ checkpoint outcome=insufficient_evidence")
+            );
+            assert_eq!(
+                verdict.spend.usage.unwrap().input_tokens,
+                value["usage"]["input_tokens"].as_u64().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn typesafe_checkpoint_feedback_keeps_both_thresholds_and_aggregation() {
+        for (choice, probability, distribution_confidence, expected) in [
+            ("supported", 0.9, 0.9, CheckpointOutcome::Supported),
+            ("contradicted", 0.9, 0.9, CheckpointOutcome::Contradicted),
+            ("supported", 0.7, 0.7, CheckpointOutcome::Supported),
+            (
+                "supported",
+                0.71,
+                0.6999999,
+                CheckpointOutcome::InsufficientEvidence,
+            ),
+            (
+                "supported",
+                0.6999999,
+                0.71,
+                CheckpointOutcome::InsufficientEvidence,
+            ),
+        ] {
+            let mut probabilities = serde_json::json!({"supported":0.0,"contradicted":0.0,"partially_supported":0.0,"insufficient_evidence":0.0});
+            probabilities[choice] = serde_json::json!(probability);
+            probabilities["partially_supported"] = serde_json::json!(1.0 - probability);
+            let answer = serde_json::json!({"type":"choice","choice":choice,"confidence":distribution_confidence,"probabilities":probabilities});
+            let value = serde_json::json!({"model":"jev-1.13.0","usage":{"input_tokens":10,"output_tokens":2},"answers":{"task_coverage":answer,"direct_evidence":answer,"consistency":answer}});
+            let verdict = parse_typesafe_checkpoint(&value);
+            assert_eq!(verdict.outcome, expected);
+            assert_eq!(verdict.confidence, Some(distribution_confidence));
+            for criterion in ["task_coverage", "direct_evidence", "consistency"] {
+                let expected_feedback = format!(
+                    "{criterion}: remote choice={choice}, selected_probability={probability}, distribution_confidence={distribution_confidence}; QQ policy={}",
+                    expected.label()
+                );
+                assert!(
+                    verdict.feedback.contains(&expected_feedback),
+                    "{}",
+                    verdict.feedback
+                );
+            }
+            assert_eq!(verdict.spend.estimated_cost_usd_nanos, Some(420));
+        }
+        let mut mixed = recorded_low_confidence_responses()[0].clone();
+        mixed["answers"]["consistency"] = serde_json::json!({"type":"choice","choice":"contradicted","confidence":0.95,"probabilities":{"supported":0.02,"contradicted":0.95,"partially_supported":0.02,"insufficient_evidence":0.01}});
+        let verdict = parse_typesafe_checkpoint(&mixed);
+        assert_eq!(verdict.outcome, CheckpointOutcome::Contradicted);
+        assert!(verdict.feedback.contains("QQ policy=insufficient_evidence"));
+        assert!(verdict.feedback.contains("QQ policy=contradicted"));
+    }
+
     #[test]
     fn tool_checkpoint_contract_is_step_scoped_while_final_is_task_scoped() {
         let (tool_claim, tool_instructions) = checkpoint_claim_and_instructions(true);
