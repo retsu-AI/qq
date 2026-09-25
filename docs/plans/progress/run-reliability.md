@@ -203,3 +203,19 @@ Existing checkpoint/session regressions and workspace checks pending;
 source-bound independent review follows the final candidate. No live TypeSafe
 qualification, speed/quality improvement, original strict-requirement completion,
 merge or release is claimed.
+
+### 2026-09-25 — RR3 focused qualification
+
+At documentation candidate `ac236614` (runtime identical to `c6df04bf`), pinned
+Rust 1.97.1 passed 26 checkpoint-filter tests, one red-exhaustion regression and
+one real SQLite restart/projection regression; no ignored selected tests.
+Initial run was 18 pass / 8 session-open failures (`Sqlite(CannotOpen)`): host
+TMPDIR used the macOS `/var` symlink with SQLite `NOFOLLOW`. Same-source rerun
+with an owned canonical TMPDIR passed; no source or policy was weakened.
+Workspace formatting, diff whitespace and changed-doc link targets pass.
+Raw logs: Startup Manager's `reviews/retsu-weekly-audit-2026-09-25/qq-jev-evidence/`.
+Full workspace test/lint/build and hosted CI were not run; no PR publication yet.
+Public standard-runner minutes are free, but cache-cost qualification returned
+HTTP402 on the storage-limit API. Preserve the candidate locally pending that
+publication dependency and final non-author review. Live-provider and original
+mandatory-verdict acceptance remain unproved.
