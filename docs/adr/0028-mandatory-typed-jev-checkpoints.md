@@ -85,3 +85,14 @@ internal runtime capability, never a tool call, so it cannot recurse.
 - `crates/qq-core/src/lib.rs` (post-result and final-candidate boundaries)
 - `crates/qq-core/src/sessions/streaming.rs` (durable checkpoint event)
 - `src/runtime.rs` (`TypeSafeCheckpointReviewer`)
+
+## Implementation divergence recorded 2026-09-25
+
+The strict-verdict policy above describes the original decision. Later
+[RR3 / #117](https://github.com/retsu-AI/qq/pull/117), merged as
+`876ec328ee46e725522871c0e8291c80fe8dc11e` and included in v0.1.4,
+changed both enabled review modes: unavailable assessments and red verdicts
+after two corrective redirects remain evidence and can accompany completion.
+The [current runbook](../runbooks/jev.md) documents the implemented contract.
+This clarification preserves the original decision and records its divergence;
+it does not establish that the original strict-verification requirement is met.

@@ -188,3 +188,18 @@ acceptance fixture
 `calibration_holds_the_estimate_within_ten_percent_on_a_code_heavy_transcript`
 (eight turns at 3.1 B/t, worst error < 10 %; the default would be 22 %
 under per delta), plus the existing chain and boundary tests.
+
+### 2026-09-25 — RR3 documentation reconciliation (ENG-791), in progress
+
+Branch `docs/eng-791-jev-review-contract`, base `c6df04bf`. The runbook and
+architecture capability table still promised failure on unavailable review,
+contradicting merged #117 and the architecture accounting section. Corrected
+the operational contract and appended factual implementation-divergence notes
+to ADR-0028/0030 without rewriting their historical decisions. Both review
+modes retain verdicts and permit completion on unavailable/red exhaustion;
+request/cost bounds and missing durable settlement remain separate failures.
+No runtime, schema, protocol, dependency or default activation change.
+Existing checkpoint/session regressions and workspace checks pending;
+source-bound independent review follows the final candidate. No live TypeSafe
+qualification, speed/quality improvement, original strict-requirement completion,
+merge or release is claimed.

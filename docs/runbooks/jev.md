@@ -82,11 +82,30 @@ Inspect configured values with `qq config show`, provenance with
 `qq auth status typesafe-jev`. Remove credentials with
 `qq auth logout typesafe-jev` when desired; removal is not required to turn off.
 
-`enforce` is an advanced mode: it currently admits one executable tool call per
-model turn and fails if an assessment is unavailable. It adds inference latency
-and does not reverse tool side effects. Approval and sandbox policy still own
-execution authorization. No Jev speed or quality improvement is claimed without
-a paired task evaluation.
+`enforce` is an advanced review mode: it admits one executable tool call per
+model turn and reviews each tool result and final candidate. The name selects
+the review boundary; it does not require a supported verdict to complete a run.
+Both `final` and `enforce` use the following outcome policy:
+
+| Review result | Run behavior |
+| --- | --- |
+| Supported | Continue, subject to the run's normal limits. |
+| Red verdict with a correction remaining | Feed the verdict back and request a correction. Tool and final reviews share two corrective redirects per run. |
+| Red verdict after both corrections | Retain the verdict and continue; a final candidate can complete with a red verdict on record. |
+| Unavailable (including timeout, malformed reply, or oversized task/evidence) | Record an unavailable outcome and continue without claiming a successful assessment. |
+
+This is the behavior introduced by [RR3 / #117](https://github.com/retsu-AI/qq/pull/117)
+and included in v0.1.4. Neither mode is a fail-closed verification gate.
+The 32-assessment request limit, cost admission, run budgets and durable event
+settlement still apply. In particular, a nominal completion with a pending
+checkpoint that was never durably settled fails; that differs from a durably
+recorded unavailable assessment.
+
+Review adds inference latency and does not reverse tool side effects. Approval
+and sandbox policy own execution authorization, including the separately enabled
+Jev approval delegate described below. A completed run is not evidence of a
+supported Jev verdict. No Jev speed or quality improvement is claimed without a
+paired task evaluation.
 
 Implementation/qualification progress for the stacked work is in
 [`../plans/progress/jev-opt-in.md`](../plans/progress/jev-opt-in.md).

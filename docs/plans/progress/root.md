@@ -389,3 +389,13 @@ while writing ADR-0038: `commands` already has no reference to `sessions`
 (receipts survive deletion by accident today), and `delete_idle_session`
 removes every session-scoped table except the session's rows in `events` —
 the event log grows regardless of deletion, which the ADR's decision 6 fixes.
+
+### 2026-09-25 — RR3 documentation reconciliation request (ENG-791)
+
+Isolated branch `docs/eng-791-jev-review-contract`, base `c6df04bf`.
+Startup Manager assigned the current-behavior documentation repair after the
+source audit: architecture Jev table/wording, runbook, and append-only factual
+implementation notes in ADR-0028/0030. No runtime or configuration change.
+The original mandatory-verdict requirement remains unresolved against merged
+RR3; this repair does not accept a new policy or claim that requirement complete.
+Non-author review and local qualification recorded in the RR3 ledger.
