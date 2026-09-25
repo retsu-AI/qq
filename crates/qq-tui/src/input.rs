@@ -440,7 +440,8 @@ pub(crate) const fn effort_row(effort: Option<ReasoningEffort>) -> EffortRow {
         Some(ReasoningEffort::Low) => "light reasoning",
         Some(ReasoningEffort::Medium) => "balanced reasoning",
         Some(ReasoningEffort::High) => "heavier reasoning",
-        Some(ReasoningEffort::Xhigh) => "highest reasoning spend",
+        Some(ReasoningEffort::Xhigh) => "extra-high reasoning spend",
+        Some(ReasoningEffort::Max) => "maximum reasoning effort",
     };
     EffortRow {
         effort,

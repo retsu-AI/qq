@@ -32,6 +32,7 @@ const CODEX_MODELS_CLIENT_VERSION: &str = "0.156.1";
 pub(crate) struct DiscoveredModel {
     pub(crate) id: String,
     pub(crate) name: Option<String>,
+    pub(crate) efforts: Option<Vec<qq_provider::ReasoningEffort>>,
 }
 
 pub(crate) struct ModelDiscovery {
@@ -122,6 +123,25 @@ impl ModelDiscovery {
         models
     }
 
+    pub(crate) fn cached(
+        &self,
+        provider_id: &str,
+        provider: &ProviderConfig,
+        credentials: &CredentialStore,
+    ) -> Option<Vec<DiscoveredModel>> {
+        let qq_config::ProviderAccess::Http(access) = provider.access()? else {
+            return None;
+        };
+        let auth = resolve_auth(access, credentials)?;
+        let key = cache_key(&self.cache_key, provider_id, provider.kind(), access, &auth)?;
+        self.cache
+            .lock()
+            .ok()?
+            .iter()
+            .find(|entry| entry.key == key && entry.expires_at > Instant::now())
+            .and_then(|entry| entry.models.clone())
+    }
+
     fn fetch(
         &self,
         kind: ProviderKind,
@@ -146,25 +166,53 @@ impl ModelDiscovery {
         // Blocking clients own an internal runtime, so keep their lifetime
         // inside the blocking discovery call rather than RuntimeFactory.
         let client = discovery_client(direct)?;
-        let mut request = apply_static_headers(client.get(endpoint), access);
-        if kind == ProviderKind::Anthropic || access.api() == ProviderApi::AnthropicMessages {
-            request = request.header("anthropic-version", "2023-06-01");
+        let mut models = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut total_bytes = 0_usize;
+        // Bound the entire pagination walk, not just each response.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        for _ in 0..16 {
+            let mut url = endpoint.clone();
+            if let Some(cursor) = &cursor {
+                url.query_pairs_mut().append_pair("after_id", cursor);
+            }
+            let mut request = apply_static_headers(client.get(url), access)
+                .timeout(deadline.checked_duration_since(Instant::now())?);
+            if kind == ProviderKind::Anthropic || access.api() == ProviderApi::AnthropicMessages {
+                request = request.header("anthropic-version", "2023-06-01");
+            }
+            let response = apply_auth(request, kind, access.api(), auth)?.send().ok()?;
+            if !response.status().is_success() {
+                return None;
+            }
+            let mut bytes = Vec::new();
+            response
+                .take((MAX_RESPONSE_BYTES.saturating_sub(total_bytes) + 1) as u64)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            total_bytes = total_bytes.checked_add(bytes.len())?;
+            if total_bytes > MAX_RESPONSE_BYTES {
+                return None;
+            }
+            let body: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+            models.extend(parse_models(&body, kind, access.api())?);
+            if models.len() > MAX_DISCOVERED_MODELS {
+                return None;
+            }
+            if kind != ProviderKind::Anthropic
+                || body.get("has_more").and_then(serde_json::Value::as_bool) != Some(true)
+            {
+                models.sort_by(|a, b| a.id.cmp(&b.id));
+                models.dedup_by(|a, b| a.id == b.id);
+                return Some(models);
+            }
+            let next = body.get("last_id")?.as_str()?;
+            if !valid_model_id(next) || cursor.as_deref() == Some(next) {
+                return None;
+            }
+            cursor = Some(next.to_owned());
         }
-        let request = apply_auth(request, kind, access.api(), auth)?;
-        let response = request.send().ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-        let mut bytes = Vec::new();
-        response
-            .take((MAX_RESPONSE_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)
-            .ok()?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            return None;
-        }
-        let body: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-        parse_models(&body, kind, access.api())
+        None
     }
 }
 
@@ -429,7 +477,9 @@ fn parse_models(
         body.get("data")?.as_array()?
     };
     // A partial response must not evict the bundled fallback catalog.
-    if kind == ProviderKind::OpenAiCodex && entries.len() > MAX_DISCOVERED_MODELS {
+    if matches!(kind, ProviderKind::OpenAiCodex | ProviderKind::Anthropic)
+        && entries.len() > MAX_DISCOVERED_MODELS
+    {
         return None;
     }
     let mut models = Vec::with_capacity(entries.len().min(MAX_DISCOVERED_MODELS));
@@ -462,7 +512,7 @@ fn parse_models(
             .map(|id| id.strip_prefix("models/").unwrap_or(id))
             .filter(|id| valid_model_id(id))
         else {
-            if kind == ProviderKind::OpenAiCodex {
+            if matches!(kind, ProviderKind::OpenAiCodex | ProviderKind::Anthropic) {
                 return None;
             }
             continue;
@@ -476,7 +526,25 @@ fn parse_models(
                 !name.is_empty() && name.len() <= 512 && !name.chars().any(char::is_control)
             })
             .map(str::to_owned);
+        let efforts = entry
+            .get("supported_reasoning_levels")
+            .and_then(serde_json::Value::as_array)
+            .map(|levels| {
+                let mut efforts = Vec::new();
+                for level in levels {
+                    if let Some(value) = level.get("effort").and_then(serde_json::Value::as_str)
+                        && let Some(effort) = qq_provider::ReasoningEffort::ALL
+                            .into_iter()
+                            .find(|effort| effort.as_str() == value)
+                        && !efforts.contains(&effort)
+                    {
+                        efforts.push(effort);
+                    }
+                }
+                efforts
+            });
         models.push(DiscoveredModel {
+            efforts,
             id: id.to_owned(),
             name,
         });
@@ -610,6 +678,7 @@ mod tests {
         assert_eq!(
             models,
             [DiscoveredModel {
+                efforts: None,
                 id: "gpt-6-astra".to_owned(),
                 name: Some("GPT-6 Astra".to_owned()),
             }]
@@ -668,10 +737,77 @@ mod tests {
         assert_eq!(
             first,
             [DiscoveredModel {
+                efforts: None,
                 id: "live-model".to_owned(),
                 name: Some("Live model".to_owned())
             }]
         );
+    }
+
+    #[test]
+    fn anthropic_discovery_collects_pages_before_publishing() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for (suffix, body) in [
+                (
+                    "limit=1000",
+                    r#"{"data":[{"id":"claude-opus-5-5"}],"has_more":true,"last_id":"claude-opus-5-5"}"#,
+                ),
+                (
+                    "limit=1000&after_id=claude-opus-5-5",
+                    r#"{"data":[{"id":"claude-sonnet-5"}],"has_more":false}"#,
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let n = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..n]);
+                assert!(request.starts_with(&format!("GET /v1/models?{suffix} HTTP/1.1")));
+                assert!(request.contains("anthropic-version: 2023-06-01"));
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let access = HttpAccess::new(
+            format!("http://{address}/v1"),
+            EndpointMode::Base,
+            ProviderApi::AnthropicMessages,
+            HttpCredential::Configured(ProviderAuth::NoAuth),
+            BTreeMap::new(),
+        );
+        let models = ModelDiscovery::new()
+            .unwrap()
+            .fetch(ProviderKind::Anthropic, &access, &DiscoveryAuth::NoAuth)
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["claude-opus-5-5", "claude-sonnet-5"]
+        );
+    }
+
+    #[test]
+    fn discovery_keeps_exact_supported_efforts_without_inventing_unknown_levels() {
+        let body = serde_json::json!({"models": [
+            {"slug":"gpt-6-sol","supported_reasoning_levels":[{"effort":"low"},{"effort":"max"},{"effort":"future"},{"effort":"low"}]},
+            {"slug":"unknown"},
+            {"slug":"unsupported","supported_reasoning_levels":[]}
+        ]});
+        let models = parse_models(
+            &body,
+            ProviderKind::OpenAiCodex,
+            ProviderApi::OpenAiResponses,
+        )
+        .unwrap();
+        assert_eq!(
+            models[0].efforts,
+            Some(vec![
+                qq_provider::ReasoningEffort::Low,
+                qq_provider::ReasoningEffort::Max
+            ])
+        );
+        assert_eq!(models[1].efforts, None);
+        assert_eq!(models[2].efforts, Some(vec![]));
     }
 
     #[test]

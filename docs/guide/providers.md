@@ -92,8 +92,20 @@ minutes. QQ sends Codex client version `0.156.1` for discovery (the upstream
 release that adds GPT-6 Sol/Luna); upgrading a separately installed Codex CLI
 does not change QQ's discovery version.
 
-GPT-6 Sol/Luna support `none`, `low`, `medium`, `high`, and `xhigh` in QQ.
-The API's `max` effort is not yet represented by QQ's shared effort vocabulary.
+GPT-6 Sol/Luna support `none`, `low`, `medium`, `high`, `xhigh`, and `max`.
+GPT-6 Astra supports `low` through `max`, but not `none` or `minimal`.
+Direct Claude Sonnet 5 / Opus 4.7 and 4.8 support `low`, `medium`, `high`,
+`xhigh`, and `max`; Opus/Sonnet 4.6 omit `xhigh`, and Opus 4.5 stops at `high`.
+The picker shows only the selected model's advertised choices. Unknown models
+show only Default. Default retains the existing configuration/profile inheritance
+semantics; it is not the explicit `none` level. Anthropic uses
+`output_config.effort`, never an OpenAI reasoning field.
+
+Protocol 28 and session-store schema 36 introduce `max`; older binaries cannot
+open upgraded stores. Back up the store before upgrading if rollback is needed.
+
+Anthropic discovery now follows bounded pagination before replacing implicit
+bundled model entries, preserving configured routes and failure fallback.
 Their pricing is currently unknown in the bundled catalog; cost-budget behavior
 therefore remains conservative. Codex uses the conservative bundled 272K
 context limit, distinct from the direct API's 1.05M limit.

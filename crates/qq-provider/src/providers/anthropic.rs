@@ -158,7 +158,12 @@ impl AnthropicMessages {
 
 impl Provider for AnthropicMessages {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
-        if let Some(error) = request.unsupported_reasoning_effort("Anthropic Messages") {
+        if matches!(
+            request.reasoning_effort(),
+            Some(crate::ReasoningEffort::None | crate::ReasoningEffort::Minimal)
+        ) && let Some(error) = request
+            .unsupported_reasoning_effort("Anthropic Messages (low, medium, high, xhigh, max)")
+        {
             return Box::pin(async_stream::stream! { yield Err(error); });
         }
         let exchange = self.exchange.clone();
@@ -389,6 +394,8 @@ const EPHEMERAL: CacheControl = CacheControl {
 
 #[derive(Serialize)]
 pub(crate) struct MessagesRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<AnthropicOutputConfig>,
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<[AnthropicBlock<'a>; 1]>,
@@ -397,6 +404,11 @@ pub(crate) struct MessagesRequest<'a> {
     tools: Vec<AnthropicTool<'a>>,
     max_tokens: u32,
     stream: bool,
+}
+
+#[derive(Serialize)]
+struct AnthropicOutputConfig {
+    effort: crate::ReasoningEffort,
 }
 
 impl<'a> From<&'a ModelRequest> for MessagesRequest<'a> {
@@ -417,6 +429,9 @@ impl<'a> From<&'a ModelRequest> for MessagesRequest<'a> {
             .collect();
         Self {
             model: request.model(),
+            output_config: request
+                .reasoning_effort()
+                .map(|effort| AnthropicOutputConfig { effort }),
             system: request.system().map(|system| {
                 [AnthropicBlock::Text {
                     text: Text(system),

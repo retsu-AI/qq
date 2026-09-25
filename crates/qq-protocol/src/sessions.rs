@@ -3515,7 +3515,7 @@ mod tests {
         // `approval_delegate_set`, and the optional
         // `SessionSummary.approval_delegate` override. Older clients reject
         // the new command, outcome, event tag, and summary field.
-        assert_eq!(crate::PROTOCOL_VERSION, 28);
+        assert_eq!(crate::PROTOCOL_VERSION, 29);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
