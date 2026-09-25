@@ -261,8 +261,9 @@ impl FrameRenderer {
                     Mode::History => history_picker(app, slot_width, body_height),
                     // An approval keeps the transcript on screen and adds its
                     // block under the awaiting call, so the decision is made
-                    // in context.
-                    Mode::Approval => {
+                    // in context. The trust prompt renders in the empty
+                    // transcript the same way.
+                    Mode::Approval | Mode::Trust => {
                         self.body(app, index, pane, *slot, body_height, inline_detail)
                     }
                     Mode::Compose => {

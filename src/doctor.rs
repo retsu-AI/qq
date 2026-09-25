@@ -930,6 +930,18 @@ mod tests {
     }
 
     #[test]
+    fn every_check_name_is_documented_in_the_cli_guide() {
+        let guide = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/guide/cli.md"),
+        )
+        .unwrap();
+        crate::docs_truth::assert_documented(
+            &guide,
+            CHECK_NAMES.iter().map(|name| ("qq doctor check", *name)),
+        );
+    }
+
+    #[test]
     fn no_configuration_fails_the_model_check_and_names_the_global_file() {
         let fixture = Fixture::new(Arc::new(MemoryKeyring::default()));
         let report = fixture.run();

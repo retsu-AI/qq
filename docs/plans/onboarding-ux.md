@@ -6,7 +6,7 @@
 **Linear:** [ENG-875](https://linear.app/retsu-ai/issue/ENG-875) (parent);
 per slice: OB0 ENG-859 (#119) + this PR, OB1 ENG-860, OB2 ENG-876, OB3
 ENG-877, OB4 ENG-878, OB5 ENG-879, OB6 ENG-880, OB7 ENG-881, OB8 ENG-882,
-OB9 ENG-861, OB10 ENG-883, OB11 ENG-884.
+OB9 ENG-861, OB10 ENG-883, OB11 ENG-884 (superseded by OB12), OB12 ENG-896.
 
 ## Goal
 
@@ -43,15 +43,16 @@ Acceptance for the plan as a whole (the fresh-machine script in
 | OB4 | `qq doctor`: config, model, credential, keyring, server, workspace trust, in one screen with remediation per line (O09, O10) | `src/cli.rs`, `src/main.rs` (new `doctor.rs`) | Planned |
 | OB5 | `qq init [--global]`: write a commented `config.ron` with the provider the user picks, refuse to overwrite; `qq config paths` marks existing files (O06, O10) | `src/cli.rs`, `src/main.rs`, `docs/guide/configuration.md` | Planned |
 | OB6 | Install: `install.sh` for the release archives, Homebrew tap formula, Nix flake `packages.qq` + `apps.default`, cargo-binstall metadata; README leads with them (O04, O20) | `install.sh`, `flake.nix`, `nix/`, `Cargo.toml` `[package.metadata.binstall]`, `.github/workflows/release.yml`, `docs/guide/install.md`, `docs/runbooks/release.md` | Planned |
-| OB7 | In-TUI trust prompt: an untrusted project opens the TUI with a hold that lists what the configuration declares; Trust / This session / Quit (O01, O17; ADR) | `crates/qq-tui`, `crates/qq-client`, `src/main.rs`, `docs/design/tools.md` | Planned |
+| OB7 | In-TUI trust prompt: an untrusted project opens the TUI with a hold that lists what the configuration declares; Trust / This session / Quit (O01, O17; ADR-0042) | `crates/qq-tui`, `crates/qq-client`, `crates/qq-config`, `src/main.rs`, `src/runtime.rs`, `src/plan.rs`, `docs/design/tools.md` | In review |
 | OB8 | First-session guidance: a one-time "try these" cell and a `? for help` footer hint; `qq run` denial notice suggests `--approval auto` (O18, O19) | `crates/qq-tui/src/view/transcript.rs`, `src/headless.rs` | Planned |
 | OB9 | Degrade an MCP server whose `Stored(...)` bearer is unregistered (ENG-861) | `src/mcp.rs`, `crates/qq-mcp` | Planned |
 | OB10 | Docs CI: a test that every `Document` key, `PolicyPatch` key, env var, `CommandSpec` slash name, and `ConfigCommand` appears in `docs/guide/`; CHANGELOG generated from Conventional Commits at release | `xtask/`, `tests/`, `.github/workflows/ci.yml`, `docs/runbooks/release.md` | Planned |
-| OB11 | Wiki mirror: a release-time job pushes `docs/guide/` to the GitHub Wiki with a `_Sidebar.md`; decide on a docs site when the guide exceeds what a wiki renders well | `.github/workflows/`, `docs/guide/_Sidebar.md` | Planned |
+| OB11 | Wiki mirror: a release-time job pushes `docs/guide/` to the GitHub Wiki with a `_Sidebar.md`; decide on a docs site when the guide exceeds what a wiki renders well | `.github/workflows/`, `docs/guide/_Sidebar.md` | Superseded by OB12 |
+| OB12 | Docs website: an Astro/Starlight site under `website/` whose documentation pages are generated from `docs/guide/` at build time, with a landing page, search, and the real `install.sh`; built on every PR that touches it or the guide, deployed to GitHub Pages from `main` | `website/`, `.github/workflows/website.yml` | Shipped (#156) |
 
 Dependencies: OB1 → OB2 (both change `interactive()`); OB2 → OB8; OB5 and
-OB4 are independent; OB6 is independent of code; OB7 needs a protocol
-addition and its ADR; OB10 after the guide is stable (OB0 + OB5).
+OB4 are independent; OB6 is independent of code; OB7 is client-side per
+ADR-0042 (no protocol change); OB10 after the guide is stable (OB0 + OB5).
 
 ## Slices
 
@@ -145,9 +146,11 @@ with a hold `◇ this project's configuration needs your trust` listing files
 and their sensitive sections (providers, MCP servers with command/url,
 grants, packs); keys `t trust  s this session  q quit`; `t` persists like
 `qq trust`; `s` loads it for the process only. Headless surfaces keep
-failing fast. Protocol: a new hold kind or a client-side prompt fed by
-`ConfigError::TrustRequired` details; decide in the ADR.
-**Docs:** `guide/permissions.md`, `design/tools.md`, ADR.
+failing fast. Protocol: decided in ADR-0042 — a client-side prompt fed by
+`ConfigError::TrustRequired` details, resolved by the composition root; no
+protocol change. A TUI attached to a server on another host gets the error,
+not the prompt.
+**Docs:** `guide/permissions.md`, `guide/tui.md`, `design/tools.md`, ADR-0042.
 
 ### OB8 — First-session guidance
 
@@ -175,8 +178,43 @@ since the last tag.
 
 ### OB11 — Wiki mirror
 
-**Acceptance:** on release, a workflow pushes `docs/guide/*.md` to the wiki
-repository with generated `_Sidebar.md`; pages keep working relative links.
+Superseded by OB12: a site renders the guide better than the wiki and can
+carry a landing page and search; keeping both would mean two publishing
+paths for one source.
+
+### OB12 — Docs website
+
+**Acceptance:** `website/` builds a static Astro + Starlight site.
+`docs/guide/*.md` is the only source of the documentation pages: a build
+step generates them (frontmatter from an H1 and a sidebar manifest, relative
+links rewritten to routes, links leaving `docs/guide/` pointed at GitHub) and
+fails when the manifest and the guide disagree. The site serves the reviewed
+`install.sh` so the landing page's one-line install is real. A post-build
+check fails on any unresolved internal link or fragment. CI builds the site
+on every PR touching `website/`, `docs/guide/`, `install.sh`, or
+`Cargo.toml`; pushes to `main` deploy to GitHub Pages. No client framework,
+analytics, or third-party script. The landing page claims nothing the guide
+does not say.
+**Docs:** `website/README.md`, `runbooks/website.md`, `guide/install.md`.
+
+### Candidate guides
+
+The v0 site design carried eight routes with no guide behind them; OB12
+dropped them rather than ship stubs. Each is a possible `docs/guide/` page,
+listed here with what it would cover and where the material already lives.
+All are **not scheduled**: none has a Linear issue, and none is a
+prerequisite for the slices above.
+
+| Topic | Page would cover | Material |
+| --- | --- | --- |
+| Agents, profiles, packs | What an agent profile is, how profiles select models/tools/prompts, how packs bundle profiles, skills, and commands for a workspace | `design/architecture.md`; `guide/configuration.md#profiles` and `#packs` |
+| Sessions | Lifecycle, parents and children, resume/attach, cleanup of empty sessions | `guide/tui.md` § Sessions already covers it; fold into the TUI page or split when it outgrows a section |
+| Skills and commands | Authoring `.qq/commands/*.md` and `.qq/skills/*/SKILL.md`, progressive disclosure, `/skills`, how a run loads one | `design/tools.md`; `guide/tui.md`; `guide/configuration.md#workspace-commands-and-skills` |
+| Environment variables | One reference table: every variable QQ reads, what it overrides, and its precedence against config | Enumerated by the OB10 docs-truth test; today scattered across `guide/configuration.md#environment-variables`, `guide/providers.md`, `guide/headless.md` |
+| Keybindings | A one-page cheat sheet grouped by mode (compose, transcript, pickers, approval) | `guide/tui.md` command tables |
+| Server and protocol | `qq serve`, discovery, the HTTP/SSE routes, envelopes, versioning, writing a client | `design/protocol.md`; `guide/headless.md#qq-serve` |
+| Enterprise / managed and org config | The managed configuration layer, `qq org`, what a policy can pin, how a team ships one config | `guide/configuration.md` managed layer and `policy`; `qq org` in `guide/cli.md` |
+| Changelog | Render `CHANGELOG.md` on the site once OB10's release step generates it | `CHANGELOG.md` (from OB10); `runbooks/release.md` |
 
 ## Decisions carried
 

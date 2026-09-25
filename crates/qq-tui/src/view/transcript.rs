@@ -947,6 +947,12 @@ impl TranscriptCache {
             ..VirtualBody::default()
         };
         let Some(session_id) = session_id else {
+            // An untrusted project has nothing else to show: the prompt is
+            // the whole empty state until it is answered.
+            if !app.pending_trust.is_empty() {
+                body.extend_owned(trust_block(app, width));
+                return body;
+            }
             // A configured model whose provider has no credential is the one
             // state Alt-N cannot fix; name the credential first so the next
             // command is obvious.

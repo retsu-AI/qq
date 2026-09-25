@@ -1,4 +1,4 @@
-# ADR-0042 — Optimize verified task efficiency, not individual turn size
+# ADR-0043 — Optimize verified task efficiency, not individual turn size
 
 **Status:** Proposed
 **Date:** 2026-09-23

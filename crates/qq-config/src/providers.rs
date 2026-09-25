@@ -17,6 +17,50 @@ pub(crate) const GOOGLE_CREDENTIAL_ENDPOINT: &str = "https://generativelanguage.
 pub(crate) const XAI_ENDPOINT: &str = "https://api.x.ai/v1";
 const CODEX_RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 
+/// The API-key variable xAI reads when nothing is stored. xAI's credential is
+/// a `HttpCredential::XAi` (OAuth or key), so unlike the plain `ApiKey`
+/// presets the variable name lives in the resolver, not the preset; it is
+/// pinned here so the published list stays complete.
+pub const XAI_API_KEY_VARIABLE: &str = "XAI_API_KEY";
+
+/// Every environment variable a built-in provider reads for its credential
+/// when no stored credential exists, in preset order. Derived from the
+/// presets so a new preset variable is published automatically.
+pub fn provider_credential_variables() -> Vec<&'static str> {
+    let mut variables = Vec::new();
+    for kind in [
+        ProviderKind::OpenAi,
+        ProviderKind::OpenAiCodex,
+        ProviderKind::Anthropic,
+        ProviderKind::Google,
+        ProviderKind::XAi,
+        ProviderKind::AmazonBedrock,
+        ProviderKind::AmazonBedrockMantle,
+    ] {
+        match builtin(kind).access() {
+            Some(ProviderAccess::Http(access)) => match access.auth() {
+                HttpCredential::ApiKey {
+                    environment_variable,
+                    alternate_variables,
+                    ..
+                } => {
+                    variables.push(*environment_variable);
+                    variables.extend_from_slice(alternate_variables);
+                }
+                HttpCredential::XAi { .. } => variables.push(XAI_API_KEY_VARIABLE),
+                HttpCredential::OpenAiCodex { .. } | HttpCredential::Configured(_) => {}
+            },
+            // The AWS default chain reads the SDK's own variables; they are
+            // the SDK's contract, not QQ's, and documented as a family.
+            Some(
+                ProviderAccess::AmazonBedrock { .. } | ProviderAccess::AmazonBedrockMantle { .. },
+            )
+            | None => {}
+        }
+    }
+    variables
+}
+
 /// The built-in preset for `kind`, cloned from a table built once per process.
 /// Every configuration load merges all seven presets, so building them (and
 /// filtering the model table into each) per load was the largest fixed cost

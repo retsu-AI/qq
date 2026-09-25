@@ -3,7 +3,7 @@
 This research inventory describes QQ at `8089a0e` (2026-09-23). It is not
 an implementation claim or a performance receipt. Future work belongs to the
 [token-efficiency plan](../plans/token-efficiency.md); the decision proposed
-for review is [ADR-0042](../adr/0042-verified-task-efficiency.md).
+for review is [ADR-0043](../adr/0043-verified-task-efficiency.md).
 
 ## Existing mechanisms
 

@@ -53,6 +53,24 @@ pub const MAX_MCP_MAX_CONCURRENT_CALLS: u32 = 64;
 /// is no deadline; this bounds what "a deadline" may mean.
 pub const MAX_APPROVAL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 
+/// Every environment variable [`LoadRequest::from_process_env`] reads, in
+/// the order it reads them. Provider credential variables are not here: they
+/// are resolved at request time and listed by
+/// [`provider_credential_variables`].
+pub const ENVIRONMENT_VARIABLES: [&str; 8] = [
+    "QQ_CONFIG",
+    "QQ_CONFIG_CONTENT",
+    "QQ_MODEL",
+    "QQ_ORGANIZATION",
+    "QQ_JEV_CHECKPOINTS",
+    "QQ_JEV_ROUTING",
+    "QQ_JEV_APPROVAL",
+    "QQ_APPROVAL_DELEGATE",
+];
+
+pub use document::{DOCUMENT_FIELD_NAMES, POLICY_FIELD_NAMES};
+pub use providers::provider_credential_variables;
+
 /// All process-dependent inputs captured before a configuration load begins.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct LoadRequest {
@@ -60,6 +78,16 @@ pub struct LoadRequest {
     explicit_path: Option<PathBuf>,
     explicit_content: Option<String>,
     overrides: RuntimeOverrides,
+    process_trust: Vec<ProcessTrust>,
+}
+
+/// One project file trusted for this process only: the TUI's "this
+/// session" answer. Applied on top of the durable trust state at load time
+/// and never written to disk, so the next launch asks again.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProcessTrust {
+    pub path: PathBuf,
+    pub digest: String,
 }
 
 impl LoadRequest {
@@ -77,40 +105,52 @@ impl LoadRequest {
         cwd: impl Into<PathBuf>,
         max_output_tokens: Option<u32>,
     ) -> Result<Self, ConfigError> {
+        // Every name is taken from `ENVIRONMENT_VARIABLES` by position so the
+        // published list and what is actually read cannot drift apart.
+        let [
+            config,
+            config_content,
+            model,
+            organization,
+            jev_checkpoints,
+            jev_routing,
+            jev_approval,
+            approval_delegate,
+        ] = ENVIRONMENT_VARIABLES;
         let mut request = Self::new(cwd);
-        request.explicit_path = optional_environment("QQ_CONFIG")?.map(PathBuf::from);
-        request.explicit_content = optional_environment("QQ_CONFIG_CONTENT")?;
-        request.overrides.model = optional_environment("QQ_MODEL")?;
-        request.overrides.organization = optional_environment("QQ_ORGANIZATION")?;
+        request.explicit_path = optional_environment(config)?.map(PathBuf::from);
+        request.explicit_content = optional_environment(config_content)?;
+        request.overrides.model = optional_environment(model)?;
+        request.overrides.organization = optional_environment(organization)?;
         request.overrides.max_output_tokens = max_output_tokens;
-        if let Some(value) = optional_environment("QQ_JEV_CHECKPOINTS")? {
+        if let Some(value) = optional_environment(jev_checkpoints)? {
             request.overrides.jev_review = Some(value.parse()?);
         }
-        if let Some(value) = optional_environment("QQ_JEV_ROUTING")? {
+        if let Some(value) = optional_environment(jev_routing)? {
             request.overrides.jev_routing = Some(match value.as_str() {
                 "on" => true,
                 "off" => false,
                 _ => {
                     return Err(ConfigError::InvalidJevSetting {
-                        setting: "QQ_JEV_ROUTING",
+                        setting: jev_routing,
                         value,
                     });
                 }
             });
         }
-        if let Some(value) = optional_environment("QQ_JEV_APPROVAL")? {
+        if let Some(value) = optional_environment(jev_approval)? {
             request.overrides.jev_approval = Some(match value.as_str() {
                 "on" => true,
                 "off" => false,
                 _ => {
                     return Err(ConfigError::InvalidJevSetting {
-                        setting: "QQ_JEV_APPROVAL",
+                        setting: jev_approval,
                         value,
                     });
                 }
             });
         }
-        if let Some(value) = optional_environment("QQ_APPROVAL_DELEGATE")? {
+        if let Some(value) = optional_environment(approval_delegate)? {
             request.overrides.approval_delegate = Some(value.parse()?);
         }
         Ok(request)
@@ -137,6 +177,24 @@ impl LoadRequest {
     pub fn with_overrides(mut self, overrides: RuntimeOverrides) -> Self {
         self.overrides = overrides;
         self
+    }
+
+    /// Trust these project files (by canonical path and sensitive digest)
+    /// for loads made with this request, without recording them. A file
+    /// whose sensitive content has since changed is pending again: the
+    /// digest no longer matches.
+    #[must_use]
+    pub fn with_process_trust(mut self, mut grants: Vec<ProcessTrust>) -> Self {
+        grants.sort();
+        grants.dedup();
+        self.process_trust = grants;
+        self
+    }
+
+    /// The process-scoped trust grants this request carries, sorted.
+    #[must_use]
+    pub fn process_trust(&self) -> &[ProcessTrust] {
+        &self.process_trust
     }
 
     #[must_use]
@@ -177,6 +235,7 @@ impl fmt::Debug for LoadRequest {
                 &self.explicit_content.as_ref().map(|_| "<redacted>"),
             )
             .field("overrides", &self.overrides)
+            .field("process_trust", &self.process_trust)
             .finish()
     }
 }
@@ -485,6 +544,15 @@ impl ConfigLoader {
         request: &LoadRequest,
     ) -> Result<Vec<PendingTrust>, ConfigError> {
         loader::grant_pending_trust(self, request)
+    }
+
+    /// The project sources under the request's directory whose sensitive
+    /// content no trust record covers, root first. Read-only: the same scan
+    /// [`Self::grant_pending_trust`] performs before it writes, so a prompt
+    /// can show exactly what a grant would accept. Process-scoped trust on
+    /// the request counts as a record.
+    pub fn pending_trust(&self, request: &LoadRequest) -> Result<Vec<PendingTrust>, ConfigError> {
+        loader::pending_trust(self, request)
     }
 
     pub fn enroll_organization(
@@ -1638,14 +1706,21 @@ pub struct PendingTrust {
     source: SourceIdentity,
     digest: String,
     sections: Vec<&'static str>,
+    declarations: Vec<TrustDeclaration>,
 }
 
 impl PendingTrust {
-    fn new(source: SourceIdentity, digest: String, sections: Vec<&'static str>) -> Self {
+    fn new(
+        source: SourceIdentity,
+        digest: String,
+        sections: Vec<&'static str>,
+        declarations: Vec<TrustDeclaration>,
+    ) -> Self {
         Self {
             source,
             digest,
             sections,
+            declarations,
         }
     }
 
@@ -1665,6 +1740,100 @@ impl PendingTrust {
     #[must_use]
     pub fn sections(&self) -> &[&'static str] {
         &self.sections
+    }
+
+    /// What those sections declare, one entry per route, provider, MCP
+    /// server, grant group, or pack list, for a prompt that shows the user
+    /// what they are about to admit. Carries names, commands, URLs, and
+    /// counts only; never a secret.
+    #[must_use]
+    pub fn declarations(&self) -> &[TrustDeclaration] {
+        &self.declarations
+    }
+}
+
+/// One thing a pending project file declares, as the trust prompt lists it.
+/// Secrets, argument lists, and environment values never appear here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrustDeclaration {
+    /// `model`, `worker_model`, `reviewer_model`, or `organization` set to a
+    /// value.
+    Route { key: &'static str, route: String },
+    /// A provider entry. `kind` is the preset id (`openai`, `custom`, …) or
+    /// `removed` for a `Remove` patch.
+    Provider { name: String, kind: &'static str },
+    /// An MCP server that runs a command.
+    McpStdio { name: String, command: String },
+    /// An MCP server reached over HTTP.
+    McpHttp { name: String, url: String },
+    /// An MCP server an earlier layer declared that this file removes.
+    McpRemoved { name: String },
+    /// Approval grants, counted per list (`Remove(...)` entries are not
+    /// counted: they narrow authority).
+    Grants {
+        tools: usize,
+        shell_prefixes: usize,
+        hosts: usize,
+        env: usize,
+    },
+    /// Agent packs by id.
+    Packs(Vec<String>),
+    /// A sensitive key whose value has no short rendering (`profiles`,
+    /// `delegation`, `Clear` on a route, …).
+    Other(&'static str),
+}
+
+impl fmt::Display for TrustDeclaration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Route { key, route } => write!(formatter, "{key} {route}"),
+            Self::Provider { name, kind } => write!(formatter, "provider {name} ({kind})"),
+            Self::McpStdio { name, command } => write!(formatter, "MCP {name} → {command}"),
+            Self::McpHttp { name, url } => write!(formatter, "MCP {name} → {url}"),
+            Self::McpRemoved { name } => write!(formatter, "MCP {name} removed"),
+            Self::Grants {
+                tools,
+                shell_prefixes,
+                hosts,
+                env,
+            } => {
+                formatter.write_str("grants:")?;
+                let mut first = true;
+                for (count, noun) in [
+                    (*tools, "tool"),
+                    (*shell_prefixes, "shell prefix"),
+                    (*hosts, "host"),
+                    (*env, "env var"),
+                ] {
+                    if count == 0 {
+                        continue;
+                    }
+                    let plural = match (count, noun) {
+                        (1, _) => "",
+                        (_, "shell prefix") => "es",
+                        _ => "s",
+                    };
+                    write!(
+                        formatter,
+                        "{}{count} {noun}{plural}",
+                        if first { " " } else { ", " }
+                    )?;
+                    first = false;
+                }
+                if first {
+                    formatter.write_str(" none added")?;
+                }
+                Ok(())
+            }
+            Self::Packs(ids) => {
+                formatter.write_str("packs: ")?;
+                if ids.is_empty() {
+                    return formatter.write_str("none");
+                }
+                formatter.write_str(&ids.join(", "))
+            }
+            Self::Other(key) => formatter.write_str(key),
+        }
     }
 }
 

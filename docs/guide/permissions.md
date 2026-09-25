@@ -3,7 +3,8 @@
 QQ separates two questions:
 
 - **Trust** — may this project's configuration influence QQ at all?
-  Answered once per file content with `qq trust`.
+  Answered once per file content, in the TUI when it opens or with
+  `qq trust`.
 - **Approval** — may the agent take this action right now? Answered by the
   session's approval mode, the grants in effect, and, when neither decides,
   you.
@@ -14,7 +15,34 @@ A repository can ship `.qq/config.ron`, `qq.ron`, `.qq/config.d/*.ron`, and
 `.qq/packs/`. Those files can declare providers, MCP servers that run
 commands, sub-agent rosters, and grants that let tools run without asking.
 QQ therefore refuses to load a project file that declares anything sensitive
-until you have accepted that exact content:
+until you have accepted that exact content.
+
+Bare `qq` opens the TUI and asks, listing each pending file and what it
+declares:
+
+```
+◇ this project's configuration needs your trust
+  /home/you/repo/.qq/config.ron
+    model anthropic/claude-sonnet-5
+    MCP linear → https://mcp.linear.app/mcp
+    MCP executor → executor
+    grants: 2 tools, 3 shell prefixes
+  t trust   s this session   q quit
+```
+
+- `t` records the files exactly as `qq trust` does; the next launch does
+  not ask.
+- `s` loads them for this process only. Nothing is written; the next `qq`
+  asks again. Runs you start in this TUI (and the embedded server that
+  serves them) see the trusted configuration.
+- `q` (or `Esc`) leaves without loading them.
+
+Only names, commands, URLs, and counts are shown; open the file for the
+rest. The prompt appears only when this `qq` owns the server: a client
+attached to a server on another host cannot read or record trust for that
+host's files and sees the error below instead.
+
+`qq ask`, `qq run`, and `qq serve` do not prompt; they exit:
 
 ```
 error: project configuration needs your trust before it is used:
@@ -37,10 +65,11 @@ trusted /home/you/repo/.qq/config.ron
   declares: model, policy.allow_tools, policy.allow_shell_prefixes
 ```
 
-Trust is recorded as a digest of the file in your data directory, not in
-the repository. Any edit to a trusted file — yours or from `git pull` —
-makes QQ ask again. `qq config sources` shows `pending trust:` lines for
-files awaiting your decision.
+Trust is recorded as a digest of the file's sensitive sections in your data
+directory, not in the repository. Any edit to a sensitive section of a
+trusted file — yours or from `git pull` — makes QQ ask again (in the TUI, or
+as the error above); a session-only grant expires the same way. `qq config
+sources` shows `pending trust:` lines for files awaiting your decision.
 
 Nothing in your global configuration needs trust: you wrote it.
 

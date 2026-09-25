@@ -91,3 +91,10 @@ is assigned per slice. [Plan](../token-efficiency.md).
 - #158 is the bounded TE1.1 reporting foundation, not full TE1 completion.
   TE1.2 still owns request-level lineage, verifier accounting, repeated-read
   attribution, corpus and overhead qualification. ENG-888 stays In Progress.
+
+### 2026-09-25 — repair parent stack against main
+
+- Merged origin/main `536a817`, preserving accepted ADR-0041/0042.
+- Renumbered proposed efficiency ADR to 0043 and updated live references;
+  historical reservation entries above describe their original context.
+- Parent #141 conflict resolved without altering implementation behavior.

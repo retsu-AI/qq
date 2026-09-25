@@ -1564,6 +1564,144 @@ fn project_trust_gates_sensitive_changes_and_ignores_safe_edits() {
 }
 
 #[test]
+fn pending_trust_scans_without_writing_and_declarations_name_what_is_admitted() {
+    // OB7: the TUI prompt reads the pending set before the user decides.
+    let tree = TempTree::new();
+    let config = tree.write(
+        "work/.qq/config.ron",
+        r#"(
+            version: 1,
+            model: "anthropic/claude-sonnet-5",
+            providers: {
+                "gateway": Custom(connection: (base_url: "https://gw.example/v1", api: OpenAiResponses, auth: Bearer(Stored("gateway/default"))), models: {"m": (name: "M")}),
+                "openai": OpenAi(api_key: Env("OPENAI_API_KEY")),
+            },
+            mcp: {
+                "linear": Http(url: "https://mcp.linear.app/mcp", bearer: Some(Stored("linear/default"))),
+                "executor": Stdio(command: "executor", args: ["mcp", "--token", "not-shown"]),
+            },
+            packs: {"reviewer": Pack(path: "packs/reviewer")},
+            policy: (allow_tools: ["read_file", "list_files"], allow_shell_prefixes: ["cargo test", "cargo fmt", Remove("rm")], allow_hosts: ["docs.rs"]),
+        )"#,
+    );
+    let request = LoadRequest::new(tree.path("work"));
+    let loader = tree.loader();
+
+    let pending = loader.pending_trust(&request).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].source().path(), Some(config.as_path()));
+    let rendered: Vec<String> = pending[0]
+        .declarations()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        rendered,
+        [
+            "model anthropic/claude-sonnet-5",
+            "provider gateway (custom)",
+            "provider openai (openai)",
+            "MCP executor → executor",
+            "MCP linear → https://mcp.linear.app/mcp",
+            "packs: reviewer",
+            "grants: 2 tools, 2 shell prefixes, 1 host",
+        ]
+    );
+    // Nothing secret-shaped and no argument list leaks into the prompt.
+    let joined = rendered.join("\n");
+    assert!(!joined.contains("not-shown"), "{joined}");
+    assert!(!joined.contains("gateway/default"), "{joined}");
+    assert!(!joined.contains("OPENAI_API_KEY"), "{joined}");
+
+    // Read-only: the same files are pending on the next scan and the load
+    // still fails, and the pending entry equals what the load reports.
+    assert_eq!(loader.pending_trust(&request).unwrap(), pending);
+    let ConfigError::TrustRequired {
+        pending: from_load, ..
+    } = loader.load_for_client(&request).unwrap_err()
+    else {
+        panic!("expected TrustRequired");
+    };
+    assert_eq!(from_load, pending);
+    assert!(!tree.path("data/trust.ron").exists());
+
+    // Granting records exactly the scanned set and clears it.
+    assert_eq!(loader.grant_pending_trust(&request).unwrap(), pending);
+    assert!(loader.pending_trust(&request).unwrap().is_empty());
+}
+
+#[test]
+fn process_trust_admits_pending_files_without_writing_and_repends_on_edit() {
+    // OB7 "this session": the request carries path + digest; the load
+    // succeeds, the durable state is untouched, and a change to the
+    // sensitive content invalidates the grant.
+    let tree = TempTree::new();
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6", max_output_tokens: 10)"#,
+    );
+    let request = LoadRequest::new(tree.path("work"));
+    let loader = tree.loader();
+    let pending = loader.pending_trust(&request).unwrap();
+    assert_eq!(pending.len(), 1);
+    let grants: Vec<ProcessTrust> = pending
+        .iter()
+        .map(|item| ProcessTrust {
+            path: item.source().path().unwrap().to_owned(),
+            digest: item.digest().to_owned(),
+        })
+        .collect();
+
+    assert!(matches!(
+        loader.load_for_client(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    let trusted = request.clone().with_process_trust(grants.clone());
+    let snapshot = loader.load_for_client(&trusted).unwrap();
+    assert_eq!(
+        snapshot.model().map(|route| route.as_str()),
+        Some("openai/gpt-5.6")
+    );
+    assert_eq!(snapshot.max_output_tokens(), 10);
+    assert!(loader.pending_trust(&trusted).unwrap().is_empty());
+    // Nothing durable: the plain request still needs trust and no state
+    // file was written.
+    assert!(matches!(
+        loader.load_for_client(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    assert!(!tree.path("data/trust.ron").exists());
+
+    // A safe edit keeps the digest; a sensitive edit re-pends.
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6", max_output_tokens: 20)"#,
+    );
+    assert_eq!(
+        loader
+            .load_for_client(&trusted)
+            .unwrap()
+            .max_output_tokens(),
+        20
+    );
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, model: "openai/gpt-6-astra", max_output_tokens: 20)"#,
+    );
+    assert!(matches!(
+        loader.load_for_client(&trusted),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    assert_eq!(loader.pending_trust(&trusted).unwrap().len(), 1);
+
+    // `qq trust` after a session grant still records the file durably.
+    let granted = loader.grant_pending_trust(&trusted).unwrap();
+    assert_eq!(granted.len(), 1);
+    assert!(tree.path("data/trust.ron").exists());
+    assert!(loader.load_for_client(&request).is_ok());
+}
+
+#[test]
 fn literal_secret_scope_and_debug_output_are_safe() {
     let tree = TempTree::new();
     tree.write(
@@ -3879,4 +4017,169 @@ fn agent_pack_manifests_fail_fast_on_every_documented_error() {
     assert!(!policy.permits("mcp__srv__danger"));
     assert!(!policy.permits("read_file"));
     assert!(PackToolPolicy::default().permits("anything"));
+}
+
+/// The field list serde's derive compiled for a `deny_unknown_fields` struct,
+/// recovered from RON's unknown-field error: the derive reports `expected`
+/// straight from its generated `FIELDS` constant, so this is the struct's
+/// real field list with no hand-maintained mirror to drift.
+fn derived_field_names<T: serde::de::DeserializeOwned + std::fmt::Debug>(
+    probe: &str,
+) -> Vec<&'static str> {
+    let options =
+        ron::Options::default().with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME);
+    match options.from_str::<T>(probe) {
+        Err(ron::error::SpannedError {
+            code: ron::Error::NoSuchStructField { expected, .. },
+            ..
+        }) => expected.to_vec(),
+        other => panic!("probe {probe:?} should fail on the unknown field, got {other:?}"),
+    }
+}
+
+#[test]
+fn published_document_field_names_match_the_struct_and_all_parse() {
+    // Equality with the derive's own list: an added field fails here until
+    // it is published (and therefore documented).
+    assert_eq!(
+        derived_field_names::<document::Document>("(version: 1, __not_a_field__: 1)"),
+        DOCUMENT_FIELD_NAMES.to_vec()
+    );
+    assert_eq!(
+        derived_field_names::<document::PolicyPatch>("(__not_a_field__: 1)"),
+        POLICY_FIELD_NAMES.to_vec()
+    );
+
+    // Every published key, set with a trivially valid value, parses as one
+    // document. `deny_unknown_fields` rejects a misspelled name.
+    let mut policy = String::from("(");
+    for name in POLICY_FIELD_NAMES {
+        let value = match name {
+            "allowed_providers" => r#"["openai"]"#,
+            "exposed_tools" => r#"["read_file"]"#,
+            "denied_providers" => r#"["xai"]"#,
+            "max_output_tokens" => "1000",
+            "require_https" => "true",
+            "allow_custom_providers" => "true",
+            "allow_literal_secrets" => "false",
+            "allow_tools" => r#"["edit_file"]"#,
+            "allow_shell_prefixes" => r#"["cargo test"]"#,
+            "allow_hosts" => r#"["docs.rs"]"#,
+            "shell_env" => r#"["CARGO_HOME"]"#,
+            "builtin_preference" => "hint",
+            "deny_tools" => r#"["shell"]"#,
+            "deny_shell_prefixes" => r#"["rm -rf"]"#,
+            "deny_hosts" => r#"["evil.example"]"#,
+            other => panic!("no sample value for policy field {other:?}"),
+        };
+        policy.push_str(&format!("{name}: {value}, "));
+    }
+    policy.push(')');
+    let mut content = String::from("(");
+    for name in DOCUMENT_FIELD_NAMES {
+        let value = match name {
+            "version" => "1".to_owned(),
+            "organization" => r#""acme""#.to_owned(),
+            "model" | "worker_model" | "reviewer_model" => r#""openai/gpt-5.6""#.to_owned(),
+            "delegation" => {
+                "(roster: [], default_role: balanced, max_depth: 1, write_children: false)"
+                    .to_owned()
+            }
+            "audit" => "(mode: off, max_revisions: 1, role: strong)".to_owned(),
+            "jev_review" => "off".to_owned(),
+            "jev_routing" | "jev_approval" => "false".to_owned(),
+            "approval_delegate" => "on".to_owned(),
+            "approval_timeout_seconds" => "60".to_owned(),
+            "reasoning_effort" => "low".to_owned(),
+            "max_output_tokens" => "1000".to_owned(),
+            "providers" | "mcp" | "profiles" | "packs" => "{}".to_owned(),
+            "policy" => policy.clone(),
+            other => panic!("no sample value for document field {other:?}"),
+        };
+        content.push_str(&format!("{name}: {value}, "));
+    }
+    content.push(')');
+    let managed = SourceIdentity::virtual_source(SourceKind::Managed, "docs-truth sample");
+    let parsed = document::Document::parse(&content, &managed)
+        .unwrap_or_else(|error| panic!("every published key should parse: {error}\n{content}"));
+    assert_eq!(
+        parsed.touched().len(),
+        DOCUMENT_FIELD_NAMES.len() - 1,
+        "version is not a key"
+    );
+    assert!(matches!(
+        document::Document::parse("(version: 1, modle: \"x/y\")", &managed),
+        Err(ConfigError::Parse { message, .. }) if message.contains("modle")
+    ));
+}
+
+#[test]
+fn environment_variables_are_the_ones_from_process_env_reads() {
+    // A misspelled or extra name in the const would leave the field untouched
+    // or fail the destructure; each override must round-trip from its
+    // variable. The environment is process-wide, so the read happens in a
+    // child test process with exactly these variables set.
+    let values = [
+        "/tmp/docs-truth.ron",
+        "(version: 1)",
+        "openai/gpt-5.6",
+        "acme",
+        "final",
+        "on",
+        "off",
+        "off",
+    ];
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+    child.args([
+        "--exact",
+        "tests::environment_variables_child",
+        "--nocapture",
+    ]);
+    child.env("QQ_TEST_ENVIRONMENT_VARIABLES_CHILD", "1");
+    for (name, value) in ENVIRONMENT_VARIABLES.iter().zip(values) {
+        child.env(name, value);
+    }
+    let output = child.output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "child failed or ran nothing: stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn environment_variables_child() {
+    if std::env::var_os("QQ_TEST_ENVIRONMENT_VARIABLES_CHILD").is_none() {
+        return;
+    }
+    let request = LoadRequest::from_process_env("/tmp", None).unwrap();
+    assert_eq!(
+        request.explicit_path(),
+        Some(Path::new("/tmp/docs-truth.ron"))
+    );
+    assert_eq!(request.explicit_content(), Some("(version: 1)"));
+    assert_eq!(request.overrides().model(), Some("openai/gpt-5.6"));
+    assert_eq!(request.overrides().organization(), Some("acme"));
+    assert_eq!(request.overrides().jev_review(), Some(JevReviewMode::Final));
+    assert_eq!(request.overrides().jev_routing(), Some(true));
+    assert_eq!(request.overrides().jev_approval(), Some(false));
+    assert_eq!(
+        request.overrides().approval_delegate(),
+        Some(ApprovalDelegateSetting::Off)
+    );
+}
+
+#[test]
+fn provider_credential_variables_cover_every_api_key_preset() {
+    assert_eq!(
+        provider_credential_variables(),
+        [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "XAI_API_KEY",
+        ]
+    );
 }

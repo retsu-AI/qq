@@ -40,9 +40,14 @@ TUI and asks with `/models` instead.
 ### `project configuration needs your trust before it is used: …`
 
 A file under this repository declares something sensitive (a model,
-providers, MCP servers, grants). Read the listed file(s), then run
-`qq trust` in that directory. You will see this again after any edit to a
-trusted file, including one that arrived with `git pull`.
+providers, MCP servers, grants). Only `qq ask`, `qq run`, and `qq serve`
+print this and stop; bare `qq` opens the TUI on a prompt that lists each
+file and what it declares, with `t` (trust, as `qq trust` would), `s` (this
+session only), and `q`. For the headless commands, read the listed file(s),
+then run `qq trust` in that directory. You will see this again after any
+edit to a trusted file's sensitive sections, including one that arrived with
+`git pull`. A TUI attached to a server on another host also prints this;
+run `qq trust` on that host.
 [Permissions › Project trust](permissions.md#project-trust).
 
 ### `model route must use provider/model syntax: "…"`
@@ -209,6 +214,14 @@ linear/default``, or the environment variable for `Env(...)`), run the
 command it names — the next run picks the credential up without a restart.
 `qq doctor` reports the same finding under `mcp`; `eager: true` surfaces a
 connection failure at startup instead of first use.
+
+### `provider returned HTTP 400: Invalid JSON payload received. Unknown name "additionalProperties"…`
+
+A `google/*` model rejected a tool declaration. Gemini accepts only a subset
+of JSON Schema; QQ now strips the unsupported keywords from every tool schema
+(built-in and MCP) before declaring it, so this no longer happens on a
+current build. If you still see it, `qq version` and the `Unknown name` in
+the message identify the keyword to report.
 
 ### `configuration working directory is invalid: …`
 

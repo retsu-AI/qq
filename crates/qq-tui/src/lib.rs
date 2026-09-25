@@ -20,7 +20,11 @@ mod theme;
 mod view;
 mod viewport;
 
-pub use app::{ModelOption, ProviderRemedy, TuiError, TuiOptions, run};
+pub use app::{
+    ModelOption, PendingTrustNotice, ProviderRemedy, TrustChoice, TrustFuture, TrustResolved,
+    TrustResolver, TuiError, TuiOptions, run,
+};
+pub use commands::slash_names;
 pub use lazy_port::LazyPort;
 pub use qq_client::{ClientFailure, ClientPort, ClientRequest, ClientUpdate, ConnectionState};
 pub use settings::{Action, KeyChord, Settings, SettingsBuilder, SettingsError, StatusItem};

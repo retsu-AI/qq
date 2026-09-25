@@ -66,7 +66,52 @@ pub struct TuiOptions {
     /// The canonical workspace root `@` mentions resolve against. `None`
     /// (a remote client without the tree) leaves `@` as literal text.
     pub workspace_root: Option<std::path::PathBuf>,
+    /// Project configuration files whose sensitive sections no trust record
+    /// covers. Non-empty opens the TUI on the trust prompt instead of a
+    /// session; `models` and `model` are then whatever loaded without them
+    /// (normally nothing) until the prompt is answered.
+    pub pending_trust: Vec<PendingTrustNotice>,
 }
+
+/// One project file awaiting the user's trust, already rendered for the
+/// prompt: the path and one human line per declaration (`model
+/// anthropic/claude-sonnet-5`, `MCP linear → https://…`, `grants: 2 tools`).
+/// Plain data so the TUI needs nothing from the configuration crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTrustNotice {
+    pub path: String,
+    pub declarations: Vec<String>,
+}
+
+/// The user's answer to the trust prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustChoice {
+    /// Record the pending files durably, exactly as `qq trust` would.
+    Persist,
+    /// Load them for this process only; the next launch asks again.
+    Session,
+}
+
+/// What a resolved trust choice unlocked: the catalog and credential state
+/// the client skipped at startup because the configuration would not load.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrustResolved {
+    /// Paths now trusted, for the confirmation notice.
+    pub trusted: Vec<String>,
+    pub model: ModelSelection,
+    pub models: Vec<ModelOption>,
+    pub unauthenticated_providers: Vec<ProviderRemedy>,
+}
+
+/// The composition root's answer to a trust choice. Runs off the event loop;
+/// `Err` is shown as an error notice and the prompt stays.
+pub type TrustFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<TrustResolved, String>> + Send>>;
+
+/// Resolves a [`TrustChoice`]. Only a client that owns the server (and so
+/// can read and record trust for the files on this host) has one; a client
+/// attached to a server elsewhere is told to run `qq trust` there.
+pub type TrustResolver = Box<dyn FnMut(TrustChoice) -> TrustFuture + Send>;
 
 /// A provider the configuration admits but that has no credential, and how
 /// to give it one. `remedy` is imperative and complete (`run qq auth login
@@ -90,12 +135,18 @@ pub(crate) const CHOOSE_MODEL_NOTICE: &str = "choose a model with /models";
 
 /// Runs the TUI to exit. Returns the session focused at exit, after the
 /// terminal has been restored, so the caller can tell the user how to
-/// continue it.
-pub async fn run<P>(client: P, options: TuiOptions) -> Result<Option<SessionId>, TuiError>
+/// continue it. `trust` answers the trust prompt when
+/// `options.pending_trust` is non-empty; `None` means this client cannot
+/// (the server, and the files, are on another host).
+pub async fn run<P>(
+    client: P,
+    options: TuiOptions,
+    trust: Option<TrustResolver>,
+) -> Result<Option<SessionId>, TuiError>
 where
     P: ClientPort,
 {
-    terminal::run(client, App::new(options)).await
+    terminal::run(client, App::new(options), trust).await
 }
 
 #[derive(Debug, Error)]
@@ -271,6 +322,12 @@ pub(crate) struct App {
     /// Read-only after startup: a credential added while the TUI runs takes
     /// effect at the next launch, like the catalog it gates.
     pub(crate) unauthenticated_providers: Vec<ProviderRemedy>,
+    /// Project files awaiting trust. While non-empty the trust prompt owns
+    /// input (`Mode::Trust`); a resolved choice clears it.
+    pub(crate) pending_trust: Vec<PendingTrustNotice>,
+    /// A trust choice is being resolved off the loop; further `t`/`s`
+    /// presses wait rather than starting a second write.
+    trust_resolving: bool,
     /// Profile new sessions are created with. `/profile` with nothing focused
     /// sets it; the server validates the name when the session is created.
     pub profile: AgentProfileId,
@@ -325,6 +382,9 @@ pub(crate) struct App {
     /// arrives, which reads as "unavailable": `Submit` queues instead of
     /// steering, and the profile and approval pickers say why.
     capabilities: Option<Arc<ServerCapabilities>>,
+    /// The degraded-tool-host message last raised as a warning, so a
+    /// re-fetched capability document with the same reason does not nag.
+    shown_host_warning: Option<String>,
     pub connection: ConnectionState,
     pub status: Option<String>,
     /// Session owning the current transient notice. A notice never follows
@@ -383,6 +443,8 @@ impl App {
             reasoning_effort: None,
             models: options.models,
             unauthenticated_providers: options.unauthenticated_providers,
+            pending_trust: options.pending_trust,
+            trust_resolving: false,
             workspace_id: None,
             workspace_path: String::new(),
             workspace_root: options.workspace_root,
@@ -402,6 +464,7 @@ impl App {
             resolving: 0,
             esc_armed_at: None,
             capabilities: None,
+            shown_host_warning: None,
             connection: ConnectionState::Connecting,
             status: None,
             status_session_id: None,
@@ -433,14 +496,76 @@ impl App {
 
     /// Requests queued by [`Self::apply_client_update`]; the terminal loop
     /// drains and sends them after each update.
-    /// Who owns keyboard input right now. Overlays win over the approval
-    /// prompt, which wins over the composer.
+    /// Who owns keyboard input right now. Overlays win over the trust
+    /// prompt, which wins over the approval prompt, which wins over the
+    /// composer.
     pub(crate) fn mode(&self) -> Mode {
         match &self.overlay {
             Some(overlay) => overlay.mode(),
+            None if !self.pending_trust.is_empty() => Mode::Trust,
             None if self.pending_approval().is_some() => Mode::Approval,
             None => Mode::Compose,
         }
+    }
+
+    /// The trust prompt's answer, resolved by the composition root. Applies
+    /// what the now-loadable configuration provides (the client default
+    /// model, the catalog, the credential remedies) and drops the prompt, so
+    /// the OB1/OB2 guidance takes over exactly as if the TUI had started
+    /// with a trusted project.
+    pub fn apply_trust_resolved(
+        &mut self,
+        choice: TrustChoice,
+        resolved: TrustResolved,
+    ) -> Effects {
+        self.trust_resolving = false;
+        self.pending_trust.clear();
+        self.unauthenticated_providers = resolved.unauthenticated_providers;
+        // Through the catalog path so the sort, per-session context windows,
+        // and an open picker are refreshed like a server catalog update.
+        self.apply_model_options(resolved.models, Some(resolved.model));
+        self.set_info(match choice {
+            TrustChoice::Persist => format!(
+                "trusted {} file{}",
+                resolved.trusted.len(),
+                if resolved.trusted.len() == 1 { "" } else { "s" }
+            ),
+            TrustChoice::Session => "trusted for this session".to_owned(),
+        });
+        // The server compiled its capabilities while the project was
+        // withheld; ask again now that profiles and skills can load, and
+        // refresh the catalog the same way bootstrap does so provider
+        // discovery replaces the root's static list.
+        let mut effects = Effects::send_now(ClientRequest::Capabilities);
+        effects.push(Effect::Send(ClientRequest::Models(self.model.clone())));
+        effects
+    }
+
+    /// The trust choice could not be resolved; the prompt stays and the
+    /// reason shows as an error.
+    pub fn note_trust_failure(&mut self, reason: &str) -> Effects {
+        self.trust_resolving = false;
+        self.set_error_for(None, reason.to_owned());
+        Effects::redraw(Redraw::Immediate)
+    }
+
+    /// Keys while the trust prompt owns input. Everything but the three
+    /// answers (and Ctrl-C, handled before dispatch) is swallowed: nothing
+    /// else is meaningful before the configuration has loaded.
+    fn handle_trust_key(&mut self, key: KeyEvent) -> Effects {
+        let choice = match key.code {
+            KeyCode::Char('t' | 'T') => TrustChoice::Persist,
+            KeyCode::Char('s' | 'S') => TrustChoice::Session,
+            KeyCode::Char('q' | 'Q') | KeyCode::Esc => return self.execute(Command::Quit),
+            _ => return Effects::none(),
+        };
+        if self.trust_resolving {
+            return Effects::none();
+        }
+        self.trust_resolving = true;
+        let mut effects = Effects::redraw(Redraw::Immediate);
+        effects.push(Effect::ResolveTrust(choice));
+        effects
     }
 
     /// The external editor could not deliver text; the draft stays as it was.
@@ -497,6 +622,18 @@ impl App {
             }
             ClientUpdate::Capabilities(capabilities) => {
                 self.capabilities = Some(capabilities);
+                // A degraded tool host (an MCP server that did not start or
+                // authenticate) explains itself once on the rule; the same
+                // reason arriving again after a refresh stays quiet.
+                match self.tool_host_warning() {
+                    Some(warning) => {
+                        if self.shown_host_warning.as_deref() != Some(warning.as_str()) {
+                            self.set_warning(warning.clone());
+                            self.shown_host_warning = Some(warning);
+                        }
+                    }
+                    None => self.shown_host_warning = None,
+                }
                 self.refresh_profile_picker();
                 Effects::redraw(Redraw::Scheduled)
             }
@@ -978,6 +1115,11 @@ impl App {
     /// when no model is configured at all. `None` once a model with an
     /// authenticated provider is in hand.
     pub(crate) fn startup_guidance(&self) -> Option<String> {
+        // Until the project is trusted the configuration has not loaded, so
+        // neither "no model" nor a credential remedy is known to be true.
+        if !self.pending_trust.is_empty() {
+            return None;
+        }
         if let Some(remedy) = self.configured_provider_remedy() {
             return Some(remedy.message());
         }
@@ -1091,6 +1233,7 @@ impl App {
             | Mode::Themes
             | Mode::Commands
             | Mode::History => self.handle_overlay_key(key),
+            Mode::Trust => self.handle_trust_key(key),
             Mode::Approval => self.handle_approval_key(key),
             Mode::Compose => self.handle_compose_key(key),
         }
@@ -2528,6 +2671,26 @@ impl App {
         self.slash.selected(len)
     }
 
+    /// Why one or more external tool hosts are degraded, as the server
+    /// reported it (`unavailable MCP servers: linear (…)`), joined when
+    /// several hosts carry a reason. `None` while every host is healthy or
+    /// before capabilities arrive.
+    pub(crate) fn tool_host_warning(&self) -> Option<String> {
+        let tools = self.capabilities.as_deref()?.workspace_tools.as_ref()?;
+        let mut warning = String::new();
+        for message in tools
+            .hosts
+            .iter()
+            .filter_map(|host| host.message.as_deref())
+        {
+            if !warning.is_empty() {
+                warning.push_str("; ");
+            }
+            warning.push_str(message);
+        }
+        (!warning.is_empty()).then_some(warning)
+    }
+
     pub fn advance_animation(&mut self) -> bool {
         self.animation_tick = self.animation_tick.wrapping_add(1);
         if self.now_ms > 0 {
@@ -2809,6 +2972,9 @@ impl App {
     /// What Enter does in the composer right now, for the prompt glyph.
     pub(crate) fn composer_mode(&self) -> crate::view::ComposerMode {
         use crate::view::ComposerMode;
+        if !self.pending_trust.is_empty() {
+            return ComposerMode::Trust;
+        }
         if self.pending_approval().is_some() {
             return ComposerMode::Approval;
         }

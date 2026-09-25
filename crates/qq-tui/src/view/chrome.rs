@@ -328,7 +328,7 @@ fn hints_for(app: &App) -> Vec<(crate::commands::Command, &'static str)> {
                 hints.push((Command::OpenSessions, "sessions"));
             }
         }
-        Mode::Approval => {
+        Mode::Approval | Mode::Trust => {
             hints.push((Command::OpenHelp, "help"));
         }
         Mode::Models
@@ -379,6 +379,8 @@ pub(crate) enum ComposerMode {
     Queue,
     /// An approval owns input; the composer is disabled.
     Approval,
+    /// The trust prompt owns input; the composer is disabled.
+    Trust,
 }
 
 impl ComposerMode {
@@ -387,7 +389,7 @@ impl ComposerMode {
             Self::Send => "›",
             Self::Steer => "↦",
             Self::Queue => "⇥",
-            Self::Approval => "✎",
+            Self::Approval | Self::Trust => "✎",
         }
     }
 
@@ -397,7 +399,13 @@ impl ComposerMode {
             Self::Steer => "Steer the run...",
             Self::Queue => "Queue for after this run...",
             Self::Approval => "Answer the approval above",
+            Self::Trust => "Answer the trust prompt above",
         }
+    }
+
+    /// Whether the composer accepts text at all.
+    const fn disabled(self) -> bool {
+        matches!(self, Self::Approval | Self::Trust)
     }
 }
 
@@ -452,7 +460,7 @@ pub(super) fn composer(
     let glyph_style = match mode {
         ComposerMode::Send => accent().bold(),
         ComposerMode::Steer | ComposerMode::Queue => warning().bold(),
-        ComposerMode::Approval => muted(),
+        ComposerMode::Approval | ComposerMode::Trust => muted(),
     };
     let gutter = format!(" {} ", mode.glyph());
     // A free-text question uses the composer for the answer, so its caret
@@ -471,7 +479,7 @@ pub(super) fn composer(
             },
             muted().italic(),
         );
-        let caret = (mode != ComposerMode::Approval || answering).then_some((3, 0));
+        let caret = (!mode.disabled() || answering).then_some((3, 0));
         return (vec![truncate_line(line, width)], caret);
     }
 
@@ -552,7 +560,7 @@ pub(super) fn composer(
     for row in &mut wrapped {
         *row = truncate_line(std::mem::take(row), width);
     }
-    if mode == ComposerMode::Approval {
+    if mode.disabled() {
         caret = None;
     }
     (wrapped, caret)

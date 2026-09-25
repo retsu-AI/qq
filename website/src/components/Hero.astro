@@ -1,0 +1,30 @@
+---
+// Overrides Starlight Hero on the splash page; all documentation keeps the native page shell.
+import Default from '@astrojs/starlight/components/Hero.astro';
+import { Icon } from '@astrojs/starlight/components';
+import InstallTabs from './InstallTabs.astro';
+import TerminalPreview from './TerminalPreview.astro';
+import RuntimeSurfaces from './RuntimeSurfaces.astro';
+import ApprovalSection from './ApprovalSection.astro';
+import SessionsSection from './SessionsSection.astro';
+import ProvidersSection from './ProvidersSection.astro';
+import { site, href } from '../../site.config.mjs';
+const isLanding = Astro.locals.starlightRoute.entry.data.template === 'splash';
+---
+{isLanding ? <div class="landing font-sans">
+  <section class="hero-grid" aria-labelledby="_top">
+    <div class="hero-copy">
+      <a class="release-label font-mono" href={`${site.github}/releases`}><span class="version">{site.version}</span><span>Open source. Written in Rust.</span><Icon name="right-arrow" size="16" /></a>
+      <h1 id="_top" class="hero-title">AI coding agents<br />in one binary.</h1>
+      <p class="hero-description">A terminal UI, a headless runner, and a local server, sharing one runtime. Every action passes a policy you can read, and every event is kept, so sessions survive restarts and many agents can run at once.</p>
+      <div class="hero-actions"><a class="action-primary" href="#install"><Icon name="download" size="18" />Install QQ</a><a class="action-secondary" href={href('docs/')}>Read the docs <Icon name="right-arrow" size="18" /></a></div>
+      <InstallTabs />
+    </div>
+    <div class="hero-terminal-wrap"><TerminalPreview /><p class="terminal-caption"><span aria-hidden="true">◇</span>Your agent works. You stay in control.</p></div>
+  </section>
+  <div class="trust-row font-mono"><span><Icon name="approve-check" size="16" />MIT licensed</span><span class="separator" aria-hidden="true">·</span><span>Single static binary</span><span class="separator" aria-hidden="true">·</span><span>Linux · macOS · Windows</span><span class="separator" aria-hidden="true">·</span><a href={site.github}><Icon name="github" size="16" />Built in the open <Icon name="external" size="14" /></a></div>
+  <RuntimeSurfaces />
+  <ApprovalSection />
+  <SessionsSection />
+  <ProvidersSection />
+</div> : <Default><slot /></Default>}

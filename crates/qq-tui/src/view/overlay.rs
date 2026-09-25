@@ -13,7 +13,8 @@ struct PickerChrome<'a> {
     title: &'a str,
     hint: &'a str,
     placeholder: &'a str,
-    /// A pending yes/no question shown under the search row.
+    /// One line under the search row: a pending yes/no question, or a note
+    /// about what the list cannot show.
     question: Option<Line>,
     /// Shown instead of rows when nothing matches.
     empty: &'a str,
@@ -390,19 +391,26 @@ pub(super) fn delegate_picker(app: &App, width: usize, height: usize) -> Vec<Lin
 }
 
 /// Skills picker: the workspace's indexed commands and skills with their
-/// source and description. Commands are grouped before skills.
+/// source and description. Commands are grouped before skills. A degraded
+/// MCP host's reason sits under the search row, since its tools are what the
+/// picker cannot show.
 pub(super) fn skill_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
     let Some(Overlay::Skills(picker)) = &app.overlay else {
         return fit_height(Vec::new(), height);
     };
     let mut kind: Option<qq_protocol::GuidanceKind> = None;
+    let host_warning = app.tool_host_warning().map(|message| {
+        let mut line = Line::styled("  MCP: ", warning());
+        line.push(message, muted());
+        line
+    });
     picker_frame(
         picker,
         PickerChrome {
             title: "SKILLS",
             hint: "type to search, Enter inserts a command or runs a skill, Esc closes",
             placeholder: "all commands and skills",
-            question: None,
+            question: host_warning,
             empty: "  No matching commands or skills.",
         },
         width,
@@ -702,6 +710,46 @@ pub(super) fn approval_block(app: &App, width: usize) -> Vec<Line> {
 
 /// Diff rows an inline approval shows before offering to scroll.
 const MAX_APPROVAL_DIFF_ROWS: usize = 12;
+
+/// The trust prompt drawn in the empty transcript when the project's
+/// configuration declares sensitive sections no trust record covers: the
+/// title, each pending file with what it declares, and the three answers.
+/// Same shape as the approval block so the two decisions read alike.
+pub(super) fn trust_block(app: &App, width: usize) -> Vec<Line> {
+    let mut lines = Vec::new();
+    let mut title = Line::styled("  ◇ ", warning());
+    title.push(
+        "this project's configuration needs your trust",
+        warning().bold(),
+    );
+    lines.push(truncate_line(title, width));
+    for notice in &app.pending_trust {
+        let mut path = Line::styled("    ", muted());
+        path.push(
+            elide_path(&notice.path, width.saturating_sub(4)),
+            normal().bold(),
+        );
+        lines.push(truncate_line(path, width));
+        for declaration in &notice.declarations {
+            let mut line = Line::styled("      ", muted());
+            line.push(declaration.as_str(), normal());
+            lines.push(truncate_line(line, width));
+        }
+    }
+    let mut choices = Line::styled("    ", muted());
+    for (index, (key, label)) in [("t", "trust"), ("s", "this session"), ("q", "quit")]
+        .into_iter()
+        .enumerate()
+    {
+        if index > 0 {
+            choices.push("   ", muted());
+        }
+        choices.push(key, accent().bold());
+        choices.push(format!(" {label}"), muted());
+    }
+    lines.push(truncate_line(choices, width));
+    lines
+}
 
 /// Prompt-history search: newest first, fuzzy filtered by what the user types.
 pub(super) fn history_picker(app: &App, width: usize, height: usize) -> Vec<Line> {

@@ -124,6 +124,14 @@ impl Harness {
     /// sends with [`Harness::settle`] so ordering is explicit rather than a
     /// consequence of `select!` bias.
     fn spawn(&mut self, app: App) -> tokio::task::JoinHandle<Result<App, TuiError>> {
+        self.spawn_with_trust(app, None)
+    }
+
+    fn spawn_with_trust(
+        &mut self,
+        app: App,
+        trust: Option<TrustResolver>,
+    ) -> tokio::task::JoinHandle<Result<App, TuiError>> {
         let port = self.port.take().expect("harness runs once");
         let events = self.event_stream.take().expect("harness runs once");
         let frames = self.frames.clone();
@@ -135,13 +143,16 @@ impl Harness {
             frames,
             || Ok((100, 30)),
             std::future::pending(),
-            move |draft| {
-                let scripted = std::sync::Arc::clone(&scripted);
-                Box::pin(async move {
-                    let mut guard = scripted.lock().expect("editor script lock");
-                    guard.1.push(draft);
-                    guard.0.take().unwrap_or(Err(EditorError::NotConfigured))
-                })
+            Hooks {
+                editor: move |draft| -> EditorFuture {
+                    let scripted = std::sync::Arc::clone(&scripted);
+                    Box::pin(async move {
+                        let mut guard = scripted.lock().expect("editor script lock");
+                        guard.1.push(draft);
+                        guard.0.take().unwrap_or(Err(EditorError::NotConfigured))
+                    })
+                },
+                trust,
             },
         ))
     }
@@ -537,7 +548,10 @@ async fn the_first_frame_paints_before_the_client_port_connects() {
         frames.clone(),
         || Ok((100, 30)),
         std::future::pending(),
-        |_| Box::pin(async { Err(EditorError::NotConfigured) }),
+        Hooks {
+            editor: |_| -> EditorFuture { Box::pin(async { Err(EditorError::NotConfigured) }) },
+            trust: None,
+        },
     ));
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
@@ -602,8 +616,114 @@ async fn a_failed_connection_is_reported_once_and_then_the_client_stops() {
         frames.clone(),
         || Ok((100, 30)),
         std::future::pending(),
-        |_| Box::pin(async { Err(EditorError::NotConfigured) }),
+        Hooks {
+            editor: |_| -> EditorFuture { Box::pin(async { Err(EditorError::NotConfigured) }) },
+            trust: None,
+        },
     ));
     let result = task.await.expect("loop task");
     assert!(matches!(result, Err(TuiError::ClientStopped(_))));
+}
+
+/// Every byte the loop wrote, as text, so a test can look for a row that
+/// some frame painted whether it was the full first frame or a later diff.
+fn painted_since_start(harness: &Harness) -> String {
+    harness
+        .frames
+        .frames()
+        .iter()
+        .map(|frame| frame_text(frame))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn untrusted_options() -> TuiOptions {
+    TuiOptions {
+        pending_trust: vec![crate::PendingTrustNotice {
+            path: "/repo/.qq/config.ron".to_owned(),
+            declarations: vec!["model openai/gpt-5.6".to_owned()],
+        }],
+        ..TuiOptions::default()
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_a_trust_resolver_the_prompt_stays_and_names_the_server_host() {
+    // OB7 remote: a client attached to a server elsewhere cannot trust files
+    // it cannot read; `t` reports why and the prompt remains.
+    let mut harness = Harness::new(64);
+    let task = harness.spawn(App::new(untrusted_options()));
+    harness.update(ClientUpdate::Connection(ConnectionState::Live));
+    harness.settle().await;
+    assert!(
+        frame_text(&harness.frames.frames()[0]).contains("needs your trust"),
+        "first frame shows the prompt"
+    );
+
+    harness.key(KeyCode::Char('t'), KeyModifiers::NONE);
+    harness.settle().await;
+    // Frames after the first are diffs: the rule row repaints with the
+    // error, the prompt rows are unchanged and so not rewritten.
+    let painted = painted_since_start(&harness);
+    assert!(painted.contains("run `qq trust` there"), "{painted}");
+    assert!(harness.sent().is_empty(), "nothing is asked of the server");
+
+    harness.quit();
+    let app = task.await.expect("loop task").expect("loop exits cleanly");
+    assert!(!app.pending_trust.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_trust_resolver_is_awaited_off_the_loop_and_its_result_applied() {
+    let mut harness = Harness::new(64);
+    let choices: Arc<Mutex<Vec<crate::TrustChoice>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&choices);
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let release_rx = Arc::new(Mutex::new(Some(release_rx)));
+    let resolver: TrustResolver = Box::new(move |choice| {
+        seen.lock().unwrap().push(choice);
+        let release = release_rx.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(release) = release {
+                release.await.expect("release");
+            }
+            Ok(crate::TrustResolved {
+                trusted: vec!["/repo/.qq/config.ron".to_owned()],
+                ..crate::TrustResolved::default()
+            })
+        })
+    });
+    let task = harness.spawn_with_trust(App::new(untrusted_options()), Some(resolver));
+    harness.update(ClientUpdate::Connection(ConnectionState::Live));
+    harness.settle().await;
+
+    harness.key(KeyCode::Char('s'), KeyModifiers::NONE);
+    harness.settle().await;
+    assert_eq!(
+        choices.lock().unwrap().as_slice(),
+        [crate::TrustChoice::Session]
+    );
+    // Still resolving: nothing was sent and nothing has replaced the prompt.
+    assert!(harness.sent().is_empty());
+    assert!(!painted_since_start(&harness).contains("trusted for this session"));
+
+    release_tx.send(()).expect("release");
+    harness.settle().await;
+    harness.settle().await;
+    let painted = painted_since_start(&harness);
+    assert!(painted.contains("trusted for this session"), "{painted}");
+    assert!(painted.contains("creates the first session"), "{painted}");
+    // The server's capabilities and catalog are re-read now that the
+    // configuration loads.
+    assert_eq!(
+        harness.sent(),
+        [
+            ClientRequest::Capabilities,
+            ClientRequest::Models(qq_protocol::ModelSelection::default()),
+        ]
+    );
+
+    harness.quit();
+    let app = task.await.expect("loop task").expect("loop exits cleanly");
+    assert!(app.pending_trust.is_empty());
 }
