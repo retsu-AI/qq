@@ -93,7 +93,10 @@ impl ModelRequest {
     /// validates whether it can encode the value before transport.
     #[must_use]
     pub const fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
-        self.reasoning_effort = Some(effort);
+        self.reasoning_effort = match effort {
+            ReasoningEffort::Default => None,
+            effort => Some(effort),
+        };
         self
     }
 

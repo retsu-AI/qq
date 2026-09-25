@@ -414,7 +414,8 @@ impl App {
     pub(crate) fn open_effort(&mut self) -> Effects {
         let advertised = self.focused_model_efforts();
         let levels = advertised.iter().copied().map(Some);
-        let rows: Vec<EffortRow> = std::iter::once(None)
+        let rows: Vec<EffortRow> = [None, Some(ReasoningEffort::Default)]
+            .into_iter()
             .chain(levels)
             .map(effort_row)
             .collect();

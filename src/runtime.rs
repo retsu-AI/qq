@@ -1310,7 +1310,9 @@ impl RuntimeFactory {
             }
         };
         let resolved_model = self.resolved_model_for_snapshot(&snapshot)?;
-        if snapshot.reasoning_effort().is_some()
+        if snapshot
+            .reasoning_effort()
+            .is_some_and(|effort| effort != qq_provider::ReasoningEffort::Default)
             && resolved_model.generation.reasoning_effort
                 == qq_protocol::CapabilitySupport::Unsupported
         {
@@ -1318,7 +1320,9 @@ impl RuntimeFactory {
                 snapshot.model().as_str().to_owned(),
             ));
         }
-        if let Some(effort) = snapshot.reasoning_effort()
+        if let Some(effort) = snapshot
+            .reasoning_effort()
+            .filter(|effort| *effort != qq_provider::ReasoningEffort::Default)
             && snapshot
                 .providers()
                 .get(snapshot.model().provider())
@@ -1362,7 +1366,9 @@ impl RuntimeFactory {
                             .and_then(|model| model.efforts.clone())
                     })
             });
-        if let Some(effort) = snapshot.reasoning_effort()
+        if let Some(effort) = snapshot
+            .reasoning_effort()
+            .filter(|effort| *effort != qq_provider::ReasoningEffort::Default)
             && let Some(levels) = &live_efforts
             && !levels.contains(&effort)
         {
@@ -1375,7 +1381,9 @@ impl RuntimeFactory {
         // A pin outside the route's advertised ladder is a configuration error
         // here, not a provider 400 mid-turn. An empty ladder advertises nothing
         // and is not checked: unknown is not the same as unsupported.
-        if let Some(effort) = snapshot.reasoning_effort()
+        if let Some(effort) = snapshot
+            .reasoning_effort()
+            .filter(|effort| *effort != qq_provider::ReasoningEffort::Default)
             && live_efforts.is_none()
             && let Some(metadata) = snapshot
                 .providers()
@@ -7636,6 +7644,42 @@ mod tests {
             factory.plan_for(&unsupported),
             Err(RuntimeBuildError::UnsupportedReasoningEffort(_))
         ));
+    }
+
+    #[test]
+    fn provider_default_overrides_configured_effort_without_becoming_a_wire_level() {
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let request = fixture.request(r#"(
+            version: 1, model: "custom/test", reasoning_effort: high,
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: AnthropicMessages, auth: NoAuth), models: { "test": (name: "test", reasoning_efforts: [low, high]) }) },
+        )"#);
+        let overridden = request.clone().with_overrides(
+            request
+                .overrides()
+                .clone()
+                .with_reasoning_effort(qq_provider::ReasoningEffort::Default),
+        );
+        assert_eq!(
+            factory
+                .plan_for(&request)
+                .unwrap()
+                .descriptor()
+                .reasoning_effort,
+            Some(qq_provider::ReasoningEffort::High)
+        );
+        assert_eq!(
+            factory
+                .plan_for(&overridden)
+                .unwrap()
+                .descriptor()
+                .reasoning_effort,
+            Some(qq_provider::ReasoningEffort::Default)
+        );
+        let snapshot = factory.load(&overridden).unwrap();
+        let router = routing::TypeSafeTaskRouter::from_snapshot(&factory, &snapshot, true);
+        // Candidate construction must reach authentication, not reject Default.
+        assert!(matches!(router, Err(RuntimeBuildError::JevKeyRequired)));
     }
 
     #[test]

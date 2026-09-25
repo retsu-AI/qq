@@ -78,7 +78,7 @@ still be used by declaring it under the provider's `models`.
 | --- | --- |
 | `openai` | `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra`, `gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.3-codex-spark`, `gpt-5.2`, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-4o`, `gpt-4o-mini` |
 | `openai-codex` | the OpenAI routes your subscription includes |
-| `anthropic` | `claude-opus-5`, `claude-sonnet-5`, `claude-fable-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5`, `claude-sonnet-4-6`, `claude-sonnet-4-5`, `claude-haiku-4-5` |
+| `anthropic` | `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5`, `claude-sonnet-4-6`, `claude-sonnet-4-5`, `claude-haiku-4-5` |
 | `google` | `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
 | `xai` | `grok-4.7`, `grok-4.6`, `grok-4.5`, `grok-4.3` |
 | `bedrock`, `bedrock-mantle` | the same Anthropic and OpenAI models under their Bedrock ids |
@@ -97,21 +97,35 @@ GPT-6 Astra supports `low` through `max`, but not `none` or `minimal`.
 Direct Claude Sonnet 5 / Opus 4.7 and 4.8 support `low`, `medium`, `high`,
 `xhigh`, and `max`; Opus/Sonnet 4.6 omit `xhigh`, and Opus 4.5 stops at `high`.
 The picker shows only the selected model's advertised choices. Unknown models
-show only Default. Default retains the existing configuration/profile inheritance
-semantics; it is not the explicit `none` level. Anthropic uses
+show only Configured and Default. Configured inherits the configuration/profile
+setting; Default explicitly overrides that setting and omits effort from the
+provider request. Neither is the explicit `none` level (which disables reasoning
+only on models that advertise it). Anthropic uses
 `output_config.effort`, never an OpenAI reasoning field.
 
-Protocol 28 and session-store schema 36 introduce `max`; older binaries cannot
-open upgraded stores. Back up the store before upgrading if rollback is needed.
+The complete stack uses protocol 30 and session-store schema 39 for the new
+effort vocabulary and replay envelopes; older binaries cannot open upgraded
+stores. Back up the store before upgrading if rollback is needed.
 
 Anthropic discovery now follows bounded pagination before replacing implicit
 bundled model entries, preserving configured routes and failure fallback.
-Their pricing is currently unknown in the bundled catalog; cost-budget behavior
+GPT-6 Sol/Luna pricing is currently unknown in the bundled catalog; cost-budget behavior
 therefore remains conservative. Codex uses the conservative bundled 272K
 context limit, distinct from the direct API's 1.05M limit.
 
-Opus 5.5 is not yet advertised as supported: its always-on thinking requires
-signed thinking-block replay during tool rounds, which QQ does not yet retain.
+Opus 5.5 supports `low`, `medium`, `high`, `xhigh`, and `max`. QQ retains signed
+thinking and redacted blocks for successful tool turns, including session restart.
+Replay is bounded and bound to the endpoint, semantic headers, model, conversation
+prefix and assistant content. Changed prompts/tools, compaction, model changes or
+invalid/incomplete turns omit incompatible replay. Always-on thinking is left to
+the provider; QQ does not send disabled/manual thinking or forced tool choice.
+Authenticated account access has not been smoke-tested; deterministic loopback
+coverage verifies the signed tool loop and SQLite reopen path.
+
+Live Codex and Anthropic effort capabilities override implicit bundled ladders;
+explicit model declarations retain their configured metadata. Older GPT-5 mini/
+nano, GPT-5.2/5.4, and GPT-5.6 use separate bundled ladders rather than one global
+set. Unknown discovery capabilities fall back to known route metadata.
 
 
 ## Amazon Bedrock

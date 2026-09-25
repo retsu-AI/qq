@@ -147,6 +147,12 @@ impl AnthropicMessages {
         authorizer: RequestAuthorizer,
         anthropic_version: &str,
     ) -> Result<Self, ProviderError> {
+        let static_headers: Vec<_> = static_headers.into_iter().collect();
+        let mut origin_headers = static_headers.clone();
+        for (name, _) in &mut origin_headers {
+            name.make_ascii_lowercase();
+        }
+        origin_headers.sort();
         let auth_kind = match &auth {
             AnthropicAuth::NoAuth => "none",
             AnthropicAuth::XApiKey(_) => "x-api-key",
@@ -161,7 +167,8 @@ impl AnthropicMessages {
                     "anthropic-messages-v1",
                     endpoint.as_str(),
                     anthropic_version,
-                    auth_kind
+                    auth_kind,
+                    origin_headers,
                 ))
                 .expect("serializable origin")
             )
@@ -318,6 +325,9 @@ impl Provider for AnthropicMessages {
                                 replay.validate()?;
                                 let turn = ReplayTurn { origin: origin.clone(), prefix: prefix_digest(&body), content: replay.blocks.into_values().collect() };
                                 let data = serde_json::to_string(&turn).map_err(|_| ProviderError::Protocol("could not encode Anthropic continuation".into()))?;
+                                if data.len() > 16 * 1024 * 1024 {
+                                    Err(ProviderError::Protocol("Anthropic continuation exceeded size limit".into()))?;
+                                }
                                 yield ProviderEvent::Replay { data: data.into() };
                             }
                             let usage = usage.finish();
@@ -597,6 +607,8 @@ impl ReplayCapture {
         };
         match value["type"].as_str() {
             Some("content_block_start") => {
+                self.invalid |=
+                    index != self.blocks.len() as u64 || self.closed.len() != self.blocks.len();
                 let block = value["content_block"].clone();
                 self.has_thinking |= matches!(
                     block["type"].as_str(),
@@ -2103,6 +2115,54 @@ mod tests {
         ));
         assert!(matches!(&events[1], Err(ProviderError::Protocol(_))));
         server.capture();
+    }
+
+    #[tokio::test]
+    async fn signed_partial_and_faulted_streams_never_emit_replay() {
+        for ending in [
+            "",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"failed\"}}\n\n",
+        ] {
+            let body = format!(
+                "data: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"thinking\",\"thinking\":\"private\",\"signature\":\"signed\"}}}}\n\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n{ending}"
+            );
+            let server = LoopbackServer::sse(&body);
+            let provider = AnthropicMessages::with_endpoint(
+                &format!("{}/v1/messages", server.base_url),
+                AnthropicAuth::NoAuth,
+                [],
+                true,
+            )
+            .unwrap();
+            let events = provider.stream(test_request()).collect::<Vec<_>>().await;
+            assert!(events.iter().any(Result::is_err));
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                Ok(ProviderEvent::Replay { .. } | ProviderEvent::Completed { .. })
+            )));
+            server.capture();
+        }
+    }
+
+    #[test]
+    fn replay_origin_binds_semantic_headers_but_not_rotating_credentials() {
+        let make = |key: &str, tenant: &str| {
+            AnthropicMessages::with_endpoint(
+                "https://example.test/v1/messages",
+                AnthropicAuth::XApiKey(key.to_owned().into()),
+                [("x-tenant".into(), tenant.into())],
+                false,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            make("old", "a").replay_origin,
+            make("new", "a").replay_origin
+        );
+        assert_ne!(
+            make("old", "a").replay_origin,
+            make("old", "b").replay_origin
+        );
     }
 
     fn decode_data(name: &str, data: &str) -> Result<DecodedEvent, ProviderError> {

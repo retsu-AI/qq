@@ -1,5 +1,16 @@
 # Latest model support (ENG-885)
 
+## Completion implementation (storage interruption resumed)
+
+- Implemented Configured/inherited versus explicit provider Default; Default survives config/profile/session selection and is normalized to omission only at the provider request boundary. Routing accepts Anthropic efforts and Default. Protocol 30 / store 39 gate the final vocabulary; historical fixtures retained.
+- Imported Anthropic `capabilities.effort` support flags with absent/disabled/exact-list regression coverage. Corrected GPT-5 mini/nano, GPT-5.2/5.4 and GPT-5.6 bundled ladders against official model documentation.
+- Added real Anthropic SSE signed thinking → read_file → tool result → completion → SQLite reopen → next request acceptance. Added partial/faulted signed stream rejection and semantic-header origin binding tests. Replay envelopes are bounded before emission and transcript allocation (64 MiB aggregate), with 16 MiB per replay.
+- Workspace tests passed with `--test-threads=1`; parallel runs hit timing deadlines in headless/delegation tests, retained as verification caveat. Focused replay, migration, picker, capability and provider-default tests passed. Workspace Clippy/build and minimal provider lint/tests passed before final test-only changes.
+- GitHub review comments: none on all three PRs. Diagnosed actual CI failure on #154/#157: body-only client updates invalidated tree index, masked locally by allocation reuse. Fixed both mutations to use body_mut; all 22 client tests pass. Propagate fix to parent before final readiness.
+- Benchmark: provider recipe 512 ns, Google 484 ns, Mantle 263 ns, dispatch 80 ns; earlier 476/407/270/80. Host contention affects unchanged Google path too; not an isolated regression measurement.
+- Review disposition: no new CLI flag required for existing config/profile/TUI effort inputs; do not normalize Default in config (would restore inherited pin). Replay invalidation is request-local by design, always revalidating full prefix/origin/content rather than mutating authoritative stored history. Existing legacy chunk bounds are separate from newly bounded replay envelopes. Final CI and PR metadata updates still pending.
+
+
 ## Delegated review and implementation
 
 - Read-only agent reviewed the outstanding blockers and a second pass reviewed the diff. Implemented endpoint/version/auth-kind replay origin hashing (no credential material persisted), pre-decode replay size check, incremental bounded history-turn decoding, and live effort precedence over implicit bundled ladders.

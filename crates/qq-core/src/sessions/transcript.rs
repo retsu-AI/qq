@@ -365,21 +365,30 @@ pub(super) fn load_model_context_with_units(
                AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
              ORDER BY t.run_id, t.turn_ordinal",
     )?;
-    let rows = statement.query_map(params![session, through_ordinal, cutoff_ordinal], |row| {
-        Ok((
+    let mut rows = statement.query(params![session, through_ordinal, cutoff_ordinal])?;
+    // Include opaque replay envelopes in the allocation budget before decoding.
+    let mut remaining_turn_bytes = 64 * 1024 * 1024_usize;
+    while let Some(row) = rows.next()? {
+        let raw = row
+            .get_ref(2)?
+            .as_str()
+            .map_err(|_| SessionRuntimeError::CONSTRAINT)?;
+        if raw.len() > remaining_turn_bytes {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        remaining_turn_bytes -= raw.len();
+        let (run_id, ordinal, content, truncated) = (
             row.get::<_, String>(0)?,
             row.get::<_, u32>(1)?,
-            row.get::<_, String>(2)?,
+            raw.to_owned(),
             row.get::<_, bool>(3)?,
-        ))
-    })?;
-    for row in rows {
-        let (run_id, ordinal, content, truncated) = row?;
+        );
         turns
             .entry(run_id)
             .or_default()
             .push((ordinal, content, truncated));
     }
+    drop(rows);
     drop(statement);
 
     // Every recorded tool result, keyed by run, turn, and provider call id, with the

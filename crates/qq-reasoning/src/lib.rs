@@ -27,6 +27,8 @@ pub enum ReasoningKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
+    /// Override configured effort and let the provider choose; never sent on its wire.
+    Default,
     None,
     Minimal,
     Low,
@@ -51,6 +53,7 @@ impl ReasoningEffort {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Default => "default",
             Self::None => "none",
             Self::Minimal => "minimal",
             Self::Low => "low",

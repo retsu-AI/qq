@@ -631,3 +631,156 @@ async fn repeated_call_ids_keep_pruning_effects_and_arguments_local_to_each_turn
         results[2].0
     );
 }
+
+struct AnthropicReplayLoader(Arc<dyn Provider>);
+impl RuntimeLoader for AnthropicReplayLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let provider = self.0.clone();
+        Box::pin(async move {
+            Runtime::new(provider, "claude-opus-5-5", 256)
+                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+                .map_err(|error| RuntimeLoadError {
+                    kind: RunFailureKind::Configuration,
+                    message: error.to_string(),
+                })
+        })
+    }
+}
+
+#[tokio::test]
+async fn anthropic_signed_tool_turn_survives_runtime_restart() {
+    use qq_provider::{
+        EndpointSpec, HttpAuth, HttpProtocol, HttpProviderRecipe, ProviderCompiler, ProviderRecipe,
+    };
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut captured = Vec::new();
+        for turn in 0..3 {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0; 4096];
+            let body = loop {
+                let count = socket.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&chunk[..count]);
+                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if bytes.len() >= end + 4 + length {
+                        break serde_json::from_slice::<serde_json::Value>(
+                            &bytes[end + 4..end + 4 + length],
+                        )
+                        .unwrap();
+                    }
+                }
+            };
+            captured.push(body);
+            let blocks = if turn == 0 {
+                vec![
+                    serde_json::json!({"type":"thinking","thinking":"inspect file","signature":"opaque-signed"}),
+                    serde_json::json!({"type":"tool_use","id":"call_0","name":"read_file","input":{}}),
+                ]
+            } else {
+                vec![serde_json::json!({"type":"text","text":"done"})]
+            };
+            let mut events = vec![
+                serde_json::json!({"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}),
+            ];
+            for (index, block) in blocks.into_iter().enumerate() {
+                events.push(serde_json::json!({"type":"content_block_start","index":index,"content_block":block}));
+                if turn == 0 && index == 1 {
+                    events.push(serde_json::json!({"type":"content_block_delta","index":index,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"note.txt\"}"}}));
+                }
+                events.push(serde_json::json!({"type":"content_block_stop","index":index}));
+            }
+            events.push(serde_json::json!({"type":"message_delta","delta":{"stop_reason":if turn == 0 {"tool_use"} else {"end_turn"}}}));
+            events.push(serde_json::json!({"type":"message_stop"}));
+            let response = events
+                .into_iter()
+                .map(|value| format!("data: {value}\n\n"))
+                .collect::<String>();
+            write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",response.len(),response).unwrap();
+        }
+        captured
+    });
+    let provider = ProviderCompiler::new()
+        .unwrap()
+        .compile(ProviderRecipe::http(HttpProviderRecipe::new(
+            EndpointSpec::base(endpoint, true),
+            HttpProtocol::AnthropicMessages,
+            HttpAuth::NoAuth,
+        )))
+        .unwrap();
+    let loader = Arc::new(AnthropicReplayLoader(provider));
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("note.txt"), "tool payload").unwrap();
+    let options = || SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    let runtime = SessionRuntime::open(options(), loader.clone())
+        .await
+        .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!()
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    let run = queue_prompt(&runtime, session_id, "read note".into()).await;
+    let observed = collect_until(&mut events, finished_for(run)).await;
+    assert!(
+        observed.iter().any(|e| matches!(
+            e.event,
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::Completed,
+                ..
+            }
+        )),
+        "{observed:?}"
+    );
+    runtime.shutdown().await.unwrap();
+    drop(events);
+    drop(runtime);
+    let runtime = SessionRuntime::open(options(), loader).await.unwrap();
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    let run = queue_prompt(&runtime, session_id, "continue".into()).await;
+    collect_until(&mut events, finished_for(run)).await;
+    runtime.shutdown().await.unwrap();
+    let requests = server.join().unwrap();
+    for request in &requests[1..] {
+        let messages = request["messages"].as_array().unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m["content"][0]["type"] == "thinking")
+            .unwrap_or_else(|| panic!("signed thinking missing: {request}"));
+        assert_eq!(assistant["content"][0]["signature"], "opaque-signed");
+        assert_eq!(assistant["content"][1]["type"], "tool_use");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m["content"].as_array().is_some_and(|blocks| blocks
+                    .iter()
+                    .any(|b| b["type"] == "tool_result" && b["tool_use_id"] == "call_0")))
+        );
+    }
+}
