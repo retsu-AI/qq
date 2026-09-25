@@ -1,0 +1,36 @@
+{
+  "command_id": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+  "command": {
+    "type": "submit_prompt",
+    "session_id": "03030303030303030303030303030303",
+    "input": [
+      {
+        "type": "text",
+        "text": "Summarize the failing tests as JSON"
+      }
+    ],
+    "output": {
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "failing": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "failing",
+          "count"
+        ],
+        "type": "object"
+      },
+      "repair_turns": 2
+    }
+  }
+}

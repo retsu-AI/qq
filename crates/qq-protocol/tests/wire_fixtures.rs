@@ -19,8 +19,8 @@ use qq_protocol::{
     CAPABILITIES_VERSION, CapabilitiesRequest, CapabilitySupport, CommandId, CommandOutcome,
     CommandReceipt, CommandRequest, ContentHash, Correlation, CredentialEpoch, DelegateIdentity,
     EventCapabilities, EventCursor, FetchPreview, FinalOutput, GenerationCapabilities, InputPart,
-    InputPartKind, InstructionHash, LimitCapabilities, MessageId, MessageRole, MessageSnapshot,
-    MessageState, ModelSelection, OutputContract, PROTOCOL_VERSION, PackSummary,
+    InputPartKind, InstructionHash, JevMode, LimitCapabilities, MessageId, MessageRole,
+    MessageSnapshot, MessageState, ModelSelection, OutputContract, PROTOCOL_VERSION, PackSummary,
     PromptCacheCapabilities, PromptVersion, Question, QuestionPreview, ResolvedModel,
     ResolvedModelVersion, RunActivity, RunFailure, RunFailureKind, RunId, RunLimits, RunOutcome,
     RunPause, RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus, ServerCapabilities,
@@ -70,6 +70,7 @@ fn summary() -> SessionSummary {
         profile: AgentProfileId::new("review").unwrap(),
         approval_mode: ApprovalMode::ReadOnly,
         approval_delegate: None,
+        jev_mode: None,
         reasoning_effort: None,
         correlation: correlation(&[("thread", "t-1")]),
         context_tokens: Some(1200),
@@ -208,7 +209,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 30);
+    assert_eq!(PROTOCOL_VERSION, 32);
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
@@ -408,6 +409,17 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             },
         ),
     );
+    // Version 31: the Jev mode ladder (ADR-0044).
+    check(
+        "command_set_jev_mode",
+        &command(
+            0x29,
+            SessionCommand::SetJevMode {
+                session_id,
+                mode: Some(JevMode::Ultrajev),
+            },
+        ),
+    );
 
     let receipt = |byte: u8, sequence: u64, outcome: CommandOutcome| CommandReceipt {
         command_id: CommandId::from_bytes([byte; 16]),
@@ -487,6 +499,17 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             },
         ),
     );
+    check(
+        "receipt_jev_mode_set",
+        &receipt(
+            0x29,
+            16,
+            CommandOutcome::JevModeSet {
+                session_id,
+                mode: Some(JevMode::High),
+            },
+        ),
+    );
 
     check(
         "event_prompt_queued",
@@ -496,6 +519,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 session: Box::new(summary()),
                 message: message(0x20, false, MessageState::Queued),
                 run: Box::new(RunSnapshot {
+                    verification: None,
                     id: run_id,
                     session_id,
                     status: RunStatus::Queued,
@@ -735,6 +759,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             19,
             SessionEvent::RunFinished {
+verification: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Failed {
@@ -771,6 +796,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             21,
             SessionEvent::RunFinished {
+verification: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Failed {
@@ -804,6 +830,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             23,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Paused {
@@ -826,6 +853,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             25,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Completed,
@@ -843,6 +871,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             26,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Completed,
@@ -907,6 +936,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
     check(
         "snapshot_run_with_plan_identity",
         &RunSnapshot {
+            verification: None,
             id: run_id,
             session_id,
             status: RunStatus::Completed,

@@ -483,6 +483,13 @@ async fn prepare_execution(
                 return Ok(PreparedExecution {
                     events,
                     audit: PreparedRunAudit {
+                        strict_reviewer: loaded
+                            .plan
+                            .descriptor()
+                            .checkpoint
+                            .as_ref()
+                            .filter(|id| id.ends_with("/strict"))
+                            .cloned(),
                         prompt_identity,
                         resolved_model: Arc::new(resolved_model),
                         plan_identity: loaded.plan.identity(),
@@ -668,6 +675,7 @@ async fn route_run(
         decision.model.organization = claimed.model.organization.clone();
         let mut load = inner.loader.load(RuntimeLoadRequest {
             reasoning_effort: decision.reasoning_effort,
+            jev_mode: claimed.jev_mode,
             routing: Some(RoutingSelection::from_identity(
                 loaded.plan.descriptor().routing.as_deref(),
             )),
@@ -763,6 +771,7 @@ pub(super) async fn execute_run(
     let mut load = inner.loader.load_with_progress(
         RuntimeLoadRequest {
             reasoning_effort: claimed.reasoning_effort,
+            jev_mode: claimed.jev_mode,
             checkpoint: claimed.checkpoint.clone(),
             routing: claimed.routing.clone(),
             workspace: claimed.workspace.clone(),
@@ -832,6 +841,20 @@ pub(super) async fn execute_run(
             },
         )
         .await;
+        return;
+    }
+    if loaded
+        .plan
+        .descriptor()
+        .checkpoint
+        .as_deref()
+        .is_some_and(|id| id.ends_with("/strict"))
+        && !claimed.limits.has_verification_bound()
+    {
+        finish_reserved_run(&inner, &claimed, RunOutcome::Failed { failure: RunFailure {
+            kind: RunFailureKind::Configuration,
+            message: "Strict Jev verification requires an explicit finite duration, model-turn, tool-call, token, or cost run limit".into(),
+        }}).await;
         return;
     }
     if let Err(outcome) = route_run(
@@ -2574,13 +2597,20 @@ async fn execute_started_run(
                 accounting.record_review(usage, cost_usd_nanos);
             }
             RunInput::Event(Some(RuntimeEvent::CheckpointStarted {
+                verification,
                 correlation,
                 phase,
                 tool_call_id,
             })) => {
                 if let Err(error) = inner
                     .store
-                    .record_checkpoint_started(&claimed, correlation.clone(), phase, tool_call_id)
+                    .record_checkpoint_started(
+                        &claimed,
+                        verification,
+                        correlation.clone(),
+                        phase,
+                        tool_call_id,
+                    )
                     .await
                 {
                     let Ok(teardown) = resources.stop(&mut events).await else {

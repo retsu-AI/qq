@@ -254,6 +254,7 @@ fn report_detached_cleanup_failure(message: &str) {
 
 /// The terminal result of the event-streaming phase.
 struct RunEnd {
+    verification: Option<Box<qq_protocol::VerificationRecord>>,
     status: HeadlessStatus,
     message: Option<String>,
     usage: Option<TokenUsage>,
@@ -278,6 +279,7 @@ impl RunEnd {
             usage: None,
             estimated_cost_usd_nanos: None,
             prompt_identity: None,
+            verification: None,
             audit: None,
             final_output: None,
             answer: String::new(),
@@ -415,6 +417,7 @@ pub async fn run(
         estimated_cost_usd_nanos,
         prompt_identity,
         audit,
+        verification,
         final_output,
         answer,
         denied_calls,
@@ -427,6 +430,7 @@ pub async fn run(
         estimated_cost_usd_nanos,
         prompt_identity,
         audit,
+        verification,
         final_output,
     };
     if let Err(error) = sink
@@ -889,10 +893,10 @@ async fn stream_run(
                         ..
                     } if ours => {
                         if text {
-                            let color = if matches!(outcome, qq_protocol::CheckpointOutcome::Supported) {
-                                "GREEN"
-                            } else {
-                                "RED"
+                            let color = match outcome {
+                                qq_protocol::CheckpointOutcome::Supported => "GREEN",
+                                qq_protocol::CheckpointOutcome::Unavailable => "UNAVAILABLE",
+                                _ => "RED",
                             };
                             let confidence = confidence_basis_points
                                 .map(|value| format!(" confidence={:.2}%", f64::from(value) / 100.0))
@@ -1012,8 +1016,17 @@ async fn stream_run(
                                 .await;
                         }
                     }
-                    SessionEvent::RunFinished { session, run_id, outcome, usage, final_output, .. }
+                    SessionEvent::RunFinished { session, run_id, outcome, usage, final_output, verification, .. }
                         if *run_id == handle.run_id => {
+                        if text && let Some(record) = verification {
+                            let label = match record.state {
+                                qq_protocol::VerificationState::Verified => "verified",
+                                qq_protocol::VerificationState::Unresolved => "unresolved",
+                                qq_protocol::VerificationState::Unavailable => "verification unavailable",
+                                qq_protocol::VerificationState::Pending => "verification pending",
+                            };
+                            let _ = writeln!(stderr, "[jev] execution produced a candidate; {label}");
+                        }
                         let usage = inclusive_usage(session.accounting, *usage);
                         let cost = inclusive_cost(
                             session.accounting,
@@ -1045,6 +1058,7 @@ async fn stream_run(
                             estimated_cost_usd_nanos: cost,
                             prompt_identity,
                             audit,
+                            verification: verification.clone(),
                             final_output: final_output.clone(),
                             answer,
                             denied_calls,

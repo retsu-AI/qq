@@ -153,7 +153,11 @@ The first credentialed smoke (2026-09-04, Sonnet 5 through LiteLLM) passed in
 
 Provider credentials are inherited by the process and passed to the task
 container by the adapter. They are never included in the launch plan or
-report. Do not put credentials or generated jobs in this directory. Note that
+report. This includes `TYPESAFE_API_KEY` when present for an explicitly
+configured JEV review or routing arm; forwarding the key does not enable JEV
+or change its completion policy. Keep the key in the process environment,
+never in `QQ_CONFIG_CONTENT`, command arguments, or benchmark artifacts.
+Do not put credentials or generated jobs in this directory. Note that
 `harbor datasets download` writes into the current directory; run it outside
 the repository or delete the result.
 

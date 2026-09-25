@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import runpy
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,20 +14,45 @@ from qq_harbor.atif import ATIF_SCHEMA_VERSION, TraceError, convert_trace, load_
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 SMOKE_TASK = Path(__file__).resolve().parents[1] / "smoke-task"
+PROTOCOL_SOURCE = Path(__file__).resolve().parents[3] / "crates/qq-protocol/src/lib.rs"
+
+
+def current_protocol_version() -> int:
+    versions = re.findall(
+        r"^pub const PROTOCOL_VERSION: u16 = (\d+);$",
+        PROTOCOL_SOURCE.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    if len(versions) != 1:
+        raise AssertionError("expected one authoritative Rust PROTOCOL_VERSION declaration")
+    return int(versions[0])
 
 
 class AtifConversionTests(unittest.TestCase):
+    def test_fixture_generator_uses_current_protocol_without_writing_fixtures(self) -> None:
+        generator = runpy.run_path(str(FIXTURES.parent / "make_fixtures.py"))
+        trace = generator["Trace"]()
+        trace.trial()
+        self.assertEqual(trace.lines[0]["protocol_version"], current_protocol_version())
+
     def test_all_durable_trace_shapes_convert_deterministically(self) -> None:
-        for trace in sorted(FIXTURES.glob("*.trace.jsonl")):
+        traces = sorted(FIXTURES.glob("*.trace.jsonl"))
+        self.assertTrue(traces)
+        protocol_version = current_protocol_version()
+        for trace in traces:
             with self.subTest(trace=trace.name):
-                first = convert_trace(load_trace(trace))
+                records = load_trace(trace)
+                trial = records[0]
+                self.assertEqual(trial["type"], "trial")
+                self.assertEqual(trial["protocol_version"], protocol_version)
+                first = convert_trace(records)
                 second = convert_trace(load_trace(trace))
                 self.assertEqual(first, second)
                 self.assertEqual(first["schema_version"], ATIF_SCHEMA_VERSION)
                 self.assertEqual(first["agent"]["name"], "qq")
                 self.assertTrue(first["steps"])
                 qq = first["extra"]["qq"]
-                self.assertEqual(qq["protocol_version"], 23)
+                self.assertEqual(qq["protocol_version"], trial["protocol_version"])
                 self.assertEqual(qq["qq_source_revision"], "fixture-revision")
                 self.assertEqual(qq["outcome"]["prompt_identity"]["version"], 7)
                 json.dumps(first)
