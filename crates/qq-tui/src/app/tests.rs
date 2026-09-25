@@ -1264,6 +1264,7 @@ fn context_usage_uses_last_turn_tokens_live_updates_and_the_model_limit() {
             3,
             session_id,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(summary),
                 run_id: id(8, RunId::from_bytes),
                 outcome: RunOutcome::Completed,
@@ -1436,6 +1437,7 @@ fn compaction_run_usage_does_not_become_session_context() {
             2,
             session_id,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(compacted.clone()),
                 run_id: id(8, RunId::from_bytes),
                 outcome: RunOutcome::Completed,
@@ -2754,6 +2756,7 @@ fn enter_during_a_run_queues_the_draft_and_it_submits_when_the_run_ends() {
     summary.active_run_id = None;
     let requests = app
         .apply_client_update(event(SessionEvent::RunFinished {
+            verification: None,
             session: Box::new(summary),
             run_id,
             outcome: RunOutcome::Completed,
@@ -3198,6 +3201,7 @@ fn a_single_theme_makes_the_picker_a_notice_instead() {
 fn attention_is_requested_only_while_the_terminal_is_unfocused() {
     let (mut app, session_id, run_id, mut event) = running_app();
     let finish = |run_id| SessionEvent::RunFinished {
+        verification: None,
         session: Box::new(SessionSummary {
             model_is_fallback: false,
             status: SessionStatus::Idle,
@@ -3345,6 +3349,7 @@ fn the_reducer_returns_notices_and_attention_as_effects_instead_of_mutating_them
             2,
             session_id,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(summary),
                 run_id,
                 outcome: RunOutcome::Failed {

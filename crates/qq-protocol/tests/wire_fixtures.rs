@@ -209,7 +209,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 31);
+    assert_eq!(PROTOCOL_VERSION, 32);
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
@@ -519,6 +519,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 session: Box::new(summary()),
                 message: message(0x20, false, MessageState::Queued),
                 run: Box::new(RunSnapshot {
+                    verification: None,
                     id: run_id,
                     session_id,
                     status: RunStatus::Queued,
@@ -758,6 +759,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             19,
             SessionEvent::RunFinished {
+verification: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Failed {
@@ -794,6 +796,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             21,
             SessionEvent::RunFinished {
+verification: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Failed {
@@ -827,6 +830,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             23,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Paused {
@@ -849,6 +853,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             25,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Completed,
@@ -866,6 +871,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             26,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Completed,
@@ -930,6 +936,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
     check(
         "snapshot_run_with_plan_identity",
         &RunSnapshot {
+            verification: None,
             id: run_id,
             session_id,
             status: RunStatus::Completed,

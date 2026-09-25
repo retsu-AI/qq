@@ -189,6 +189,7 @@ impl ClaimedRun {
 
 #[derive(Clone)]
 pub(super) struct PreparedRunAudit {
+    pub(super) strict_reviewer: Option<String>,
     pub(super) prompt_identity: Arc<RunPromptIdentity>,
     pub(super) resolved_model: Arc<ResolvedModel>,
     pub(super) plan_identity: RunPlanIdentity,
@@ -380,6 +381,7 @@ pub(super) fn test_prepared_audit_with_identity(
         },
     });
     PreparedRunAudit {
+        strict_reviewer: None,
         prompt_identity: Arc::new(RunPromptIdentity {
             version: qq_protocol::PromptVersion::new(1).unwrap(),
             instruction_hash: qq_protocol::InstructionHash::from_bytes([0; 32]),
@@ -792,6 +794,14 @@ pub(super) fn start_reserved_run(
     let prompt_identity = serde_json::to_string(audit.prompt_identity.as_ref())?;
     let resolved_model = serde_json::to_string(audit.resolved_model.as_ref())?;
     let plan_identity = serde_json::to_string(&audit.plan_identity)?;
+    let verification = audit
+        .strict_reviewer
+        .as_ref()
+        .map(|identity| qq_protocol::VerificationRecord::pending(identity.clone()));
+    let verification_json = verification
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     let context_base_bytes = prepared_context_bytes(audit.weight)?;
     let now = now_ms();
     let transaction = store::begin_unit(connection)?;
@@ -803,7 +813,7 @@ pub(super) fn start_reserved_run(
              SET status = 'running', started_at_ms = ?3,
                  prompt_identity_json = ?4, resolved_model_json = ?5,
                  context_base_bytes = ?6, context_increment_bytes = 0,
-                 plan_identity_json = ?7, plan_descriptor_json = ?8
+                 plan_identity_json = ?7, plan_descriptor_json = ?8, verification_json = ?9
              WHERE id = ?1 AND session_id = ?2 AND status = 'queued'
                AND outcome_json IS NULL AND cancel_requested = 0",
         params![
@@ -815,6 +825,7 @@ pub(super) fn start_reserved_run(
             context_base_bytes,
             plan_identity,
             audit.plan_descriptor_json.as_ref(),
+            verification_json,
         ],
     )?;
     if run_started != 1 {
@@ -1029,7 +1040,7 @@ pub(super) fn load_run(
             "SELECT session_id, status, outcome_json, prompt_identity_json,
                     resolved_model_json, usage_json, context_tokens,
                     estimated_cost_usd_nanos, limits_json, plan_identity_json, correlation_json,
-                    audit_json, final_output_json
+                    audit_json, final_output_json, verification_json
              FROM runs WHERE id = ?1",
             [run_id.to_string()],
             |row| {
@@ -1047,6 +1058,7 @@ pub(super) fn load_run(
                     row.get::<_, Option<String>>(10)?,
                     row.get::<_, Option<String>>(11)?,
                     row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
                 ))
             },
         )
@@ -1066,8 +1078,14 @@ pub(super) fn load_run(
                 correlation,
                 audit,
                 final_output,
+                verification,
             )| {
                 Ok(RunSnapshot {
+                    verification: verification
+                        .as_deref()
+                        .map(serde_json::from_str)
+                        .transpose()?
+                        .map(Box::new),
                     id: run_id,
                     session_id: parse_id(&session)?,
                     status: parse_run_status(&status)?,

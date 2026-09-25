@@ -117,6 +117,7 @@ pub fn tool_call(id: ToolCallId, session_id: SessionId, name: &str) -> ToolCallS
 #[must_use]
 pub fn run(id: RunId, session_id: SessionId, status: RunStatus) -> RunSnapshot {
     RunSnapshot {
+        verification: None,
         id,
         session_id,
         status,

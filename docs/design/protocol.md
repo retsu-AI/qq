@@ -2129,3 +2129,22 @@ Model selections and session summaries carry optional `model_is_fallback`
 opted-in routing. False preserves explicit and legacy choices as pins. Schema 32
 persists the flag; model changes and reconnect snapshots retain it. A TUI model
 pick clears it. This field does not enable Jev or grant access to any model.
+
+## Protocol 32: Strict verification (ADR-0045)
+
+`RunSnapshot.verification`, checkpoint events' optional `verification`,
+`RunFinished.verification`, and `HeadlessOutcome.verification` carry an optional
+`VerificationRecord`. Absence is historical or non-strict, never inferred support.
+The record has reviewer identity, state (`pending`, `verified`, `unresolved`,
+`unavailable`), latest phase/correlation/tool ID/outcome/reason, masked typed
+`basis_sha256`, evidence generation, review count, open correction and its generation.
+Checkpoint records commit with events. A supported final receipt remains pending
+until `Verified` is committed in the same transaction as `Completed`.
+`verification_unresolved` and `verification_unavailable` are distinct failure kinds.
+Cancellation/budget/interruption retain their outcomes and a non-verified record.
+Schema41 adds nullable `runs.verification_json`; prior rows remain NULL.
+Existing modes and protocol31 Jev ladder selection retain their semantics.
+
+Store schema 41 also retains an internal per-tool verification receipt marker.
+Strict recovery closes each retained or interrupted unreviewed tool locally,
+without scanning the workspace event journal or repeating remote assessment.

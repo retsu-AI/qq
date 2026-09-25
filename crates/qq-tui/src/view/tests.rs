@@ -3403,6 +3403,7 @@ fn a_finished_run_ends_with_a_completion_line_and_a_running_one_does_not() {
     // The run started at the fixture's occurred_at_ms (1) and finishes here;
     // duration comes from the envelopes, tokens from usage.
     app.apply_client_update(event(SessionEvent::RunFinished {
+        verification: None,
         session: Box::new(summary),
         run_id,
         outcome: qq_protocol::RunOutcome::Completed,
@@ -4200,6 +4201,7 @@ fn the_sidebar_groups_sessions_by_what_the_user_should_do() {
         done_id,
         done_run,
         SessionEvent::RunFinished {
+            verification: None,
             session: Box::new(done),
             run_id: done_run,
             outcome: qq_protocol::RunOutcome::Completed,
@@ -4321,6 +4323,7 @@ fn app_with_every_rail_group() -> (App, [SessionId; 5]) {
             id,
             run,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(summary),
                 run_id: run,
                 outcome: qq_protocol::RunOutcome::Completed,
@@ -5032,6 +5035,7 @@ fn the_completion_line_names_the_plan_and_an_overridden_route() {
     summary.status = SessionStatus::Idle;
     summary.active_run_id = None;
     app.apply_client_update(event(SessionEvent::RunFinished {
+        verification: None,
         session: Box::new(summary),
         run_id,
         outcome: qq_protocol::RunOutcome::Completed,

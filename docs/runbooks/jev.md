@@ -110,7 +110,7 @@ paired task evaluation.
 Implementation/qualification progress for the stacked work is in
 [`../plans/progress/jev-opt-in.md`](../plans/progress/jev-opt-in.md).
 
-Review is bounded to 32 requests and two corrections per run, five seconds per
+Legacy `final`/`enforce` review is bounded to 32 requests and two corrections per run, five seconds per
 request, and 64 KiB per response. It consumes the same run token/cost allowance.
 Pending review and its final criterion outcomes are visible in event streams;
 known reviewer usage and estimated cost are recorded with the verdict. Interrupted
@@ -138,6 +138,44 @@ configured choice. Session decisions and spend are durable; direct `ask` reports
 them on stderr and remains ephemeral. Routing spends count against session run
 budgets. Owned children inherit the parent's routing activation; later user
 prompts resolve current configuration.
+
+## Strict completion verification
+
+Select Strict through trusted configuration/profile `jev_review: strict` or the
+explicit environment override. A stored key alone never enables it:
+
+```sh
+QQ_JEV_CHECKPOINTS=strict qq run --timeout-seconds 300 --max-turns 40 -- "Inspect and verify the change"
+```
+
+At least one explicit finite duration, turn, tool, token or cost run bound is
+required before provider work. A session mode pin retains its existing precedence;
+clear it to use the configured Strict profile. The Low–Ultrajev ladder is unchanged.
+Owned children inherit Strict and must also have a finite bound; remaining duration,
+token and cost bounds propagate, while parent-only turn/tool counts do not grant
+children a fresh allowance.
+
+Strict reviews each retained tool result and the final candidate. A failed tool
+can be supported evidence of failure. A semantic rejection permits repair under
+the original permissions and budgets; it cannot complete until a fresh tool
+observation receives support. Rewording the final answer or repeating unchanged
+rejected tool evidence cannot request another score. There is no automatic two-
+repair or 32-review ceiling in Strict. Reviewer usage/cost consume the original
+run allowance; each wait is at most five seconds and the remaining run duration.
+
+Only final `supported` with no pending/open obligation yields `Completed` and a
+`verified` record atomically. `verification_unresolved` means semantic obligations
+remain; `verification_unavailable` means assessment could not be obtained (including
+malformed replies, timeouts and exact-evidence overflow). Unavailable is not a red
+verdict and does not initiate repair. Cancellation, interruption and budget
+exhaustion preserve their own terminal outcomes and a non-verified record.
+
+Snapshots, checkpoint/terminal events and headless outcomes expose `verification`
+separately from answer text, advisory `audit` and typed `final_output`. The record
+contains the policy identity, masked request digest, evidence generation, review
+count and open correction. Historical/non-strict runs omit it. Headless unresolved
+and unavailable outcomes exit unsuccessfully. Pending requests recovered after a
+crash retain unknown spend and settle unavailable; they are never replayed.
 
 ## Jev as the approval delegate
 

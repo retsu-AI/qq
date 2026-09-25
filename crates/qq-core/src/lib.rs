@@ -1354,12 +1354,20 @@ impl plan::CompiledAgentPlan {
                 .min(model_max_output_tokens);
             // The session owner supplies the original execution admission,
             // including time spent loading or automatically compacting.
+            let strict = checkpoint.as_ref().is_some_and(|r| r.requires_supported_completion());
             let mut budget = BudgetMeter::new(limits, pricing, started);
             if let Some(spend) = routing_spend {
                 budget.charge_child(spend.usage, spend.estimated_cost_usd_nanos);
             }
             let _cancel_on_drop = CancelOnDrop(cancelled.clone());
             yield RuntimeEvent::Started;
+            if strict && !limits.has_verification_bound()
+            {
+                yield RuntimeEvent::Failed { kind: RunFailureKind::Configuration,
+                    message: "Strict Jev verification requires an explicit finite duration, model-turn, tool-call, token, or cost run limit".into() };
+                return;
+            }
+
 
             // Completed turns can persist an assistant message with no model-visible
             // content (reasoning-only or a call-less empty completion). Live turns
@@ -1572,7 +1580,11 @@ impl plan::CompiledAgentPlan {
             let mut audit_triggers = runtime::AuditTriggers::default();
             let mut audit_actions: Vec<runtime::AuditedAction> = Vec::new();
             let mut audit_revisions = 0_u16;
-            let mut checkpoint_context = checkpoint.as_ref().map(|_| runtime::CheckpointContext::new(&messages));
+            let mut checkpoint_context = checkpoint.as_ref().map(|reviewer| {
+                let mut context = runtime::CheckpointContext::new(&messages);
+                if strict { context.enable_strict(reviewer.identity()); }
+                context
+            });
             // Repair turns spent against the output contract, for the whole
             // run: neither an audit revision nor steering resets them.
             let mut output_repairs = 0_u8;
@@ -2712,6 +2724,11 @@ impl plan::CompiledAgentPlan {
                             .join("\n");
                         let context = checkpoint_context.as_mut().expect("enabled review context");
                         let correlation = format!("final:{turn_ordinal}");
+                        if strict && context.has_obligation() {
+                            yield RuntimeEvent::Failed { kind: RunFailureKind::VerificationUnresolved,
+                                message: "Strict verification requires a fresh supported tool observation before another final candidate".into() };
+                            return;
+                        }
                         // A review the harness could not run is recorded as
                         // `Unavailable` and the candidate completes: the
                         // verdict is evidence for the user, not the run's
@@ -2726,6 +2743,10 @@ impl plan::CompiledAgentPlan {
                         };
                         match final_evidence {
                             Err(feedback) => {
+                                if strict {
+                                    let request = runtime::CheckpointRequest { correlation: correlation.clone(), phase: runtime::CheckpointPhase::FinalCandidate, tool_call_id: None, tool: None, task: context.task.clone(), evidence: feedback.into(), is_error: false };
+                                    yield RuntimeEvent::CheckpointStarted { verification: context.start(&request), correlation: correlation.clone(), phase: qq_protocol::CheckpointPhase::FinalCandidate, tool_call_id: None };
+                                }
                                 yield RuntimeEvent::CheckpointReviewed {
                                     spend: None,
                                     correlation,
@@ -2735,6 +2756,10 @@ impl plan::CompiledAgentPlan {
                                     confidence: None,
                                     feedback: feedback.to_owned(),
                                 };
+                                if strict {
+                                    yield RuntimeEvent::Failed { kind: RunFailureKind::VerificationUnavailable, message: feedback.into() };
+                                    return;
+                                }
                             }
                             Ok(final_evidence) => {
                         let remaining = match budget.remaining(tokio::time::Instant::now()) {
@@ -2762,12 +2787,13 @@ impl plan::CompiledAgentPlan {
                             is_error: false,
                         };
                                 yield RuntimeEvent::CheckpointStarted {
+                            verification: context.start(&request),
                             correlation: correlation.clone(), phase: qq_protocol::CheckpointPhase::FinalCandidate, tool_call_id: None,
                         };
                         let verdict = tokio::select! {
                                     biased;
                                     () = interrupt_requested(&mut steering, handled_interrupt) => None,
-                                    verdict = runtime::assess_checkpoint(reviewer.as_ref(), request) => Some(verdict),
+                                    verdict = runtime::assess_checkpoint(reviewer.as_ref(), request, if strict { budget.deadline() } else { None }) => Some(verdict),
                                 };
                                 let Some(verdict) = verdict else {
                                     budget.charge_child(None, None);
@@ -2780,6 +2806,10 @@ impl plan::CompiledAgentPlan {
                                         confidence: None,
                                         feedback: "Final review interrupted by new user input; no assessment was recorded".to_owned(),
                                     };
+                                    if strict {
+                                        yield RuntimeEvent::Failed { kind: RunFailureKind::VerificationUnavailable, message: "Strict final verification interrupted by steering".into() };
+                                        return;
+                                    }
                                     handled_interrupt = steering.as_ref().map_or(handled_interrupt, |steering| *steering.interrupts.borrow());
                                     irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                                     Arc::make_mut(&mut messages).push(assistant);
@@ -2803,6 +2833,11 @@ impl plan::CompiledAgentPlan {
                         };
                         if let Some(kind) = budget.exceeded(tokio::time::Instant::now()) {
                             yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                            return;
+                        }
+                        checkpoint_context.as_mut().expect("enabled review context").reviewed(verdict.outcome);
+                        if strict && verdict.outcome == runtime::CheckpointOutcome::Unavailable {
+                            yield RuntimeEvent::Failed { kind: RunFailureKind::VerificationUnavailable, message: verdict.feedback };
                             return;
                         }
                         // `Unavailable` (timeout, malformed reply, outage) is
@@ -3425,6 +3460,12 @@ impl plan::CompiledAgentPlan {
                             retained.model_text
                         );
                         let evidence = tools::output::mask_secrets(evidence);
+                        let fresh = context.observe(&evidence, retained.is_error);
+                        if strict && !fresh && context.has_obligation() {
+                            yield RuntimeEvent::Failed { kind: RunFailureKind::VerificationUnresolved,
+                                message: "Strict repair produced unchanged tool evidence; the retained verdict cannot be retried for a different score".into() };
+                            return;
+                        }
                         context.record(format!("{correlation}\n{evidence}"));
                         if !reviewer.reviews_tools() {
                             continue;
@@ -3443,6 +3484,10 @@ impl plan::CompiledAgentPlan {
                                 "JEV tool checkpoint was not sent because {field} exceeded the exact review bound"
                             );
                             retained.model_text.push_str(&format!("\n\n[JEV unavailable: {feedback}]"));
+                            if strict {
+                                let request = runtime::CheckpointRequest { correlation: correlation.clone(), phase: runtime::CheckpointPhase::ToolResult, tool_call_id: Some(call.id), tool: Some(call.name.clone()), task: context.task.clone(), evidence: evidence.clone(), is_error: retained.is_error };
+                                yield RuntimeEvent::CheckpointStarted { verification: context.start(&request), correlation: correlation.clone(), phase: qq_protocol::CheckpointPhase::ToolResult, tool_call_id: Some(call.id) };
+                            }
                             yield RuntimeEvent::CheckpointReviewed {
                                 spend: None,
                                 correlation,
@@ -3450,8 +3495,12 @@ impl plan::CompiledAgentPlan {
                                 tool_call_id: Some(call.id),
                                 outcome: qq_protocol::CheckpointOutcome::Unavailable,
                                 confidence: None,
-                                feedback,
+                                feedback: feedback.clone(),
                             };
+                            if strict {
+                                yield RuntimeEvent::Failed { kind: RunFailureKind::VerificationUnavailable, message: feedback };
+                                return;
+                            }
                             continue;
                         }
                         let remaining = match budget.remaining(tokio::time::Instant::now()) {
@@ -3479,9 +3528,10 @@ impl plan::CompiledAgentPlan {
                             is_error: retained.is_error,
                         };
                         yield RuntimeEvent::CheckpointStarted {
+                            verification: context.start(&request),
                             correlation: correlation.clone(), phase: qq_protocol::CheckpointPhase::ToolResult, tool_call_id: Some(call.id),
                         };
-                        let verdict = runtime::assess_checkpoint(reviewer.as_ref(), request).await;
+                        let verdict = runtime::assess_checkpoint(reviewer.as_ref(), request, if strict { budget.deadline() } else { None }).await;
                         budget.charge_child(verdict.spend.usage, verdict.spend.estimated_cost_usd_nanos);
                         yield RuntimeEvent::CheckpointReviewed {
                                 spend: Some(verdict.spend),
@@ -3500,6 +3550,11 @@ impl plan::CompiledAgentPlan {
                         ));
                         if let Some(kind) = budget.exceeded(tokio::time::Instant::now()) {
                             yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                            return;
+                        }
+                        context.reviewed(verdict.outcome);
+                        if strict && verdict.outcome == runtime::CheckpointOutcome::Unavailable {
+                            yield RuntimeEvent::Failed { kind: RunFailureKind::VerificationUnavailable, message: verdict.feedback };
                             return;
                         }
                         // An unavailable reviewer leaves its marker on the
@@ -3681,7 +3736,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 | RuntimeEvent::TurnRetrying { .. }
                 // Direct runs carry no output contract.
                 | RuntimeEvent::OutputRepairRequested { .. } => {}
-                RuntimeEvent::CheckpointStarted { correlation, phase, tool_call_id } => {
+                RuntimeEvent::CheckpointStarted { correlation, phase, tool_call_id, .. } => {
                     yield RunEvent::CheckpointStarted { correlation, phase, tool_call_id };
                 }
                 RuntimeEvent::CheckpointReviewed {
@@ -10554,5 +10609,327 @@ mod tests {
         assert!(!tool_names(&restricted_requests[0]).contains(&"load_skill"));
         assert_eq!(plan.descriptor().skills.disclosed, 1);
         assert_eq!(plan.descriptor().skills.indexed, 2);
+    }
+    async fn strict_case(
+        actions: Vec<Option<String>>,
+        verdicts: Vec<CheckpointOutcome>,
+        limits: RunLimits,
+    ) -> (Vec<RuntimeEvent>, Vec<CheckpointRequest>, usize) {
+        struct ProviderScript {
+            actions: Mutex<std::collections::VecDeque<Option<String>>>,
+            calls: Arc<AtomicUsize>,
+        }
+        impl Provider for ProviderScript {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                let mut events = Vec::new();
+                match self.actions.lock().unwrap().pop_front().flatten() {
+                    Some(path) => {
+                        events.push(Ok(ProviderEvent::ToolCallStarted {
+                            id: format!("read{n}"),
+                            name: "read_file".into(),
+                        }));
+                        events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: format!("read{n}"),
+                            json: serde_json::json!({"path":path}).to_string(),
+                        }));
+                        events.push(Ok(ProviderEvent::ToolCallCompleted {
+                            id: format!("read{n}"),
+                        }));
+                    }
+                    None => events.push(Ok(ProviderEvent::OutputTextDelta {
+                        text: format!("candidate {n}: completed"),
+                    })),
+                }
+                events.push(Ok(ProviderEvent::Completed {
+                    usage: Some(qq_provider::ProviderUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_tokens: None,
+                    }),
+                }));
+                Box::pin(stream::iter(events))
+            }
+        }
+        struct ReviewerScript {
+            verdicts: Mutex<std::collections::VecDeque<CheckpointOutcome>>,
+            requests: Arc<Mutex<Vec<CheckpointRequest>>>,
+        }
+        impl CheckpointReviewer for ReviewerScript {
+            fn identity(&self) -> &'static str {
+                "test/strict"
+            }
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                self.requests.lock().unwrap().push(request);
+                let outcome = self
+                    .verdicts
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(CheckpointOutcome::Supported);
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome,
+                    confidence: Some(1.0),
+                    feedback: "test criterion".into(),
+                    spend: qq_protocol::CheckpointSpend {
+                        usage: Some(TokenUsage::default()),
+                        estimated_cost_usd_nanos: Some(0),
+                    },
+                }))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        for path in actions
+            .iter()
+            .flatten()
+            .filter(|p| !p.starts_with("missing"))
+        {
+            std::fs::write(directory.path().join(path), path).unwrap();
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            ProviderScript {
+                actions: Mutex::new(actions.into()),
+                calls: Arc::clone(&calls),
+            },
+            "test",
+            256,
+        )
+        .unwrap()
+        .with_checkpoint_reviewer(Arc::new(ReviewerScript {
+            verdicts: Mutex::new(verdicts.into()),
+            requests: Arc::clone(&requests),
+        }));
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("inspect and finish")],
+                directory.path().into(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::ReadOnly,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).with_limits(limits, None),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        let requests = requests.lock().unwrap().clone();
+        (events, requests, calls.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn strict_rejects_missing_bound_before_provider_work() {
+        let (events, reviews, calls) = strict_case(vec![None], vec![], RunLimits::default()).await;
+        assert_eq!(calls, 0);
+        assert!(reviews.is_empty());
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Failed { kind: RunFailureKind::Configuration, message }) if message.contains("explicit finite"))
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_unavailable_and_rewording_without_fresh_evidence_never_complete() {
+        for (verdict, kind, calls) in [
+            (
+                CheckpointOutcome::Unavailable,
+                RunFailureKind::VerificationUnavailable,
+                1,
+            ),
+            (
+                CheckpointOutcome::Contradicted,
+                RunFailureKind::VerificationUnresolved,
+                2,
+            ),
+        ] {
+            let (events, reviews, actual_calls) = strict_case(
+                vec![None, None],
+                vec![verdict],
+                RunLimits {
+                    max_model_turns: Some(10),
+                    ..RunLimits::default()
+                },
+            )
+            .await;
+            assert_eq!(reviews.len(), 1);
+            assert_eq!(actual_calls, calls);
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Failed { kind: actual, .. }) if *actual == kind),
+                "{events:?}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, RuntimeEvent::Completed { .. }))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_accepts_more_than_two_fresh_repairs_and_more_than_32_reviews() {
+        for count in [4, 34] {
+            let actions = (0..count)
+                .map(|n| Some(format!("note{n}")))
+                .chain([None])
+                .collect();
+            let verdicts = (0..count)
+                .map(|n| {
+                    if n + 1 == count {
+                        CheckpointOutcome::Supported
+                    } else {
+                        CheckpointOutcome::InsufficientEvidence
+                    }
+                })
+                .chain([CheckpointOutcome::Supported])
+                .collect();
+            let (events, requests, _) = strict_case(
+                actions,
+                verdicts,
+                RunLimits {
+                    max_model_turns: Some(40),
+                    ..RunLimits::default()
+                },
+            )
+            .await;
+            assert_eq!(requests.len(), count + 1);
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                "{events:?}"
+            );
+            let starts = events
+                .iter()
+                .filter_map(|e| match e {
+                    RuntimeEvent::CheckpointStarted {
+                        verification: Some(v),
+                        ..
+                    } => Some(v),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(starts.len(), count + 1);
+            assert_eq!(starts.last().unwrap().evidence_generation, count as u64);
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_failed_tool_is_valid_evidence_but_false_success_is_not() {
+        let (events, requests, _) = strict_case(
+            vec![Some("missing-file".into()), None, None],
+            vec![
+                CheckpointOutcome::Supported,
+                CheckpointOutcome::Contradicted,
+            ],
+            RunLimits {
+                max_model_turns: Some(10),
+                ..RunLimits::default()
+            },
+        )
+        .await;
+        assert!(requests[0].is_error);
+        assert_eq!(requests.len(), 2);
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Failed {
+                kind: RunFailureKind::VerificationUnresolved,
+                ..
+            })
+        ));
+    }
+    #[tokio::test]
+    async fn strict_unchanged_tool_evidence_does_not_dispatch_another_assessment() {
+        let (events, requests, _) = strict_case(
+            vec![Some("note".into()), Some("note".into()), None],
+            vec![CheckpointOutcome::Contradicted],
+            RunLimits {
+                max_model_turns: Some(10),
+                ..RunLimits::default()
+            },
+        )
+        .await;
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Failed {
+                kind: RunFailureKind::VerificationUnresolved,
+                ..
+            })
+        ));
+    }
+    #[tokio::test]
+    async fn strict_final_checkpoint_spend_exhausts_the_shared_run_budget() {
+        struct FinalProvider;
+        impl Provider for FinalProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "done".into(),
+                    }),
+                    Ok(ProviderEvent::Completed {
+                        usage: Some(qq_provider::ProviderUsage {
+                            input_tokens: 1,
+                            cache_read_input_tokens: 0,
+                            cache_write_input_tokens: 0,
+                            output_tokens: 0,
+                            reasoning_tokens: None,
+                        }),
+                    }),
+                ]))
+            }
+        }
+        struct Reviewer;
+        impl CheckpointReviewer for Reviewer {
+            fn identity(&self) -> &'static str {
+                "test/strict"
+            }
+            fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome: CheckpointOutcome::Supported,
+                    confidence: Some(1.0),
+                    feedback: "supported".into(),
+                    spend: qq_protocol::CheckpointSpend {
+                        usage: Some(TokenUsage {
+                            input_tokens: 20,
+                            output_tokens: 2,
+                            ..TokenUsage::default()
+                        }),
+                        estimated_cost_usd_nanos: Some(840),
+                    },
+                }))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(FinalProvider, "test", 256)
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(Reviewer));
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("finish")],
+                directory.path().into(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::ReadOnly,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).with_limits(
+                    RunLimits {
+                        max_total_tokens: Some(10),
+                        ..RunLimits::default()
+                    },
+                    None,
+                ),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(events.iter().any(|event| matches!(event, RuntimeEvent::CheckpointReviewed { spend: Some(spend), .. } if spend.usage.unwrap().input_tokens == 20)));
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::BudgetExhausted { .. })),
+            "{events:?}"
+        );
     }
 }

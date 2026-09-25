@@ -64,11 +64,11 @@ pub use sessions::{
     SessionCommand, SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionPurpose,
     SessionSnapshot, SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict,
     SnapshotRequest, SpawnOrigin, SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay,
-    ToolCallSnapshot, ToolCallState, ToolExposure, WorkspaceGrantOutcome, WorkspaceSnapshot,
-    WorkspaceSummary,
+    ToolCallSnapshot, ToolCallState, ToolExposure, VerificationRecord, VerificationState,
+    WorkspaceGrantOutcome, WorkspaceSnapshot, WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 31;
+pub const PROTOCOL_VERSION: u16 = 32;
 
 /// Most retries one turn may spend on a transient provider fault after the
 /// stream has started; a completed turn resets the count. Exhaustion settles
@@ -190,6 +190,10 @@ pub enum RunEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunFailureKind {
+    /// Strict verification retains an unresolved semantic obligation.
+    VerificationUnresolved,
+    /// Strict verification could not obtain an assessment.
+    VerificationUnavailable,
     InvalidCommand,
     Configuration,
     Authentication,

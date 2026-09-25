@@ -4187,7 +4187,10 @@ fn provider_credential_variables_cover_every_api_key_preset() {
 #[test]
 fn strict_review_requires_explicit_selection_and_preserves_provenance() {
     let tree = TempTree::new();
-    assert_eq!(tree.loader().load(&tree.request()).unwrap().jev_review(), JevReviewMode::Off);
+    assert_eq!(
+        tree.loader().load(&tree.request()).unwrap().jev_review(),
+        JevReviewMode::Off
+    );
     let mode: JevReviewMode = "strict".parse().expect("explicit strict mode is supported");
     assert_eq!(mode.as_str(), "strict");
     let snapshot = tree.loader().load(&tree.request().with_explicit_content(
@@ -4195,7 +4198,10 @@ fn strict_review_requires_explicit_selection_and_preserves_provenance() {
     )).unwrap();
     assert_eq!(snapshot.jev_review(), mode);
     assert_eq!(snapshot.profile("review").unwrap().jev_review(), Some(mode));
-    assert_eq!(snapshot.provenance().jev_review().unwrap().kind(), SourceKind::Inline);
+    assert_eq!(
+        snapshot.provenance().jev_review().unwrap().kind(),
+        SourceKind::Inline
+    );
     assert!(!snapshot.jev_routing());
     assert!(!snapshot.jev_approval());
 }

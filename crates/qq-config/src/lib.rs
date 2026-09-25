@@ -2159,6 +2159,8 @@ pub enum JevReviewMode {
     Final,
     /// Assess every tool boundary and final candidate.
     Enforce,
+    /// Require supported final verification under explicit finite run limits.
+    Strict,
 }
 
 impl JevReviewMode {
@@ -2168,6 +2170,7 @@ impl JevReviewMode {
             Self::Off => "off",
             Self::Final => "final",
             Self::Enforce => "enforce",
+            Self::Strict => "strict",
         }
     }
 }
@@ -2180,8 +2183,9 @@ impl std::str::FromStr for JevReviewMode {
             "off" => Ok(Self::Off),
             "final" => Ok(Self::Final),
             "enforce" => Ok(Self::Enforce),
+            "strict" => Ok(Self::Strict),
             _ => Err(ConfigError::InvalidJevSetting {
-                setting: "QQ_JEV_CHECKPOINTS (off, final, enforce)",
+                setting: "QQ_JEV_CHECKPOINTS (off, final, enforce, strict)",
                 value: value.to_owned(),
             }),
         }

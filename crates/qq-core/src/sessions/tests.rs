@@ -4031,6 +4031,7 @@ impl RuntimeLoader for QueueLoader {
 }
 
 struct CheckpointQueueLoader {
+    strict: bool,
     inner: QueueLoader,
     reviewed: Arc<StdMutex<Vec<CheckpointRequest>>>,
 }
@@ -4045,9 +4046,17 @@ impl RuntimeLoader for CheckpointQueueLoader {
             .collect::<Vec<_>>();
         let provider = self.inner.next_provider(&request);
         let reviewed = Arc::clone(&self.reviewed);
+        let strict = self.strict;
         Box::pin(async move {
-            struct Supports(Arc<StdMutex<Vec<CheckpointRequest>>>);
+            struct Supports(Arc<StdMutex<Vec<CheckpointRequest>>>, bool);
             impl CheckpointReviewer for Supports {
+                fn identity(&self) -> &'static str {
+                    if self.1 {
+                        "test/strict"
+                    } else {
+                        "custom/enforce"
+                    }
+                }
                 fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
                     self.0.lock().unwrap().push(request);
                     Box::pin(std::future::ready(CheckpointVerdict {
@@ -4064,7 +4073,7 @@ impl RuntimeLoader for CheckpointQueueLoader {
                     loaded_runtime(
                         runtime
                             .with_spawn_model_routes(spawn_model_routes)
-                            .with_checkpoint_reviewer(Arc::new(Supports(reviewed))),
+                            .with_checkpoint_reviewer(Arc::new(Supports(reviewed, strict))),
                         &request.workspace,
                         None,
                     )

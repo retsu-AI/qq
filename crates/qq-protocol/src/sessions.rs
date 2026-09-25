@@ -1027,6 +1027,18 @@ pub struct RunLimits {
 }
 
 impl RunLimits {
+    /// Whether caller resources independently bound strict verification work.
+    #[must_use]
+    pub const fn has_verification_bound(&self) -> bool {
+        self.max_duration_ms.is_some()
+            || self.max_model_turns.is_some()
+            || self.max_tool_calls.is_some()
+            || self.max_total_tokens.is_some()
+            || self.max_input_tokens.is_some()
+            || self.max_output_tokens.is_some()
+            || self.max_cost_usd_nanos.is_some()
+    }
+
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.max_duration_ms.is_none()
@@ -1365,9 +1377,57 @@ pub struct SessionSummary {
     pub last_outcome: Option<RunOutcome>,
 }
 
+/// Durable strict verification, separate from advisory audit and output shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationRecord {
+    pub reviewer: String,
+    pub state: VerificationState,
+    pub phase: Option<CheckpointPhase>,
+    pub correlation: Option<String>,
+    pub tool_call_id: Option<ToolCallId>,
+    pub outcome: Option<CheckpointOutcome>,
+    pub reason: String,
+    pub basis_sha256: Option<String>,
+    pub evidence_generation: u64,
+    pub review_count: u64,
+    pub open_correction: Option<String>,
+    pub correction_generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationState {
+    Pending,
+    Verified,
+    Unresolved,
+    Unavailable,
+}
+
+impl VerificationRecord {
+    pub fn pending(reviewer: String) -> Self {
+        Self {
+            reviewer,
+            state: VerificationState::Pending,
+            phase: None,
+            correlation: None,
+            tool_call_id: None,
+            outcome: None,
+            reason: String::new(),
+            basis_sha256: None,
+            evidence_generation: 0,
+            review_count: 0,
+            open_correction: None,
+            correction_generation: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<Box<VerificationRecord>>,
     pub id: RunId,
     pub session_id: SessionId,
     pub status: RunStatus,
@@ -2030,12 +2090,16 @@ pub enum SessionEvent {
         decision: Box<RoutingDecision>,
     },
     CheckpointStarted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verification: Option<Box<VerificationRecord>>,
         run_id: RunId,
         correlation: String,
         phase: CheckpointPhase,
         tool_call_id: Option<ToolCallId>,
     },
     CheckpointReviewed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verification: Option<Box<VerificationRecord>>,
         run_id: RunId,
         correlation: String,
         phase: CheckpointPhase,
@@ -2087,6 +2151,8 @@ pub enum SessionEvent {
         context_tokens: Option<u64>,
     },
     RunFinished {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verification: Option<Box<VerificationRecord>>,
         session: Box<SessionSummary>,
         run_id: RunId,
         outcome: RunOutcome,
@@ -3156,6 +3222,7 @@ mod tests {
         let workspace_id = id::<WorkspaceId>(2);
         let session_id = id::<SessionId>(3);
         let event = SessionEvent::RunFinished {
+            verification: None,
             session: Box::new(SessionSummary {
                 model_is_fallback: false,
                 activity: None,
@@ -3391,6 +3458,7 @@ mod tests {
         );
 
         let finished = SessionEvent::RunFinished {
+            verification: None,
             session: Box::new(SessionSummary {
                 model_is_fallback: false,
                 activity: None,
@@ -3437,6 +3505,7 @@ mod tests {
         );
 
         let run = RunSnapshot {
+            verification: None,
             id: id(4),
             session_id: id(3),
             status: RunStatus::Completed,

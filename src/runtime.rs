@@ -2255,6 +2255,9 @@ impl RuntimeLoader for RuntimeFactory {
                                 "typesafe/jev-1.13.0/criteria-2026-09-18.1/enforce" => {
                                     qq_config::JevReviewMode::Enforce
                                 }
+                                "typesafe/jev-1.13.0/criteria-2026-09-18.1/strict" => {
+                                    qq_config::JevReviewMode::Strict
+                                }
                                 _ => {
                                     return Err(RuntimeBuildError::InheritedCheckpoint(
                                         identity.clone(),
@@ -3403,12 +3406,16 @@ impl CheckpointReviewer for TypeSafeCheckpointReviewer {
             qq_config::JevReviewMode::Enforce => {
                 "typesafe/jev-1.13.0/criteria-2026-09-18.1/enforce"
             }
+            qq_config::JevReviewMode::Strict => "typesafe/jev-1.13.0/criteria-2026-09-18.1/strict",
             qq_config::JevReviewMode::Off => unreachable!("disabled reviewers are not constructed"),
         }
     }
 
     fn reviews_tools(&self) -> bool {
-        self.mode == qq_config::JevReviewMode::Enforce
+        matches!(
+            self.mode,
+            qq_config::JevReviewMode::Enforce | qq_config::JevReviewMode::Strict
+        )
     }
 
     fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
@@ -8652,6 +8659,7 @@ mod tests {
             qq_config::JevReviewMode::Off => 0,
             qq_config::JevReviewMode::Final => 1,
             qq_config::JevReviewMode::Enforce => 2,
+            qq_config::JevReviewMode::Strict => 3,
         };
         let delegate_rank = |setting: qq_config::ApprovalDelegateSetting| match setting {
             qq_config::ApprovalDelegateSetting::Off => 0,

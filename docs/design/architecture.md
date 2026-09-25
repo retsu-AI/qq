@@ -1336,9 +1336,22 @@ Steering accepted during final assessment is applied before completion; an
 interrupting steer drops the in-flight reviewer, records an unavailable marker,
 and regenerates the candidate for the updated task instead of dropping input.
 
+### Strict verification
+
+Trusted `strict` review (ADR-0045) uses the existing checkpoint loop with a distinct
+pinned identity. An explicit finite run bound is required before inference. It
+removes the legacy correction/review-count ceilings while retaining the original
+budgets, authorization and cancellation. Semantic rejection requires fresh supported
+tool evidence before a final retry; unavailable assessment settles unsuccessfully.
+The masked typed request basis and correction generation are persisted on an optional
+`VerificationRecord`. Store41 and protocol32 make final supported verification and
+`Completed` atomic. Replay, cancellation and recovery retain non-verified receipts;
+headless outcomes expose verification independently of advisory audit/output schema.
+No change is made to the session ladder or existing `final`/`enforce` policy below.
+
 ### Jev assessment bounds and accounting
 
-Each opted-in run admits at most 32 assessments and two correction attempts;
+Each legacy `final`/`enforce` run admits at most 32 assessments and two correction attempts;
 each request has a five-second deadline and a 64 KiB response cap (including
 chunked bodies). Final claims may be corrected using existing evidence within
 the same finite repair allowance; no extra tool call is forced merely to revise

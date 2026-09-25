@@ -69,3 +69,5 @@ Write an ADR when a change:
 
 Do not write one for a bug fix, a refactor with no behavior change, or a
 measurement receipt; those go in the plan ledger.
+
+- [ADR-0045: explicitly selected Strict Jev verification](0045-strict-jev-verification.md) — Proposed (ENG-791).

@@ -3350,3 +3350,304 @@ async fn schedules_ready_sessions_fairly() {
         Some(&Message::user("first-b"))
     );
 }
+
+#[tokio::test]
+async fn strict_final_settlement_is_atomic_and_checkpoint_delivery_is_idempotent() {
+    use qq_protocol::{
+        CheckpointOutcome as Outcome, CheckpointPhase as Phase, VerificationRecord,
+        VerificationState,
+    };
+    for verdict in [
+        Outcome::Supported,
+        Outcome::Contradicted,
+        Outcome::Unavailable,
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("strict.sqlite3");
+        let store = Store::open(path.clone()).await.unwrap();
+        let (_, _, claimed) = create_claimed_parent(&store, directory.path()).await;
+        let id = claimed.identity.run_id;
+        let mut record = VerificationRecord::pending("test/strict".into());
+        record.phase = Some(Phase::FinalCandidate);
+        record.correlation = Some("final:1".into());
+        record.basis_sha256 = Some("a".repeat(64));
+        record.review_count = 1;
+        assert!(
+            store
+                .record_checkpoint_started(
+                    &claimed,
+                    Some(Box::new(record.clone())),
+                    "final:1".into(),
+                    Phase::FinalCandidate,
+                    None
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .record_checkpoint_started(
+                    &claimed,
+                    Some(Box::new(record)),
+                    "final:1".into(),
+                    Phase::FinalCandidate,
+                    None
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for duplicate in [false, true] {
+            let event = store
+                .record_checkpoint(
+                    &claimed,
+                    crate::sessions::CheckpointRecord {
+                        correlation: "final:1".into(),
+                        phase: Phase::FinalCandidate,
+                        tool_call_id: None,
+                        outcome: verdict,
+                        confidence_basis_points: Some(9000),
+                        feedback: "retained evidence".into(),
+                        spend: None,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(event.is_none(), duplicate);
+        }
+        let before = store
+            .call(Priority::Control, move |c| load_run(c, id))
+            .await
+            .unwrap();
+        assert_ne!(
+            before.verification.unwrap().state,
+            VerificationState::Verified
+        );
+        let events = store
+            .finish_run(
+                &claimed,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        let final_record = events
+            .iter()
+            .find_map(|e| match &e.event {
+                SessionEvent::RunFinished {
+                    outcome,
+                    verification: Some(v),
+                    ..
+                } => Some((outcome.clone(), v.clone())),
+                _ => None,
+            })
+            .unwrap();
+        if verdict == Outcome::Supported {
+            assert_eq!(final_record.0, RunOutcome::Completed);
+            assert_eq!(final_record.1.state, VerificationState::Verified);
+        } else {
+            assert!(matches!(final_record.0, RunOutcome::Failed { .. }));
+            assert_ne!(final_record.1.state, VerificationState::Verified);
+        }
+        store.close().await.unwrap();
+        let reopened = Store::open(path).await.unwrap();
+        let cold = reopened
+            .call(Priority::Control, move |c| load_run(c, id))
+            .await
+            .unwrap();
+        assert_eq!(cold.outcome, Some(final_record.0));
+        assert_eq!(cold.verification, Some(final_record.1));
+        reopened.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn strict_pending_checkpoint_recovers_unavailable_before_interrupted_terminal() {
+    use qq_protocol::{CheckpointPhase as Phase, VerificationRecord, VerificationState};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("strict-recovery.sqlite3");
+    let store = Store::open(path.clone()).await.unwrap();
+    let (_, _, claimed) = create_claimed_parent(&store, directory.path()).await;
+    let id = claimed.identity.run_id;
+    let workspace = claimed.identity.workspace_id;
+    let mut record = VerificationRecord::pending("test/strict".into());
+    record.phase = Some(Phase::FinalCandidate);
+    record.correlation = Some("final:1".into());
+    record.basis_sha256 = Some("b".repeat(64));
+    record.review_count = 1;
+    store
+        .record_checkpoint_started(
+            &claimed,
+            Some(Box::new(record)),
+            "final:1".into(),
+            Phase::FinalCandidate,
+            None,
+        )
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let reopened = Store::open(path.clone()).await.unwrap();
+    reopened.recover_interrupted_runs().await.unwrap();
+    let (cold, events) = reopened
+        .call(Priority::Control, move |c| {
+            Ok((load_run(c, id)?, read_events(c, workspace, 0, 100)?))
+        })
+        .await
+        .unwrap();
+    assert_eq!(cold.outcome, Some(RunOutcome::Interrupted));
+    assert_eq!(
+        cold.verification.unwrap().state,
+        VerificationState::Unavailable
+    );
+    let reviewed = events.iter().position(|e| matches!(&e.event, SessionEvent::CheckpointReviewed { verification: Some(v), .. } if v.state == VerificationState::Unavailable)).unwrap();
+    let finished = events
+        .iter()
+        .position(|e| matches!(&e.event, SessionEvent::RunFinished { run_id, .. } if *run_id == id))
+        .unwrap();
+    assert!(reviewed < finished);
+    reopened.recover_interrupted_runs().await.unwrap();
+    let after = reopened
+        .call(Priority::Control, move |c| {
+            read_events(c, workspace, 0, 100)
+        })
+        .await
+        .unwrap();
+    assert_eq!(events, after);
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn strict_unattempted_tool_checkpoint_has_atomic_local_pair_without_stale_basis() {
+    use qq_protocol::{CheckpointOutcome, CheckpointPhase, VerificationRecord};
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("strict-local.sqlite3"))
+        .await
+        .unwrap();
+    let (_, _, claimed) = create_claimed_parent(&store, directory.path()).await;
+    let id = claimed.identity.run_id;
+    let workspace = claimed.identity.workspace_id;
+    store
+        .call_write(Priority::Control, move |c| {
+            let mut record = VerificationRecord::pending("test/strict".into());
+            record.correlation = Some("tool:prior".into());
+            record.basis_sha256 = Some("a".repeat(64));
+            record.outcome = Some(CheckpointOutcome::Contradicted);
+            record.open_correction = Some("tool:prior".into());
+            record.review_count = 1;
+            c.execute(
+                "UPDATE runs SET verification_json = ?2 WHERE id = ?1",
+                params![id.to_string(), serde_json::to_string(&record)?],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let tool_call_id = ToolCallId::generate().unwrap();
+    let correlation = format!("tool:{tool_call_id}");
+    for duplicate in [false, true] {
+        let event = store
+            .record_checkpoint(
+                &claimed,
+                crate::sessions::CheckpointRecord {
+                    correlation: correlation.clone(),
+                    phase: CheckpointPhase::ToolResult,
+                    tool_call_id: Some(tool_call_id),
+                    outcome: CheckpointOutcome::Unavailable,
+                    confidence_basis_points: None,
+                    feedback: "Budget ended before reviewer dispatch".into(),
+                    spend: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(event.is_none(), duplicate);
+    }
+    let (run, events) = store
+        .call(Priority::Control, move |c| {
+            Ok((load_run(c, id)?, read_events(c, workspace, 0, 100)?))
+        })
+        .await
+        .unwrap();
+    let record = run.verification.unwrap();
+    assert_eq!(record.basis_sha256, None);
+    assert_eq!(record.open_correction.as_deref(), Some("tool:prior"));
+    let pair = events.iter().filter(|e| matches!(&e.event,
+        SessionEvent::CheckpointStarted { correlation: c, .. } | SessionEvent::CheckpointReviewed { correlation: c, .. } if c == &correlation)).collect::<Vec<_>>();
+    assert_eq!(pair.len(), 2);
+    assert!(
+        matches!(&pair[0].event, SessionEvent::CheckpointStarted { verification: Some(v), .. } if v.basis_sha256.is_none() && v.outcome.is_none())
+    );
+    assert!(matches!(
+        &pair[1].event,
+        SessionEvent::CheckpointReviewed {
+            spend: None,
+            outcome: CheckpointOutcome::Unavailable,
+            ..
+        }
+    ));
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn strict_recovery_pairs_each_retained_or_interrupted_tool_once() {
+    use qq_protocol::{CheckpointOutcome, VerificationRecord};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("strict-tools.sqlite3");
+    let store = Store::open(path.clone()).await.unwrap();
+    let (_, _, claimed) = create_claimed_parent(&store, directory.path()).await;
+    let id = claimed.identity.run_id;
+    let workspace = claimed.identity.workspace_id;
+    let ids = [
+        ToolCallId::generate().unwrap(),
+        ToolCallId::generate().unwrap(),
+    ];
+    store.call_write(Priority::Control, move |c| {
+        c.execute("UPDATE runs SET verification_json = ?2 WHERE id = ?1", params![id.to_string(), serde_json::to_string(&VerificationRecord::pending("test/strict".into()))?])?;
+        for (index, tool) in ids.iter().enumerate() {
+            c.execute("INSERT INTO tool_calls(id, run_id, turn_ordinal, call_ordinal, provider_call_id, name, arguments_json, state, result, requested_at_ms, finished_at_ms) VALUES (?1, ?2, 1, ?3, ?1, 'read', '{}', ?4, ?5, 1, ?6)",
+                params![tool.to_string(), id.to_string(), index + 1, if index == 0 { "completed" } else { "running" }, if index == 0 { Some("retained") } else { None }, if index == 0 { Some(2) } else { None }])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    store.close().await.unwrap();
+    let reopened = Store::open(path).await.unwrap();
+    reopened.recover_interrupted_runs().await.unwrap();
+    let events = reopened
+        .call(Priority::Control, move |c| {
+            read_events(c, workspace, 0, 100)
+        })
+        .await
+        .unwrap();
+    for tool in ids {
+        let pair = events.iter().filter(|e| matches!(&e.event,
+            SessionEvent::CheckpointStarted { tool_call_id: Some(t), .. } | SessionEvent::CheckpointReviewed { tool_call_id: Some(t), .. } if *t == tool)).collect::<Vec<_>>();
+        assert_eq!(pair.len(), 2);
+        assert!(
+            matches!(&pair[0].event, SessionEvent::CheckpointStarted { verification: Some(v), .. } if v.basis_sha256.is_none())
+        );
+        assert!(matches!(
+            &pair[1].event,
+            SessionEvent::CheckpointReviewed {
+                outcome: CheckpointOutcome::Unavailable,
+                spend: None,
+                ..
+            }
+        ));
+    }
+    assert!(
+        matches!(&events.last().unwrap().event, SessionEvent::RunFinished { outcome: RunOutcome::Interrupted, verification: Some(v), .. } if v.state == qq_protocol::VerificationState::Unavailable)
+    );
+    reopened.recover_interrupted_runs().await.unwrap();
+    let again = reopened
+        .call(Priority::Control, move |c| {
+            read_events(c, workspace, 0, 100)
+        })
+        .await
+        .unwrap();
+    assert_eq!(events, again);
+    reopened.close().await.unwrap();
+}

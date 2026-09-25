@@ -466,3 +466,19 @@ Acceptance: typed unavailable/unresolved vs supported-only atomic completion,
 fresh evidence, budget/cancel/restart/child/accounting semantics, compatibility,
 workspace checks and exact-head review. Baseline: accepted291440a gates and
 red-first Strict tests; no live provider calls.
+
+### 2026-09-25 — ENG-791 Strict candidate verification in progress
+
+Protocol32/store41/ADR0045 implement explicit Strict selection, finite-bound
+admission, fresh-evidence repair, durable receipts, atomic supported completion,
+child inheritance, and unavailable recovery. Historical modes remain unchanged.
+12 focused core tests and 7 protocol fixture tests pass; 244 root tests pass in a
+subprocess scrubbed of TYPESAFE_API_KEY, JEV_API_KEY_FILE and QQ_JEV_* inputs.
+The initial full suite inherited a host credential; four missing-key tests failed
+and one existing approval fixture may have attempted remote review. Remote
+completion/spend are unknown. Its endpoint is now loopback-only; original errors
+are retained. No deliberate live qualification occurred. Full-suite migration
+failures exposed table-less historical fixtures; schema41 now uses the established
+conditional table migration. Full gates, performance and independent review pending.
+Evidence: external qq-jev-evidence/strict-implementation-20260925; owned output
+`target/strict-20260925` and task-specific /private/tmp directories expire after review.

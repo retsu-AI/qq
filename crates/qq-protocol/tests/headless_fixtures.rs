@@ -189,6 +189,7 @@ fn run_events(outcome: RunOutcome, final_output: Option<Box<FinalOutput>>) -> Ve
         event(
             5,
             SessionEvent::CheckpointStarted {
+                verification: None,
                 run_id: RUN,
                 correlation: "final:1".to_owned(),
                 phase: qq_protocol::CheckpointPhase::FinalCandidate,
@@ -198,6 +199,7 @@ fn run_events(outcome: RunOutcome, final_output: Option<Box<FinalOutput>>) -> Ve
         event(
             6,
             SessionEvent::CheckpointReviewed {
+                verification: None,
                 spend: Some(qq_protocol::CheckpointSpend {
                     usage: Some(qq_protocol::TokenUsage::default()),
                     estimated_cost_usd_nanos: Some(0),
@@ -214,6 +216,7 @@ fn run_events(outcome: RunOutcome, final_output: Option<Box<FinalOutput>>) -> Ve
         event(
             7,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(summary(SessionStatus::Idle, false)),
                 run_id: RUN,
                 outcome,
@@ -227,6 +230,7 @@ fn run_events(outcome: RunOutcome, final_output: Option<Box<FinalOutput>>) -> Ve
 
 fn outcome(status: HeadlessStatus) -> HeadlessOutcome {
     HeadlessOutcome {
+        verification: None,
         status,
         exit_code: status.code(),
         message: None,
@@ -328,7 +332,7 @@ fn assert_well_formed<'a>(
 
 #[test]
 fn current_version_streams_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 31);
+    assert_eq!(PROTOCOL_VERSION, 32);
 
     let stream = |trial: HeadlessTrial, events: Vec<HeadlessRecord>, outcome: HeadlessOutcome| {
         let mut stream = Vec::with_capacity(events.len() + 2);
@@ -347,6 +351,98 @@ fn current_version_streams_match_their_goldens() {
             outcome(HeadlessStatus::Completed),
         ),
     );
+
+    for (name, state, verdict, status, run_outcome) in [
+        (
+            "strict_verified",
+            qq_protocol::VerificationState::Verified,
+            qq_protocol::CheckpointOutcome::Supported,
+            HeadlessStatus::Completed,
+            RunOutcome::Completed,
+        ),
+        (
+            "strict_unresolved",
+            qq_protocol::VerificationState::Unresolved,
+            qq_protocol::CheckpointOutcome::Contradicted,
+            HeadlessStatus::TaskFailed,
+            RunOutcome::Failed {
+                failure: RunFailure {
+                    kind: RunFailureKind::VerificationUnresolved,
+                    message: "fresh evidence required".into(),
+                },
+            },
+        ),
+        (
+            "strict_unavailable",
+            qq_protocol::VerificationState::Unavailable,
+            qq_protocol::CheckpointOutcome::Unavailable,
+            HeadlessStatus::TaskFailed,
+            RunOutcome::Failed {
+                failure: RunFailure {
+                    kind: RunFailureKind::VerificationUnavailable,
+                    message: "review unavailable".into(),
+                },
+            },
+        ),
+    ] {
+        let mut record = qq_protocol::VerificationRecord::pending(
+            "typesafe/jev-1.13.0/criteria-2026-09-18.1/strict".into(),
+        );
+        record.state = state;
+        record.phase = Some(qq_protocol::CheckpointPhase::FinalCandidate);
+        record.correlation = Some("final:1".into());
+        record.outcome = Some(verdict);
+        record.basis_sha256 = Some("a".repeat(64));
+        record.evidence_generation = 0;
+        record.review_count = 1;
+        if state == qq_protocol::VerificationState::Unresolved {
+            record.open_correction = record.correlation.clone();
+            record.correction_generation = Some(0);
+        }
+        let record = Some(Box::new(record));
+        let mut events = run_events(run_outcome, None);
+        for event in &mut events {
+            if let HeadlessRecord::Event { envelope } = event {
+                match &mut envelope.event {
+                    SessionEvent::RunFinished { verification, .. } => {
+                        *verification = record.clone()
+                    }
+                    SessionEvent::CheckpointStarted { verification, .. } => {
+                        let mut pending = record.clone().unwrap();
+                        pending.state = qq_protocol::VerificationState::Pending;
+                        pending.outcome = None;
+                        pending.open_correction = None;
+                        pending.correction_generation = None;
+                        *verification = Some(pending);
+                    }
+                    SessionEvent::CheckpointReviewed {
+                        verification,
+                        outcome,
+                        ..
+                    } => {
+                        let mut reviewed = record.clone().unwrap();
+                        if state == qq_protocol::VerificationState::Verified {
+                            reviewed.state = qq_protocol::VerificationState::Pending;
+                        }
+                        *verification = Some(reviewed);
+                        *outcome = verdict;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        check(
+            name,
+            &stream(
+                trial(),
+                events,
+                HeadlessOutcome {
+                    verification: record,
+                    ..outcome(status)
+                },
+            ),
+        );
+    }
 
     // Every optional trial field the flags can set, plus an audited answer.
     check(
@@ -517,6 +613,7 @@ fn current_version_streams_match_their_goldens() {
                     envelope: Box::new(envelope(
                         2,
                         SessionEvent::RunFinished {
+                            verification: None,
                             session: Box::new(summary(SessionStatus::Idle, false)),
                             run_id: RUN,
                             outcome: RunOutcome::Cancelled,
@@ -581,6 +678,7 @@ fn current_version_streams_match_their_goldens() {
                     envelope: Box::new(envelope(
                         3,
                         SessionEvent::RunFinished {
+verification: None,
                             session: Box::new(summary(SessionStatus::Idle, false)),
                             run_id: RUN,
                             outcome: RunOutcome::Cancelled,
