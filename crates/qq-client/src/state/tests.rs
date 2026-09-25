@@ -733,8 +733,15 @@ fn streaming_deltas_keep_the_tree_index() {
         ),
         context(&models),
     );
-    // Same allocation: the index was never dropped.
+    // Same allocation: the index was never dropped. (A pointer comparison
+    // can pass by luck when the allocator reuses the freed block, so the
+    // rebuild counter below is the authoritative check.)
     assert_eq!(store.thread_order().as_ptr(), order_before);
+    assert_eq!(
+        store.index_rebuilds(),
+        1,
+        "streaming deltas must not invalidate the tree index"
+    );
     assert_eq!(store.thread_order(), &[parent, child]);
     assert_eq!(
         store.get(&child).unwrap().messages.as_ref().unwrap()[0].output,
