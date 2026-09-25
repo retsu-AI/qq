@@ -13,10 +13,10 @@ below, newest last.
 | OB4 | `qq doctor` | Shipped (#138) | `feat/eng-878-doctor` | ENG-878 |
 | OB5 | `qq init`; `config paths` marks existing files | Shipped (#147) | `feat/eng-879-init` | ENG-879 |
 | OB6 | `install.sh`, Homebrew tap, Nix package, binstall | Shipped (#139) | `feat/eng-880-install-paths` | ENG-880; tap repo + `HOMEBREW_TAP_TOKEN` are owner setup |
-| OB7 | In-TUI trust prompt | In review | `feat/eng-881-tui-trust-prompt` | ENG-881; ADR-0042, no protocol change |
+| OB7 | In-TUI trust prompt | Shipped (#161) | `feat/eng-881-tui-trust-prompt` | ENG-881; ADR-0042, no protocol change |
 | OB8 | First-session guidance; `qq run` denial hint | Shipped (#146) | `feat/eng-882-first-session-guidance` | ENG-882 |
 | OB9 | Missing MCP credential degrades the server | Shipped (#148) | `fix/eng-861-mcp-credential-degrade` | ENG-861 |
-| OB10 | Docs-truth test; CHANGELOG at release | In review | `feat/eng-883-docs-truth` | ENG-883 |
+| OB10 | Docs-truth test; CHANGELOG at release | Shipped (#160) | `feat/eng-883-docs-truth` | ENG-883 |
 | OB11 | Wiki mirror workflow | Superseded by OB12 | | ENG-884 |
 | OB12 | Docs website from `docs/guide/`, GitHub Pages | Shipped (#156) | `feat/eng-896-docs-website` | ENG-896 |
 
@@ -341,3 +341,44 @@ branch examples; `runbooks/local-dev.md` recommends `CARGO_TARGET_DIR` for
 `nix/dev-shells.nix` does not set it). Gates: fmt, clippy `-D warnings`,
 `cargo test --workspace`, `cargo test -p qq-provider --no-default-features
 --features test-support`.
+
+### 2026-09-25 — plan complete; site layout shift fixed
+
+Every slice is shipped: OB0–OB10 and OB12 (OB11 superseded by the site);
+follow-ups ENG-897 (Gemini schemas) and ENG-898 landed as #162. Of the
+twenty audit findings O01–O20, all are closed; O05 ("`qq trust` grants
+blind") is closed by OB7's declaration list in the TUI and by
+`qq trust`'s own `declares:` output from OB0.
+
+Lighthouse on the live site (desktop preset, three pages): landing
+100/100/100/100; docs pages 100 accessibility, best practices, and SEO
+but performance 85–94 from a layout shift of 0.19–0.29 on cold loads,
+traced to the web font arriving after first paint: Inter's fallback
+(Arial) breaks lines differently, and the fixed right sidebar is
+positioned from `--sl-content-width`, which was `76ch` — a unit that
+changes with the font. Fixed in `fix/eng-926-site-layout-shift`: the
+content width is `50rem`; `scrollbar-gutter: stable` so the first layout
+and the final one agree on viewport width; a metric-matched `Inter
+Fallback` `@font-face` (`size-adjust`, ascent/descent overrides against
+Arial) so lines break identically before and after the swap; and the
+three Latin font files copied by `sync-docs` to `public/_fonts` under
+stable names and `<link rel=preload>`ed from the head, so they arrive
+with the HTML rather than a round-trip after the CSS. Verified locally
+against the built `dist/`: five consecutive runs of `/docs/install/` at
+CLS 0, and 100 in every category on `/`, `/docs/install/`,
+`/docs/configuration/`, `/docs/tui/`. Method note: a CDP probe sampling
+the sidebar rect never reproduced the shift because the probe's own
+observer delayed first paint past the font load; Lighthouse's trace was
+the reliable instrument.
+
+What worked in this plan: one audit up front (O01–O20) that every slice
+cited; small slices with one ledger, merged in stacks so conflicts were
+only ever in this file; the docs-truth test and the generated site
+landing together, so the guide is now load-bearing. What to carry
+forward: per-worktree `target/` directories filled the disk once
+(`runbooks/local-dev.md` now recommends a shared `CARGO_TARGET_DIR`);
+the ADR-first rule for OB7 cost one research pass and saved a protocol
+bump. Owner setup still open: none — the Homebrew tap
+(`retsu-AI/homebrew-qq`, formula at v0.1.4) and `HOMEBREW_TAP_TOKEN` are
+in place. Candidate guides (eight topics) are listed in the plan and
+unscheduled.

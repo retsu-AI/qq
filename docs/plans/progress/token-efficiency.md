@@ -108,3 +108,14 @@ is assigned per slice. [Plan](../token-efficiency.md).
   preserving the derived tree index. No tree-summary mutation is bypassed.
 - Passed all 22 client tests, workspace Clippy, full parallel workspace tests,
   workspace build and formatting. No serial-test workaround required.
+
+### 2026-09-26 — refresh both stack bases
+
+- Merged current main `9f2d82d` into #141. Resolved the overlapping streaming
+  regression test by retaining direct cache retention and main's rebuild-counter
+  assertions; removed the obsolete allocation-address assertion.
+- Passed 22 client tests, workspace formatting, Clippy with all targets/features
+  and `-D warnings`, `cargo test --workspace --quiet -- --test-threads=1`, and
+  workspace build using `CARGO_TARGET_DIR=../te1/target`.
+- Updating child #158 from this parent preserves TE1.1 and avoids force pushes.
+  Remote CI is separate from these local verification results.

@@ -419,21 +419,13 @@ impl App {
 
     // --- effort ---
 
-    /// Rows are the focused model's advertised ladder when the catalog knows
-    /// it, otherwise every level. `default` always leads. `none` is a request
-    /// opt-out, not a model capability, so it rides along whenever the ladder
-    /// is known and the adapter transmits effort at all.
+    /// Offer only model-advertised choices. Default/inheritance is distinct
+    /// from the explicit `none` value, which some models reject.
     pub(crate) fn open_effort(&mut self) -> Effects {
         let advertised = self.focused_model_efforts();
-        let levels: Vec<Option<ReasoningEffort>> = if advertised.is_empty() {
-            ReasoningEffort::ALL.into_iter().map(Some).collect()
-        } else {
-            std::iter::once(ReasoningEffort::None)
-                .chain(advertised.iter().copied())
-                .map(Some)
-                .collect()
-        };
-        let rows: Vec<EffortRow> = std::iter::once(None)
+        let levels = advertised.iter().copied().map(Some);
+        let rows: Vec<EffortRow> = [None, Some(ReasoningEffort::Default)]
+            .into_iter()
             .chain(levels)
             .map(effort_row)
             .collect();

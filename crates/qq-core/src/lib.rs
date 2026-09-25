@@ -865,6 +865,7 @@ impl Runtime {
                     return Err("summarizer stream ended without completing".to_owned());
                 };
                 match event {
+                    Ok(ProviderEvent::Replay { .. }) => {} // Summaries have no provider continuation.
                     Ok(ProviderEvent::OutputTextDelta { text: delta }) => {
                         if summary
                             .len()
@@ -1833,6 +1834,7 @@ impl plan::CompiledAgentPlan {
                 let mut provider_events = provider.stream(request);
                 let mut pending_calls = Vec::<PendingToolCall>::new();
                 let mut calls_by_provider_id = HashMap::<String, usize>::new();
+                let mut replay = None;
                 let mut blocks = Vec::<TurnBlock>::new();
                 let mut terminal_usage = None;
                 let mut completed = false;
@@ -1880,6 +1882,13 @@ impl plan::CompiledAgentPlan {
                         StreamStep::Event(None) => break,
                     };
                     match event {
+                        Ok(ProviderEvent::Replay { data }) => {
+                            if replay.is_some() || data.len() > 16 * 1024 * 1024 {
+                                yield RuntimeEvent::Failed { kind: RunFailureKind::ProviderProtocol, message: "invalid or oversized provider continuation".to_owned() };
+                                return;
+                            }
+                            replay = Some(data);
+                        }
                         Ok(ProviderEvent::ReasoningStarted { kind }) => {
                             if open_reasoning.is_some() {
                                 yield RuntimeEvent::Failed {
@@ -2255,7 +2264,11 @@ impl plan::CompiledAgentPlan {
                         }
                     })
                     .collect::<Vec<_>>();
-                let assistant = Message::new(Role::Assistant, assistant_content);
+                let mut assistant = Message::new(Role::Assistant, assistant_content);
+                if completed && !interrupted_turn && !truncated_turn && turn_fault.is_none()
+                    && let Some(data) = replay {
+                    assistant = assistant.with_replay(data);
+                }
                 let mut calls = Vec::with_capacity(pending_calls.len());
                 let mut id_generation_failed = None;
                 for (index, pending) in pending_calls.into_iter().enumerate() {
@@ -3793,10 +3806,10 @@ impl RetainedResult {
 }
 
 pub(crate) fn measure_message(message: &Message) -> u64 {
-    message
-        .content()
-        .iter()
-        .fold(CONTEXT_MESSAGE_FRAMING_BYTES, |total, block| {
+    message.content().iter().fold(
+        CONTEXT_MESSAGE_FRAMING_BYTES
+            .saturating_add(message.replay().map_or(0, |replay| replay.len() as u64)),
+        |total, block| {
             let content = match block {
                 ContentBlock::Text { text } => u64::try_from(text.len()).unwrap_or(u64::MAX),
                 ContentBlock::ToolCall {
@@ -3816,7 +3829,8 @@ pub(crate) fn measure_message(message: &Message) -> u64 {
             total
                 .saturating_add(CONTEXT_BLOCK_FRAMING_BYTES)
                 .saturating_add(content)
-        })
+        },
+    )
 }
 
 fn append_turn_text(blocks: &mut Vec<TurnBlock>, text: &str) {
