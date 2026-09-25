@@ -80,3 +80,14 @@ is assigned per slice. [Plan](../token-efficiency.md).
   remain null for incomplete coverage or zero successes. Empty trial IDs reject.
 - Focused eval tests: 17 passed, including report fixture assertions for complete
   and unknown accounting. Targeted xtask Clippy passed. Full TE1 remains open.
+
+### 2026-09-24 — TE1.1 verification recovered
+
+- Complete `cargo test --workspace --quiet -- --test-threads=1` passed,
+  including 720 qq-core tests and 59 xtask tests. Prior concurrent failures
+  remain recorded; serial success is not a root-cause claim.
+- Rechecked workspace formatting, all-target/all-feature Clippy, workspace
+  build and diff whitespace: passed. No production/test timeout changes.
+- #158 is the bounded TE1.1 reporting foundation, not full TE1 completion.
+  TE1.2 still owns request-level lineage, verifier accounting, repeated-read
+  attribution, corpus and overhead qualification. ENG-888 stays In Progress.
