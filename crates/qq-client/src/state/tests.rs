@@ -73,6 +73,7 @@ fn summary(id: SessionId) -> SessionSummary {
         reasoning_effort: None,
         approval_mode: qq_protocol::ApprovalMode::default(),
         approval_delegate: None,
+        jev_mode: None,
         correlation: qq_protocol::Correlation::default(),
         last_outcome: None,
         context_tokens: None,
@@ -762,4 +763,44 @@ fn streaming_deltas_keep_the_tree_index() {
         context(&models),
     );
     assert_eq!(store.thread_order(), &[child, parent]);
+}
+
+/// `set_jev_mode` is observed like every other session field: the durable
+/// `session_updated` carries the whole summary, so every surface on the
+/// reducer sees the same mode without a dedicated event.
+#[test]
+fn session_updated_carries_the_jev_mode_to_every_surface() {
+    let session_id = SessionId::from_bytes([7; 16]);
+    let mut store = SessionStore::default();
+    store.upsert_summary(summary(session_id), &[], 0);
+    assert_eq!(store.get(&session_id).unwrap().summary.jev_mode, None);
+
+    let mut switched = summary(session_id);
+    switched.jev_mode = Some(qq_protocol::JevMode::Ultrajev);
+    store.reduce_event(
+        &envelope(
+            1,
+            session_id,
+            SessionEvent::SessionUpdated {
+                session: Box::new(switched),
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(
+        store.get(&session_id).unwrap().summary.jev_mode,
+        Some(qq_protocol::JevMode::Ultrajev)
+    );
+
+    store.reduce_event(
+        &envelope(
+            2,
+            session_id,
+            SessionEvent::SessionUpdated {
+                session: Box::new(summary(session_id)),
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(store.get(&session_id).unwrap().summary.jev_mode, None);
 }

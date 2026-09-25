@@ -1,0 +1,15 @@
+{
+  "command_id": "27272727272727272727272727272727",
+  "command": {
+    "type": "respond_tool_approval",
+    "run_id": "04040404040404040404040404040404",
+    "tool_call_id": "08080808080808080808080808080808",
+    "decision": {
+      "type": "approve_for_session",
+      "grant": {
+        "type": "host",
+        "host": "*.docs.rs"
+      }
+    }
+  }
+}

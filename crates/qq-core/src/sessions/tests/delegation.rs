@@ -2051,6 +2051,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
     };
     let parent_run = RunId::generate().unwrap();
     let parent = ClaimedRun {
+        jev_mode: None,
         checkpoint: None,
         routing: None,
         identity: RunIdentity {

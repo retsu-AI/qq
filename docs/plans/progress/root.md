@@ -65,6 +65,7 @@ may append a **request** row; only root changes a request's status.
 | 0040 | Two-phase retry ownership: provider owns pre-event sends, the run owns post-event turn recovery and `Paused`; supersedes ADR-0005 in part | run-reliability RR4 | Accepted 2026-09-21: `docs/adr/0040-two-phase-retry-ownership.md`; `PROTOCOL_VERSION` 25 → 26 |
 | 0041 | Jev as an approval delegate for held calls only; supersedes ADR-0030's "never authorizes side effects" for the `jev_approval` lane | delegated-approval DA5 (ENG-862) | Accepted 2026-09-23: `docs/adr/0041-jev-delegated-approval.md`; no protocol or schema change |
 | 0042 | In-TUI trust prompt: client-side, root-resolved, no protocol change | onboarding-ux OB7 | Accepted 2026-09-24: `docs/adr/0042-in-tui-trust-prompt.md` |
+| 0043 | Two session switchers: the regular model/effort switch is the existing `set_session_model` / `set_session_effort`; a five-mode `JevMode` session override (`low`–`ultrajev`) resolves at the composition root to `jev_routing` / `jev_review` / `approval_delegate`, never a TypeSafe request parameter | integration plan § 2 item 9 (model switcher workstream) | Proposed 2026-09-24: `docs/adr/0043-session-model-and-jev-mode-switchers.md`; `PROTOCOL_VERSION` 30 → 31, store schema 39 → 40; existing ladder preserved under manager integration direction |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -135,7 +136,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0043. Reserve here before opening a PR that adds an ADR.
+Next free number: 0044. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -154,6 +155,7 @@ Next free number: 0043. Reserve here before opening a PR that adds an ADR.
 | 2026-09-21 | run-reliability RR4 | root `Cargo.toml`, `Cargo.lock` (RR5: `httpdate = "1"` workspace row, already in the lock via hyper); `crates/qq-protocol` `PROTOCOL_VERSION` 25 → 26 (`run_turn_retrying`, `paused`); `docs/adr/README.md`; `docs/design/architecture.md` § run loop | Turn recovery per ADR-0040 | Done in the RR4 PR |
 | 2026-09-24 | delegated-approval DA6 (ENG-862) | `crates/qq-protocol` `PROTOCOL_VERSION` 27 → 28 (`tool_approval_resolved.delegate`, `tool_approval_escalated`, `set_approval_delegate` / `approval_delegate_set`, `SessionSummary.approval_delegate`, `/delegate` reserved); `docs/README.md` and `docs/plans/README.md` rows (target contract deleted, plan closed) | The delegate identity must be on the stream for a supervisor to tell Jev from `reviewer_model`; the plan's acceptance requires it | Done in the DA6 PR |
 | 2026-09-24 | onboarding-ux OB7 (ENG-881) | `docs/adr/README.md` (ADR-0042 row); `crates/qq-client/src/port.rs` `ClientRequest::Models` (client-internal enum, not wire) | The trust prompt is client-side per ADR-0042; **no `PROTOCOL_VERSION` change** (stays 28). The plan's "needs a protocol addition" note is superseded by the ADR | Done in the OB7 PR |
+| 2026-09-24 | model-switcher (ADR-0043) | `crates/qq-protocol` `PROTOCOL_VERSION` 28 → 29 (`JevMode`, `set_jev_mode` / `jev_mode_set`, `SessionSummary.jev_mode`, `/jev` reserved); `docs/adr/README.md` row. Open PRs #154/#157 also bump to 29 for the Anthropic effort work; whichever lands second rebases to 30 | Every surface must reduce one persisted Jev mode from the same `session_updated` | Open in the ADR-0043 PR |
 
 Shared files: root `Cargo.toml` and `Cargo.lock` version bumps,
 `rust-toolchain.toml`, `flake.nix`, `.github/workflows/*`,
@@ -409,3 +411,22 @@ otherwise accepted the contract wording and inspected test evidence. The report
 is in Startup Manager's
 `reviews/retsu-weekly-audit-2026-09-25/qq-jev-evidence/independent-review.md`.
 Final successor review is pending; no merge or publication approval is implied.
+
+
+### ENG-791 session Jev integration — 2026-09-25
+
+In progress: isolated `fix/eng-791-jev-stack-integration`, based on main c6df04bf.
+Original #166/#170 heads83455ec/6cbe790 preserved in a bundle; authors' branches untouched.
+Accepted documentation27c1bff and OAuth118e3d9 remain distinct merge dependencies.
+Root request/reservation: ADR0043 (0042 already occupied), protocol31 and store40
+(29/30 and37/38/39 already occupied). Existing migration/fixture history preserved.
+Owned paths: the existing stack's protocol/session/client/server/runtime/TUI/docs changes.
+Acceptance: migrations/protocol/session/TUI behavior, full local gates, independent
+final-head review, bounded isolated QQ dogfood where credentials permit.
+Review semantics remain RR3; original strict completion requirement remains unresolved.
+No publication, paid CI, credential retry, migration of user stores or release.
+
+Integration clarification: the historical model-switcher request above used
+protocol29/store37 and called its ADR0042. Current reservations are
+protocol31/store40/ADR0043; main's prior IDs and accepted trust ADR remain intact.
+The existing ladder is preserved under manager direction, not a new strict policy.

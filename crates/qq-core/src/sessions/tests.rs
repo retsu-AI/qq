@@ -2003,6 +2003,7 @@ fn denial_capacity_fixture(
         resolved_input: None,
         profile: AgentProfileId::default(),
         reasoning_effort: None,
+        jev_mode: None,
         approval_mode: ApprovalMode::default(),
         depth: 0,
         root_run_id: run_id,

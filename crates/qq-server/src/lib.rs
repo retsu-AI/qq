@@ -804,6 +804,7 @@ async fn session_command(
         | SessionCommand::SetSessionModel { .. }
         | SessionCommand::SetSessionProfile { .. }
         | SessionCommand::SetSessionEffort { .. }
+        | SessionCommand::SetJevMode { .. }
         | SessionCommand::DeleteSession { .. }
         | SessionCommand::PruneSessions { .. }
         | SessionCommand::CompactSession { .. }
@@ -2110,6 +2111,10 @@ mod tests {
                         effort: *effort,
                     }
                 }
+                SessionCommand::SetJevMode { session_id, mode } => CommandOutcome::JevModeSet {
+                    session_id: *session_id,
+                    mode: *mode,
+                },
                 _ => {
                     return Box::pin(async {
                         Err(ServerHandlerError::InvalidRequest(
@@ -2253,6 +2258,10 @@ mod tests {
             SessionCommandKind::SetSessionEffort => SessionCommand::SetSessionEffort {
                 session_id,
                 effort: Some(qq_protocol::ReasoningEffort::High),
+            },
+            SessionCommandKind::SetJevMode => SessionCommand::SetJevMode {
+                session_id,
+                mode: Some(qq_protocol::JevMode::High),
             },
             SessionCommandKind::DeleteSession => SessionCommand::DeleteSession { session_id },
             SessionCommandKind::PruneSessions => SessionCommand::PruneSessions { workspace_id },

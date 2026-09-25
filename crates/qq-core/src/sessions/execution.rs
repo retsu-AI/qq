@@ -668,6 +668,7 @@ async fn route_run(
         decision.model.organization = claimed.model.organization.clone();
         let mut load = inner.loader.load(RuntimeLoadRequest {
             reasoning_effort: decision.reasoning_effort,
+            jev_mode: claimed.jev_mode,
             routing: Some(RoutingSelection::from_identity(
                 loaded.plan.descriptor().routing.as_deref(),
             )),
@@ -763,6 +764,7 @@ pub(super) async fn execute_run(
     let mut load = inner.loader.load_with_progress(
         RuntimeLoadRequest {
             reasoning_effort: claimed.reasoning_effort,
+            jev_mode: claimed.jev_mode,
             checkpoint: claimed.checkpoint.clone(),
             routing: claimed.routing.clone(),
             workspace: claimed.workspace.clone(),
