@@ -650,6 +650,16 @@ impl RuntimeFactory {
                 continue;
             }
             for (model_id, metadata) in provider.models() {
+                if matches!(
+                    provider.kind(),
+                    qq_config::ProviderKind::OpenAiCodex | qq_config::ProviderKind::Anthropic
+                ) && !metadata.explicitly_configured()
+                    && discovered
+                        .get(provider_id)
+                        .is_some_and(|models| !models.iter().any(|model| &model.id == model_id))
+                {
+                    continue;
+                }
                 if options.len() >= MAX_MODEL_OPTIONS {
                     break 'providers;
                 }
@@ -658,7 +668,12 @@ impl RuntimeFactory {
                     model: model_id.clone(),
                     name: metadata.name().map(str::to_owned),
                     context_window: metadata.context_window(),
-                    reasoning_efforts: metadata.reasoning_efforts().to_vec(),
+                    reasoning_efforts: discovered
+                        .get(provider_id)
+                        .and_then(|models| models.iter().find(|model| &model.id == model_id))
+                        .and_then(|model| model.efforts.clone())
+                        .filter(|_| !metadata.explicitly_configured())
+                        .unwrap_or_else(|| metadata.reasoning_efforts().to_vec()),
                     selection: qq_protocol::ModelSelection {
                         model_is_fallback: false,
                         model: Some(format!("{provider_id}/{model_id}")),
@@ -686,7 +701,7 @@ impl RuntimeFactory {
                         model: model.id.clone(),
                         name: model.name.clone(),
                         context_window: None,
-                        reasoning_efforts: Vec::new(),
+                        reasoning_efforts: model.efforts.clone().unwrap_or_default(),
                         selection: qq_protocol::ModelSelection {
                             model_is_fallback: false,
                             model: Some(format!("{provider_id}/{}", model.id)),
@@ -1162,17 +1177,28 @@ impl RuntimeFactory {
                 provider_id.to_owned(),
             ));
         }
-        if provider.models().contains_key(model_id) {
+        if provider.models().get(model_id).is_some_and(|metadata| {
+            metadata.explicitly_configured()
+                || !matches!(
+                    provider.kind(),
+                    qq_config::ProviderKind::OpenAiCodex | qq_config::ProviderKind::Anthropic
+                )
+        }) {
             return Ok(());
         }
-        // The discovery cache keeps this equal to the served list without a
-        // network round trip while the cache is warm; when discovery is
-        // unavailable the builtin catalog and configured ids above are the
-        // whole list.
-        if self
-            .inner
-            .discovery
-            .discover(provider_id, provider, &self.inner.credentials)
+        let discovered =
+            self.inner
+                .discovery
+                .discover(provider_id, provider, &self.inner.credentials);
+        if provider.models().get(model_id).is_some_and(|metadata| {
+            metadata.explicitly_configured()
+                || !matches!(
+                    provider.kind(),
+                    qq_config::ProviderKind::OpenAiCodex | qq_config::ProviderKind::Anthropic
+                )
+                || discovered.is_none()
+        }) || discovered
+            .as_ref()
             .is_some_and(|models| models.iter().any(|model| model.id == model_id))
         {
             return Ok(());
@@ -1225,6 +1251,17 @@ impl RuntimeFactory {
                 .discovery
                 .discover(provider_id, provider, &self.inner.credentials)
         {
+            if matches!(
+                provider.kind(),
+                qq_config::ProviderKind::OpenAiCodex | qq_config::ProviderKind::Anthropic
+            ) {
+                ids.retain(|id| {
+                    provider
+                        .models()
+                        .get(id)
+                        .is_some_and(|model| model.explicitly_configured())
+                });
+            }
             ids.extend(discovered.into_iter().map(|model| model.id));
         }
         if ids.is_empty() || ids.len() > MAX_LISTED_ROUTES {
@@ -1453,7 +1490,9 @@ impl RuntimeFactory {
             }
         };
         let resolved_model = self.resolved_model_for_snapshot(&snapshot)?;
-        if snapshot.reasoning_effort().is_some()
+        if snapshot
+            .reasoning_effort()
+            .is_some_and(|effort| effort != qq_provider::ReasoningEffort::Default)
             && resolved_model.generation.reasoning_effort
                 == qq_protocol::CapabilitySupport::Unsupported
         {
@@ -1461,10 +1500,71 @@ impl RuntimeFactory {
                 snapshot.model().as_str().to_owned(),
             ));
         }
+        if let Some(effort) = snapshot
+            .reasoning_effort()
+            .filter(|effort| *effort != qq_provider::ReasoningEffort::Default)
+            && snapshot
+                .providers()
+                .get(snapshot.model().provider())
+                .is_some_and(|provider| {
+                    provider.access().is_some_and(|access| {
+                        effective_provider_api(provider, snapshot.model().model(), access)
+                            == ProviderApi::AnthropicMessages
+                    })
+                })
+            && matches!(
+                effort,
+                qq_provider::ReasoningEffort::None | qq_provider::ReasoningEffort::Minimal
+            )
+        {
+            return Err(RuntimeBuildError::UnsupportedReasoningEffort(
+                snapshot.model().as_str().to_owned(),
+            ));
+        }
+        let live_efforts = snapshot
+            .providers()
+            .get(snapshot.model().provider())
+            .and_then(|provider| {
+                if provider
+                    .models()
+                    .get(snapshot.model().model())
+                    .is_some_and(|metadata| metadata.explicitly_configured())
+                {
+                    return None;
+                }
+                self.inner
+                    .discovery
+                    .cached(
+                        snapshot.model().provider(),
+                        provider,
+                        &self.inner.credentials,
+                    )
+                    .and_then(|models| {
+                        models
+                            .iter()
+                            .find(|model| model.id == snapshot.model().model())
+                            .and_then(|model| model.efforts.clone())
+                    })
+            });
+        if let Some(effort) = snapshot
+            .reasoning_effort()
+            .filter(|effort| *effort != qq_provider::ReasoningEffort::Default)
+            && let Some(levels) = &live_efforts
+            && !levels.contains(&effort)
+        {
+            return Err(RuntimeBuildError::ReasoningEffortNotAdvertised {
+                model: snapshot.model().as_str().to_owned(),
+                effort,
+                advertised: levels.clone(),
+            });
+        }
         // A pin outside the route's advertised ladder is a configuration error
         // here, not a provider 400 mid-turn. An empty ladder advertises nothing
         // and is not checked: unknown is not the same as unsupported.
-        if let Some(effort) = snapshot.reasoning_effort()
+        if let Some(effort) = snapshot
+            .reasoning_effort()
+            .filter(|effort| *effort != qq_provider::ReasoningEffort::Default)
+            && live_efforts.is_none()
             && let Some(metadata) = snapshot
                 .providers()
                 .get(snapshot.model().provider())
@@ -1683,7 +1783,9 @@ impl RuntimeFactory {
                 reasoning_effort: if matches!(access, ProviderAccess::Http(_))
                     && matches!(
                         api,
-                        ProviderApi::OpenAiResponses | ProviderApi::OpenAiChatCompletions
+                        ProviderApi::OpenAiResponses
+                            | ProviderApi::OpenAiChatCompletions
+                            | ProviderApi::AnthropicMessages
                     ) {
                     CapabilitySupport::Native
                 } else {
@@ -6284,10 +6386,12 @@ mod tests {
             "custom".to_owned(),
             vec![
                 DiscoveredModel {
+                    efforts: None,
                     id: "configured".to_owned(),
                     name: Some("Vendor name".to_owned()),
                 },
                 DiscoveredModel {
+                    efforts: None,
                     id: "live".to_owned(),
                     name: Some("Live name".to_owned()),
                 },
@@ -6303,6 +6407,54 @@ mod tests {
         assert!(options
             .iter()
             .any(|option| option.model == "live" && option.name.as_deref() == Some("Live name")));
+    }
+
+    #[test]
+    fn codex_live_catalog_replaces_implicit_models_but_keeps_explicit_routes() {
+        let fixture = RuntimeFixture::new();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        );
+        credentials.set_with_metadata("openai-codex/default", serde_json::to_vec(&serde_json::json!({
+            "version": 1, "id_token": "id", "access_token": "access", "refresh_token": "refresh",
+            "account_id": "test", "is_fedramp": false, "refreshed_at": 1
+        })).unwrap(), false, Some("openai-codex"), Some("https://chatgpt.com")).unwrap();
+        let factory = fixture.factory_with_credentials(credentials);
+        let snapshot = factory
+            .load(&fixture.request(
+                r#"(
+            version: 1,
+            model: "openai-codex/selected",
+            providers: {"openai-codex": OpenAiCodex(
+                models: {"gpt-5.5": (name: "Explicit legacy")},
+            )},
+        )"#,
+            ))
+            .unwrap();
+        let source = CatalogSource::from(&snapshot);
+        let fallback = factory.model_options_with_discovery(&source, &BTreeMap::new());
+        assert!(fallback.iter().any(|model| model.model == "gpt-5.4"));
+        let live = BTreeMap::from([(
+            "openai-codex".to_owned(),
+            vec![DiscoveredModel {
+                efforts: None,
+                id: "gpt-6-sol".to_owned(),
+                name: Some("GPT-6 Sol".to_owned()),
+            }],
+        )]);
+        let options = factory.model_options_with_discovery(&source, &live);
+        assert!(
+            options
+                .iter()
+                .any(|model| model.model == "gpt-6-sol" && model.context_window.is_some())
+        );
+        assert!(options.iter().any(|model| model.model == "gpt-5.5"));
+        assert!(options.iter().any(|model| model.model == "selected"));
+        assert!(!options.iter().any(|model| model.model == "gpt-5.4"));
+        let empty = BTreeMap::from([("openai-codex".to_owned(), Vec::new())]);
+        let options = factory.model_options_with_discovery(&source, &empty);
+        assert_eq!(options.len(), 2);
     }
 
     #[test]
@@ -7804,12 +7956,48 @@ mod tests {
         );
         let unsupported = fixture.request(r#"(
             version: 1, model: "custom/test", reasoning_effort: high,
-            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: AnthropicMessages, auth: ApiKey(Stored("missing-key"))), models: { "test": (name: "test") }) },
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: GoogleGenerateContent, auth: ApiKey(Stored("missing-key"))), models: { "test": (name: "test") }) },
         )"#);
         assert!(matches!(
             factory.plan_for(&unsupported),
             Err(RuntimeBuildError::UnsupportedReasoningEffort(_))
         ));
+    }
+
+    #[test]
+    fn provider_default_overrides_configured_effort_without_becoming_a_wire_level() {
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let request = fixture.request(r#"(
+            version: 1, model: "custom/test", reasoning_effort: high,
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: AnthropicMessages, auth: NoAuth), models: { "test": (name: "test", reasoning_efforts: [low, high]) }) },
+        )"#);
+        let overridden = request.clone().with_overrides(
+            request
+                .overrides()
+                .clone()
+                .with_reasoning_effort(qq_provider::ReasoningEffort::Default),
+        );
+        assert_eq!(
+            factory
+                .plan_for(&request)
+                .unwrap()
+                .descriptor()
+                .reasoning_effort,
+            Some(qq_provider::ReasoningEffort::High)
+        );
+        assert_eq!(
+            factory
+                .plan_for(&overridden)
+                .unwrap()
+                .descriptor()
+                .reasoning_effort,
+            Some(qq_provider::ReasoningEffort::Default)
+        );
+        let snapshot = factory.load(&overridden).unwrap();
+        let router = routing::TypeSafeTaskRouter::from_snapshot(&factory, &snapshot, true);
+        // Candidate construction must reach authentication, not reject Default.
+        assert!(matches!(router, Err(RuntimeBuildError::JevKeyRequired)));
     }
 
     #[test]

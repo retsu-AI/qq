@@ -2757,6 +2757,7 @@ fn apply_models(
 }
 
 fn apply_model_patch(model: &mut ModelMetadata, patch: &ModelPatch) {
+    model.explicitly_configured = true;
     apply_optional_string(&patch.name, &mut model.name);
     apply_optional(&patch.api, &mut model.api);
     apply_default(&patch.reasoning, &mut model.reasoning, false);

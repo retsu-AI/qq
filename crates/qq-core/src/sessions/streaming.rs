@@ -150,7 +150,13 @@ pub(super) fn persist_model_turn(
         .iter()
         .map(PersistedContentBlock::from)
         .collect::<Vec<_>>();
-    let content_json = serde_json::to_string(&content)?;
+    let content_json = match message.replay() {
+        Some(replay) => serde_json::to_string(&super::codec::PersistedTurn::Replay {
+            content,
+            replay: replay.to_owned(),
+        })?,
+        None => serde_json::to_string(&content)?,
+    };
     let model_json = serde_json::to_string(&claimed.model)?;
     let usage_json = usage
         .map(|usage| serde_json::to_string(&usage))

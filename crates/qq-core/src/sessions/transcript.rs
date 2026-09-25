@@ -365,21 +365,30 @@ pub(super) fn load_model_context_with_units(
                AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
              ORDER BY t.run_id, t.turn_ordinal",
     )?;
-    let rows = statement.query_map(params![session, through_ordinal, cutoff_ordinal], |row| {
-        Ok((
+    let mut rows = statement.query(params![session, through_ordinal, cutoff_ordinal])?;
+    // Include opaque replay envelopes in the allocation budget before decoding.
+    let mut remaining_turn_bytes = 64 * 1024 * 1024_usize;
+    while let Some(row) = rows.next()? {
+        let raw = row
+            .get_ref(2)?
+            .as_str()
+            .map_err(|_| SessionRuntimeError::CONSTRAINT)?;
+        if raw.len() > remaining_turn_bytes {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        remaining_turn_bytes -= raw.len();
+        let (run_id, ordinal, content, truncated) = (
             row.get::<_, String>(0)?,
             row.get::<_, u32>(1)?,
-            row.get::<_, String>(2)?,
+            raw.to_owned(),
             row.get::<_, bool>(3)?,
-        ))
-    })?;
-    for row in rows {
-        let (run_id, ordinal, content, truncated) = row?;
+        );
         turns
             .entry(run_id)
             .or_default()
             .push((ordinal, content, truncated));
     }
+    drop(rows);
     drop(statement);
 
     // Every recorded tool result, keyed by run, turn, and provider call id, with the
@@ -793,7 +802,13 @@ pub(super) fn context_bytes(messages: &[Message]) -> usize {
                 call_id, content, ..
             } => call_id.len() + content.len(),
         })
-        .fold(0_usize, usize::saturating_add)
+        .fold(
+            messages
+                .iter()
+                .map(|message| message.replay().map_or(0, str::len))
+                .fold(0usize, usize::saturating_add),
+            usize::saturating_add,
+        )
 }
 
 /// Searches the session's complete durable transcript for a case-insensitive
@@ -874,12 +889,19 @@ pub(super) fn search_session_history(
                 run_hits.push(HistoryMatch { citation, excerpt });
             }
         };
-        let turns = turns_statement
-            .query_map([&run_id], |row| {
-                Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        for (turn_ordinal, content_json) in turns {
+        let mut turns = turns_statement.query([&run_id])?;
+        while let Some(row) = turns.next()? {
+            let turn_ordinal: u32 = row.get(0)?;
+            let raw = row
+                .get_ref(1)?
+                .as_str()
+                .map_err(|_| SessionRuntimeError::CONSTRAINT)?;
+            if raw.len() > HISTORY_SCAN_BUDGET_BYTES.saturating_sub(scanned) {
+                truncated = true;
+                break 'prompts;
+            }
+            scanned += raw.len();
+            let content_json = raw.to_owned();
             let results = results_statement
                 .query_map(params![&run_id, turn_ordinal], |row| {
                     Ok((
@@ -899,7 +921,11 @@ pub(super) fn search_session_history(
                     &result,
                 );
             }
-            let content = serde_json::from_str::<Vec<PersistedContentBlock>>(&content_json)?;
+            let content = match serde_json::from_str::<super::codec::PersistedTurn>(&content_json)?
+            {
+                super::codec::PersistedTurn::Legacy(content)
+                | super::codec::PersistedTurn::Replay { content, .. } => content,
+            };
             for block in content.into_iter().rev() {
                 match ContentBlock::from(block) {
                     ContentBlock::Text { text } => record(
@@ -1040,11 +1066,12 @@ pub(super) fn append_run_turns(
             let (_, text) = steering.pop_front().expect("front was just checked");
             context.push(Message::user(text));
         }
-        let content: Vec<ContentBlock> =
-            serde_json::from_str::<Vec<PersistedContentBlock>>(&content_json)?
-                .into_iter()
-                .map(ContentBlock::from)
-                .collect();
+        let (content, replay) =
+            match serde_json::from_str::<super::codec::PersistedTurn>(&content_json)? {
+                super::codec::PersistedTurn::Legacy(content) => (content, None),
+                super::codec::PersistedTurn::Replay { content, replay } => (content, Some(replay)),
+            };
+        let content: Vec<ContentBlock> = content.into_iter().map(ContentBlock::from).collect();
         // A block without a recorded result (a crash between the turn commit
         // and its tool_calls rows in an older store) gets an explicit
         // interrupted result so replayed context stays provider-valid
@@ -1100,7 +1127,11 @@ pub(super) fn append_run_turns(
                 ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,
             })
             .collect::<Vec<_>>();
-        context.push(Message::new(Role::Assistant, content));
+        let mut message = Message::new(Role::Assistant, content);
+        if let Some(replay) = replay {
+            message = message.with_replay(replay.into());
+        }
+        context.push(message);
         if !results.is_empty() {
             context.push(Message::tool_results(results));
         }
