@@ -3521,20 +3521,21 @@ fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
         return unavailable();
     }
     let mut outcome = CheckpointOutcome::Supported;
-    let mut minimum_confidence = 1.0_f64;
-    let mut findings = Vec::new();
+    let mut minimum_distribution_confidence = 1.0_f64;
+    let mut criteria_feedback = Vec::new();
     for id in ["task_coverage", "direct_evidence", "consistency"] {
         let answer = &value["answers"][id];
         if answer["type"].as_str() != Some("choice") {
             return unavailable();
         }
-        let Some(confidence) = answer["confidence"]
+        let Some(distribution_confidence) = answer["confidence"]
             .as_f64()
             .filter(|value| (0.0..=1.0).contains(value))
         else {
             return unavailable();
         };
-        minimum_confidence = minimum_confidence.min(confidence);
+        minimum_distribution_confidence =
+            minimum_distribution_confidence.min(distribution_confidence);
         let labels = [
             "supported",
             "partially_supported",
@@ -3566,15 +3567,15 @@ fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
         else {
             return unavailable();
         };
-        let probability = probabilities[choice]
+        let selected_probability = probabilities[choice]
             .as_f64()
             .expect("validated distribution");
-        if probability < maximum {
+        if selected_probability < maximum {
             return unavailable();
         }
-        // Conservative initial policy, not calibrated accuracy: a weak winner
-        // asks for evidence rather than allowing a completion claim.
-        let classified = if confidence < 0.7 || probability < 0.7 {
+        // QQ policy requires both the selected probability and distribution-derived
+        // confidence; neither is calibrated correctness accuracy.
+        let classified = if distribution_confidence < 0.7 || selected_probability < 0.7 {
             CheckpointOutcome::InsufficientEvidence
         } else {
             match choice {
@@ -3585,8 +3586,11 @@ fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
                 _ => unreachable!("validated choice"),
             }
         };
+        criteria_feedback.push(format!(
+            "{id}: remote choice={choice}, selected_probability={selected_probability}, distribution_confidence={distribution_confidence}; QQ policy={}",
+            classified.label()
+        ));
         if classified != CheckpointOutcome::Supported {
-            findings.push(format!("{id}={}", classified.label()));
             outcome = match (outcome, classified) {
                 (CheckpointOutcome::Contradicted, _) | (_, CheckpointOutcome::Contradicted) => {
                     CheckpointOutcome::Contradicted
@@ -3602,15 +3606,17 @@ fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
     CheckpointVerdict {
         spend,
         outcome,
-        confidence: Some(minimum_confidence),
-        feedback: if findings.is_empty() {
-            "Jev criteria-2026-09-18.1: supplied evidence supports task_coverage, direct_evidence and consistency; this is not proof of correctness".to_owned()
-        } else {
-            format!(
-                "Jev criteria-2026-09-18.1: {}. Next: correct conflicting claims or gather direct evidence for these criterion IDs; omitted observations are not proof. Low-confidence choices count as insufficient evidence.",
-                findings.join("; ")
-            )
-        },
+        confidence: Some(minimum_distribution_confidence),
+        feedback: format!(
+            "Jev criteria-2026-09-18.1: {}. QQ checkpoint outcome={}. {}",
+            criteria_feedback.join("; "),
+            outcome.label(),
+            if outcome == CheckpointOutcome::Supported {
+                "The supplied evidence meets QQ policy; this is not proof of correctness."
+            } else {
+                "Next: correct conflicting claims or gather direct evidence for criteria not supported by QQ policy; omitted observations are not proof. QQ classifies a choice as insufficient evidence when its selected probability or distribution confidence is below 0.7."
+            }
+        ),
     }
 }
 
@@ -8799,7 +8805,11 @@ mod tests {
         });
         let verdict = parse_typesafe_checkpoint(&conflicting);
         assert_eq!(verdict.outcome, CheckpointOutcome::Contradicted);
-        assert!(verdict.feedback.contains("consistency=contradicted"));
+        assert!(
+            verdict
+                .feedback
+                .contains("consistency: remote choice=contradicted")
+        );
         assert_eq!(
             parse_typesafe_checkpoint(&valid).outcome,
             CheckpointOutcome::Supported
