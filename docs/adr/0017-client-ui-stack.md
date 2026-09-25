@@ -1,6 +1,6 @@
 # ADR-0017 — Client UI stack: Leptos CSR remotes behind a framework-neutral ES-module contract
 
-**Status:** Proposed (founder decision requested; evidence and recommendation below)
+**Status:** Accepted (founder decision 2026-09-24: Leptos; evidence and recommendation below)
 **Date:** 2026-09-24
 **Deciders:** founder; multi-surface lead
 **Implements:** `docs/plans/multi-surface-clients.md` U1 (framework), U2–U7 (Sessions remote), D1–D3 / M1–M3 (Tauri v2 shells)

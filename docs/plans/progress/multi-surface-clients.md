@@ -16,7 +16,7 @@ dated entries appended below, newest last.
 | S5 | Workspace catalog | Planned | | |
 | S6 | `server` configuration | Planned | | |
 | TB | Tracer bullet gate | Planned | | Lead runs; `g-multi-surface-tb.md` |
-| ADR-0017/0018 | UI stack spike + ADRs | In review | `devin/*-adr-0017-ui-stack-spike` | Leptos recommended; founder decision pending |
+| ADR-0017/0018 | UI stack spike + ADRs | In review | `devin/*-adr-0017-ui-stack-spike` | Leptos accepted by founder 2026-09-24 |
 | U1–U7 | Web app | Planned | | ADR-0017, ADR-0018 |
 | D1–D3 | Desktop shell | Planned | | |
 | M1–M3 | Mobile | Planned | | |
