@@ -76,6 +76,16 @@ pub(super) fn parse_run_activity(column: &str) -> Result<RunActivity, SessionRun
     }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub(super) enum PersistedTurn {
+    Legacy(Vec<PersistedContentBlock>),
+    Replay {
+        content: Vec<PersistedContentBlock>,
+        replay: String,
+    },
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum PersistedContentBlock {
@@ -254,6 +264,7 @@ pub(super) fn parse_reasoning_effort(
         Some("medium") => Ok(Some(qq_provider::ReasoningEffort::Medium)),
         Some("high") => Ok(Some(qq_provider::ReasoningEffort::High)),
         Some("xhigh") => Ok(Some(qq_provider::ReasoningEffort::Xhigh)),
+        Some("default") => Ok(Some(qq_provider::ReasoningEffort::Default)),
         Some("max") => Ok(Some(qq_provider::ReasoningEffort::Max)),
         Some(_) => Err(SessionRuntimeError::CODEC),
     }

@@ -43,7 +43,8 @@ async fn measured_occupancy_basis_persists_atomically_and_reloads_with_the_reser
             &claimed,
             ModelTurnCommit {
                 turn_ordinal: 1,
-                message: Message::assistant("measured"),
+                message: Message::assistant("measured")
+                    .with_replay(Arc::from("signed-continuation")),
                 calls: Vec::new(),
                 turn_message: None,
                 context_tokens: Some(100),
@@ -84,6 +85,17 @@ async fn measured_occupancy_basis_persists_atomically_and_reloads_with_the_reser
 
     let reopened = Store::open(database_path).await.unwrap();
     let reserved = reopened.reserve_next_run(false).await.unwrap().unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+    let stored: String = connection
+        .query_row(
+            "SELECT assistant_content_json FROM model_turns WHERE run_id = ?1",
+            [claimed.identity.run_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        matches!(serde_json::from_str::<super::super::codec::PersistedTurn>(&stored).unwrap(), super::super::codec::PersistedTurn::Replay { replay, .. } if replay == "signed-continuation")
+    );
     let occupancy = reserved
         .context_occupancy
         .expect("the next reservation loads occupancy in its existing query");

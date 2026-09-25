@@ -270,6 +270,45 @@ async fn anthropic_efforts_use_output_config_and_default_is_omitted() {
     }
 }
 
+#[tokio::test]
+async fn explicit_provider_default_omits_effort_on_every_supported_wire() {
+    for (protocol, auth, response) in [
+        (
+            HttpProtocol::OpenAiResponses,
+            HttpAuth::NoAuth,
+            RESPONSES_DONE,
+        ),
+        (
+            HttpProtocol::OpenAiResponses,
+            static_codex_auth(),
+            RESPONSES_DONE,
+        ),
+        (
+            HttpProtocol::OpenAiChatCompletions,
+            HttpAuth::NoAuth,
+            CHAT_DONE,
+        ),
+        (
+            HttpProtocol::AnthropicMessages,
+            HttpAuth::NoAuth,
+            "data: {\"type\":\"message_stop\"}\n\n",
+        ),
+    ] {
+        let requests = send(
+            LoopbackServer::sse(response),
+            protocol,
+            auth,
+            Some(ReasoningEffort::Default),
+            AttemptPolicy::disabled(),
+        )
+        .await;
+        let body = requests[0].json_body();
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("output_config").is_none());
+    }
+}
+
 struct PanicCredentials;
 
 impl RequestCredentialProvider for PanicCredentials {

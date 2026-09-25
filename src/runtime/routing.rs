@@ -51,13 +51,18 @@ impl TypeSafeTaskRouter {
             let supports_effort = matches!(access, ProviderAccess::Http(_))
                 && matches!(
                     effective_provider_api(provider, &option.model, access),
-                    ProviderApi::OpenAiResponses | ProviderApi::OpenAiChatCompletions
+                    ProviderApi::OpenAiResponses
+                        | ProviderApi::OpenAiChatCompletions
+                        | ProviderApi::AnthropicMessages
                 );
-            if snapshot.reasoning_effort().is_some() && !supports_effort {
+            let concrete_effort = snapshot
+                .reasoning_effort()
+                .filter(|effort| *effort != qq_provider::ReasoningEffort::Default);
+            if concrete_effort.is_some() && !supports_effort {
                 continue;
             }
             if option.selection.model.as_deref() != Some(fallback.route.as_str())
-                && let Some(effort) = snapshot.reasoning_effort()
+                && let Some(effort) = concrete_effort
                 && !metadata.is_some_and(|metadata| metadata.reasoning_efforts().contains(&effort))
             {
                 continue;

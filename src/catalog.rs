@@ -199,7 +199,7 @@ impl ModelDiscovery {
             if models.len() > MAX_DISCOVERED_MODELS {
                 return None;
             }
-            if kind != ProviderKind::Anthropic
+            if !(kind == ProviderKind::Anthropic || access.api() == ProviderApi::AnthropicMessages)
                 || body.get("has_more").and_then(serde_json::Value::as_bool) != Some(true)
             {
                 models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -543,6 +543,34 @@ fn parse_models(
                 }
                 efforts
             });
+        let efforts = if kind == ProviderKind::Anthropic || api == ProviderApi::AnthropicMessages {
+            match entry.pointer("/capabilities/effort") {
+                Some(capability) if !capability.is_null() => {
+                    let supported = capability.get("supported")?.as_bool()?;
+                    let mut levels = Vec::new();
+                    if supported {
+                        for level in [
+                            qq_provider::ReasoningEffort::Low,
+                            qq_provider::ReasoningEffort::Medium,
+                            qq_provider::ReasoningEffort::High,
+                            qq_provider::ReasoningEffort::Xhigh,
+                            qq_provider::ReasoningEffort::Max,
+                        ] {
+                            if let Some(value) =
+                                capability.get(level.as_str()).filter(|v| !v.is_null())
+                                && value.get("supported")?.as_bool()?
+                            {
+                                levels.push(level);
+                            }
+                        }
+                    }
+                    Some(levels)
+                }
+                _ => None,
+            }
+        } else {
+            efforts
+        };
         models.push(DiscoveredModel {
             efforts,
             id: id.to_owned(),
@@ -808,6 +836,40 @@ mod tests {
         );
         assert_eq!(models[1].efforts, None);
         assert_eq!(models[2].efforts, Some(vec![]));
+    }
+
+    #[test]
+    fn anthropic_capabilities_distinguish_absent_disabled_and_exact_levels() {
+        let body = serde_json::json!({"data":[
+            {"id":"a","capabilities":{"effort":{"supported":true,"low":{"supported":true},"high":{"supported":false},"xhigh":null,"max":{"supported":true}}}},
+            {"id":"b","capabilities":{"effort":{"supported":false}}},
+            {"id":"c","capabilities":null}
+        ]});
+        let models = parse_models(
+            &body,
+            ProviderKind::Anthropic,
+            ProviderApi::AnthropicMessages,
+        )
+        .unwrap();
+        assert_eq!(
+            models[0].efforts,
+            Some(vec![
+                qq_provider::ReasoningEffort::Low,
+                qq_provider::ReasoningEffort::Max
+            ])
+        );
+        assert_eq!(models[1].efforts, Some(vec![]));
+        assert_eq!(models[2].efforts, None);
+        let malformed =
+            serde_json::json!({"data":[{"id":"a","capabilities":{"effort":{"supported":"yes"}}}]});
+        assert!(
+            parse_models(
+                &malformed,
+                ProviderKind::Anthropic,
+                ProviderApi::AnthropicMessages
+            )
+            .is_none()
+        );
     }
 
     #[test]

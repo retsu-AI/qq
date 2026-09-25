@@ -3761,7 +3761,7 @@ fn effort_picker_sets_the_focused_idle_session_effort_and_refuses_running_ones()
     let focused = app.focused().unwrap();
     app.execute(Command::OpenEffort);
     // Rows: default, none, minimal, low, medium, high, xhigh. Jump to xhigh.
-    for _ in 0..6 {
+    for _ in 0..7 {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
     let (_, requests) = app
@@ -3918,7 +3918,7 @@ fn effort_chosen_without_a_focused_session_applies_to_the_next_create() {
         selection,
     }];
     app.execute(Command::OpenEffort);
-    for _ in 0..6 {
+    for _ in 0..7 {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
     let (_, requests) = app
@@ -3998,19 +3998,19 @@ fn effort_picker_is_shaped_by_the_focused_models_advertised_ladder() {
 
     assert_eq!(
         rows_for(vec![ladder(vec![E::Low, E::High])], &snap),
-        vec![None, Some(E::Low), Some(E::High)],
+        vec![None, Some(E::Default), Some(E::Low), Some(E::High)],
         "advertised ladder: default, none, then exactly the ladder"
     );
     assert_eq!(
         rows_for(vec![ladder(Vec::new())], &snap),
-        vec![None],
-        "unknown capability: default only"
+        vec![None, Some(E::Default)],
+        "unknown capability: inheritance and provider default only"
     );
     snap.focused = None;
     snap.sessions.clear();
     assert_eq!(
         rows_for(vec![ladder(vec![E::Medium])], &snap),
-        vec![None, Some(E::Medium)],
+        vec![None, Some(E::Default), Some(E::Medium)],
         "nothing focused: the default model's ladder"
     );
 }

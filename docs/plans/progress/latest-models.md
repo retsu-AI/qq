@@ -1,5 +1,46 @@
 # Latest model support (ENG-885)
 
+## Completion implementation (storage interruption resumed)
+
+- Implemented Configured/inherited versus explicit provider Default; Default survives config/profile/session selection and is normalized to omission only at the provider request boundary. Routing accepts Anthropic efforts and Default. Protocol 30 / store 39 gate the final vocabulary; historical fixtures retained.
+- Imported Anthropic `capabilities.effort` support flags with absent/disabled/exact-list regression coverage. Corrected GPT-5 mini/nano, GPT-5.2/5.4 and GPT-5.6 bundled ladders against official model documentation.
+- Added real Anthropic SSE signed thinking → read_file → tool result → completion → SQLite reopen → next request acceptance. Added partial/faulted signed stream rejection and semantic-header origin binding tests. Replay envelopes are bounded before emission and transcript allocation (64 MiB aggregate), with 16 MiB per replay.
+- Workspace tests passed with `--test-threads=1`; parallel runs hit timing deadlines in headless/delegation tests, retained as verification caveat. Focused replay, migration, picker, capability and provider-default tests passed. Workspace Clippy/build and minimal provider lint/tests passed before final test-only changes.
+- GitHub review comments: none on all three PRs. Diagnosed actual CI failure on #154/#157: body-only client updates invalidated tree index, masked locally by allocation reuse. Fixed both mutations to use body_mut; all 22 client tests pass. Propagate fix to parent before final readiness.
+- Benchmark: provider recipe 512 ns, Google 484 ns, Mantle 263 ns, dispatch 80 ns; earlier 476/407/270/80. Host contention affects unchanged Google path too; not an isolated regression measurement.
+- Review disposition: no new CLI flag required for existing config/profile/TUI effort inputs; do not normalize Default in config (would restore inherited pin). Replay invalidation is request-local by design, always revalidating full prefix/origin/content rather than mutating authoritative stored history. Existing legacy chunk bounds are separate from newly bounded replay envelopes. Final CI and PR metadata updates still pending.
+
+
+## Delegated review and implementation
+
+- Read-only agent reviewed the outstanding blockers and a second pass reviewed the diff. Implemented endpoint/version/auth-kind replay origin hashing (no credential material persisted), pre-decode replay size check, incremental bounded history-turn decoding, and live effort precedence over implicit bundled ladders.
+- Added captured SSE → replay → subsequent request acceptance test and changed-origin rejection. Reviewer claim of a prefix mismatch disproved by this regression: capture hashes the prior request, not the generated assistant response. Explicit configured ladders retain precedence intentionally.
+- Final workspace tests, all-target/all-feature Clippy, formatting and whitespace checks passed. Workspace build and minimal-provider tests passed before the final test-only addition. Provider compiler benchmark: 476 ns recipe, 407 ns Google, 270 ns Mantle, 80 ns Mantle dispatch; informational, no baseline comparison.
+- Not yet complete: full tool-loop/restart acceptance, complete history/context bound audit, message lifecycle audit, explicit provider-default versus inheritance, capability audit and CI/PR metadata reconciliation. Draft status remains required.
+
+
+## Stack conflict resolution
+
+- Merged current origin/main through all three branches without rewriting history. Preserved upstream delegated approval changes and historical v28 fixtures. Effort now uses protocol 29 / store 37; replay uses store 38, superseding earlier numbers below.
+- Resolved schema, protocol commentary and capability fixture conflicts; generated v29 fixtures and updated Harbor traces.
+- Passed protocol tests, migration tests (49 passed, 1 ignored), replay regressions (4 passed), Harbor fixtures, formatting and whitespace checks.
+- Local replay review changes preserved. Remaining correctness and effort blockers are not resolved merely by removing merge conflicts.
+
+## Opus replay implementation
+
+- Branch `feat/eng-885-opus-replay` stacks on effort PR 154; live Codex effort commit 1b164d9 pushed to that parent.
+- Implemented signature/redacted-block capture, prefix-bound replay, durable turn envelopes and schema 37; Opus 5.5 catalog includes five effort levels.
+- Focused signed replay and persistence reopen tests pass; workspace Clippy passes.
+- Workspace test run failed at `wall_clock_budget_settles_a_hanging_provider_without_a_final_response` (0 provider requests versus expected 1); focused rerun also fails. Not declared baseline/unrelated without proof.
+- Independent review found remaining blockers: origin/current-visible-content replay binding, strict capture state validation, history scan byte budget, quadratic prefix hashing. Cache stripping was narrowed to metadata locations; delta concatenation now appends in place; core rejects oversized/duplicate replay and includes sidecars in context byte weight.
+- Must remain draft: no end-to-end tool-loop/restart acceptance yet; explicit provider-default semantics and full capability audit also outstanding.
+
+## 2026-09-24 continuation
+
+- Working on draft PR 154. Added uncommitted Codex supported_reasoning_levels parsing and picker projection plus cache-based effort validation.
+- Started provider-owned Message replay sidecar, complete-turn runtime attachment and legacy-compatible persisted turn envelope. Adapter capture/replay, eligibility validation, bounds and regression tests are not yet implemented; this plumbing must not be advertised as working Opus support.
+- `cargo check --workspace --all-targets` passes for the intermediate tree. No final tests or push for these changes yet.
+
 ## Effort implementation session
 
 - In progress: shared Max value, Anthropic output_config.effort encoding, per-model Claude ladders and GPT-6 Sol/Luna Max.
@@ -34,4 +75,12 @@
 - `cargo bench -p qq-core --bench plan_compile`: 23,485 ns compile; 2,313 ns descriptor digest. Informational only; no pre-change baseline captured, so no regression claim.
 - No live inference or account-specific availability verification. Pricing remains unknown; Codex context uses conservative existing 272K convention; `max` effort remains unsupported.
 - Opus 5.5 deferred to a separate durable replay slice: complete signature/redacted-block capture, ordered persistence, restart/tool-loop tests, byte bounds, incompatible-provider projection, and compaction/prefix invalidation. This PR must not close ENG-885.
+
+## Merge-readiness review continuation
+
+- Reviewed all three live PR descriptions and obtained independent read-only reviews of adapter replay, core persistence, and effort discovery. GitHub reports #154 mergeable=false; #142/#157 mergeable=true. Draft status remains appropriate.
+- Working-tree fixes replace repeated full-prefix hashing with a length-framed incremental SHA-256 chain (including model identity), require replay visible blocks to equal the current assistant projection, and refuse captured signed replay with unclosed/unsigned blocks or invalid delta/stop lifecycle.
+- Added regressions for changed visible content/model/role and invalid signed-block lifecycle. `cargo test -p qq-provider replay`: 4 passed. Earlier `cargo test -p qq-provider anthropic`: 28 unit and 4 interface passed. `cargo fmt --all` completed.
+- Previously failing focused wall-clock budget test passed this session without changing that test; this is not evidence that the timing race is fixed. Workspace gates and benchmarks have not been rerun for these edits.
+- Still blocked on bounded history reads, full origin/transport binding, end-to-end tool-loop/restart acceptance, effort precedence/default semantics, stack conflict resolution, CI/review feedback collection, and final verification. Changes are not pushed or claimed merge-ready.
 
