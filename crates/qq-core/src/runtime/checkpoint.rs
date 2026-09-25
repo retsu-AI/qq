@@ -19,6 +19,9 @@ pub(crate) struct CheckpointContext {
     omitted: usize,
     reviews: u16,
     repairs: u8,
+    pub(crate) verification: Option<qq_protocol::VerificationRecord>,
+    last_observation: Option<String>,
+    correction_generation: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -54,6 +57,9 @@ impl CheckpointContext {
             omitted: 0,
             reviews: 0,
             repairs: 0,
+            verification: None,
+            last_observation: None,
+            correction_generation: 0,
         };
         for (index, message) in messages.iter().enumerate() {
             for block in message.content() {
@@ -85,7 +91,7 @@ impl CheckpointContext {
         cost_limit: Option<u64>,
         maximum_cost: Option<u64>,
     ) -> Result<(), CheckpointAdmissionError> {
-        if self.reviews >= 32 {
+        if self.verification.is_none() && self.reviews >= 32 {
             return Err(CheckpointAdmissionError::Requests);
         }
         if let Some(limit) = cost_limit {
@@ -99,11 +105,14 @@ impl CheckpointContext {
                 Some(_) => {}
             }
         }
-        self.reviews += 1;
+        self.reviews = self.reviews.saturating_add(1);
         Ok(())
     }
 
     pub(crate) fn repair(&mut self) -> bool {
+        if self.verification.is_some() {
+            return true;
+        }
         if self.repairs_exhausted() {
             return false;
         }
@@ -115,6 +124,85 @@ impl CheckpointContext {
     /// as evidence and no longer redirect the run.
     pub(crate) const fn repairs_exhausted(&self) -> bool {
         self.repairs >= 2
+    }
+
+    pub(crate) fn enable_strict(&mut self, reviewer: &str) {
+        self.verification = Some(qq_protocol::VerificationRecord::pending(
+            reviewer.to_owned(),
+        ));
+    }
+
+    pub(crate) fn has_obligation(&self) -> bool {
+        self.verification
+            .as_ref()
+            .is_some_and(|v| v.open_correction.is_some())
+    }
+
+    pub(crate) fn observe(&mut self, evidence: &str, is_error: bool) -> bool {
+        let digest = format!("{:x}", Sha256::digest(format!("{is_error}:{evidence}")));
+        if self.last_observation.as_ref() != Some(&digest) {
+            if let Some(v) = &mut self.verification {
+                v.evidence_generation = v.evidence_generation.saturating_add(1);
+            }
+            self.last_observation = Some(digest);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn start(
+        &mut self,
+        request: &CheckpointRequest,
+    ) -> Option<Box<qq_protocol::VerificationRecord>> {
+        let v = self.verification.as_mut()?;
+        // Length-prefixed canonical typed fields; only masked request bytes enter the hash.
+        let basis = serde_json::to_vec(&(
+            "qq-strict-checkpoint-v1",
+            &request.correlation,
+            match request.phase {
+                CheckpointPhase::ToolResult => "tool_result",
+                CheckpointPhase::FinalCandidate => "final_candidate",
+            },
+            request.tool_call_id,
+            &request.tool,
+            &request.task,
+            &request.evidence,
+            request.is_error,
+            v.evidence_generation,
+        ))
+        .expect("checkpoint scalar fields serialize");
+        v.state = qq_protocol::VerificationState::Pending;
+        v.phase = Some(match request.phase {
+            CheckpointPhase::ToolResult => qq_protocol::CheckpointPhase::ToolResult,
+            CheckpointPhase::FinalCandidate => qq_protocol::CheckpointPhase::FinalCandidate,
+        });
+        v.correlation = Some(request.correlation.clone());
+        v.tool_call_id = request.tool_call_id;
+        v.outcome = None;
+        v.reason.clear();
+        v.basis_sha256 = Some(format!("{:x}", Sha256::digest(basis)));
+        v.review_count = v.review_count.saturating_add(1);
+        Some(Box::new(v.clone()))
+    }
+
+    pub(crate) fn reviewed(&mut self, outcome: CheckpointOutcome) {
+        let Some(v) = &mut self.verification else {
+            return;
+        };
+        if outcome == CheckpointOutcome::Supported {
+            if v.evidence_generation > self.correction_generation {
+                v.open_correction = None;
+                v.correction_generation = None;
+            }
+        } else if outcome == CheckpointOutcome::Unavailable {
+            v.state = qq_protocol::VerificationState::Unavailable;
+        } else {
+            v.state = qq_protocol::VerificationState::Unresolved;
+            v.open_correction.clone_from(&v.correlation);
+            self.correction_generation = v.evidence_generation;
+            v.correction_generation = Some(v.evidence_generation);
+        }
     }
 
     pub(crate) fn steer(&mut self, text: &str) {
@@ -237,6 +325,10 @@ pub struct CheckpointVerdict {
 pub type CheckpointFuture = Pin<Box<dyn Future<Output = CheckpointVerdict> + Send>>;
 
 pub trait CheckpointReviewer: Send + Sync {
+    /// Strict policy is part of the pinned identity inherited by child plans.
+    fn requires_supported_completion(&self) -> bool {
+        self.identity().ends_with("/strict")
+    }
     fn identity(&self) -> &'static str {
         "custom/enforce"
     }
@@ -257,14 +349,24 @@ pub trait CheckpointReviewer: Send + Sync {
 pub(crate) async fn assess_checkpoint(
     reviewer: &dyn CheckpointReviewer,
     request: CheckpointRequest,
+    deadline: Option<tokio::time::Instant>,
 ) -> CheckpointVerdict {
-    match tokio::time::timeout(std::time::Duration::from_secs(5), reviewer.review(request)).await {
+    let limit = std::time::Duration::from_secs(5);
+    let timeout = deadline.map_or(limit, |d| {
+        d.saturating_duration_since(tokio::time::Instant::now())
+            .min(limit)
+    });
+    match tokio::time::timeout(timeout, reviewer.review(request)).await {
         Ok(verdict) => verdict,
         Err(_) => CheckpointVerdict {
             outcome: CheckpointOutcome::Unavailable,
             confidence: None,
-            feedback: "Jev assessment timed out after five seconds; remote spend is unknown"
-                .to_owned(),
+            feedback: if timeout < limit {
+                "Jev assessment reached the run deadline; remote spend is unknown"
+            } else {
+                "Jev assessment timed out after five seconds; remote spend is unknown"
+            }
+            .to_owned(),
             spend: qq_protocol::CheckpointSpend::default(),
         },
     }

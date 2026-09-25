@@ -53,21 +53,22 @@ pub use sessions::{
     ChildAuthority, CommandOutcome, CommandReceipt, CommandRequest, ContentHash, ContentHashError,
     ContextSourceOutcome, ContextSourceRecord, CursorError, DEFAULT_OUTPUT_REPAIR_TURNS,
     DelegateIdentity, EditPreview, EventCursor, FetchPreview, FinalOutput, GenerationCapabilities,
-    GuidanceIdentity, GuidanceKind, InstructionHash, InstructionHashError, MAX_INCLUDED_SESSIONS,
-    MAX_OUTPUT_ERROR_BYTES, MAX_OUTPUT_REPAIR_TURNS, MAX_OUTPUT_SCHEMA_BYTES,
-    MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MessageRole, MessageSnapshot, MessageState,
-    ModelCatalogRequest, ModelDescriptor, ModelPricing, ModelPricingTier, ModelSelection,
-    OutputContract, PromptCacheCapabilities, PromptVersion, ProviderRequestShapeIdentity,
-    ProviderRequestShapeVersion, Question, QuestionPreview, ResolvedModel, ResolvedModelVersion,
-    RoutingDecision, RoutingOutcome, RunActivity, RunFailure, RunLimits, RunOutcome, RunPause,
-    RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting, SessionCommand,
-    SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionPurpose, SessionSnapshot,
-    SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict, SnapshotRequest, SpawnOrigin,
-    SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallSnapshot, ToolCallState,
-    ToolExposure, WorkspaceGrantOutcome, WorkspaceSnapshot, WorkspaceSummary,
+    GuidanceIdentity, GuidanceKind, InstructionHash, InstructionHashError, JevMode,
+    MAX_INCLUDED_SESSIONS, MAX_OUTPUT_ERROR_BYTES, MAX_OUTPUT_REPAIR_TURNS,
+    MAX_OUTPUT_SCHEMA_BYTES, MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MessageRole,
+    MessageSnapshot, MessageState, ModelCatalogRequest, ModelDescriptor, ModelPricing,
+    ModelPricingTier, ModelSelection, OutputContract, PromptCacheCapabilities, PromptVersion,
+    ProviderRequestShapeIdentity, ProviderRequestShapeVersion, Question, QuestionPreview,
+    ResolvedModel, ResolvedModelVersion, RoutingDecision, RoutingOutcome, RunActivity, RunFailure,
+    RunLimits, RunOutcome, RunPause, RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting,
+    SessionCommand, SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionPurpose,
+    SessionSnapshot, SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict,
+    SnapshotRequest, SpawnOrigin, SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay,
+    ToolCallSnapshot, ToolCallState, ToolExposure, VerificationRecord, VerificationState,
+    WorkspaceGrantOutcome, WorkspaceSnapshot, WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 30;
+pub const PROTOCOL_VERSION: u16 = 32;
 
 /// Most retries one turn may spend on a transient provider fault after the
 /// stream has started; a completed turn resets the count. Exhaustion settles
@@ -78,7 +79,7 @@ pub const MAX_TURN_RETRIES: u16 = 5;
 /// Slash commands owned by interactive clients rather than the shared
 /// runtime. Keeping this vocabulary in the transport-neutral protocol avoids
 /// a client/runtime drift where one side forwards a name the other reserves.
-pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 23] = [
+pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 24] = [
     "/help",
     "/commands",
     "/models",
@@ -86,6 +87,7 @@ pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 23] = [
     "/approval",
     "/delegate",
     "/effort",
+    "/jev",
     "/skills",
     "/sessions",
     "/resume",
@@ -188,6 +190,10 @@ pub enum RunEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunFailureKind {
+    /// Strict verification retains an unresolved semantic obligation.
+    VerificationUnresolved,
+    /// Strict verification could not obtain an assessment.
+    VerificationUnavailable,
     InvalidCommand,
     Configuration,
     Authentication,

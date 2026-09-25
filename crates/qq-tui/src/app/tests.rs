@@ -1264,6 +1264,7 @@ fn context_usage_uses_last_turn_tokens_live_updates_and_the_model_limit() {
             3,
             session_id,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(summary),
                 run_id: id(8, RunId::from_bytes),
                 outcome: RunOutcome::Completed,
@@ -1436,6 +1437,7 @@ fn compaction_run_usage_does_not_become_session_context() {
             2,
             session_id,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(compacted.clone()),
                 run_id: id(8, RunId::from_bytes),
                 outcome: RunOutcome::Completed,
@@ -2754,6 +2756,7 @@ fn enter_during_a_run_queues_the_draft_and_it_submits_when_the_run_ends() {
     summary.active_run_id = None;
     let requests = app
         .apply_client_update(event(SessionEvent::RunFinished {
+            verification: None,
             session: Box::new(summary),
             run_id,
             outcome: RunOutcome::Completed,
@@ -3198,6 +3201,7 @@ fn a_single_theme_makes_the_picker_a_notice_instead() {
 fn attention_is_requested_only_while_the_terminal_is_unfocused() {
     let (mut app, session_id, run_id, mut event) = running_app();
     let finish = |run_id| SessionEvent::RunFinished {
+        verification: None,
         session: Box::new(SessionSummary {
             model_is_fallback: false,
             status: SessionStatus::Idle,
@@ -3345,6 +3349,7 @@ fn the_reducer_returns_notices_and_attention_as_effects_instead_of_mutating_them
             2,
             session_id,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(summary),
                 run_id,
                 outcome: RunOutcome::Failed {
@@ -3866,6 +3871,124 @@ fn delegate_picker_switches_the_focused_session_off_and_reports_the_receipt() {
     assert_eq!(
         app.status.as_deref(),
         Some("session already uses delegate off")
+    );
+}
+
+#[test]
+fn jev_mode_picker_switches_the_focused_session_and_reports_the_receipt() {
+    // `/jev` → `ultrajev` sends `set_jev_mode` for the focused session
+    // (running or not: the runtime reads it at the next claim) and the
+    // receipt says what changed. Rows: configured, low, medium, high, max,
+    // ultrajev — the protocol's ladder order.
+    let (mut app, _, _, _) = running_app();
+    let focused = app.focused().unwrap();
+    app.execute(Command::OpenJevMode);
+    let Some(Overlay::JevMode(picker)) = &app.overlay else {
+        panic!("expected the jev mode picker")
+    };
+    let rows: Vec<Option<qq_protocol::JevMode>> =
+        picker.items().iter().map(|row| row.mode).collect();
+    assert_eq!(
+        rows,
+        std::iter::once(None)
+            .chain(qq_protocol::JevMode::ALL.into_iter().map(Some))
+            .collect::<Vec<_>>()
+    );
+    for _ in 0..5 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    let [ClientRequest::Command(request)] = requests.as_slice() else {
+        panic!("expected one set-jev-mode command")
+    };
+    assert!(matches!(
+        &request.command,
+        SessionCommand::SetJevMode {
+            session_id,
+            mode: Some(qq_protocol::JevMode::Ultrajev),
+        } if *session_id == focused
+    ));
+    assert!(app.overlay.is_none());
+
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Ok(qq_protocol::CommandReceipt {
+            command_id: request.command_id,
+            outcome: CommandOutcome::JevModeSet {
+                session_id: focused,
+                mode: Some(qq_protocol::JevMode::Ultrajev),
+            },
+            committed_through: fixtures::cursor(2),
+        }),
+    });
+    assert_eq!(
+        app.status.as_deref(),
+        Some("session jev mode set to ultrajev from the next run")
+    );
+
+    // Choosing what the session already has sends nothing; the picker opens
+    // on the active row.
+    app.sessions.get_mut(&focused).unwrap().summary.jev_mode = Some(qq_protocol::JevMode::Ultrajev);
+    app.execute(Command::OpenJevMode);
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    assert!(requests.is_empty(), "the picker opens on the active row");
+    assert_eq!(
+        app.status.as_deref(),
+        Some("session jev mode already selected for the next run: ultrajev")
+    );
+
+    // `configured` clears the override, and the receipt says so.
+    app.execute(Command::OpenJevMode);
+    for _ in 0..5 {
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    }
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    let [ClientRequest::Command(request)] = requests.as_slice() else {
+        panic!("expected one set-jev-mode command")
+    };
+    assert!(matches!(
+        &request.command,
+        SessionCommand::SetJevMode {
+            session_id,
+            mode: None,
+        } if *session_id == focused
+    ));
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Ok(qq_protocol::CommandReceipt {
+            command_id: request.command_id,
+            outcome: CommandOutcome::JevModeSet {
+                session_id: focused,
+                mode: None,
+            },
+            committed_through: fixtures::cursor(3),
+        }),
+    });
+    assert_eq!(
+        app.status.as_deref(),
+        Some("jev mode cleared: the configured Jev settings apply from the next run")
+    );
+}
+
+#[test]
+fn jev_mode_picker_needs_a_focused_session() {
+    let mut app = App::new(TuiOptions::default());
+    let mut empty = snapshot();
+    empty.sessions.clear();
+    empty.focused = None;
+    app.apply_snapshot(empty);
+    let (_, requests) = app.execute(Command::OpenJevMode).split();
+    assert!(requests.is_empty());
+    assert!(app.overlay.is_none());
+    assert_eq!(
+        app.status.as_deref(),
+        Some("focus a session to choose its Jev mode")
     );
 }
 
