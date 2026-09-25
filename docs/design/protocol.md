@@ -199,7 +199,7 @@ Version 29 added model-specific effort capabilities, including `max`.
 Version 30 added explicit provider-default effort, distinct from inheritance.
 Their historical wire fixtures remain unchanged.
 
-Version 31 adds the Jev mode switcher (ADR-0043): `set_jev_mode` /
+Version 31 adds the Jev mode switcher (ADR-0044): `set_jev_mode` /
 `jev_mode_set` on `/v1/sessions/jev-mode`, the session's own rung on the Jev
 ladder (`low` | `medium` | `high` | `max` | `ultrajev`, or absent to clear), and
 the optional `SessionSummary.jev_mode` that carries it. The mode is opaque to
@@ -1054,7 +1054,7 @@ Outcome:
 }
 ```
 
-Protocol 31 (ADR-0043). Pins, for the rest of this session, how much of Jev
+Protocol 31 (ADR-0044). Pins, for the rest of this session, how much of Jev
 the runtime composes in: `low` | `medium` | `high` | `max` | `ultrajev`, lowest
 to highest. Omitting `mode` clears the pin so the workspace's configured
 `jev_routing`, `jev_review`, and `approval_delegate` apply again. The value is

@@ -65,7 +65,8 @@ may append a **request** row; only root changes a request's status.
 | 0040 | Two-phase retry ownership: provider owns pre-event sends, the run owns post-event turn recovery and `Paused`; supersedes ADR-0005 in part | run-reliability RR4 | Accepted 2026-09-21: `docs/adr/0040-two-phase-retry-ownership.md`; `PROTOCOL_VERSION` 25 → 26 |
 | 0041 | Jev as an approval delegate for held calls only; supersedes ADR-0030's "never authorizes side effects" for the `jev_approval` lane | delegated-approval DA5 (ENG-862) | Accepted 2026-09-23: `docs/adr/0041-jev-delegated-approval.md`; no protocol or schema change |
 | 0042 | In-TUI trust prompt: client-side, root-resolved, no protocol change | onboarding-ux OB7 | Accepted 2026-09-24: `docs/adr/0042-in-tui-trust-prompt.md` |
-| 0043 | Two session switchers: the regular model/effort switch is the existing `set_session_model` / `set_session_effort`; a five-mode `JevMode` session override (`low`–`ultrajev`) resolves at the composition root to `jev_routing` / `jev_review` / `approval_delegate`, never a TypeSafe request parameter | integration plan § 2 item 9 (model switcher workstream) | Proposed 2026-09-24: `docs/adr/0043-session-model-and-jev-mode-switchers.md`; `PROTOCOL_VERSION` 30 → 31, store schema 39 → 40; existing ladder preserved under manager integration direction |
+| 0043 | Verified root-task efficiency and evidence-gated defaults | token-efficiency TE0 | Reserved 2026-09-23; Proposed ADR-0043 |
+| 0044 | Two session switchers: the regular model/effort switch is the existing `set_session_model` / `set_session_effort`; a five-mode `JevMode` session override (`low`–`ultrajev`) resolves at the composition root to `jev_routing` / `jev_review` / `approval_delegate`, never a TypeSafe request parameter | integration plan § 2 item 9 (model switcher workstream) | Proposed 2026-09-24: `docs/adr/0044-session-model-and-jev-mode-switchers.md`; `PROTOCOL_VERSION` 30 → 31, store schema 39 → 40; existing ladder preserved under manager integration direction |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -136,7 +137,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0044. Reserve here before opening a PR that adds an ADR.
+Next free number: 0045. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -164,6 +165,14 @@ sections, `docs/adr/README.md`, `docs/README.md`, `docs/plans/README.md`,
 `AGENTS.md`. A lane may edit a design doc section it owns without a request.
 
 ## Entries
+
+### 2026-09-23 — TE0 shared-file request
+
+Requested: index the user-requested token-efficiency documentation PR in
+`docs/README.md`, `docs/plans/README.md`, `docs/adr/README.md` and the progress
+index. Proposed edits are included for root review; no runtime boundary changes.
+ADR-0042 reserved after checking concurrent worktree reservations (DA5 owns 0041).
+Status: Open for root review. Ledger: `progress/token-efficiency.md`.
 
 ### 2026-09-19 — Linear board reconciled with the plan docs
 
@@ -435,3 +444,10 @@ Picker regression reproduced at c5a5836: the saved max row displayed
 “Jev settles ... active”. Repair labels the next-run pin “selected” and
 describes the configured reviewer; workspace Jev consent and /delegate
 overrides remain unchanged. Full integration checks and independent review pending.
+
+### 2026-09-25 — current-main ADR collision reconciliation
+
+Main dc07e29 occupies ADR0043 for token efficiency. The proposed local session
+switcher decision moves to ADR0044; historical ledger receipts retain their
+original IDs. Protocol31/store40 remain unchanged. Accepted291440a and parser
+5eed43f are preserved on their prior branches.

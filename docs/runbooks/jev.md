@@ -168,7 +168,7 @@ with `qq config show` and `qq config explain jev_approval`.
 ## The Jev mode ladder
 
 A session can pin one rung of a five-step ladder over the three Jev roles
-above instead of toggling them one by one (ADR-0043, protocol 31):
+above instead of toggling them one by one (ADR-0044, protocol 31):
 `set_jev_mode` on `POST /v1/sessions/jev-mode`, with `mode` set to `low`,
 `medium`, `high`, `max`, or `ultrajev`, or omitted to clear the pin. The
 summary field `jev_mode` carries the pin on every `session_updated` and

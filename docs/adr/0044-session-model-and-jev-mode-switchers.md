@@ -1,4 +1,4 @@
-# ADR-0043 — Two session switchers: the model, and how much Jev does
+# ADR-0044 — Two session switchers: the model, and how much Jev does
 
 **Status:** Proposed — existing ladder semantics preserved during integration;
 final verification and release disposition remain pending
@@ -171,3 +171,6 @@ profile value, with `approval_delegate` alone switchable per session
 - **Letting the mode also set `jev_approval`** was rejected: that is the
   consent that lets Jev authorize side effects (ADR-0041), and a per-session
   switch must not be the place it is first granted.
+
+Numbering reconciliation (2026-09-25): moved to ADR-0044 after current main
+reserved ADR-0043 for verified task efficiency; policy text is unchanged.

@@ -679,6 +679,10 @@ struct TrialSummary {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct EvalReport {
+    efficiency_coverage: EfficiencyCoverage,
+    reported_agent_cost_usd: f64,
+    agent_cost_unknown_attempts: u64,
+    agent_tokens_unknown_attempts: u64,
     harbor_config_hash: String,
     harbor_lock_hash: String,
     launch_manifest_hash: String,
@@ -699,6 +703,49 @@ struct EvalReport {
     harness_failure_rate: f64,
     failure_counts: BTreeMap<FailureCategory, u64>,
     trials: Vec<TrialSummary>,
+}
+
+/// Coverage of the existing Harbor aggregates, not a claim of task-tree billing.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct EfficiencyCoverage {
+    schema_version: u16,
+    legacy_metrics_scope: &'static str,
+    verified_task_cost_complete: bool,
+    limitations: [&'static str; 3],
+}
+
+impl EfficiencyCoverage {
+    fn new() -> Self {
+        Self {
+            schema_version: 1,
+            legacy_metrics_scope: "harbor_agent_only",
+            verified_task_cost_complete: false,
+            limitations: [
+                "external_verifier_usage_not_reported",
+                "request_level_lineage_not_reported",
+                "failed_stream_usage_may_be_missing",
+            ],
+        }
+    }
+}
+
+fn record_trial_identity(
+    identities: &mut BTreeMap<String, String>,
+    id: &str,
+    trial: &str,
+) -> Result<(), EvalError> {
+    if id.trim().is_empty() {
+        return Err(EvalError::Invalid(format!(
+            "trial {trial} has an empty trial id"
+        )));
+    }
+    if let Some(previous) = identities.get(id) {
+        return Err(EvalError::Invalid(format!(
+            "duplicate trial id {id} in {previous} and {trial}; refusing to double-count an exported attempt"
+        )));
+    }
+    identities.insert(id.to_owned(), trial.to_owned());
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -814,6 +861,7 @@ fn report_job(job: &Path) -> Result<EvalReport, EvalError> {
     let mut harness_failures = 0_u64;
     let mut failure_counts = BTreeMap::new();
     let mut trials = Vec::with_capacity(trial_dirs.len());
+    let mut trial_identities = BTreeMap::new();
 
     for trial_dir in &trial_dirs {
         let result_path = trial_dir.join("result.json");
@@ -832,6 +880,7 @@ fn report_job(job: &Path) -> Result<EvalReport, EvalError> {
                 "trial {trial_name} is missing required Harbor 0.20.0 identity fields"
             )));
         }
+        record_trial_identity(&mut trial_identities, &result.id, &trial_name)?;
         let trial_config_path = trial_dir.join("config.json");
         let trial_config = read_valid_json_bytes(&trial_config_path)?;
         let decoded_config: Value =
@@ -1006,6 +1055,16 @@ fn report_job(job: &Path) -> Result<EvalReport, EvalError> {
         durations.clear();
     }
     Ok(EvalReport {
+        efficiency_coverage: EfficiencyCoverage::new(),
+        reported_agent_cost_usd: trials.iter().filter_map(|trial| trial.cost_usd).sum(),
+        agent_cost_unknown_attempts: trials
+            .iter()
+            .filter(|trial| trial.cost_usd.is_none())
+            .count() as u64,
+        agent_tokens_unknown_attempts: trials
+            .iter()
+            .filter(|trial| trial.total_tokens.is_none())
+            .count() as u64,
         harbor_config_hash,
         harbor_lock_hash,
         launch_manifest_hash,
@@ -2226,6 +2285,32 @@ mod tests {
     }
 
     #[test]
+    fn efficiency_coverage_does_not_claim_unknown_verifier_cost() {
+        let report = EfficiencyCoverage::new();
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["legacy_metrics_scope"], "harbor_agent_only");
+        assert_eq!(json["verified_task_cost_complete"], false);
+        assert!(json["limitations"].as_array().unwrap().len() >= 3);
+    }
+
+    #[test]
+    fn duplicate_trial_identity_is_rejected_even_with_a_different_directory() {
+        let mut identities = BTreeMap::new();
+        record_trial_identity(&mut identities, "same-id", "first").unwrap();
+        let error = record_trial_identity(&mut identities, "same-id", "second").unwrap_err();
+        assert!(error.to_string().contains("duplicate trial id"));
+        record_trial_identity(&mut identities, "retry-id", "retry").unwrap();
+    }
+
+    #[test]
+    fn empty_trial_identity_cannot_hide_duplicate_exports() {
+        let mut identities = BTreeMap::new();
+        assert!(record_trial_identity(&mut identities, "  ", "first").is_err());
+        assert!(identities.is_empty());
+    }
+
+    #[test]
     fn launch_plan_defaults_to_full_approval_and_the_host_release_binary() {
         let repository = Path::new("/repo");
         let plan = launch_plan(
@@ -2563,6 +2648,9 @@ mod tests {
         let report = report_job(directory.path()).unwrap();
 
         assert_eq!(report.attempts, 2);
+        assert!((report.reported_agent_cost_usd - 0.30).abs() < f64::EPSILON);
+        assert_eq!(report.agent_cost_unknown_attempts, 0);
+        assert_eq!(report.agent_tokens_unknown_attempts, 0);
         assert_eq!(report.harbor_config_hash.len(), 64);
         assert_eq!(report.passes, 1);
         assert_eq!(report.mean_reward, 0.5);
@@ -2653,6 +2741,10 @@ mod tests {
 
         let report = report_job(directory.path()).unwrap();
 
+        assert_eq!(report.reported_agent_cost_usd, 0.0);
+        assert_eq!(report.agent_cost_unknown_attempts, 1);
+        assert_eq!(report.agent_tokens_unknown_attempts, 1);
+        assert_eq!(report.cost_usd_per_pass, None);
         assert_eq!(report.identity, None);
         assert_eq!(report.harness_failure_rate, 1.0);
         assert!(!report.trials[0].identity_observed);
