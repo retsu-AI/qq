@@ -180,3 +180,21 @@ Deviations: **`auto` does not execute an ungranted public host** — the plan's 
 Docs: `docs/design/tools.md` § Built-In Tools, new § Network Tools, § Approval Policy row + blocked-host note, § Workspace Grant Configuration (`allow_hosts`/`deny_hosts`, grammar, overlap rule); `docs/design/protocol.md` v22 note, `host` grant, `fetch` preview; `docs/design/headless-contract.md` `--allow-host`; ADR-0021 Network paragraph, consequences.
 Open: ETag/conditional cache when T13 shows repeat fetches; `select_tools`-style host suggestions in the TUI (offer `*.suffix` as well as the exact host); IDN/punycode hosts are accepted by `url` and grant-matched as ASCII — decide whether grants should accept Unicode names; the `builtin_preference=strict` refusal message for `curl` already names `fetch`.
 Evidence: `target/qq-perf/t9-2026-09-15/` (untracked).
+
+### 2026-09-25 — `.qqignore` (GitHub #172)
+
+External contribution, narrowed in review from a Merkle workspace index
+plus a three-part ADR (see `decisions-needed.md` row 9 and
+`run-snapshots.md` § Atomic Multi-File Edits for where the rest went).
+Shipped: `.qqignore` joins `.gitignore`/`.ignore` in the per-directory
+matcher stack (`tools/walk.rs::directory_matcher`), so a project can hide
+git-tracked paths from `search` and `tree` with one file in gitignore
+syntax. Tool schemas unchanged; tool output honors the new file.
+Test: `tools::tests` search/tree case extended (a `.qqignore` rule hides a
+file from both). Docs: `tools.md` § Read-Side Walk names the three files
+read and records why tool-private (`.rgignore`, `.cursorignore`, …),
+other-VCS, and global-git ignore files are not. Cost: one more file probe
+per directory listed. `search_walk` A/B (20 iterations, dev box):
+`content_absent_10k_full_scan` 20.3 → 18.1 ms, `references_10k_full_scan`
+20.1 → 20.2 ms, `names_10k` 1.98 → 2.00 ms, `tree_depth2` (200 dirs)
+4.82 → 5.03 ms; the tree case is the extra probe, the rest is noise.

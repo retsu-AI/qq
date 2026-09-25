@@ -108,11 +108,81 @@ other policy knobs.
   Snapshot creation emits no events — it is internal bookkeeping until a
   client asks.
 
+## Atomic Multi-File Edits
+
+The snapshot design above restores a whole run. A narrower failure needs
+a narrower fix and does not need the shadow store: a multi-file
+`edit_file` batch whose second or later write fails is reported as
+`partial_apply` and leaves the workspace between two states, and a crash
+between two renames leaves it there silently (`tools/edit.rs::
+apply_atomically` makes each *file* atomic, not the batch). For a run
+that edits for hours, this is the reliability gap that matters most;
+it is also the cheapest to close.
+
+Design, sized to that gap:
+
+- **Journal, not blob store.** Before the first rename of a batch,
+  under the workspace apply lock, write one journal record listing every
+  planned write as `(path, before_hash, after_hash)` plus the temp-file
+  path already synced next to each target. Rename all targets; then
+  mark the record complete. The pre-images are the files themselves
+  until the rename, and the post-images are the synced temp files, so
+  the journal adds **one** synced write per batch, not two per file,
+  and holds no content.
+- **Location.** Under the QQ data directory keyed by workspace id
+  (`<data>/workspaces/<id>/journal/`), where this plan already puts the
+  shadow repository. Nothing new appears in the user's tree, and the
+  path is already threaded to the composition root for the session
+  store. Not `.qq/` in the workspace: that directory is user
+  configuration, and per-batch state next to it would show up in
+  `git status` for anyone not ignoring it.
+- **Recovery.** Workspace open takes the apply lock, reads incomplete
+  records, and for each planned write whose target's current hash is
+  `after_hash` and whose temp file is gone, does nothing; whose target
+  hash is still `before_hash`, deletes the leftover temp file; anything
+  else is a conflict reported to the session, never silently rewritten.
+  Because recovery holds the same lock the writer holds, a second
+  session sharing the workspace cannot roll back a batch that is
+  still in flight, and the liveness question ("is the writer alive?")
+  never arises: an incomplete record with the lock free is by
+  definition abandoned.
+- **Undo within a run** remains this plan's snapshot restore. The
+  journal makes the batch atomic; it is not a second history. The
+  alternative of a content-addressed blob store with rollback and
+  re-apply per transaction, retained sixty-four deep in the workspace,
+  was considered and rejected: it is a second store with its own
+  retention and recovery machine, it doubles the synced writes on the
+  edit hot path, and it duplicates what the shadow repository provides
+  for the whole tree, including files shell commands touched.
+- **Acceptance.** A two-file batch whose second rename fails leaves both
+  files at their pre-call bytes and returns one error naming the batch;
+  a journal left incomplete with one rename done is finished or reported
+  on the next open; recovery never writes a file whose hash it does not
+  recognize; `edit_file` single-file p50 stays within the tool-layer
+  budget (`benchmarks/perf/budgets-*.json`) with the extra synced write
+  measured before and after.
+
+## Change Detection
+
+The dirty scan the shadow store needs ("which files changed since the
+last snapshot") is a walk over the same tree the tools see, comparing
+size and mtime against the previous manifest and hashing only the
+candidates. The primitive is a Merkle index over the `search`/`tree`
+walker with an incremental `refresh` that reuses the previous index's
+hashes for entries whose size and mtime are unchanged, and a `diff` into
+sorted added/modified/deleted paths. It carries no chunking or search
+structure — the shadow store is its only planned consumer — and a
+budget-stopped build is a distinct `Partial` type with no root hash to
+misread as a statement about the whole tree.
+
 ## Sequencing
 
 Independent of MCP (`docs/design/tools.md`); the two share no files. The
 natural order inside this workstream:
 
-1. Shadow store: create/open, dirty scan, snapshot commit, retention.
-2. Runtime hooks: lazy run-start snapshot, post-mutation checkpoints.
-3. Restore command, file-state refresh, TUI/CLI surface.
+1. Atomic multi-file edits: journal record, recovery on open, the
+   `partial_apply` result retired.
+2. Shadow store: create/open, dirty scan over `WorkspaceIndex`, snapshot
+   commit, retention.
+3. Runtime hooks: lazy run-start snapshot, post-mutation checkpoints.
+4. Restore command, file-state refresh, TUI/CLI surface.
