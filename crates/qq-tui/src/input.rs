@@ -425,7 +425,7 @@ pub(crate) const fn approval_mode_row(mode: ApprovalMode) -> ApprovalModeRow {
 /// status row show. `None` is the unremarkable configured default.
 pub(crate) const fn effort_label(effort: Option<ReasoningEffort>) -> &'static str {
     match effort {
-        None => "default",
+        None => "configured",
         Some(effort) => effort.as_str(),
     }
 }
@@ -435,12 +435,14 @@ pub(crate) const fn effort_label(effort: Option<ReasoningEffort>) -> &'static st
 pub(crate) const fn effort_row(effort: Option<ReasoningEffort>) -> EffortRow {
     let summary = match effort {
         None => "use the configured or profile effort; omit the field",
+        Some(ReasoningEffort::Default) => "use the provider default, overriding configured effort",
         Some(ReasoningEffort::None) => "disable reasoning; distinct from omission",
         Some(ReasoningEffort::Minimal) => "lowest reasoning spend the model accepts",
         Some(ReasoningEffort::Low) => "light reasoning",
         Some(ReasoningEffort::Medium) => "balanced reasoning",
         Some(ReasoningEffort::High) => "heavier reasoning",
-        Some(ReasoningEffort::Xhigh) => "highest reasoning spend",
+        Some(ReasoningEffort::Xhigh) => "extra-high reasoning spend",
+        Some(ReasoningEffort::Max) => "maximum reasoning effort",
     };
     EffortRow {
         effort,

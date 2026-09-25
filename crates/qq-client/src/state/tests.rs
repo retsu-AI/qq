@@ -737,6 +737,11 @@ fn streaming_deltas_keep_the_tree_index() {
         store.index.get().is_some(),
         "streaming must retain the index"
     );
+    assert_eq!(
+        store.index_rebuilds(),
+        1,
+        "streaming deltas must not invalidate the tree index"
+    );
     assert_eq!(store.thread_order(), &[parent, child]);
     assert_eq!(
         store.get(&child).unwrap().messages.as_ref().unwrap()[0].output,

@@ -93,7 +93,10 @@ impl ModelRequest {
     /// validates whether it can encode the value before transport.
     #[must_use]
     pub const fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
-        self.reasoning_effort = Some(effort);
+        self.reasoning_effort = match effort {
+            ReasoningEffort::Default => None,
+            effort => Some(effort),
+        };
         self
     }
 
@@ -121,10 +124,9 @@ impl ModelRequest {
         const BLOCK_FRAMING: usize = 64;
         const TOOL_FRAMING: usize = 64;
         let messages = self.messages.iter().fold(0, |total, message| {
-            message
-                .content()
-                .iter()
-                .fold(total + MESSAGE_FRAMING, |total, block| {
+            message.content().iter().fold(
+                total + MESSAGE_FRAMING + message.replay().map_or(0, str::len),
+                |total, block| {
                     total
                         + BLOCK_FRAMING
                         + match block {
@@ -138,7 +140,8 @@ impl ModelRequest {
                                 call_id, content, ..
                             } => call_id.len() + content.len(),
                         }
-                })
+                },
+            )
         });
         let tools = self.tools.iter().fold(0, |total, tool| {
             total
@@ -325,12 +328,17 @@ impl ToolSpec {
 pub struct Message {
     role: Role,
     content: Vec<ContentBlock>,
+    replay: Option<Arc<str>>,
 }
 
 impl Message {
     #[must_use]
     pub fn new(role: Role, content: Vec<ContentBlock>) -> Self {
-        Self { role, content }
+        Self {
+            role,
+            content,
+            replay: None,
+        }
     }
 
     /// A user message with one text block.
@@ -338,6 +346,7 @@ impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: Role::User,
+            replay: None,
             content: vec![ContentBlock::Text {
                 text: content.into(),
             }],
@@ -349,6 +358,7 @@ impl Message {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
+            replay: None,
             content: vec![ContentBlock::Text {
                 text: content.into(),
             }],
@@ -360,6 +370,7 @@ impl Message {
     pub fn tool_results(results: Vec<ContentBlock>) -> Self {
         Self {
             role: Role::User,
+            replay: None,
             content: results,
         }
     }
@@ -372,6 +383,18 @@ impl Message {
     #[must_use]
     pub fn content(&self) -> &[ContentBlock] {
         &self.content
+    }
+
+    /// Opaque provider continuation data, separate from user-visible content.
+    #[must_use]
+    pub fn with_replay(mut self, replay: Arc<str>) -> Self {
+        self.replay = Some(replay);
+        self
+    }
+
+    #[must_use]
+    pub fn replay(&self) -> Option<&str> {
+        self.replay.as_deref()
     }
 
     /// Whether any block carries usable content.
@@ -467,6 +490,10 @@ pub enum Role {
 /// Events common to provider streaming implementations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderEvent {
+    /// Complete opaque continuation data, emitted only for a validated turn.
+    Replay {
+        data: Arc<str>,
+    },
     OutputTextDelta {
         text: String,
     },

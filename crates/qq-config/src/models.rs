@@ -45,10 +45,8 @@ struct ModelDefinition {
     canonical_id: &'static str,
     name: &'static str,
     reasoning: bool,
-    /// Effort values the provider documents for this model. Empty means the
-    /// catalog does not advertise a set: either the adapter never transmits
-    /// effort (Anthropic, Google, Bedrock Claude) or the provider has not
-    /// published one. Only the OpenAI-shaped adapters send `reasoning_effort`.
+    /// Documented effort values for this access route. Empty means unknown or
+    /// unsupported; provider-default and configured inheritance are UI controls.
     efforts: &'static [ReasoningEffort],
     context_tokens: u32,
     output_tokens: u32,
@@ -56,11 +54,9 @@ struct ModelDefinition {
     api: Option<ProviderApi>,
 }
 
-/// The documented OpenAI reasoning ladder. `minimal` through `xhigh`; `none`
-/// is a request-level opt-out rather than a model capability, so it is not
-/// advertised here.
+/// GPT-5.2/5.4 API ladder; later and earlier families use separate lists.
 const OPENAI_EFFORTS: &[ReasoningEffort] = &[
-    ReasoningEffort::Minimal,
+    ReasoningEffort::None,
     ReasoningEffort::Low,
     ReasoningEffort::Medium,
     ReasoningEffort::High,
@@ -68,6 +64,12 @@ const OPENAI_EFFORTS: &[ReasoningEffort] = &[
 ];
 
 /// xAI's Responses/Chat deployments accept the `low`/`high` pair.
+const GPT5_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::Minimal,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+];
 const XAI_EFFORTS: &[ReasoningEffort] = &[ReasoningEffort::Low, ReasoningEffort::High];
 
 #[derive(Clone, Copy)]
@@ -158,13 +160,48 @@ const fn tiered(
     })
 }
 
+// GPT-6 Sol/Luna exclude the legacy `minimal` effort.
+const GPT6_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::None,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::Xhigh,
+    ReasoningEffort::Max,
+];
+
+const FRONTIER_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::Xhigh,
+    ReasoningEffort::Max,
+];
+const CLAUDE_46_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::Max,
+];
+const CLAUDE_45_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+];
+
 const MODELS: &[ModelDefinition] = &[
+    model! { catalogs: ANTHROPIC_API, wire: "claude-opus-5-5", canonical: "anthropic/claude-opus-5-5", name: "Claude Opus 5.5", reasoning: true, efforts: FRONTIER_EFFORTS, limits: 1_000_000 / 128_000, pricing: metered(4_000, 20_000, 200, 5_000) },
+    model! { catalogs: OPENAI_API, wire: "gpt-6-sol", canonical: "openai/gpt-6-sol", name: "GPT-6 Sol", reasoning: true, efforts: GPT6_EFFORTS, limits: 1_050_000 / 128_000, pricing: None },
+    model! { catalogs: OPENAI_API, wire: "gpt-6-luna", canonical: "openai/gpt-6-luna", name: "GPT-6 Luna", reasoning: true, efforts: GPT6_EFFORTS, limits: 1_050_000 / 128_000, pricing: None },
+    model! { catalogs: OPENAI_CODEX, wire: "gpt-6-sol", canonical: "openai/gpt-6-sol", name: "GPT-6 Sol", reasoning: true, efforts: GPT6_EFFORTS, limits: 272_000 / 128_000, pricing: None },
+    model! { catalogs: OPENAI_CODEX, wire: "gpt-6-luna", canonical: "openai/gpt-6-luna", name: "GPT-6 Luna", reasoning: true, efforts: GPT6_EFFORTS, limits: 272_000 / 128_000, pricing: None },
     model! {
         catalogs: ANTHROPIC_API,
         wire: "claude-sonnet-5",
         canonical: "anthropic/claude-sonnet-5",
         name: "Claude Sonnet 5",
         reasoning: true,
+        efforts: FRONTIER_EFFORTS,
         limits: 1_000_000 / 128_000,
         pricing: metered(2_000, 10_000, 200, 2_500)
     },
@@ -174,6 +211,7 @@ const MODELS: &[ModelDefinition] = &[
         canonical: "anthropic/claude-opus-4-8",
         name: "Claude Opus 4.8",
         reasoning: true,
+        efforts: FRONTIER_EFFORTS,
         limits: 1_000_000 / 128_000,
         pricing: metered(5_000, 25_000, 500, 6_250)
     },
@@ -183,6 +221,7 @@ const MODELS: &[ModelDefinition] = &[
         canonical: "anthropic/claude-opus-4-7",
         name: "Claude Opus 4.7",
         reasoning: true,
+        efforts: FRONTIER_EFFORTS,
         limits: 1_000_000 / 128_000,
         pricing: metered(5_000, 25_000, 500, 6_250)
     },
@@ -192,6 +231,7 @@ const MODELS: &[ModelDefinition] = &[
         canonical: "anthropic/claude-opus-4-6",
         name: "Claude Opus 4.6",
         reasoning: true,
+        efforts: CLAUDE_46_EFFORTS,
         limits: 1_000_000 / 128_000,
         pricing: metered(5_000, 25_000, 500, 6_250)
     },
@@ -201,6 +241,7 @@ const MODELS: &[ModelDefinition] = &[
         canonical: "anthropic/claude-sonnet-4-6",
         name: "Claude Sonnet 4.6",
         reasoning: true,
+        efforts: CLAUDE_46_EFFORTS,
         limits: 1_000_000 / 128_000,
         pricing: metered(3_000, 15_000, 300, 3_750)
     },
@@ -228,6 +269,7 @@ const MODELS: &[ModelDefinition] = &[
         canonical: "anthropic/claude-opus-4-5",
         name: "Claude Opus 4.5",
         reasoning: true,
+        efforts: CLAUDE_45_EFFORTS,
         limits: 200_000 / 64_000,
         pricing: metered(5_000, 25_000, 500, 6_250)
     },
@@ -237,7 +279,7 @@ const MODELS: &[ModelDefinition] = &[
         canonical: "openai/gpt-6-astra",
         name: "GPT-6 Astra",
         reasoning: true,
-        efforts: OPENAI_EFFORTS,
+        efforts: FRONTIER_EFFORTS,
         limits: 1_050_000 / 128_000,
         pricing: tiered(10_000, 50_000, 1_000, 12_500, PricingTierDefinition {
             above_input_tokens: 272_000, input: 20_000, output: 75_000,
@@ -250,7 +292,7 @@ const MODELS: &[ModelDefinition] = &[
         canonical: "openai/gpt-5.6",
         name: "GPT-5.6",
         reasoning: true,
-        efforts: OPENAI_EFFORTS,
+        efforts: GPT6_EFFORTS,
         limits: 1_050_000 / 128_000,
         pricing: tiered(5_000, 30_000, 500, 6_250, PricingTierDefinition {
             above_input_tokens: 272_000, input: 10_000, output: 45_000,
@@ -263,7 +305,7 @@ const MODELS: &[ModelDefinition] = &[
         canonical: "openai/gpt-5.6-sol",
         name: "GPT-5.6 Sol",
         reasoning: true,
-        efforts: OPENAI_EFFORTS,
+        efforts: GPT6_EFFORTS,
         limits: 1_050_000 / 128_000,
         pricing: tiered(5_000, 30_000, 500, 6_250, PricingTierDefinition {
             above_input_tokens: 272_000, input: 10_000, output: 45_000,
@@ -276,7 +318,7 @@ const MODELS: &[ModelDefinition] = &[
         canonical: "openai/gpt-5.6-luna",
         name: "GPT-5.6 Luna",
         reasoning: true,
-        efforts: OPENAI_EFFORTS,
+        efforts: GPT6_EFFORTS,
         limits: 1_050_000 / 128_000,
         pricing: tiered(1_000, 6_000, 100, 1_250, PricingTierDefinition {
             above_input_tokens: 272_000, input: 2_000, output: 9_000,
@@ -299,17 +341,17 @@ const MODELS: &[ModelDefinition] = &[
     model! { catalogs: OPENAI_API, wire: "gpt-5.4-mini", canonical: "openai/gpt-5.4-mini", name: "GPT-5.4 mini", reasoning: true, efforts: OPENAI_EFFORTS, limits: 400_000 / 128_000, pricing: metered(750, 4_500, 75, 0) },
     model! { catalogs: OPENAI_API, wire: "gpt-5.4-nano", canonical: "openai/gpt-5.4-nano", name: "GPT-5.4 nano", reasoning: true, efforts: OPENAI_EFFORTS, limits: 400_000 / 128_000, pricing: metered(200, 1_250, 20, 0) },
     model! { catalogs: OPENAI_API, wire: "gpt-5.2", canonical: "openai/gpt-5.2", name: "GPT-5.2", reasoning: true, efforts: OPENAI_EFFORTS, limits: 400_000 / 128_000, pricing: metered(1_750, 14_000, 175, 0) },
-    model! { catalogs: OPENAI_API, wire: "gpt-5-mini", canonical: "openai/gpt-5-mini", name: "GPT-5 Mini", reasoning: true, efforts: OPENAI_EFFORTS, limits: 400_000 / 128_000, pricing: metered(250, 2_000, 25, 0) },
-    model! { catalogs: OPENAI_API, wire: "gpt-5-nano", canonical: "openai/gpt-5-nano", name: "GPT-5 Nano", reasoning: true, efforts: OPENAI_EFFORTS, limits: 400_000 / 128_000, pricing: metered(50, 400, 5, 0) },
+    model! { catalogs: OPENAI_API, wire: "gpt-5-mini", canonical: "openai/gpt-5-mini", name: "GPT-5 Mini", reasoning: true, efforts: GPT5_EFFORTS, limits: 400_000 / 128_000, pricing: metered(250, 2_000, 25, 0) },
+    model! { catalogs: OPENAI_API, wire: "gpt-5-nano", canonical: "openai/gpt-5-nano", name: "GPT-5 Nano", reasoning: true, efforts: GPT5_EFFORTS, limits: 400_000 / 128_000, pricing: metered(50, 400, 5, 0) },
     model! { catalogs: OPENAI_API, wire: "gpt-4.1", canonical: "openai/gpt-4.1", name: "GPT-4.1", reasoning: false, limits: 1_047_576 / 32_768, pricing: metered(2_000, 8_000, 500, 0) },
     model! { catalogs: OPENAI_API, wire: "gpt-4.1-mini", canonical: "openai/gpt-4.1-mini", name: "GPT-4.1 mini", reasoning: false, limits: 1_047_576 / 32_768, pricing: metered(400, 1_600, 100, 0) },
     model! { catalogs: OPENAI_API, wire: "gpt-4.1-nano", canonical: "openai/gpt-4.1-nano", name: "GPT-4.1 nano", reasoning: false, limits: 1_047_576 / 32_768, pricing: metered(100, 400, 25, 0) },
     model! { catalogs: OPENAI_API, wire: "gpt-4o", canonical: "openai/gpt-4o", name: "GPT-4o", reasoning: false, limits: 128_000 / 16_384, pricing: metered(2_500, 10_000, 1_250, 0) },
     model! { catalogs: OPENAI_API, wire: "gpt-4o-mini", canonical: "openai/gpt-4o-mini", name: "GPT-4o mini", reasoning: false, limits: 128_000 / 16_384, pricing: metered(150, 600, 75, 0) },
-    model! { catalogs: OPENAI_CODEX, wire: "gpt-6-astra", canonical: "openai/gpt-6-astra", name: "GPT-6 Astra", reasoning: true, efforts: OPENAI_EFFORTS, limits: 272_000 / 128_000, pricing: None },
-    model! { catalogs: OPENAI_CODEX, wire: "gpt-5.6-sol", canonical: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", reasoning: true, efforts: OPENAI_EFFORTS, limits: 272_000 / 128_000, pricing: None },
-    model! { catalogs: OPENAI_CODEX, wire: "gpt-5.6-terra", canonical: "openai/gpt-5.6-terra", name: "GPT-5.6 Terra", reasoning: true, efforts: OPENAI_EFFORTS, limits: 272_000 / 128_000, pricing: None },
-    model! { catalogs: OPENAI_CODEX, wire: "gpt-5.6-luna", canonical: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", reasoning: true, efforts: OPENAI_EFFORTS, limits: 272_000 / 128_000, pricing: None },
+    model! { catalogs: OPENAI_CODEX, wire: "gpt-6-astra", canonical: "openai/gpt-6-astra", name: "GPT-6 Astra", reasoning: true, efforts: FRONTIER_EFFORTS, limits: 272_000 / 128_000, pricing: None },
+    model! { catalogs: OPENAI_CODEX, wire: "gpt-5.6-sol", canonical: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", reasoning: true, efforts: GPT6_EFFORTS, limits: 272_000 / 128_000, pricing: None },
+    model! { catalogs: OPENAI_CODEX, wire: "gpt-5.6-terra", canonical: "openai/gpt-5.6-terra", name: "GPT-5.6 Terra", reasoning: true, efforts: GPT6_EFFORTS, limits: 272_000 / 128_000, pricing: None },
+    model! { catalogs: OPENAI_CODEX, wire: "gpt-5.6-luna", canonical: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", reasoning: true, efforts: GPT6_EFFORTS, limits: 272_000 / 128_000, pricing: None },
     model! { catalogs: OPENAI_CODEX, wire: "gpt-5.5", canonical: "openai/gpt-5.5", name: "GPT-5.5", reasoning: true, efforts: OPENAI_EFFORTS, limits: 272_000 / 128_000, pricing: None },
     model! { catalogs: OPENAI_CODEX, wire: "gpt-5.4", canonical: "openai/gpt-5.4", name: "GPT-5.4", reasoning: true, efforts: OPENAI_EFFORTS, limits: 272_000 / 128_000, pricing: None },
     model! { catalogs: OPENAI_CODEX, wire: "gpt-5.4-mini", canonical: "openai/gpt-5.4-mini", name: "GPT-5.4 Mini", reasoning: true, efforts: OPENAI_EFFORTS, limits: 272_000 / 128_000, pricing: None },
@@ -357,9 +399,9 @@ const MODELS: &[ModelDefinition] = &[
     model! { catalogs: BEDROCK_MANTLE, wire: "anthropic.claude-opus-5", canonical: "anthropic/claude-opus-5", name: "Claude Opus 5", reasoning: true, limits: 1_000_000 / 128_000, pricing: metered(5_000, 25_000, 0, 0), api: ProviderApi::AnthropicMessages },
     model! { catalogs: BEDROCK_MANTLE, wire: "anthropic.claude-fable-5", canonical: "anthropic/claude-fable-5", name: "Claude Fable 5", reasoning: true, limits: 1_000_000 / 128_000, pricing: metered(10_000, 50_000, 0, 0), api: ProviderApi::AnthropicMessages },
     model! { catalogs: BEDROCK_MANTLE, wire: "anthropic.claude-sonnet-5", canonical: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", reasoning: true, limits: 1_000_000 / 128_000, pricing: metered(2_000, 10_000, 0, 0), api: ProviderApi::AnthropicMessages },
-    model! { catalogs: BEDROCK_MANTLE, wire: "openai.gpt-5.6-sol", canonical: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", reasoning: true, efforts: OPENAI_EFFORTS, limits: 272_000 / 128_000, pricing: metered(5_500, 33_000, 0, 0), api: ProviderApi::OpenAiResponses },
-    model! { catalogs: BEDROCK_MANTLE, wire: "openai.gpt-5.6-luna", canonical: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", reasoning: true, efforts: OPENAI_EFFORTS, limits: 272_000 / 128_000, pricing: metered(1_100, 6_600, 0, 0), api: ProviderApi::OpenAiResponses },
-    model! { catalogs: BEDROCK_MANTLE, wire: "openai.gpt-5.6-terra", canonical: "openai/gpt-5.6-terra", name: "GPT-5.6 Terra", reasoning: true, efforts: OPENAI_EFFORTS, limits: 272_000 / 128_000, pricing: metered(2_200, 13_200, 0, 0), api: ProviderApi::OpenAiResponses },
+    model! { catalogs: BEDROCK_MANTLE, wire: "openai.gpt-5.6-sol", canonical: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", reasoning: true, efforts: GPT6_EFFORTS, limits: 272_000 / 128_000, pricing: metered(5_500, 33_000, 0, 0), api: ProviderApi::OpenAiResponses },
+    model! { catalogs: BEDROCK_MANTLE, wire: "openai.gpt-5.6-luna", canonical: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", reasoning: true, efforts: GPT6_EFFORTS, limits: 272_000 / 128_000, pricing: metered(1_100, 6_600, 0, 0), api: ProviderApi::OpenAiResponses },
+    model! { catalogs: BEDROCK_MANTLE, wire: "openai.gpt-5.6-terra", canonical: "openai/gpt-5.6-terra", name: "GPT-5.6 Terra", reasoning: true, efforts: GPT6_EFFORTS, limits: 272_000 / 128_000, pricing: metered(2_200, 13_200, 0, 0), api: ProviderApi::OpenAiResponses },
     model! { catalogs: XAI_API, wire: "grok-4.7", canonical: "xai/grok-4.7", name: "Grok 4.7", reasoning: true, efforts: XAI_EFFORTS, limits: 500_000 / 500_000, pricing: tiered(2_000, 6_000, 500, 0, PricingTierDefinition { above_input_tokens: 200_000, input: 4_000, output: 12_000, cache_read: Some(1_000), cache_write: None }), api: ProviderApi::OpenAiResponses },
     model! { catalogs: XAI_API, wire: "grok-4.6", canonical: "xai/grok-4.6", name: "Grok 4.6", reasoning: true, efforts: XAI_EFFORTS, limits: 500_000 / 500_000, pricing: tiered(2_000, 6_000, 500, 0, PricingTierDefinition { above_input_tokens: 200_000, input: 4_000, output: 12_000, cache_read: Some(1_000), cache_write: None }), api: ProviderApi::OpenAiResponses },
     model! { catalogs: XAI_API, wire: "grok-4.5", canonical: "xai/grok-4.5", name: "Grok 4.5", reasoning: true, efforts: XAI_EFFORTS, limits: 256_000 / 128_000, pricing: None, api: ProviderApi::OpenAiResponses },
@@ -409,6 +451,23 @@ pub(crate) fn builtin_models(catalog: BuiltinCatalog) -> BTreeMap<String, ModelM
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpt6_sol_and_luna_have_current_api_limits_and_no_minimal_effort() {
+        for catalog in [BuiltinCatalog::OpenAiApi, BuiltinCatalog::OpenAiCodex] {
+            let models = builtin_models(catalog);
+            for id in ["gpt-6-sol", "gpt-6-luna"] {
+                let model = &models[id];
+                assert_eq!(model.canonical_id(), Some(format!("openai/{id}").as_str()));
+                assert_eq!(model.max_output_tokens(), Some(128_000));
+                assert_eq!(model.reasoning_efforts(), GPT6_EFFORTS);
+                assert!(!model.explicitly_configured());
+            }
+        }
+        let models = builtin_models(BuiltinCatalog::OpenAiApi);
+        assert_eq!(models["gpt-6-sol"].context_window(), Some(1_050_000));
+        assert_eq!(models["gpt-6-luna"].context_window(), Some(1_050_000));
+    }
 
     #[test]
     fn access_routes_share_canonical_model_identity() {
@@ -469,8 +528,8 @@ mod tests {
         let anthropic = builtin_models(BuiltinCatalog::AnthropicApi);
         let mantle = builtin_models(BuiltinCatalog::BedrockMantle);
 
-        assert_eq!(openai["gpt-6-astra"].reasoning_efforts(), OPENAI_EFFORTS);
-        assert_eq!(codex["gpt-6-astra"].reasoning_efforts(), OPENAI_EFFORTS);
+        assert_eq!(openai["gpt-6-astra"].reasoning_efforts(), FRONTIER_EFFORTS);
+        assert_eq!(codex["gpt-6-astra"].reasoning_efforts(), FRONTIER_EFFORTS);
         assert!(
             openai["gpt-6-astra"]
                 .reasoning_efforts()
@@ -480,11 +539,14 @@ mod tests {
         assert!(!openai["gpt-4.1"].reasoning());
 
         assert!(anthropic["claude-sonnet-5"].reasoning());
-        assert!(anthropic["claude-sonnet-5"].reasoning_efforts().is_empty());
+        assert_eq!(
+            anthropic["claude-sonnet-5"].reasoning_efforts(),
+            FRONTIER_EFFORTS
+        );
 
         assert_eq!(
             mantle["openai.gpt-5.6-sol"].reasoning_efforts(),
-            OPENAI_EFFORTS
+            GPT6_EFFORTS
         );
         assert!(
             mantle["anthropic.claude-opus-5"]

@@ -27,34 +27,40 @@ pub enum ReasoningKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
+    /// Override configured effort and let the provider choose; never sent on its wire.
+    Default,
     None,
     Minimal,
     Low,
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 impl ReasoningEffort {
     /// Every effort value, lowest to highest.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::None,
         Self::Minimal,
         Self::Low,
         Self::Medium,
         Self::High,
         Self::Xhigh,
+        Self::Max,
     ];
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Default => "default",
             Self::None => "none",
             Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Max => "max",
         }
     }
 }

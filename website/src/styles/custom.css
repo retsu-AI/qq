@@ -1,6 +1,4 @@
-@import '@fontsource-variable/inter';
-@import '@fontsource/jetbrains-mono/latin-400.css';
-@import '@fontsource/jetbrains-mono/latin-500.css';
+@import './fonts.generated.css';
 
 /* Ink is the terminal's source palette (crates/qq-config/themes/ink.ron). These tokens never change with the page theme. */
 :root {
@@ -13,7 +11,7 @@
   --mint: #8fd3a6;
   --graphite: #20242c;
   --ink-background: #141720;
-  --font-sans: 'Inter Variable', Inter, system-ui, sans-serif;
+  --font-sans: 'Inter Variable', 'Inter Fallback', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
   --sl-font: var(--font-sans);
   --sl-font-mono: var(--font-mono);
@@ -22,7 +20,9 @@
   --sl-line-height: 1.65;
   --sl-nav-height: 5rem;
   --sl-sidebar-width: 17.5rem;
-  --sl-content-width: 76ch;
+  /* In rem, not ch: the fixed right sidebar is positioned from this value,
+     and a `ch` measure changes when the web font replaces the fallback. */
+  --sl-content-width: 50rem;
   --sl-text-h1: 2.5rem;
   --sl-text-h2: 1.65rem;
   --sl-text-h3: 1.2rem;
@@ -99,6 +99,10 @@ a, button, select { -webkit-tap-highlight-color: transparent; }
 button { font: inherit; }
 a { text-underline-offset: 4px; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+/* The first layout happens before the content is tall enough to need a
+   scrollbar; when it arrives the viewport narrows and the fixed right sidebar
+   and every line of prose move. Reserving the gutter makes both layouts agree. */
+html { scrollbar-gutter: stable; }
 h1, h2, h3 { font-weight: 600; letter-spacing: -0.035em; text-wrap: balance; }
 p { text-wrap: pretty; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }

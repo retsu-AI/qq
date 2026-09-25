@@ -5,3 +5,5 @@ dist/
 src/content/docs/docs/
 public/install.sh
 src/generated/
+public/_fonts/
+src/styles/fonts.generated.css

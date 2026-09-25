@@ -143,6 +143,8 @@ pub fn plan_label(plan: &RunPlanIdentity) -> (AgentProfileId, String) {
 pub struct SessionStore {
     sessions: HashMap<SessionId, SessionView>,
     index: OnceCell<TreeIndex>,
+    #[cfg(test)]
+    index_rebuilds: std::cell::Cell<usize>,
     sanitizer: TextSanitizer,
 }
 
@@ -171,6 +173,8 @@ impl SessionStore {
         Self {
             sessions: HashMap::new(),
             index: OnceCell::new(),
+            #[cfg(test)]
+            index_rebuilds: std::cell::Cell::new(0),
             sanitizer,
         }
     }
@@ -404,7 +408,7 @@ impl SessionStore {
     /// A session this client just created has an empty transcript by
     /// construction, so it is warm immediately and needs no round trip.
     pub fn warm_empty(&mut self, session_id: SessionId) {
-        if let Some(session) = self.get_mut(&session_id)
+        if let Some(session) = self.body_mut(&session_id)
             && !session.is_warm()
         {
             session.messages = Some(Vec::new());
@@ -415,7 +419,7 @@ impl SessionStore {
     /// Stamp `session_id` with `focus_clock` and clear what the user has now
     /// seen. The caller owns the clock so one counter can span stores.
     pub fn mark_focused(&mut self, session_id: SessionId, focus_clock: u64) {
-        if let Some(session) = self.get_mut(&session_id) {
+        if let Some(session) = self.body_mut(&session_id) {
             session.last_focused = focus_clock;
             session.unread = 0;
             session.finished_unread = false;
@@ -438,7 +442,7 @@ impl SessionStore {
         warm.sort_unstable();
         let evict = warm.len() - keep;
         for (_, session_id) in warm.into_iter().take(evict) {
-            if let Some(session) = self.get_mut(&session_id) {
+            if let Some(session) = self.body_mut(&session_id) {
                 session.evict_body();
             }
         }
@@ -534,8 +538,17 @@ impl SessionStore {
         }
     }
 
+    /// How many times the tree index has been rebuilt; tests use it to prove
+    /// that body-only mutations leave the index alone.
+    #[cfg(test)]
+    pub(crate) fn index_rebuilds(&self) -> usize {
+        self.index_rebuilds.get()
+    }
+
     fn index(&self) -> &TreeIndex {
         self.index.get_or_init(|| {
+            #[cfg(test)]
+            self.index_rebuilds.set(self.index_rebuilds.get() + 1);
             let mut index = TreeIndex::default();
             for session in self.sessions.values() {
                 index

@@ -3740,10 +3740,28 @@ fn profile_chosen_without_a_focused_session_applies_to_the_next_create() {
 fn effort_picker_sets_the_focused_idle_session_effort_and_refuses_running_ones() {
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());
+    let route = app
+        .focused()
+        .and_then(|id| app.sessions.get(&id))
+        .unwrap()
+        .summary
+        .model
+        .clone();
+    app.models = vec![ModelOption {
+        provider: "openai".into(),
+        model: "test".into(),
+        name: None,
+        context_window: None,
+        reasoning_efforts: qq_protocol::ReasoningEffort::ALL.to_vec(),
+        selection: ModelSelection {
+            model: route,
+            ..ModelSelection::default()
+        },
+    }];
     let focused = app.focused().unwrap();
     app.execute(Command::OpenEffort);
     // Rows: default, none, minimal, low, medium, high, xhigh. Jump to xhigh.
-    for _ in 0..6 {
+    for _ in 0..7 {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
     let (_, requests) = app
@@ -3891,8 +3909,16 @@ fn effort_chosen_without_a_focused_session_applies_to_the_next_create() {
     empty.sessions.clear();
     empty.focused = None;
     app.apply_snapshot(empty);
+    app.models = vec![ModelOption {
+        provider: "openai".into(),
+        model: "gpt-test".into(),
+        name: None,
+        context_window: None,
+        reasoning_efforts: qq_protocol::ReasoningEffort::ALL.to_vec(),
+        selection,
+    }];
     app.execute(Command::OpenEffort);
-    for _ in 0..6 {
+    for _ in 0..7 {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
     let (_, requests) = app
@@ -3972,21 +3998,19 @@ fn effort_picker_is_shaped_by_the_focused_models_advertised_ladder() {
 
     assert_eq!(
         rows_for(vec![ladder(vec![E::Low, E::High])], &snap),
-        vec![None, Some(E::None), Some(E::Low), Some(E::High)],
+        vec![None, Some(E::Default), Some(E::Low), Some(E::High)],
         "advertised ladder: default, none, then exactly the ladder"
     );
     assert_eq!(
         rows_for(vec![ladder(Vec::new())], &snap),
-        std::iter::once(None)
-            .chain(E::ALL.into_iter().map(Some))
-            .collect::<Vec<_>>(),
-        "no advertised ladder: every level"
+        vec![None, Some(E::Default)],
+        "unknown capability: inheritance and provider default only"
     );
     snap.focused = None;
     snap.sessions.clear();
     assert_eq!(
         rows_for(vec![ladder(vec![E::Medium])], &snap),
-        vec![None, Some(E::None), Some(E::Medium)],
+        vec![None, Some(E::Default), Some(E::Medium)],
         "nothing focused: the default model's ladder"
     );
 }
