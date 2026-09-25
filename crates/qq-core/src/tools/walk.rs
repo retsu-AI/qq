@@ -104,6 +104,8 @@ impl StopReason {
 /// Gitignore matchers for the directory being listed and every ancestor up
 /// to the workspace root, deepest last. A deeper file overrides a shallower
 /// one and, within one file, the last matching pattern wins, as in git.
+/// Each directory contributes `.gitignore`, `.ignore`, and `.qqignore` —
+/// the last is QQ's own, for paths git tracks but agents should not see.
 pub(crate) struct IgnoreStack {
     matchers: Vec<Option<Gitignore>>,
     include_ignored: bool,
@@ -176,7 +178,7 @@ fn directory_matcher(workspace: &Workspace, dir: &str) -> Option<Gitignore> {
     let root = if dir == "." { "" } else { dir };
     let mut builder = GitignoreBuilder::new(root);
     let mut any = false;
-    for file in [".gitignore", ".ignore"] {
+    for file in [".gitignore", ".ignore", ".qqignore"] {
         any |= add_ignore_file(workspace, &mut builder, &join(dir, file));
     }
     if !any {

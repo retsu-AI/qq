@@ -753,6 +753,25 @@ mod tests {
                 everything.model_text
             );
         }
+
+        // `.qqignore` stacks with `.gitignore` and hides from `search` and
+        // `tree` alike, so every listing tool sees the same tree.
+        fs::write(root.join(".qqignore"), "main.rs\n").unwrap();
+        let qq = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"needle"}"#,
+        );
+        assert_eq!(
+            qq.model_text,
+            "search \"needle\" mode=content matches=2/2 files=2 scanned=2\n\
+             keep.log\nL1: needle in kept log\n\
+             nested/a.txt\nL1: needle nested txt\n"
+        );
+        let tree = run_tool(&workspace, &FileState::default(), "tree", "{}");
+        assert!(!tree.model_text.contains("main.rs"), "{}", tree.model_text);
+        assert!(tree.model_text.contains("keep.log"), "{}", tree.model_text);
     }
 
     #[test]
