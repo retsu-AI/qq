@@ -1099,6 +1099,39 @@ fn codex_login_routes_a_realistic_oversized_bundle_to_windows_protection() {
 }
 
 #[test]
+fn codex_login_deadline_bounds_a_connected_client_that_sends_nothing() {
+    let (store, _keyring, _directory) = test_store();
+    let login = CodexLogin::start_for_test(
+        0,
+        "known-state",
+        "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        Duration::from_millis(500),
+    )
+    .unwrap();
+    let authorization = reqwest::Url::parse(login.authorization_url()).unwrap();
+    let redirect_uri = authorization
+        .query_pairs()
+        .find(|(name, _)| name == "redirect_uri")
+        .unwrap()
+        .1;
+    let port = reqwest::Url::parse(&redirect_uri).unwrap().port().unwrap();
+    let completion_store = store.clone();
+    let completion = thread::spawn(move || login.complete(&completion_store, "default", false));
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 400"));
+    assert!(matches!(
+        completion.join().unwrap(),
+        Err(AuthError::Codex(codex::CodexAuthError::CallbackTimedOut))
+    ));
+    assert!(store.list().unwrap().is_empty());
+}
+
+#[test]
 fn codex_resolution_refreshes_an_expired_access_token_once() {
     let (mut store, _keyring, _directory) = test_store();
     let expires_at = SystemTime::now()
