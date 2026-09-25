@@ -7,6 +7,7 @@ import shlex
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from qq_harbor.agent import QQAgent
@@ -96,6 +97,69 @@ class RunEnvTests(unittest.TestCase):
             ):
                 chosen = QQAgent(Path(tempfile.mkdtemp()))._resolve_host_ca_bundle()
             self.assertEqual(chosen, Path(override.name).resolve())
+
+
+class JevCredentialTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        logs = tempfile.TemporaryDirectory()
+        self.addCleanup(logs.cleanup)
+        self.logs_dir = Path(logs.name)
+
+    def test_typesafe_key_is_projected_without_changing_inline_config(self) -> None:
+        fake_key = "fake-typesafe-projection-test-key"
+        config = "(version: 1)"
+        with mock.patch.dict(
+            os.environ,
+            {"TYPESAFE_API_KEY": fake_key, "QQ_CONFIG_CONTENT": config},
+            clear=True,
+        ):
+            agent = QQAgent(self.logs_dir)
+            forwarded = agent._run_env()
+        self.assertEqual(forwarded["TYPESAFE_API_KEY"], fake_key)
+        self.assertEqual(forwarded["QQ_CONFIG_CONTENT"], config)
+        self.assertNotIn(fake_key, agent._build_command("review the fixture"))
+        self.assertNotIn(fake_key, agent.get_version_command())
+
+    def test_absent_typesafe_key_is_not_synthesized(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            forwarded = QQAgent(self.logs_dir)._run_env()
+        self.assertNotIn("TYPESAFE_API_KEY", forwarded)
+        self.assertEqual(forwarded, {"SSL_CERT_FILE": "/installed-agent/ca-certificates.crt"})
+
+    def test_similarly_named_and_unrelated_secrets_are_not_projected(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "TYPESAFE_API_KEY_BACKUP": "fake-backup-key",
+                "TYPESAFE_OTHER_SECRET": "fake-other-key",
+                "UNRELATED_API_KEY": "fake-unrelated-key",
+            },
+            clear=True,
+        ):
+            forwarded = QQAgent(self.logs_dir)._run_env()
+        self.assertEqual(forwarded, {"SSL_CERT_FILE": "/installed-agent/ca-certificates.crt"})
+
+    async def test_run_passes_key_only_in_exec_environment_not_logs_or_context(self) -> None:
+        fake_key = "fake-typesafe-execution-test-key"
+        for return_code in (0, 1, 3):
+            with self.subTest(return_code=return_code), mock.patch.dict(
+                os.environ, {"TYPESAFE_API_KEY": fake_key}, clear=True
+            ):
+                agent = QQAgent(self.logs_dir, model_name="test/fixed")
+                environment = SimpleNamespace(
+                    exec=mock.AsyncMock(return_value=SimpleNamespace(return_code=return_code))
+                )
+                context = SimpleNamespace(metadata=None)
+                logger = mock.Mock()
+                with mock.patch.object(agent, "logger", logger):
+                    await agent.run("review the fixture", environment, context)
+                environment.exec.assert_awaited_once()
+                call = environment.exec.await_args.kwargs
+                self.assertEqual(call["env"]["TYPESAFE_API_KEY"], fake_key)
+                self.assertNotIn(fake_key, call["command"])
+                self.assertNotIn(fake_key, repr(logger.mock_calls))
+                self.assertEqual(vars(context), {"metadata": None})
+                self.assertEqual(list(self.logs_dir.iterdir()), [])
 
 
 class PostRunTests(unittest.TestCase):
