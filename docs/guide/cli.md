@@ -148,8 +148,14 @@ between global packs and your global config.
 ## `qq jev …`
 
 Optional TypeSafe Jev review. `setup [--allow-file]` stores the API key;
-`observe` assesses completed runs without gating them.
-[`../runbooks/jev.md`](../runbooks/jev.md).
+`observe` assesses completed runs on the running local server without gating
+them. [`../runbooks/jev.md`](../runbooks/jev.md) explains what the observer
+reads and how its receipts resume.
+
+| Subcommand | Effect |
+| --- | --- |
+| `setup [--allow-file]` | prompt for and store the TypeSafe API key; `--allow-file` permits a user-only plaintext file when no OS keyring exists |
+| `observe --workspace-id UUID --receipts PATH --max-cost-usd V [--session-id ID] [--max-requests N] [--max-total-tokens N] [--duration-seconds N]` | follow the workspace (or one session) and write one JSONL receipt per assessed run to `--receipts`; stops at the spend cap, `--max-requests` (default and limit 32), `--max-total-tokens` (default 4194304), or `--duration-seconds` (default 300, at most 86400) |
 
 ## `qq version`
 

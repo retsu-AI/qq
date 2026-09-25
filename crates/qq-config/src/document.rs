@@ -442,9 +442,55 @@ impl GrantEntry {
     }
 }
 
+/// Every key a `policy` section accepts, as spelled in RON, in declaration
+/// order. The user guide must name each; the docs-truth test in the root
+/// crate reads this list, and a unit test here holds it equal to the field
+/// list the `Deserialize` derive reports.
+pub const POLICY_FIELD_NAMES: [&str; 15] = [
+    "allowed_providers",
+    "exposed_tools",
+    "denied_providers",
+    "max_output_tokens",
+    "require_https",
+    "allow_custom_providers",
+    "allow_literal_secrets",
+    "allow_tools",
+    "allow_shell_prefixes",
+    "allow_hosts",
+    "shell_env",
+    "builtin_preference",
+    "deny_tools",
+    "deny_shell_prefixes",
+    "deny_hosts",
+];
+
+/// Every top-level key a configuration document accepts, as spelled in RON,
+/// in declaration order. See [`POLICY_FIELD_NAMES`].
+pub const DOCUMENT_FIELD_NAMES: [&str; 19] = [
+    "version",
+    "organization",
+    "model",
+    "worker_model",
+    "reviewer_model",
+    "delegation",
+    "audit",
+    "jev_review",
+    "jev_routing",
+    "jev_approval",
+    "approval_delegate",
+    "approval_timeout_seconds",
+    "reasoning_effort",
+    "max_output_tokens",
+    "providers",
+    "mcp",
+    "profiles",
+    "packs",
+    "policy",
+];
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct PolicyPatch {
+pub(super) struct PolicyPatch {
     allowed_providers: Option<Vec<String>>,
     exposed_tools: Option<Vec<String>>,
     denied_providers: Option<Vec<String>>,

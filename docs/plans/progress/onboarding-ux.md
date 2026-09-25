@@ -16,9 +16,9 @@ below, newest last.
 | OB7 | In-TUI trust prompt | Planned | | ENG-881; needs ADR + protocol row in root |
 | OB8 | First-session guidance; `qq run` denial hint | Shipped (#146) | `feat/eng-882-first-session-guidance` | ENG-882 |
 | OB9 | Missing MCP credential degrades the server | Shipped (#148) | `fix/eng-861-mcp-credential-degrade` | ENG-861 |
-| OB10 | Docs-truth test; CHANGELOG at release | Planned | | ENG-883 |
+| OB10 | Docs-truth test; CHANGELOG at release | In review | `feat/eng-883-docs-truth` | ENG-883 |
 | OB11 | Wiki mirror workflow | Superseded by OB12 | | ENG-884 |
-| OB12 | Docs website from `docs/guide/`, GitHub Pages | In review | `feat/eng-896-docs-website` | ENG-896 |
+| OB12 | Docs website from `docs/guide/`, GitHub Pages | Shipped (#156) | `feat/eng-896-docs-website` | ENG-896 |
 
 ## Entries
 
@@ -226,3 +226,35 @@ needed for docs. `.github/workflows/website.yml` builds on PRs touching
 (wiki mirror) is superseded. Follow-ups: OB10's docs-truth test now also
 protects the site; a custom domain is two lines in `site.config.mjs` plus
 `public/CNAME`; the eight dropped topics are candidate guides.
+
+### 2026-09-24 — OB10 docs-truth and changelog in review
+
+Branch `feat/eng-883-docs-truth` off `main` (#156). The root crate has no
+lib target, so the docs-truth tests are `#[test]`s in the binary:
+`src/docs_truth.rs` (`#[cfg(test)]`, declared from `main.rs`) holds the
+shared guide loader and `assert_documented`, which indexes every code span
+and fenced-block token in `docs/guide/*.md` and reports every miss in one
+panic grouped by category; it also carries the config-key, environment
+variable, and slash-command checks. `cli::tests` walks
+`Cli::command()` recursively (subcommands + visible long flags; `help`/
+`version` and `is_hide_set()` skipped) and `doctor::tests` checks
+`CHECK_NAMES` against `cli.md`. Sources of truth are exported, not copied:
+qq-config gains `DOCUMENT_FIELD_NAMES` / `POLICY_FIELD_NAMES` (a unit test
+holds each equal to the list serde's derive reports in RON's unknown-field
+error, and parses a document that sets every key), `ENVIRONMENT_VARIABLES`
+(`from_process_env` destructures it by position, so it cannot drift; a
+child-process test round-trips every variable), and
+`provider_credential_variables()` (derived from the presets; xAI's variable
+pinned as `XAI_API_KEY_VARIABLE`); qq-tui gains `slash_names()`.
+`install.sh` `${QQ_*}` names are parsed from the script text. Gaps found:
+one — the `qq jev observe` flags were only in the runbook; `cli.md` now has
+a `qq jev` table. Allow-lists: `QQ_RELEASE_BASE_URL` (installer test hook);
+the CLI flag allow-list is empty. `cargo xtask release X.Y.Z` now prepends a
+`## X.Y.Z — date` section to `CHANGELOG.md` from `git log <newest v*
+tag>..HEAD --format=%s --no-merges` (`xtask/src/release/changelog.rs`: 5
+deterministic tests for parse/render/prepend; smoke-tested `--no-commit`
+against the real history: 10 entries). Tests added: qq-config 4, qq bin 7,
+xtask 5. Gates: fmt, clippy `-D warnings`, `cargo test --workspace`, `cargo
+xtask release --help` green. Docs: `runbooks/release.md` (changelog step and
+section), `runbooks/website.md`, `guide/cli.md`. OB12 marked shipped (#156).
+No hot-path or protocol change.
