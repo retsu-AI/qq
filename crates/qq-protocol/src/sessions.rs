@@ -3705,7 +3705,7 @@ mod tests {
         // `set_jev_mode` / `jev_mode_set`, the optional
         // `SessionSummary.jev_mode` override, and the reserved `/jev` slash
         // command.
-        assert_eq!(crate::PROTOCOL_VERSION, 31);
+        assert_eq!(crate::PROTOCOL_VERSION, 32);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
