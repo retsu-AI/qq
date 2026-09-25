@@ -60,3 +60,12 @@ Rust source is unchanged from accepted `291440a`; its prior workspace gates
 are baseline evidence, not rerun checks on this Python-only candidate.
 Independent final-head review and publication remain manager-owned. No live
 agent/model run, provider call, hosted CI, merge or release is claimed.
+
+### 2026-09-25 — ENG-815 independent-review counterexamples repaired
+
+Review of5eed43f requested changes: numeric prerelease leading zero and
+one-field/blank annotation were accepted. Added all three negatives; focused
+red run fails exactly those cases, then corrected grammar. Native Harbor0.20.0
+focused4/4 and full24/24 pass; AST/diff checks pass. No Rust source changes.
+New candidate requires independent review; prior5eed43f is not accepted.
+Evidence: manager harbor-version-repair-20260925/followup/.

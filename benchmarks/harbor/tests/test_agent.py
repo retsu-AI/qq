@@ -39,6 +39,8 @@ class VersionTests(unittest.TestCase):
     def test_unexpected_output_never_guesses_a_version(self) -> None:
         for output in (
             "", " ", "qq", "2026-09-25)", "qq 2026-09-25", "qq 0.1",
+            "qq 1.2.3-01 (abcdef1 2026-09-25)", "qq 0.1.4 (garbage)",
+            "qq 0.1.4 ( )",
             "other 0.1.4", "qq 00.1.4", "qq 0.1.4 unexpected",
             "qq 0.1.4 (unterminated", "qq 0.1.4\nwarning: unexpected output",
         ):
