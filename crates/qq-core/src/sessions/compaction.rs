@@ -186,6 +186,7 @@ pub(super) fn start_auto_compaction(
             resolved_input: None,
             profile: original.profile.clone(),
             reasoning_effort: original.reasoning_effort,
+            jev_mode: original.jev_mode,
             approval_mode: original.approval_mode,
             depth: original.depth,
             root_run_id: original.root_run_id,

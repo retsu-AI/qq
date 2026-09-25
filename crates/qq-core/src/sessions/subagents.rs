@@ -463,6 +463,7 @@ async fn run_owned_child(
             .loader
             .load(RuntimeLoadRequest {
                 reasoning_effort: parent.reasoning_effort,
+                jev_mode: parent.jev_mode,
                 checkpoint: parent.checkpoint.clone(),
                 routing: parent.routing.clone(),
                 workspace: parent.workspace.clone(),

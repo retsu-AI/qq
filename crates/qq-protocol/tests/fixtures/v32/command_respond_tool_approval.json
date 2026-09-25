@@ -1,0 +1,15 @@
+{
+  "command_id": "16161616161616161616161616161616",
+  "command": {
+    "type": "respond_tool_approval",
+    "run_id": "04040404040404040404040404040404",
+    "tool_call_id": "05050505050505050505050505050505",
+    "decision": {
+      "type": "approve_for_session",
+      "grant": {
+        "type": "shell_prefix",
+        "prefix": "cargo test"
+      }
+    }
+  }
+}

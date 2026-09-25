@@ -82,16 +82,35 @@ Inspect configured values with `qq config show`, provenance with
 `qq auth status typesafe-jev`. Remove credentials with
 `qq auth logout typesafe-jev` when desired; removal is not required to turn off.
 
-`enforce` is an advanced mode: it currently admits one executable tool call per
-model turn and fails if an assessment is unavailable. It adds inference latency
-and does not reverse tool side effects. Approval and sandbox policy still own
-execution authorization. No Jev speed or quality improvement is claimed without
-a paired task evaluation.
+`enforce` is an advanced review mode: it admits one executable tool call per
+model turn and reviews each tool result and final candidate. The name selects
+the review boundary; it does not require a supported verdict to complete a run.
+Both `final` and `enforce` use the following outcome policy:
+
+| Review result | Run behavior |
+| --- | --- |
+| Supported | Continue, subject to the run's normal limits. |
+| Red verdict with a correction remaining | Feed the verdict back and request a correction. Tool and final reviews share two corrective redirects per run. |
+| Red verdict after both corrections | Retain the verdict and continue; a final candidate can complete with a red verdict on record. |
+| Unavailable (including timeout, malformed reply, or oversized task/evidence) | Record an unavailable outcome and continue without claiming a successful assessment. |
+
+This is the behavior introduced by [RR3 / #117](https://github.com/retsu-AI/qq/pull/117)
+and included in v0.1.4. Neither mode is a fail-closed verification gate.
+The 32-assessment request limit, cost admission, run budgets and durable event
+settlement still apply. In particular, a nominal completion with a pending
+checkpoint that was never durably settled fails; that differs from a durably
+recorded unavailable assessment.
+
+Review adds inference latency and does not reverse tool side effects. Approval
+and sandbox policy own execution authorization, including the separately enabled
+Jev approval delegate described below. A completed run is not evidence of a
+supported Jev verdict. No Jev speed or quality improvement is claimed without a
+paired task evaluation.
 
 Implementation/qualification progress for the stacked work is in
 [`../plans/progress/jev-opt-in.md`](../plans/progress/jev-opt-in.md).
 
-Review is bounded to 32 requests and two corrections per run, five seconds per
+Legacy `final`/`enforce` review is bounded to 32 requests and two corrections per run, five seconds per
 request, and 64 KiB per response. It consumes the same run token/cost allowance.
 Pending review and its final criterion outcomes are visible in event streams;
 known reviewer usage and estimated cost are recorded with the verdict. Interrupted
@@ -120,6 +139,44 @@ them on stderr and remains ephemeral. Routing spends count against session run
 budgets. Owned children inherit the parent's routing activation; later user
 prompts resolve current configuration.
 
+## Strict completion verification
+
+Select Strict through trusted configuration/profile `jev_review: strict` or the
+explicit environment override. A stored key alone never enables it:
+
+```sh
+QQ_JEV_CHECKPOINTS=strict qq run --timeout-seconds 300 --max-turns 40 -- "Inspect and verify the change"
+```
+
+At least one explicit finite duration, turn, tool, token or cost run bound is
+required before provider work. A session mode pin retains its existing precedence;
+clear it to use the configured Strict profile. The Low–Ultrajev ladder is unchanged.
+Owned children inherit Strict and must also have a finite bound; remaining duration,
+token and cost bounds propagate, while parent-only turn/tool counts do not grant
+children a fresh allowance.
+
+Strict reviews each retained tool result and the final candidate. A failed tool
+can be supported evidence of failure. A semantic rejection permits repair under
+the original permissions and budgets; it cannot complete until a fresh tool
+observation receives support. Rewording the final answer or repeating unchanged
+rejected tool evidence cannot request another score. There is no automatic two-
+repair or 32-review ceiling in Strict. Reviewer usage/cost consume the original
+run allowance; each wait is at most five seconds and the remaining run duration.
+
+Only final `supported` with no pending/open obligation yields `Completed` and a
+`verified` record atomically. `verification_unresolved` means semantic obligations
+remain; `verification_unavailable` means assessment could not be obtained (including
+malformed replies, timeouts and exact-evidence overflow). Unavailable is not a red
+verdict and does not initiate repair. Cancellation, interruption and budget
+exhaustion preserve their own terminal outcomes and a non-verified record.
+
+Snapshots, checkpoint/terminal events and headless outcomes expose `verification`
+separately from answer text, advisory `audit` and typed `final_output`. The record
+contains the policy identity, masked request digest, evidence generation, review
+count and open correction. Historical/non-strict runs omit it. Headless unresolved
+and unavailable outcomes exit unsuccessfully. Pending requests recovered after a
+crash retain unknown spend and settle unavailable; they are never replayed.
+
 ## Jev as the approval delegate
 
 `jev_approval: true` (or `QQ_JEV_APPROVAL=on`) makes Jev the first delegate
@@ -146,6 +203,43 @@ wider. `Forbidden` shell shapes, blocked hosts, managed denies, and
 Spend counts against the run's budget as reviewer spend. Inspect the setting
 with `qq config show` and `qq config explain jev_approval`.
 
+## The Jev mode ladder
+
+A session can pin one rung of a five-step ladder over the three Jev roles
+above instead of toggling them one by one (ADR-0044, protocol 31):
+`set_jev_mode` on `POST /v1/sessions/jev-mode`, with `mode` set to `low`,
+`medium`, `high`, `max`, or `ultrajev`, or omitted to clear the pin. The
+summary field `jev_mode` carries the pin on every `session_updated` and
+snapshot, so each surface renders the same state from the reducer. In the
+TUI, `/jev` opens the same ladder for the focused session (`configured`
+clears the pin). A picker row marked `selected` is the saved choice for the
+next run, and the top row shows `jev max` while that pin is set. Neither
+label means an active run has changed policy.
+
+| mode | routing | review | approval delegate |
+| --- | --- | --- | --- |
+| `low` | on | off | off |
+| `medium` | on | final | off |
+| `high` | on | enforce | off |
+| `max` | on | enforce | by_mode |
+| `ultrajev` | on | enforce | on |
+
+The `enforce` value asks for review after tools and at the final answer;
+it retains the RR3 completion behavior described above. `max` and `ultrajev`
+set delegation defaults for the configured reviewer. Jev handles approvals
+only when the workspace separately enables `jev_approval`; a session
+`/delegate` override still wins.
+
+The rung is read when the next run is claimed and never rewrites an active
+run's plan. It sits between configuration and explicit selections: it
+overrides the workspace's `jev_routing` / `jev_review` / `approval_delegate`
+values, while a spawned child's resolved routing and checkpoint policy still
+win over the rung it inherits from its parent. A rung never widens Jev
+consent (the credential and trust gates above still apply) or the approval
+mode's ceiling. When a rung's roles need Jev and no `typesafe-jev` credential
+is stored, the next run fails closed with a configuration error, exactly as
+`jev_routing: true` would.
+
 Explicit effort can be pinned independently of Jev in trusted configuration:
 
 ```ron
@@ -156,11 +250,13 @@ Explicit effort can be pinned independently of Jev in trusted configuration:
 )
 ```
 
-Values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`. Omission
+Values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`,
+subject to the selected model. `default` explicitly lets the provider choose. Omission
 preserves provider defaults; top-level `Clear` removes an inherited setting.
 Profile values override top-level settings; explicit runtime overrides win.
 In the TUI, `/effort` pins the focused session (or the default for new sessions);
-`default` restores configured/profile omission. `qq config show` and
+`configured` restores configured/profile inheritance; `default` overrides it
+with the provider default. `qq config show` and
 `qq config explain reasoning_effort` expose the configured value and source. Unsupported adapter families reject the choice before credential lookup.
 Remote model restrictions still apply. This is a pinned choice, not automatic
 routing; it makes no speed or quality promise.

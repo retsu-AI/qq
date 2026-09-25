@@ -165,10 +165,11 @@ pub(super) fn create_child_run(
                 id, workspace_id, parent_id, owner_run_id, spawned_by_tool_call_id, title,
                 status, queued_prompts, model, max_output_tokens, organization, approval_mode,
                 created_at_ms, updated_at_ms, depth, root_run_id, purpose, profile, model_is_fallback,
-                reasoning_effort, approval_delegate
+                reasoning_effort, approval_delegate, jev_mode
              ) VALUES (?1, ?2, ?3, ?4, ?10, ?5, 'queued', 1, ?6, ?7, ?8, ?11, ?9, ?9, ?12, ?13, ?14, ?15, ?16,
                 (SELECT reasoning_effort FROM sessions WHERE id = ?3),
-                (SELECT approval_delegate FROM sessions WHERE id = ?3))",
+                (SELECT approval_delegate FROM sessions WHERE id = ?3),
+                (SELECT jev_mode FROM sessions WHERE id = ?3))",
             params![
                 session_id.to_string(),
                 workspace_id.to_string(),
@@ -463,9 +464,11 @@ pub(super) fn execute_command(
                         id, workspace_id, parent_id, title, status, model,
                         max_output_tokens, organization, approval_mode,
                         created_at_ms, updated_at_ms, profile, correlation_json, depth,
-                        root_run_id, model_is_fallback, reasoning_effort, approval_delegate
+                        root_run_id, model_is_fallback, reasoning_effort, approval_delegate,
+                        jev_mode
                      ) VALUES (?1, ?2, ?3, 'New session', 'idle', ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                        (SELECT approval_delegate FROM sessions WHERE id = ?3))",
+                        (SELECT approval_delegate FROM sessions WHERE id = ?3),
+                        (SELECT jev_mode FROM sessions WHERE id = ?3))",
                     params![
                         session_id.to_string(),
                         workspace_id.to_string(),
@@ -1239,6 +1242,42 @@ pub(super) fn execute_command(
                         session_id,
                         delegate,
                     },
+                },
+                false,
+            )
+        }
+        SessionCommand::SetJevMode { session_id, mode } => {
+            let workspace_id = session_workspace(&transaction, session_id)?;
+            // No authority check: every rung resolves inside the configured
+            // Jev capabilities and approval ceiling at the composition root.
+            let updated = transaction.execute(
+                "UPDATE sessions SET jev_mode = ?2, updated_at_ms = ?3 WHERE id = ?1",
+                params![session_id.to_string(), jev_mode_column(mode), now],
+            )?;
+            if updated != 1 {
+                return Err(SessionRuntimeError::SessionNotFound);
+            }
+            // Read at the next run claim: an active run keeps the plan it
+            // compiled. The summary carries the value to every client.
+            let summary = load_session_summary(&transaction, session_id)?;
+            let event = append_event(
+                &transaction,
+                EventContext::for_session(
+                    store_id,
+                    workspace_id,
+                    session_id,
+                    Some(command_id),
+                    now,
+                ),
+                SessionEvent::SessionUpdated {
+                    session: Box::new(summary),
+                },
+            )?;
+            (
+                CommandReceipt {
+                    command_id,
+                    committed_through: event.cursor,
+                    outcome: CommandOutcome::JevModeSet { session_id, mode },
                 },
                 false,
             )

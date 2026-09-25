@@ -22,6 +22,7 @@ The adapter:
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -46,6 +47,7 @@ _CREDENTIAL_ENV_VARS = (
     "GEMINI_API_KEY",
     "XAI_API_KEY",
     "LITELLM_API_KEY",
+    "TYPESAFE_API_KEY",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
@@ -128,9 +130,17 @@ class QQAgent(BaseInstalledAgent):
 
     @override
     def parse_version(self, stdout: str) -> str:
-        """Return the semver from Cargo's conventional ``qq <version>`` output."""
-        fields = stdout.strip().split()
-        return fields[-1] if fields else ""
+        """Return the package version from recognized ``qq --version`` output."""
+        match = re.fullmatch(
+            r"qq[ \t]+("
+            r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+            r"(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+            r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?"
+            r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+            r")(?:[ \t]+\([^()\s]+ [^()\s]+\))?",
+            stdout.strip(),
+        )
+        return match.group(1) if match else ""
 
     # ------------------------------------------------------------------
     # Install

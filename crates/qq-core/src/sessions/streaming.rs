@@ -364,11 +364,35 @@ pub(super) fn record_checkpoint_started(
     connection: &mut Connection,
     store_id: StoreId,
     identity: RunIdentity,
+    verification: Option<Box<qq_protocol::VerificationRecord>>,
     correlation: String,
     phase: qq_protocol::CheckpointPhase,
     tool_call_id: Option<qq_protocol::ToolCallId>,
-) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    if let Some(record) = &verification {
+        let current = load_run(&transaction, identity.run_id)?;
+        if current.outcome.is_some() {
+            return Ok(None);
+        }
+        if let Some(prior) = current.verification {
+            if record.review_count <= prior.review_count {
+                if record.correlation == prior.correlation
+                    && record.basis_sha256 == prior.basis_sha256
+                {
+                    return Ok(None);
+                }
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+            if record.reviewer != prior.reviewer {
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+        }
+        transaction.execute(
+            "UPDATE runs SET verification_json = ?2 WHERE id = ?1 AND outcome_json IS NULL",
+            params![identity.run_id.to_string(), serde_json::to_string(record)?],
+        )?;
+    }
     // A crash after dispatch must not leave a known total that omits it.
     // A completed receipt restores totals from the live accumulator atomically.
     transaction.execute(
@@ -379,6 +403,7 @@ pub(super) fn record_checkpoint_started(
         &transaction,
         EventContext::for_run(store_id, identity, now_ms()),
         SessionEvent::CheckpointStarted {
+            verification,
             run_id: identity.run_id,
             correlation,
             phase,
@@ -386,7 +411,7 @@ pub(super) fn record_checkpoint_started(
         },
     )?;
     transaction.commit()?;
-    Ok(event)
+    Ok(Some(event))
 }
 
 pub(super) struct CheckpointRecord {
@@ -405,7 +430,7 @@ pub(super) fn record_checkpoint(
     identity: RunIdentity,
     review: CheckpointRecord,
     accounting: Option<RunAccounting>,
-) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let CheckpointRecord {
         correlation,
         phase,
@@ -416,6 +441,20 @@ pub(super) fn record_checkpoint(
         spend,
     } = review;
     let transaction = store::begin_unit(connection)?;
+    let current = load_run(&transaction, identity.run_id)?;
+    if current.outcome.is_some() {
+        return Ok(None);
+    }
+    if let Some(record) = &current.verification {
+        if record.correlation.as_ref() == Some(&correlation) && record.outcome.is_some() {
+            return Ok(None);
+        }
+        if record.correlation.as_ref() != Some(&correlation)
+            && outcome != qq_protocol::CheckpointOutcome::Unavailable
+        {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+    }
     if let Some(accounting) = accounting {
         let usage_json = accounting
             .usage
@@ -432,10 +471,74 @@ pub(super) fn record_checkpoint(
             ],
         )?;
     }
+    let mut verification = current.verification;
+    if let Some(record) = &mut verification {
+        if record.correlation.as_ref() != Some(&correlation) {
+            // A retained result can outlive the remaining budget or cancellation.
+            // Pair its local unavailability atomically, without reusing the prior
+            // request basis or claiming an unattempted request incurred spend.
+            record.phase = Some(phase);
+            record.tool_call_id = tool_call_id;
+            record.correlation = Some(correlation.clone());
+            record.outcome = None;
+            record.state = qq_protocol::VerificationState::Pending;
+            record.reason.clear();
+            record.basis_sha256 = None;
+            record.review_count = record.review_count.saturating_add(1);
+            append_event(
+                &transaction,
+                EventContext::for_run(store_id, identity, now_ms()),
+                SessionEvent::CheckpointStarted {
+                    verification: Some(record.clone()),
+                    run_id: identity.run_id,
+                    correlation: correlation.clone(),
+                    phase,
+                    tool_call_id,
+                },
+            )?;
+        }
+        record.phase = Some(phase);
+        record.tool_call_id = tool_call_id;
+        record.correlation = Some(correlation.clone());
+        record.outcome = Some(outcome);
+        record.reason = feedback.clone();
+        if let Some(tool_call_id) = tool_call_id {
+            transaction.execute(
+                "UPDATE tool_calls SET verification_reviewed = 1 WHERE id = ?1 AND run_id = ?2",
+                params![tool_call_id.to_string(), identity.run_id.to_string()],
+            )?;
+        }
+        match outcome {
+            qq_protocol::CheckpointOutcome::Supported => {
+                record.state = qq_protocol::VerificationState::Pending;
+                if phase == qq_protocol::CheckpointPhase::ToolResult
+                    && record
+                        .correction_generation
+                        .is_none_or(|generation| record.evidence_generation > generation)
+                {
+                    record.open_correction = None;
+                    record.correction_generation = None;
+                }
+            }
+            qq_protocol::CheckpointOutcome::Unavailable => {
+                record.state = qq_protocol::VerificationState::Unavailable
+            }
+            _ => {
+                record.state = qq_protocol::VerificationState::Unresolved;
+                record.open_correction = Some(correlation.clone());
+                record.correction_generation = Some(record.evidence_generation);
+            }
+        }
+        transaction.execute(
+            "UPDATE runs SET verification_json = ?2 WHERE id = ?1 AND outcome_json IS NULL",
+            params![identity.run_id.to_string(), serde_json::to_string(record)?],
+        )?;
+    }
     let event = append_event(
         &transaction,
         EventContext::for_run(store_id, identity, now_ms()),
         SessionEvent::CheckpointReviewed {
+            verification,
             run_id: identity.run_id,
             correlation,
             phase,
@@ -447,7 +550,7 @@ pub(super) fn record_checkpoint(
         },
     )?;
     transaction.commit()?;
-    Ok(event)
+    Ok(Some(event))
 }
 
 /// Persists the continuation counter and publishes `run_output_truncated`

@@ -658,7 +658,10 @@ mod tests {
             }),
         });
         let (factory, workspace) = factory_with_key(None);
-        let reviewer = JevApprovalReviewer::new(factory, fallback);
+        // Even an accidentally inherited host key must never turn this missing-key
+        // fixture into a request to the production reviewer.
+        let reviewer =
+            JevApprovalReviewer::new(factory, fallback).with_endpoint("http://127.0.0.1:1/unused");
         let verdict = reviewer.review(request_in(&workspace)).await;
         assert_eq!(asked.lock().unwrap().len(), 1, "the reviewer model is next");
         assert_eq!(verdict.delegate, DelegateIdentity::Reviewer);

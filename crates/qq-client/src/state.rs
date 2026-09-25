@@ -365,6 +365,7 @@ impl SessionStore {
         for run in &snapshot.runs {
             let stats = view.runs.entry(run.id).or_default();
             stats.outcome = run.outcome.clone();
+            stats.verification = run.verification.clone();
             stats.usage = run.usage;
             stats.cost_usd_nanos = run.estimated_cost_usd_nanos;
             stats.plan = run.plan.as_deref().map(plan_label);
@@ -667,6 +668,7 @@ impl Reasoning {
 /// outcome and usage until the protocol records run timing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunStats {
+    pub verification: Option<Box<qq_protocol::VerificationRecord>>,
     pub started_at_ms: Option<u64>,
     /// When the first assistant text of the run arrived: time to first token.
     pub first_token_at_ms: Option<u64>,

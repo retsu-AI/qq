@@ -73,6 +73,7 @@ fn summary(id: SessionId) -> SessionSummary {
         reasoning_effort: None,
         approval_mode: qq_protocol::ApprovalMode::default(),
         approval_delegate: None,
+        jev_mode: None,
         correlation: qq_protocol::Correlation::default(),
         last_outcome: None,
         context_tokens: None,
@@ -476,6 +477,7 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
             5,
             session_id,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(idle.clone()),
                 run_id,
                 outcome: RunOutcome::Completed,
@@ -507,6 +509,7 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
             6,
             session_id,
             SessionEvent::RunFinished {
+                verification: None,
                 session: Box::new(idle),
                 run_id,
                 outcome: RunOutcome::Completed,
@@ -762,4 +765,99 @@ fn streaming_deltas_keep_the_tree_index() {
         context(&models),
     );
     assert_eq!(store.thread_order(), &[child, parent]);
+}
+
+/// `set_jev_mode` is observed like every other session field: the durable
+/// `session_updated` carries the whole summary, so every surface on the
+/// reducer sees the same mode without a dedicated event.
+#[test]
+fn session_updated_carries_the_jev_mode_to_every_surface() {
+    let session_id = SessionId::from_bytes([7; 16]);
+    let mut store = SessionStore::default();
+    store.upsert_summary(summary(session_id), &[], 0);
+    assert_eq!(store.get(&session_id).unwrap().summary.jev_mode, None);
+
+    let mut switched = summary(session_id);
+    switched.jev_mode = Some(qq_protocol::JevMode::Ultrajev);
+    store.reduce_event(
+        &envelope(
+            1,
+            session_id,
+            SessionEvent::SessionUpdated {
+                session: Box::new(switched),
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(
+        store.get(&session_id).unwrap().summary.jev_mode,
+        Some(qq_protocol::JevMode::Ultrajev)
+    );
+
+    store.reduce_event(
+        &envelope(
+            2,
+            session_id,
+            SessionEvent::SessionUpdated {
+                session: Box::new(summary(session_id)),
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(store.get(&session_id).unwrap().summary.jev_mode, None);
+}
+
+#[test]
+fn strict_checkpoint_events_keep_live_verification_and_unavailable_warning() {
+    let session_id = SessionId::from_bytes([3; 16]);
+    let run_id = RunId::from_bytes([4; 16]);
+    let mut store = SessionStore::default();
+    store.upsert_summary(summary(session_id), &[], 0);
+    store.warm_empty(session_id);
+    let mut record = qq_protocol::VerificationRecord::pending("test/strict".into());
+    record.phase = Some(qq_protocol::CheckpointPhase::FinalCandidate);
+    record.correlation = Some("final:1".into());
+    store.reduce_event(
+        &envelope(
+            1,
+            session_id,
+            SessionEvent::CheckpointStarted {
+                run_id,
+                correlation: "final:1".into(),
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                tool_call_id: None,
+                verification: Some(Box::new(record.clone())),
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(
+        store[&session_id].runs[&run_id].verification.as_deref(),
+        Some(&record)
+    );
+    record.state = qq_protocol::VerificationState::Unavailable;
+    record.outcome = Some(qq_protocol::CheckpointOutcome::Unavailable);
+    let effects = store.reduce_event(
+        &envelope(
+            2,
+            session_id,
+            SessionEvent::CheckpointReviewed {
+                run_id,
+                correlation: "final:1".into(),
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                tool_call_id: None,
+                verification: Some(Box::new(record.clone())),
+                outcome: qq_protocol::CheckpointOutcome::Unavailable,
+                confidence_basis_points: None,
+                feedback: "reviewer unavailable".into(),
+                spend: None,
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(
+        store[&session_id].runs[&run_id].verification.as_deref(),
+        Some(&record)
+    );
+    assert!(effects.iter().any(|effect| matches!(effect, StateEffect::Notice { level: NoticeLevel::Warning, text, .. } if text.contains("Unavailable"))));
 }
