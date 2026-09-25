@@ -102,6 +102,25 @@ if (!version) problems.push('Cargo.toml: no [workspace.package] version');
 await mkdir(join(website, 'src', 'generated'), { recursive: true });
 await writeFile(join(website, 'src', 'generated', 'site.json'), JSON.stringify({ version }, null, 2) + '\n');
 
+// The three font files every page uses, under stable names so the head can
+// preload them (Vite would otherwise hash them, and the CSS discovers them a
+// round-trip late; see custom.css for the matching @font-face rules).
+const fonts = [
+  ['@fontsource-variable/inter/files/inter-latin-wght-normal.woff2', 'inter-latin-wght-normal.woff2'],
+  ['@fontsource/jetbrains-mono/files/jetbrains-mono-latin-400-normal.woff2', 'jetbrains-mono-latin-400-normal.woff2'],
+  ['@fontsource/jetbrains-mono/files/jetbrains-mono-latin-500-normal.woff2', 'jetbrains-mono-latin-500-normal.woff2'],
+];
+await mkdir(join(website, 'public', '_fonts'), { recursive: true });
+for (const [source, name] of fonts) {
+  await copyFile(join(website, 'node_modules', source), join(website, 'public', '_fonts', name));
+}
+const { site } = await import(join(website, 'site.config.mjs'));
+const fontsCss = await readFile(join(website, 'src', 'styles', 'fonts.template.css'), 'utf8');
+await writeFile(
+  join(website, 'src', 'styles', 'fonts.generated.css'),
+  fontsCss.replaceAll('__BASE__', site.base.replace(/\/$/, '')),
+);
+
 if (problems.length > 0) {
   console.error('sync-docs: the guide and the site disagree:\n  ' + problems.join('\n  '));
   process.exit(1);
