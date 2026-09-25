@@ -37,7 +37,8 @@ below is for people changing QQ.
 - [`onboarding-audit-2026-09-22.md`](design/onboarding-audit-2026-09-22.md)
   — first-run and configuration UX of Codex, OpenCode, Pi, and fx against
   QQ; findings O01–O20 and the positions the onboarding plan builds on
-  (research; owned by `plans/onboarding-ux.md`).
+  (research; the onboarding plan that acted on it is closed — receipt in
+  `plans/progress/onboarding-ux.md`).
 - [`run-reliability-audit-2026-09-21.md`](design/run-reliability-audit-2026-09-21.md)
   — why sessions do not finish: failure taxonomy from the live session store
   (27 % of prompt runs failed, 73 % of those by harness policy), how Codex,

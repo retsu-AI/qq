@@ -14,7 +14,8 @@ under `target/qq-perf/` and never committed.
 | [`tool-layer.md`](./tool-layer.md) | agent on the tool-layer plan | T1–T14 built-in tool slices and the A0–A5 ablation |
 | [`run-reliability.md`](./run-reliability.md) | agent on the run-reliability plan | RR1–RR12: turn recovery, mid-run compaction, checkpoint tolerance, admission validation, tool leniency |
 | [`delegated-approval.md`](./delegated-approval.md) | closed 2026-09-24 (receipt) | DA1–DA6 shipped: reviewer denial is final, two clocks, `approval_delegate`, exact delegate grants, `jev_approval` (ADR-0041), `/delegate` and delegate identity on the wire (protocol 28). Acceptance 3 (one week of use) to be recorded |
-| [`onboarding-ux.md`](./onboarding-ux.md) | agent on the onboarding plan | OB0–OB11: user guide, startup error text, TUI without model/credential, doctor, init, install paths, trust prompt, docs-truth CI |
+| [`onboarding-ux.md`](./onboarding-ux.md) | closed 2026-09-25 (receipt) | OB0–OB12 shipped: user guide, actionable startup errors, TUI opens without model/credential/trust, doctor, init, install paths, first-session guidance, MCP credential degrade, docs-truth CI, docs site |
+| [`guide-expansion.md`](./guide-expansion.md) | agent on the guide-expansion plan | GE1–GE8: agents, sessions, skills, environment, keybindings, server, enterprise, changelog pages |
 | [`root.md`](./root.md) | lead | Shared-file changes, dependency and toolchain bumps, ADR number allocation, cross-plan requests; ADR-0035 reserved and accepted locally for GitHub #83 |
 | [`decisions-needed.md`](./decisions-needed.md) | anyone appends; lead resolves | Open questions with the conservative default taken |
 | [`g-phase-5b.md`](./g-phase-5b.md), [`g-phase-6.md`](./g-phase-6.md), `g-<name>.md` | lead | Phase gate runs on `main` with exact SHA, commands, counts, and what was not tested |
