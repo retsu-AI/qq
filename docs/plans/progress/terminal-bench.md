@@ -35,3 +35,16 @@ required first; that evaluation is now tool-layer T13 and still owns the
 keep/reject decision for T10 (`terminal`). R8's warm-path items other than
 prompt-cache determinism shipped through speed-first H14/H18/H22.2. No R
 slice in progress.
+
+### 2026-09-28 — Harbor adapter repaired ahead of the pilot (ENG-815)
+
+Main's adapter tests had been red since the protocol bump to 30: the fixture
+generator hardcoded the protocol number and `parse_version` returned the last
+whitespace field, which `qq --version`'s revision suffix (`qq 0.1.4 (abc
+2026-09-25)`) turned into `2026-09-25)`. Fixed: `parse_version` matches the
+semver and an optional `(rev date)` group, refusing anything else;
+`TYPESAFE_API_KEY` is forwarded with the other credentials; `make_fixtures.py`
+reads `PROTOCOL_VERSION` from `crates/qq-protocol/src/lib.rs`, so a future
+bump regenerates rather than drifts. 20 Python tests and
+`harbor_atif_fixtures` pass. Contributor commits from #187/#189 were kept
+verbatim where they were correct; no core change.

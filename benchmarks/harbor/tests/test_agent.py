@@ -12,8 +12,6 @@ from unittest import mock
 from qq_harbor.agent import QQAgent
 
 
-<<<<<<< HEAD
-=======
 class VersionTests(unittest.TestCase):
     def setUp(self) -> None:
         logs = tempfile.TemporaryDirectory()
@@ -49,7 +47,6 @@ class VersionTests(unittest.TestCase):
                 self.assertEqual(self.agent.parse_version(output), "")
 
 
->>>>>>> 61bac54 (fix(harbor): reject malformed version metadata and prereleases)
 class BuildCommandTests(unittest.TestCase):
     def _agent(self, **kwargs: object) -> QQAgent:
         logs_dir = Path(tempfile.mkdtemp())

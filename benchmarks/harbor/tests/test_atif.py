@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import runpy
 import tempfile
 import unittest
@@ -14,18 +13,10 @@ from qq_harbor.atif import ATIF_SCHEMA_VERSION, TraceError, convert_trace, load_
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 SMOKE_TASK = Path(__file__).resolve().parents[1] / "smoke-task"
-PROTOCOL_SOURCE = Path(__file__).resolve().parents[3] / "crates/qq-protocol/src/lib.rs"
 
 
 def current_protocol_version() -> int:
-    versions = re.findall(
-        r"^pub const PROTOCOL_VERSION: u16 = (\d+);$",
-        PROTOCOL_SOURCE.read_text(encoding="utf-8"),
-        re.MULTILINE,
-    )
-    if len(versions) != 1:
-        raise AssertionError("expected one authoritative Rust PROTOCOL_VERSION declaration")
-    return int(versions[0])
+    return runpy.run_path(str(FIXTURES.parent / "make_fixtures.py"))["PROTOCOL_VERSION"]
 
 
 class AtifConversionTests(unittest.TestCase):
