@@ -696,7 +696,6 @@ fn streaming_deltas_keep_the_tree_index() {
     child_summary.parent_id = Some(parent);
     store.upsert_summary(child_summary, &models, 0);
     store.warm_empty(child);
-    let order_before: *const SessionId = store.thread_order().as_ptr();
     assert_eq!(store.thread_order(), &[parent, child]);
 
     let started = message(9, child, run_id, "");
@@ -733,8 +732,11 @@ fn streaming_deltas_keep_the_tree_index() {
         ),
         context(&models),
     );
-    // Same allocation: the index was never dropped.
-    assert_eq!(store.thread_order().as_ptr(), order_before);
+    // Check before reading thread_order: reading would silently rebuild the cache.
+    assert!(
+        store.index.get().is_some(),
+        "streaming must retain the index"
+    );
     assert_eq!(store.thread_order(), &[parent, child]);
     assert_eq!(
         store.get(&child).unwrap().messages.as_ref().unwrap()[0].output,
