@@ -7,6 +7,7 @@ under `target/qq-perf/` and never committed.
 
 | File | Owner | Covers |
 | --- | --- | --- |
+| [`token-efficiency.md`](token-efficiency.md) | agent on efficiency plan | TE0–TE8 and links to existing evaluation owners |
 | [`speed-first.md`](./speed-first.md) | agent on the speed-first plan | H and HC slices; two open quiet-host recordings; Phases 7–9 when gated |
 | [`terminal-bench.md`](./terminal-bench.md) | agent on the readiness plan | R6–R8 and the Terminal-Bench evaluation program |
 | [`supervised-delegation.md`](./supervised-delegation.md) | agent on the delegation plan | D6b paired evaluation and default decisions |

@@ -15,6 +15,10 @@ below is for people changing QQ.
 
 ## Design — present tense, the system as built
 
+- [`token-efficiency.md`](design/token-efficiency.md) — baseline mechanisms and
+  research hypotheses; future changes belong to the
+  [token-efficiency plan](plans/token-efficiency.md).
+
 - [`architecture.md`](design/architecture.md) — system shape, crate layout,
   runtime, compiled plans, persistence, hosting boundary, deferred items.
 - [`product.md`](design/product.md) — product intent, priorities, scope.
