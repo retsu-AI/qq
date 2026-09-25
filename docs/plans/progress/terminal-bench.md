@@ -47,3 +47,16 @@ the exact output, legacy plain output, revision/semver suffixes and malformed
 responses. No agent/model run, credential or accepted source identity changed.
 Runtime evidence is retained in the manager's September25
 `qq-jev-evidence/colima-prerequisite-20260925/` directory.
+
+### 2026-09-25 — ENG-815 Harbor version parser locally verified
+
+Test-first commit `2b08bb9` reproduces the actual annotated version failure.
+The parser now extracts the package version from recognized QQ output and
+returns empty for unexpected output instead of guessing a date or token.
+Native Harbor 0.20.0: focused version tests 4/4 and full adapter/ATIF suite
+24/24 pass; retained real Linux stdout reads back as `0.1.4`. Python AST and
+diff whitespace checks pass. Evidence: manager `qq-jev-evidence/harbor-version-repair-20260925/`.
+Rust source is unchanged from accepted `291440a`; its prior workspace gates
+are baseline evidence, not rerun checks on this Python-only candidate.
+Independent final-head review and publication remain manager-owned. No live
+agent/model run, provider call, hosted CI, merge or release is claimed.
