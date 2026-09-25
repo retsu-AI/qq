@@ -97,7 +97,9 @@ unavailable MCP servers: linear (credential `linear/default` is not registered; 
 Run the command named, and the next run picks the credential up without a
 restart: the tool registry is keyed by the credential store's epoch, which
 `qq auth set` advances. `qq doctor` reports the same finding under `mcp`
-as a warning. Inline `Value(...)` bearers are unaffected.
+as a warning. The TUI shows the same reason as a warning on the composer
+rule when it connects (once per distinct message) and under the search row
+of `/skills`. Inline `Value(...)` bearers are unaffected.
 
 ## Inspecting
 

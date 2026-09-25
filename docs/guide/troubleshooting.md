@@ -215,6 +215,14 @@ command it names — the next run picks the credential up without a restart.
 `qq doctor` reports the same finding under `mcp`; `eager: true` surfaces a
 connection failure at startup instead of first use.
 
+### `provider returned HTTP 400: Invalid JSON payload received. Unknown name "additionalProperties"…`
+
+A `google/*` model rejected a tool declaration. Gemini accepts only a subset
+of JSON Schema; QQ now strips the unsupported keywords from every tool schema
+(built-in and MCP) before declaring it, so this no longer happens on a
+current build. If you still see it, `qq version` and the `Unknown name` in
+the message identify the keyword to report.
+
 ### `configuration working directory is invalid: …`
 
 The workspace path does not exist or is not a directory. `qq run --workspace`

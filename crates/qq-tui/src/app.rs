@@ -382,6 +382,9 @@ pub(crate) struct App {
     /// arrives, which reads as "unavailable": `Submit` queues instead of
     /// steering, and the profile and approval pickers say why.
     capabilities: Option<Arc<ServerCapabilities>>,
+    /// The degraded-tool-host message last raised as a warning, so a
+    /// re-fetched capability document with the same reason does not nag.
+    shown_host_warning: Option<String>,
     pub connection: ConnectionState,
     pub status: Option<String>,
     /// Session owning the current transient notice. A notice never follows
@@ -461,6 +464,7 @@ impl App {
             resolving: 0,
             esc_armed_at: None,
             capabilities: None,
+            shown_host_warning: None,
             connection: ConnectionState::Connecting,
             status: None,
             status_session_id: None,
@@ -618,6 +622,18 @@ impl App {
             }
             ClientUpdate::Capabilities(capabilities) => {
                 self.capabilities = Some(capabilities);
+                // A degraded tool host (an MCP server that did not start or
+                // authenticate) explains itself once on the rule; the same
+                // reason arriving again after a refresh stays quiet.
+                match self.tool_host_warning() {
+                    Some(warning) => {
+                        if self.shown_host_warning.as_deref() != Some(warning.as_str()) {
+                            self.set_warning(warning.clone());
+                            self.shown_host_warning = Some(warning);
+                        }
+                    }
+                    None => self.shown_host_warning = None,
+                }
                 self.refresh_profile_picker();
                 Effects::redraw(Redraw::Scheduled)
             }
@@ -2653,6 +2669,26 @@ impl App {
     /// Highlighted row in the slash autocomplete list, clamped to `len`.
     pub(crate) fn slash_selected(&self, len: usize) -> usize {
         self.slash.selected(len)
+    }
+
+    /// Why one or more external tool hosts are degraded, as the server
+    /// reported it (`unavailable MCP servers: linear (…)`), joined when
+    /// several hosts carry a reason. `None` while every host is healthy or
+    /// before capabilities arrive.
+    pub(crate) fn tool_host_warning(&self) -> Option<String> {
+        let tools = self.capabilities.as_deref()?.workspace_tools.as_ref()?;
+        let mut warning = String::new();
+        for message in tools
+            .hosts
+            .iter()
+            .filter_map(|host| host.message.as_deref())
+        {
+            if !warning.is_empty() {
+                warning.push_str("; ");
+            }
+            warning.push_str(message);
+        }
+        (!warning.is_empty()).then_some(warning)
     }
 
     pub fn advance_animation(&mut self) -> bool {

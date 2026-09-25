@@ -155,7 +155,7 @@ Declare children from `providers.rs`. Prefer this layout over
 
 Linear is the source of work tracking:
 
-- Team: `DEV`
+- Team: `ENG`
 - Project: `qq`
 
 Use the Executor MCP/tool integrations as the primary interface for both Linear
@@ -166,8 +166,8 @@ Branch names must start with a Conventional Commit type followed by `/` and a
 short kebab-case description. Include the Linear identifier when available:
 
 ```text
-feat/dev-123-provider-cache
-fix/dev-456-sse-reconnect
+feat/eng-123-provider-cache
+fix/eng-456-sse-reconnect
 docs/agent-guide
 ```
 

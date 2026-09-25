@@ -3,7 +3,10 @@
   // Astro's `strict` preset (astro/tsconfigs/strict -> base), inlined. The
   // preset is reached through the package's `exports` wildcard, which some
   // TypeScript-aware runners resolve incorrectly (nubjs/nub#804); these
-  // options are what the preset has contained since Astro 5.
+  // options are what the preset has contained since Astro 5. The fix is
+  // merged upstream but not in any release (0.9.3 predates it): revert to
+  // `extends: "astro/tsconfigs/strict"` once a nub release after 0.9.3
+  // ships the fix.
   "compilerOptions": {
     "strict": true,
     "target": "ESNext",
