@@ -13,6 +13,11 @@ pub enum ClientRequest {
     /// compile lazily from workspace files, so a client asks again after an
     /// edit rather than restarting.
     Capabilities,
+    /// Re-read the model catalog for this workspace with `selection` as the
+    /// client default, exactly as bootstrap does. Delivered as
+    /// [`ClientUpdate::Models`]; a client asks after its configuration
+    /// becomes loadable (a trusted project) rather than restarting.
+    Models(qq_protocol::ModelSelection),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

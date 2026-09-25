@@ -111,6 +111,8 @@ Custom providers appear once their `auth` reference resolves — see
 `qq` opens even when the configuration is incomplete; only `qq ask` and `qq
 run` refuse to start.
 
+- **Project not yet trusted**: the transcript is the trust prompt (below);
+  nothing else loads until you answer.
 - **No `model` configured**: the top row reads `no model` and the composer
   rule reads `choose a model with /models` until you pick one. `Enter` in
   the picker creates the first session with the highlighted model, which
@@ -121,6 +123,36 @@ run` refuse to start.
   session.`; `Alt-N` repeats the same line as a warning. Add the credential
   in another terminal and start `qq` again — the credential check runs at
   startup.
+
+## Trust
+
+A repository that ships `.qq/config.ron` (or `qq.ron`, `.qq/config.d/`) with
+a model, providers, MCP servers, grants, or packs is loaded only after you
+accept it. Until then the transcript is the prompt and the composer is
+disabled (`✎ Answer the trust prompt above`):
+
+```
+◇ this project's configuration needs your trust
+  /home/you/repo/.qq/config.ron
+    model anthropic/claude-sonnet-5
+    MCP linear → https://mcp.linear.app/mcp
+    grants: 2 tools, 3 shell prefixes
+  t trust   s this session   q quit
+```
+
+| Key | Effect |
+| --- | --- |
+| `t` | record the files, exactly as `qq trust` does; the next launch does not ask |
+| `s` | load them for this process only; nothing is written and the next `qq` asks again |
+| `q`, `Esc` | quit without loading them |
+
+Every other key is ignored while the prompt is up. After `t` or `s` the
+notice reads `trusted N file(s)` or `trusted for this session`, and the
+empty state continues as above (`no model`, a credential remedy, or `Alt-N
+creates the first session.`). If this `qq` attached to a server on another
+host, `t` and `s` say to run `qq trust` there instead: trust is a decision
+about files on the host that runs the server. Details and what "sensitive"
+means in [Permissions and trust](permissions.md#project-trust).
 
 ## Your first session
 
@@ -189,6 +221,7 @@ searchable palette that runs the highlighted command on `Enter`.
 | attention / changes | `/attention`, `/changes` | |
 | external editor | `/editor` | `Alt-E` |
 | prompt history | | `Ctrl-R` |
+| trust prompt: trust / this session / quit | | `t` / `s` / `q` |
 | quit | `/quit`, `/exit` | `Ctrl-C` |
 
 Scrolling: mouse wheel, `PageUp` / `PageDown`, `Shift-Up` / `Shift-Down`,

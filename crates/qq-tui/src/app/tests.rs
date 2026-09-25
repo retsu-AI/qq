@@ -829,6 +829,7 @@ fn new_slash_command_creates_a_root_session_with_the_selected_model() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        pending_trust: Vec::new(),
     });
     app.apply_snapshot(snapshot());
     app.composer.text = "/new".to_owned();
@@ -865,6 +866,7 @@ fn slash_clear_is_a_client_alias_for_a_new_session() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        pending_trust: Vec::new(),
     });
     app.apply_snapshot(snapshot());
     app.composer.text = "/clear".to_owned();
@@ -1205,6 +1207,7 @@ fn context_meter_app() -> App {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        pending_trust: Vec::new(),
     })
 }
 
@@ -1523,6 +1526,7 @@ fn model_refresh_preserves_the_open_picker_selection_by_identity() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        pending_trust: Vec::new(),
     });
     app.apply_snapshot(snapshot());
     app.open_models();
@@ -1605,6 +1609,7 @@ fn model_picker_applies_to_the_focused_session_and_ctrl_n_creates() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        pending_trust: Vec::new(),
     });
     app.apply_snapshot(snapshot());
     app.composer.text = "/models".to_owned();
@@ -1676,6 +1681,7 @@ fn model_picker_enter_without_a_focused_session_creates_one() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        pending_trust: Vec::new(),
     });
     let mut empty = snapshot();
     empty.sessions.clear();
@@ -1731,6 +1737,7 @@ fn model_picker_selection_becomes_the_default_for_new_sessions() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        pending_trust: Vec::new(),
     });
     app.apply_snapshot(snapshot());
     app.open_models();
@@ -3134,6 +3141,7 @@ fn themed_app() -> App {
             crate::Theme::from_roles("mono", [crate::ThemeColor::White; 8]),
         ],
         workspace_root: None,
+        pending_trust: Vec::new(),
     });
     app.apply_snapshot(snapshot());
     app
@@ -3699,6 +3707,7 @@ fn profile_chosen_without_a_focused_session_applies_to_the_next_create() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        pending_trust: Vec::new(),
     });
     let mut empty = snapshot();
     empty.sessions.clear();
@@ -3876,6 +3885,7 @@ fn effort_chosen_without_a_focused_session_applies_to_the_next_create() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        pending_trust: Vec::new(),
     });
     let mut empty = snapshot();
     empty.sessions.clear();
@@ -3946,6 +3956,7 @@ fn effort_picker_is_shaped_by_the_focused_models_advertised_ladder() {
             unauthenticated_providers: Vec::new(),
             themes: Vec::new(),
             workspace_root: None,
+            pending_trust: Vec::new(),
         });
         app.apply_snapshot(snap.clone());
         app.execute(Command::OpenEffort);
@@ -4095,6 +4106,7 @@ fn approval_mode_chosen_without_a_focused_session_applies_to_the_next_create() {
         unauthenticated_providers: Vec::new(),
         themes: Vec::new(),
         workspace_root: None,
+        pending_trust: Vec::new(),
     });
     let mut empty = snapshot();
     empty.sessions.clear();
@@ -4415,4 +4427,171 @@ fn without_a_workspace_root_mentions_stay_literal_text() {
             ..
         })] if input.as_slice() == [qq_protocol::InputPart::text("see @src/lib.rs")]
     ));
+}
+
+fn untrusted_project_app() -> App {
+    // OB7: the root opened the TUI on `TrustRequired`, so nothing loaded.
+    let mut app = App::new(TuiOptions {
+        pending_trust: vec![PendingTrustNotice {
+            path: "/home/me/repo/.qq/config.ron".to_owned(),
+            declarations: vec![
+                "model anthropic/claude-sonnet-5".to_owned(),
+                "MCP linear → https://mcp.linear.app/mcp".to_owned(),
+            ],
+        }],
+        ..TuiOptions::default()
+    });
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        sessions: Vec::new(),
+        focused: None,
+        ..snapshot()
+    }));
+    app
+}
+
+#[test]
+fn trust_prompt_owns_input_and_maps_t_s_q_to_effects() {
+    let mut app = untrusted_project_app();
+    assert_eq!(app.mode(), Mode::Trust);
+    assert_eq!(app.composer_mode(), crate::view::ComposerMode::Trust);
+    // Nothing else is meaningful before the configuration loads: no text
+    // reaches the composer, no slash command runs, no session is created.
+    for code in [
+        KeyCode::Char('x'),
+        KeyCode::Char('/'),
+        KeyCode::Enter,
+        KeyCode::Char('n'),
+        KeyCode::Char('y'),
+    ] {
+        let effects = app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+        assert!(effects.is_empty(), "{code:?} produced {effects:?}");
+    }
+    assert!(app.composer.text.is_empty());
+    let effects = app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT));
+    assert!(effects.is_empty(), "{effects:?}");
+
+    let effects: Vec<Effect> = app
+        .handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE))
+        .into_iter()
+        .collect();
+    assert_eq!(
+        effects,
+        [
+            Effect::Redraw(Redraw::Immediate),
+            Effect::ResolveTrust(TrustChoice::Persist),
+        ]
+    );
+    // While the first choice resolves a second press does nothing.
+    assert!(
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .is_empty()
+    );
+    let effects: Vec<Effect> = app
+        .note_trust_failure("trust state unavailable")
+        .into_iter()
+        .collect();
+    assert_eq!(effects, [Effect::Redraw(Redraw::Immediate)]);
+    assert_eq!(app.mode(), Mode::Trust, "the prompt stays on failure");
+    assert_eq!(
+        app.visible_status(),
+        Some(("trust state unavailable", NoticeLevel::Error))
+    );
+
+    let effects: Vec<Effect> = app
+        .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+        .into_iter()
+        .collect();
+    assert_eq!(
+        effects,
+        [
+            Effect::Redraw(Redraw::Immediate),
+            Effect::ResolveTrust(TrustChoice::Session),
+        ]
+    );
+    app.note_trust_failure("still no");
+
+    for code in [KeyCode::Char('q'), KeyCode::Esc] {
+        let effects: Vec<Effect> = app
+            .handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+            .into_iter()
+            .collect();
+        assert!(effects.contains(&Effect::Quit), "{code:?}: {effects:?}");
+    }
+}
+
+#[test]
+fn resolved_trust_drops_the_prompt_applies_the_catalog_and_refreshes_the_server_view() {
+    let mut app = untrusted_project_app();
+    app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+    let selection = ModelSelection {
+        model_is_fallback: true,
+        model: Some("anthropic/claude-sonnet-5".to_owned()),
+        max_output_tokens: Some(16_384),
+        organization: None,
+    };
+    let effects: Vec<Effect> = app
+        .apply_trust_resolved(
+            TrustChoice::Persist,
+            TrustResolved {
+                trusted: vec!["/home/me/repo/.qq/config.ron".to_owned()],
+                model: selection.clone(),
+                models: vec![ModelOption {
+                    provider: "anthropic".to_owned(),
+                    model: "claude-sonnet-5".to_owned(),
+                    name: None,
+                    context_window: Some(200_000),
+                    reasoning_efforts: Vec::new(),
+                    selection: selection.clone(),
+                }],
+                unauthenticated_providers: vec![ProviderRemedy {
+                    provider: "openai".to_owned(),
+                    remedy: "run qq auth login openai or set OPENAI_API_KEY".to_owned(),
+                }],
+            },
+        )
+        .into_iter()
+        .collect();
+
+    assert_eq!(app.mode(), Mode::Compose);
+    assert!(app.pending_trust.is_empty());
+    assert_eq!(app.model, selection);
+    assert_eq!(app.models.len(), 1);
+    assert_eq!(app.unauthenticated_providers.len(), 1);
+    assert_eq!(
+        app.visible_status(),
+        Some(("trusted 1 file", NoticeLevel::Info))
+    );
+    // Profiles/skills and the catalog are re-read from the server, which
+    // compiled them while the project was withheld.
+    assert_eq!(
+        effects,
+        [
+            Effect::Redraw(Redraw::Immediate),
+            Effect::Send(ClientRequest::Capabilities),
+            Effect::Send(ClientRequest::Models(selection.clone())),
+        ]
+    );
+    // With a usable model in hand, Alt-N creates a session as after an
+    // ordinary start.
+    let requests = app
+        .handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT))
+        .into_requests();
+    assert!(matches!(
+        requests.as_slice(),
+        [ClientRequest::Command(CommandRequest {
+            command: SessionCommand::CreateSession { model, .. },
+            ..
+        })] if *model == selection
+    ));
+
+    // The session-scoped answer says so, and a resolved prompt without a
+    // model hands over to the OB1 guidance.
+    let mut app = untrusted_project_app();
+    assert_eq!(app.startup_guidance(), None, "unknown until loaded");
+    app.apply_trust_resolved(TrustChoice::Session, TrustResolved::default());
+    assert_eq!(
+        app.visible_status(),
+        Some(("trusted for this session", NoticeLevel::Info))
+    );
+    assert_eq!(app.startup_guidance().as_deref(), Some(CHOOSE_MODEL_NOTICE));
 }

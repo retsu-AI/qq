@@ -10,7 +10,7 @@ use qq_protocol::{
     ReasoningEffort, ServerCapabilities, SessionCommand, SessionId, SessionStatus,
 };
 
-use super::{App, PendingIntent, ProviderRemedy};
+use super::{App, ModelOption, PendingIntent, ProviderRemedy};
 use crate::{
     commands::{Command, SlashAction},
     effect::{Effects, Redraw},
@@ -228,7 +228,17 @@ impl App {
         models: Vec<ModelDescriptor>,
         selected_model: Option<ModelSelection>,
     ) {
-        self.models = models.into_iter().map(Into::into).collect();
+        self.apply_model_options(models.into_iter().map(Into::into).collect(), selected_model);
+    }
+
+    /// [`Self::apply_models`] for a catalog the composition root computed
+    /// (startup options, a resolved trust prompt) rather than the server.
+    pub(super) fn apply_model_options(
+        &mut self,
+        models: Vec<ModelOption>,
+        selected_model: Option<ModelSelection>,
+    ) {
+        self.models = models;
         self.models.sort_by(|left, right| {
             (&left.provider, &left.name, &left.model).cmp(&(
                 &right.provider,

@@ -50,6 +50,7 @@ written.
 - [ADR-0039: a run compacts its own turns at a safe boundary with a run-scoped marker](0039-in-run-compaction.md) — Accepted (ENG-793, #92).
 - [ADR-0040: two-phase retry ownership — the provider owns sends, the run owns turns and settles `paused`](0040-two-phase-retry-ownership.md) — Accepted (run-reliability RR4); supersedes ADR-0005 in part.
 - [ADR-0041: Jev as an approval delegate, for held calls only](0041-jev-delegated-approval.md) — Accepted (delegated-approval DA5, ENG-862); supersedes ADR-0030's "never authorizes side effects" for the `jev_approval` lane only.
+- [ADR-0042: the in-TUI trust prompt is client-side, resolved by the composition root; no protocol change](0042-in-tui-trust-prompt.md) — Accepted (onboarding-ux OB7, ENG-881).
 
 ## When to write one
 

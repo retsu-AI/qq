@@ -29,6 +29,9 @@ pub(crate) enum Effect {
     Attention(Attention),
     /// Turn terminal mouse reporting on or off.
     MouseCapture(bool),
+    /// Answer the trust prompt: the composition root records or admits the
+    /// pending files off the loop and calls back with what loaded.
+    ResolveTrust(crate::app::TrustChoice),
     Quit,
 }
 

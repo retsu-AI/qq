@@ -257,6 +257,7 @@ async fn run_tui_client(
                     let Some(request) = request else { return; };
                     dispatch_tui_request(
                         client.clone(),
+                        workspace.clone(),
                         workspace_id,
                         request,
                         Arc::clone(&request_permits),
@@ -567,6 +568,7 @@ async fn recover_tui_client(
 
 fn dispatch_tui_request(
     client: SessionClient,
+    workspace: PathBuf,
     workspace_id: WorkspaceId,
     request: ClientRequest,
     permits: Arc<Semaphore>,
@@ -583,7 +585,7 @@ fn dispatch_tui_request(
             )),
             // A refresh that cannot run now is simply not delivered: the TUI
             // keeps the document it has and the user can ask again.
-            ClientRequest::Capabilities => return,
+            ClientRequest::Capabilities | ClientRequest::Models(_) => return,
         };
         let _ = updates.try_send(update);
         return;
@@ -609,6 +611,25 @@ fn dispatch_tui_request(
                 Ok(capabilities) => ClientUpdate::Capabilities(Arc::new(capabilities)),
                 Err(_) => return,
             },
+            ClientRequest::Models(selection) => {
+                let request = ModelCatalogRequest {
+                    workspace: workspace.to_string_lossy().into_owned(),
+                    selection: selection.clone(),
+                };
+                // Same validity rule as bootstrap: the default is kept only
+                // when the catalog lists it, so the TUI never offers Alt-N a
+                // route the server would refuse.
+                match client.models(request).await {
+                    Ok(models) => {
+                        let selected = models
+                            .iter()
+                            .any(|model| model.selection.model == selection.model)
+                            .then_some(selection);
+                        ClientUpdate::Models { models, selected }
+                    }
+                    Err(_) => return,
+                }
+            }
         };
         let _permit = permit;
         let _ = updates.send(update).await;
