@@ -328,3 +328,20 @@ clamping the lifted cap to the remaining run output budget (pre-existing
 after-the-turn meter semantics); the live LiteLLM check (cannot run in CI;
 still recorded above as not done); ledger and `worker_model` wording (the code
 is right: `worker_model` is a balanced entry and runs at `medium`; docs fixed).
+
+Round two (three more on #198, one on #200). Acted on: a turn that streamed a
+complete tool call and then hit the cap with no text was classified as
+all-reasoning because truncation cleanup drops pending calls before the check
+(now continued like any truncation); an empty truncated turn was persisted as
+truncated and replay appended an empty assistant message plus the continuation
+notice the live run never sent (replay now skips it); and the compiled-default
+filter from round one would have discarded an explicit `--max-output-tokens
+16384`, so it is withdrawn and the cause fixed instead: pickers, the configured
+default, the worker selection and the headless path no longer materialise the
+compiled default into `ModelSelection`, so a row pins a cap only when it was
+chosen. Declined: clamping the compaction cap-raise retry to the remaining
+context window — the summarizer input was selected against an 8 192 reserve
+and the ceiling is well above it, so the retry overflows only for a transcript
+already at the window edge, where the original request was about to fail
+anyway; not worth a second selection pass. Rebased onto `main` after #194
+took descriptor v10; ours is v11.
