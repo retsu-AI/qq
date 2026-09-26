@@ -1038,8 +1038,14 @@ mod tests {
         );
         let safe = test_provider(
             ProviderKind::Custom,
-            endpoint,
+            endpoint.clone(),
             HttpCredential::Configured(ProviderAuth::NoAuth),
+        );
+        let value_reference: SecretRef = ron::from_str(r#"Value("inline-safe")"#).unwrap();
+        let value = test_provider(
+            ProviderKind::Custom,
+            endpoint,
+            HttpCredential::Configured(ProviderAuth::Bearer(value_reference)),
         );
         let discovery = ModelDiscovery::new().unwrap();
         let ProviderAccess::Http(safe_access) = safe.access().unwrap() else {
@@ -1063,6 +1069,28 @@ mod tests {
             expires_at: Instant::now() + CACHE_TTL,
             models: Some(safe_models.clone()),
         });
+        let ProviderAccess::Http(value_access) = value.access().unwrap() else {
+            unreachable!()
+        };
+        let value_auth = resolve_auth(value_access, &credentials).unwrap();
+        let value_key = cache_key(
+            &discovery.cache_key,
+            "value",
+            ProviderKind::Custom,
+            value_access,
+            &value_auth,
+        )
+        .unwrap();
+        let value_models = vec![DiscoveredModel {
+            id: "value-model".to_owned(),
+            name: Some("Value model".to_owned()),
+            efforts: None,
+        }];
+        discovery.cache.lock().unwrap().push_back(CacheEntry {
+            key: value_key,
+            expires_at: Instant::now() + CACHE_TTL,
+            models: Some(value_models.clone()),
+        });
 
         assert_eq!(discovery.cached("stored", &stored, &credentials), None);
         assert_eq!(discovery.cached("xai", &xai, &credentials), None);
@@ -1073,6 +1101,10 @@ mod tests {
         assert_eq!(
             discovery.cached("safe", &safe, &credentials),
             Some(safe_models)
+        );
+        assert_eq!(
+            discovery.cached("value", &value, &credentials),
+            Some(value_models)
         );
         assert_eq!(keyring.reads(), 0, "cache-only discovery read Keychain");
         assert_eq!(

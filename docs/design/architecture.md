@@ -459,13 +459,14 @@ error naming the accepted values, so the operator sees it before the provider
 would fail the turn. An empty ladder is unknown, not unsupported, and is not
 checked.
 
-Plan compilation keeps credential material request-time. Its optional model-
-discovery cache lookup uses a cached result only when the cache scope can be
+Plan compilation does not read secure storage while assembling discovery and
+spawn-route metadata. Its optional model-discovery cache lookup uses a cached result only when the cache scope can be
 derived without secure-store I/O. Codex, XAI, stored secret references, and a
 built-in API-key fallback without an explicit non-stored reference therefore
 skip the cache probe and use the configured reasoning ladder. Model catalogs
 may still check authentication when explicitly requested, and live discovery
-and provider requests resolve credentials through their existing paths.
+resolves credentials through its existing path. Codex and XAI provider requests
+remain request-time; other credentials retain their existing preparation paths.
 
 Credential rotation is tracked separately by an opaque `CredentialEpoch` owned
 by `qq-auth`: every durable credential write advances the store's index

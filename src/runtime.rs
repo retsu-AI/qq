@@ -1258,7 +1258,8 @@ impl RuntimeFactory {
                 .any(|option| option.selection.model.as_deref() == Some(route.as_str()))
             && let Some(provider) = snapshot.providers.get(route.provider())
             && (route_is_admitted(route.provider(), route.model())
-                && (admitted_routes.is_some()
+                && (!require_authentication
+                    || admitted_routes.is_some()
                     || self.provider_authenticated(route.provider(), provider)))
         {
             let metadata = provider.models().get(route.model());
@@ -8685,12 +8686,11 @@ mod tests {
             )
             .unwrap();
         let factory = fixture.factory_with_credentials(credentials);
-        let plan =
-            factory
-                .plan_for(&fixture.request(
-                    r#"(version: 1, model: "openai-codex/gpt-5.4", reasoning_effort: high)"#,
-                ))
-                .unwrap();
+        let plan = factory
+            .plan_for(&fixture.request(
+                r#"(version: 1, model: "openai-codex/not-in-the-catalog", reasoning_effort: high)"#,
+            ))
+            .unwrap();
 
         assert_eq!(
             plan.descriptor().reasoning_effort,

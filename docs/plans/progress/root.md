@@ -535,11 +535,11 @@ Matched off/Strict product-value evidence and owner approval remain open; no pus
 Test-first commit `927ab0be` reproduces Codex, XAI, stored-reference and built-in
 API-key fallback reads during cache-only discovery and plan compilation. Repair
 `b0ae6223` skips cache scopes that require secure storage and builds spawn-route
-metadata without authentication reads; request-time authentication is unchanged.
+metadata without authentication reads; provider authentication timing is otherwise unchanged.
 Focused result: catalog 4/4, plan 2/2, and loader-ownership 1/1 passed without a
 real Keychain or provider. Paired 200-iteration debug fixture, baseline/candidate:
-cold median 1.829/1.794 ms, p95 2.340/2.570 ms; warm median 21.458/21.917 us,
-p95 25.792/27.250 us. Rust 1.97.1 serial all-features: 1,942 passed,
+cold median 1.829/1.543 ms, p95 2.340/1.797 ms; warm median 21.458/20.709 us,
+p95 25.792/24.125 us. Rust 1.97.1 serial all-features: 1,942 passed,
 zero failed, five existing ignores; all-features build, format and diff pass.
 Strict Clippy remains blocked by pre-existing provider/headless warnings present
 at base `f29545da`; independent exact-head review remains pending.
