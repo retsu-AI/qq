@@ -755,7 +755,11 @@ One durable run follows a guarded loop:
    step per command. Within a run, before a later turn is refused for the
    window, the loop first stubs its own read-only results older than the
    recency window in memory (the same rewrite assembly applies between
-   runs) and re-plans. If that still does not fit, the run compacts
+   runs) and re-plans. Both that decision and the in-run compaction below
+   are made on the same estimate the session's admission guard applies to
+   the prepared request — the measured chain when one covers it, the byte
+   ratio otherwise — so the loop cannot judge a request as fitting that the
+   guard then refuses. If that still does not fit, the run compacts
    *itself* at the boundary — every tool result durable, nothing in flight,
    steering applied: it hands its prompt and every turn but the last
    `CONTEXT_PRUNE_KEEP_TURNS` to an in-run compactor

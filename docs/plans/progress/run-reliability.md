@@ -13,6 +13,7 @@ appended below, newest last.
 | RR5 | `Retry-After` ≤ 60 s; 529 retryable; HTTP-date | Shipped (#118) | [ENG-866](https://linear.app/retsu-ai/issue/ENG-866) | `fix/rr5-retry-after` | provider crate; minimal profile green |
 | RR6 | Reactive overflow; un-wedge admission (mid-run compaction shipped in #92) | In review | [ENG-868](https://linear.app/retsu-ai/issue/ENG-868) | `feat/eng-868-rr6-reactive-overflow` | 9 runs / 3 sessions; independent review |
 | RR7 | Estimate calibration from reported usage | In review | [ENG-869](https://linear.app/retsu-ai/issue/ENG-869) | `feat/eng-869-rr7-estimate-calibration` | deferred from F04 |
+| RR7.1 | Use measured admission occupancy for in-run recovery | In review | [ENG-940](https://linear.app/retsu-ai/issue/ENG-940) | `fix/eng-940-measured-context-recovery` | Eight observed failures; zero compaction attempts |
 | RR8 | Output-token handling and persisted `max_output_tokens` floor | Planned | [ENG-870](https://linear.app/retsu-ai/issue/ENG-870) | | 5 runs |
 | RR9 | Approval deadline policy | Planned | [ENG-871](https://linear.app/retsu-ai/issue/ENG-871) | | 4 timeouts |
 | RR10 | Lenient tool-argument decode | Planned | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872) | | ~11 wasted turns |
@@ -188,3 +189,32 @@ acceptance fixture
 `calibration_holds_the_estimate_within_ten_percent_on_a_code_heavy_transcript`
 (eight turns at 3.1 B/t, worst error < 10 %; the default would be 22 %
 under per delta), plus the existing chain and boundary tests.
+
+
+### 2026-09-25 — RR7.1 measured in-run recovery (ENG-940)
+
+Read-only session DB inspection found eight context-estimate policy failures;
+all had zero compaction attempts despite 21–1,091 completed turns. The exact
+reported request was 968,606 bytes / 256,359 measured-adjusted input tokens,
+plus 16,384 output tokens against a 272,000-token window. Cause: the run
+loop's `would_overflow` / `still_overflows` checks used the raw
+`estimate_tokens(input_bytes)` (bytes/4) while the `Prepared` weight the
+session guard planned carried `compatible_input_tokens` from the calibrated
+measured chain (RR7). On code-heavy transcripts (~3 B/t) the two diverge by
+a third; the loop said "fits", skipped stubbing and in-run compaction, and
+the guard failed the run closed with `NoReducibleHistory` /
+`BetweenRunsOnly`. Fix (`lib.rs`): one `estimate_input_tokens` closure
+computes the measured-chain figure (or the byte ratio when no chain covers
+the request) and every decision on the turn — stub trigger, compaction
+trigger, and the weight handed to admission — uses it; the chain is passed
+by value so clearing it after an in-run summary is visible to the next
+estimate. No schema or protocol change. Test:
+`a_dense_tokenizer_compacts_in_run_instead_of_failing_at_the_guard` (new
+`Measured` harness wrapper reports usage at 2 B/t; 24 mutating turns in a
+16k window; fails on the old code with the exact production message, passes
+with ≥1 in-run compaction and every prompt-run request under the window by
+the provider's ratio). Baseline `cargo bench -p qq-core --bench
+plan_compile` unchanged (compile 23,756 ns/op, digest 2,292 ns/op).
+Follow-up filed: [ENG-952](https://linear.app/retsu-ai/issue/ENG-952) — an
+empty completed turn with no usage settles `completed` instead of retrying
+as a provider fault; it stalled this slice's implementation twice.
