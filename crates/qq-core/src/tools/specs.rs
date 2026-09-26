@@ -135,7 +135,7 @@ impl BuiltInTool {
             ),
             Self::Search => ToolSpec::new(
                 "search",
-                "Search workspace file contents or names, ignore-aware. Modes: content (default), names, definition, references. Pass the header's next= cursor to continue.",
+                "Search workspace file contents or names, ignore-aware. Modes: content (default), names, definition, references. Omit cursor for the first page; pass the header's next= value to continue.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -150,7 +150,7 @@ impl BuiltInTool {
                         "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 60 },
                         "max_per_file": { "type": "integer", "minimum": 1, "maximum": MAX_PER_FILE, "default": 10 },
                         "include_ignored": { "type": "boolean", "default": false },
-                        "cursor": { "type": "string", "maxLength": MAX_CURSOR_BYTES }
+                        "cursor": { "type": "string", "maxLength": MAX_CURSOR_BYTES, "description": "Omit for the first page. Only the exact next= value from a previous search result continues it." }
                     },
                     "required": ["query"],
                     "additionalProperties": false

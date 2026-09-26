@@ -880,6 +880,45 @@ mod tests {
         );
         assert!(bad.is_error);
         assert!(bad.model_text.starts_with("cursor_invalid"));
+        assert!(
+            bad.model_text.contains("omit `cursor` for the first page"),
+            "{}",
+            bad.model_text
+        );
+
+        // ENG-959: every placeholder a model sends for "start from the
+        // beginning" is the first page, byte for byte identical to omitting
+        // the field. One day's sessions had ~1,470 of 1,485 search calls
+        // fail on these.
+        let first_page = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"needle","limit":25}"#,
+        );
+        assert!(!first_page.is_error);
+        for placeholder in [
+            "", " ", "initial", "INITIAL", "start", "first", "0", ".", "/", "null", "none",
+        ] {
+            let page = run_tool(
+                &workspace,
+                &state,
+                "search",
+                &format!(
+                    r#"{{"query":"needle","limit":25,"cursor":{}}}"#,
+                    serde_json::json!(placeholder)
+                ),
+            );
+            assert!(
+                !page.is_error,
+                "cursor {placeholder:?}: {}",
+                page.model_text
+            );
+            assert_eq!(
+                page.model_text, first_page.model_text,
+                "cursor {placeholder:?}"
+            );
+        }
     }
 
     #[test]
