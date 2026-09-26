@@ -5,7 +5,12 @@ pub(super) struct MdmConfiguration {
     pub(super) content: String,
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    test,
+    feature = "test-support",
+    target_os = "macos",
+    target_os = "windows"
+))]
 impl MdmConfiguration {
     pub(super) fn new(origin: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
@@ -17,6 +22,28 @@ impl MdmConfiguration {
 
 pub(super) trait MdmReader: Send + Sync {
     fn read(&self) -> Result<Option<MdmConfiguration>, ConfigError>;
+}
+
+#[cfg(feature = "test-support")]
+pub(super) struct SequenceMdmReader {
+    pub(super) origin: String,
+    pub(super) contents: std::sync::Mutex<std::collections::VecDeque<String>>,
+}
+
+#[cfg(feature = "test-support")]
+impl MdmReader for SequenceMdmReader {
+    fn read(&self) -> Result<Option<MdmConfiguration>, ConfigError> {
+        let mut contents = self.contents.lock().expect("test MDM sequence lock");
+        let content = if contents.len() > 1 {
+            contents.pop_front().expect("nonempty test MDM sequence")
+        } else {
+            contents
+                .front()
+                .expect("nonempty test MDM sequence")
+                .clone()
+        };
+        Ok(Some(MdmConfiguration::new(self.origin.clone(), content)))
+    }
 }
 
 pub(super) struct SystemMdmReader;

@@ -76,7 +76,7 @@ approximate anchors, not stable identifiers.
 ### Invocation
 
 ```sh
-qq run [--workspace PATH] [--session ID]
+qq run [--workspace PATH] [--state-root PATH] [--session ID]
        [--approval read-only|auto|full] [--profile NAME]
        [--allow-tool NAME]... [--allow-shell PREFIX]... [--steer-stdin]
        [--timeout-seconds N] [--max-turns N] [--max-cost-usd VALUE]
@@ -155,10 +155,39 @@ referenced, never inlined.
 
 ### State Location
 
-`qq run` always creates a new session in `<data_dir>/sessions.sqlite3`, where
-`data_dir` honors `XDG_DATA_HOME` on Linux (`crates/qq-config/src/loader.rs`).
-A supervisor that wants the session store as an artifact redirects
-`XDG_DATA_HOME` to a run-scoped directory.
+Without `--state-root`, `qq run` creates or resumes a session in the ordinary
+`<data_dir>/sessions.sqlite3`; `data_dir` honors `XDG_DATA_HOME` on Linux
+(`crates/qq-config/src/loader.rs`). This default path keeps its existing
+configuration, trust, organization, credential, and session behavior.
+
+`--state-root PATH` is an opt-in admission boundary for a supervisor-owned run.
+`PATH` must already be a private canonical directory with existing `config/`,
+`data/`, `workspace/`, and `artifacts/` children. QQ rejects symlinks, a
+workspace outside the root, overlap with ordinary QQ config/data, and a fresh
+root that already contains `sessions.sqlite3`. On Unix, the root, required
+children, and config must not grant group or other permissions, and the
+children and config must share the root's UID. Writes for global-style
+configuration, trust/grants, durable identity, and sessions are relocated under
+the root.
+Managed files, native MDM, and cached enrolled-organization policy remain
+read-only inputs from their ordinary sources, with managed ownership checks
+preserved. Credentials remain in the ordinary credential store; the flag does
+not copy or serialize them.
+
+The initial load captures a secret-free run-state admission. Later profile,
+plan-cache, child, and resume loads must match the admitted workspace, model
+routes, organization, profile, output ceiling, reasoning choice, effective
+credential/process consumers, and configuration-source content. Native MDM and
+cached organization documents are bound by content digest as well as origin.
+A mismatch fails as `invalid_configuration` before credential resolution,
+durable identity creation, session-store opening, or plan use. A named profile
+compiles from the exact effective snapshot that passed this check.
+
+The state root separates QQ-owned state; it is not an OS sandbox. It does not
+confine shell commands, MCP processes, network access, or same-user OS
+credentials. The supervisor still owns process, filesystem, and network
+isolation. `--session` may resume only a session in the admitted root and
+workspace; moving a session id between roots does not grant access to it.
 
 One process owns a store at a time (ADR-0022). A second `qq` opening the same
 store — a retry that starts before the previous attempt has exited, or two

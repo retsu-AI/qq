@@ -15,9 +15,10 @@ use qq_auth::{
     resolve_provider_credential_with_aliases,
 };
 use qq_config::{
-    AwsAuth, BedrockAuth, ClientSnapshot, ConfigError, ConfigLoader, ConfigSnapshot, EndpointMode,
-    HttpAccess, HttpCredential, LoadRequest, ProcessTrust, PromotionOutcome, ProviderAccess,
-    ProviderApi, ProviderAuth, ProviderConfig, RuntimeOverrides, WorkspaceGrant,
+    AwsAuth, BedrockAuth, ClientSnapshot, ConfigError, ConfigKey, ConfigLoader, ConfigSnapshot,
+    ConfigSources, EndpointMode, HttpAccess, HttpCredential, LoadRequest, ProcessTrust,
+    PromotionOutcome, ProviderAccess, ProviderApi, ProviderAuth, ProviderConfig, RuntimeOverrides,
+    SourceIdentity, SourceKind, WorkspaceGrant,
 };
 use qq_core::{
     ApprovalReviewer, CheckpointFuture, CheckpointOutcome, CheckpointRequest, CheckpointReviewer,
@@ -165,6 +166,37 @@ struct RuntimeFactoryInner {
 enum RuntimeMode {
     Standard,
     IsolatedTuiQa { root: PathBuf, workspace: PathBuf },
+    RunState(Box<RunStateScope>),
+}
+
+#[derive(Clone)]
+struct RunStateScope {
+    workspace: PathBuf,
+    config_dir: PathBuf,
+    request: LoadRequest,
+    profile: String,
+    admission: RunStateAdmission,
+    admitted_sources: Vec<ConfigSources>,
+}
+
+#[derive(Clone)]
+struct RunStateAdmission {
+    model_routes: BTreeSet<String>,
+    organization: Option<String>,
+    jev_review: qq_config::JevReviewMode,
+    jev_routing: bool,
+    jev_approval: bool,
+    approval_delegate: Option<qq_config::ApprovalDelegateSetting>,
+    reasoning_effort: Option<qq_provider::ReasoningEffort>,
+    max_output_tokens: u32,
+    sources_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RunStateAdmissionIdentity {
+    pub profile: String,
+    pub admission_sha256: String,
+    pub max_output_tokens: u32,
 }
 
 fn validate_tui_qa_tree(path: &Path) -> Result<(), String> {
@@ -211,6 +243,405 @@ fn validate_tui_qa_tree(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn run_state_source_allowed(source: &SourceIdentity, config_dir: &Path) -> bool {
+    match source.kind() {
+        SourceKind::Compiled | SourceKind::Runtime => true,
+        SourceKind::Global | SourceKind::Explicit => source
+            .path()
+            .is_some_and(|path| path.starts_with(config_dir)),
+        SourceKind::Remote
+        | SourceKind::Project
+        | SourceKind::Managed
+        | SourceKind::Mdm
+        | SourceKind::Inline
+        | SourceKind::TrustState => false,
+    }
+}
+
+fn run_state_effective_source<'a>(
+    snapshot: &'a ConfigSnapshot,
+    key: &ConfigKey,
+) -> Option<&'a SourceIdentity> {
+    snapshot
+        .source_reports()
+        .iter()
+        .rev()
+        .find(|report| report.touched().iter().any(|candidate| candidate == key))
+        .map(qq_config::SourceReport::source)
+}
+
+fn validate_run_state_source(
+    source: Option<&SourceIdentity>,
+    config_dir: &Path,
+    consumer: &str,
+) -> Result<(), RuntimeBuildError> {
+    if source.is_some_and(|source| run_state_source_allowed(source, config_dir)) {
+        return Ok(());
+    }
+    Err(RuntimeBuildError::InvalidRunState {
+        reason: format!(
+            "effective {consumer} was introduced outside the captured run configuration"
+        ),
+    })
+}
+
+/// Enumerates every effective route that can resolve credentials, construct a
+/// reviewer, expose tools, start MCP/subprocess work, or reach another
+/// service. Administrator and organization policy still merge normally; a
+/// policy result that introduces one of these consumers is rejected rather
+/// than silently overridden.
+fn validate_run_state_sources(
+    snapshot: &ConfigSnapshot,
+    config_dir: &Path,
+) -> Result<(), RuntimeBuildError> {
+    let provenance = snapshot.provenance();
+    validate_run_state_source(provenance.model(), config_dir, "model route")?;
+    let validate_provider = |provider: &str, consumer: &str| {
+        validate_run_state_source(provenance.provider(provider), config_dir, consumer)
+    };
+    validate_provider(snapshot.model().provider(), "selected provider")?;
+    if snapshot.worker_model().is_some() {
+        validate_run_state_source(provenance.worker_model(), config_dir, "worker model")?;
+        validate_provider(
+            snapshot.worker_model().unwrap().provider(),
+            "worker model provider",
+        )?;
+    }
+    if snapshot.reviewer_model().is_some() {
+        validate_run_state_source(
+            provenance.reviewer_model(),
+            config_dir,
+            "approval reviewer model",
+        )?;
+        validate_provider(
+            snapshot.reviewer_model().unwrap().provider(),
+            "approval reviewer provider",
+        )?;
+    }
+    if snapshot.jev_review() != qq_config::JevReviewMode::Off {
+        validate_run_state_source(provenance.jev_review(), config_dir, "Jev review")?;
+    }
+    if snapshot.jev_routing() {
+        validate_run_state_source(provenance.jev_routing(), config_dir, "Jev routing")?;
+    }
+    if snapshot.jev_approval() {
+        validate_run_state_source(provenance.jev_approval(), config_dir, "Jev approval")?;
+    }
+    if snapshot.approval_delegate().is_some() {
+        validate_run_state_source(
+            provenance.approval_delegate(),
+            config_dir,
+            "approval delegate",
+        )?;
+    }
+    if !snapshot.delegation().roster().is_empty() {
+        match provenance.delegation() {
+            Some(source) => {
+                validate_run_state_source(Some(source), config_dir, "delegation route")?
+            }
+            None if snapshot.worker_model().is_some_and(|worker| {
+                snapshot.delegation().roster().len() == 1
+                    && snapshot.delegation().roster()[0].route() == worker
+            }) => {}
+            None => validate_run_state_source(None, config_dir, "delegation route")?,
+        }
+        for entry in snapshot.delegation().roster() {
+            validate_provider(entry.route().provider(), "delegation provider")?;
+        }
+    }
+    if snapshot.audit().mode() != qq_config::AuditMode::Off {
+        validate_run_state_source(provenance.audit(), config_dir, "audit route")?;
+    }
+    for name in snapshot.mcp_servers().keys() {
+        validate_run_state_source(
+            run_state_effective_source(snapshot, &ConfigKey::McpServer(name.clone())),
+            config_dir,
+            &format!("MCP server {name:?}"),
+        )?;
+    }
+    for (name, profile) in snapshot.profiles() {
+        validate_run_state_source(
+            provenance.profile(name),
+            config_dir,
+            &format!("agent profile {name:?}"),
+        )?;
+        if let Some(route) = profile.model() {
+            let provider = route
+                .split_once('/')
+                .map(|(provider, _)| provider)
+                .expect("profile routes were validated during configuration loading");
+            validate_provider(provider, &format!("agent profile {name:?} provider"))?;
+        }
+    }
+    for name in snapshot.packs().keys() {
+        validate_run_state_source(
+            provenance.pack(name),
+            config_dir,
+            &format!("agent pack {name:?}"),
+        )?;
+    }
+    for (name, source) in provenance.grant_tools() {
+        validate_run_state_source(Some(source), config_dir, &format!("tool grant {name:?}"))?;
+    }
+    for (prefix, source) in provenance.grant_shell_prefixes() {
+        validate_run_state_source(Some(source), config_dir, &format!("shell grant {prefix:?}"))?;
+    }
+    let policy_has_process_or_service_consumers = snapshot
+        .policy()
+        .exposed_tools()
+        .is_some_and(|tools| !tools.is_empty())
+        || !snapshot.policy().allow_hosts().is_empty()
+        || !snapshot.policy().shell_env().is_empty();
+    if policy_has_process_or_service_consumers {
+        validate_run_state_source(
+            run_state_effective_source(snapshot, &ConfigKey::Policy),
+            config_dir,
+            "tool, host, or subprocess policy",
+        )?;
+    }
+    Ok(())
+}
+
+fn load_request_with_profile_defaults(
+    request: &LoadRequest,
+    profile: &qq_config::AgentProfileConfig,
+) -> LoadRequest {
+    let mut overrides = request.overrides().clone();
+    if request.overrides().model().is_none()
+        && let Some(model) = profile.model()
+    {
+        overrides = overrides.with_model(model.to_owned());
+    }
+    if request.overrides().organization().is_none()
+        && let Some(organization) = profile.organization()
+    {
+        overrides = overrides.with_organization(organization.to_owned());
+    }
+    if request.overrides().max_output_tokens().is_none()
+        && let Some(cap) = profile.max_output_tokens()
+    {
+        overrides = overrides.with_max_output_tokens(cap);
+    }
+    if request.overrides().reasoning_effort().is_none()
+        && let Some(effort) = profile.reasoning_effort()
+    {
+        overrides = overrides.with_reasoning_effort(effort);
+    }
+    if request.overrides().jev_review().is_none()
+        && let Some(mode) = profile.jev_review()
+    {
+        overrides = overrides.with_jev_review(mode);
+    }
+    if request.overrides().jev_routing().is_none()
+        && let Some(enabled) = profile.jev_routing()
+    {
+        overrides = overrides.with_jev_routing(enabled);
+    }
+    if request.overrides().jev_approval().is_none()
+        && let Some(enabled) = profile.jev_approval()
+    {
+        overrides = overrides.with_jev_approval(enabled);
+    }
+    if request.overrides().approval_delegate().is_none()
+        && let Some(setting) = profile.approval_delegate()
+    {
+        overrides = overrides.with_approval_delegate(setting);
+    }
+    request.clone().with_overrides(overrides)
+}
+
+fn run_state_sources_digest(snapshot: &ConfigSnapshot) -> Result<String, RuntimeBuildError> {
+    let mut digest = Sha256::new();
+    update_digest(&mut digest, b"qq-run-state-sources-v1");
+    for report in snapshot.source_reports() {
+        let source = report.source();
+        if source.kind() == SourceKind::Runtime {
+            continue;
+        }
+        update_digest(&mut digest, format!("{:?}", source.kind()).as_bytes());
+        update_digest(&mut digest, source.label().as_bytes());
+        update_digest(&mut digest, format!("{:?}", report.status()).as_bytes());
+        for key in report.touched() {
+            update_digest(&mut digest, format!("{key:?}").as_bytes());
+        }
+        let Some(path) = source.path() else {
+            if let Some(content_sha256) = report.content_sha256() {
+                update_digest(&mut digest, b"virtual-content-sha256");
+                update_digest(&mut digest, content_sha256);
+            } else {
+                update_digest(&mut digest, b"no-path");
+            }
+            continue;
+        };
+        update_digest(&mut digest, path.to_string_lossy().as_bytes());
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+            RuntimeBuildError::InvalidRunState {
+                reason: format!(
+                    "captured configuration source {} could not be fingerprinted: {error}",
+                    path.display()
+                ),
+            }
+        })?;
+        if metadata.file_type().is_symlink() {
+            let target = std::fs::read_link(path).map_err(|error| {
+                RuntimeBuildError::InvalidRunState {
+                    reason: format!(
+                        "captured configuration source symlink {} could not be fingerprinted: {error}",
+                        path.display()
+                    ),
+                }
+            })?;
+            update_digest(&mut digest, b"symlink");
+            update_digest(&mut digest, target.to_string_lossy().as_bytes());
+        } else if metadata.is_file() {
+            update_digest(&mut digest, b"file");
+        } else {
+            update_digest(&mut digest, b"non-file");
+            continue;
+        }
+        let bytes = std::fs::read(path).map_err(|error| RuntimeBuildError::InvalidRunState {
+            reason: format!(
+                "captured configuration source {} could not be fingerprinted: {error}",
+                path.display()
+            ),
+        })?;
+        update_digest(&mut digest, &bytes);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+impl RunStateAdmission {
+    fn from_snapshot(
+        snapshot: &ConfigSnapshot,
+        config_dir: &Path,
+    ) -> Result<Self, RuntimeBuildError> {
+        let mut model_routes = BTreeSet::new();
+        model_routes.insert(snapshot.model().as_str().to_owned());
+        if let Some(route) = snapshot.worker_model() {
+            model_routes.insert(route.as_str().to_owned());
+        }
+        if let Some(route) = snapshot.reviewer_model() {
+            model_routes.insert(route.as_str().to_owned());
+        }
+        for entry in snapshot.delegation().roster() {
+            model_routes.insert(entry.route().as_str().to_owned());
+        }
+        for profile in snapshot.profiles().values() {
+            if let Some(route) = profile.model() {
+                model_routes.insert(route.to_owned());
+            }
+        }
+        for (provider, config) in snapshot.providers() {
+            if !snapshot
+                .provenance()
+                .provider(provider)
+                .is_some_and(|source| run_state_source_allowed(source, config_dir))
+            {
+                continue;
+            }
+            for model in config.models().keys() {
+                model_routes.insert(format!("{provider}/{model}"));
+            }
+        }
+        Ok(Self {
+            model_routes,
+            organization: snapshot.organization().map(str::to_owned),
+            jev_review: snapshot.jev_review(),
+            jev_routing: snapshot.jev_routing(),
+            jev_approval: snapshot.jev_approval(),
+            approval_delegate: snapshot.approval_delegate(),
+            reasoning_effort: snapshot.reasoning_effort(),
+            max_output_tokens: snapshot.max_output_tokens(),
+            sources_sha256: run_state_sources_digest(snapshot)?,
+        })
+    }
+
+    fn identity_digest(&self) -> String {
+        let mut digest = Sha256::new();
+        update_digest(&mut digest, b"qq-run-state-admission-v1");
+        update_digest(&mut digest, crate::cli::BUILD_VERSION.as_bytes());
+        for route in &self.model_routes {
+            update_digest(&mut digest, route.as_bytes());
+        }
+        update_digest(
+            &mut digest,
+            self.organization.as_deref().unwrap_or("<none>").as_bytes(),
+        );
+        update_digest(&mut digest, self.jev_review.as_str().as_bytes());
+        update_digest(
+            &mut digest,
+            if self.jev_routing {
+                b"routing-on"
+            } else {
+                b"routing-off"
+            },
+        );
+        update_digest(
+            &mut digest,
+            if self.jev_approval {
+                b"approval-on"
+            } else {
+                b"approval-off"
+            },
+        );
+        update_digest(
+            &mut digest,
+            self.approval_delegate
+                .map_or("<none>", qq_config::ApprovalDelegateSetting::as_str)
+                .as_bytes(),
+        );
+        update_digest(
+            &mut digest,
+            self.reasoning_effort
+                .map_or("<none>", qq_provider::ReasoningEffort::as_str)
+                .as_bytes(),
+        );
+        update_digest(&mut digest, self.sources_sha256.as_bytes());
+        format!("{:x}", digest.finalize())
+    }
+
+    fn validate(&self, snapshot: &ConfigSnapshot) -> Result<(), RuntimeBuildError> {
+        self.validate_sources(snapshot)?;
+        let changed = if !self.model_routes.contains(snapshot.model().as_str()) {
+            Some("model route")
+        } else if snapshot.organization() != self.organization.as_deref() {
+            Some("organization")
+        } else if snapshot.jev_review() != self.jev_review {
+            Some("Jev review")
+        } else if snapshot.jev_routing() != self.jev_routing {
+            Some("Jev routing")
+        } else if snapshot.jev_approval() != self.jev_approval {
+            Some("Jev approval")
+        } else if snapshot.approval_delegate() != self.approval_delegate {
+            Some("approval delegate")
+        } else if snapshot.reasoning_effort() != self.reasoning_effort {
+            Some("reasoning effort")
+        } else if snapshot.max_output_tokens() > self.max_output_tokens {
+            Some("maximum output tokens")
+        } else {
+            None
+        };
+        if let Some(consumer) = changed {
+            return Err(RuntimeBuildError::InvalidRunState {
+                reason: format!(
+                    "effective {consumer} differs from the captured run-state admission"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_sources(&self, snapshot: &ConfigSnapshot) -> Result<(), RuntimeBuildError> {
+        if run_state_sources_digest(snapshot)? != self.sources_sha256 {
+            return Err(RuntimeBuildError::InvalidRunState {
+                reason: "configuration sources differ from the captured run-state admission"
+                    .to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
 impl RuntimeFactory {
     pub fn system() -> Result<Self, RuntimeBuildError> {
         Self::new(ConfigLoader::system()?, CredentialStore::system()?)
@@ -255,6 +686,55 @@ impl RuntimeFactory {
         )
     }
 
+    /// Builds a headless factory whose configuration inputs and effective
+    /// credential/process consumers are fixed before provider compilation or
+    /// credential-store access. The ordinary credential store remains the
+    /// execution backend; callers can inject a fake backend for nonsecret
+    /// tests without changing the production path.
+    pub(crate) fn run_state(
+        config: ConfigLoader,
+        credentials: CredentialStore,
+        workspace: PathBuf,
+        config_dir: PathBuf,
+        request: LoadRequest,
+        profile: &str,
+    ) -> Result<Self, RuntimeBuildError> {
+        if request.cwd() != workspace || request.has_explicit_content() {
+            return Err(RuntimeBuildError::InvalidRunState {
+                reason: "the captured request must use the run workspace and a file-backed configuration"
+                    .to_owned(),
+            });
+        }
+        let base_snapshot = config.load(&request)?;
+        validate_run_state_sources(&base_snapshot, &config_dir)?;
+        let selected_profile =
+            base_snapshot
+                .profile(profile)
+                .ok_or_else(|| RuntimeBuildError::InvalidRunState {
+                    reason: format!("captured agent profile {profile:?} is not configured"),
+                })?;
+        let effective_request = load_request_with_profile_defaults(&request, &selected_profile);
+        let admitted_snapshot = config.load(&effective_request)?;
+        validate_run_state_sources(&admitted_snapshot, &config_dir)?;
+        let admission = RunStateAdmission::from_snapshot(&admitted_snapshot, &config_dir)?;
+        let mut admitted_sources = vec![base_snapshot.sources().clone()];
+        if !admitted_sources.contains(admitted_snapshot.sources()) {
+            admitted_sources.push(admitted_snapshot.sources().clone());
+        }
+        Self::with_mode(
+            config,
+            credentials,
+            RuntimeMode::RunState(Box::new(RunStateScope {
+                workspace,
+                config_dir,
+                request: effective_request,
+                profile: profile.to_owned(),
+                admission,
+                admitted_sources,
+            })),
+        )
+    }
+
     fn with_mode(
         config: ConfigLoader,
         credentials: CredentialStore,
@@ -271,6 +751,24 @@ impl RuntimeFactory {
                 plans: PlanCache::new(PlanCacheLimits::default()),
                 process_trust: std::sync::Mutex::new(Vec::new()),
             }),
+        })
+    }
+
+    pub(crate) fn captured_run_state_request(&self, fallback: &LoadRequest) -> LoadRequest {
+        match &self.inner.mode {
+            RuntimeMode::RunState(scope) => scope.request.clone(),
+            RuntimeMode::Standard | RuntimeMode::IsolatedTuiQa { .. } => fallback.clone(),
+        }
+    }
+
+    pub(crate) fn run_state_admission_identity(&self) -> Option<RunStateAdmissionIdentity> {
+        let RuntimeMode::RunState(scope) = &self.inner.mode else {
+            return None;
+        };
+        Some(RunStateAdmissionIdentity {
+            profile: scope.profile.clone(),
+            admission_sha256: scope.admission.identity_digest(),
+            max_output_tokens: scope.admission.max_output_tokens,
         })
     }
 
@@ -410,10 +908,13 @@ impl RuntimeFactory {
     pub fn load(&self, request: &LoadRequest) -> Result<ConfigSnapshot, RuntimeBuildError> {
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(request.cwd())?;
+        self.validate_run_state_workspace(request.cwd())?;
+        self.validate_run_state_inputs()?;
         let snapshot = self.inner.config.load(request)?;
         if self.is_isolated_tui_qa() {
             self.validate_tui_qa_snapshot(&snapshot)?;
         }
+        self.validate_run_state_snapshot(&snapshot)?;
         Ok(snapshot)
     }
 
@@ -427,6 +928,7 @@ impl RuntimeFactory {
     ) -> Result<ClientSnapshot, RuntimeBuildError> {
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(request.cwd())?;
+        self.validate_run_state_workspace(request.cwd())?;
         if self.is_isolated_tui_qa() {
             let snapshot = self.inner.config.load(request)?;
             self.validate_tui_qa_snapshot(&snapshot)?;
@@ -534,7 +1036,7 @@ impl RuntimeFactory {
     /// lists nothing because it never consults the credential store for
     /// providers it does not select.
     pub fn unauthenticated_providers(&self, snapshot: &ClientSnapshot) -> Vec<ProviderRemedy> {
-        if self.is_isolated_tui_qa() {
+        if self.is_isolated_tui_qa() || matches!(self.inner.mode, RuntimeMode::RunState(_)) {
             return Vec::new();
         }
         let allowed = snapshot.policy().allowed_providers();
@@ -640,17 +1142,46 @@ impl RuntimeFactory {
         snapshot: &CatalogSource<'_>,
         discovered: &BTreeMap<String, Vec<DiscoveredModel>>,
     ) -> Vec<ModelDescriptor> {
+        self.model_options_with_discovery_impl(snapshot, discovered, true)
+    }
+
+    fn model_options_for_plan(&self, snapshot: &ConfigSnapshot) -> Vec<ModelDescriptor> {
+        self.model_options_with_discovery_impl(
+            &CatalogSource::from(snapshot),
+            &BTreeMap::new(),
+            false,
+        )
+    }
+
+    fn model_options_with_discovery_impl(
+        &self,
+        snapshot: &CatalogSource<'_>,
+        discovered: &BTreeMap<String, Vec<DiscoveredModel>>,
+        require_authentication: bool,
+    ) -> Vec<ModelDescriptor> {
         let allowed = snapshot.policy.allowed_providers();
         let denied = snapshot.policy.denied_providers();
+        let admitted_routes = match &self.inner.mode {
+            RuntimeMode::RunState(scope) => Some(&scope.admission.model_routes),
+            RuntimeMode::Standard | RuntimeMode::IsolatedTuiQa { .. } => None,
+        };
+        let route_is_admitted = |provider: &str, model: &str| {
+            admitted_routes.is_none_or(|routes| routes.contains(&format!("{provider}/{model}")))
+        };
         let mut options = Vec::new();
         'providers: for (provider_id, provider) in snapshot.providers {
             if allowed.is_some_and(|allowed| !allowed.iter().any(|id| id == provider_id))
                 || denied.iter().any(|id| id == provider_id)
-                || !self.provider_authenticated(provider_id, provider)
+                || (require_authentication
+                    && admitted_routes.is_none()
+                    && !self.provider_authenticated(provider_id, provider))
             {
                 continue;
             }
             for (model_id, metadata) in provider.models() {
+                if !route_is_admitted(provider_id, model_id) {
+                    continue;
+                }
                 if matches!(
                     provider.kind(),
                     qq_config::ProviderKind::OpenAiCodex | qq_config::ProviderKind::Anthropic
@@ -694,6 +1225,9 @@ impl RuntimeFactory {
                     if provider.models().contains_key(&model.id) {
                         continue;
                     }
+                    if !route_is_admitted(provider_id, &model.id) {
+                        continue;
+                    }
                     if options.len() >= MAX_MODEL_OPTIONS {
                         break 'providers;
                     }
@@ -714,14 +1248,19 @@ impl RuntimeFactory {
             }
         }
         // The configured route is selectable even when the catalog does not
-        // list it, provided its provider is authenticated.
+        // list it. A run-state route was already admitted from captured
+        // configuration and must not trigger another provider-authentication
+        // probe; standard mode retains its ordinary credential check.
         if let Some(route) = snapshot.model
             && options.len() < MAX_MODEL_OPTIONS
             && !options
                 .iter()
                 .any(|option| option.selection.model.as_deref() == Some(route.as_str()))
             && let Some(provider) = snapshot.providers.get(route.provider())
-            && self.provider_authenticated(route.provider(), provider)
+            && (route_is_admitted(route.provider(), route.model())
+                && (!require_authentication
+                    || admitted_routes.is_some()
+                    || self.provider_authenticated(route.provider(), provider)))
         {
             let metadata = provider.models().get(route.model());
             options.push(ModelDescriptor {
@@ -756,6 +1295,10 @@ impl RuntimeFactory {
                 .model()
                 .map(|route| vec![Self::isolated_tui_qa_model_option_for(snapshot, route)])
                 .unwrap_or_default();
+        }
+        if matches!(self.inner.mode, RuntimeMode::RunState(_)) {
+            return self
+                .model_options_with_discovery(&CatalogSource::from(snapshot), &BTreeMap::new());
         }
         let allowed = snapshot.policy().allowed_providers();
         let denied = snapshot.policy().denied_providers();
@@ -868,7 +1411,14 @@ impl RuntimeFactory {
     ) -> Result<LoadRequest, RuntimeBuildError> {
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(workspace)?;
-        let request = if self.is_isolated_tui_qa() {
+        self.validate_run_state_workspace(workspace)?;
+        let request = if let RuntimeMode::RunState(scope) = &self.inner.mode {
+            let mut overrides = scope.request.overrides().clone();
+            if let Some(max_output_tokens) = max_output_tokens {
+                overrides = overrides.with_max_output_tokens(max_output_tokens);
+            }
+            scope.request.clone().with_overrides(overrides)
+        } else if self.is_isolated_tui_qa() {
             let mut overrides = RuntimeOverrides::new();
             if let Some(max_output_tokens) = max_output_tokens {
                 overrides = overrides.with_max_output_tokens(max_output_tokens);
@@ -882,6 +1432,80 @@ impl RuntimeFactory {
             return Ok(request);
         }
         Ok(request.with_process_trust(process_trust))
+    }
+
+    fn validate_run_state_workspace(&self, workspace: &Path) -> Result<(), RuntimeBuildError> {
+        let RuntimeMode::RunState(scope) = &self.inner.mode else {
+            return Ok(());
+        };
+        if workspace != scope.workspace {
+            return Err(RuntimeBuildError::InvalidRunState {
+                reason: format!(
+                    "workspace `{}` is outside the captured run state",
+                    workspace.display()
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_run_state_snapshot(
+        &self,
+        snapshot: &ConfigSnapshot,
+    ) -> Result<(), RuntimeBuildError> {
+        let RuntimeMode::RunState(scope) = &self.inner.mode else {
+            return Ok(());
+        };
+        validate_run_state_sources(snapshot, &scope.config_dir)?;
+        scope.admission.validate(snapshot)?;
+        Ok(())
+    }
+
+    fn validate_run_state_sources_only(
+        &self,
+        request: &LoadRequest,
+    ) -> Result<ConfigSnapshot, RuntimeBuildError> {
+        self.validate_run_state_workspace(request.cwd())?;
+        self.validate_run_state_inputs()?;
+        let snapshot = self.inner.config.load(request)?;
+        let RuntimeMode::RunState(scope) = &self.inner.mode else {
+            return Ok(snapshot);
+        };
+        validate_run_state_sources(&snapshot, &scope.config_dir)?;
+        scope.admission.validate_sources(&snapshot)?;
+        Ok(snapshot)
+    }
+
+    fn validate_run_state_profile(
+        &self,
+        profile: &AgentProfileId,
+    ) -> Result<(), RuntimeBuildError> {
+        let RuntimeMode::RunState(scope) = &self.inner.mode else {
+            return Ok(());
+        };
+        if profile.as_str() != scope.profile {
+            return Err(RuntimeBuildError::InvalidRunState {
+                reason: format!(
+                    "agent profile {:?} differs from the captured run-state profile {:?}",
+                    profile.as_str(),
+                    scope.profile
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_run_state_inputs(&self) -> Result<(), RuntimeBuildError> {
+        let RuntimeMode::RunState(scope) = &self.inner.mode else {
+            return Ok(());
+        };
+        if !scope.admitted_sources.iter().all(ConfigSources::is_current) {
+            return Err(RuntimeBuildError::InvalidRunState {
+                reason: "a captured configuration, policy, organization, trust, or workspace source changed after run admission"
+                    .to_owned(),
+            });
+        }
+        Ok(())
     }
 
     fn validate_tui_qa_snapshot(&self, snapshot: &ConfigSnapshot) -> Result<(), RuntimeBuildError> {
@@ -1374,6 +1998,21 @@ impl RuntimeFactory {
         workspace: &Path,
         progress: Option<&qq_core::RuntimeLoadProgress>,
     ) -> Result<CompiledGeneration, RuntimeBuildError> {
+        // Run-scoped loads must finish the full policy merge and consumer
+        // admission before even credential metadata is inspected. Standard
+        // mode retains its established ordering.
+        let admitted_snapshot = if matches!(self.inner.mode, RuntimeMode::RunState(_)) {
+            self.validate_run_state_profile(profile_id)?;
+            let base_snapshot = self.validate_run_state_sources_only(request)?;
+            let selected_profile = base_snapshot
+                .profile(profile_id.as_str())
+                .ok_or_else(|| RuntimeBuildError::UnknownProfile(profile_id.clone()))?;
+            let effective_request = load_request_with_profile_defaults(request, &selected_profile);
+            Some(self.load(&effective_request)?)
+        } else {
+            None
+        };
+        let run_state_admitted = admitted_snapshot.is_some();
         // The credential index is fingerprinted before secrets are read so a
         // rotation racing this compile is observed on the next lookup.
         if let Some(progress) = progress {
@@ -1385,13 +2024,15 @@ impl RuntimeFactory {
         if let Some(progress) = progress {
             progress.set(qq_core::RuntimeLoadStage::LoadingConfiguration);
         }
-        let snapshot = self.load(request)?;
+        let snapshot = match admitted_snapshot {
+            Some(snapshot) => snapshot,
+            None => self.load(request)?,
+        };
         let mut configuration_sources = vec![snapshot.sources().clone()];
         // A named profile supplies defaults beneath the request's explicit
-        // overrides. Resolving it needs the merged configuration, so the load
-        // repeats with the profile's values applied where the request left a
-        // gap. Both loads retain their pre-read observations because the
-        // first selected the profile and the second supplied runtime values.
+        // overrides. Standard modes reload with those defaults applied. A
+        // run-state compile already holds that exact validated effective
+        // snapshot and must consume it without another virtual-source read.
         let selected_profile = snapshot.profile(profile_id.as_str());
         let model_pinned = request.overrides().model().is_some()
             || selected_profile
@@ -1440,50 +2081,10 @@ impl RuntimeFactory {
         };
         let snapshot = match selected_profile {
             None => return Err(RuntimeBuildError::UnknownProfile(profile_id.clone())),
+            Some(_) if run_state_admitted => snapshot,
             Some(profile) if profile == qq_config::AgentProfileConfig::default() => snapshot,
             Some(profile) => {
-                let mut overrides = request.overrides().clone();
-                if request.overrides().model().is_none()
-                    && let Some(model) = profile.model()
-                {
-                    overrides = overrides.with_model(model.to_owned());
-                }
-                if request.overrides().organization().is_none()
-                    && let Some(organization) = profile.organization()
-                {
-                    overrides = overrides.with_organization(organization.to_owned());
-                }
-                if request.overrides().max_output_tokens().is_none()
-                    && let Some(cap) = profile.max_output_tokens()
-                {
-                    overrides = overrides.with_max_output_tokens(cap);
-                }
-                if request.overrides().reasoning_effort().is_none()
-                    && let Some(effort) = profile.reasoning_effort()
-                {
-                    overrides = overrides.with_reasoning_effort(effort);
-                }
-                if request.overrides().jev_review().is_none()
-                    && let Some(mode) = profile.jev_review()
-                {
-                    overrides = overrides.with_jev_review(mode);
-                }
-                if request.overrides().jev_routing().is_none()
-                    && let Some(enabled) = profile.jev_routing()
-                {
-                    overrides = overrides.with_jev_routing(enabled);
-                }
-                if request.overrides().jev_approval().is_none()
-                    && let Some(enabled) = profile.jev_approval()
-                {
-                    overrides = overrides.with_jev_approval(enabled);
-                }
-                if request.overrides().approval_delegate().is_none()
-                    && let Some(setting) = profile.approval_delegate()
-                {
-                    overrides = overrides.with_approval_delegate(setting);
-                }
-                let snapshot = self.load(&request.clone().with_overrides(overrides))?;
+                let snapshot = self.load(&load_request_with_profile_defaults(request, &profile))?;
                 if !configuration_sources.contains(snapshot.sources()) {
                     configuration_sources.push(snapshot.sources().clone());
                 }
@@ -1592,7 +2193,7 @@ impl RuntimeFactory {
             self.prepare_provider(provider_id, snapshot.model().model(), provider_config)?;
         let provider = self.inner.providers.compile(recipe)?;
         let spawn_model_routes = self
-            .configured_model_options(&snapshot)
+            .model_options_for_plan(&snapshot)
             .into_iter()
             .filter_map(|model| model.selection.model)
             .collect();
@@ -3521,20 +4122,21 @@ fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
         return unavailable();
     }
     let mut outcome = CheckpointOutcome::Supported;
-    let mut minimum_confidence = 1.0_f64;
-    let mut findings = Vec::new();
+    let mut minimum_distribution_confidence = 1.0_f64;
+    let mut criteria_feedback = Vec::new();
     for id in ["task_coverage", "direct_evidence", "consistency"] {
         let answer = &value["answers"][id];
         if answer["type"].as_str() != Some("choice") {
             return unavailable();
         }
-        let Some(confidence) = answer["confidence"]
+        let Some(distribution_confidence) = answer["confidence"]
             .as_f64()
             .filter(|value| (0.0..=1.0).contains(value))
         else {
             return unavailable();
         };
-        minimum_confidence = minimum_confidence.min(confidence);
+        minimum_distribution_confidence =
+            minimum_distribution_confidence.min(distribution_confidence);
         let labels = [
             "supported",
             "partially_supported",
@@ -3566,15 +4168,15 @@ fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
         else {
             return unavailable();
         };
-        let probability = probabilities[choice]
+        let selected_probability = probabilities[choice]
             .as_f64()
             .expect("validated distribution");
-        if probability < maximum {
+        if selected_probability < maximum {
             return unavailable();
         }
-        // Conservative initial policy, not calibrated accuracy: a weak winner
-        // asks for evidence rather than allowing a completion claim.
-        let classified = if confidence < 0.7 || probability < 0.7 {
+        // QQ policy requires both the selected probability and distribution-derived
+        // confidence; neither is calibrated correctness accuracy.
+        let classified = if distribution_confidence < 0.7 || selected_probability < 0.7 {
             CheckpointOutcome::InsufficientEvidence
         } else {
             match choice {
@@ -3585,8 +4187,11 @@ fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
                 _ => unreachable!("validated choice"),
             }
         };
+        criteria_feedback.push(format!(
+            "{id}: remote choice={choice}, selected_probability={selected_probability}, distribution_confidence={distribution_confidence}; QQ policy={}",
+            classified.label()
+        ));
         if classified != CheckpointOutcome::Supported {
-            findings.push(format!("{id}={}", classified.label()));
             outcome = match (outcome, classified) {
                 (CheckpointOutcome::Contradicted, _) | (_, CheckpointOutcome::Contradicted) => {
                     CheckpointOutcome::Contradicted
@@ -3602,15 +4207,17 @@ fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
     CheckpointVerdict {
         spend,
         outcome,
-        confidence: Some(minimum_confidence),
-        feedback: if findings.is_empty() {
-            "Jev criteria-2026-09-18.1: supplied evidence supports task_coverage, direct_evidence and consistency; this is not proof of correctness".to_owned()
-        } else {
-            format!(
-                "Jev criteria-2026-09-18.1: {}. Next: correct conflicting claims or gather direct evidence for these criterion IDs; omitted observations are not proof. Low-confidence choices count as insufficient evidence.",
-                findings.join("; ")
-            )
-        },
+        confidence: Some(minimum_distribution_confidence),
+        feedback: format!(
+            "Jev criteria-2026-09-18.1: {}. QQ checkpoint outcome={}. {}",
+            criteria_feedback.join("; "),
+            outcome.label(),
+            if outcome == CheckpointOutcome::Supported {
+                "The supplied evidence meets QQ policy; this is not proof of correctness."
+            } else {
+                "Next: correct conflicting claims or gather direct evidence for criteria not supported by QQ policy; omitted observations are not proof. QQ classifies a choice as insufficient evidence when its selected probability or distribution confidence is below 0.7."
+            }
+        ),
     }
 }
 
@@ -3692,6 +4299,8 @@ pub enum RuntimeBuildError {
     },
     #[error("isolated TUI QA profile is invalid: {reason}")]
     InvalidTuiQaProfile { reason: String },
+    #[error("run-scoped configuration is invalid: {reason}")]
+    InvalidRunState { reason: String },
 }
 
 impl RuntimeBuildError {
@@ -3731,7 +4340,8 @@ impl RuntimeBuildError {
             | Self::UnsupportedReasoningEffort(_)
             | Self::ReasoningEffortNotAdvertised { .. }
             | Self::JevClientUnavailable
-            | Self::InvalidTuiQaProfile { .. } => RunFailureKind::Configuration,
+            | Self::InvalidTuiQaProfile { .. }
+            | Self::InvalidRunState { .. } => RunFailureKind::Configuration,
             Self::UnauthenticatedProvider(_) => RunFailureKind::Authentication,
             Self::Runtime(_)
             | Self::UnknownProvider(_)
@@ -3749,6 +4359,7 @@ impl RuntimeBuildError {
 
 #[cfg(test)]
 mod tests {
+    mod run_state;
     mod strict_verification;
     use std::{
         collections::BTreeMap,
@@ -3820,6 +4431,32 @@ mod tests {
 
         fn remove(&self, name: &str) -> Result<(), KeyringError> {
             panic!("isolated TUI QA attempted to remove keyring entry {name:?}")
+        }
+    }
+
+    #[derive(Default)]
+    struct PanicOnReadKeyring(Mutex<BTreeMap<String, Vec<u8>>>);
+
+    impl KeyringBackend for PanicOnReadKeyring {
+        fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
+            panic!("plan compilation attempted to read keyring entry {name:?}")
+        }
+
+        fn set(&self, name: &str, secret: &[u8]) -> Result<(), KeyringError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(name.to_owned(), secret.to_vec());
+            Ok(())
+        }
+
+        fn remove(&self, name: &str) -> Result<(), KeyringError> {
+            self.0
+                .lock()
+                .unwrap()
+                .remove(name)
+                .map(|_| ())
+                .ok_or(KeyringError::Missing)
         }
     }
 
@@ -8031,6 +8668,98 @@ mod tests {
     }
 
     #[test]
+    fn codex_plan_compilation_keeps_credentials_request_time() {
+        use qq_provider::ReasoningEffort;
+
+        let fixture = RuntimeFixture::new();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(PanicOnReadKeyring::default()),
+        );
+        credentials
+            .set_with_metadata(
+                "openai-codex/default",
+                b"cache-probe-must-not-resolve-this-credential",
+                false,
+                Some("openai-codex"),
+                Some("https://chatgpt.com"),
+            )
+            .unwrap();
+        let factory = fixture.factory_with_credentials(credentials);
+        let plan = factory
+            .plan_for(&fixture.request(
+                r#"(version: 1, model: "openai-codex/not-in-the-catalog", reasoning_effort: high)"#,
+            ))
+            .unwrap();
+
+        assert_eq!(
+            plan.descriptor().reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(plan.descriptor().provider.auth_scheme, "codex");
+        assert_eq!(
+            plan.descriptor().provider.credential,
+            CredentialReference::Profile("default".to_owned())
+        );
+    }
+
+    #[test]
+    fn codex_plan_with_no_live_cache_uses_configured_effort_ladder() {
+        use qq_provider::ReasoningEffort;
+
+        let fixture = RuntimeFixture::new();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(PanicOnReadKeyring::default()),
+        );
+        credentials
+            .set_with_metadata(
+                "openai-codex/default",
+                b"cache-probe-must-not-resolve-this-credential",
+                false,
+                Some("openai-codex"),
+                Some("https://chatgpt.com"),
+            )
+            .unwrap();
+        let factory = fixture.factory_with_credentials(credentials);
+        let request = |effort: &str| {
+            fixture.request(format!(
+                r#"(version: 1, model: "openai-codex/gpt-5.4", reasoning_effort: {effort})"#
+            ))
+        };
+
+        assert_eq!(
+            factory
+                .plan_for(&request("high"))
+                .unwrap()
+                .descriptor()
+                .reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+        match factory.plan_for(&request("max")) {
+            Err(RuntimeBuildError::ReasoningEffortNotAdvertised {
+                model,
+                effort,
+                advertised,
+            }) => {
+                assert_eq!(model, "openai-codex/gpt-5.4");
+                assert_eq!(effort, ReasoningEffort::Max);
+                assert_eq!(
+                    advertised,
+                    vec![
+                        ReasoningEffort::None,
+                        ReasoningEffort::Low,
+                        ReasoningEffort::Medium,
+                        ReasoningEffort::High,
+                        ReasoningEffort::Xhigh,
+                    ]
+                );
+            }
+            other => panic!("expected ReasoningEffortNotAdvertised, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn provider_default_overrides_configured_effort_without_becoming_a_wire_level() {
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
@@ -8799,7 +9528,11 @@ mod tests {
         });
         let verdict = parse_typesafe_checkpoint(&conflicting);
         assert_eq!(verdict.outcome, CheckpointOutcome::Contradicted);
-        assert!(verdict.feedback.contains("consistency=contradicted"));
+        assert!(
+            verdict
+                .feedback
+                .contains("consistency: remote choice=contradicted")
+        );
         assert_eq!(
             parse_typesafe_checkpoint(&valid).outcome,
             CheckpointOutcome::Supported
@@ -8815,6 +9548,179 @@ mod tests {
                 CheckpointOutcome::Unavailable
             );
         }
+    }
+
+    // Exact synthetic-only real-service responses retained in the September 25 qualification.
+    fn recorded_low_confidence_responses() -> [serde_json::Value; 2] {
+        [
+            serde_json::json!({
+                "model": "jev-1.13.0",
+                "answers": {
+                    "consistency": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "confidence": 0.83,
+                        "probabilities": {
+                            "supported": 0.88,
+                            "partially_supported": 0.07,
+                            "contradicted": 0.02,
+                            "insufficient_evidence": 0.03
+                        }
+                    },
+                    "direct_evidence": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "confidence": 0.75,
+                        "probabilities": {
+                            "supported": 0.81,
+                            "partially_supported": 0.1,
+                            "contradicted": 0.03,
+                            "insufficient_evidence": 0.06
+                        }
+                    },
+                    "task_coverage": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "confidence": 0.57,
+                        "probabilities": {
+                            "supported": 0.68,
+                            "partially_supported": 0.25,
+                            "contradicted": 0.03,
+                            "insufficient_evidence": 0.04
+                        }
+                    }
+                },
+                "usage": {
+                    "input_tokens": 1182,
+                    "output_tokens": 173
+                }
+            }),
+            serde_json::json!({
+                "model": "jev-1.13.0",
+                "answers": {
+                    "consistency": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "confidence": 0.48,
+                        "probabilities": {
+                            "contradicted": 0.24,
+                            "partially_supported": 0.14,
+                            "insufficient_evidence": 0.01,
+                            "supported": 0.61
+                        }
+                    },
+                    "direct_evidence": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "confidence": 0.5,
+                        "probabilities": {
+                            "contradicted": 0.21,
+                            "partially_supported": 0.15,
+                            "insufficient_evidence": 0.01,
+                            "supported": 0.63
+                        }
+                    },
+                    "task_coverage": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "confidence": 0.36,
+                        "probabilities": {
+                            "contradicted": 0.21,
+                            "partially_supported": 0.26,
+                            "insufficient_evidence": 0.01,
+                            "supported": 0.52
+                        }
+                    }
+                },
+                "usage": {
+                    "input_tokens": 1194,
+                    "output_tokens": 173
+                }
+            }),
+        ]
+    }
+
+    #[test]
+    fn typesafe_checkpoint_feedback_separates_remote_choices_from_local_policy() {
+        let expected = [
+            [
+                "task_coverage: remote choice=supported, selected_probability=0.68, distribution_confidence=0.57; QQ policy=insufficient_evidence",
+                "direct_evidence: remote choice=supported, selected_probability=0.81, distribution_confidence=0.75; QQ policy=supported",
+                "consistency: remote choice=supported, selected_probability=0.88, distribution_confidence=0.83; QQ policy=supported",
+            ],
+            [
+                "task_coverage: remote choice=supported, selected_probability=0.52, distribution_confidence=0.36; QQ policy=insufficient_evidence",
+                "direct_evidence: remote choice=supported, selected_probability=0.63, distribution_confidence=0.5; QQ policy=insufficient_evidence",
+                "consistency: remote choice=supported, selected_probability=0.61, distribution_confidence=0.48; QQ policy=insufficient_evidence",
+            ],
+        ];
+        for (value, criteria) in recorded_low_confidence_responses()
+            .into_iter()
+            .zip(expected)
+        {
+            let verdict = parse_typesafe_checkpoint(&value);
+            assert_eq!(verdict.outcome, CheckpointOutcome::InsufficientEvidence);
+            for criterion in criteria {
+                assert!(verdict.feedback.contains(criterion), "{}", verdict.feedback);
+            }
+            assert!(
+                verdict
+                    .feedback
+                    .contains("QQ checkpoint outcome=insufficient_evidence")
+            );
+            assert_eq!(
+                verdict.spend.usage.unwrap().input_tokens,
+                value["usage"]["input_tokens"].as_u64().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn typesafe_checkpoint_feedback_keeps_both_thresholds_and_aggregation() {
+        for (choice, probability, distribution_confidence, expected) in [
+            ("supported", 0.9, 0.9, CheckpointOutcome::Supported),
+            ("contradicted", 0.9, 0.9, CheckpointOutcome::Contradicted),
+            ("supported", 0.7, 0.7, CheckpointOutcome::Supported),
+            (
+                "supported",
+                0.71,
+                0.6999999,
+                CheckpointOutcome::InsufficientEvidence,
+            ),
+            (
+                "supported",
+                0.6999999,
+                0.71,
+                CheckpointOutcome::InsufficientEvidence,
+            ),
+        ] {
+            let mut probabilities = serde_json::json!({"supported":0.0,"contradicted":0.0,"partially_supported":0.0,"insufficient_evidence":0.0});
+            probabilities[choice] = serde_json::json!(probability);
+            probabilities["partially_supported"] = serde_json::json!(1.0 - probability);
+            let answer = serde_json::json!({"type":"choice","choice":choice,"confidence":distribution_confidence,"probabilities":probabilities});
+            let value = serde_json::json!({"model":"jev-1.13.0","usage":{"input_tokens":10,"output_tokens":2},"answers":{"task_coverage":answer,"direct_evidence":answer,"consistency":answer}});
+            let verdict = parse_typesafe_checkpoint(&value);
+            assert_eq!(verdict.outcome, expected);
+            assert_eq!(verdict.confidence, Some(distribution_confidence));
+            for criterion in ["task_coverage", "direct_evidence", "consistency"] {
+                let expected_feedback = format!(
+                    "{criterion}: remote choice={choice}, selected_probability={probability}, distribution_confidence={distribution_confidence}; QQ policy={}",
+                    expected.label()
+                );
+                assert!(
+                    verdict.feedback.contains(&expected_feedback),
+                    "{}",
+                    verdict.feedback
+                );
+            }
+            assert_eq!(verdict.spend.estimated_cost_usd_nanos, Some(420));
+        }
+        let mut mixed = recorded_low_confidence_responses()[0].clone();
+        mixed["answers"]["consistency"] = serde_json::json!({"type":"choice","choice":"contradicted","confidence":0.95,"probabilities":{"supported":0.02,"contradicted":0.95,"partially_supported":0.02,"insufficient_evidence":0.01}});
+        let verdict = parse_typesafe_checkpoint(&mixed);
+        assert_eq!(verdict.outcome, CheckpointOutcome::Contradicted);
+        assert!(verdict.feedback.contains("QQ policy=insufficient_evidence"));
+        assert!(verdict.feedback.contains("QQ policy=contradicted"));
     }
 
     #[test]

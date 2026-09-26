@@ -12,7 +12,7 @@ use hmac::{Hmac, Mac};
 use qq_auth::{CredentialStore, Secret, resolve_provider_credential_with_aliases};
 use qq_config::{
     EndpointMode, HttpAccess, HttpCredential, ProviderApi, ProviderAuth, ProviderConfig,
-    ProviderKind,
+    ProviderKind, SecretRef,
 };
 use reqwest::{Url, blocking::RequestBuilder, header::AUTHORIZATION};
 use sha2::Sha256;
@@ -132,6 +132,9 @@ impl ModelDiscovery {
         let qq_config::ProviderAccess::Http(access) = provider.access()? else {
             return None;
         };
+        if cache_probe_requires_secure_store(access.auth()) {
+            return None;
+        }
         let auth = resolve_auth(access, credentials)?;
         let key = cache_key(&self.cache_key, provider_id, provider.kind(), access, &auth)?;
         self.cache
@@ -347,6 +350,21 @@ fn apply_static_headers(mut request: RequestBuilder, access: &HttpAccess) -> Req
         request = request.header(name, value.expose_value());
     }
     request
+}
+
+fn cache_probe_requires_secure_store(auth: &HttpCredential) -> bool {
+    match auth {
+        HttpCredential::Configured(ProviderAuth::NoAuth) => false,
+        HttpCredential::Configured(
+            ProviderAuth::ApiKey(reference)
+            | ProviderAuth::Bearer(reference)
+            | ProviderAuth::Header(_, reference),
+        ) => matches!(reference, SecretRef::Stored(_)),
+        HttpCredential::ApiKey { explicit, .. } => {
+            explicit.is_none() || matches!(explicit, Some(SecretRef::Stored(_)))
+        }
+        HttpCredential::OpenAiCodex { .. } | HttpCredential::XAi { .. } => true,
+    }
 }
 
 fn resolve_auth(access: &HttpAccess, credentials: &CredentialStore) -> Option<DiscoveryAuth> {
@@ -592,15 +610,74 @@ mod tests {
         collections::BTreeMap,
         io::{Read as _, Write as _},
         net::TcpListener,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicU64, AtomicUsize, Ordering},
+        },
         thread,
     };
 
     use super::*;
-    use qq_auth::CredentialPaths;
-    use qq_config::{ProviderAccess, SecretRef};
+    use qq_auth::{CredentialPaths, KeyringBackend, KeyringError};
+    use qq_config::{ProviderAccess, SecretRef, UsageType};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Default)]
+    struct ReadCountingKeyring {
+        reads: AtomicUsize,
+        values: Mutex<BTreeMap<String, Vec<u8>>>,
+    }
+
+    impl ReadCountingKeyring {
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::Relaxed)
+        }
+    }
+
+    impl KeyringBackend for ReadCountingKeyring {
+        fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.values
+                .lock()
+                .unwrap()
+                .get(name)
+                .cloned()
+                .ok_or(KeyringError::Missing)
+        }
+
+        fn set(&self, name: &str, secret: &[u8]) -> Result<(), KeyringError> {
+            self.values
+                .lock()
+                .unwrap()
+                .insert(name.to_owned(), secret.to_vec());
+            Ok(())
+        }
+
+        fn remove(&self, name: &str) -> Result<(), KeyringError> {
+            self.values
+                .lock()
+                .unwrap()
+                .remove(name)
+                .map(|_| ())
+                .ok_or(KeyringError::Missing)
+        }
+    }
+
+    fn test_provider(kind: ProviderKind, endpoint: String, auth: HttpCredential) -> ProviderConfig {
+        ProviderConfig::new(
+            kind,
+            Some(ProviderAccess::Http(HttpAccess::new(
+                endpoint,
+                EndpointMode::Exact,
+                ProviderApi::OpenAiResponses,
+                auth,
+                BTreeMap::new(),
+            ))),
+            UsageType::Unknown,
+            BTreeMap::new(),
+        )
+    }
 
     #[test]
     fn malformed_codex_entries_do_not_replace_the_fallback_catalog() {
@@ -836,6 +913,204 @@ mod tests {
         );
         assert_eq!(models[1].efforts, None);
         assert_eq!(models[2].efforts, Some(vec![]));
+    }
+
+    #[test]
+    fn cached_openai_codex_does_not_read_keyring() {
+        let directory = tempfile::tempdir().unwrap();
+        let keyring = Arc::new(ReadCountingKeyring::default());
+        let credentials =
+            CredentialStore::with_backend(CredentialPaths::new(directory.path()), keyring.clone());
+        credentials
+            .set_with_metadata(
+                "openai-codex/default",
+                b"registered-codex-credential",
+                false,
+                Some("openai-codex"),
+                Some("https://chatgpt.com"),
+            )
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+        let provider = test_provider(
+            ProviderKind::OpenAiCodex,
+            endpoint.clone(),
+            HttpCredential::OpenAiCodex { profile: None },
+        );
+        let discovery = ModelDiscovery::new().unwrap();
+
+        assert_eq!(
+            discovery.cached("openai-codex", &provider, &credentials),
+            None
+        );
+        assert_eq!(keyring.reads(), 0, "an empty cache probe read Keychain");
+
+        let safe_provider = test_provider(
+            ProviderKind::Custom,
+            endpoint,
+            HttpCredential::Configured(ProviderAuth::NoAuth),
+        );
+        let ProviderAccess::Http(safe_access) = safe_provider.access().unwrap() else {
+            unreachable!()
+        };
+        let safe_key = cache_key(
+            &discovery.cache_key,
+            "safe",
+            ProviderKind::Custom,
+            safe_access,
+            &DiscoveryAuth::NoAuth,
+        )
+        .unwrap();
+        discovery.cache.lock().unwrap().push_back(CacheEntry {
+            key: safe_key,
+            expires_at: Instant::now() + CACHE_TTL,
+            models: Some(vec![DiscoveredModel {
+                id: "safe-model".to_owned(),
+                name: None,
+                efforts: None,
+            }]),
+        });
+
+        assert_eq!(
+            discovery.cached("openai-codex", &provider, &credentials),
+            None
+        );
+        assert_eq!(keyring.reads(), 0, "an unrelated cache entry read Keychain");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn cached_stored_reference_and_xai_do_not_read_keyring_but_no_auth_hits() {
+        let directory = tempfile::tempdir().unwrap();
+        let keyring = Arc::new(ReadCountingKeyring::default());
+        let credentials =
+            CredentialStore::with_backend(CredentialPaths::new(directory.path()), keyring.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+        credentials
+            .set_with_metadata(
+                "custom/stored",
+                b"stored-test-secret",
+                false,
+                Some("custom"),
+                Some(&endpoint),
+            )
+            .unwrap();
+        credentials
+            .set_with_metadata(
+                "xai/default",
+                b"xai-test-secret",
+                false,
+                Some("xai"),
+                Some("https://api.x.ai"),
+            )
+            .unwrap();
+        let stored = test_provider(
+            ProviderKind::Custom,
+            endpoint.clone(),
+            HttpCredential::Configured(ProviderAuth::Bearer(SecretRef::Stored(
+                "custom/stored".to_owned(),
+            ))),
+        );
+        let xai = test_provider(
+            ProviderKind::XAi,
+            endpoint.clone(),
+            HttpCredential::XAi {
+                api_key: None,
+                profile: None,
+            },
+        );
+        let builtin_fallback = test_provider(
+            ProviderKind::OpenAi,
+            endpoint.clone(),
+            HttpCredential::ApiKey {
+                explicit: None,
+                stored_name: "custom/stored",
+                environment_variable: "QQ_TEST_UNUSED_API_KEY",
+                alternate_variables: &[],
+                audience: "custom",
+            },
+        );
+        let safe = test_provider(
+            ProviderKind::Custom,
+            endpoint.clone(),
+            HttpCredential::Configured(ProviderAuth::NoAuth),
+        );
+        let value_reference: SecretRef = ron::from_str(r#"Value("inline-safe")"#).unwrap();
+        let value = test_provider(
+            ProviderKind::Custom,
+            endpoint,
+            HttpCredential::Configured(ProviderAuth::Bearer(value_reference)),
+        );
+        let discovery = ModelDiscovery::new().unwrap();
+        let ProviderAccess::Http(safe_access) = safe.access().unwrap() else {
+            unreachable!()
+        };
+        let safe_key = cache_key(
+            &discovery.cache_key,
+            "safe",
+            ProviderKind::Custom,
+            safe_access,
+            &DiscoveryAuth::NoAuth,
+        )
+        .unwrap();
+        let safe_models = vec![DiscoveredModel {
+            id: "safe-model".to_owned(),
+            name: Some("Safe model".to_owned()),
+            efforts: None,
+        }];
+        discovery.cache.lock().unwrap().push_back(CacheEntry {
+            key: safe_key,
+            expires_at: Instant::now() + CACHE_TTL,
+            models: Some(safe_models.clone()),
+        });
+        let ProviderAccess::Http(value_access) = value.access().unwrap() else {
+            unreachable!()
+        };
+        let value_auth = resolve_auth(value_access, &credentials).unwrap();
+        let value_key = cache_key(
+            &discovery.cache_key,
+            "value",
+            ProviderKind::Custom,
+            value_access,
+            &value_auth,
+        )
+        .unwrap();
+        let value_models = vec![DiscoveredModel {
+            id: "value-model".to_owned(),
+            name: Some("Value model".to_owned()),
+            efforts: None,
+        }];
+        discovery.cache.lock().unwrap().push_back(CacheEntry {
+            key: value_key,
+            expires_at: Instant::now() + CACHE_TTL,
+            models: Some(value_models.clone()),
+        });
+
+        assert_eq!(discovery.cached("stored", &stored, &credentials), None);
+        assert_eq!(discovery.cached("xai", &xai, &credentials), None);
+        assert_eq!(
+            discovery.cached("builtin", &builtin_fallback, &credentials),
+            None
+        );
+        assert_eq!(
+            discovery.cached("safe", &safe, &credentials),
+            Some(safe_models)
+        );
+        assert_eq!(
+            discovery.cached("value", &value, &credentials),
+            Some(value_models)
+        );
+        assert_eq!(keyring.reads(), 0, "cache-only discovery read Keychain");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]

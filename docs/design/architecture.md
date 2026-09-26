@@ -459,6 +459,15 @@ error naming the accepted values, so the operator sees it before the provider
 would fail the turn. An empty ladder is unknown, not unsupported, and is not
 checked.
 
+Plan compilation does not read secure storage while assembling discovery and
+spawn-route metadata. Its optional model-discovery cache lookup uses a cached result only when the cache scope can be
+derived without secure-store I/O. Codex, XAI, stored secret references, and a
+built-in API-key fallback without an explicit non-stored reference therefore
+skip the cache probe and use the configured reasoning ladder. Model catalogs
+may still check authentication when explicitly requested, and live discovery
+resolves credentials through its existing path. Codex and XAI provider requests
+remain request-time; other credentials retain their existing preparation paths.
+
 Credential rotation is tracked separately by an opaque `CredentialEpoch` owned
 by `qq-auth`: every durable credential write advances the store's index
 revision, including in-place rotation of an existing entry. The root records
@@ -497,6 +506,38 @@ and credential epoch — is written in the same statement that moves the run to
 `running`, beside the resolved model and the canonical descriptor JSON. It is
 carried on `run_started` and `RunSnapshot.plan`. A later refresh never touches
 that row.
+
+### Run-Scoped State Roots
+
+Headless `qq run --state-root PATH` selects an opt-in composition root for a
+supervisor-owned run. The validated root has private, canonical `config/`,
+`data/`, `workspace/`, and `artifacts/` children. QQ relocates writable user
+configuration, trust/grants, durable run identity, and the session database,
+while retaining the system credential store and read-only managed, native MDM,
+and enrolled-organization policy inputs. The ordinary no-option path still uses
+`RuntimeFactory::system()` and its existing paths.
+
+`ConfigLoader::for_run_state` preserves the native MDM reader, managed ownership
+enforcement, organization selection, cached policy validation, and source
+probes. Organization mutation is refused for the scoped loader. Its
+`SourceReport` binds filesystem identity and the content digest of virtual MDM
+and cached organization documents, so a same-origin policy change cannot pass
+as the captured source.
+
+The root composition layer captures a `RunStateScope` before any credential or
+session-store use. It records the canonical root/workspace, request overrides,
+model routes, organization, effective credential and process consumers,
+profile, output ceiling, reasoning choice, and the complete configuration-source
+digest. Every scoped reload validates that admission. Named-profile compilation
+retains and consumes the exact effective snapshot that passed validation rather
+than validating one snapshot and compiling another. Drift is a configuration
+error before credential resolution, durable identity creation, session opening,
+or plan use.
+
+This mechanism separates QQ-owned state and policy identity; it does not
+contain shell, MCP, network, or same-user OS access. A supervisor that executes
+untrusted work still provides the process/filesystem/network sandbox described
+by the hosting boundary.
 
 ### Agent Profiles
 

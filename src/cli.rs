@@ -77,7 +77,7 @@ pub enum Command {
     /// server. Exit status: 0 success, 1 task or model failure, 2 invalid
     /// configuration, 3 timeout or budget exhaustion, 4 harness or
     /// persistence failure, 130 interrupted by Ctrl-C.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
 
     /// Run the user-scoped QQ server in the foreground.
     Serve {
@@ -164,6 +164,11 @@ pub struct RunArgs {
     /// Workspace directory. Defaults to the current directory.
     #[arg(long, value_name = "PATH")]
     pub workspace: Option<PathBuf>,
+
+    /// Existing private root for this run's config, session data, workspace,
+    /// and artifacts. Separates QQ state; it is not an OS or tool sandbox.
+    #[arg(long, value_name = "PATH")]
+    pub state_root: Option<PathBuf>,
 
     /// Submit the prompt into this existing idle root session of the
     /// workspace instead of creating one. The invocation, not the session's

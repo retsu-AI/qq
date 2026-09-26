@@ -445,6 +445,7 @@ impl ConfigPaths {
 pub struct ConfigLoader {
     paths: ConfigPaths,
     mdm_reader: Arc<dyn managed::MdmReader>,
+    organization_read_source: Option<PathBuf>,
 }
 
 impl fmt::Debug for ConfigLoader {
@@ -462,6 +463,7 @@ impl ConfigLoader {
         Self {
             paths,
             mdm_reader: Arc::new(managed::SystemMdmReader),
+            organization_read_source: None,
         }
     }
 
@@ -472,6 +474,42 @@ impl ConfigLoader {
     #[must_use]
     pub const fn paths(&self) -> &ConfigPaths {
         &self.paths
+    }
+
+    /// Relocates writable state for one headless run while preserving the
+    /// system loader's managed policy, MDM reader, and enrolled organization
+    /// policy as read-only inputs. Organization mutations are disabled on the
+    /// returned loader so reads and writes cannot diverge across roots.
+    #[must_use]
+    pub fn for_run_state(
+        mut self,
+        global_dir: impl Into<PathBuf>,
+        data_dir: impl Into<PathBuf>,
+    ) -> Self {
+        if self.organization_read_source.is_none() {
+            self.organization_read_source = Some(self.paths.data_dir.clone());
+        }
+        self.paths.global_dir = global_dir.into();
+        self.paths.data_dir = data_dir.into();
+        self
+    }
+
+    pub(crate) fn organization_read_paths(&self) -> ConfigPaths {
+        let mut paths = self.paths.clone();
+        if let Some(data_dir) = &self.organization_read_source {
+            paths.data_dir.clone_from(data_dir);
+        }
+        paths
+    }
+
+    fn reject_scoped_organization_mutation(
+        &self,
+        operation: &'static str,
+    ) -> Result<(), ConfigError> {
+        if self.organization_read_source.is_some() {
+            return Err(ConfigError::RunScopedOrganizationMutation { operation });
+        }
+        Ok(())
     }
 
     pub fn load(&self, request: &LoadRequest) -> Result<ConfigSnapshot, ConfigError> {
@@ -560,23 +598,31 @@ impl ConfigLoader {
         name: &str,
         manifest_url: &str,
     ) -> Result<OrganizationEnrollment, ConfigError> {
+        self.reject_scoped_organization_mutation("enroll")?;
         remote::enroll(&self.paths, name, manifest_url)
     }
 
     pub fn refresh_organization(&self, name: &str) -> Result<OrganizationEnrollment, ConfigError> {
+        self.reject_scoped_organization_mutation("refresh")?;
         remote::refresh(&self.paths, name)
     }
 
     pub fn select_organization(&self, name: &str) -> Result<(), ConfigError> {
+        self.reject_scoped_organization_mutation("select")?;
         remote::select(&self.paths, name)
     }
 
     pub fn remove_organization(&self, name: &str) -> Result<bool, ConfigError> {
+        self.reject_scoped_organization_mutation("remove")?;
         remote::remove(&self.paths, name)
     }
 
     pub fn organizations(&self) -> Result<Vec<OrganizationEnrollment>, ConfigError> {
-        remote::list(&self.paths)
+        if self.organization_read_source.is_some() {
+            remote::list_read_only(&self.organization_read_paths())
+        } else {
+            remote::list(&self.paths)
+        }
     }
 
     /// Durably records an approval grant in the workspace's
@@ -595,6 +641,32 @@ impl ConfigLoader {
     #[cfg(test)]
     fn with_mdm_reader(mut self, reader: Arc<dyn managed::MdmReader>) -> Self {
         self.mdm_reader = reader;
+        self
+    }
+
+    /// Installs a deterministic virtual MDM source for cross-crate tests.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_test_mdm(self, origin: impl Into<String>, content: impl Into<String>) -> Self {
+        self.with_test_mdm_sequence(origin, vec![content.into()])
+    }
+
+    /// Installs a deterministic sequence of virtual MDM values for tests.
+    /// The last value repeats after the earlier values have been consumed.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_test_mdm_sequence(
+        mut self,
+        origin: impl Into<String>,
+        contents: Vec<String>,
+    ) -> Self {
+        assert!(!contents.is_empty(), "test MDM sequence must not be empty");
+        self.mdm_reader = Arc::new(managed::SequenceMdmReader {
+            origin: origin.into(),
+            contents: std::sync::Mutex::new(contents.into()),
+        });
         self
     }
 }
@@ -1547,6 +1619,7 @@ pub struct SourceReport {
     source: SourceIdentity,
     status: SourceStatus,
     touched: Vec<ConfigKey>,
+    content_sha256: Option<[u8; 32]>,
 }
 
 impl SourceReport {
@@ -1555,7 +1628,13 @@ impl SourceReport {
             source,
             status,
             touched,
+            content_sha256: None,
         }
+    }
+
+    fn with_content_sha256(mut self, content_sha256: [u8; 32]) -> Self {
+        self.content_sha256 = Some(content_sha256);
+        self
     }
 
     #[must_use]
@@ -1571,6 +1650,13 @@ impl SourceReport {
     #[must_use]
     pub fn touched(&self) -> &[ConfigKey] {
         &self.touched
+    }
+
+    /// A non-secret fingerprint of virtual policy bytes when the source has
+    /// no filesystem path whose content can be read back for admission.
+    #[must_use]
+    pub const fn content_sha256(&self) -> Option<&[u8; 32]> {
+        self.content_sha256.as_ref()
     }
 }
 
@@ -2580,6 +2666,8 @@ pub enum ConfigError {
         "organization manifest URL must be an HTTPS URL without credentials, query, or fragment"
     )]
     InvalidOrganizationManifestUrl,
+    #[error("organization {operation} is disabled for a run-scoped configuration loader")]
+    RunScopedOrganizationMutation { operation: &'static str },
     #[error("organization {0:?} is not enrolled")]
     OrganizationNotEnrolled(String),
     #[error("organization {name:?} enrollment changed while its manifest was refreshing")]

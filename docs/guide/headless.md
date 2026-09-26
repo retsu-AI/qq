@@ -24,6 +24,12 @@ Runs one task to completion in the current directory (or `--workspace
 PATH`) through a durable session. Progress goes to stderr, the final answer
 to stdout.
 
+`--state-root PATH` binds the run to an existing private supervisor-owned
+tree with `config/`, `data/`, `workspace/`, and `artifacts/` directories.
+QQ keeps its configuration and session database there while still applying
+managed, MDM, and enrolled-organization policy. This separates run state; it
+does not confine tools, processes, network access, or OS credentials.
+
 ### Approval without a human
 
 | `--approval` | Meaning |

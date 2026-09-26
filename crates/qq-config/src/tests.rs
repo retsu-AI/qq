@@ -8,6 +8,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use sha2::{Digest as _, Sha256};
+
 use super::*;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -83,6 +85,23 @@ impl TempTree {
     fn request(&self) -> LoadRequest {
         LoadRequest::new(self.path("work"))
             .with_overrides(RuntimeOverrides::new().with_model("openai/test-model"))
+    }
+
+    fn write_organization(&self, name: &str, manifest: &str) {
+        let url = format!("https://config.example.test/{name}.ron");
+        let mut digest = Sha256::new();
+        digest.update(name.len().to_le_bytes());
+        digest.update(name.as_bytes());
+        digest.update(url.len().to_le_bytes());
+        digest.update(url.as_bytes());
+        let cache_key = format!("{:x}", digest.finalize());
+        self.write(
+            "data/organizations.ron",
+            &format!(
+                "(version:1,selected:Some(\"{name}\"),enrollments:[(name:\"{name}\",manifest_url:\"{url}\",cache_key:\"{cache_key}\")])"
+            ),
+        );
+        self.write(format!("data/organizations/{cache_key}.ron"), manifest);
     }
 }
 
@@ -996,6 +1015,119 @@ fn applies_every_layer_in_documented_order() {
         snapshot.provenance().max_output_tokens().unwrap().kind(),
         SourceKind::Managed
     );
+}
+
+#[test]
+fn run_state_relocates_writes_but_inherits_organization_state_read_only() {
+    let tree = TempTree::new();
+    tree.write_organization(
+        "acme",
+        r#"(version: 1, organization: "acme", max_output_tokens: 77)"#,
+    );
+    fs::create_dir_all(tree.path("run/config")).unwrap();
+    fs::create_dir_all(tree.path("run/data")).unwrap();
+    tree.write(
+        "run/config/config.ron",
+        r#"(version: 1, model: "openai/test-model")"#,
+    );
+
+    let canonical_root = fs::canonicalize(&tree.root).unwrap();
+    let scoped = ConfigLoader::new(ConfigPaths::new(
+        canonical_root.join("global"),
+        canonical_root.join("data"),
+        canonical_root.join("managed"),
+    ))
+    .for_run_state(
+        fs::canonicalize(tree.path("run/config")).unwrap(),
+        fs::canonicalize(tree.path("run/data")).unwrap(),
+    );
+    let snapshot = scoped.load(&tree.request()).unwrap();
+
+    assert_eq!(
+        scoped.paths().global_dir(),
+        fs::canonicalize(tree.path("run/config")).unwrap()
+    );
+    assert_eq!(
+        scoped.paths().data_dir(),
+        fs::canonicalize(tree.path("run/data")).unwrap()
+    );
+    assert_eq!(snapshot.organization(), Some("acme"));
+    assert_eq!(snapshot.max_output_tokens(), 77);
+    assert_eq!(
+        snapshot.provenance().organization().unwrap().kind(),
+        SourceKind::Remote
+    );
+    assert_eq!(scoped.organizations().unwrap()[0].name(), "acme");
+
+    for (operation, result) in [
+        (
+            "enroll",
+            scoped
+                .enroll_organization("other", "https://config.example.test/other.ron")
+                .map(|_| ()),
+        ),
+        ("refresh", scoped.refresh_organization("acme").map(|_| ())),
+        ("select", scoped.select_organization("acme")),
+        ("remove", scoped.remove_organization("acme").map(|_| ())),
+    ] {
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::RunScopedOrganizationMutation { operation: actual })
+                    if actual == operation
+            ),
+            "{operation} must fail before either organization root is mutated"
+        );
+    }
+    assert!(!tree.path("run/data/organizations.ron").exists());
+    assert!(!tree.path("data/organizations.lock").exists());
+    assert_eq!(scoped.organizations().unwrap()[0].name(), "acme");
+    assert!(!tree.path("data/organizations.lock").exists());
+}
+
+#[test]
+fn run_state_keeps_mdm_reader_and_managed_ownership_enforcement() {
+    let tree = TempTree::new();
+    fs::create_dir_all(tree.path("run/config")).unwrap();
+    fs::create_dir_all(tree.path("run/data")).unwrap();
+    tree.write(
+        "run/config/config.ron",
+        r#"(version: 1, model: "openai/test-model")"#,
+    );
+    let reads = Arc::new(AtomicUsize::new(0));
+    let canonical_root = fs::canonicalize(&tree.root).unwrap();
+    let paths = ConfigPaths::new(
+        canonical_root.join("global"),
+        canonical_root.join("data"),
+        canonical_root.join("managed"),
+    );
+    let loader = ConfigLoader::new(paths.clone())
+        .with_mdm_reader(Arc::new(TestMdmReader {
+            reads: Arc::clone(&reads),
+            content: r#"(version: 1, organization: "mdm")"#.to_owned(),
+        }))
+        .for_run_state(
+            fs::canonicalize(tree.path("run/config")).unwrap(),
+            fs::canonicalize(tree.path("run/data")).unwrap(),
+        );
+
+    let snapshot = loader.load(&tree.request()).unwrap();
+    assert_eq!(reads.load(Ordering::Relaxed), 1);
+    assert_eq!(snapshot.organization(), Some("mdm"));
+    let mdm_report = snapshot.source_reports().last().unwrap();
+    assert_eq!(mdm_report.source().kind(), SourceKind::Mdm);
+    assert_eq!(
+        mdm_report.content_sha256().copied(),
+        Some(Sha256::digest(r#"(version: 1, organization: "mdm")"#.as_bytes()).into())
+    );
+    assert_eq!(
+        snapshot.provenance().organization().unwrap().kind(),
+        SourceKind::Mdm
+    );
+
+    let ownership_checked = ConfigLoader::new(paths.with_managed_ownership_checks())
+        .for_run_state(tree.path("run/config"), tree.path("run/data"));
+    assert!(ownership_checked.paths.enforce_managed_ownership);
 }
 
 #[test]

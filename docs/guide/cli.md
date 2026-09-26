@@ -34,6 +34,7 @@ One unattended agent task. [Headless](headless.md#qq-run--the-agent-unattended).
 | Flag | Default |
 | --- | --- |
 | `--workspace PATH` | current directory |
+| `--state-root PATH` | none; use existing private `config/`, `data/`, `workspace/`, and `artifacts/` children |
 | `--session ID` | new session |
 | `--approval read-only\|auto\|full` | `read-only` |
 | `--profile NAME` | `default` |

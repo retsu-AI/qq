@@ -146,5 +146,6 @@ provider-bedrock = ["qq-provider/provider-bedrock"]
 
 [dev-dependencies]
 base64.workspace = true
+qq-config = { workspace = true, features = ["test-support"] }
 ron.workspace = true
 tempfile.workspace = true

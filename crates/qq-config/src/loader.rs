@@ -8,6 +8,7 @@ use std::{
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use super::{
     ClientSnapshot, ConfigError, ConfigLoader, ConfigPaths, ConfigSnapshot, ConfigSources,
@@ -107,10 +108,21 @@ pub(super) fn load_for_client(
     }
 
     if let Some(organization) = organization
-        && let Some((document, source)) =
-            remote::load_cached_if_enrolled(&loader.paths, &organization, probes)?
+        && let Some((document, source, content_sha256)) = remote::load_cached_if_enrolled(
+            &loader.organization_read_paths(),
+            &organization,
+            probes,
+        )?
     {
-        apply_document(document, source, &trust, &mut merged, &mut report, probes)?;
+        apply_document(
+            document,
+            source,
+            Some(content_sha256),
+            &trust,
+            &mut merged,
+            &mut report,
+            probes,
+        )?;
     }
 
     for candidate in discover_layer_directory(
@@ -211,6 +223,7 @@ pub(super) fn load_for_client(
         apply_document(
             Document::parse(content, &source)?,
             source,
+            None,
             &trust,
             &mut merged,
             &mut report,
@@ -253,6 +266,7 @@ pub(super) fn load_for_client(
         apply_document(
             mdm.document,
             mdm.source,
+            Some(mdm.content_sha256),
             &trust,
             &mut merged,
             &mut report,
@@ -277,7 +291,7 @@ fn selected_organization(
     mdm: Option<&MdmDocument>,
     probes: &mut Probes,
 ) -> Result<Option<String>, ConfigError> {
-    let mut organization = remote::selected(&loader.paths, probes)?;
+    let mut organization = remote::selected(&loader.organization_read_paths(), probes)?;
     let mut seen = BTreeSet::new();
 
     for candidate in discover_layer_directory(
@@ -362,6 +376,7 @@ fn selected_organization(
 pub(super) struct MdmDocument {
     source: SourceIdentity,
     pub(super) document: Document,
+    content_sha256: [u8; 32],
 }
 
 pub(super) fn read_mdm_document(loader: &ConfigLoader) -> Result<Option<MdmDocument>, ConfigError> {
@@ -375,8 +390,13 @@ pub(super) fn read_mdm_document(loader: &ConfigLoader) -> Result<Option<MdmDocum
             limit: MAX_CONFIG_BYTES,
         });
     }
+    let content_sha256 = Sha256::digest(content.as_bytes()).into();
     let document = Document::parse(&content, &source)?;
-    Ok(Some(MdmDocument { source, document }))
+    Ok(Some(MdmDocument {
+        source,
+        document,
+        content_sha256,
+    }))
 }
 
 fn apply_organization_candidate(
@@ -708,12 +728,13 @@ fn apply_candidate(
                 .expect("global file sources always have a path"),
         )?;
     }
-    apply_document(document, source, trust, merged, report, probes)
+    apply_document(document, source, None, trust, merged, report, probes)
 }
 
 fn apply_document(
     document: Document,
     source: SourceIdentity,
+    content_sha256: Option<[u8; 32]>,
     trust: &TrustState,
     merged: &mut MergeState,
     report: &mut LoadReport,
@@ -742,9 +763,11 @@ fn apply_document(
     } else {
         SourceStatus::Applied
     };
-    report
-        .sources
-        .push(SourceReport::new(source, status, document.touched()));
+    let mut source_report = SourceReport::new(source, status, document.touched());
+    if let Some(content_sha256) = content_sha256 {
+        source_report = source_report.with_content_sha256(content_sha256);
+    }
+    report.sources.push(source_report);
     Ok(())
 }
 
