@@ -634,13 +634,21 @@ pub(super) fn search(
         Ok(filter) => filter,
         Err(error) => return ToolOutput::error(error.to_string()),
     };
-    let cursor = match &arguments.cursor {
-        None => None,
+    let cursor = match arguments.cursor.as_deref().map(str::trim) {
+        // Models routinely send an empty or placeholder cursor on the first
+        // page ("", "initial", "start", "0", ".", "null"): 99 % of search
+        // calls in one day's sessions failed that way. None of these can be
+        // a real cursor (those are base64 of `path\0line` with a non-empty
+        // path), so read them as "no cursor" instead of refusing the call.
+        None
+        | Some(
+            "" | "initial" | "INITIAL" | "start" | "first" | "0" | "." | "/" | "null" | "none",
+        ) => None,
         Some(encoded) => match Cursor::decode(encoded) {
             Some(cursor) => Some(cursor),
             None => {
                 return ToolOutput::error(
-                    "cursor_invalid: pass the exact next= value from a previous search header",
+                    "cursor_invalid: omit `cursor` for the first page; to continue a previous search, pass the exact next= value from its result header",
                 );
             }
         },
