@@ -344,6 +344,18 @@ selection and refer back to the run instead of copying the full descriptor.
 Historical rows remain explicitly unknown rather than being reinterpreted
 through current configuration.
 
+
+The output cap resolves as the lesser of the catalog's model ceiling and the
+configured `max_output_tokens` (compiled default 16 384), with one exception:
+when a reasoning effort is set and the model's thinking is billed inside the
+same `max_tokens` (Anthropic Messages, Bedrock Converse, or an Anthropic model
+behind an OpenAI-compatible gateway, recognised by the catalog canonical id or
+the vendor segment of the gateway id), the compiled default would be spent on
+hidden reasoning before any visible output, so the wire cap is the catalog
+ceiling instead. A `max_output_tokens` the operator set in any configuration
+layer or override is honoured verbatim; run budgets bound spend either way. A
+per-session cap persisted below the current compiled default is the old
+default, not a choice, and is treated as unset at load.
 Version-2 resolved models also carry an optional opaque provider request-shape
 identity built once by the root from the effective adapter, API, endpoint mode,
 safe normalized endpoint, explicit region, and non-secret authorization shape.
