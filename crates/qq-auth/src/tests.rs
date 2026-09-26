@@ -1,9 +1,9 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     ffi::OsString,
     fs,
     io::{Read as _, Write as _},
-    net::TcpStream,
+    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -15,6 +15,7 @@ use std::{
 
 use super::*;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use sha2::Digest as _;
 
 static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -170,6 +171,34 @@ struct FakeCodexTokenClient {
     refreshed: codex::RefreshedTokens,
 }
 
+struct FakeCodexDeviceClient {
+    authorization: codex::DeviceAuthorization,
+    polls: Mutex<VecDeque<Result<codex::DevicePoll, codex::CodexAuthError>>>,
+    poll_requests: Mutex<Vec<(String, String)>>,
+}
+
+impl codex::CodexDeviceClient for FakeCodexDeviceClient {
+    fn start_device(&self) -> Result<codex::DeviceAuthorization, codex::CodexAuthError> {
+        Ok(self.authorization.clone())
+    }
+
+    fn poll_device(
+        &self,
+        device_auth_id: &str,
+        user_code: &str,
+    ) -> Result<codex::DevicePoll, codex::CodexAuthError> {
+        self.poll_requests
+            .lock()
+            .unwrap()
+            .push((device_auth_id.to_owned(), user_code.to_owned()));
+        self.polls
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("the fixture supplies every poll result")
+    }
+}
+
 #[derive(Clone, Copy)]
 enum FakeCodexRefreshFailure {
     Rejected,
@@ -177,6 +206,32 @@ enum FakeCodexRefreshFailure {
 }
 
 struct FailingCodexTokenClient(FakeCodexRefreshFailure);
+
+#[derive(Default)]
+struct FailingCodexExchangeClient {
+    exchanges: AtomicU64,
+}
+
+impl codex::CodexTokenClient for FailingCodexExchangeClient {
+    fn exchange(
+        &self,
+        _code: &str,
+        _redirect_uri: &str,
+        _code_verifier: &str,
+    ) -> Result<codex::ExchangedTokens, codex::CodexAuthError> {
+        self.exchanges.fetch_add(1, Ordering::Relaxed);
+        Err(codex::CodexAuthError::TokenRequestFailed {
+            operation: "exchange",
+        })
+    }
+
+    fn refresh(
+        &self,
+        _refresh_token: &str,
+    ) -> Result<codex::RefreshedTokens, codex::CodexAuthError> {
+        unreachable!("the exchange-failure fixture does not refresh")
+    }
+}
 
 impl codex::CodexTokenClient for FailingCodexTokenClient {
     fn exchange(
@@ -361,6 +416,75 @@ fn callback(port: u16, query: &str) -> String {
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     response
+}
+
+fn fake_http_response(status: u16, body: impl Into<Vec<u8>>) -> reqwest::blocking::Response {
+    let (url, server) = fake_http_endpoint(status, body);
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap()
+        .get(url)
+        .send()
+        .unwrap();
+    drop(server);
+    response
+}
+
+fn fake_http_endpoint(
+    status: u16,
+    body: impl Into<Vec<u8>>,
+) -> (String, thread::JoinHandle<Vec<u8>>) {
+    let body = body.into();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        let body_end = loop {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0, "fixture request ended before its body");
+            request.extend_from_slice(&buffer[..read]);
+            let Some(head_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&request[..head_end]);
+            let content_length = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            break head_end + 4 + content_length;
+        };
+        while request.len() < body_end {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0, "fixture request ended before its body");
+            request.extend_from_slice(&buffer[..read]);
+        }
+        let reason = match status {
+            200 => "OK",
+            403 => "Forbidden",
+            404 => "Not Found",
+            _ => "Error",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(&body).unwrap();
+        stream.flush().unwrap();
+        request
+    });
+    (format!("http://127.0.0.1:{port}/fixture"), server)
 }
 
 fn write_private(path: &Path, bytes: impl AsRef<[u8]>) {
@@ -1024,6 +1148,462 @@ fn codex_login_uses_pkce_rejects_wrong_state_and_stores_tokens() {
 }
 
 #[test]
+fn codex_device_login_honors_poll_interval_and_exchanges_once() {
+    let (mut store, _keyring, _directory) = test_store();
+    let verifier = "device-verifier";
+    let challenge = URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
+    let device = Arc::new(FakeCodexDeviceClient {
+        authorization: codex::DeviceAuthorization {
+            device_auth_id: "device-id".to_owned(),
+            user_code: "ABCD-EFGH".to_owned(),
+            interval: Duration::from_secs(7),
+        },
+        polls: Mutex::new(VecDeque::from([
+            Ok(codex::DevicePoll::Pending),
+            Ok(codex::DevicePoll::Complete(codex::DeviceGrant {
+                authorization_code: "authorization-code".to_owned(),
+                code_challenge: challenge,
+                code_verifier: verifier.to_owned(),
+            })),
+        ])),
+        poll_requests: Mutex::new(Vec::new()),
+    });
+    let tokens = Arc::new(FakeCodexTokenClient::new(
+        codex::ExchangedTokens {
+            id_token: jwt(serde_json::json!({
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "workspace-test-id",
+                    "chatgpt_account_is_fedramp": false
+                }
+            })),
+            access_token: "access-token".to_owned(),
+            refresh_token: "refresh-token".to_owned(),
+        },
+        codex::RefreshedTokens::default(),
+    ));
+    store.codex_device_client = device.clone();
+    store.codex_client = tokens.clone();
+
+    let login = codex::CodexDeviceLogin::start(&store).unwrap();
+    assert_eq!(
+        login.verification_url(),
+        "https://auth.openai.com/codex/device"
+    );
+    assert_eq!(login.user_code(), "ABCD-EFGH");
+    let mut sleeps = Vec::new();
+    assert_eq!(
+        login
+            .complete_for_test(
+                &store,
+                "default",
+                false,
+                Duration::from_secs(60),
+                || false,
+                |duration| sleeps.push(duration),
+            )
+            .unwrap(),
+        CredentialBackend::Keyring
+    );
+
+    assert_eq!(sleeps, [Duration::from_secs(7), Duration::from_secs(7)]);
+    assert_eq!(
+        device.poll_requests.lock().unwrap().as_slice(),
+        [
+            ("device-id".to_owned(), "ABCD-EFGH".to_owned()),
+            ("device-id".to_owned(), "ABCD-EFGH".to_owned())
+        ]
+    );
+    assert_eq!(tokens.exchanges.lock().unwrap().len(), 1);
+    assert_eq!(
+        tokens.exchanges.lock().unwrap()[0],
+        (
+            "authorization-code".to_owned(),
+            "https://auth.openai.com/deviceauth/callback".to_owned(),
+            verifier.to_owned()
+        )
+    );
+}
+
+#[test]
+fn codex_device_http_accepts_usercode_alias_and_pending_statuses() {
+    let authorization = codex::decode_device_authorization(fake_http_response(
+        200,
+        br#"{"device_auth_id":"device-id","usercode":"ABCD-EFGH","interval":"9"}"#.to_vec(),
+    ))
+    .unwrap();
+    assert_eq!(authorization.device_auth_id, "device-id");
+    assert_eq!(authorization.user_code, "ABCD-EFGH");
+    assert_eq!(authorization.interval, Duration::from_secs(9));
+
+    assert!(matches!(
+        codex::decode_device_poll(fake_http_response(403, Vec::new())).unwrap(),
+        codex::DevicePoll::Pending
+    ));
+    assert!(matches!(
+        codex::decode_device_poll(fake_http_response(404, Vec::new())).unwrap(),
+        codex::DevicePoll::Pending
+    ));
+}
+
+#[test]
+fn codex_device_http_sends_bounded_json_requests_with_the_published_client_id() {
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let (start_url, start_server) = fake_http_endpoint(
+        200,
+        br#"{"device_auth_id":"device-id","user_code":"ABCD-EFGH","interval":"5"}"#.to_vec(),
+    );
+    codex::request_device_authorization(&client, &start_url).unwrap();
+    let start_request = String::from_utf8(start_server.join().unwrap()).unwrap();
+    assert!(start_request.starts_with("POST /fixture HTTP/1.1\r\n"));
+    let start_body = start_request.split("\r\n\r\n").nth(1).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(start_body).unwrap(),
+        serde_json::json!({"client_id": codex::CLIENT_ID})
+    );
+
+    let verifier = "device-verifier";
+    let challenge = URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
+    let (poll_url, poll_server) = fake_http_endpoint(
+        200,
+        serde_json::to_vec(&serde_json::json!({
+            "authorization_code": "authorization-code",
+            "code_challenge": challenge,
+            "code_verifier": verifier
+        }))
+        .unwrap(),
+    );
+    assert!(matches!(
+        codex::request_device_poll(&client, &poll_url, "device-id", "ABCD-EFGH").unwrap(),
+        codex::DevicePoll::Complete(_)
+    ));
+    let poll_request = String::from_utf8(poll_server.join().unwrap()).unwrap();
+    let poll_body = poll_request.split("\r\n\r\n").nth(1).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(poll_body).unwrap(),
+        serde_json::json!({
+            "device_auth_id": "device-id",
+            "user_code": "ABCD-EFGH"
+        })
+    );
+}
+
+#[test]
+fn codex_device_http_rejects_malformed_oversized_and_invalid_pkce_responses() {
+    let malformed = codex::decode_device_authorization(fake_http_response(200, b"{".to_vec()))
+        .err()
+        .unwrap();
+    assert!(matches!(
+        malformed,
+        codex::CodexAuthError::DeviceResponseInvalid
+    ));
+
+    let oversized = codex::decode_device_authorization(fake_http_response(
+        200,
+        vec![b'x'; codex::MAX_DEVICE_RESPONSE_BYTES + 1],
+    ))
+    .err()
+    .unwrap();
+    assert!(matches!(
+        oversized,
+        codex::CodexAuthError::DeviceResponseInvalid
+    ));
+
+    let invalid_pkce = codex::decode_device_poll(fake_http_response(
+        200,
+        br#"{"authorization_code":"authorization-code","code_challenge":"wrong","code_verifier":"device-verifier"}"#.to_vec(),
+    ))
+    .err()
+    .unwrap();
+    assert!(matches!(
+        invalid_pkce,
+        codex::CodexAuthError::DevicePkceMismatch
+    ));
+}
+
+#[test]
+fn codex_device_http_rejects_invalid_fields_and_terminal_statuses_without_echoing_bodies() {
+    let invalid_start_bodies = [
+        serde_json::json!({"device_auth_id":"","user_code":"ABCD","interval":"5"}),
+        serde_json::json!({"device_auth_id":"device-id","user_code":"","interval":"5"}),
+        serde_json::json!({"device_auth_id":"device-id","user_code":"ABCD","interval":"0"}),
+        serde_json::json!({"device_auth_id":"device-id","user_code":"ABCD","interval":"not-a-number"}),
+        serde_json::json!({"device_auth_id":"device-id","user_code":"x".repeat(257),"interval":"5"}),
+        serde_json::json!({"device_auth_id":"device-id","user_code":"ABCD\nEFGH","interval":"5"}),
+    ];
+    for body in invalid_start_bodies {
+        let error = codex::decode_device_authorization(fake_http_response(
+            200,
+            serde_json::to_vec(&body).unwrap(),
+        ))
+        .err()
+        .unwrap();
+        assert!(matches!(
+            error,
+            codex::CodexAuthError::DeviceResponseInvalid
+        ));
+    }
+
+    let marker = "secret-response-marker";
+    let error = codex::decode_device_poll(fake_http_response(500, marker.as_bytes().to_vec()))
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error,
+        codex::CodexAuthError::DeviceRequestRejected { status: 500 }
+    ));
+    assert!(!error.to_string().contains(marker));
+}
+
+#[test]
+fn codex_device_login_stops_at_deadline_or_cancellation_without_polling() {
+    let (mut store, _keyring, _directory) = test_store();
+    let device = Arc::new(FakeCodexDeviceClient {
+        authorization: codex::DeviceAuthorization {
+            device_auth_id: "device-id".to_owned(),
+            user_code: "ABCD-EFGH".to_owned(),
+            interval: Duration::from_secs(1),
+        },
+        polls: Mutex::new(VecDeque::new()),
+        poll_requests: Mutex::new(Vec::new()),
+    });
+    store.codex_device_client = device.clone();
+
+    let deadline_error = codex::CodexDeviceLogin::start(&store)
+        .unwrap()
+        .complete_for_test(
+            &store,
+            "default",
+            false,
+            Duration::ZERO,
+            || false,
+            |_| panic!("an expired login must not sleep"),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        deadline_error,
+        AuthError::Codex(codex::CodexAuthError::DeviceAuthorizationTimedOut)
+    ));
+
+    let cancelled_error = codex::CodexDeviceLogin::start(&store)
+        .unwrap()
+        .complete_for_test(
+            &store,
+            "default",
+            false,
+            Duration::from_secs(60),
+            || true,
+            |_| panic!("a cancelled login must not sleep"),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        cancelled_error,
+        AuthError::Codex(codex::CodexAuthError::DeviceAuthorizationCancelled)
+    ));
+    assert!(device.poll_requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn codex_device_login_does_not_store_tokens_with_missing_identity() {
+    let (mut store, _keyring, _directory) = test_store();
+    let verifier = "device-verifier";
+    let device = Arc::new(FakeCodexDeviceClient {
+        authorization: codex::DeviceAuthorization {
+            device_auth_id: "device-id".to_owned(),
+            user_code: "ABCD-EFGH".to_owned(),
+            interval: Duration::from_nanos(1),
+        },
+        polls: Mutex::new(VecDeque::from([Ok(codex::DevicePoll::Complete(
+            codex::DeviceGrant {
+                authorization_code: "authorization-code".to_owned(),
+                code_challenge: URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes())),
+                code_verifier: verifier.to_owned(),
+            },
+        ))])),
+        poll_requests: Mutex::new(Vec::new()),
+    });
+    let tokens = Arc::new(FakeCodexTokenClient::new(
+        codex::ExchangedTokens {
+            id_token: jwt(serde_json::json!({})),
+            access_token: "access-token".to_owned(),
+            refresh_token: "refresh-token".to_owned(),
+        },
+        codex::RefreshedTokens::default(),
+    ));
+    store.codex_device_client = device;
+    store.codex_client = tokens.clone();
+
+    let error = codex::CodexDeviceLogin::start(&store)
+        .unwrap()
+        .complete_for_test(
+            &store,
+            "default",
+            false,
+            Duration::from_secs(60),
+            || false,
+            |_| {},
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        AuthError::Codex(codex::CodexAuthError::AccountIdMissing)
+    ));
+    assert_eq!(tokens.exchanges.lock().unwrap().len(), 1);
+    assert!(store.status("openai-codex/default").unwrap().is_none());
+}
+
+#[test]
+fn codex_device_login_reports_storage_failure_after_one_exchange() {
+    let (mut store, keyring, _directory) = test_store();
+    let verifier = "device-verifier";
+    store.codex_device_client = Arc::new(FakeCodexDeviceClient {
+        authorization: codex::DeviceAuthorization {
+            device_auth_id: "device-id".to_owned(),
+            user_code: "ABCD-EFGH".to_owned(),
+            interval: Duration::from_nanos(1),
+        },
+        polls: Mutex::new(VecDeque::from([Ok(codex::DevicePoll::Complete(
+            codex::DeviceGrant {
+                authorization_code: "authorization-code".to_owned(),
+                code_challenge: URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes())),
+                code_verifier: verifier.to_owned(),
+            },
+        ))])),
+        poll_requests: Mutex::new(Vec::new()),
+    });
+    let tokens = Arc::new(FakeCodexTokenClient::new(
+        codex::ExchangedTokens {
+            id_token: jwt(serde_json::json!({
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "workspace-test-id",
+                    "chatgpt_account_is_fedramp": false
+                }
+            })),
+            access_token: "access-token".to_owned(),
+            refresh_token: "refresh-token".to_owned(),
+        },
+        codex::RefreshedTokens::default(),
+    ));
+    store.codex_client = tokens.clone();
+    keyring.set_mode(FakeMode::Failure);
+
+    let error = codex::CodexDeviceLogin::start(&store)
+        .unwrap()
+        .complete_for_test(
+            &store,
+            "default",
+            false,
+            Duration::from_secs(60),
+            || false,
+            |_| {},
+        )
+        .unwrap_err();
+    assert!(matches!(error, AuthError::KeyringFailure { .. }));
+    assert_eq!(tokens.exchanges.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn codex_device_login_does_not_retry_an_ambiguous_exchange_failure() {
+    let (mut store, _keyring, _directory) = test_store();
+    let verifier = "device-verifier";
+    store.codex_device_client = Arc::new(FakeCodexDeviceClient {
+        authorization: codex::DeviceAuthorization {
+            device_auth_id: "device-id".to_owned(),
+            user_code: "ABCD-EFGH".to_owned(),
+            interval: Duration::from_nanos(1),
+        },
+        polls: Mutex::new(VecDeque::from([Ok(codex::DevicePoll::Complete(
+            codex::DeviceGrant {
+                authorization_code: "authorization-code".to_owned(),
+                code_challenge: URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes())),
+                code_verifier: verifier.to_owned(),
+            },
+        ))])),
+        poll_requests: Mutex::new(Vec::new()),
+    });
+    let tokens = Arc::new(FailingCodexExchangeClient::default());
+    store.codex_client = tokens.clone();
+
+    let error = codex::CodexDeviceLogin::start(&store)
+        .unwrap()
+        .complete_for_test(
+            &store,
+            "default",
+            false,
+            Duration::from_secs(60),
+            || false,
+            |_| {},
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        AuthError::Codex(codex::CodexAuthError::TokenRequestFailed {
+            operation: "exchange"
+        })
+    ));
+    assert_eq!(tokens.exchanges.load(Ordering::Relaxed), 1);
+    assert!(store.status("openai-codex/default").unwrap().is_none());
+}
+
+#[test]
+fn codex_device_credential_reopens_through_the_existing_store() {
+    let (mut store, keyring, directory) = test_store();
+    let verifier = "device-verifier";
+    store.codex_device_client = Arc::new(FakeCodexDeviceClient {
+        authorization: codex::DeviceAuthorization {
+            device_auth_id: "device-id".to_owned(),
+            user_code: "ABCD-EFGH".to_owned(),
+            interval: Duration::from_nanos(1),
+        },
+        polls: Mutex::new(VecDeque::from([Ok(codex::DevicePoll::Complete(
+            codex::DeviceGrant {
+                authorization_code: "authorization-code".to_owned(),
+                code_challenge: URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes())),
+                code_verifier: verifier.to_owned(),
+            },
+        ))])),
+        poll_requests: Mutex::new(Vec::new()),
+    });
+    store.codex_client = Arc::new(FakeCodexTokenClient::new(
+        codex::ExchangedTokens {
+            id_token: jwt(serde_json::json!({
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "workspace-test-id",
+                    "chatgpt_account_is_fedramp": false
+                }
+            })),
+            access_token: "access-token".to_owned(),
+            refresh_token: "refresh-token".to_owned(),
+        },
+        codex::RefreshedTokens::default(),
+    ));
+    codex::CodexDeviceLogin::start(&store)
+        .unwrap()
+        .complete_for_test(
+            &store,
+            "work",
+            false,
+            Duration::from_secs(60),
+            || false,
+            |_| {},
+        )
+        .unwrap();
+    drop(store);
+
+    let reopened =
+        CredentialStore::with_backend(CredentialPaths::new(directory.path()), keyring.clone());
+    let credential = reopened.resolve_codex("work").unwrap();
+    assert_eq!(
+        credential.access_token().expose_secret_str().unwrap(),
+        "access-token"
+    );
+    assert_eq!(credential.account_id(), "workspace-test-id");
+}
+
+#[test]
 fn codex_login_routes_a_realistic_oversized_bundle_to_windows_protection() {
     let (mut store, keyring, protected, _directory) = test_store_with_protected();
     keyring.set_max_secret_len(2_560);
@@ -1079,6 +1659,39 @@ fn codex_login_routes_a_realistic_oversized_bundle_to_windows_protection() {
             .unwrap(),
         access_token
     );
+}
+
+#[test]
+fn codex_login_deadline_bounds_a_connected_client_that_sends_nothing() {
+    let (store, _keyring, _directory) = test_store();
+    let login = CodexLogin::start_for_test(
+        0,
+        "known-state",
+        "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        Duration::from_millis(500),
+    )
+    .unwrap();
+    let authorization = reqwest::Url::parse(login.authorization_url()).unwrap();
+    let redirect_uri = authorization
+        .query_pairs()
+        .find(|(name, _)| name == "redirect_uri")
+        .unwrap()
+        .1;
+    let port = reqwest::Url::parse(&redirect_uri).unwrap().port().unwrap();
+    let completion_store = store.clone();
+    let completion = thread::spawn(move || login.complete(&completion_store, "default", false));
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 400"));
+    assert!(matches!(
+        completion.join().unwrap(),
+        Err(AuthError::Codex(codex::CodexAuthError::CallbackTimedOut))
+    ));
+    assert!(store.list().unwrap().is_empty());
 }
 
 #[test]

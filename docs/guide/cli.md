@@ -67,7 +67,7 @@ The user-scoped server in the foreground. Default bind `127.0.0.1:0`.
 
 | Subcommand | Effect |
 | --- | --- |
-| `login PROVIDER [--profile NAME] [--oauth] [--allow-file]` | store a credential for a built-in provider (`openai`, `anthropic`, `google`, `xai`, `openai-codex`); prompts without echo, or reads stdin when piped; `--oauth` for `xai`; `openai-codex` always opens the browser |
+| `login PROVIDER [--profile NAME] [--oauth] [--device-auth] [--allow-file]` | store a credential for a built-in provider (`openai`, `anthropic`, `google`, `xai`, `openai-codex`); prompts without echo, or reads stdin when piped; `--oauth` is for `xai`; `openai-codex` uses the loopback browser flow by default and `--device-auth` prints a code for a browser on any device |
 | `set NAME [--kind KIND] [--endpoint URL] [--allow-file]` | store an arbitrary named secret for `Stored("NAME")` |
 | `list` | every stored credential: name, backend, kind, endpoint |
 | `status NAME` | metadata for one credential |

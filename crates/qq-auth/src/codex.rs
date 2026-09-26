@@ -29,14 +29,25 @@ pub(crate) const CREDENTIAL_ENDPOINT: &str = "https://chatgpt.com";
 
 const ISSUER: &str = "https://auth.openai.com";
 const TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
+const DEVICE_CODE_ENDPOINT: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
+const DEVICE_TOKEN_ENDPOINT: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
+const DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
+const DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 const DEFAULT_CALLBACK_PORT: u16 = 1455;
 const FALLBACK_CALLBACK_PORT: u16 = 1457;
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const DEVICE_LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const CALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CALLBACK_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CALLBACK_BYTES: usize = 16 * 1024;
 const MAX_TOKEN_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_TOKEN_BYTES: usize = 256 * 1024;
+pub(super) const MAX_DEVICE_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_DEVICE_AUTH_ID_BYTES: usize = 4 * 1024;
+const MAX_DEVICE_USER_CODE_BYTES: usize = 256;
+const MAX_DEVICE_AUTHORIZATION_CODE_BYTES: usize = 64 * 1024;
+const MAX_DEVICE_PKCE_BYTES: usize = 4 * 1024;
+const MAX_DEVICE_POLL_INTERVAL_SECONDS: u64 = 5 * 60;
 const MAX_ACCOUNT_ID_BYTES: usize = 4 * 1024;
 const REFRESH_WINDOW_SECONDS: u64 = 5 * 60;
 const REFRESH_FALLBACK_SECONDS: u64 = 8 * 24 * 60 * 60;
@@ -52,6 +63,18 @@ pub enum CodexAuthError {
     CallbackFailed,
     #[error("OpenAI Codex login timed out")]
     CallbackTimedOut,
+    #[error("the OpenAI Codex device authorization request failed")]
+    DeviceRequestFailed,
+    #[error("the OpenAI Codex device authorization request returned HTTP {status}")]
+    DeviceRequestRejected { status: u16 },
+    #[error("the OpenAI Codex device authorization response was invalid")]
+    DeviceResponseInvalid,
+    #[error("OpenAI Codex device authorization timed out")]
+    DeviceAuthorizationTimedOut,
+    #[error("OpenAI Codex device authorization was cancelled")]
+    DeviceAuthorizationCancelled,
+    #[error("OpenAI Codex device authorization returned an invalid PKCE proof")]
+    DevicePkceMismatch,
     #[error("OpenAI Codex authorization was denied: {code}")]
     AuthorizationDenied { code: String },
     #[error("OpenAI Codex authorization did not return a code")]
@@ -186,6 +209,206 @@ impl CodexTokenClient for SystemCodexTokenClient {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct DeviceAuthorization {
+    pub(super) device_auth_id: String,
+    pub(super) user_code: String,
+    pub(super) interval: Duration,
+}
+
+#[derive(Clone)]
+pub(super) struct DeviceGrant {
+    pub(super) authorization_code: String,
+    pub(super) code_challenge: String,
+    pub(super) code_verifier: String,
+}
+
+pub(super) enum DevicePoll {
+    Pending,
+    Complete(DeviceGrant),
+}
+
+pub(super) trait CodexDeviceClient: Send + Sync {
+    fn start_device(&self) -> Result<DeviceAuthorization, CodexAuthError>;
+
+    fn poll_device(
+        &self,
+        device_auth_id: &str,
+        user_code: &str,
+    ) -> Result<DevicePoll, CodexAuthError>;
+}
+
+pub(super) struct SystemCodexDeviceClient;
+
+impl CodexDeviceClient for SystemCodexDeviceClient {
+    fn start_device(&self) -> Result<DeviceAuthorization, CodexAuthError> {
+        request_device_authorization(&device_client()?, DEVICE_CODE_ENDPOINT)
+    }
+
+    fn poll_device(
+        &self,
+        device_auth_id: &str,
+        user_code: &str,
+    ) -> Result<DevicePoll, CodexAuthError> {
+        request_device_poll(
+            &device_client()?,
+            DEVICE_TOKEN_ENDPOINT,
+            device_auth_id,
+            user_code,
+        )
+    }
+}
+
+pub(super) fn request_device_authorization(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+) -> Result<DeviceAuthorization, CodexAuthError> {
+    #[derive(Serialize)]
+    struct StartRequest {
+        client_id: &'static str,
+    }
+
+    let response = client
+        .post(endpoint)
+        .json(&StartRequest {
+            client_id: CLIENT_ID,
+        })
+        .send()
+        .map_err(|_| CodexAuthError::DeviceRequestFailed)?;
+    decode_device_authorization(response)
+}
+
+pub(super) fn request_device_poll(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    device_auth_id: &str,
+    user_code: &str,
+) -> Result<DevicePoll, CodexAuthError> {
+    #[derive(Serialize)]
+    struct PollRequest<'a> {
+        device_auth_id: &'a str,
+        user_code: &'a str,
+    }
+
+    let response = client
+        .post(endpoint)
+        .json(&PollRequest {
+            device_auth_id,
+            user_code,
+        })
+        .send()
+        .map_err(|_| CodexAuthError::DeviceRequestFailed)?;
+    decode_device_poll(response)
+}
+
+fn device_client() -> Result<reqwest::blocking::Client, CodexAuthError> {
+    reqwest::blocking::Client::builder()
+        .use_rustls_tls()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(60))
+        .user_agent(concat!("qq/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|_| CodexAuthError::DeviceRequestFailed)
+}
+
+pub(super) fn decode_device_authorization(
+    mut response: Response,
+) -> Result<DeviceAuthorization, CodexAuthError> {
+    #[derive(Deserialize)]
+    struct StartResponse {
+        device_auth_id: String,
+        #[serde(alias = "usercode")]
+        user_code: String,
+        interval: String,
+    }
+
+    if !response.status().is_success() {
+        return Err(CodexAuthError::DeviceRequestRejected {
+            status: response.status().as_u16(),
+        });
+    }
+    let body: StartResponse = decode_device_body(&mut response)?;
+    let interval = body
+        .interval
+        .parse::<u64>()
+        .map_err(|_| CodexAuthError::DeviceResponseInvalid)?;
+    if body.device_auth_id.is_empty()
+        || body.device_auth_id.len() > MAX_DEVICE_AUTH_ID_BYTES
+        || body.user_code.is_empty()
+        || body.user_code.len() > MAX_DEVICE_USER_CODE_BYTES
+        || !body
+            .user_code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || interval == 0
+        || interval > MAX_DEVICE_POLL_INTERVAL_SECONDS
+    {
+        return Err(CodexAuthError::DeviceResponseInvalid);
+    }
+    Ok(DeviceAuthorization {
+        device_auth_id: body.device_auth_id,
+        user_code: body.user_code,
+        interval: Duration::from_secs(interval),
+    })
+}
+
+pub(super) fn decode_device_poll(mut response: Response) -> Result<DevicePoll, CodexAuthError> {
+    #[derive(Deserialize)]
+    struct PollResponse {
+        authorization_code: String,
+        code_challenge: String,
+        code_verifier: String,
+    }
+
+    if matches!(response.status().as_u16(), 403 | 404) {
+        return Ok(DevicePoll::Pending);
+    }
+    if !response.status().is_success() {
+        return Err(CodexAuthError::DeviceRequestRejected {
+            status: response.status().as_u16(),
+        });
+    }
+    let body: PollResponse = decode_device_body(&mut response)?;
+    let grant = DeviceGrant {
+        authorization_code: body.authorization_code,
+        code_challenge: body.code_challenge,
+        code_verifier: body.code_verifier,
+    };
+    validate_device_grant(&grant)?;
+    Ok(DevicePoll::Complete(grant))
+}
+
+fn validate_device_grant(grant: &DeviceGrant) -> Result<(), CodexAuthError> {
+    if grant.authorization_code.is_empty()
+        || grant.authorization_code.len() > MAX_DEVICE_AUTHORIZATION_CODE_BYTES
+        || grant.code_challenge.is_empty()
+        || grant.code_challenge.len() > MAX_DEVICE_PKCE_BYTES
+        || grant.code_verifier.is_empty()
+        || grant.code_verifier.len() > MAX_DEVICE_PKCE_BYTES
+    {
+        return Err(CodexAuthError::DeviceResponseInvalid);
+    }
+    let expected_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(grant.code_verifier.as_bytes()));
+    if grant.code_challenge != expected_challenge {
+        return Err(CodexAuthError::DevicePkceMismatch);
+    }
+    Ok(())
+}
+
+fn decode_device_body<T: DeserializeOwned>(response: &mut Response) -> Result<T, CodexAuthError> {
+    let mut bytes = Vec::new();
+    response
+        .take((MAX_DEVICE_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| CodexAuthError::DeviceResponseInvalid)?;
+    if bytes.len() > MAX_DEVICE_RESPONSE_BYTES {
+        return Err(CodexAuthError::DeviceResponseInvalid);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| CodexAuthError::DeviceResponseInvalid)
+}
+
 fn token_client(operation: &'static str) -> Result<reqwest::blocking::Client, CodexAuthError> {
     reqwest::blocking::Client::builder()
         .use_rustls_tls()
@@ -310,6 +533,13 @@ impl CodexLogin {
             }
             match self.listener.accept() {
                 Ok((mut stream, _)) => {
+                    // BSD-family platforms may propagate O_NONBLOCK from the
+                    // listener to an accepted socket. The callback reader is
+                    // deadline-bounded with socket timeouts and must wait for
+                    // a browser that connected just before writing its request.
+                    stream
+                        .set_nonblocking(false)
+                        .map_err(|_| CodexAuthError::CallbackFailed)?;
                     stream
                         .set_read_timeout(Some(CALLBACK_IO_TIMEOUT))
                         .map_err(|_| CodexAuthError::CallbackFailed)?;
@@ -383,6 +613,130 @@ impl CodexLogin {
             Some("openai-codex"),
             Some(CREDENTIAL_ENDPOINT),
         )
+    }
+}
+
+/// An OpenAI Codex device authorization that does not require a loopback callback.
+pub struct CodexDeviceLogin {
+    authorization: DeviceAuthorization,
+}
+
+impl CodexDeviceLogin {
+    pub fn start(store: &CredentialStore) -> Result<Self, AuthError> {
+        Ok(Self {
+            authorization: store.codex_device_client.start_device()?,
+        })
+    }
+
+    #[must_use]
+    pub fn verification_url(&self) -> &'static str {
+        DEVICE_VERIFICATION_URL
+    }
+
+    #[must_use]
+    pub fn user_code(&self) -> &str {
+        &self.authorization.user_code
+    }
+
+    pub fn complete(
+        self,
+        store: &CredentialStore,
+        profile: &str,
+        allow_file_fallback: bool,
+    ) -> Result<CredentialBackend, AuthError> {
+        self.complete_with(
+            store,
+            profile,
+            allow_file_fallback,
+            DEVICE_LOGIN_TIMEOUT,
+            || false,
+            thread::sleep,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn complete_for_test<C, S>(
+        self,
+        store: &CredentialStore,
+        profile: &str,
+        allow_file_fallback: bool,
+        timeout: Duration,
+        cancelled: C,
+        sleep: S,
+    ) -> Result<CredentialBackend, AuthError>
+    where
+        C: FnMut() -> bool,
+        S: FnMut(Duration),
+    {
+        self.complete_with(
+            store,
+            profile,
+            allow_file_fallback,
+            timeout,
+            cancelled,
+            sleep,
+        )
+    }
+
+    fn complete_with<C, S>(
+        self,
+        store: &CredentialStore,
+        profile: &str,
+        allow_file_fallback: bool,
+        timeout: Duration,
+        mut cancelled: C,
+        mut sleep: S,
+    ) -> Result<CredentialBackend, AuthError>
+    where
+        C: FnMut() -> bool,
+        S: FnMut(Duration),
+    {
+        let name = credential_name(profile)?;
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or(CodexAuthError::DeviceResponseInvalid)?;
+        loop {
+            if cancelled() {
+                return Err(CodexAuthError::DeviceAuthorizationCancelled.into());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
+            }
+            sleep(
+                self.authorization
+                    .interval
+                    .min(deadline.saturating_duration_since(now)),
+            );
+            if cancelled() {
+                return Err(CodexAuthError::DeviceAuthorizationCancelled.into());
+            }
+            if Instant::now() >= deadline {
+                return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
+            }
+            match store.codex_device_client.poll_device(
+                &self.authorization.device_auth_id,
+                &self.authorization.user_code,
+            )? {
+                DevicePoll::Pending => {}
+                DevicePoll::Complete(grant) => {
+                    validate_device_grant(&grant)?;
+                    let tokens = store.codex_client.exchange(
+                        &grant.authorization_code,
+                        DEVICE_REDIRECT_URI,
+                        &grant.code_verifier,
+                    )?;
+                    let credential = StoredCodexCredential::from_exchange(tokens, unix_time()?)?;
+                    return store.set_with_metadata(
+                        &name,
+                        credential.encode()?,
+                        allow_file_fallback,
+                        Some("openai-codex"),
+                        Some(CREDENTIAL_ENDPOINT),
+                    );
+                }
+            }
+        }
     }
 }
 
