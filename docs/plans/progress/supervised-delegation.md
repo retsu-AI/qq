@@ -14,7 +14,7 @@ dated entries appended below, newest last.
 | D5 | Heuristic final-answer audit | Shipped (`a1939d2`) | | Schema 24 |
 | D6a | Compare command, arm stamping, reasoning tokens | Shipped (`428af0a`, `66f3aba`) | | Runbook `benchmarks/arms/README.md` |
 | D6b | Paired runs and the default decisions they feed | Planned | | Needs spend; decides depth and worker-model defaults |
-| D6a.1 / ENG-950, ENG-957 | Correct offline cross-harness summary accounting | In progress | `fix/eng-950-harbor-summary` | Local candidate reviewed; complete clean-environment workspace gate pending; no publication |
+| D6a.1 / ENG-950, ENG-957 | Correct offline cross-harness summary accounting | In progress | `fix/eng-950-harbor-summary` | Local candidate reviewed; complete workspace gate passed; branch preservation pending |
 
 ## Entries
 
@@ -34,3 +34,10 @@ Shipped: none new. In progress: none. Blocked: D6b (spend).
 - Complete workspace gate is queued with canonical temporary directory, stripped credentials, ANSI colors and serial tests; status remains In progress until that invocation succeeds.
 - Local patch/bundle and raw receipts retained in the manager handoff `reviews/employee-organization-2026-09-09/roles/engineering/benchmark-20260926/HANDOFF.md` (manager workspace, outside this repository).
 - No paid model runs, provider changes, publication or merge; D6b and broader evaluation/spend gates remain open.
+
+### 2026-09-26 07:34 UTC — D6a.1 complete workspace gate
+
+- Tested commit `d365a01ec559759d02520bfda6271215a814024f`: `cargo test --workspace --no-fail-fast -- --test-threads=1` exited 0, with 1,908 passed, zero failed and five intentionally ignored tests.
+- Pinned Rust 1.97.1; canonical TMPDIR, inherited credentials removed, NO_COLOR unset, TERM=xterm-256color and COLORTERM=truecolor. No tests or Rust code changed to obtain this result.
+- Full command ran 07:30:16–07:33:55 UTC; raw output `local-test-workspace-clean.log` and result JSON retained beside the manager handoff. Prior failed runs remain retained.
+- Earlier fmt, strict all-feature Clippy and build passes apply to identical source; subsequent changes are ledger-only. Independent source and ledger reviews retained. No PR, merge or paid trials; Manager owns integration and publication-cost resolution.
