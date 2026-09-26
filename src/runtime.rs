@@ -67,7 +67,9 @@ const MAX_DISCOVERY_PROVIDERS: usize = 4;
 struct CatalogSource<'a> {
     model: Option<&'a qq_config::ModelRoute>,
     organization: Option<&'a str>,
-    max_output_tokens: u32,
+    /// The cap a new session should pin: `None` while it is the compiled
+    /// default, so the row records a choice, never the default of its day.
+    max_output_tokens: Option<u32>,
     providers: &'a BTreeMap<String, ProviderConfig>,
     policy: &'a qq_config::EffectivePolicy,
 }
@@ -77,7 +79,10 @@ impl<'a> From<&'a ConfigSnapshot> for CatalogSource<'a> {
         Self {
             model: Some(snapshot.model()),
             organization: snapshot.organization(),
-            max_output_tokens: snapshot.max_output_tokens(),
+            max_output_tokens: chosen_max_output_tokens(
+                snapshot.max_output_tokens(),
+                snapshot.provenance(),
+            ),
             providers: snapshot.providers(),
             policy: snapshot.policy(),
         }
@@ -89,11 +94,29 @@ impl<'a> From<&'a ClientSnapshot> for CatalogSource<'a> {
         Self {
             model: snapshot.model(),
             organization: snapshot.organization(),
-            max_output_tokens: snapshot.max_output_tokens(),
+            max_output_tokens: chosen_max_output_tokens(
+                snapshot.max_output_tokens(),
+                snapshot.provenance(),
+            ),
             providers: snapshot.providers(),
             policy: snapshot.policy(),
         }
     }
+}
+
+/// The `max_output_tokens` a session row should pin. A cap that came from
+/// the compiled default is not a choice: persisting it would turn the default
+/// of the day into an explicit override on every later load (and, for
+/// reasoning routes, defeat the effort-aware lift). Any other provenance —
+/// a configuration layer, the CLI, a profile, a picker — is kept.
+pub(crate) fn chosen_max_output_tokens(
+    effective: u32,
+    provenance: &qq_config::ConfigProvenance,
+) -> Option<u32> {
+    provenance
+        .max_output_tokens()
+        .is_some_and(|source| source.kind() != qq_config::SourceKind::Compiled)
+        .then_some(effective)
 }
 
 /// A built-in provider the configuration admits but that has no resolvable
@@ -320,7 +343,10 @@ impl RuntimeFactory {
             .map_or_else(ModelSelection::default, |route| ModelSelection {
                 model_is_fallback: request.overrides().model().is_none(),
                 model: Some(route.as_str().to_owned()),
-                max_output_tokens: Some(snapshot.max_output_tokens()),
+                max_output_tokens: chosen_max_output_tokens(
+                    snapshot.max_output_tokens(),
+                    snapshot.provenance(),
+                ),
                 organization: snapshot.organization().map(str::to_owned),
             });
         let model = (configured_model.model.is_some()
@@ -622,13 +648,11 @@ impl RuntimeFactory {
             selection: ModelSelection {
                 model_is_fallback: false,
                 model: Some(route.as_str().to_owned()),
-                max_output_tokens: Some(
+                max_output_tokens: snapshot.max_output_tokens.map(|chosen| {
                     metadata
                         .and_then(|metadata| metadata.max_output_tokens())
-                        .map_or(snapshot.max_output_tokens, |limit| {
-                            limit.min(snapshot.max_output_tokens)
-                        }),
-                ),
+                        .map_or(chosen, |limit| limit.min(chosen))
+                }),
                 organization: snapshot.organization.map(str::to_owned),
             },
         }
@@ -677,13 +701,11 @@ impl RuntimeFactory {
                     selection: qq_protocol::ModelSelection {
                         model_is_fallback: false,
                         model: Some(format!("{provider_id}/{model_id}")),
-                        max_output_tokens: Some(
+                        max_output_tokens: snapshot.max_output_tokens.map(|chosen| {
                             metadata
                                 .max_output_tokens()
-                                .map_or(snapshot.max_output_tokens, |limit| {
-                                    limit.min(snapshot.max_output_tokens)
-                                }),
-                        ),
+                                .map_or(chosen, |limit| limit.min(chosen))
+                        }),
                         organization: snapshot.organization.map(str::to_owned),
                     },
                 });
@@ -705,7 +727,7 @@ impl RuntimeFactory {
                         selection: qq_protocol::ModelSelection {
                             model_is_fallback: false,
                             model: Some(format!("{provider_id}/{}", model.id)),
-                            max_output_tokens: Some(snapshot.max_output_tokens),
+                            max_output_tokens: snapshot.max_output_tokens,
                             organization: snapshot.organization.map(str::to_owned),
                         },
                     });
@@ -734,7 +756,7 @@ impl RuntimeFactory {
                 selection: qq_protocol::ModelSelection {
                     model_is_fallback: false,
                     model: Some(route.as_str().to_owned()),
-                    max_output_tokens: Some(snapshot.max_output_tokens),
+                    max_output_tokens: snapshot.max_output_tokens,
                     organization: snapshot.organization.map(str::to_owned),
                 },
             });
@@ -867,16 +889,15 @@ impl RuntimeFactory {
     ) -> Result<LoadRequest, RuntimeBuildError> {
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(workspace)?;
-        // A session row records the effective cap of its day, not necessarily
-        // a choice: the TUI and headless paths materialise the compiled
-        // default into every new session, and older releases persisted
-        // 2 048 / 4 096. Exactly those defaults are treated as unset so the
-        // configured value (and the reasoning-aware lift) applies; any other
-        // persisted value is an operator's pick and is kept (RR8).
-        let max_output_tokens = max_output_tokens.filter(|limit| {
-            !LEGACY_DEFAULT_MAX_OUTPUT_TOKENS.contains(limit)
-                && *limit != qq_config::DEFAULT_MAX_OUTPUT_TOKENS
-        });
+        // A session created before the default rose to 16 384 persisted the
+        // then-default (2 048, later 4 096) and would pin every later run to
+        // it, costing continuation turns on each long answer (RR8). Exactly
+        // those historical defaults are treated as unset so the configured
+        // value applies; any other persisted value is a choice and is kept.
+        // (Sessions created now never persist the compiled default: see
+        // `chosen_max_output_tokens`.)
+        let max_output_tokens =
+            max_output_tokens.filter(|limit| !LEGACY_DEFAULT_MAX_OUTPUT_TOKENS.contains(limit));
         let request = if self.is_isolated_tui_qa() {
             let mut overrides = RuntimeOverrides::new();
             if let Some(max_output_tokens) = max_output_tokens {
@@ -2213,7 +2234,10 @@ impl RuntimeLoader for RuntimeFactory {
                     Some(worker) => qq_protocol::ModelSelection {
                         model_is_fallback: false,
                         model: Some(worker.as_str().to_owned()),
-                        max_output_tokens: Some(snapshot.max_output_tokens()),
+                        max_output_tokens: chosen_max_output_tokens(
+                            snapshot.max_output_tokens(),
+                            snapshot.provenance(),
+                        ),
                         organization: snapshot.organization().map(str::to_owned),
                     },
                     None => parent,
@@ -4925,6 +4949,53 @@ mod tests {
     }
 
     #[test]
+    fn a_new_session_pins_the_output_cap_only_when_it_was_chosen() {
+        // RR8.3 review: materialising the compiled default into every new
+        // session row made it an explicit override on the next load, which
+        // defeated the reasoning-aware lift. A configured or CLI cap is a
+        // choice and is still pinned, whatever its value.
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let config = r#"(
+            version: 1,
+            model: "custom/test-model",
+            providers: {
+                "custom": Custom(
+                    connection: (
+                        base_url: "http://127.0.0.1:1/v1",
+                        api: OpenAiResponses,
+                        auth: NoAuth,
+                    ),
+                    models: {"test-model": (name: "Test")},
+                ),
+            },
+        )"#;
+        let chosen = |overrides: RuntimeOverrides| {
+            let snapshot = factory
+                .load(
+                    &LoadRequest::new(fixture.path("work"))
+                        .with_explicit_content(config.to_owned())
+                        .with_overrides(overrides),
+                )
+                .unwrap();
+            chosen_max_output_tokens(snapshot.max_output_tokens(), snapshot.provenance())
+        };
+        assert_eq!(chosen(RuntimeOverrides::new()), None);
+        // Even the default's own value is a pin when the operator asked for it.
+        assert_eq!(
+            chosen(
+                RuntimeOverrides::new()
+                    .with_max_output_tokens(qq_config::DEFAULT_MAX_OUTPUT_TOKENS)
+            ),
+            Some(qq_config::DEFAULT_MAX_OUTPUT_TOKENS)
+        );
+        assert_eq!(
+            chosen(RuntimeOverrides::new().with_max_output_tokens(4_096)),
+            Some(4_096)
+        );
+    }
+
+    #[test]
     fn a_persisted_output_limit_below_the_default_is_treated_as_unset() {
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
@@ -4932,9 +5003,12 @@ mod tests {
             (Some(2_048), None),
             (Some(4_096), None),
             (Some(123), Some(123)),
-            // The TUI materialises the compiled default into every new
-            // session row; it is not a choice either.
-            (Some(qq_config::DEFAULT_MAX_OUTPUT_TOKENS), None),
+            // A persisted 16 384 is an operator's pick (a fresh row never
+            // records the compiled default: `chosen_max_output_tokens`).
+            (
+                Some(qq_config::DEFAULT_MAX_OUTPUT_TOKENS),
+                Some(qq_config::DEFAULT_MAX_OUTPUT_TOKENS),
+            ),
             (Some(32_768), Some(32_768)),
             (None, None),
         ] {

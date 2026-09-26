@@ -354,10 +354,13 @@ the vendor segment of the gateway id), the compiled default would be spent on
 hidden reasoning before any visible output, so the wire cap is the catalog
 ceiling instead, still bounded by a managed `policy.max_output_tokens`. A
 `max_output_tokens` the operator set in any configuration layer or override is
-honoured verbatim; run budgets bound spend either way. A per-session cap equal
-to the current compiled default or to an older release's default (2 048,
-4 096) records the default of its day, not a choice, and is treated as unset
-at load so the configured value and the lift apply.
+honoured verbatim; run budgets bound spend either way. A new session row pins
+`max_output_tokens` only when the cap has non-compiled provenance (a
+configuration layer, `--max-output-tokens`, a profile, a picker); the compiled
+default is never persisted as a choice. Rows from older releases that recorded
+the then-default (2 048, 4 096) are treated as unset at load so the configured
+value and the lift apply; an operator who pins exactly one of those two values
+on such a row is the accepted cost of that repair.
 Version-2 resolved models also carry an optional opaque provider request-shape
 identity built once by the root from the effective adapter, API, endpoint mode,
 safe normalized endpoint, explicit region, and non-secret authorization shape.
