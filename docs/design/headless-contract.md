@@ -162,11 +162,13 @@ configuration, trust, organization, credential, and session behavior.
 
 `--state-root PATH` is an opt-in admission boundary for a supervisor-owned run.
 `PATH` must already be a private canonical directory with existing `config/`,
-`data/`, `workspace/`, and `artifacts/` children. QQ rejects symlinks,
-non-private modes, roots or workspaces owned by another user, a workspace
-outside the root, overlap with ordinary QQ config/data, and a fresh root that
-already contains `sessions.sqlite3`. Writes for global-style configuration,
-trust/grants, durable identity, and sessions are relocated under the root.
+`data/`, `workspace/`, and `artifacts/` children. QQ rejects symlinks, a
+workspace outside the root, overlap with ordinary QQ config/data, and a fresh
+root that already contains `sessions.sqlite3`. On Unix, the root, required
+children, and config must not grant group or other permissions, and the
+children and config must share the root's UID. Writes for global-style
+configuration, trust/grants, durable identity, and sessions are relocated under
+the root.
 Managed files, native MDM, and cached enrolled-organization policy remain
 read-only inputs from their ordinary sources, with managed ownership checks
 preserved. Credentials remain in the ordinary credential store; the flag does
