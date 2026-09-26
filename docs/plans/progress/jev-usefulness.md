@@ -7,7 +7,7 @@ ENG-791. Raw evidence: `target/qq-perf/jev-audit-2026-09-25/` (not committed).
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| JU0 | Plan, proposed ADR-0046, qualification runbook, audit, PR 187/189 comparison | In review | `docs/eng-938-jev-usefulness-plan` / [ENG-938](https://linear.app/retsu-ai/issue/ENG-938) | Docs only; base `ac28bf2`; draft PR |
+| JU0 | Plan, proposed ADR-0046, qualification runbook, audit, PR 187/189 comparison | In review | [#193](https://github.com/retsu-AI/qq/pull/193) / [ENG-938](https://linear.app/retsu-ai/issue/ENG-938) | Docs only; base `ac28bf2`; draft PR |
 | JU1 | Effective consent, cache/profile correctness, reliable Off | Planned | — | Reproduced stale on-to-off probe is the first regression |
 | JU2 | Authoritative bounded task context for approval | Planned | — | Root brief gap; shares session files with JU3 (one writer) |
 | JU3 | Durable delegate-vs-human lifecycle; Jev-only headless waiting | Planned | — | Split JU3.1 phases/fixtures, JU3.2 TUI/headless consumers |
@@ -62,3 +62,16 @@ ENG-791. Raw evidence: `target/qq-perf/jev-audit-2026-09-25/` (not committed).
 - `cargo build --locked --offline --workspace`: passed.
 - Minimal-provider profile and provider benchmarks not applicable: no Rust
   or manifest changes. No live Jev call, credential read, or paid run.
+
+### 2026-09-25 — JU0 publication
+
+- Committed `0c1cbd6` and pushed `docs/eng-938-jev-usefulness-plan`; opened
+  draft [#193](https://github.com/retsu-AI/qq/pull/193) against `main` through
+  Executor.
+- The Linear update (ENG-938 → In Review, PR link) was declined at the
+  Executor approval gate and was not retried: ENG-938 remains In Progress and
+  carries no PR attachment. Reconcile manually or on the next approved update.
+- A third independent-review attempt (default worker route) stopped at its
+  output-token limit; no non-author review of these documents is recorded.
+- The PR body records the verification above and the comparison summary. It
+  does not approve, retarget or merge #187/#189; those remain owner decisions.
