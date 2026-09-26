@@ -138,6 +138,12 @@ const INTERRUPTED_TOOL_RESULT: &str =
 /// limit. The cap keeps a model that re-emits the same prefix from spending
 /// the whole budget; the typed failure names it.
 pub const MAX_OUTPUT_CONTINUATIONS: u16 = 3;
+/// Most times one run raises its output cap after a turn hit the limit with
+/// nothing visible streamed. Such a turn was spent entirely on hidden
+/// reasoning; resending the same request would only spend it again, so the
+/// retry doubles the cap (bounded by the model's ceiling) and a second empty
+/// turn settles the run with the cause named.
+pub const MAX_EMPTY_OUTPUT_RETRIES: u16 = 1;
 /// Sent after a truncated turn is committed so the model resumes rather than
 /// restarts. Assistant/user alternation is preserved because the partial
 /// assistant message precedes it.
@@ -923,6 +929,13 @@ impl Runtime {
             if !truncated {
                 return Ok((summary, total_usage));
             }
+            if text.is_empty() {
+                // Nothing visible: the cap went to hidden reasoning. A
+                // continuation would resend the same request.
+                return Err(format!(
+                    "summarizer output was cut off at the output token limit ({max_output_tokens} tokens) without producing any visible text; the limit was spent on reasoning. Lower `reasoning_effort` or raise `max_output_tokens`"
+                ));
+            }
             if continuations >= MAX_OUTPUT_CONTINUATIONS {
                 return Err(format!(
                     "summarizer output was cut off at the output token limit ({max_output_tokens} tokens) on {} consecutive turns",
@@ -1355,9 +1368,12 @@ impl plan::CompiledAgentPlan {
             let mut handled_interrupt = steering
                 .as_ref()
                 .map_or(0, |steering| *steering.interrupts.borrow());
-            let max_output_tokens = max_output_tokens
+            let mut max_output_tokens = max_output_tokens
                 .unwrap_or(model_max_output_tokens)
                 .min(model_max_output_tokens);
+            // Empty truncations raise the cap toward the model ceiling once
+            // per run; the ceiling itself is the resolved model's limit.
+            let mut empty_output_retries = 0_u16;
             // The session owner supplies the original execution admission,
             // including time spent loading or automatically compacting.
             let mut budget = BudgetMeter::new(limits, pricing, started);
@@ -2402,6 +2418,39 @@ impl plan::CompiledAgentPlan {
                     // continued: the budget already settles the run below.
                     // Otherwise resume, bounded, or settle with the reason.
                     if !budget_final_turn {
+                        if !assistant.has_content() {
+                            // Nothing visible streamed: the whole cap went to
+                            // hidden reasoning (or the model produced nothing).
+                            // A continuation notice cannot help because there
+                            // is nothing to continue and the request would be
+                            // resent byte-for-byte. Raise the cap once toward
+                            // the model ceiling; otherwise settle with the
+                            // cause and both remedies named.
+                            if empty_output_retries >= MAX_EMPTY_OUTPUT_RETRIES
+                                || max_output_tokens >= model_max_output_tokens
+                            {
+                                yield RuntimeEvent::Failed {
+                                    kind: RunFailureKind::ProviderOutputTruncated,
+                                    message: format!(
+                                        "the provider stopped at its output token limit ({max_output_tokens} tokens) \
+                                         without producing any visible output on {} consecutive turns; the \
+                                         limit was spent on reasoning. Raise `max_output_tokens` (model ceiling \
+                                         {model_max_output_tokens}) or lower `reasoning_effort`",
+                                        u32::from(empty_output_retries) + 1
+                                    ),
+                                };
+                                return;
+                            }
+                            empty_output_retries += 1;
+                            max_output_tokens = max_output_tokens
+                                .saturating_mul(2)
+                                .min(model_max_output_tokens);
+                            yield RuntimeEvent::OutputTruncated {
+                                turn_ordinal,
+                                continuation: output_continuations,
+                            };
+                            continue;
+                        }
                         if output_continuations >= MAX_OUTPUT_CONTINUATIONS {
                             yield RuntimeEvent::Failed {
                                 kind: RunFailureKind::ProviderOutputTruncated,
@@ -7088,6 +7137,8 @@ mod tests {
         truncations: usize,
         /// Cut a tool call mid-arguments on the first truncated turn.
         cut_tool_call: bool,
+        /// Truncated turns stream nothing visible (all hidden reasoning).
+        empty: bool,
         requests: Arc<Mutex<Vec<ModelRequest>>>,
     }
 
@@ -7105,9 +7156,13 @@ mod tests {
                 reasoning_tokens: None,
             });
             if turn < self.truncations {
-                let mut events = vec![Ok(ProviderEvent::OutputTextDelta {
-                    text: format!("part{turn} "),
-                })];
+                let mut events = if self.empty {
+                    Vec::new()
+                } else {
+                    vec![Ok(ProviderEvent::OutputTextDelta {
+                        text: format!("part{turn} "),
+                    })]
+                };
                 if turn == 0 && self.cut_tool_call {
                     // A tool call cut mid-arguments must never execute.
                     events.push(Ok(ProviderEvent::ToolCallStarted {
@@ -7142,6 +7197,7 @@ mod tests {
             TruncatingProvider {
                 truncations: 2,
                 cut_tool_call: true,
+                empty: false,
                 requests: Arc::clone(&requests),
             },
             "gpt-test",
@@ -7230,6 +7286,7 @@ mod tests {
             TruncatingProvider {
                 truncations: usize::MAX,
                 cut_tool_call: false,
+                empty: false,
                 requests: Arc::clone(&requests),
             },
             "gpt-test",
@@ -7276,6 +7333,101 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn an_empty_truncated_turn_raises_the_cap_once_then_completes() {
+        // RR8.1 regression: a turn cut at the limit with nothing visible was
+        // resent byte-for-byte up to the continuation cap (four identical
+        // 16 384-token reasoning turns in the audited runs). The retry must
+        // change the request: the cap doubles toward the model ceiling.
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TruncatingProvider {
+                truncations: 1,
+                cut_tool_call: false,
+                empty: true,
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            1024,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("think hard")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::ReadOnly,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).with_max_output_tokens(256),
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+        let caps = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(ModelRequest::max_output_tokens)
+            .collect::<Vec<_>>();
+        assert_eq!(caps, vec![256, 512], "the retry carries a larger cap");
+        assert_eq!(
+            events.last(),
+            Some(&RuntimeEvent::Completed { final_output: None })
+        );
+        // The empty partial turn is durable and flagged; no continuation
+        // notice was appended because there was nothing to continue.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::AssistantTurnCompleted {
+                truncated: true,
+                ..
+            }
+        )));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests[1].messages().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_empty_truncated_turn_at_the_ceiling_fails_at_once_naming_the_cause() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TruncatingProvider {
+                truncations: usize::MAX,
+                cut_tool_call: false,
+                empty: true,
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(
+                vec![Message::user("think hard")],
+                directory.path().to_owned(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+        // Already at the model ceiling: no retry can change the request, so
+        // exactly one provider call is spent, not MAX_OUTPUT_CONTINUATIONS + 1.
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Failed {
+                kind: RunFailureKind::ProviderOutputTruncated,
+                message,
+            }) if message.contains("without producing any visible output")
+                && message.contains("reasoning_effort")
+                && message.contains("model ceiling 256")
+        ));
+    }
     #[tokio::test]
     async fn completed_limited_stream_stays_finished_when_polled_after_its_deadline() {
         let directory = tempfile::tempdir().unwrap();
@@ -7328,6 +7480,7 @@ mod tests {
             TruncatingProvider {
                 truncations: usize::MAX,
                 cut_tool_call: false,
+                empty: false,
                 requests: Arc::clone(&requests),
             },
             "gpt-test",

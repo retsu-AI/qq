@@ -688,7 +688,15 @@ its message, so it is charged and durable before anything continues. Up to
 message to keep role alternation, and issues the next turn with tools
 available. Context assembly replays that notice after every truncated turn so
 the durable transcript matches the requests the provider saw. Past the cap the
-run settles as `provider_output_truncated`, naming the limit and turn count; a
+run settles as `provider_output_truncated`, naming the limit and turn count. A
+truncated turn with nothing visible (no text, refusal, or completed call: the
+whole cap went to hidden reasoning) is not continued, because there is nothing
+to continue and the resend would be byte-identical; the loop instead doubles
+the request's output cap toward the resolved model's ceiling once per run
+(`MAX_EMPTY_OUTPUT_RETRIES`) and, if the next turn is empty again or the cap
+was already at the ceiling, settles at once with the cause and both remedies
+(`max_output_tokens`, `reasoning_effort`) named. The summarizer applies the
+same rule and fails its step rather than continuing an empty reply. A
 reserved budget final response that truncates settles as the budget exhaustion
 it already was and is never continued. Restart never resumes an in-flight
 continuation: the committed partial turns are what the next prompt sees.
