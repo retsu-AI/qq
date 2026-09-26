@@ -44,8 +44,10 @@ Related documents:
    `deny_unknown_fields`.
 
 Plan descriptor version 9 records optional `reasoning_effort`, routing policy
-and candidate-configuration fingerprint in its canonical identity. It does not alter the wire envelope version or require a database
-migration; historical descriptor JSON remains historical evidence.
+and candidate-configuration fingerprint in its canonical identity; version 10
+adds each declared MCP server's configured tool-set `pin` (ADR-0046). Neither
+alters the wire envelope version or requires a database migration; historical
+descriptor JSON remains historical evidence.
 
 ## Protocol Version
 

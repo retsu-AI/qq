@@ -53,6 +53,7 @@ written.
 - [ADR-0042: the in-TUI trust prompt is client-side, resolved by the composition root; no protocol change](0042-in-tui-trust-prompt.md) — Accepted (onboarding-ux OB7, ENG-881).
 
 - [ADR-0043: optimize verified task efficiency, not individual turn size](0043-verified-task-efficiency.md) — Proposed (token-efficiency TE0).
+- [ADR-0046: pin an MCP server's advertised tool set in configuration and plan identity; enforce the pin at dispatch](0046-mcp-tool-set-pinning.md) — Accepted (ENG-939; supersedes the contributed #163/#165/#171 design; `DESCRIPTOR_VERSION` 9 → 10).
 
 ## When to write one
 

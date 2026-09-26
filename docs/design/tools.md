@@ -1020,6 +1020,48 @@ embedded host above.
 - Concurrency: calls to distinct MCP servers proceed in parallel; calls to
   one server are limited by a small per-server bound so a slow server
   backpressures instead of queueing unboundedly.
+- Tool-set pinning (ADR-0046): every listing is reduced to an
+  `McpToolSetDigest` — SHA-256 under a versioned domain separator
+  (`qq-mcp-tool-set-v2`) over the tools in name order, each contributing its
+  length-prefixed namespaced name (which carries the server name),
+  description, compact sorted-key input schema, and hints. Listing order does
+  not affect it; any change to what a tool is called, says, accepts, or claims
+  about itself does. The digest is computed once per fetch, next to the
+  cached listing, and `McpCatalog.servers` publishes it for every server that
+  answered. A server declared with a `pin` whose listing digests differently
+  is *quarantined*: `McpCatalog.quarantined` names it with the expected and
+  actual digests, none of its tools reach `tools`, and `McpManager::call`
+  fails closed with `McpCallFailure::Quarantined` for every tool on it —
+  including one whose own schema did not change, because a server that
+  changed one tool cannot be trusted about the others. A server without a
+  `pin` behaves exactly as before.
+- Pins are enforced at dispatch, not only at discovery. A pinned call
+  resolves the cached listing *before* it waits for a concurrency permit and
+  re-checks, after the permit, that the listing's generation is still the
+  server's current one and that no `list_changed` is pending; either drift
+  releases the permit and re-resolves, so a queued call never executes
+  against a tool set the pin did not cover. The tool must be present in that
+  listing (`UnknownTool` otherwise). The request itself is sent as exactly
+  one `tools/call` with no implicit continuation, polled under a synchronous
+  dispatch gate that `list_changed`, reconnect, and shutdown also take while
+  flipping their flags, so the enqueue and the last drift check are atomic;
+  the gate covers only that non-blocking poll, never the wait for capacity or
+  the server's answer. A drift observed at the gate is `Quarantined`; a
+  response that is not a `CallToolResult` is `InvalidResult`. A
+  `list_changed` that arrives while a listing is being fetched discards that
+  fetch (`unavailable`, retry) rather than certifying a snapshot taken across
+  the change.
+- Listings are bounded and taken whole: at most 32 pages, 512 tools, and
+  1 MiB of descriptors per server, each under the 20 s list deadline; a
+  listing with an empty, oversized, non-`[A-Za-z0-9_.-]`, or duplicate tool
+  name fails as `unavailable` for every server — a pin may never approve a
+  silently reduced or ambiguous listing.
+- Inspection is separate from admission. `McpManager::inspect(server)` fetches
+  the raw listing, ignores the pin, calls nothing, and returns the digest and
+  the descriptors (`McpInspection`); the CLI's `qq mcp inspect NAME` prints it
+  as JSON with an explicit warning that the descriptors are untrusted input
+  and that the digest grants nothing. A pin attests to the advertised
+  metadata only, never to the server's implementation.
 
 MCP tools execute outside the workspace containment model, so they are
 externally visible by default and require approval unless allowlisted.
@@ -1056,10 +1098,23 @@ declare servers at all.
             bearer: Env("LINEAR_TOKEN"),  // sourced like every other secret
             call_timeout_seconds: 60,     // default 60, max 600
             max_concurrent_calls: 4,      // per-server bound, default 4
+            // The tool-set digest this server must keep listing; any
+            // drift quarantines it until the pin is updated.
+            pin: "5a1f…e9c0",
         ),
     },
 )
 ```
+
+`pin` is the 64 lowercase hex digits of the server's tool-set digest,
+validated when the document loads so a typo fails configuration rather
+than quarantining the server at first use. The composition root parses it
+into `McpServerSettings::pin` (an `McpToolSetDigest`), so `qq-mcp`
+compares digests, never text. The pin is also recorded on the plan
+descriptor's `McpServerDescriptor` (`DESCRIPTOR_VERSION` 10), so a pinned
+and an unpinned declaration of the same server compile to distinct plan
+digests and a run's durable identity names the tool set it was admitted
+against.
 
 One deliberate convenience: the per-MCP-server tool allowlist lives on
 the server's own `mcp` entry, next to the declaration it scopes, even
@@ -1077,6 +1132,14 @@ server stays declared with its grants, never connects, and reports as
 so one missing credential degrades one server rather than failing plan
 compilation for the workspace. The registry cache key includes the
 credential epoch, so `qq auth set` is picked up by the next compile.
+
+A quarantined server is reported the same way — `quarantined MCP servers:
+NAME (tool set digests to ACTUAL but the configured pin is EXPECTED)` —
+and its calls surface to the runtime as `Refused`, not `Unavailable`: the
+server is reachable; QQ declines to use it. The message names both digests
+so the operator can tell a drifted server from a stale pin, but the actual
+digest is not an invitation to copy: `qq mcp inspect NAME` shows what the
+server now declares, and the pin is updated only after that review.
 
 ## Approval Policy
 

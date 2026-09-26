@@ -78,18 +78,36 @@ impl ExternalToolHost for WiredMcpRegistry {
                         },
                     })
                     .collect(),
-                readiness: if catalog.unavailable.is_empty() {
+                readiness: if catalog.unavailable.is_empty() && catalog.quarantined.is_empty() {
                     HostReadiness::Ready
                 } else {
-                    let mut message = String::from("unavailable MCP servers: ");
-                    for (index, unavailable) in catalog.unavailable.iter().enumerate() {
-                        if index > 0 {
+                    let mut message = String::new();
+                    if !catalog.unavailable.is_empty() {
+                        message.push_str("unavailable MCP servers: ");
+                        for (index, unavailable) in catalog.unavailable.iter().enumerate() {
+                            if index > 0 {
+                                message.push_str("; ");
+                            }
+                            message.push_str(&unavailable.server);
+                            message.push_str(" (");
+                            message.push_str(&unavailable.reason);
+                            message.push(')');
+                        }
+                    }
+                    if !catalog.quarantined.is_empty() {
+                        if !message.is_empty() {
                             message.push_str("; ");
                         }
-                        message.push_str(&unavailable.server);
-                        message.push_str(" (");
-                        message.push_str(&unavailable.reason);
-                        message.push(')');
+                        message.push_str("quarantined MCP servers: ");
+                        for (index, quarantine) in catalog.quarantined.iter().enumerate() {
+                            if index > 0 {
+                                message.push_str("; ");
+                            }
+                            message.push_str(&format!(
+                                "{} (tool set digests to {} but the configured pin is {})",
+                                quarantine.server, quarantine.actual, quarantine.expected
+                            ));
+                        }
                     }
                     HostReadiness::Degraded { message }
                 },
@@ -132,8 +150,11 @@ impl ExternalToolHost for WiredMcpRegistry {
                 Some(McpCallFailure::Unavailable) => {
                     Err(HostCallError::Unavailable(outcome.content))
                 }
-                Some(McpCallFailure::InvalidArguments) => {
+                Some(McpCallFailure::InvalidArguments | McpCallFailure::Quarantined) => {
                     Err(HostCallError::Refused(outcome.content))
+                }
+                Some(McpCallFailure::InvalidResult) => {
+                    Err(HostCallError::InvalidResult(outcome.content))
                 }
                 Some(McpCallFailure::UnknownTool) => Err(HostCallError::UnknownTool(name)),
                 Some(McpCallFailure::ShutDown) => Err(HostCallError::ShutDown),
@@ -282,6 +303,89 @@ impl McpRegistryCache {
     }
 }
 
+/// Loads only trusted configuration and resolves only the requested server's
+/// credential. Called on a blocking thread; no model or store is opened.
+pub(crate) fn inspection_settings(
+    name: &str,
+    request: &qq_config::LoadRequest,
+) -> Result<McpServerSettings, Box<dyn std::error::Error>> {
+    let loader = qq_config::ConfigLoader::system()?;
+    let snapshot = loader.load_for_client(request)?;
+    // MCP inspection needs no selected model. Use the client snapshot's
+    // effective declarations rather than compiling an agent plan.
+    let server = snapshot
+        .mcp_servers()
+        .get(name)
+        .ok_or_else(|| std::io::Error::other(format!("MCP server {name:?} is not configured")))?;
+    let credentials = CredentialStore::system()?;
+    let mut settings = resolve_server(name, server, &credentials);
+    settings.eager = false;
+    Ok(settings)
+}
+
+/// Connects to one server, lists its tools, and renders the inspection
+/// report; the pin is reported, never enforced, and no tool is called.
+pub(crate) async fn inspect_server(
+    settings: McpServerSettings,
+) -> Result<serde_json::Value, std::io::Error> {
+    tokio::select! {
+        biased;
+        signal = tokio::signal::ctrl_c() => Err(std::io::Error::other(match signal {
+            Ok(()) => "MCP inspection cancelled".to_owned(),
+            Err(error) => format!("cannot listen for interruption: {error}"),
+        })),
+        result = inspect_report(settings) => result,
+    }
+}
+
+async fn inspect_report(settings: McpServerSettings) -> Result<serde_json::Value, std::io::Error> {
+    let name = settings.name.clone();
+    let manager = McpManager::new(vec![settings]).map_err(std::io::Error::other)?;
+    let result = match tokio::time::timeout(CATALOG_SNAPSHOT_TIMEOUT, manager.inspect(&name)).await
+    {
+        Ok(Ok(inspection)) => Ok(inspection_report(&inspection)),
+        Ok(Err(error)) => Err(std::io::Error::other(error.reason)),
+        Err(_) => Err(std::io::Error::other(format!(
+            "MCP inspection timed out after {} s",
+            CATALOG_SNAPSHOT_TIMEOUT.as_secs()
+        ))),
+    };
+    manager.shutdown().await;
+    result
+}
+
+/// Descriptions and schemas are the server's own words: the report says so
+/// and the digest it prints authorizes nothing until an operator pins it.
+const INSPECTION_WARNING: &str = "Untrusted server declarations. Review every descriptor before copying the digest into pin. This does not verify server code or grant execution permission.";
+
+fn inspection_report(inspection: &qq_mcp::McpInspection) -> serde_json::Value {
+    let tools = inspection
+        .tools
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "name": tool.spec.name(),
+                "description": tool.spec.description(),
+                "input_schema": tool.spec.input_schema(),
+                "hints": {
+                    "read_only": tool.hints.read_only,
+                    "destructive": tool.hints.destructive,
+                    "idempotent": tool.hints.idempotent,
+                    "open_world": tool.hints.open_world,
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "server": inspection.server,
+        "digest": inspection.digest.to_string(),
+        "configured_pin": inspection.configured_pin.map(|pin| pin.to_string()),
+        "matches_pin": inspection.configured_pin.map(|pin| pin == inspection.digest),
+        "warning": INSPECTION_WARNING,
+        "tools": tools,
+    })
+}
+
 fn describe_server(name: &str, server: &McpServerConfig) -> McpServerDescriptor {
     let (transport, target, args, env, credential) = match server.transport() {
         McpTransport::Stdio { command, args, env } => (
@@ -315,6 +419,7 @@ fn describe_server(name: &str, server: &McpServerConfig) -> McpServerDescriptor 
         allow: server.allow().to_vec(),
         call_timeout_seconds: server.call_timeout_seconds(),
         max_concurrent_calls: server.max_concurrent_calls(),
+        pin: server.pin().map(str::to_owned),
     }
 }
 
@@ -361,6 +466,9 @@ fn resolve_server(
     settings.call_timeout = std::time::Duration::from_secs(server.call_timeout_seconds());
     settings.max_concurrent_calls = usize::try_from(server.max_concurrent_calls())
         .expect("the validated concurrency bound fits usize");
+    settings.pin = server
+        .pin()
+        .map(|pin| pin.parse().expect("the validated pin is a tool-set digest"));
     settings
 }
 
@@ -454,7 +562,7 @@ mod tests {
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use super::{McpRegistryCache, WiredMcpRegistry};
+    use super::{McpRegistryCache, WiredMcpRegistry, inspect_report};
 
     #[derive(Default)]
     struct MemoryKeyring(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
@@ -1022,6 +1130,74 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    /// `qq mcp inspect` reports the live digest and every descriptor without
+    /// enforcing the pin: a mismatched pin is reported as `matches_pin: false`
+    /// while the tools are still listed, and no `tools/call` is ever sent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inspection_reports_descriptors_and_pin_status_without_calling_a_tool() {
+        let server = HttpFixture::new().await;
+        let http = |pin: Option<String>| {
+            let mut settings = McpServerSettings::new(
+                "srv",
+                McpTransportSettings::Http {
+                    url: server.url.clone(),
+                    bearer: qq_mcp::McpBearer::None,
+                },
+            );
+            settings.pin = pin.map(|pin| pin.parse().unwrap());
+            settings
+        };
+        let report = tokio::time::timeout(
+            Duration::from_secs(10),
+            inspect_report(http(Some("ab".repeat(32)))),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(report["server"], "srv");
+        assert_eq!(report["configured_pin"], "ab".repeat(32));
+        assert_eq!(report["matches_pin"], false);
+        let digest = report["digest"].as_str().unwrap().to_owned();
+        assert_eq!(digest.len(), 64);
+        assert!(report["warning"].as_str().unwrap().contains("Untrusted"));
+        assert_eq!(report["tools"][0]["name"], "mcp__srv__echo");
+        assert_eq!(report["tools"][0]["input_schema"]["type"], "object");
+        assert_eq!(report["tools"][0]["hints"]["read_only"], false);
+        assert_eq!(server.initializations.load(Ordering::SeqCst), 1);
+
+        // The digest the report printed is the pin that admits this listing.
+        let report = tokio::time::timeout(
+            Duration::from_secs(10),
+            inspect_report(http(Some(digest.clone()))),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(report["matches_pin"], true);
+        assert_eq!(report["digest"], digest);
+
+        let report = tokio::time::timeout(Duration::from_secs(10), inspect_report(http(None)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(report["configured_pin"].is_null());
+        assert!(report["matches_pin"].is_null());
+
+        let unreachable = McpServerSettings::new(
+            "srv",
+            McpTransportSettings::Stdio {
+                command: "qq-mcp-test-no-such-binary".to_owned(),
+                args: Vec::new(),
+                env: Vec::new(),
+            },
+        );
+        let error = tokio::time::timeout(Duration::from_secs(30), inspect_report(unreachable))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("srv"), "{error}");
     }
 
     /// The adapter runs the shared host suite against a real manager whose
