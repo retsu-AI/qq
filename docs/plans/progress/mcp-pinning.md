@@ -82,3 +82,17 @@ a quarantined server, listing bounds, and invalid names.
 Not covered here: a live pinned server in the TUI (the fixtures are the
 in-process `rmcp` pair and the HTTP fixture), and an independent review of
 the dispatch-gate design — requested on the PR.
+
+
+## 2026-09-26 — Codex review on #194
+
+One P2 finding (`lib.rs` byte bound): `serde_json::to_vec(tool)` buffered a
+full encoded copy of each descriptor before the 1 MiB check. The claim that
+the bound "does not constrain peak memory" overstates it — `rmcp` decodes a
+page before we see it and the stdio transport has no line limit (HTTP SSE
+events are capped at 16 MiB by `rmcp`), so the transport layer, not this
+check, sets the peak — but the second copy was real and avoidable. Replaced
+with a counting `ByteBudget` writer (`serde_json::to_writer`), which rejects
+the write that crosses the budget and allocates nothing;
+`descriptor_bytes_are_counted_without_an_encoded_copy` covers it. A transport
+read limit is an `rmcp` configuration question left out of this slice.

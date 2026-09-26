@@ -1201,6 +1201,37 @@ async fn listings_bound_pages_tool_count_and_bytes_without_partial_pins() {
     );
 }
 
+#[test]
+fn descriptor_bytes_are_counted_without_an_encoded_copy() {
+    use std::io::Write;
+
+    // Exactly the budget passes; one byte more fails at the write that
+    // crosses it, leaving the sink spent rather than allocating.
+    let mut budget = ByteBudget { remaining: 8 };
+    assert_eq!(budget.write(b"12345").unwrap(), 5);
+    assert_eq!(budget.write(b"678").unwrap(), 3);
+    assert_eq!(budget.remaining, 0);
+    assert!(budget.write(b"9").is_err());
+
+    let mut budget = ByteBudget {
+        remaining: MAX_LIST_BYTES,
+    };
+    let mut oversized = tool("big");
+    oversized.description = Some("x".repeat(MAX_LIST_BYTES).into());
+    let error = serde_json::to_writer(&mut budget, &oversized).unwrap_err();
+    assert!(
+        error.is_io(),
+        "budget exhaustion surfaces as an io error: {error}"
+    );
+    // The write that crosses the budget is rejected whole, never partially.
+    assert!(budget.remaining > 0 && budget.remaining < MAX_LIST_BYTES);
+
+    let mut budget = ByteBudget {
+        remaining: MAX_LIST_BYTES,
+    };
+    serde_json::to_writer(&mut budget, &tool("small")).unwrap();
+    assert!(budget.remaining < MAX_LIST_BYTES);
+}
 #[tokio::test]
 async fn invalid_tool_names_are_not_omitted_from_a_pin_candidate() {
     for name in [

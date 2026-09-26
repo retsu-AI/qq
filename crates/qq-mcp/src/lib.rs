@@ -74,6 +74,30 @@ const MAX_NAMESPACED_NAME_BYTES: usize = 128;
 const MAX_LIST_PAGES: usize = 32;
 const MAX_LIST_TOOLS: usize = 512;
 const MAX_LIST_BYTES: usize = 1024 * 1024;
+/// A `Write` sink that counts encoded descriptor bytes against a budget and
+/// fails the write once it is spent, so a listing is measured without ever
+/// buffering a second copy of a descriptor. The `rmcp` transports already
+/// hold each decoded page; this keeps the 1 MiB check from doubling that.
+struct ByteBudget {
+    remaining: usize,
+}
+
+impl std::io::Write for ByteBudget {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self.remaining.checked_sub(buf.len()) {
+            Some(remaining) => {
+                self.remaining = remaining;
+                Ok(buf.len())
+            }
+            None => Err(std::io::Error::other("descriptor byte budget exceeded")),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Environment variables always passed through to stdio server processes so
 /// the configured command resolves and behaves like a normal child process.
 const DEFAULT_ENV_PASSTHROUGH: [&str; 2] = ["PATH", "HOME"];
@@ -613,7 +637,9 @@ impl ServerHandle {
                 let fetch = async {
                     let mut tools = Vec::new();
                     let mut cursor = None;
-                    let mut bytes = 0;
+                    let mut budget = ByteBudget {
+                        remaining: MAX_LIST_BYTES,
+                    };
                     for _ in 0..MAX_LIST_PAGES {
                         let mut request = PaginatedRequestParams::default();
                         request.cursor = cursor;
@@ -625,13 +651,14 @@ impl ServerHandle {
                             return Err("tool listing exceeds the 512-tool limit".to_owned());
                         }
                         for tool in &page.tools {
-                            let encoded = serde_json::to_vec(tool)
-                                .map_err(|error| format!("invalid tool descriptor: {error}"))?;
-                            bytes += encoded.len();
-                            if bytes > MAX_LIST_BYTES {
-                                return Err(
-                                    "tool listing exceeds the 1 MiB descriptor limit".to_owned()
-                                );
+                            // Measured in place: the decoded descriptor is
+                            // already resident, so no encoded copy is made.
+                            if let Err(error) = serde_json::to_writer(&mut budget, tool) {
+                                if error.is_io() {
+                                    return Err("tool listing exceeds the 1 MiB descriptor limit"
+                                        .to_owned());
+                                }
+                                return Err(format!("invalid tool descriptor: {error}"));
                             }
                         }
                         tools.extend(page.tools);
