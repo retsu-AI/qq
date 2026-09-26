@@ -943,7 +943,16 @@ allowance is `MAX_TURN_RETRIES` (5) per turn and resets when a turn
 completes. Exhaustion settles the run `paused`: every completed turn is
 durable and the next prompt continues the session. Faults that would recur
 (authentication, invalid request, protocol, output truncation) still fail at
-once.
+once. A completion that arrives right after tool results carrying no text
+(whitespace counts as none), no call, and no usage is the same
+`provider_transport` fault: a gateway has folded an upstream failure into a
+bare terminal event, and settling `completed` would present silence as the
+answer. The results are looked for in every user message since the last
+assistant turn, so a checkpoint notice or steering that joined after them
+does not hide them. A completion that reports usage is an answer even when
+empty, and an empty reply to the prompt itself (turn one, no results) still
+completes; the follow-up's history carries a placeholder assistant turn so
+roles alternate.
 
 Once prompt submission commits, the runtime owns that accepted run until it
 persists exactly one terminal `RunFinished` event. Before settling started
