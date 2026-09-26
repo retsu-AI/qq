@@ -24,6 +24,7 @@ async fn owned_child_inherits_the_persisted_routing_identity() {
             &parent,
             ToolCallId::from_bytes([0x5b; 16]),
             ChildAdmission {
+                reasoning_effort: None,
                 profile: AgentProfileId::default(),
                 model: parent.model.clone(),
                 task: "child".to_owned(),
@@ -58,6 +59,7 @@ async fn child_checkpoint_inheritance_preserves_profile_but_not_user_followups()
             &parent,
             ToolCallId::from_bytes([0x5a; 16]),
             ChildAdmission {
+                reasoning_effort: None,
                 profile: profile.clone(),
                 model: parent.model.clone(),
                 task: "child task".into(),
@@ -731,6 +733,7 @@ async fn parent_cancellation_linearizes_with_in_flight_child_creation() {
                         root_run_id: create_parent.identity.run_id,
                     },
                     ChildAdmission {
+                        reasoning_effort: None,
                         profile: AgentProfileId::default(),
                         model: ModelSelection {
                             model_is_fallback: false,
@@ -810,6 +813,7 @@ async fn parent_cancellation_linearizes_with_in_flight_child_creation() {
             &cancelling_parent,
             ToolCallId::from_bytes([0x5a; 16]),
             ChildAdmission {
+                reasoning_effort: None,
                 profile: AgentProfileId::default(),
                 model: ModelSelection {
                     model_is_fallback: false,
@@ -849,6 +853,7 @@ async fn replayed_parent_cancellation_rediscovers_its_running_child() {
             &parent,
             ToolCallId::from_bytes([0x5a; 16]),
             ChildAdmission {
+                reasoning_effort: None,
                 profile: AgentProfileId::default(),
                 model: ModelSelection {
                     model_is_fallback: false,
@@ -910,6 +915,7 @@ async fn restart_cancels_a_queued_child_owned_by_an_interrupted_parent() {
             &parent,
             ToolCallId::from_bytes([0x5a; 16]),
             ChildAdmission {
+                reasoning_effort: None,
                 profile: AgentProfileId::default(),
                 model: ModelSelection {
                     model_is_fallback: false,
@@ -2116,6 +2122,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
         },
         SpawnRequest {
             call_id: ToolCallId::from_bytes([0x5a; 16]),
+            reasoning_effort: None,
             task: "research".to_owned(),
             model: None,
             authority: qq_protocol::ChildAuthority::Read,
@@ -3792,6 +3799,7 @@ async fn nested_spend_receipt_distinguishes_never_started_from_unknown_cancelled
             &parent,
             ToolCallId::generate().unwrap(),
             ChildAdmission {
+                reasoning_effort: None,
                 profile: AgentProfileId::default(),
                 model: parent.model.clone(),
                 task: "never starts".to_owned(),
@@ -4757,6 +4765,57 @@ async fn sequential_children_receive_the_remaining_budget_after_prior_spend() {
     assert_eq!(admitted[1].max_input_tokens, Some(110));
     assert_eq!(admitted[1].max_output_tokens, Some(85));
     assert_eq!(admitted[1].max_cost_usd_nanos, Some(190_000));
+    assert_eq!(
+        finished_outcome(&observed, run_id),
+        Some(RunOutcome::Completed)
+    );
+}
+
+#[tokio::test]
+async fn a_balanced_child_of_a_max_effort_parent_is_admitted_at_medium() {
+    // RR8.4 regression: children inherited the parent's pin verbatim, so a
+    // read-only worker under `max` spent ~14 k reasoning tokens per read.
+    // The roster entry's role now caps the child's effort; the pin is on the
+    // child's own session row so the loader, replay, and clients agree.
+    let parent: Arc<dyn Provider> = Arc::new(MultiSpawnProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        spawns: 1,
+        arguments: |_| r#"{"task":"research","model":"test/child"}"#.to_owned(),
+        turn: StdMutex::new(0),
+    });
+    let child: Arc<dyn Provider> = Arc::new(StaticTextProvider);
+    let mut harness =
+        child_budget_harness(parent, child, false, crate::runtime::AuditMode::Off).await;
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetSessionEffort {
+                session_id: harness.session_id,
+                effort: Some(qq_provider::ReasoningEffort::Max),
+            },
+        )
+        .await
+        .unwrap();
+    let run_id = submit_child_budget_prompt(&harness, RunLimits::default()).await;
+    let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+    harness.runtime.shutdown().await.unwrap();
+    let child_efforts: Vec<_> = observed
+        .iter()
+        .filter_map(|event| match &event.event {
+            SessionEvent::PromptQueued { session, .. }
+                if session.parent_id == Some(harness.session_id) =>
+            {
+                Some(session.reasoning_effort)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        child_efforts,
+        vec![Some(qq_provider::ReasoningEffort::Medium)],
+        "the balanced roster entry caps a max parent at medium"
+    );
     assert_eq!(
         finished_outcome(&observed, run_id),
         Some(RunOutcome::Completed)

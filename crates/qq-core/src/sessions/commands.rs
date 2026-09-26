@@ -57,6 +57,8 @@ pub(super) struct ChildRunParent {
 pub(super) struct ChildAdmission {
     pub(super) profile: AgentProfileId,
     pub(super) model: ModelSelection,
+    /// The child's own effort pin. `None` inherits the parent session's.
+    pub(super) reasoning_effort: Option<qq_provider::ReasoningEffort>,
     pub(super) task: String,
     pub(super) limits: RunLimits,
     pub(super) approval_mode: ApprovalMode,
@@ -77,6 +79,7 @@ pub(super) fn create_child_run(
     let ChildAdmission {
         profile,
         model,
+        reasoning_effort,
         task,
         limits,
         approval_mode,
@@ -167,7 +170,7 @@ pub(super) fn create_child_run(
                 created_at_ms, updated_at_ms, depth, root_run_id, purpose, profile, model_is_fallback,
                 reasoning_effort, approval_delegate
              ) VALUES (?1, ?2, ?3, ?4, ?10, ?5, 'queued', 1, ?6, ?7, ?8, ?11, ?9, ?9, ?12, ?13, ?14, ?15, ?16,
-                (SELECT reasoning_effort FROM sessions WHERE id = ?3),
+                COALESCE(?17, (SELECT reasoning_effort FROM sessions WHERE id = ?3)),
                 (SELECT approval_delegate FROM sessions WHERE id = ?3))",
             params![
                 session_id.to_string(),
@@ -186,6 +189,7 @@ pub(super) fn create_child_run(
                 purpose.as_str(),
                 profile.as_str(),
                 model.model_is_fallback,
+                super::codec::reasoning_effort_column(reasoning_effort),
             ],
         )
         ?;

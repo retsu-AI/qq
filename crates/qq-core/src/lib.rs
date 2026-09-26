@@ -407,7 +407,8 @@ fn resolve_delegation_route(
     delegation: &DelegationRoster,
     model: Option<String>,
     role: Option<qq_protocol::DelegationRole>,
-) -> Result<Option<String>, String> {
+    parent_effort: Option<qq_provider::ReasoningEffort>,
+) -> Result<(Option<String>, Option<qq_provider::ReasoningEffort>), String> {
     if delegation.roster.is_empty() {
         if role.is_some() {
             return Err(
@@ -416,20 +417,24 @@ fn resolve_delegation_route(
                     .to_owned(),
             );
         }
-        return Ok(model);
+        return Ok((model, None));
     }
     if let Some(model) = model {
-        if !delegation.contains_route(&model) {
+        let Some(entry) = delegation.entry_for_route(&model) else {
             return Err(format!(
                 "model {model:?} is not on the delegation roster; choose a role instead or use \
                  one of the listed routes"
             ));
-        }
-        return Ok(Some(model));
+        };
+        let effort = qq_protocol::child_reasoning_effort(entry, parent_effort);
+        return Ok((Some(model), effort));
     }
     let role = role.unwrap_or(delegation.default_role);
-    match delegation.route_for_role(role) {
-        Some(route) => Ok(Some(route.to_owned())),
+    match delegation.entry_for_role(role) {
+        Some(entry) => Ok((
+            Some(entry.route.clone()),
+            qq_protocol::child_reasoning_effort(entry, parent_effort),
+        )),
         None => Err(format!(
             "no roster entry declares the {} role; choose one of the roles listed in the \
              system prompt",
@@ -3095,6 +3100,7 @@ impl plan::CompiledAgentPlan {
                                                 &delegation,
                                                 arguments.model,
                                                 arguments.role,
+                                                reasoning_effort,
                                             );
                                             match (child_limits, resolution) {
                                                 (_, Err(message)) => tools::bounded_result(message, true),
@@ -3105,12 +3111,13 @@ impl plan::CompiledAgentPlan {
                                                     ),
                                                     true,
                                                 ),
-                                                (Ok(child_budget), Ok(model)) => {
+                                                (Ok(child_budget), Ok((model, child_effort))) => {
                                                     let outcome = spawner
                                                         .spawn(SpawnRequest {
                                                             call_id: call.id,
                                                             task: arguments.task,
                                                             model,
+                                                            reasoning_effort: child_effort,
                                                             authority: arguments.authority,
                                                             budget: child_budget,
                                                             purpose: qq_protocol::SessionPurpose::Task,
@@ -9802,11 +9809,14 @@ mod tests {
 
     #[test]
     fn delegation_route_resolution_prefers_model_then_role_then_default() {
-        use qq_protocol::{DelegationRole, DelegationRoster, DelegationRosterEntry};
+        use qq_protocol::{
+            DelegationRole, DelegationRoster, DelegationRosterEntry, ReasoningEffort,
+        };
         let entry = |route: &str, role| DelegationRosterEntry {
             route: route.to_owned(),
             role,
             note: None,
+            effort: None,
             context_window: None,
             max_output_tokens: None,
             relative_cost_permille: None,
@@ -9827,28 +9837,35 @@ mod tests {
             resolve_delegation_route(
                 &roster,
                 Some("openai/fast".to_owned()),
-                Some(DelegationRole::Balanced)
+                Some(DelegationRole::Balanced),
+                None,
             ),
-            Ok(Some("openai/fast".to_owned()))
+            Ok((Some("openai/fast".to_owned()), Some(ReasoningEffort::Low)))
         );
         assert!(
-            resolve_delegation_route(&roster, Some("openai/other".to_owned()), None)
+            resolve_delegation_route(&roster, Some("openai/other".to_owned()), None, None)
                 .unwrap_err()
                 .contains("not on the delegation roster")
         );
         // Role maps to the first entry declaring it.
         assert_eq!(
-            resolve_delegation_route(&roster, None, Some(DelegationRole::Balanced)),
-            Ok(Some("anthropic/balanced".to_owned()))
+            resolve_delegation_route(&roster, None, Some(DelegationRole::Balanced), None),
+            Ok((
+                Some("anthropic/balanced".to_owned()),
+                Some(ReasoningEffort::Medium)
+            ))
         );
         // Default role when neither is given.
         assert_eq!(
-            resolve_delegation_route(&roster, None, None),
-            Ok(Some("anthropic/balanced".to_owned()))
+            resolve_delegation_route(&roster, None, None, None),
+            Ok((
+                Some("anthropic/balanced".to_owned()),
+                Some(ReasoningEffort::Medium)
+            ))
         );
         // A role nobody declares is a tool error naming it.
         assert!(
-            resolve_delegation_route(&roster, None, Some(DelegationRole::Strong))
+            resolve_delegation_route(&roster, None, Some(DelegationRole::Strong), None)
                 .unwrap_err()
                 .contains("strong role")
         );
@@ -9857,14 +9874,74 @@ mod tests {
         // through for spawn-time validation, and role is refused.
         let none = DelegationRoster::default();
         assert_eq!(
-            resolve_delegation_route(&none, Some("x/y".to_owned()), None),
-            Ok(Some("x/y".to_owned()))
+            resolve_delegation_route(&none, Some("x/y".to_owned()), None, None),
+            Ok((Some("x/y".to_owned()), None))
         );
-        assert_eq!(resolve_delegation_route(&none, None, None), Ok(None));
+        assert_eq!(
+            resolve_delegation_route(&none, None, None, None),
+            Ok((None, None))
+        );
         assert!(
-            resolve_delegation_route(&none, None, Some(DelegationRole::Fast))
+            resolve_delegation_route(&none, None, Some(DelegationRole::Fast), None)
                 .unwrap_err()
                 .contains("no delegation roster")
+        );
+    }
+
+    #[test]
+    fn child_effort_derives_from_the_role_and_never_exceeds_the_parent() {
+        // RR8.4: the audited failure was a read-only review child inheriting
+        // `max` and spending 14 k reasoning tokens per read_file turn.
+        use qq_protocol::{
+            DelegationRole, DelegationRosterEntry, ReasoningEffort, child_reasoning_effort,
+        };
+        let entry = |role, effort| DelegationRosterEntry {
+            route: "p/m".to_owned(),
+            role,
+            note: None,
+            effort,
+            context_window: None,
+            max_output_tokens: None,
+            relative_cost_permille: None,
+        };
+        let fast = entry(DelegationRole::Fast, None);
+        let balanced = entry(DelegationRole::Balanced, None);
+        let strong = entry(DelegationRole::Strong, None);
+        // Parent at max: fast and balanced are capped, strong inherits.
+        assert_eq!(
+            child_reasoning_effort(&fast, Some(ReasoningEffort::Max)),
+            Some(ReasoningEffort::Low)
+        );
+        assert_eq!(
+            child_reasoning_effort(&balanced, Some(ReasoningEffort::Max)),
+            Some(ReasoningEffort::Medium)
+        );
+        assert_eq!(
+            child_reasoning_effort(&strong, Some(ReasoningEffort::Max)),
+            Some(ReasoningEffort::Max)
+        );
+        // A parent already below the role ceiling is not raised.
+        assert_eq!(
+            child_reasoning_effort(&balanced, Some(ReasoningEffort::Minimal)),
+            Some(ReasoningEffort::Minimal)
+        );
+        // Unpinned or provider-default parent: the role ceiling applies.
+        assert_eq!(
+            child_reasoning_effort(&fast, None),
+            Some(ReasoningEffort::Low)
+        );
+        assert_eq!(
+            child_reasoning_effort(&fast, Some(ReasoningEffort::Default)),
+            Some(ReasoningEffort::Low)
+        );
+        assert_eq!(child_reasoning_effort(&strong, None), None);
+        // An explicit roster effort wins over everything.
+        assert_eq!(
+            child_reasoning_effort(
+                &entry(DelegationRole::Fast, Some(ReasoningEffort::High)),
+                Some(ReasoningEffort::Low)
+            ),
+            Some(ReasoningEffort::High)
         );
     }
 
@@ -9877,6 +9954,7 @@ mod tests {
                     route: "openai/fast".to_owned(),
                     role: DelegationRole::Fast,
                     note: Some("lookups, breadth".to_owned()),
+                    effort: None,
                     context_window: Some(400_000),
                     max_output_tokens: None,
                     relative_cost_permille: Some(150),
@@ -9885,6 +9963,7 @@ mod tests {
                     route: "anthropic/same".to_owned(),
                     role: DelegationRole::Balanced,
                     note: None,
+                    effort: None,
                     context_window: Some(200_000),
                     max_output_tokens: None,
                     relative_cost_permille: Some(1000),
@@ -9893,6 +9972,7 @@ mod tests {
                     route: "anthropic/strong".to_owned(),
                     role: DelegationRole::Strong,
                     note: None,
+                    effort: None,
                     context_window: None,
                     max_output_tokens: None,
                     relative_cost_permille: Some(2_500),
@@ -9901,6 +9981,7 @@ mod tests {
                     route: "custom/unpriced".to_owned(),
                     role: DelegationRole::Strong,
                     note: None,
+                    effort: None,
                     context_window: Some(1_500),
                     max_output_tokens: None,
                     relative_cost_permille: None,

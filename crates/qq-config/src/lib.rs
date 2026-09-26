@@ -2010,6 +2010,7 @@ pub struct DelegationEntry {
     route: ModelRoute,
     role: DelegationRole,
     note: Option<String>,
+    effort: Option<qq_provider::ReasoningEffort>,
 }
 
 impl DelegationEntry {
@@ -2026,6 +2027,12 @@ impl DelegationEntry {
     #[must_use]
     pub fn note(&self) -> Option<&str> {
         self.note.as_deref()
+    }
+
+    /// The operator's explicit effort for children on this route, if any.
+    #[must_use]
+    pub const fn effort(&self) -> Option<qq_provider::ReasoningEffort> {
+        self.effort
     }
 }
 

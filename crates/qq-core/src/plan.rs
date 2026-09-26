@@ -1245,6 +1245,7 @@ mod tests {
                     route: "custom/worker".to_owned(),
                     role: qq_protocol::DelegationRole::Balanced,
                     note: Some("everyday".to_owned()),
+                    effort: None,
                     context_window: Some(200_000),
                     max_output_tokens: Some(8_192),
                     relative_cost_permille: Some(400),
