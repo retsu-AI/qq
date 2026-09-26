@@ -164,8 +164,9 @@ impl Provider for OpenAiChatCompletions {
                 // A `length` finish reason arrives before the usage chunk and
                 // `[DONE]`; remember it so the terminal event still carries usage.
                 let mut incomplete = None;
-                // Gateways (LiteLLM, OpenRouter, DeepSeek, vLLM) stream exposed
-                // thinking as `delta.reasoning_content` with no block framing;
+                // Gateways stream exposed thinking as `delta.reasoning_content`
+                // (LiteLLM, DeepSeek, vLLM) or `delta.reasoning` (OpenRouter)
+                // with no block framing;
                 // the first fragment opens one block, the first visible delta,
                 // finish reason, or `[DONE]` closes it.
                 let mut reasoning_open = false;
@@ -529,8 +530,12 @@ struct ChatDelta {
     content: Option<String>,
     refusal: Option<String>,
     /// Exposed thinking on OpenAI-compatible gateways. Not an OpenAI field;
-    /// absent from OpenAI's own responses.
+    /// absent from OpenAI's own responses. LiteLLM, DeepSeek and vLLM spell
+    /// it `reasoning_content`; OpenRouter's normalized stream spells it
+    /// `reasoning`. A gateway sends one or the other, never both with
+    /// different text; `reasoning_content` wins if both are present.
     reasoning_content: Option<String>,
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ChatToolCallDelta>,
 }
@@ -608,6 +613,7 @@ fn decode_event(data: &str, redactions: &[String]) -> Result<DecodedChunk, Provi
         if let Some(text) = choice
             .delta
             .reasoning_content
+            .or(choice.delta.reasoning)
             .filter(|text| !text.is_empty())
         {
             deltas.push(DecodedDelta::Reasoning(text));
@@ -957,7 +963,7 @@ mod tests {
 
     #[test]
     fn decodes_gateway_reasoning_content_ahead_of_visible_content() {
-        // LiteLLM/OpenRouter/DeepSeek stream exposed thinking as
+        // LiteLLM/DeepSeek/vLLM stream exposed thinking as
         // `reasoning_content`; dropping it made an all-thinking turn look
         // empty (RR8.2).
         let deltas = decode_event(
@@ -970,6 +976,17 @@ mod tests {
             deltas.as_slice(),
             [DecodedDelta::Reasoning(reasoning), DecodedDelta::OutputText(text)]
                 if reasoning == "Let me check" && text == "Done."
+        ));
+        // OpenRouter's normalized stream spells the same field `reasoning`.
+        let openrouter = decode_event(
+            r#"{"choices":[{"delta":{"reasoning":"Hmm","content":null}}]}"#,
+            &[],
+        )
+        .unwrap()
+        .deltas;
+        assert!(matches!(
+            openrouter.as_slice(),
+            [DecodedDelta::Reasoning(reasoning)] if reasoning == "Hmm"
         ));
         let empty = decode_event(r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#, &[])
             .unwrap()

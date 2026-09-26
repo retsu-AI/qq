@@ -422,8 +422,9 @@ request-time authorization, or lazy AWS provider initialization.
 
 
 Exposed thinking on the Chat Completions wire: OpenAI's own responses never
-carry it, but gateways in front of reasoning models (LiteLLM, OpenRouter,
-DeepSeek, vLLM) stream it as `delta.reasoning_content` with no block framing.
+carry it, but gateways in front of reasoning models stream it with no block
+framing as `delta.reasoning_content` (LiteLLM, DeepSeek, vLLM) or
+`delta.reasoning` (OpenRouter).
 The codec opens one `ExposedThinking` reasoning block on the first fragment,
 closes it on the first visible delta, finish reason, or `[DONE]`, and counts
 the bytes against the output bound like every other adapter. A turn that spends
