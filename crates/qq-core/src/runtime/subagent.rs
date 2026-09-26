@@ -54,6 +54,10 @@ pub(crate) struct SpawnRequest {
     pub(crate) call_id: ToolCallId,
     pub(crate) task: String,
     pub(crate) model: Option<String>,
+    /// The effort the child runs at. `None` inherits the parent's session
+    /// pin (the legacy worker path and audits); a roster spawn derives one
+    /// from the entry via `qq_protocol::child_reasoning_effort`.
+    pub(crate) reasoning_effort: Option<qq_provider::ReasoningEffort>,
     /// The authority the parent asked for. `Write` is admitted only when the
     /// roster allows write children and a reviewer is installed; the child
     /// then runs `Supervised`, never above.

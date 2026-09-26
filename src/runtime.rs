@@ -3150,6 +3150,7 @@ fn delegation_roster(
                     route: entry.route().as_str().to_owned(),
                     role: delegation_role(entry.role()),
                     note: entry.note().map(str::to_owned),
+                    effort: entry.effort(),
                     context_window: metadata.and_then(qq_config::ModelMetadata::context_window),
                     max_output_tokens: metadata
                         .and_then(qq_config::ModelMetadata::max_output_tokens),

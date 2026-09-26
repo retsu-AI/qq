@@ -252,6 +252,11 @@ pub struct DelegationRosterEntry {
     pub role: DelegationRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The reasoning effort children spawned on this entry run at. `None`
+    /// derives one from the role: `fast` → low, `balanced` → medium, never
+    /// above the parent's own effort; `strong` inherits the parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<qq_reasoning::ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -278,15 +283,57 @@ pub struct DelegationRoster {
 impl DelegationRoster {
     #[must_use]
     pub fn route_for_role(&self, role: DelegationRole) -> Option<&str> {
-        self.roster
-            .iter()
-            .find(|entry| entry.role == role)
-            .map(|entry| entry.route.as_str())
+        self.entry_for_role(role).map(|entry| entry.route.as_str())
+    }
+
+    #[must_use]
+    pub fn entry_for_role(&self, role: DelegationRole) -> Option<&DelegationRosterEntry> {
+        self.roster.iter().find(|entry| entry.role == role)
+    }
+
+    #[must_use]
+    pub fn entry_for_route(&self, route: &str) -> Option<&DelegationRosterEntry> {
+        self.roster.iter().find(|entry| entry.route == route)
     }
 
     #[must_use]
     pub fn contains_route(&self, route: &str) -> bool {
-        self.roster.iter().any(|entry| entry.route == route)
+        self.entry_for_route(route).is_some()
+    }
+}
+
+/// The effort a child spawned on `entry` runs at when the parent runs at
+/// `parent`. An explicit roster effort wins. Otherwise the role decides:
+/// `fast` lookups and breadth at `low`, the `balanced` worker at `medium`,
+/// each capped by the parent's effort so a child never thinks harder than
+/// the run that delegated to it; `strong` inherits the parent's pin.
+#[must_use]
+pub fn child_reasoning_effort(
+    entry: &DelegationRosterEntry,
+    parent: Option<qq_reasoning::ReasoningEffort>,
+) -> Option<qq_reasoning::ReasoningEffort> {
+    use qq_reasoning::ReasoningEffort;
+    if let Some(effort) = entry.effort {
+        return Some(effort);
+    }
+    let ceiling = match entry.role {
+        DelegationRole::Fast => ReasoningEffort::Low,
+        DelegationRole::Balanced => ReasoningEffort::Medium,
+        DelegationRole::Strong => return parent,
+    };
+    let rank = |effort: ReasoningEffort| {
+        ReasoningEffort::ALL
+            .iter()
+            .position(|candidate| *candidate == effort)
+    };
+    match parent {
+        // `Default` and an unpinned parent both mean the provider chooses;
+        // the role ceiling is then the only bound worth sending.
+        None | Some(ReasoningEffort::Default) => Some(ceiling),
+        Some(parent) => match (rank(parent), rank(ceiling)) {
+            (Some(parent_rank), Some(ceiling_rank)) if parent_rank <= ceiling_rank => Some(parent),
+            _ => Some(ceiling),
+        },
     }
 }
 
