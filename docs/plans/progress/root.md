@@ -529,3 +529,19 @@ Independent exact-stack source review accepted; report SHA256 `dd9176e70e1f0835d
 Preserved evidence: `/Users/romanmondello/Developer/agent-cloud-operations/reviews/retsu-weekly-audit-2026-09-25/qq-jev-evidence/feedback-draft187-stack-20260925/`.
 Full bundle restores exact tested identity; source, raw logs and native binary retained; owned build/temp outputs removed.
 Matched off/Strict product-value evidence and owner approval remain open; no push, PR update, merge or release in this unit.
+
+### 2026-09-25 — ENG-791 cache probe credential boundary repaired locally
+
+Test-first commit `927ab0be` reproduces Codex, XAI, stored-reference and built-in
+API-key fallback reads during cache-only discovery and plan compilation. Repair
+`b0ae6223` skips cache scopes that require secure storage and builds spawn-route
+metadata without authentication reads; request-time authentication is unchanged.
+Focused result: catalog 4/4, plan 2/2, and loader-ownership 1/1 passed without a
+real Keychain or provider. Paired 200-iteration debug fixture, baseline/candidate:
+cold median 1.829/1.794 ms, p95 2.340/2.570 ms; warm median 21.458/21.917 us,
+p95 25.792/27.250 us. Rust 1.97.1 serial all-features: 1,942 passed,
+zero failed, five existing ignores; all-features build, format and diff pass.
+Strict Clippy remains blocked by pre-existing provider/headless warnings present
+at base `f29545da`; independent exact-head review remains pending.
+Evidence: external `keychain-cache-repair/`; manager owns publication. General
+Keychain timeout containment and stable cross-build signing remain unresolved.
