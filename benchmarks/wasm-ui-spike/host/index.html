@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>qq spike — remote-loading host</title>
+    <link rel="stylesheet" href="spike.css" />
+    <style>
+      body { display: grid; grid-template-rows: auto 1fr 1fr; height: 100vh; }
+      header { padding: 0.5rem 0.75rem; background: #222; border-bottom: 1px solid #444; display: flex; gap: 1.5rem; align-items: center; }
+      header b { color: #8fd; }
+      .slot { border-top: 2px solid #444; min-height: 0; overflow: hidden; }
+      button { font: inherit; background: #333; color: #ddd; border: 1px solid #555; padding: 0.2rem 0.6rem; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span>host: plain ES module loader, no framework</span>
+      <span>leptos remote: <b id="leptos-load">not loaded</b></span>
+      <span>dioxus remote: <b id="dioxus-load">not loaded</b></span>
+      <button id="unmount-leptos">unmount leptos</button>
+      <button id="unmount-dioxus">unmount dioxus</button>
+      <span id="host-error" class="err"></span>
+    </header>
+    <div class="slot" id="slot-leptos"></div>
+    <div class="slot" id="slot-dioxus"></div>
+    <script type="module">
+      // The remote contract exercised here: a remote is a wasm-bindgen ES
+      // module (as trunk emits it, hashes disabled) exporting
+      //   default init({module_or_path}) -> Promise<exports>
+      //   mount(rootElement, configJson) -> void
+      //   unmount() -> void
+      // The host knows nothing about the remote's framework.
+      const params = new URLSearchParams(location.search);
+      const config = JSON.stringify({
+        server: params.get("server"),
+        credential: params.get("credential"),
+        workspace: params.get("workspace"),
+      });
+
+      async function loadRemote(name) {
+        const status = document.getElementById(`${name}-load`);
+        const started = performance.now();
+        const module = await import(`./${name}/spike-${name}.js`);
+        const imported = performance.now();
+        await module.default({ module_or_path: `./${name}/spike-${name}_bg.wasm` });
+        const initialised = performance.now();
+        module.mount(document.getElementById(`slot-${name}`), config);
+        const mounted = performance.now();
+        status.textContent =
+          `import ${(imported - started).toFixed(0)}ms, ` +
+          `init ${(initialised - imported).toFixed(0)}ms, ` +
+          `mount ${(mounted - initialised).toFixed(1)}ms`;
+        return module;
+      }
+
+      const remotes = {};
+      for (const name of ["leptos", "dioxus"]) {
+        try {
+          remotes[name] = await loadRemote(name);
+        } catch (error) {
+          document.getElementById("host-error").textContent += ` ${name}: ${error}`;
+        }
+        document.getElementById(`unmount-${name}`).onclick = () => {
+          try {
+            remotes[name].unmount();
+            document.getElementById(`${name}-load`).textContent = "unmounted";
+          } catch (error) {
+            document.getElementById("host-error").textContent += ` ${name}: ${error}`;
+          }
+        };
+      }
+    </script>
+  </body>
+</html>

@@ -27,6 +27,8 @@ written.
 | 0013 | [Context sources are part of plan identity; excess sources fail compilation](0013-context-sources-in-descriptor.md) | Accepted |
 | 0014 | [Typed final output: a per-run contract compiled at admission, judged at the completion boundary, repaired within a bounded allowance](0014-typed-final-output.md) | Accepted |
 | 0015 | [Enroll remote clients with a pairing code and issue per-client credentials](0015-pairing-code-client-enrollment.md) | Proposed (multi-surface S2) |
+| 0017 | [Client UI stack: Leptos CSR remotes behind a framework-neutral ES-module contract](0017-client-ui-stack.md) | Accepted 2026-09-24 (multi-surface U1) |
+| 0018 | [`apps/` is a separate Cargo workspace for `wasm32` surfaces](0018-apps-workspace.md) | Proposed (multi-surface U1) |
 | 0019 | [Spill handles are durable session state: cut tool outputs stored with their result, cited by a content-addressed handle, masked inline and exact on explicit read](0019-spill-handles.md) | Accepted |
 | 0020 | [Shell `Forbidden` is a policy decision above every approval mode, produced by a CST classifier whose rules are self-tested data](0020-shell-forbidden-classifier.md) | Accepted |
 | 0021 | [`Interactive` and `Network` effect classes: a question is a hold, not a permission; a fetch is authority over the outside, not the workspace](0021-interactive-and-network-effect-classes.md) | Accepted |
