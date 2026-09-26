@@ -11,6 +11,7 @@ appended below, newest last.
 | RR3 | Jev exhaustion is an outcome, not a failure | Shipped (#117) | [ENG-865](https://linear.app/retsu-ai/issue/ENG-865) | `fix/rr3-jev-verdict-outcome` | 9 runs |
 | RR4 | Turn-level recovery; `Paused`; `TurnRetry`; ADR-0040 superseding 0005 | Shipped (#120) | [ENG-867](https://linear.app/retsu-ai/issue/ENG-867) | `feat/rr4-turn-recovery` | 12 runs / 4.5 h; protocol 25 → 26 |
 | RR5 | `Retry-After` ≤ 60 s; 529 retryable; HTTP-date | Shipped (#118) | [ENG-866](https://linear.app/retsu-ai/issue/ENG-866) | `fix/rr5-retry-after` | provider crate; minimal profile green |
+| RR4.1 | Empty completion after tool results is a `ProviderTransport` turn fault, not an answer | In review | [ENG-952](https://linear.app/retsu-ai/issue/ENG-952) | `fix/eng-952-empty-turn-fault` #196 | 2 runs settled `completed` on `[]` / `NULL` usage; stacked on RR7.1 (#195) |
 | RR6 | Reactive overflow; un-wedge admission (mid-run compaction shipped in #92) | In review | [ENG-868](https://linear.app/retsu-ai/issue/ENG-868) | `feat/eng-868-rr6-reactive-overflow` | 9 runs / 3 sessions; independent review |
 | RR7 | Estimate calibration from reported usage | In review | [ENG-869](https://linear.app/retsu-ai/issue/ENG-869) | `feat/eng-869-rr7-estimate-calibration` | deferred from F04 |
 | RR7.1 | Use measured admission occupancy for in-run recovery | In review | [ENG-940](https://linear.app/retsu-ai/issue/ENG-940) | `fix/eng-940-measured-context-recovery` | Eight observed failures; zero compaction attempts |
@@ -218,3 +219,42 @@ plan_compile` unchanged (compile 23,756 ns/op, digest 2,292 ns/op).
 Follow-up filed: [ENG-952](https://linear.app/retsu-ai/issue/ENG-952) — an
 empty completed turn with no usage settles `completed` instead of retrying
 as a provider fault; it stalled this slice's implementation twice.
+
+### 2026-09-26 — RR4.1 empty completion is a turn fault (ENG-952)
+
+Stacked on RR7.1 (`fix/eng-940-measured-context-recovery`, #195), which
+filed this. Two live runs (`a82434a9`, `d273b9e1`) ended with
+`assistant_content_json=[]`, `usage_json=NULL`, then `run_finished
+completed`: the LiteLLM gateway answered fresh tool results with a bare
+`[DONE]` and the loop read silence as the final answer. Fix (`lib.rs` run
+loop): a turn that completes right after tool results with no text, no
+call, and no usage is a `RunFailureKind::ProviderTransport` turn fault
+("provider completed the turn after tool results with no content and no
+usage") and takes the ADR-0040 path — commit, `run_turn_retrying`,
+re-issue, `paused` at `MAX_TURN_RETRIES`. A completion that reports usage
+is still an answer; an empty reply on turn one (no results) still
+completes and `EMPTY_TURN_PLACEHOLDER` keeps the follow-up well-formed.
+No schema or protocol change. Test:
+`an_empty_completion_without_usage_is_a_transient_fault_not_an_answer`
+(`EmptyCompletionProvider`: `MAX_TURN_RETRIES` + 2 sends then `Paused`
+naming the fault; with usage, 2 sends then `Completed`); fails on the base
+commit. Five fixture providers now emit `done` text on their closing turn.
+Commit `3f501d3`. Gates: fmt, clippy `-D warnings`, `cargo test -p qq-core`
+green. Under full-workspace load
+`hard_cost_budget_cancels_an_unmetered_looping_child`,
+`aborting_the_headless_owner_still_settles_its_accepted_run`, and
+`turn_budget_cancels_before_a_silent_over_budget_turn_can_hang`
+(`src/headless.rs`) flake as before and pass alone; unrelated. Docs:
+`architecture.md` § run loop, ADR-0040 paragraph.
+
+Review (Codex, #196): two findings taken. (1) Steering or a checkpoint
+correction joins the request as a user message *after* the tool results
+(`lib.rs` turn boundary), so `messages.last()` missed the results and the
+fault path was skipped; the predicate now scans every user message since
+the last assistant turn. (2) Whitespace-only deltas before the bare
+terminal event counted as content while `has_content` (which decides what
+the transcript keeps) trims; the predicate trims too. Tests: the regression
+now runs with `None`, `"\n"`, and `" \n\t"` preludes, a `"ok"` prelude
+control still completes in 2 sends, and
+`an_empty_completion_after_tool_results_and_steering_is_still_a_fault`
+queues steering before the run so its request ends in a user message.
