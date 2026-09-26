@@ -880,6 +880,46 @@ mod tests {
         );
         assert!(bad.is_error);
         assert!(bad.model_text.starts_with("cursor_invalid"));
+        assert!(
+            bad.model_text.contains("omit `cursor` for the first page"),
+            "{}",
+            bad.model_text
+        );
+
+        // ENG-959: every placeholder a model sends for "start from the
+        // beginning" is the first page, byte for byte identical to omitting
+        // the field. One day's sessions had ~1,470 of 1,485 search calls
+        // fail on these.
+        let first_page = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"needle","limit":25}"#,
+        );
+        assert!(!first_page.is_error);
+        for placeholder in [
+            "", " ", "initial", "INITIAL", "Initial", "start", "START", "first", "First", "0", ".",
+            "/", "null", "NULL", "Null", "none", "None", " none ",
+        ] {
+            let page = run_tool(
+                &workspace,
+                &state,
+                "search",
+                &format!(
+                    r#"{{"query":"needle","limit":25,"cursor":{}}}"#,
+                    serde_json::json!(placeholder)
+                ),
+            );
+            assert!(
+                !page.is_error,
+                "cursor {placeholder:?}: {}",
+                page.model_text
+            );
+            assert_eq!(
+                page.model_text, first_page.model_text,
+                "cursor {placeholder:?}"
+            );
+        }
     }
 
     #[test]
@@ -1237,7 +1277,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "f7bb6a1fe6b11e10f52b98e4cb262e888bfa80fff6534ad4014d9c25febab22a"
+            "568cef80e021a4c69625eb992086993b9c0f43857ae74ff253f70253a752f24f"
         );
     }
 

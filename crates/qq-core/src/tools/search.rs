@@ -45,6 +45,11 @@ pub(super) const MAX_CONTEXT: usize = 5;
 pub(super) const MAX_GLOBS: usize = 8;
 pub(super) const MAX_GLOB_BYTES: usize = 256;
 pub(super) const MAX_CURSOR_BYTES: usize = 512;
+/// Cursor values models send for "the first page". None can be a real cursor
+/// under any casing: a real one is base64url of `path\0line` with a non-empty
+/// path, so at least four alphabet characters that decode to a NUL byte.
+const FIRST_PAGE_PLACEHOLDERS: &[&str] =
+    &["initial", "start", "first", "0", ".", "/", "null", "none"];
 /// Directory depth past which the walk does not descend (symlinks are never
 /// followed, so this only guards pathological trees).
 const MAX_WALK_DEPTH: usize = 64;
@@ -634,13 +639,27 @@ pub(super) fn search(
         Ok(filter) => filter,
         Err(error) => return ToolOutput::error(error.to_string()),
     };
-    let cursor = match &arguments.cursor {
+    let cursor = match arguments.cursor.as_deref().map(str::trim) {
+        // Models routinely send an empty or placeholder cursor on the first
+        // page ("", "initial", "start", "0", ".", "null", in any case):
+        // 99 % of search calls in one day's sessions failed that way. None of
+        // these can be a real cursor (those are base64 of `path\0line` with a
+        // non-empty path), so read them as "no cursor" instead of refusing
+        // the call.
         None => None,
+        Some(trimmed)
+            if trimmed.is_empty()
+                || FIRST_PAGE_PLACEHOLDERS
+                    .iter()
+                    .any(|placeholder| placeholder.eq_ignore_ascii_case(trimmed)) =>
+        {
+            None
+        }
         Some(encoded) => match Cursor::decode(encoded) {
             Some(cursor) => Some(cursor),
             None => {
                 return ToolOutput::error(
-                    "cursor_invalid: pass the exact next= value from a previous search header",
+                    "cursor_invalid: omit `cursor` for the first page; to continue a previous search, pass the exact next= value from its result header",
                 );
             }
         },
