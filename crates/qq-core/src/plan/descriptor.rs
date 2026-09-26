@@ -11,10 +11,10 @@ use super::PlanCompileError;
 /// Version of the descriptor's canonical encoding. Bump it whenever a field is
 /// added, removed, renamed, or its normalization changes, so historical digests
 /// are never compared against a different encoding.
-pub const DESCRIPTOR_VERSION: u16 = 9;
+pub const DESCRIPTOR_VERSION: u16 = 10;
 
 /// Domain separator prepended to the canonical bytes before hashing.
-const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v9\0";
+const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v10\0";
 
 /// Where a credential comes from, without its value. Two plans that read the
 /// same environment variable or stored credential name share a reference and
@@ -107,6 +107,9 @@ pub struct McpServerDescriptor {
     pub allow: Vec<String>,
     pub call_timeout_seconds: u64,
     pub max_concurrent_calls: u32,
+    /// Operator-approved MCP descriptor digest, not a credential or code identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
 }
 
 /// The complete tool catalog every run of the plan selects from: built-ins,

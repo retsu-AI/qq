@@ -103,6 +103,12 @@ pub enum Command {
         command: AuthCommand,
     },
 
+    /// Inspect an MCP server's untrusted descriptors before configuring a pin.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
+
     /// Store credentials for optional TypeSafe Jev review.
     Jev {
         #[command(subcommand)]
@@ -131,6 +137,14 @@ pub enum Command {
 
     /// Print the version with the compatibility contracts this build speaks.
     Version,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    /// Connect only to NAME and print its tool descriptors and digest as JSON.
+    /// This starts the configured process or contacts its endpoint; no tool is
+    /// called and no configuration is changed.
+    Inspect { name: String },
 }
 
 #[derive(Debug, Args)]
@@ -887,6 +901,16 @@ mod tests {
             })
         ));
         assert!(Cli::try_parse_from(["qq", "jev", "setup", "secret-in-argv"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["qq", "mcp", "inspect", "linear"])
+                .unwrap()
+                .command,
+            Some(Command::Mcp {
+                command: McpCommand::Inspect { name }
+            }) if name == "linear"
+        ));
+        assert!(Cli::try_parse_from(["qq", "mcp", "inspect"]).is_err());
+        assert!(Cli::try_parse_from(["qq", "mcp"]).is_err());
         assert!(matches!(
             Cli::try_parse_from([
                 "qq",

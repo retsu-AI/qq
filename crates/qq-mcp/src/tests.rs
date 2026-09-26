@@ -25,6 +25,9 @@ use super::*;
 struct FixtureServer {
     tools: Arc<StdMutex<Vec<Tool>>>,
     list_calls: Arc<AtomicUsize>,
+    tool_calls: Arc<AtomicUsize>,
+    list_barrier: Option<Arc<tokio::sync::Barrier>>,
+    next_cursor: Option<String>,
     active_calls: Arc<AtomicUsize>,
     max_active_calls: Arc<AtomicUsize>,
     slow_delay: Duration,
@@ -36,6 +39,9 @@ impl FixtureServer {
         Self {
             tools: Arc::new(StdMutex::new(tools.iter().map(|name| tool(name)).collect())),
             list_calls: Arc::new(AtomicUsize::new(0)),
+            tool_calls: Arc::new(AtomicUsize::new(0)),
+            list_barrier: None,
+            next_cursor: None,
             active_calls: Arc::new(AtomicUsize::new(0)),
             max_active_calls: Arc::new(AtomicUsize::new(0)),
             slow_delay: Duration::from_millis(100),
@@ -67,9 +73,13 @@ impl rmcp::ServerHandler for FixtureServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         self.list_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ListToolsResult::with_all_items(
-            self.tools.lock().unwrap().clone(),
-        ))
+        let mut listing = ListToolsResult::with_all_items(self.tools.lock().unwrap().clone());
+        listing.next_cursor = self.next_cursor.clone();
+        if let Some(barrier) = &self.list_barrier {
+            barrier.wait().await;
+            barrier.wait().await;
+        }
+        Ok(listing)
     }
 
     async fn call_tool(
@@ -77,6 +87,7 @@ impl rmcp::ServerHandler for FixtureServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        self.tool_calls.fetch_add(1, Ordering::SeqCst);
         match request.name.as_ref() {
             "echo" => {
                 let text = request
@@ -711,4 +722,502 @@ async fn an_unresolvable_bearer_keeps_the_server_declared_but_unavailable() {
         .await;
     assert_eq!(sibling.content, "alive");
     assert!(!sibling.is_error);
+}
+
+/// Digest of what `manager` currently lists for the single fixture server.
+async fn listed_digest(manager: &McpManager, server: &str) -> McpToolSetDigest {
+    let catalog = manager.catalog().await;
+    catalog
+        .servers
+        .iter()
+        .find(|listing| listing.server == server)
+        .unwrap_or_else(|| panic!("{server:?} must be in the catalog's servers"))
+        .digest
+}
+
+#[test]
+fn tool_set_digest_ignores_listing_order_and_tracks_every_field() {
+    let spec = |name: &str, description: &str, schema: serde_json::Value| McpTool {
+        spec: ToolSpec::new(name, description, schema),
+        hints: McpToolHints::default(),
+    };
+    let echo = spec(
+        "mcp__srv__echo",
+        "echoes",
+        serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}}),
+    );
+    let slow = spec(
+        "mcp__srv__slow",
+        "waits",
+        serde_json::json!({"type": "object"}),
+    );
+
+    let forward = McpToolSetDigest::of_tools(&[echo.clone(), slow.clone()]);
+    let reversed = McpToolSetDigest::of_tools(&[slow.clone(), echo.clone()]);
+    assert_eq!(
+        forward, reversed,
+        "listing order must not change the digest"
+    );
+    assert_ne!(
+        forward,
+        McpToolSetDigest::of_tools(std::slice::from_ref(&echo))
+    );
+
+    // Sorted-key `Value` encoding makes key order in the schema irrelevant.
+    let reordered_schema = spec(
+        "mcp__srv__echo",
+        "echoes",
+        serde_json::json!({"properties": {"text": {"type": "string"}}, "type": "object"}),
+    );
+    assert_eq!(
+        McpToolSetDigest::of_tools(&[reordered_schema, slow.clone()]),
+        forward
+    );
+
+    let renamed = spec(
+        "mcp__other__echo",
+        "echoes",
+        serde_json::json!({"type": "object"}),
+    );
+    let described = spec(
+        "mcp__srv__echo",
+        "echoes loudly",
+        serde_json::json!({"type": "object"}),
+    );
+    let reshaped = spec(
+        "mcp__srv__echo",
+        "echoes",
+        serde_json::json!({"type": "object", "required": ["text"]}),
+    );
+    let mut hinted = echo.clone();
+    hinted.hints.destructive = true;
+    let variants = [
+        McpToolSetDigest::of_tools(&[renamed, slow.clone()]),
+        McpToolSetDigest::of_tools(&[described, slow.clone()]),
+        McpToolSetDigest::of_tools(&[reshaped, slow.clone()]),
+        McpToolSetDigest::of_tools(&[hinted, slow]),
+    ];
+    for (index, variant) in variants.iter().enumerate() {
+        assert_ne!(*variant, forward, "variant {index} must change the digest");
+        for other in &variants[index + 1..] {
+            assert_ne!(variant, other, "distinct changes must not collide");
+        }
+    }
+
+    let text = forward.to_string();
+    assert_eq!(text.len(), 64);
+    assert_eq!(text.parse::<McpToolSetDigest>(), Ok(forward));
+    assert_eq!(
+        text.to_uppercase().parse::<McpToolSetDigest>(),
+        Err(McpToolSetDigestParseError)
+    );
+    assert_eq!(
+        text[..63].parse::<McpToolSetDigest>(),
+        Err(McpToolSetDigestParseError)
+    );
+    assert_eq!(format!("{forward:?}"), format!("McpToolSetDigest({text})"));
+}
+
+#[tokio::test]
+async fn unpinned_servers_list_tools_and_expose_their_digest() {
+    let fixture = Fixture::new(&["echo", "slow"]);
+    let manager = manager_with(vec![(settings("srv"), fixture.connector())]);
+    let catalog = manager.catalog().await;
+    assert_eq!(catalog.tools.len(), 2);
+    assert!(catalog.quarantined.is_empty());
+    assert_eq!(catalog.servers.len(), 1);
+    assert_eq!(catalog.servers[0].server, "srv");
+    assert_eq!(
+        catalog.servers[0].digest,
+        McpToolSetDigest::of_tools(&catalog.tools),
+        "the published digest is the digest of the published tools"
+    );
+    let outcome = manager
+        .call("mcp__srv__echo", r#"{"text":"hi"}"#, not_cancelled())
+        .await;
+    assert_eq!(outcome.failure, None);
+    assert_eq!(outcome.content, "hi");
+}
+
+#[tokio::test]
+async fn a_matching_pin_leaves_the_server_usable() {
+    let probe = Fixture::new(&["echo", "slow"]);
+    let probe_manager = manager_with(vec![(settings("srv"), probe.connector())]);
+    let digest = listed_digest(&probe_manager, "srv").await;
+
+    let fixture = Fixture::new(&["slow", "echo"]);
+    let mut pinned = settings("srv");
+    pinned.pin = Some(digest);
+    let manager = manager_with(vec![(pinned, fixture.connector())]);
+    let catalog = manager.catalog().await;
+    assert!(catalog.quarantined.is_empty());
+    assert_eq!(catalog.tools.len(), 2, "a reordered listing still matches");
+    assert_eq!(catalog.servers[0].digest, digest);
+    let outcome = manager
+        .call("mcp__srv__echo", r#"{"text":"pinned"}"#, not_cancelled())
+        .await;
+    assert_eq!(outcome.failure, None);
+    assert_eq!(outcome.content, "pinned");
+}
+
+#[tokio::test]
+async fn a_drifted_pin_quarantines_the_catalog_and_every_call() {
+    let probe = Fixture::new(&["echo"]);
+    let probe_manager = manager_with(vec![(settings("srv"), probe.connector())]);
+    let expected = listed_digest(&probe_manager, "srv").await;
+
+    // The live server grew a tool; `echo` itself is unchanged.
+    let fixture = Fixture::new(&["echo", "fail"]);
+    let mut pinned = settings("srv");
+    pinned.pin = Some(expected);
+    let healthy = Fixture::new(&["echo"]);
+    let manager = manager_with(vec![
+        (pinned, fixture.connector()),
+        (settings("other"), healthy.connector()),
+    ]);
+
+    let catalog = manager.catalog().await;
+    assert_eq!(catalog.quarantined.len(), 1);
+    let quarantine = &catalog.quarantined[0];
+    assert_eq!(quarantine.server, "srv");
+    assert_eq!(quarantine.expected, expected);
+    assert_ne!(quarantine.actual, expected);
+    assert_eq!(
+        catalog
+            .tools
+            .iter()
+            .map(|tool| tool.spec.name())
+            .collect::<Vec<_>>(),
+        ["mcp__other__echo"],
+        "no tool of a quarantined server may be offered"
+    );
+    assert!(catalog.unavailable.is_empty());
+    assert_eq!(
+        catalog
+            .servers
+            .iter()
+            .map(|listing| (listing.server.as_str(), listing.digest))
+            .collect::<Vec<_>>(),
+        [
+            ("other", McpToolSetDigest::of_tools(&catalog.tools)),
+            ("srv", quarantine.actual),
+        ],
+        "the actual digest is published so the operator can re-pin"
+    );
+    assert_ne!(
+        catalog.servers[0].digest, expected,
+        "the server name is part of the digest: the same tools under another name differ"
+    );
+    assert!(manager.catalog_is_current(catalog.generation));
+
+    // The unchanged tool fails closed too: the quarantine is per server.
+    let outcome = manager
+        .call("mcp__srv__echo", r#"{"text":"nope"}"#, not_cancelled())
+        .await;
+    assert_eq!(outcome.failure, Some(McpCallFailure::Quarantined));
+    assert!(outcome.is_error);
+    assert!(outcome.content.contains(&expected.to_string()));
+    assert!(outcome.content.contains(&quarantine.actual.to_string()));
+    let outcome = manager.call("mcp__srv__fail", "{}", not_cancelled()).await;
+    assert_eq!(outcome.failure, Some(McpCallFailure::Quarantined));
+    assert_eq!(
+        fixture.server.list_calls.load(Ordering::SeqCst),
+        1,
+        "a quarantined listing is cached, not refetched per call"
+    );
+
+    let sibling = manager
+        .call("mcp__other__echo", r#"{"text":"alive"}"#, not_cancelled())
+        .await;
+    assert_eq!(sibling.failure, None);
+    assert_eq!(sibling.content, "alive");
+
+    // The server drops the extra tool and announces it: the listing matches
+    // the pin again and the server leaves quarantine without a restart.
+    fixture.server.tools.lock().unwrap().pop();
+    fixture.notify_tool_list_changed().await;
+    poll_until(async || manager.catalog().await.quarantined.is_empty()).await;
+    let restored = manager
+        .call("mcp__srv__echo", r#"{"text":"back"}"#, not_cancelled())
+        .await;
+    assert_eq!(restored.failure, None);
+    assert_eq!(restored.content, "back");
+}
+
+#[tokio::test]
+async fn a_list_changed_drift_quarantines_before_the_next_call() {
+    let fixture = Fixture::new(&["echo"]);
+    let probe_manager = manager_with(vec![(settings("srv"), fixture.connector())]);
+    let expected = listed_digest(&probe_manager, "srv").await;
+    probe_manager.shutdown().await;
+
+    let mut pinned = settings("srv");
+    pinned.pin = Some(expected);
+    let manager = manager_with(vec![(pinned, fixture.connector())]);
+    let before = manager.catalog().await;
+    assert!(before.quarantined.is_empty());
+    assert_eq!(before.tools.len(), 1);
+    let outcome = manager
+        .call("mcp__srv__echo", r#"{"text":"ok"}"#, not_cancelled())
+        .await;
+    assert_eq!(outcome.failure, None);
+
+    // The server changes `echo`'s description under the same name and
+    // notifies. No catalog is fetched in between: the call path itself must
+    // notice the dirty listing and re-verify.
+    {
+        let mut tools = fixture.server.tools.lock().unwrap();
+        tools[0].description = Some("a changed fixture tool".to_owned().into());
+    }
+    fixture.notify_tool_list_changed().await;
+    poll_until(async || !manager.catalog_is_current(before.generation)).await;
+    let outcome = manager
+        .call("mcp__srv__echo", r#"{"text":"drifted"}"#, not_cancelled())
+        .await;
+    assert_eq!(outcome.failure, Some(McpCallFailure::Quarantined));
+    assert!(outcome.is_error);
+
+    let after = manager.catalog().await;
+    assert_eq!(after.quarantined.len(), 1);
+    assert_eq!(after.quarantined[0].expected, expected);
+    assert!(after.tools.is_empty());
+    assert_eq!(fixture.connects(), 2, "verification reuses the connection");
+}
+
+#[tokio::test]
+async fn queued_pinned_call_refuses_drift_before_dispatch() {
+    let fixture = Fixture::new(&["echo"]);
+    let expected = listed_digest(
+        &manager_with(vec![(settings("srv"), fixture.connector())]),
+        "srv",
+    )
+    .await;
+    let mut pinned = settings("srv");
+    pinned.pin = Some(expected);
+    pinned.max_concurrent_calls = 1;
+    let manager = manager_with(vec![(pinned, fixture.connector())]);
+    let before = manager.catalog().await;
+    let permit = manager.servers["srv"].permits.acquire().await.unwrap();
+    let mut pending = Box::pin(manager.call("mcp__srv__echo", "{}", not_cancelled()));
+    assert!(futures_util::poll!(pending.as_mut()).is_pending());
+    fixture.server.tools.lock().unwrap()[0].description = Some("changed".into());
+    fixture.notify_tool_list_changed().await;
+    poll_until(async || !manager.catalog_is_current(before.generation)).await;
+    assert_eq!(manager.catalog().await.quarantined.len(), 1);
+    drop(permit);
+    assert_eq!(pending.await.failure, Some(McpCallFailure::Quarantined));
+    assert_eq!(fixture.server.tool_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn pinned_call_cannot_execute_an_unlisted_tool() {
+    let fixture = Fixture::new(&["fail"]);
+    let expected = listed_digest(
+        &manager_with(vec![(settings("srv"), fixture.connector())]),
+        "srv",
+    )
+    .await;
+    let mut pinned = settings("srv");
+    pinned.pin = Some(expected);
+    let manager = manager_with(vec![(pinned, fixture.connector())]);
+    assert_eq!(
+        manager
+            .call("mcp__srv__echo", "{}", not_cancelled())
+            .await
+            .failure,
+        Some(McpCallFailure::UnknownTool)
+    );
+}
+
+#[tokio::test]
+async fn pinned_listing_refuses_duplicates_instead_of_hashing_a_subset() {
+    let fixture = Fixture::new(&["echo"]);
+    let expected = listed_digest(
+        &manager_with(vec![(settings("srv"), fixture.connector())]),
+        "srv",
+    )
+    .await;
+    fixture.server.tools.lock().unwrap().push(tool("echo"));
+    let mut pinned = settings("srv");
+    pinned.pin = Some(expected);
+    let manager = manager_with(vec![(pinned, fixture.connector())]);
+    assert_eq!(
+        manager
+            .call("mcp__srv__echo", "{}", not_cancelled())
+            .await
+            .failure,
+        Some(McpCallFailure::Unavailable)
+    );
+}
+
+#[tokio::test]
+async fn queued_pinned_call_revalidates_a_replacement_connection() {
+    let fixture = Fixture::new(&["echo"]);
+    let probe = manager_with(vec![(settings("srv"), fixture.connector())]);
+    let expected = listed_digest(&probe, "srv").await;
+    probe.shutdown().await;
+    let mut pinned = settings("srv");
+    pinned.pin = Some(expected);
+    pinned.max_concurrent_calls = 1;
+    let manager = manager_with(vec![(pinned, fixture.connector())]);
+    manager.catalog().await;
+    let handle = &manager.servers["srv"];
+    let client = handle.client().await.unwrap();
+    let permit = handle.permits.acquire().await.unwrap();
+    let mut call = Box::pin(manager.call("mcp__srv__echo", "{}", not_cancelled()));
+    assert!(futures_util::poll!(call.as_mut()).is_pending());
+    handle.invalidate(&client).await;
+    fixture.server.tools.lock().unwrap()[0].description = Some("replacement listing".into());
+    assert_eq!(manager.catalog().await.quarantined.len(), 1);
+    drop(permit);
+    assert_eq!(call.await.failure, Some(McpCallFailure::Quarantined));
+    assert_eq!(fixture.server.tool_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn pinned_call_cancellation_and_shutdown_do_not_dispatch_waiters() {
+    let fixture = Fixture::new(&["echo"]);
+    let probe = manager_with(vec![(settings("srv"), fixture.connector())]);
+    let expected = listed_digest(&probe, "srv").await;
+    probe.shutdown().await;
+    let mut pinned = settings("srv");
+    pinned.pin = Some(expected);
+    pinned.max_concurrent_calls = 1;
+    let manager = manager_with(vec![(pinned, fixture.connector())]);
+    manager.catalog().await;
+    assert_eq!(
+        manager
+            .call("mcp__srv__echo", "{}", Box::pin(async {}))
+            .await
+            .failure,
+        Some(McpCallFailure::Cancelled)
+    );
+    let permit = manager.servers["srv"].permits.acquire().await.unwrap();
+    let (cancel, cancelled) = tokio::sync::oneshot::channel();
+    let mut call = Box::pin(manager.call(
+        "mcp__srv__echo",
+        "{}",
+        Box::pin(async {
+            let _closed = cancelled.await;
+        }),
+    ));
+    assert!(futures_util::poll!(call.as_mut()).is_pending());
+    cancel.send(()).unwrap();
+    assert_eq!(call.await.failure, Some(McpCallFailure::Cancelled));
+    let mut call = Box::pin(manager.call("mcp__srv__echo", "{}", not_cancelled()));
+    assert!(futures_util::poll!(call.as_mut()).is_pending());
+    manager.shutdown().await;
+    drop(permit);
+    assert_eq!(call.await.failure, Some(McpCallFailure::ShutDown));
+    assert_eq!(fixture.server.tool_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_notification_during_discovery_never_certifies_the_old_listing() {
+    let mut fixture = Fixture::new(&["echo"]);
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    fixture.server.list_barrier = Some(Arc::clone(&barrier));
+    let manager = manager_with(vec![(settings("srv"), fixture.connector())]);
+    let inspect = manager.inspect("srv");
+    let change = async {
+        barrier.wait().await;
+        let before = manager.generation();
+        fixture.server.tools.lock().unwrap()[0].description = Some("changed mid-fetch".into());
+        fixture.notify_tool_list_changed().await;
+        poll_until(async || manager.generation() != before).await;
+        barrier.wait().await;
+    };
+    let (result, ()) = tokio::join!(inspect, change);
+    assert!(
+        result
+            .unwrap_err()
+            .reason
+            .contains("changed during discovery")
+    );
+    assert_eq!(fixture.server.tool_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn inspection_exposes_quarantined_descriptors_without_authorizing_them() {
+    let fixture = Fixture::new(&["echo"]);
+    let mut pinned = settings("srv");
+    pinned.pin = Some("00".repeat(32).parse().unwrap());
+    let manager = manager_with(vec![(pinned.clone(), fixture.connector())]);
+    let inspected = manager.inspect("srv").await.unwrap();
+    assert_ne!(Some(inspected.digest), inspected.configured_pin);
+    assert_eq!(inspected.tools.len(), 1);
+    assert_eq!(inspected.configured_pin, pinned.pin);
+    assert_eq!(
+        manager
+            .call("mcp__srv__echo", "{}", not_cancelled())
+            .await
+            .failure,
+        Some(McpCallFailure::Quarantined)
+    );
+    assert_eq!(fixture.server.tool_calls.load(Ordering::SeqCst), 0);
+    assert!(manager.inspect("missing").await.is_err());
+}
+
+#[tokio::test]
+async fn listings_bound_pages_tool_count_and_bytes_without_partial_pins() {
+    let mut fixture = Fixture::new(&[]);
+    fixture.server.next_cursor = Some("repeat".to_owned());
+    let manager = manager_with(vec![(settings("srv"), fixture.connector())]);
+    assert!(
+        manager
+            .inspect("srv")
+            .await
+            .unwrap_err()
+            .reason
+            .contains("32-page")
+    );
+    assert_eq!(
+        fixture.server.list_calls.load(Ordering::SeqCst),
+        MAX_LIST_PAGES
+    );
+    let fixture = Fixture::new(&[]);
+    *fixture.server.tools.lock().unwrap() = (0..=MAX_LIST_TOOLS)
+        .map(|i| tool(&format!("tool_{i}")))
+        .collect();
+    let manager = manager_with(vec![(settings("srv"), fixture.connector())]);
+    assert!(
+        manager
+            .inspect("srv")
+            .await
+            .unwrap_err()
+            .reason
+            .contains("512-tool")
+    );
+    let fixture = Fixture::new(&["echo"]);
+    fixture.server.tools.lock().unwrap()[0].description = Some("x".repeat(MAX_LIST_BYTES).into());
+    let manager = manager_with(vec![(settings("srv"), fixture.connector())]);
+    assert!(
+        manager
+            .inspect("srv")
+            .await
+            .unwrap_err()
+            .reason
+            .contains("1 MiB")
+    );
+}
+
+#[tokio::test]
+async fn invalid_tool_names_are_not_omitted_from_a_pin_candidate() {
+    for name in [
+        "",
+        "has space",
+        "bad\0name",
+        &"x".repeat(MAX_NAMESPACED_NAME_BYTES),
+    ] {
+        let fixture = Fixture::new(&[name]);
+        let manager = manager_with(vec![(settings("srv"), fixture.connector())]);
+        assert!(
+            manager
+                .inspect("srv")
+                .await
+                .unwrap_err()
+                .reason
+                .contains("invalid or duplicate")
+        );
+    }
 }

@@ -389,6 +389,8 @@ pub(super) enum McpServerPatch {
         call_timeout_seconds: Option<u64>,
         #[serde(default)]
         max_concurrent_calls: Option<u32>,
+        #[serde(default)]
+        pin: Option<String>,
     },
     Http {
         url: String,
@@ -402,6 +404,8 @@ pub(super) enum McpServerPatch {
         call_timeout_seconds: Option<u64>,
         #[serde(default)]
         max_concurrent_calls: Option<u32>,
+        #[serde(default)]
+        pin: Option<String>,
     },
     Remove,
 }
@@ -1216,6 +1220,19 @@ fn valid_mcp_server_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
+/// Hex length of a SHA-256 tool-set digest as `qq-mcp` prints it.
+pub(crate) const MCP_TOOL_SET_PIN_HEX_LEN: usize = 64;
+
+/// A pin is exactly the digest `qq-mcp` reports for a listing: 64 lowercase
+/// hex digits. Checked at load so a typo fails the document rather than
+/// quarantining the server at first use.
+fn valid_mcp_tool_set_pin(pin: &str) -> bool {
+    pin.len() == MCP_TOOL_SET_PIN_HEX_LEN
+        && pin
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn validate_mcp_servers(
     servers: &UniqueMap<String, McpServerPatch>,
     origin: &SourceIdentity,
@@ -1232,24 +1249,26 @@ fn validate_mcp_servers(
                  separator)"
             )));
         }
-        let (allow, call_timeout_seconds, max_concurrent_calls) = match patch {
+        let (allow, call_timeout_seconds, max_concurrent_calls, pin) = match patch {
             McpServerPatch::Stdio {
                 command,
                 allow,
                 call_timeout_seconds,
                 max_concurrent_calls,
+                pin,
                 ..
             } => {
                 if command.trim().is_empty() {
                     return Err(invalid(format!("mcp server {name:?} has an empty command")));
                 }
-                (allow, call_timeout_seconds, max_concurrent_calls)
+                (allow, call_timeout_seconds, max_concurrent_calls, pin)
             }
             McpServerPatch::Http {
                 url,
                 allow,
                 call_timeout_seconds,
                 max_concurrent_calls,
+                pin,
                 ..
             } => {
                 let valid_scheme = ["https://", "http://"].into_iter().any(|scheme| {
@@ -1263,10 +1282,18 @@ fn validate_mcp_servers(
                         "mcp server {name:?} must use an http:// or https:// URL"
                     )));
                 }
-                (allow, call_timeout_seconds, max_concurrent_calls)
+                (allow, call_timeout_seconds, max_concurrent_calls, pin)
             }
             McpServerPatch::Remove => continue,
         };
+        if let Some(pin) = pin
+            && !valid_mcp_tool_set_pin(pin)
+        {
+            return Err(invalid(format!(
+                "mcp server {name:?} pin must be the {MCP_TOOL_SET_PIN_HEX_LEN} lowercase hex \
+                 digits of a tool-set digest"
+            )));
+        }
         let mut unique = BTreeSet::new();
         for tool in allow {
             if tool.trim().is_empty() {
@@ -2114,6 +2141,7 @@ fn apply_mcp_into(
                         allow,
                         call_timeout_seconds,
                         max_concurrent_calls,
+                        pin,
                     } => {
                         mcp.insert(
                             name.clone(),
@@ -2127,6 +2155,7 @@ fn apply_mcp_into(
                                 allow.clone(),
                                 call_timeout_seconds.unwrap_or(DEFAULT_MCP_CALL_TIMEOUT_SECONDS),
                                 max_concurrent_calls.unwrap_or(DEFAULT_MCP_MAX_CONCURRENT_CALLS),
+                                pin.clone(),
                             ),
                         );
                     }
@@ -2137,6 +2166,7 @@ fn apply_mcp_into(
                         allow,
                         call_timeout_seconds,
                         max_concurrent_calls,
+                        pin,
                     } => {
                         mcp.insert(
                             name.clone(),
@@ -2149,6 +2179,7 @@ fn apply_mcp_into(
                                 allow.clone(),
                                 call_timeout_seconds.unwrap_or(DEFAULT_MCP_CALL_TIMEOUT_SECONDS),
                                 max_concurrent_calls.unwrap_or(DEFAULT_MCP_MAX_CONCURRENT_CALLS),
+                                pin.clone(),
                             ),
                         );
                     }

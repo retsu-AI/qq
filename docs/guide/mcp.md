@@ -26,6 +26,7 @@ approval policy as built-ins.
             bearer: Env("LINEAR_TOKEN"),    // or Stored("linear/default")
             call_timeout_seconds: 120,      // default 60
             max_concurrent_calls: 2,        // default 4
+            pin: "5a1f…e9c0",               // refuse the server if its tool set changes
         ),
 
         // Drop one an earlier layer declared.
@@ -44,8 +45,56 @@ approval policy as built-ins.
 | `allow` | `[]` | `[]` | tool names granted for the workspace, folded into `policy.allow_tools` as `mcp__server__tool` |
 | `call_timeout_seconds` | `60` | `60` | per call |
 | `max_concurrent_calls` | `4` | `4` | per server |
+| `pin` | optional | optional | the 64-hex-digit digest of the server's tool set from `qq mcp inspect`; a server whose tools no longer match is quarantined |
 
 Entries replace whole declarations by name; there is no per-field layering.
+
+## Pinning a server's tools
+
+An MCP server can change what its tools are called, what they accept, and
+what they say they do at any time, and the model reads those descriptions as
+instructions. `pin` freezes the tool set you reviewed. QQ reduces every
+listing to one SHA-256 digest over each tool's namespaced name, description,
+input schema, and hints (listing order does not matter) and, when a pinned
+server lists anything else, quarantines it: its tools leave the catalog,
+every call to it is refused — including tools that did not change themselves,
+because a server that changed one tool cannot be trusted about the others —
+and the readiness message names the server with both digests:
+
+```text
+quarantined MCP servers: linear (tool set digests to 9c2e… but the configured pin is 5a1f…)
+```
+
+To pin a server, inspect it, review what it declares, and copy the digest:
+
+```sh
+qq mcp inspect linear
+```
+
+connects to that one server (it starts the configured process or contacts
+the endpoint), calls no tool, and prints a JSON report: `digest`,
+`configured_pin` and `matches_pin` (null when no pin is set), and every tool's
+`name`, `description`, `input_schema`, and `hints`. Read the descriptions and
+schemas as untrusted text — that is exactly what the model will read — then
+put `digest` into `pin`. When a server legitimately changes, run the command
+again, review the new descriptors, and update the pin. A server that returns
+to the pinned listing leaves quarantine on its next `list_changed`
+notification without a restart.
+
+A pin covers what the server *advertises*, not what its code does: a server
+can keep its descriptors identical and change its behavior. Pins are also
+enforced at dispatch, not only at discovery. A call that was queued behind
+the server's concurrency bound is re-checked against the listing it was
+admitted under before the request is sent, so a `list_changed` notification
+or a reconnect that arrives while the call waits refuses it instead of
+letting it run against a tool set nobody reviewed; a pinned call to a tool
+absent from the listing is refused as unknown. A pinned server's listing is
+also taken whole or not at all: a listing with a malformed or duplicate tool
+name, more than 512 tools, more than 1 MiB of descriptors, or more than 32
+pages is unavailable rather than partially pinned. The pin is part of the
+compiled plan's identity, so a run records which tool set it was admitted
+against and changing a pin recompiles the plan. Unpinned servers behave as
+before.
 
 ## Where to declare it
 
@@ -103,6 +152,8 @@ of `/skills`. Inline `Value(...)` bearers are unaffected.
 
 ## Inspecting
 
+- `qq mcp inspect NAME` connects to one server and prints its tool
+  descriptors and digest as JSON without calling anything.
 - `qq config show` lists declared servers with redacted bearers.
 - In the TUI, an MCP tool call row shows the server, tool, and arguments
   when expanded (`Enter` on the row).

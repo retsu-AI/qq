@@ -1287,6 +1287,7 @@ mod tests {
                 allow: vec!["execute".to_owned()],
                 call_timeout_seconds: 60,
                 max_concurrent_calls: 4,
+                pin: Some("ab".repeat(32)),
             }],
             provenance: vec!["compiled defaults".to_owned()],
             context_sources: vec![ContextSourceDescriptor {
@@ -1308,7 +1309,7 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v9\0{\"version\":9,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v10\0{\"version\":10,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
@@ -1316,10 +1317,10 @@ mod tests {
         // from a different encoding.
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "f6fbe410226e6543e6f9ad931ba67ac4820d141388ecf1126ad97c044352dc29"
+            "bbce38425d8bcca413cfc55b8b5970860aefc7a9e6db57f19a47810be1efe223"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v9\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v10\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }
@@ -1486,6 +1487,11 @@ mod tests {
                 }),
             ),
             ("mcp_servers", Box::new(|d| d.mcp_servers.clear())),
+            ("mcp_servers.pin", Box::new(|d| d.mcp_servers[0].pin = None)),
+            (
+                "mcp_servers.pin_changed",
+                Box::new(|d| d.mcp_servers[0].pin = Some("cd".repeat(32))),
+            ),
             (
                 "mcp_servers.allow",
                 Box::new(|d| d.mcp_servers[0].allow.clear()),

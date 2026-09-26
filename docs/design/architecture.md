@@ -435,12 +435,14 @@ and static header *names*, the resolved model, workspace root, prompt version,
 instruction hash and source, the tool catalog (digest, exposure, admitted
 names, host generations, typed exclusions), the skill index, the selected pack
 (identifier, version, manifest digest, persona hash, tool policy), spawn
-routes, configuration grants, MCP server declarations, configuration
-source labels, and every registered context source (name, version, the
-clamped budget the runtime enforces, fail policy). Retry is the provider's alone (`qq_provider::AttemptPolicy`)
-and is not part of the plan. `AgentPlanDigest` is the SHA-256 of a domain-tagged compact JSON
-encoding in declaration order (`DESCRIPTOR_VERSION` pins the encoding). Secret
-values, secret hashes, live handles, and the credential epoch never enter the
+routes, configuration grants, MCP server declarations (transport, sanitized
+target, credential *reference*, and the configured tool-set `pin`),
+configuration source labels, and every registered context source (name,
+version, the clamped budget the runtime enforces, fail policy). Retry is the
+provider's alone (`qq_provider::AttemptPolicy`) and is not part of the plan.
+`AgentPlanDigest` is the SHA-256 of a domain-tagged compact JSON encoding in
+declaration order (`DESCRIPTOR_VERSION` pins the encoding). Secret values,
+secret hashes, live handles, and the credential epoch never enter the
 descriptor or its digest.
 
 Explicit `reasoning_effort` is resolved from trusted configuration and profiles,
@@ -458,6 +460,16 @@ effort. A pin outside a non-empty ladder is a plan-time `ReasoningEffortNotAdver
 error naming the accepted values, so the operator sees it before the provider
 would fail the turn. An empty ladder is unknown, not unsupported, and is not
 checked.
+
+An MCP server's configured tool-set `pin` is part of the descriptor
+(version 10, ADR-0046): the plan compiled for a pinned server is a different
+plan from the one compiled without the pin, and a run's durable identity names
+the tool set it was admitted against. `qq-mcp` enforces the pin at discovery
+(a drifted server is quarantined and contributes no tools) and again at
+dispatch (a queued call re-validates the listing generation under a
+synchronous gate before its single request is enqueued), so a `list_changed`
+that lands while a call waits for a permit refuses the call instead of
+running it against an unreviewed tool set; see [`tools.md` § MCP](tools.md#mcp).
 
 Credential rotation is tracked separately by an opaque `CredentialEpoch` owned
 by `qq-auth`: every durable credential write advances the store's index

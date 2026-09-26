@@ -64,6 +64,18 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         Some(cli::Command::Jev {
             command: cli::JevCommand::Setup { allow_file },
         }) => run_blocking_command(move || jev_setup(allow_file)).await?,
+        Some(cli::Command::Mcp {
+            command: cli::McpCommand::Inspect { name },
+        }) => {
+            let request = overrides.load_request()?;
+            let settings = tokio::task::spawn_blocking(move || {
+                mcp::inspection_settings(&name, &request).map_err(|error| error.to_string())
+            })
+            .await?
+            .map_err(io::Error::other)?;
+            let report = mcp::inspect_server(settings).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Some(cli::Command::Org { command }) => organization_command(command)?,
         Some(cli::Command::Trust) => trust_command(&overrides)?,
         Some(cli::Command::Doctor(args)) => {

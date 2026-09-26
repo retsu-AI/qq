@@ -75,6 +75,17 @@ The user-scoped server in the foreground. Default bind `127.0.0.1:0`.
 
 `--allow-file` permits a user-only plaintext file when no OS keyring exists.
 
+## `qq mcp inspect NAME`
+
+Connect to the one declared MCP server `NAME` (starting its process or
+contacting its endpoint, with only that server's credential resolved), list
+its tools, and print one JSON object: `server`, `digest`, `configured_pin`,
+`matches_pin` (`null` without a pin), a `warning` that the descriptors are
+untrusted, and `tools` with each `name`, `description`, `input_schema`, and
+`hints`. No tool is called and nothing is written; the digest is what `pin`
+takes ([MCP servers](mcp.md#pinning-a-servers-tools)). Exit 1 when the
+server is not configured, cannot be reached, or does not answer within 45 s.
+
 ## `qq trust`
 
 Accept the sensitive sections of the project configuration found from the
