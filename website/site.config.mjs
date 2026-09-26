@@ -21,7 +21,7 @@ export const installMethods = [
   { label: 'Homebrew', command: 'brew install retsu-ai/qq/qq' },
   { label: 'Nix', command: 'nix run github:retsu-AI/qq' },
   { label: 'Cargo', command: `cargo binstall --git ${site.github} qq` },
-  { label: 'Windows', command: '# Download qq-vX.Y.Z-x86_64-pc-windows-msvc.zip from Releases' },
+  { label: 'Windows', downloadUrl: `${site.github}/releases/latest` },
 ];
 
 /** Site-absolute href that honors the deployment base. */

@@ -19,6 +19,7 @@ below, newest last.
 | OB10 | Docs-truth test; CHANGELOG at release | Shipped (#160) | `feat/eng-883-docs-truth` | ENG-883 |
 | OB11 | Wiki mirror workflow | Superseded by OB12 | | ENG-884 |
 | OB12 | Docs website from `docs/guide/`, GitHub Pages | Shipped (#156) | `feat/eng-896-docs-website` | ENG-896 |
+| OB12.1 | Replace Windows placeholder-copy action with download/setup links | In review | `fix/eng-906-windows-install` | ENG-906; bounded follow-up, not a reopening of shipped onboarding slices |
 
 ## Entries
 
@@ -382,3 +383,23 @@ bump. Owner setup still open: none — the Homebrew tap
 (`retsu-AI/homebrew-qq`, formula at v0.1.4) and `HOMEBREW_TAP_TOKEN` are
 in place. Candidate guides (eight topics) are listed in the plan and
 unscheduled.
+
+### 2026-09-26 — OB12.1 Windows install entry follow-up
+
+ENG-906, branch `fix/eng-906-windows-install`, implementation `4da55cb3`
+on `bd8c580b`. The Windows tab copied a shell comment containing an
+unresolved version placeholder. It now links to the latest release and
+the existing Windows checksum/setup guide; the other four copy commands
+are unchanged. Source and rendered behavior were independently approved.
+Node 24.19.0/nub 0.8.3 site build passed (478 internal links); the focused
+check fails on the retained live baseline and passes on the candidate.
+Isolated Chrome fixtures at 1280px and 390px verify keyboard links and all
+four clipboard payloads. This is not a native Windows installation test.
+Pinned Rust 1.97.1 pre-push gates passed: formatting, strict all-targets /
+all-features Clippy, workspace tests (1908 passed, 5 explicitly ignored),
+workspace build, exact-test guard (10 fixtures), and installer (17 checks).
+Tests ran serially with credentials removed from the inherited environment,
+canonical `/private/tmp`, `NO_COLOR` unset and two build jobs. No Rust,
+dependency, runtime policy or analytics change; no native Windows runtime,
+deployment or hosted-CI claim. Retained evidence is in the manager's
+`reviews/retsu-weekly-audit-2026-09-25/marketing-delivery-20260926/` packet.

@@ -1,11 +1,17 @@
 ---
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import ShellCommand from './ShellCommand.astro';
-import { installMethods, site } from '../../site.config.mjs';
+import { installMethods, site, href } from '../../site.config.mjs';
 ---
 <div class="install-widget" id="install">
   <Tabs syncKey="install-method">
-    {installMethods.map(({ label, command }) => <TabItem label={label}><ShellCommand command={command} prompt={label !== 'Windows'} /></TabItem>)}
+    {installMethods.map((method) => <TabItem label={method.label}>
+      {typeof method.command === 'string' ? <ShellCommand command={method.command} /> : <p>
+        <a href={method.downloadUrl}>Download QQ for Windows from the latest release</a>.
+        Choose the <code>x86_64-pc-windows-msvc.zip</code> archive and <code>SHA256SUMS</code>,
+        then follow the <a href={href('docs/install/#windows')}>Windows verification and setup instructions</a>.
+      </p>}
+    </TabItem>)}
   </Tabs>
   <p class="install-caption">No runtime to install. <a href={`${site.github}/releases`}>Or download a binary <span aria-hidden="true">↗</span></a></p>
 </div>
