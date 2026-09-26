@@ -1887,6 +1887,7 @@ impl plan::CompiledAgentPlan {
                 // Why the provider stopped short; `Paused` must be resent as
                 // the provider requires, `OutputTokens` may not be worth it.
                 let mut truncation_reason = qq_provider::IncompleteReason::OutputTokens;
+                let mut streamed_visible_output = false;
                 // A transient provider fault. The provider's own ledger
                 // (ADR-0005) already resent while nothing had streamed, at
                 // sub-minute backoff; a fault that reaches here has outlasted
@@ -2306,7 +2307,10 @@ impl plan::CompiledAgentPlan {
                     }
                     // Only fully streamed calls could be executed; an interrupt
                     // or truncation executes none, so the partial turn carries
-                    // text alone.
+                    // text alone. A call the model did stream is still
+                    // visible output: that truncation is continued, not
+                    // treated as an all-reasoning turn.
+                    streamed_visible_output = !pending_calls.is_empty();
                     blocks.retain(|block| matches!(block, TurnBlock::Text(_)));
                     pending_calls.clear();
                 }
@@ -2476,6 +2480,7 @@ impl plan::CompiledAgentPlan {
                     // Otherwise resume, bounded, or settle with the reason.
                     if !budget_final_turn {
                         if !assistant.has_content()
+                            && !streamed_visible_output
                             && truncation_reason == qq_provider::IncompleteReason::OutputTokens
                         {
                             // Nothing visible streamed: the whole cap went to
@@ -7530,6 +7535,81 @@ mod tests {
                 && message.contains("model ceiling 256")
         ));
     }
+    #[tokio::test]
+    async fn a_truncated_turn_that_streamed_a_tool_call_is_continued_not_failed() {
+        // The model streamed a whole tool call (visible work) and then hit the
+        // cap with no text. The call cannot execute, but the turn was not
+        // spent on hidden reasoning: it is continued like any truncation
+        // rather than failed as an empty one.
+        struct CallThenCutProvider {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for CallThenCutProvider {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let mut requests = self.requests.lock().unwrap();
+                let turn = requests.len();
+                requests.push(request);
+                drop(requests);
+                if turn == 0 {
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::ToolCallStarted {
+                            id: "call".to_owned(),
+                            name: "read_file".to_owned(),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: "call".to_owned(),
+                            json: r#"{"path":"AGENTS.md"}"#.to_owned(),
+                        }),
+                        Ok(ProviderEvent::ToolCallCompleted {
+                            id: "call".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Incomplete {
+                            usage: None,
+                            reason: qq_provider::IncompleteReason::OutputTokens,
+                        }),
+                    ]))
+                } else {
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
+            }
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        // Already at the model ceiling: an empty truncation would fail here.
+        let runtime = Runtime::new(
+            CallThenCutProvider {
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("go")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            events.last(),
+            Some(&RuntimeEvent::Completed { final_output: None })
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::OutputTruncated {
+                continuation: 1,
+                ..
+            }
+        )));
+        assert_eq!(requests.lock().unwrap().len(), 2);
+    }
+
     #[tokio::test]
     async fn completed_limited_stream_stays_finished_when_polled_after_its_deadline() {
         let directory = tempfile::tempdir().unwrap();

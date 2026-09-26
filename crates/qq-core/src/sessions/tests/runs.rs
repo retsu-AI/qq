@@ -1794,6 +1794,7 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
         SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
         Arc::new(TruncatingLoader {
             requests: Arc::clone(&requests),
+            empty: false,
         }),
     )
     .await
@@ -1938,6 +1939,85 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
             (Role::Assistant, " second half"),
             (Role::User, "and now summarize"),
         ]
+    );
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_empty_truncated_turn_replays_without_the_continuation_notice() {
+    // RR8.1: a session run's cap is the model ceiling, so an empty
+    // truncation fails the run at once; the empty turn is still persisted
+    // as truncated. The next prompt's replayed context must not append an
+    // empty assistant message plus a continuation notice the live run
+    // never sent (and that would tell the model to continue nothing).
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        Arc::new(TruncatingLoader {
+            requests: Arc::clone(&requests),
+            empty: true,
+        }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, cursor) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session(&runtime, workspace_id, None).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("unexpected receipt")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: cursor,
+        })
+        .unwrap();
+    let mut outcomes = Vec::new();
+    for prompt in ["think hard", "and now summarize"] {
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::text(prompt.to_owned())],
+                    limits: qq_protocol::RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let finished = collect_through_finished(&mut events).await;
+        outcomes.push(finished.iter().find_map(|envelope| match &envelope.event {
+            SessionEvent::RunFinished { outcome, .. } => Some(outcome.clone()),
+            _ => None,
+        }));
+    }
+    assert!(matches!(
+        outcomes[0],
+        Some(RunOutcome::Failed {
+            failure: RunFailure {
+                kind: RunFailureKind::ProviderOutputTruncated,
+                ..
+            }
+        })
+    ));
+    assert!(matches!(outcomes[1], Some(RunOutcome::Completed)));
+    let requests = requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    // Prompt, the failed-run notice, prompt: no empty assistant message and
+    // no continuation notice in between.
+    let replayed = requests[1].messages();
+    assert_eq!(replayed.len(), 3, "{replayed:#?}");
+    assert!(replayed.iter().all(|message| message.role() == Role::User));
+    assert!(
+        replayed
+            .iter()
+            .all(|message| match message.content().first() {
+                Some(ContentBlock::Text { text }) =>
+                    text != crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE,
+                _ => false,
+            })
     );
     runtime.shutdown().await.unwrap();
 }

@@ -2624,7 +2624,11 @@ mod reference_assembly {
                     ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,
                 })
                 .collect::<Vec<_>>();
-            context.push(Message::new(Role::Assistant, content));
+            let message = Message::new(Role::Assistant, content);
+            if truncated && !message.has_content() && results.is_empty() {
+                continue;
+            }
+            context.push(message);
             if !results.is_empty() {
                 context.push(Message::tool_results(results));
             }
@@ -3749,13 +3753,16 @@ async fn project_terminal_run_with_tool_boundaries(
 /// completes on the second turn.
 struct TruncatingLoader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    /// The truncated turn streams nothing visible (all hidden reasoning).
+    empty: bool,
 }
 
 impl RuntimeLoader for TruncatingLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
+        let empty = self.empty;
         Box::pin(async move {
-            Runtime::new(TruncatingProvider { requests }, "test-model", 256)
+            Runtime::new(TruncatingProvider { requests, empty }, "test-model", 1024)
                 .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
                 .map_err(|error| RuntimeLoadError {
                     kind: RunFailureKind::Configuration,
@@ -3767,6 +3774,7 @@ impl RuntimeLoader for TruncatingLoader {
 
 struct TruncatingProvider {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    empty: bool,
 }
 
 impl Provider for TruncatingProvider {
@@ -3784,15 +3792,17 @@ impl Provider for TruncatingProvider {
         });
         // Even-numbered requests (the first of each run) truncate.
         if turn.is_multiple_of(2) {
-            Box::pin(stream::iter([
-                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+            let mut events = Vec::new();
+            if !self.empty {
+                events.push(Ok(qq_provider::ProviderEvent::OutputTextDelta {
                     text: "first half".to_owned(),
-                }),
-                Ok(qq_provider::ProviderEvent::Incomplete {
-                    usage,
-                    reason: qq_provider::IncompleteReason::OutputTokens,
-                }),
-            ]))
+                }));
+            }
+            events.push(Ok(qq_provider::ProviderEvent::Incomplete {
+                usage,
+                reason: qq_provider::IncompleteReason::OutputTokens,
+            }));
+            Box::pin(stream::iter(events))
         } else {
             Box::pin(stream::iter([
                 Ok(qq_provider::ProviderEvent::OutputTextDelta {
