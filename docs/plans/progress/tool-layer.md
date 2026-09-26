@@ -9,6 +9,7 @@ newest last.
 | T1 | Cross-cutting primitives: `Bounds`, `bound_text`, `ToolOutput` split, header convention, masking, per-turn budget | Shipped (#31, `b0a18be`) | `feat/tool-layer-t1-output-bounds` | Evidence `target/qq-perf/t1-2026-09-11/` |
 | T2 | `search` v2 + `tree` (+ `list_dir` alias) | Shipped (#32, `8bb4050`) | `feat/tool-layer-t2-search-tree` | Evidence `target/qq-perf/t2-2026-09-12/` |
 | T3 | `read_file` v2 (gutter, ranges, outline, info, `if_changed_since`) | Shipped (#35, `eecc76b`) | `feat/tool-layer-t3-read-file` | Evidence `target/qq-perf/t3-2026-09-14/` |
+| T2.1 | `search` reads an empty or placeholder `cursor` as the first page | In review | `fix/eng-959-search-cursor` [#197](https://github.com/retsu-AI/qq/pull/197) | [ENG-959](https://linear.app/retsu-ai/issue/ENG-959); ~1,470 of 1,485 calls on 2026-09-25 failed `cursor_invalid`; stacked on #196 |
 | T4 | Spill store + `read_tool_result` | Shipped (#36, `80e7396`) | `feat/tool-layer-t4-spill-store` | Evidence `target/qq-perf/t4-2026-09-14/`; ADR-0019 |
 | T5 | `edit_file` v2 batch/cascade/anchors/dry-run; `write_file` flags | Shipped (#37, `95fef1b`) | `feat/tool-layer-t5-edit-v2` | Evidence `target/qq-perf/t5-2026-09-14/` |
 | T6 | Shell classifier + `Forbidden` decision; shell v2 env/cleared environment; builtin preference | Shipped (#40, `91809b2`) | `feat/tool-layer-t6-classifier` | Evidence `target/qq-perf/t6-2026-09-14/`; ADR-0020 |
@@ -222,3 +223,32 @@ sorted diff, `.qqignore`, refresh reuse / same-size change / racy mtime /
 no mtime, refresh with adds and deletes, partial on each budget axis,
 symlinks, missing root). No consumer yet; run-snapshots § Change Detection
 names it.
+
+### 2026-09-26 — T2.1 placeholder search cursor (ENG-959)
+
+Session-store forensics for 2026-09-25: 1,485 `search` calls, ~1,470
+failed `cursor_invalid` — cursor `""` 266 times, `initial`/`INITIAL` 44,
+`.` 33, `0` 30, `start`/`first` 27 — across several models; one run
+re-issued the failing call for 1,091 turns until context overflow. None of
+those strings decode to a `path\0line` position, so refusing them bought
+nothing. Fix (`tools/search.rs`): `cursor` is trimmed; empty or a
+first-page placeholder (`initial`, `start`, `first`, `0`, `.`, `/`, `null`,
+`none`, ASCII-case-insensitive) is read as no cursor and returns the first
+page byte for byte; anything else that does not decode fails
+`cursor_invalid` with guidance ("omit `cursor` for the first page; to
+continue a previous search, pass the exact next= value from its result
+header"). `specs.rs`: the tool description ends "Omit cursor for the first
+page; pass the header's next= value to continue." and the `cursor` property
+gained a matching description; the pinned tool-schema digest in
+`built_in_tool_declarations_keep_their_order_and_schema_identity` moved
+with it (expected: it hashes descriptions). No protocol or store change.
+Test: `search_pages_with_an_exact_cursor_and_caps_per_file` extended —
+every placeholder in several casings equals the bare first page, `!!` still
+fails with the guidance. Stacked on #196 (ENG-952). Gates: fmt, clippy
+`-D warnings`, `cargo test -p qq-core` green. `search_walk` not re-run: the
+change is one `match` on the argument before the walk starts. Docs:
+`tools.md` § Read-Side Walk. Review (Codex, #197): took case-insensitive
+placeholders, the digest fixture, this entry, and the `tools.md` update;
+declined checking the cursor length before trimming — tool arguments are
+already capped at 64 KiB in dispatch and a whitespace cursor costs exactly
+what omitting it costs. The general lenient decode stays RR10 (ENG-872).

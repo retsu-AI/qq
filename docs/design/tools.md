@@ -510,7 +510,16 @@ the total was known; `files=` counts files shown, `scanned=` files read.
 `next=<cursor>` appears when `limit` was reached (`base64url(path \0
 line)`: the last match shown) or the byte budget was (`truncated=bytes`);
 passing it back resumes at the exact next match, skipping whole directories
-that sort before it. `partial=scan|bytes|time` names a scan bound (50 000
+that sort before it. The argument is trimmed, and an empty or first-page
+placeholder cursor (`initial`, `start`, `first`, `0`, `.`, `/`, `null`,
+`none`, compared ASCII-case-insensitively) is read as no cursor: the result
+is byte for byte the first page. None of those can be a real cursor (one
+decodes to a non-empty path) and models send one on most first calls, so a
+refusal would cost a turn for nothing. Anything else that does not decode
+fails `cursor_invalid`, and the message says to omit `cursor` for the first
+page or pass the exact `next=` value from a previous result; the tool
+description and the `cursor` schema property say the same.
+`partial=scan|bytes|time` names a scan bound (50 000
 entries, 64 MiB, 5 s) that stopped the walk, with a cursor past the last
 file scanned. A case-sensitive content search that finds nothing reports
 `hint=case_insensitive_matches=N` so the model need not retry blind.
