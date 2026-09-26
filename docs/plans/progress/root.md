@@ -501,6 +501,21 @@ Raw receipts: external strict-implementation-20260925/falsification. Owned
 are retained for manager/reviewer reruns until final disposition, then removed.
 No live provider qualification, Strict push, PR, merge, hosted CI or release.
 
+### 2026-09-25 — Opt-in run-state admission accepted locally
+
+`qq run --state-root` now relocates writable config/trust/session state while
+preserving managed, MDM, organization, and credential boundaries. Admission
+binds canonical root/workspace, routes, profile, output/reasoning choices,
+effective consumers, and virtual-source content; every reload and the exact
+effective profile snapshot are checked before credentials, identity, DB, or plan
+use. Exact source `69663c3d`, tree `0433ab03`, passed focused run-state/config
+tests, provider test-support, default workspace, serial all-features workspace,
+strict Clippy, format, diff, and build. Independent review accepted. Retained
+binary reports `qq 0.1.4 (69663c3 2026-09-25)`, SHA256 `ed37fda1a08d8119…`.
+Parallel predecessor timing failures and an invalid nested-zsh credential run
+remain retained as counterevidence. Local source is unpushed/unmerged; no live
+provider, hosted CI, release, deployment, or customer acceptance is established.
+
 ### 2026-09-25 — ENG-791 feedback attribution: In review / local ready
 Owner: Startup writer `01a0d95e-d2ce-7350-9a9a-125f78a1be6a`; manager owns publication.
 Branch: `fix/eng-791-feedback-attribution-stack`; draft base `bdd90fb8d3e66f2a027e81afe23fd14ae1a58b48`.

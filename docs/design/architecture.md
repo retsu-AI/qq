@@ -498,6 +498,38 @@ and credential epoch — is written in the same statement that moves the run to
 carried on `run_started` and `RunSnapshot.plan`. A later refresh never touches
 that row.
 
+### Run-Scoped State Roots
+
+Headless `qq run --state-root PATH` selects an opt-in composition root for a
+supervisor-owned run. The validated root has private, canonical `config/`,
+`data/`, `workspace/`, and `artifacts/` children. QQ relocates writable user
+configuration, trust/grants, durable run identity, and the session database,
+while retaining the system credential store and read-only managed, native MDM,
+and enrolled-organization policy inputs. The ordinary no-option path still uses
+`RuntimeFactory::system()` and its existing paths.
+
+`ConfigLoader::for_run_state` preserves the native MDM reader, managed ownership
+enforcement, organization selection, cached policy validation, and source
+probes. Organization mutation is refused for the scoped loader. Its
+`SourceReport` binds filesystem identity and the content digest of virtual MDM
+and cached organization documents, so a same-origin policy change cannot pass
+as the captured source.
+
+The root composition layer captures a `RunStateScope` before any credential or
+session-store use. It records the canonical root/workspace, request overrides,
+model routes, organization, effective credential and process consumers,
+profile, output ceiling, reasoning choice, and the complete configuration-source
+digest. Every scoped reload validates that admission. Named-profile compilation
+retains and consumes the exact effective snapshot that passed validation rather
+than validating one snapshot and compiling another. Drift is a configuration
+error before credential resolution, durable identity creation, session opening,
+or plan use.
+
+This mechanism separates QQ-owned state and policy identity; it does not
+contain shell, MCP, network, or same-user OS access. A supervisor that executes
+untrusted work still provides the process/filesystem/network sandbox described
+by the hosting boundary.
+
 ### Agent Profiles
 
 An `AgentProfileId` names a bundle of per-session defaults declared in the
