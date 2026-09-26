@@ -255,7 +255,7 @@ struct RunStatePaths {
     workspace: PathBuf,
 }
 
-const RUN_STATE_IDENTITY_VERSION: u32 = 1;
+const RUN_STATE_IDENTITY_VERSION: u32 = 2;
 const RUN_STATE_IDENTITY_FILE: &str = "run-state-identity.json";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -265,9 +265,15 @@ struct RunStateIdentity {
     root: PathBuf,
     workspace: PathBuf,
     config_sha256: String,
+    profile: String,
+    admission_sha256: String,
+    max_output_tokens: u32,
 }
 
-fn current_run_state_identity(paths: &RunStatePaths) -> Result<RunStateIdentity, String> {
+fn current_run_state_identity(
+    paths: &RunStatePaths,
+    admission: &runtime::RunStateAdmissionIdentity,
+) -> Result<RunStateIdentity, String> {
     let config = paths.config.join("config.ron");
     let bytes = std::fs::read(&config).map_err(|error| {
         format!(
@@ -280,7 +286,35 @@ fn current_run_state_identity(paths: &RunStatePaths) -> Result<RunStateIdentity,
         root: paths.root.clone(),
         workspace: paths.workspace.clone(),
         config_sha256: format!("{:x}", Sha256::digest(bytes)),
+        profile: admission.profile.clone(),
+        admission_sha256: admission.admission_sha256.clone(),
+        max_output_tokens: admission.max_output_tokens,
     })
+}
+
+fn validate_run_state_resume_identity(
+    recorded: &RunStateIdentity,
+    current: &RunStateIdentity,
+) -> Result<(), String> {
+    if recorded.version != current.version
+        || recorded.root != current.root
+        || recorded.workspace != current.workspace
+        || recorded.config_sha256 != current.config_sha256
+        || recorded.profile != current.profile
+        || recorded.admission_sha256 != current.admission_sha256
+    {
+        return Err(
+            "--session run-state root, workspace, config, profile, or consumer admission differs from the recorded identity"
+                .to_owned(),
+        );
+    }
+    if current.max_output_tokens > recorded.max_output_tokens {
+        return Err(format!(
+            "--session maximum output tokens {} exceed the recorded run-state ceiling {}",
+            current.max_output_tokens, recorded.max_output_tokens
+        ));
+    }
+    Ok(())
 }
 
 fn read_run_state_identity(paths: &RunStatePaths) -> Result<RunStateIdentity, String> {
@@ -532,23 +566,6 @@ where
             ))
         })?
     };
-    let run_state_identity = run_state
-        .as_ref()
-        .map(current_run_state_identity)
-        .transpose()
-        .map_err(invalid)?;
-    if args.session.is_some()
-        && let (Some(paths), Some(current)) = (&run_state, &run_state_identity)
-    {
-        let recorded = read_run_state_identity(paths).map_err(invalid)?;
-        if recorded != *current {
-            return Err(invalid(
-                "--session run-state root, workspace, or config differs from the recorded identity"
-                    .to_owned(),
-            ));
-        }
-    }
-
     let max_cost_usd_nanos = match args.max_cost_usd {
         None => None,
         // The value is validated finite and positive; the saturating cast
@@ -617,14 +634,35 @@ where
     let captured_profile = args.profile.as_deref().unwrap_or("default");
     let factory = factory_builder(run_state.as_ref(), &workspace, &load, captured_profile)
         .map_err(|error| invalid(error.to_string()))?;
-    let model_is_fallback = load.overrides().model().is_none();
+    let effective_load = factory.captured_run_state_request(&load);
+    let run_state_admission = factory.run_state_admission_identity();
+    let run_state_identity = match (&run_state, &run_state_admission) {
+        (Some(paths), Some(admission)) => {
+            Some(current_run_state_identity(paths, admission).map_err(invalid)?)
+        }
+        (None, None) => None,
+        _ => {
+            return Err(harness(
+                "run-state factory identity did not match the requested execution mode".to_owned(),
+            ));
+        }
+    };
+    if args.session.is_some()
+        && let (Some(paths), Some(current)) = (&run_state, &run_state_identity)
+    {
+        let recorded = read_run_state_identity(paths).map_err(invalid)?;
+        validate_run_state_resume_identity(&recorded, current).map_err(invalid)?;
+    }
+    let model_is_fallback = effective_load.overrides().model().is_none();
     let config_factory = factory.clone();
-    let snapshot = tokio::task::spawn_blocking(move || config_factory.load(&load))
+    let snapshot = tokio::task::spawn_blocking(move || config_factory.load(&effective_load))
         .await
         .map_err(|_| harness("configuration loading stopped unexpectedly".to_owned()))?
         .map_err(|error| invalid(error.to_string()))?;
-    if let (Some(paths), Some(expected)) = (&run_state, &run_state_identity) {
-        let current = current_run_state_identity(paths).map_err(invalid)?;
+    if let (Some(paths), Some(admission), Some(expected)) =
+        (&run_state, &run_state_admission, &run_state_identity)
+    {
+        let current = current_run_state_identity(paths, admission).map_err(invalid)?;
         if current != *expected {
             return Err(invalid(
                 "run-state root, workspace, or config changed during admission".to_owned(),
@@ -2758,6 +2796,156 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.1.contains("differs from the recorded identity"));
+    }
+
+    #[tokio::test]
+    async fn headless_run_state_persists_profile_admission_and_output_ceiling() {
+        let directory = run_state_tree();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let root_arg = root.to_str().unwrap();
+        std::fs::write(
+            root.join("config/config.ron"),
+            r#"(
+                version: 1,
+                model: "custom/test",
+                providers: {"custom": Custom(
+                    connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth),
+                    models: {
+                        "test": (name: "Test"),
+                        "worker": (name: "Worker"),
+                    },
+                )},
+                profiles: {
+                    "review": Profile(
+                        model: "custom/test",
+                        max_output_tokens: 128,
+                        reasoning_effort: Some(low),
+                        jev_review: final,
+                        approval_delegate: off,
+                    ),
+                    "other": Profile(
+                        model: "custom/test",
+                        reasoning_effort: Some(high),
+                        jev_review: enforce,
+                        approval_delegate: on,
+                    ),
+                },
+            )"#,
+        )
+        .unwrap();
+        for name in ["original-data", "managed", "credentials"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(root.join(name), std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+        }
+        let fresh = run_args("task", &["--state-root", root_arg, "--profile", "review"]);
+        let fresh_overrides = CliOverrides {
+            max_output_tokens: Some(100),
+            ..CliOverrides::default()
+        };
+        let (runtime, options) = prepare_headless_with_factory(
+            fresh,
+            &fresh_overrides,
+            |paths, workspace, load, profile| {
+                build_test_run_state_factory(&root, paths, workspace, load, profile)
+            },
+        )
+        .await
+        .expect("a selected profile supplies the initial effective admission");
+        assert_eq!(options.profile.as_str(), "review");
+        assert_eq!(options.model.max_output_tokens, Some(100));
+        drop(runtime);
+
+        let recorded = read_run_state_identity(&RunStatePaths {
+            root: root.clone(),
+            config: root.join("config"),
+            data: root.join("data"),
+            workspace: root.join("workspace"),
+        })
+        .unwrap();
+        assert_eq!(recorded.profile, "review");
+        assert_eq!(recorded.max_output_tokens, 100);
+
+        let session = qq_protocol::SessionId::from_bytes([7; 16]);
+        let session_arg = session.to_string();
+        let resume = |profile: &str| {
+            run_args(
+                "task",
+                &[
+                    "--state-root",
+                    root_arg,
+                    "--session",
+                    &session_arg,
+                    "--profile",
+                    profile,
+                ],
+            )
+        };
+        let lower = CliOverrides {
+            model: Some("custom/worker".to_owned()),
+            max_output_tokens: Some(50),
+            ..CliOverrides::default()
+        };
+        let (runtime, options) = prepare_headless_with_factory(
+            resume("review"),
+            &lower,
+            |paths, workspace, load, profile| {
+                build_test_run_state_factory(&root, paths, workspace, load, profile)
+            },
+        )
+        .await
+        .expect("the recorded profile may resume with a lower output cap");
+        assert_eq!(options.model.max_output_tokens, Some(50));
+        assert_eq!(options.model.model.as_deref(), Some("custom/worker"));
+        drop(runtime);
+        let database_before = std::fs::read(root.join("data/sessions.sqlite3")).unwrap();
+        let identity_before = std::fs::read(root.join("data/run-state-identity.json")).unwrap();
+
+        let raised = CliOverrides {
+            max_output_tokens: Some(101),
+            ..CliOverrides::default()
+        };
+        let error = match prepare_headless_with_factory(
+            resume("review"),
+            &raised,
+            |paths, workspace, load, profile| {
+                build_test_run_state_factory(&root, paths, workspace, load, profile)
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("a resumed run raised its recorded output ceiling"),
+            Err(error) => error,
+        };
+        assert!(error.1.contains("exceed the recorded run-state ceiling"));
+
+        let error = match prepare_headless_with_factory(
+            resume("other"),
+            &lower,
+            |paths, workspace, load, profile| {
+                build_test_run_state_factory(&root, paths, workspace, load, profile)
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("a resumed run replaced the recorded profile admission"),
+            Err(error) => error,
+        };
+        assert!(error.1.contains("profile, or consumer admission differs"));
+        assert_eq!(
+            std::fs::read(root.join("data/sessions.sqlite3")).unwrap(),
+            database_before,
+            "rejected resumes must not mutate the session store"
+        );
+        assert_eq!(
+            std::fs::read(root.join("data/run-state-identity.json")).unwrap(),
+            identity_before,
+            "rejected resumes must not replace the durable identity"
+        );
     }
 
     /// The output schema is read and compiled before any configuration or

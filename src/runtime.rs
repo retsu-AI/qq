@@ -189,6 +189,14 @@ struct RunStateAdmission {
     approval_delegate: Option<qq_config::ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     max_output_tokens: u32,
+    sources_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RunStateAdmissionIdentity {
+    pub profile: String,
+    pub admission_sha256: String,
+    pub max_output_tokens: u32,
 }
 
 fn validate_tui_qa_tree(path: &Path) -> Result<(), String> {
@@ -442,8 +450,66 @@ fn load_request_with_profile_defaults(
     request.clone().with_overrides(overrides)
 }
 
+fn run_state_sources_digest(snapshot: &ConfigSnapshot) -> Result<String, RuntimeBuildError> {
+    let mut digest = Sha256::new();
+    update_digest(&mut digest, b"qq-run-state-sources-v1");
+    for report in snapshot.source_reports() {
+        let source = report.source();
+        if source.kind() == SourceKind::Runtime {
+            continue;
+        }
+        update_digest(&mut digest, format!("{:?}", source.kind()).as_bytes());
+        update_digest(&mut digest, source.label().as_bytes());
+        update_digest(&mut digest, format!("{:?}", report.status()).as_bytes());
+        for key in report.touched() {
+            update_digest(&mut digest, format!("{key:?}").as_bytes());
+        }
+        let Some(path) = source.path() else {
+            update_digest(&mut digest, b"no-path");
+            continue;
+        };
+        update_digest(&mut digest, path.to_string_lossy().as_bytes());
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+            RuntimeBuildError::InvalidRunState {
+                reason: format!(
+                    "captured configuration source {} could not be fingerprinted: {error}",
+                    path.display()
+                ),
+            }
+        })?;
+        if metadata.file_type().is_symlink() {
+            let target = std::fs::read_link(path).map_err(|error| {
+                RuntimeBuildError::InvalidRunState {
+                    reason: format!(
+                        "captured configuration source symlink {} could not be fingerprinted: {error}",
+                        path.display()
+                    ),
+                }
+            })?;
+            update_digest(&mut digest, b"symlink");
+            update_digest(&mut digest, target.to_string_lossy().as_bytes());
+        } else if metadata.is_file() {
+            update_digest(&mut digest, b"file");
+        } else {
+            update_digest(&mut digest, b"non-file");
+            continue;
+        }
+        let bytes = std::fs::read(path).map_err(|error| RuntimeBuildError::InvalidRunState {
+            reason: format!(
+                "captured configuration source {} could not be fingerprinted: {error}",
+                path.display()
+            ),
+        })?;
+        update_digest(&mut digest, &bytes);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 impl RunStateAdmission {
-    fn from_snapshot(snapshot: &ConfigSnapshot, config_dir: &Path) -> Self {
+    fn from_snapshot(
+        snapshot: &ConfigSnapshot,
+        config_dir: &Path,
+    ) -> Result<Self, RuntimeBuildError> {
         let mut model_routes = BTreeSet::new();
         model_routes.insert(snapshot.model().as_str().to_owned());
         if let Some(route) = snapshot.worker_model() {
@@ -472,7 +538,7 @@ impl RunStateAdmission {
                 model_routes.insert(format!("{provider}/{model}"));
             }
         }
-        Self {
+        Ok(Self {
             model_routes,
             organization: snapshot.organization().map(str::to_owned),
             jev_review: snapshot.jev_review(),
@@ -481,7 +547,52 @@ impl RunStateAdmission {
             approval_delegate: snapshot.approval_delegate(),
             reasoning_effort: snapshot.reasoning_effort(),
             max_output_tokens: snapshot.max_output_tokens(),
+            sources_sha256: run_state_sources_digest(snapshot)?,
+        })
+    }
+
+    fn identity_digest(&self) -> String {
+        let mut digest = Sha256::new();
+        update_digest(&mut digest, b"qq-run-state-admission-v1");
+        update_digest(&mut digest, crate::cli::BUILD_VERSION.as_bytes());
+        for route in &self.model_routes {
+            update_digest(&mut digest, route.as_bytes());
         }
+        update_digest(
+            &mut digest,
+            self.organization.as_deref().unwrap_or("<none>").as_bytes(),
+        );
+        update_digest(&mut digest, self.jev_review.as_str().as_bytes());
+        update_digest(
+            &mut digest,
+            if self.jev_routing {
+                b"routing-on"
+            } else {
+                b"routing-off"
+            },
+        );
+        update_digest(
+            &mut digest,
+            if self.jev_approval {
+                b"approval-on"
+            } else {
+                b"approval-off"
+            },
+        );
+        update_digest(
+            &mut digest,
+            self.approval_delegate
+                .map_or("<none>", qq_config::ApprovalDelegateSetting::as_str)
+                .as_bytes(),
+        );
+        update_digest(
+            &mut digest,
+            self.reasoning_effort
+                .map_or("<none>", qq_provider::ReasoningEffort::as_str)
+                .as_bytes(),
+        );
+        update_digest(&mut digest, self.sources_sha256.as_bytes());
+        format!("{:x}", digest.finalize())
     }
 
     fn validate(&self, snapshot: &ConfigSnapshot) -> Result<(), RuntimeBuildError> {
@@ -589,7 +700,7 @@ impl RuntimeFactory {
         let effective_request = load_request_with_profile_defaults(&request, &selected_profile);
         let admitted_snapshot = config.load(&effective_request)?;
         validate_run_state_sources(&admitted_snapshot, &config_dir)?;
-        let admission = RunStateAdmission::from_snapshot(&admitted_snapshot, &config_dir);
+        let admission = RunStateAdmission::from_snapshot(&admitted_snapshot, &config_dir)?;
         let mut admitted_sources = vec![base_snapshot.sources().clone()];
         if !admitted_sources.contains(admitted_snapshot.sources()) {
             admitted_sources.push(admitted_snapshot.sources().clone());
@@ -600,7 +711,7 @@ impl RuntimeFactory {
             RuntimeMode::RunState(Box::new(RunStateScope {
                 workspace,
                 config_dir,
-                request,
+                request: effective_request,
                 profile: profile.to_owned(),
                 admission,
                 admitted_sources,
@@ -624,6 +735,24 @@ impl RuntimeFactory {
                 plans: PlanCache::new(PlanCacheLimits::default()),
                 process_trust: std::sync::Mutex::new(Vec::new()),
             }),
+        })
+    }
+
+    pub(crate) fn captured_run_state_request(&self, fallback: &LoadRequest) -> LoadRequest {
+        match &self.inner.mode {
+            RuntimeMode::RunState(scope) => scope.request.clone(),
+            RuntimeMode::Standard | RuntimeMode::IsolatedTuiQa { .. } => fallback.clone(),
+        }
+    }
+
+    pub(crate) fn run_state_admission_identity(&self) -> Option<RunStateAdmissionIdentity> {
+        let RuntimeMode::RunState(scope) = &self.inner.mode else {
+            return None;
+        };
+        Some(RunStateAdmissionIdentity {
+            profile: scope.profile.clone(),
+            admission_sha256: scope.admission.identity_digest(),
+            max_output_tokens: scope.admission.max_output_tokens,
         })
     }
 

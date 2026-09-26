@@ -414,13 +414,51 @@ fn run_state_does_not_authenticate_an_unselected_organization_provider() {
 #[tokio::test]
 async fn run_state_runtime_loader_rejects_consumer_and_profile_drift() {
     let fixture = RuntimeFixture::new();
-    let configured =
-        loopback_config(r#"profiles: {"other": Profile(model: "custom/test-model")},"#);
+    let configured = r#"(
+        version: 1,
+        model: "custom/test-model",
+        providers: {
+            "custom": Custom(
+                connection: (
+                    base_url: "http://127.0.0.1:9080/v1",
+                    api: OpenAiResponses,
+                    auth: NoAuth,
+                ),
+                models: {
+                    "test-model": (name: "Test model", reasoning_efforts: [low, high]),
+                },
+            ),
+        },
+        profiles: {"other": Profile(model: "custom/test-model")},
+    )"#;
     let factory = run_state_factory(&fixture, &configured, None).unwrap();
     let workspace = std::fs::canonicalize(fixture.path("work"))
         .unwrap()
         .display()
         .to_string();
+    let reasoning_error = match RuntimeLoader::load(
+        &factory,
+        RuntimeLoadRequest {
+            routing: None,
+            checkpoint: None,
+            reasoning_effort: Some(qq_provider::ReasoningEffort::High),
+            jev_mode: None,
+            workspace: workspace.clone(),
+            model: ModelSelection::default(),
+            profile: AgentProfileId::default(),
+        },
+    )
+    .await
+    {
+        Ok(_) => panic!("a resumed reasoning effort expanded the captured consumers"),
+        Err(error) => error,
+    };
+    assert!(
+        reasoning_error
+            .message
+            .contains("captured run-state admission")
+    );
+
     let request = RuntimeLoadRequest {
         routing: None,
         checkpoint: None,
@@ -538,4 +576,48 @@ async fn run_state_runtime_loader_loads_a_captured_worker_route() {
     .await
     .expect("a captured worker route remains loadable for an admitted child");
     assert_eq!(loaded.resolved_model().route, "secondary/worker");
+}
+
+#[tokio::test]
+async fn run_state_runtime_loader_rejects_an_unadmitted_policy_route() {
+    let fixture = RuntimeFixture::new();
+    let managed = r#"(
+        version: 1,
+        providers: {
+            "policy": Custom(
+                connection: (base_url: "http://127.0.0.1:9081/v1", api: OpenAiResponses, auth: NoAuth),
+                models: {"worker": (name: "Policy worker")},
+            ),
+        },
+    )"#;
+    let factory = run_state_factory(&fixture, &loopback_config(""), Some(managed)).unwrap();
+    let workspace = std::fs::canonicalize(fixture.path("work"))
+        .unwrap()
+        .display()
+        .to_string();
+    let error = match RuntimeLoader::load(
+        &factory,
+        RuntimeLoadRequest {
+            routing: None,
+            checkpoint: None,
+            reasoning_effort: None,
+            jev_mode: None,
+            workspace,
+            model: ModelSelection {
+                model: Some("policy/worker".to_owned()),
+                ..ModelSelection::default()
+            },
+            profile: AgentProfileId::default(),
+        },
+    )
+    .await
+    {
+        Ok(_) => panic!("a policy-backed route entered the captured run-state admission"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .message
+            .contains("outside the captured run configuration")
+    );
 }
