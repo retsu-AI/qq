@@ -6,11 +6,11 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Barrier, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use super::*;
@@ -174,7 +174,7 @@ struct FakeCodexTokenClient {
 struct FakeCodexDeviceClient {
     authorization: codex::DeviceAuthorization,
     polls: Mutex<VecDeque<Result<codex::DevicePoll, codex::CodexAuthError>>>,
-    poll_requests: Mutex<Vec<(String, String)>>,
+    poll_requests: Mutex<Vec<(String, String, Duration)>>,
 }
 
 impl codex::CodexDeviceClient for FakeCodexDeviceClient {
@@ -186,16 +186,43 @@ impl codex::CodexDeviceClient for FakeCodexDeviceClient {
         &self,
         device_auth_id: &str,
         user_code: &str,
+        timeout: Duration,
     ) -> Result<codex::DevicePoll, codex::CodexAuthError> {
-        self.poll_requests
-            .lock()
-            .unwrap()
-            .push((device_auth_id.to_owned(), user_code.to_owned()));
+        self.poll_requests.lock().unwrap().push((
+            device_auth_id.to_owned(),
+            user_code.to_owned(),
+            timeout,
+        ));
         self.polls
             .lock()
             .unwrap()
             .pop_front()
             .expect("the fixture supplies every poll result")
+    }
+}
+
+struct DeadlineCrossingDeviceClient {
+    authorization: codex::DeviceAuthorization,
+    grant: codex::DeviceGrant,
+    now: Arc<Mutex<Instant>>,
+    poll_timeouts: Mutex<Vec<Duration>>,
+}
+
+impl codex::CodexDeviceClient for DeadlineCrossingDeviceClient {
+    fn start_device(&self) -> Result<codex::DeviceAuthorization, codex::CodexAuthError> {
+        Ok(self.authorization.clone())
+    }
+
+    fn poll_device(
+        &self,
+        _device_auth_id: &str,
+        _user_code: &str,
+        timeout: Duration,
+    ) -> Result<codex::DevicePoll, codex::CodexAuthError> {
+        self.poll_timeouts.lock().unwrap().push(timeout);
+        let mut now = self.now.lock().unwrap();
+        *now += timeout + Duration::from_nanos(1);
+        Ok(codex::DevicePoll::Complete(self.grant.clone()))
     }
 }
 
@@ -271,6 +298,71 @@ impl FakeCodexTokenClient {
             exchanged,
             refreshed,
         }
+    }
+}
+
+struct CoordinatedCodexRefreshClient {
+    refreshes: AtomicU64,
+    entered: Arc<Barrier>,
+    release: Arc<Barrier>,
+    refreshed: codex::RefreshedTokens,
+}
+
+struct DeadlineCrossingExchangeClient {
+    now: Arc<Mutex<Instant>>,
+    timeouts: Mutex<Vec<Duration>>,
+    exchanged: codex::ExchangedTokens,
+}
+
+impl codex::CodexTokenClient for DeadlineCrossingExchangeClient {
+    fn exchange(
+        &self,
+        _code: &str,
+        _redirect_uri: &str,
+        _code_verifier: &str,
+    ) -> Result<codex::ExchangedTokens, codex::CodexAuthError> {
+        unreachable!("device authorization uses the deadline-bounded exchange")
+    }
+
+    fn exchange_with_timeout(
+        &self,
+        _code: &str,
+        _redirect_uri: &str,
+        _code_verifier: &str,
+        timeout: Duration,
+    ) -> Result<codex::ExchangedTokens, codex::CodexAuthError> {
+        self.timeouts.lock().unwrap().push(timeout);
+        *self.now.lock().unwrap() += timeout + Duration::from_nanos(1);
+        Ok(self.exchanged.clone())
+    }
+
+    fn refresh(
+        &self,
+        _refresh_token: &str,
+    ) -> Result<codex::RefreshedTokens, codex::CodexAuthError> {
+        unreachable!("the deadline fixture does not refresh")
+    }
+}
+
+impl codex::CodexTokenClient for CoordinatedCodexRefreshClient {
+    fn exchange(
+        &self,
+        _code: &str,
+        _redirect_uri: &str,
+        _code_verifier: &str,
+    ) -> Result<codex::ExchangedTokens, codex::CodexAuthError> {
+        unreachable!("the refresh-coordination fixture never exchanges a grant")
+    }
+
+    fn refresh(
+        &self,
+        _refresh_token: &str,
+    ) -> Result<codex::RefreshedTokens, codex::CodexAuthError> {
+        if self.refreshes.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.entered.wait();
+            self.release.wait();
+        }
+        Ok(self.refreshed.clone())
     }
 }
 
@@ -1206,13 +1298,14 @@ fn codex_device_login_honors_poll_interval_and_exchanges_once() {
     );
 
     assert_eq!(sleeps, [Duration::from_secs(7), Duration::from_secs(7)]);
-    assert_eq!(
-        device.poll_requests.lock().unwrap().as_slice(),
-        [
-            ("device-id".to_owned(), "ABCD-EFGH".to_owned()),
-            ("device-id".to_owned(), "ABCD-EFGH".to_owned())
-        ]
-    );
+    let poll_requests = device.poll_requests.lock().unwrap();
+    assert_eq!(poll_requests.len(), 2);
+    assert!(poll_requests.iter().all(|(device_id, user_code, timeout)| {
+        device_id == "device-id"
+            && user_code == "ABCD-EFGH"
+            && !timeout.is_zero()
+            && *timeout <= Duration::from_secs(60)
+    }));
     assert_eq!(tokens.exchanges.lock().unwrap().len(), 1);
     assert_eq!(
         tokens.exchanges.lock().unwrap()[0],
@@ -1277,7 +1370,14 @@ fn codex_device_http_sends_bounded_json_requests_with_the_published_client_id() 
         .unwrap(),
     );
     assert!(matches!(
-        codex::request_device_poll(&client, &poll_url, "device-id", "ABCD-EFGH").unwrap(),
+        codex::request_device_poll(
+            &client,
+            &poll_url,
+            "device-id",
+            "ABCD-EFGH",
+            Duration::from_secs(5)
+        )
+        .unwrap(),
         codex::DevicePoll::Complete(_)
     ));
     let poll_request = String::from_utf8(poll_server.join().unwrap()).unwrap();
@@ -1404,6 +1504,133 @@ fn codex_device_login_stops_at_deadline_or_cancellation_without_polling() {
         AuthError::Codex(codex::CodexAuthError::DeviceAuthorizationCancelled)
     ));
     assert!(device.poll_requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn codex_device_login_rejects_a_complete_poll_that_crosses_the_deadline() {
+    let (mut store, _keyring, _directory) = test_store();
+    let verifier = "device-verifier";
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let device = Arc::new(DeadlineCrossingDeviceClient {
+        authorization: codex::DeviceAuthorization {
+            device_auth_id: "device-id".to_owned(),
+            user_code: "ABCD-EFGH".to_owned(),
+            interval: Duration::from_secs(2),
+        },
+        grant: codex::DeviceGrant {
+            authorization_code: "authorization-code".to_owned(),
+            code_challenge: URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes())),
+            code_verifier: verifier.to_owned(),
+        },
+        now: Arc::clone(&now),
+        poll_timeouts: Mutex::new(Vec::new()),
+    });
+    let tokens = Arc::new(FakeCodexTokenClient::new(
+        codex::ExchangedTokens {
+            id_token: String::new(),
+            access_token: String::new(),
+            refresh_token: String::new(),
+        },
+        codex::RefreshedTokens::default(),
+    ));
+    store.codex_device_client = device.clone();
+    store.codex_client = tokens.clone();
+
+    let clock = {
+        let now = Arc::clone(&now);
+        move || *now.lock().unwrap()
+    };
+    let sleeper = {
+        let now = Arc::clone(&now);
+        move |duration| *now.lock().unwrap() += duration
+    };
+    let error = codex::CodexDeviceLogin::start(&store)
+        .unwrap()
+        .complete_for_test_with_clock(
+            &store,
+            "default",
+            false,
+            Duration::from_secs(5),
+            (clock, || false, sleeper),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AuthError::Codex(codex::CodexAuthError::DeviceAuthorizationTimedOut)
+    ));
+    assert_eq!(
+        device.poll_timeouts.lock().unwrap().as_slice(),
+        [Duration::from_secs(3)]
+    );
+    assert!(tokens.exchanges.lock().unwrap().is_empty());
+    assert!(store.status("openai-codex/default").unwrap().is_none());
+}
+
+#[test]
+fn codex_device_login_does_not_store_an_exchange_that_crosses_the_deadline() {
+    let (mut store, _keyring, _directory) = test_store();
+    let verifier = "device-verifier";
+    let now = Arc::new(Mutex::new(Instant::now()));
+    store.codex_device_client = Arc::new(FakeCodexDeviceClient {
+        authorization: codex::DeviceAuthorization {
+            device_auth_id: "device-id".to_owned(),
+            user_code: "ABCD-EFGH".to_owned(),
+            interval: Duration::from_secs(2),
+        },
+        polls: Mutex::new(VecDeque::from([Ok(codex::DevicePoll::Complete(
+            codex::DeviceGrant {
+                authorization_code: "authorization-code".to_owned(),
+                code_challenge: URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes())),
+                code_verifier: verifier.to_owned(),
+            },
+        ))])),
+        poll_requests: Mutex::new(Vec::new()),
+    });
+    let exchange = Arc::new(DeadlineCrossingExchangeClient {
+        now: Arc::clone(&now),
+        timeouts: Mutex::new(Vec::new()),
+        exchanged: codex::ExchangedTokens {
+            id_token: jwt(serde_json::json!({
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "workspace-test-id",
+                    "chatgpt_account_is_fedramp": false
+                }
+            })),
+            access_token: "access-token".to_owned(),
+            refresh_token: "refresh-token".to_owned(),
+        },
+    });
+    store.codex_client = exchange.clone();
+
+    let clock = {
+        let now = Arc::clone(&now);
+        move || *now.lock().unwrap()
+    };
+    let sleeper = {
+        let now = Arc::clone(&now);
+        move |duration| *now.lock().unwrap() += duration
+    };
+    let error = codex::CodexDeviceLogin::start(&store)
+        .unwrap()
+        .complete_for_test_with_clock(
+            &store,
+            "default",
+            false,
+            Duration::from_secs(5),
+            (clock, || false, sleeper),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AuthError::Codex(codex::CodexAuthError::DeviceAuthorizationTimedOut)
+    ));
+    assert_eq!(
+        exchange.timeouts.lock().unwrap().as_slice(),
+        [Duration::from_secs(3)]
+    );
+    assert!(store.status("openai-codex/default").unwrap().is_none());
 }
 
 #[test]
@@ -2060,6 +2287,102 @@ async fn codex_request_cache_coalesces_expired_refresh() {
         ["original-refresh"]
     );
     assert_eq!(keyring.read_count("openai-codex/work"), 3);
+}
+
+#[tokio::test]
+async fn independent_codex_stores_share_one_refresh_owner_and_newest_epoch() {
+    let directory = TestDirectory::new();
+    let paths = CredentialPaths::new(directory.path());
+    let keyring = Arc::new(FakeKeyring::default());
+    let protected = Arc::new(FakeWindowsProtected::default());
+    let mut first_store =
+        CredentialStore::with_backends(paths.clone(), keyring.clone(), protected.clone());
+    let mut second_store =
+        CredentialStore::with_backends(paths.clone(), keyring.clone(), protected.clone());
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3_600;
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let client = Arc::new(CoordinatedCodexRefreshClient {
+        refreshes: AtomicU64::new(0),
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+        refreshed: codex::RefreshedTokens {
+            id_token: None,
+            access_token: Some(jwt(serde_json::json!({"exp": expires_at}))),
+            refresh_token: Some("rotated-refresh".to_owned()),
+        },
+    });
+    first_store.codex_client = client.clone();
+    second_store.codex_client = client.clone();
+    first_store
+        .set_with_metadata(
+            "openai-codex/work",
+            stored_codex_credential(jwt(serde_json::json!({"exp": 1})), "original-refresh"),
+            false,
+            Some("openai-codex"),
+            Some("https://chatgpt.com"),
+        )
+        .unwrap();
+    let seed_epoch = first_store.epoch().unwrap();
+    let first_provider = Arc::new(codex_request_provider(&first_store, "work"));
+    let second_provider = Arc::new(codex_request_provider(&second_store, "work"));
+
+    let first = {
+        let provider = Arc::clone(&first_provider);
+        tokio::spawn(async move {
+            qq_provider::RequestCredentialProvider::credential(provider.as_ref()).await
+        })
+    };
+    tokio::task::spawn_blocking(move || entered.wait())
+        .await
+        .unwrap();
+    let second = {
+        let provider = Arc::clone(&second_provider);
+        tokio::spawn(async move {
+            qq_provider::RequestCredentialProvider::credential(provider.as_ref()).await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while keyring.read_count("openai-codex/work") < 3 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    release.wait();
+
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+    assert_eq!(client.refreshes.load(Ordering::SeqCst), 1);
+
+    let first_cached = first_provider.cache.lock().await.clone().unwrap();
+    let second_cached = second_provider.cache.lock().await.clone().unwrap();
+    let durable_epoch = first_store.epoch().unwrap();
+    assert_ne!(durable_epoch, seed_epoch);
+    assert_eq!(first_cached.epoch, durable_epoch);
+    assert_eq!(second_cached.epoch, durable_epoch);
+    for cached in [&first_cached, &second_cached] {
+        assert_eq!(
+            cached
+                .credential
+                .access_token()
+                .expose_secret_str()
+                .unwrap(),
+            client.refreshed.access_token.as_deref().unwrap()
+        );
+    }
+
+    let reopened = CredentialStore::with_backends(paths, keyring, protected);
+    let durable = reopened.resolve_codex("work").unwrap();
+    assert_eq!(
+        durable.access_token().expose_secret_str().unwrap(),
+        client.refreshed.access_token.as_deref().unwrap()
+    );
+    assert_eq!(reopened.epoch().unwrap(), durable_epoch);
 }
 
 #[tokio::test]

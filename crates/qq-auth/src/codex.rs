@@ -124,17 +124,29 @@ pub(super) trait CodexTokenClient: Send + Sync {
         code_verifier: &str,
     ) -> Result<ExchangedTokens, CodexAuthError>;
 
+    fn exchange_with_timeout(
+        &self,
+        code: &str,
+        redirect_uri: &str,
+        code_verifier: &str,
+        timeout: Duration,
+    ) -> Result<ExchangedTokens, CodexAuthError> {
+        let _ = timeout;
+        self.exchange(code, redirect_uri, code_verifier)
+    }
+
     fn refresh(&self, refresh_token: &str) -> Result<RefreshedTokens, CodexAuthError>;
 }
 
 pub(super) struct SystemCodexTokenClient;
 
-impl CodexTokenClient for SystemCodexTokenClient {
-    fn exchange(
+impl SystemCodexTokenClient {
+    fn exchange_tokens(
         &self,
         code: &str,
         redirect_uri: &str,
         code_verifier: &str,
+        timeout: Option<Duration>,
     ) -> Result<ExchangedTokens, CodexAuthError> {
         #[derive(Deserialize)]
         struct TokenResponse {
@@ -144,25 +156,53 @@ impl CodexTokenClient for SystemCodexTokenClient {
         }
 
         let client = token_client("exchange")?;
-        let response = client
-            .post(TOKEN_ENDPOINT)
-            .form(&[
-                ("grant_type", "authorization_code"),
-                ("code", code),
-                ("redirect_uri", redirect_uri),
-                ("client_id", CLIENT_ID),
-                ("code_verifier", code_verifier),
-            ])
-            .send()
-            .map_err(|_| CodexAuthError::TokenRequestFailed {
-                operation: "exchange",
-            })?;
+        let request = client.post(TOKEN_ENDPOINT).form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("client_id", CLIENT_ID),
+            ("code_verifier", code_verifier),
+        ]);
+        let request = match timeout {
+            Some(timeout) => request.timeout(timeout),
+            None => request,
+        };
+        let response = request.send().map_err(|error| {
+            if timeout.is_some() && error.is_timeout() {
+                CodexAuthError::DeviceAuthorizationTimedOut
+            } else {
+                CodexAuthError::TokenRequestFailed {
+                    operation: "exchange",
+                }
+            }
+        })?;
         let tokens: TokenResponse = decode_token_response(response, "exchange")?;
         Ok(ExchangedTokens {
             id_token: tokens.id_token,
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
         })
+    }
+}
+
+impl CodexTokenClient for SystemCodexTokenClient {
+    fn exchange(
+        &self,
+        code: &str,
+        redirect_uri: &str,
+        code_verifier: &str,
+    ) -> Result<ExchangedTokens, CodexAuthError> {
+        self.exchange_tokens(code, redirect_uri, code_verifier, None)
+    }
+
+    fn exchange_with_timeout(
+        &self,
+        code: &str,
+        redirect_uri: &str,
+        code_verifier: &str,
+        timeout: Duration,
+    ) -> Result<ExchangedTokens, CodexAuthError> {
+        self.exchange_tokens(code, redirect_uri, code_verifier, Some(timeout))
     }
 
     fn refresh(&self, refresh_token: &str) -> Result<RefreshedTokens, CodexAuthError> {
@@ -235,6 +275,7 @@ pub(super) trait CodexDeviceClient: Send + Sync {
         &self,
         device_auth_id: &str,
         user_code: &str,
+        timeout: Duration,
     ) -> Result<DevicePoll, CodexAuthError>;
 }
 
@@ -249,12 +290,14 @@ impl CodexDeviceClient for SystemCodexDeviceClient {
         &self,
         device_auth_id: &str,
         user_code: &str,
+        timeout: Duration,
     ) -> Result<DevicePoll, CodexAuthError> {
         request_device_poll(
             &device_client()?,
             DEVICE_TOKEN_ENDPOINT,
             device_auth_id,
             user_code,
+            timeout,
         )
     }
 }
@@ -283,6 +326,7 @@ pub(super) fn request_device_poll(
     endpoint: &str,
     device_auth_id: &str,
     user_code: &str,
+    timeout: Duration,
 ) -> Result<DevicePoll, CodexAuthError> {
     #[derive(Serialize)]
     struct PollRequest<'a> {
@@ -296,8 +340,15 @@ pub(super) fn request_device_poll(
             device_auth_id,
             user_code,
         })
+        .timeout(timeout)
         .send()
-        .map_err(|_| CodexAuthError::DeviceRequestFailed)?;
+        .map_err(|error| {
+            if error.is_timeout() {
+                CodexAuthError::DeviceAuthorizationTimedOut
+            } else {
+                CodexAuthError::DeviceRequestFailed
+            }
+        })?;
     decode_device_poll(response)
 }
 
@@ -649,8 +700,7 @@ impl CodexDeviceLogin {
             profile,
             allow_file_fallback,
             DEVICE_LOGIN_TIMEOUT,
-            || false,
-            thread::sleep,
+            (Instant::now, || false, thread::sleep),
         )
     }
 
@@ -673,60 +723,103 @@ impl CodexDeviceLogin {
             profile,
             allow_file_fallback,
             timeout,
-            cancelled,
-            sleep,
+            (Instant::now, cancelled, sleep),
         )
     }
 
-    fn complete_with<C, S>(
+    #[cfg(test)]
+    pub(super) fn complete_for_test_with_clock<N, C, S>(
         self,
         store: &CredentialStore,
         profile: &str,
         allow_file_fallback: bool,
         timeout: Duration,
-        mut cancelled: C,
-        mut sleep: S,
+        runtime: (N, C, S),
     ) -> Result<CredentialBackend, AuthError>
     where
+        N: FnMut() -> Instant,
         C: FnMut() -> bool,
         S: FnMut(Duration),
     {
+        self.complete_with(store, profile, allow_file_fallback, timeout, runtime)
+    }
+
+    fn complete_with<N, C, S>(
+        self,
+        store: &CredentialStore,
+        profile: &str,
+        allow_file_fallback: bool,
+        timeout: Duration,
+        runtime: (N, C, S),
+    ) -> Result<CredentialBackend, AuthError>
+    where
+        N: FnMut() -> Instant,
+        C: FnMut() -> bool,
+        S: FnMut(Duration),
+    {
+        let (mut now, mut cancelled, mut sleep) = runtime;
         let name = credential_name(profile)?;
-        let deadline = Instant::now()
+        let deadline = now()
             .checked_add(timeout)
             .ok_or(CodexAuthError::DeviceResponseInvalid)?;
         loop {
             if cancelled() {
                 return Err(CodexAuthError::DeviceAuthorizationCancelled.into());
             }
-            let now = Instant::now();
-            if now >= deadline {
+            let current = now();
+            if current >= deadline {
                 return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
             }
             sleep(
                 self.authorization
                     .interval
-                    .min(deadline.saturating_duration_since(now)),
+                    .min(deadline.saturating_duration_since(current)),
             );
             if cancelled() {
                 return Err(CodexAuthError::DeviceAuthorizationCancelled.into());
             }
-            if Instant::now() >= deadline {
+            let current = now();
+            if current >= deadline {
                 return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
             }
-            match store.codex_device_client.poll_device(
+            let polled = store.codex_device_client.poll_device(
                 &self.authorization.device_auth_id,
                 &self.authorization.user_code,
-            )? {
+                deadline.saturating_duration_since(current),
+            )?;
+            if cancelled() {
+                return Err(CodexAuthError::DeviceAuthorizationCancelled.into());
+            }
+            if now() >= deadline {
+                return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
+            }
+            match polled {
                 DevicePoll::Pending => {}
                 DevicePoll::Complete(grant) => {
                     validate_device_grant(&grant)?;
-                    let tokens = store.codex_client.exchange(
+                    let current = now();
+                    if current >= deadline {
+                        return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
+                    }
+                    let tokens = store.codex_client.exchange_with_timeout(
                         &grant.authorization_code,
                         DEVICE_REDIRECT_URI,
                         &grant.code_verifier,
+                        deadline.saturating_duration_since(current),
                     )?;
+                    if cancelled() {
+                        return Err(CodexAuthError::DeviceAuthorizationCancelled.into());
+                    }
+                    if now() >= deadline {
+                        return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
+                    }
                     let credential = StoredCodexCredential::from_exchange(tokens, unix_time()?)?;
+                    if cancelled() {
+                        return Err(CodexAuthError::DeviceAuthorizationCancelled.into());
+                    }
+                    if now() >= deadline {
+                        return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
+                    }
                     return store.set_with_metadata(
                         &name,
                         credential.encode()?,
