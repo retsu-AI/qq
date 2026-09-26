@@ -1756,8 +1756,17 @@ impl MergeState {
             &mut self.max_output_tokens,
             DEFAULT_MAX_OUTPUT_TOKENS,
         );
-        if document.max_output_tokens.is_present() {
-            self.provenance.max_output_tokens = Some(source.clone());
+        // `Clear` restores the compiled default; that is not a chosen cap, so
+        // its provenance is the compiled one again, not the clearing layer.
+        match document.max_output_tokens {
+            Field::Missing => {}
+            Field::Set(_) => self.provenance.max_output_tokens = Some(source.clone()),
+            Field::Clear => {
+                self.provenance.max_output_tokens = Some(SourceIdentity::virtual_source(
+                    SourceKind::Compiled,
+                    "compiled defaults",
+                ));
+            }
         }
         // A shorter approval wait adds no authority; it applies from any
         // layer, trusted or not, like `max_output_tokens`.
