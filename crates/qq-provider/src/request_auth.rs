@@ -217,14 +217,15 @@ impl RequestAuthorizer {
 }
 
 fn request_credential_error(error: RequestCredentialError) -> ProviderError {
-    let kind = match error {
+    let kind = match &error {
+        RequestCredentialError::TimedOut | RequestCredentialError::CapacityUnavailable => {
+            return ProviderError::CredentialsUnavailable(error.to_string());
+        }
         RequestCredentialError::Missing { .. }
         | RequestCredentialError::Invalid
         | RequestCredentialError::RefreshRejected => ProviderErrorKind::Authentication,
         RequestCredentialError::RefreshUnavailable
         | RequestCredentialError::StorageUnavailable
-        | RequestCredentialError::TimedOut
-        | RequestCredentialError::CapacityUnavailable
         | RequestCredentialError::WorkerFailed => ProviderErrorKind::Unavailable,
     };
     ProviderError::ResponseFailed {
@@ -351,6 +352,33 @@ mod tests {
                 .to_string(),
             "provider response failed: no credential for provider `example`"
         );
+    }
+
+    #[test]
+    fn timed_out_and_exhausted_credential_loads_are_terminal_for_this_request() {
+        for error in [
+            RequestCredentialError::TimedOut,
+            RequestCredentialError::CapacityUnavailable,
+        ] {
+            let message = error.to_string();
+            let provider_error = request_credential_error(error);
+            assert_eq!(provider_error.kind(), ProviderErrorKind::Authentication);
+            assert!(matches!(
+                provider_error,
+                ProviderError::CredentialsUnavailable(got) if got == message
+            ));
+        }
+
+        for error in [
+            RequestCredentialError::WorkerFailed,
+            RequestCredentialError::RefreshUnavailable,
+            RequestCredentialError::StorageUnavailable,
+        ] {
+            assert_eq!(
+                request_credential_error(error).kind(),
+                ProviderErrorKind::Unavailable
+            );
+        }
     }
 
     struct MissingCredentials {

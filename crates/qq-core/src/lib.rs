@@ -9030,6 +9030,57 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn credential_load_timeout_does_not_retry_the_turn() {
+        for message in [
+            "credential loading timed out",
+            "credential loading capacity is exhausted",
+        ] {
+            let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            struct CredentialFailure {
+                calls: Arc<std::sync::atomic::AtomicU32>,
+                message: &'static str,
+            }
+            impl Provider for CredentialFailure {
+                fn stream(&self, _: ModelRequest) -> ProviderStream {
+                    self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let message = self.message.to_owned();
+                    Box::pin(stream::once(async move {
+                        Err(ProviderError::CredentialsUnavailable(message))
+                    }))
+                }
+            }
+            let runtime = Runtime::new(
+                CredentialFailure {
+                    calls: Arc::clone(&calls),
+                    message,
+                },
+                "gpt-test",
+                256,
+            )
+            .unwrap()
+            .with_turn_recovery(TurnRecoveryPolicy::new(
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+            ));
+            let events = runtime
+                .run(RunCommand::new("hello"))
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(RunEvent::Failed {
+                        kind: RunFailureKind::ProviderAuthentication,
+                        message: got,
+                    }) if got.contains(message) && !got.contains("paused after")
+                ),
+                "{events:?}"
+            );
+        }
+    }
+
     /// Steering accepted while tools ran joins the request as a user message
     /// after the results (`apply_steering` at the turn boundary), so the
     /// last message is no longer the results. The empty completion that
