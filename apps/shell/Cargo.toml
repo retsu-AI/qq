@@ -1,0 +1,19 @@
+[package]
+name = "qq-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The QQ web shell: hosts independently deployed remotes and owns server connections."
+
+[dependencies]
+qq-ui-common.workspace = true
+qq-protocol.workspace = true
+leptos.workspace = true
+console_error_panic_hook = "0.1"
+js-sys.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+web-sys.workspace = true

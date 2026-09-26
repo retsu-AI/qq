@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101418" />
+    <title>qq</title>
+    <link data-trunk rel="rust" data-bin="qq-shell" data-wasm-opt="z" data-reference-types data-weak-refs />
+    <link data-trunk rel="css" href="shell.css" />
+    <link data-trunk rel="copy-file" href="manifest.webmanifest" />
+    <link data-trunk rel="copy-file" href="sw.js" />
+    <link data-trunk rel="copy-file" href="remotes.json" />
+    <link data-trunk rel="copy-file" href="icon.svg" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <script>
+      // Host side of the remote contract. wasm-bindgen cannot express a
+      // dynamic `import()`, so the shell calls this from Rust. URLs resolve
+      // against the shell's own document, so `remotes.json` may use relative
+      // paths or absolute URLs on another origin (served with CORS).
+      window.qqShell = {
+        importRemote: async (moduleUrl, wasmUrl) => {
+          const module = await import(new URL(moduleUrl, document.baseURI).href);
+          await module.default({ module_or_path: new URL(wasmUrl, document.baseURI).href });
+          return module;
+        },
+      };
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker.register("sw.js").catch(() => {});
+        });
+      }
+    </script>
+  </head>
+  <body></body>
+</html>

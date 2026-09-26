@@ -1,0 +1,14 @@
+[package]
+name = "qq-sessions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The Sessions remote: workspaces, session tree, transcript, and composer against `qq serve`."
+
+[dependencies]
+qq-ui-common.workspace = true
+qq-protocol.workspace = true
+leptos.workspace = true
+wasm-bindgen.workspace = true
+web-sys.workspace = true
