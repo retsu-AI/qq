@@ -345,3 +345,10 @@ and the ceiling is well above it, so the retry overflows only for a transcript
 already at the window edge, where the original request was about to fail
 anyway; not worth a second selection pass. Rebased onto `main` after #194
 took descriptor v10; ours is v11.
+
+Round three (two on #198). Acted on both: after three visible truncations an
+empty one entered the cap-raise branch, pushed `continuation` to 4 (past the
+advertised `max_output_continuations`) and spent a fifth turn — the branch now
+settles once the shared cap is spent (regression pins 5 → 4 turns); and the
+summarizer's empty check trims like `has_content`, so a whitespace-only reply
+is not continued three times.
