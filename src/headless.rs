@@ -2968,10 +2968,11 @@ mod tests {
             }))
         };
         let directory = tempfile::tempdir().unwrap();
-        let workspace = directory.path().join("work");
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let workspace = root.join("work");
         std::fs::create_dir_all(&workspace).unwrap();
         let workspace = std::fs::canonicalize(&workspace).unwrap();
-        let database = directory.path().join("sessions.sqlite3");
+        let database = root.join("sessions.sqlite3");
 
         // Process one: start a run that never finishes, then die without
         // shutting down. The store is left with a `running` run.

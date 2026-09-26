@@ -17,6 +17,7 @@ under `target/qq-perf/` and never committed.
 | [`delegated-approval.md`](./delegated-approval.md) | closed 2026-09-24 (receipt) | DA1–DA6 shipped: reviewer denial is final, two clocks, `approval_delegate`, exact delegate grants, `jev_approval` (ADR-0041), `/delegate` and delegate identity on the wire (protocol 28). Acceptance 3 (one week of use) to be recorded |
 | [`onboarding-ux.md`](./onboarding-ux.md) | agent on the onboarding plan | OB0–OB11: user guide, startup error text, TUI without model/credential, doctor, init, install paths, trust prompt, docs-truth CI |
 | [`mcp-pinning.md`](./mcp-pinning.md) | agent on ENG-939 | MP1: MCP tool-set pinning taken over from contributed #163/#165/#171 — dispatch-time enforcement, descriptor v10, `qq mcp inspect` (ADR-0046) |
+| [`codex-device-auth.md`](./codex-device-auth.md) | agent on bounded ENG-809/ENG-791 auth slice | Opt-in Codex device authorization, reusing the existing protected credential and refresh lifecycle; offline qualification only |
 | [`root.md`](./root.md) | lead | Shared-file changes, dependency and toolchain bumps, ADR number allocation, cross-plan requests; ADR-0035 reserved and accepted locally for GitHub #83 |
 | [`decisions-needed.md`](./decisions-needed.md) | anyone appends; lead resolves | Open questions with the conservative default taken |
 | [`g-phase-5b.md`](./g-phase-5b.md), [`g-phase-6.md`](./g-phase-6.md), `g-<name>.md` | lead | Phase gate runs on `main` with exact SHA, commands, counts, and what was not tested |

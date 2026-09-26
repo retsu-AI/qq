@@ -320,6 +320,15 @@ still needs an update.
 - OpenAI Codex OAuth uses an interactive subscription identity. Keep its live
   check manual or on an explicitly approved secure runner; do not bypass OAuth
   or place a personal refresh token in general CI.
+- OpenAI Codex login keeps the loopback browser flow as the default. The
+  explicit `--device-auth` path uses the provider's device endpoints, validates
+  the returned PKCE proof, exchanges the authorization code once, and then
+  writes the same versioned credential through the existing Codex lock, epoch,
+  protected-storage, and refresh path. The device exchange does not create a
+  portable credential format or transfer a credential between hosts.
+- An unattended job needs a durable protected store that its service identity
+  can unlock. A successful device prompt alone establishes neither that storage
+  nor live provider support for a particular headless host.
 - Never print, serialize into artifacts, or include credentials in command-line
   arguments. Mark authorization headers sensitive.
 - Do not log full model responses. The smoke marker, event counts, byte counts,
@@ -434,7 +443,9 @@ Current gaps:
 - Connection timing and sanitized provider request IDs are not exposed by the
   neutral provider interface, so result records begin at first token.
 - Bedrock SDK request/replay coverage is less complete than the HTTP codecs.
-- Codex OAuth has deterministic login tests but no approved live release check.
+- Codex browser and device OAuth have deterministic login tests but no approved
+  live release check. The device protocol implementation is therefore separate
+  from provider-support and live-headless qualification.
 - Model defaults and provider resolution are not yet owned by a model registry.
 
 ## Completion Criteria
