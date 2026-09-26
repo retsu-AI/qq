@@ -91,7 +91,7 @@ shared driver into a shallow generic-provider abstraction. Shared behavior must
 continue to pass the deletion test: it replaces implementation in at least two
 adapters.
 
-The provider is the single retry owner. Each compiled HTTP provider carries one
+The provider owns retries of an HTTP request. Each compiled HTTP provider carries one
 public `AttemptPolicy` (default four attempts, 500 ms base, 8 s cap, 30 s
 backoff budget, full jitter) set through
 `ProviderCompiler::with_attempt_policy`. Every send a logical request costs
@@ -112,8 +112,14 @@ gateway that loses a request looks like. Once one `ProviderEvent`
 has been yielded the request is never resent, so a retry can never duplicate
 output; a body that ends after events is the adapter's protocol error. Auth
 and other client errors are never retried. When the policy is exhausted the
-final error message records the attempts spent. Nothing above the provider —
-not the core run loop, not the session layer — retries a turn. Operational
+final error message records the attempts spent. Separately, the core run loop
+retries a failed turn only for unavailable, rate-limited, or
+transport faults; authentication faults stop that run without a turn retry.
+Request-time credential loading timeouts and exhausted loader capacity are
+authentication-class `CredentialsUnavailable` errors, so neither the provider
+restart loop nor the core retries them. Refresh, storage, and worker failures
+remain unavailable-class and may be retried. The credential timeout bounds the
+async wait, but a blocked system Keychain read can outlive it. Operational
 probes use `ProviderCompiler::compile_for_canary`, which disables direct HTTP
 and Mantle adapter retries through the facade. Bedrock's AWS SDK client already
 has SDK retries disabled.

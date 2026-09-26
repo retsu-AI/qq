@@ -17,6 +17,7 @@ may append a **request** row; only root changes a request's status.
 | ENG-791.R1 | Typed reasoning effort reaches the real provider request | Shipped (#76 J6a; superseded row) | Author repaired actual wire/retry, zero-connection and lazy-initialization tests. Default provider 208 + interface 17 pass (one ignored); minimal provider 161 + interface 17 pass. Reviewer `qa_root_candidate_review`; manager integration. This dependency is not automatic routing |
 | ENG-791.R2 | JEV selects authorized model/effort pairs for root and child tasks | Shipped (#77 J6b; superseded row) | Same ENG-791 requirement, not a separate backlog. Actual dispatch, overrides, current capability/authorization checks, cancellation and declared fallback must agree with the selection; mandatory completion checkpoints remain enforced |
 | ENG-791.R3 | Durable routing identity, TUI visibility and observed runtime qualification | Partly shipped (#77 durable identity); remainder [ENG-815](https://linear.app/retsu-ai/issue/ENG-815) | Retain candidate set, selection/distribution, actual model/effort, usage and outcomes across replay; real-model and fixed-baseline comparison before any savings claim. Recorded demonstration and canonical release remain separate gates |
+| ENG-791 credential retry | Stop automatic retries after request-time credential timeout or loader capacity exhaustion | In review (local `53dad753`) | Pinned 1.97.1 checks and independent code review pass; prior live canary was on `138cb23d`. Process-level Keychain hard stop and PR #189 merge hold remain separate |
 | F07 | Control and cleanup commands admitted past `MAX_COMMANDS` | Shipped (`c8b1120`, #68; ENG-786 Done) | 2026-09-16. `SessionCommandKind::creates_work` splits the thirteen kinds; new work bounded at 100 000 receipts, control/cleanup at +10 000 headroom, runtime settlement cancels unbounded (`CommandOrigin`). Receipts never trimmed; replay unchanged. Two regression tests fill the counter and drive cancel/approve/delete/prune/shutdown |
 | F05 | Attachments reconstructed as the model first saw them | Shipped (`e0f5655`, #69; ENG-788 Done) | 2026-09-17. Schema 28 → 29: `attachment_blobs` (per-session, keyed by whole-file hash + range, 64 MiB cap with explicit evicted rendering) and `message_attachments`, written in the `RunStarted` transaction; `load_model_context` re-renders `<attached-file>` blocks from the store; `ClaimedRun.resolved_input` carries the first read across the auto-compaction retry. Three regression tests (modify/delete/reopen/dedup/cascade; eviction stub; auto-compaction retry) plus the reference-assembly oracle |
 | F06 | Context assembly and history search bounded by retained context, not archive size | Shipped (`ae7deec`, #70; ENG-790 Done) | 2026-09-17. Turn/result/steering/attachment queries joined to the retained prompt window; schema 29 → 30 adds `messages(run_id, steering, state)`. `search_history` newest-first with an 8 MiB scan budget and a `truncated` note. New `context_assembly` bench: assembly 83 µs / 25 ms / 98 ms → 50 / 47 / 82 µs at 10 / 1 000 / 10 000 archived runs; absent-term search 433 ms → 54 ms (truncated) at 10 000 |
@@ -545,3 +546,19 @@ Strict Clippy remains blocked by pre-existing provider/headless warnings present
 at base `f29545da`; independent review accepted repair head `2415d799`.
 Evidence: external `keychain-cache-repair/`; manager owns publication. General
 Keychain timeout containment and stable cross-build signing remain unresolved.
+
+### 2026-09-26 — ENG-791 request-time credential retry correction in review
+
+Local code commit `53dad753` maps only `TimedOut` and `CapacityUnavailable` to
+nonretryable `CredentialsUnavailable`; refresh/storage/worker and provider-network
+retry behavior remain. Credential-free provider and core regressions cover zero
+HTTP sends, one credential call, no provider restart or turn retry, and transient
+refresh/storage recovery. Non-author review approved exact tree `a717bfc1`.
+Pinned Rust/Cargo/Clippy 1.97.1: workspace 1,946 passed, five ignored; minimal
+provider profile 203 passed; strict all-targets Clippy, workspace build, format,
+both CI shell fixtures and diff check pass. Previous Homebrew 1.95 Clippy
+failure is superseded for this qualification, not hidden; logs are retained in
+external `request-time-diagnosis-20260926/`. This error-path-only change does not
+touch provider compilation or the successful request hot path, so no performance
+gate is named; live latency and shutdown remain unmeasured. No push, merge,
+Keychain/provider call, or new canary. Manager owns publication and hard-stop scope.
