@@ -632,6 +632,9 @@ struct DelegationEntryPatch {
     role: DelegationRole,
     #[serde(default)]
     note: Option<String>,
+    /// Effort children on this entry run at; absent derives from the role.
+    #[serde(default)]
+    effort: Option<qq_provider::ReasoningEffort>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2395,6 +2398,7 @@ impl MergeState {
                         route,
                         role: entry.role,
                         note,
+                        effort: entry.effort,
                     });
                 }
                 // `max_depth: 0` disables delegation entirely: no run receives
@@ -2428,6 +2432,7 @@ impl MergeState {
                         route,
                         role: DelegationRole::Balanced,
                         note: None,
+                        effort: None,
                     })
                     .into_iter()
                     .collect(),

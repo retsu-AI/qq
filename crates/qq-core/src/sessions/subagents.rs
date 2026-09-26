@@ -344,6 +344,7 @@ async fn run_owned_child(
         call_id,
         task,
         model,
+        reasoning_effort: child_effort,
         authority,
         budget: child_budget,
         purpose,
@@ -462,7 +463,7 @@ async fn run_owned_child(
         if let Err(error) = inner
             .loader
             .load(RuntimeLoadRequest {
-                reasoning_effort: parent.reasoning_effort,
+                reasoning_effort: child_effort.or(parent.reasoning_effort),
                 checkpoint: parent.checkpoint.clone(),
                 routing: parent.routing.clone(),
                 workspace: parent.workspace.clone(),
@@ -519,6 +520,7 @@ async fn run_owned_child(
             ChildAdmission {
                 profile: parent.profile.clone(),
                 model: selection,
+                reasoning_effort: child_effort,
                 task,
                 limits: child_limits,
                 approval_mode: child_mode,
@@ -859,6 +861,7 @@ impl crate::runtime::AuditHook for SessionAuditHook {
                 },
                 SpawnRequest {
                     call_id,
+                    reasoning_effort: None,
                     task: brief,
                     model,
                     authority: ChildAuthority::Read,

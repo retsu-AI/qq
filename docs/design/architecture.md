@@ -1019,6 +1019,15 @@ over the whole subtree by a bounded recursive query, inclusive accounting sums
 the same subtree, and each depth claims runs from its own permit pool so
 parents awaiting children at any level cannot starve the level below.
 
+
+A child's reasoning effort is chosen at spawn from the roster entry it resolved
+through (`qq_protocol::child_reasoning_effort`), not inherited verbatim: an
+entry's explicit `effort` wins; otherwise `fast` runs at `low` and `balanced`
+at `medium`, each capped by the parent's own pin so a child never thinks harder
+than the run that delegated to it, and `strong` inherits the parent's. The
+chosen effort is written to the child's session row in the same transaction
+that creates it, so the loader, replay, and every client see the same value.
+Legacy worker-model spawns without a roster and audits inherit as before.
 A root run's candidate final answer may be audited before it completes. The
 plan carries an `AuditPolicy` (`off`, `heuristic`, or `always`; `off` is the
 default because an audit is a second full agent run whose benefit on coding

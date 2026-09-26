@@ -287,7 +287,7 @@ fn delegation_roster_layers_validates_and_falls_back_to_worker_model_sugar() {
         "global/config.ron",
         r#"(version: 1, worker_model: "openai/ignored", delegation: (
             roster: [
-                (route: "openai/fast", role: fast, note: "  lookups  "),
+                (route: "openai/fast", role: fast, note: "  lookups  ", effort: low),
                 (route: "anthropic/balanced", role: balanced),
                 (route: "anthropic/strong", role: strong),
             ],
@@ -301,7 +301,17 @@ fn delegation_roster_layers_validates_and_falls_back_to_worker_model_sugar() {
     assert_eq!(roster.len(), 3);
     assert_eq!(roster[0].route().as_str(), "openai/fast");
     assert_eq!(roster[0].note(), Some("lookups"), "notes are trimmed");
+    assert_eq!(
+        roster[0].effort(),
+        Some(qq_provider::ReasoningEffort::Low),
+        "an entry may pin its children's effort"
+    );
     assert_eq!(roster[1].note(), None);
+    assert_eq!(
+        roster[1].effort(),
+        None,
+        "absent effort derives from the role"
+    );
     assert_eq!(declared.delegation().default_role(), DelegationRole::Strong);
     assert_eq!(declared.delegation().max_depth(), 2);
     assert!(declared.delegation().write_children());
