@@ -542,6 +542,6 @@ cold median 1.829/1.543 ms, p95 2.340/1.797 ms; warm median 21.458/20.709 us,
 p95 25.792/24.125 us. Rust 1.97.1 serial all-features: 1,942 passed,
 zero failed, five existing ignores; all-features build, format and diff pass.
 Strict Clippy remains blocked by pre-existing provider/headless warnings present
-at base `f29545da`; independent exact-head review remains pending.
+at base `f29545da`; independent review accepted repair head `2415d799`.
 Evidence: external `keychain-cache-repair/`; manager owns publication. General
 Keychain timeout containment and stable cross-build signing remain unresolved.
