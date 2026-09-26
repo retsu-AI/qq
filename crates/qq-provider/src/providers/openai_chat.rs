@@ -164,6 +164,11 @@ impl Provider for OpenAiChatCompletions {
                 // A `length` finish reason arrives before the usage chunk and
                 // `[DONE]`; remember it so the terminal event still carries usage.
                 let mut incomplete = None;
+                // Gateways (LiteLLM, OpenRouter, DeepSeek, vLLM) stream exposed
+                // thinking as `delta.reasoning_content` with no block framing;
+                // the first fragment opens one block, the first visible delta,
+                // finish reason, or `[DONE]` closes it.
+                let mut reasoning_open = false;
 
                 while let Some(event) = sse.next_event().await? {
                     let data = event.data.trim();
@@ -171,6 +176,11 @@ impl Provider for OpenAiChatCompletions {
                         continue;
                     }
                     if data == "[DONE]" {
+                        if reasoning_open {
+                            yield ProviderEvent::ReasoningCompleted {
+                                kind: crate::ReasoningKind::ExposedThinking,
+                            };
+                        }
                         let usage = usage.finish();
                         match incomplete {
                             Some(reason) => yield ProviderEvent::Incomplete { usage, reason },
@@ -184,7 +194,26 @@ impl Provider for OpenAiChatCompletions {
                         usage.set(chunk_usage)?;
                     }
                     for delta in decoded.deltas {
+                        if reasoning_open && !matches!(delta, DecodedDelta::Reasoning(_)) {
+                            reasoning_open = false;
+                            yield ProviderEvent::ReasoningCompleted {
+                                kind: crate::ReasoningKind::ExposedThinking,
+                            };
+                        }
                         match delta {
+                            DecodedDelta::Reasoning(text) => {
+                                if !reasoning_open {
+                                    reasoning_open = true;
+                                    yield ProviderEvent::ReasoningStarted {
+                                        kind: crate::ReasoningKind::ExposedThinking,
+                                    };
+                                }
+                                output_bytes.add(text.len())?;
+                                yield ProviderEvent::ReasoningDelta {
+                                    kind: crate::ReasoningKind::ExposedThinking,
+                                    text,
+                                };
+                            }
                             DecodedDelta::OutputText(text) => {
                                 output_bytes.add(text.len())?;
                                 yield ProviderEvent::OutputTextDelta { text };
@@ -499,6 +528,9 @@ struct ChatChoice {
 struct ChatDelta {
     content: Option<String>,
     refusal: Option<String>,
+    /// Exposed thinking on OpenAI-compatible gateways. Not an OpenAI field;
+    /// absent from OpenAI's own responses.
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ChatToolCallDelta>,
 }
@@ -533,6 +565,7 @@ struct WireApiError {
 
 #[derive(Debug)]
 enum DecodedDelta {
+    Reasoning(String),
     OutputText(String),
     Refusal(String),
     ToolCallStarted {
@@ -572,6 +605,13 @@ fn decode_event(data: &str, redactions: &[String]) -> Result<DecodedChunk, Provi
     let usage = chunk.usage.map(provider_usage).transpose()?;
     let mut deltas = Vec::new();
     for choice in chunk.choices {
+        if let Some(text) = choice
+            .delta
+            .reasoning_content
+            .filter(|text| !text.is_empty())
+        {
+            deltas.push(DecodedDelta::Reasoning(text));
+        }
         if let Some(text) = choice.delta.content.filter(|text| !text.is_empty()) {
             deltas.push(DecodedDelta::OutputText(text));
         }
@@ -916,6 +956,28 @@ mod tests {
     }
 
     #[test]
+    fn decodes_gateway_reasoning_content_ahead_of_visible_content() {
+        // LiteLLM/OpenRouter/DeepSeek stream exposed thinking as
+        // `reasoning_content`; dropping it made an all-thinking turn look
+        // empty (RR8.2).
+        let deltas = decode_event(
+            r#"{"choices":[{"delta":{"reasoning_content":"Let me check","content":"Done."}}]}"#,
+            &[],
+        )
+        .unwrap()
+        .deltas;
+        assert!(matches!(
+            deltas.as_slice(),
+            [DecodedDelta::Reasoning(reasoning), DecodedDelta::OutputText(text)]
+                if reasoning == "Let me check" && text == "Done."
+        ));
+        let empty = decode_event(r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#, &[])
+            .unwrap()
+            .deltas;
+        assert!(empty.is_empty());
+    }
+
+    #[test]
     fn rejects_incomplete_and_unsupported_finish_reasons() {
         let length = decode_event(
             r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
@@ -1237,6 +1299,98 @@ mod tests {
                     id: "call_1".to_owned(),
                 },
                 ProviderEvent::Completed { usage: None },
+            ]
+        );
+        server.capture();
+    }
+
+    #[tokio::test]
+    async fn streams_gateway_reasoning_as_one_block_closed_by_visible_output() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Think\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"ing.\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let server = LoopbackServer::sse(body);
+        let endpoint = format!("{}/v1/chat/completions", server.base_url);
+        let provider =
+            OpenAiChatCompletions::with_endpoint(&endpoint, ChatCompletionsAuth::NoAuth, [], true)
+                .unwrap();
+        let events = provider
+            .stream(test_request())
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        let kind = crate::ReasoningKind::ExposedThinking;
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::ReasoningStarted { kind },
+                ProviderEvent::ReasoningDelta {
+                    kind,
+                    text: "Think".to_owned(),
+                },
+                ProviderEvent::ReasoningDelta {
+                    kind,
+                    text: "ing.".to_owned(),
+                },
+                ProviderEvent::ReasoningCompleted { kind },
+                ProviderEvent::OutputTextDelta {
+                    text: "Answer".to_owned(),
+                },
+                ProviderEvent::Completed { usage: None },
+            ]
+        );
+        server.capture();
+    }
+
+    #[tokio::test]
+    async fn an_all_reasoning_turn_cut_at_length_closes_its_block_before_incomplete() {
+        // The audited failure shape: 16 384 tokens of thinking, `length`, no
+        // visible output. The runtime must see the reasoning, then the
+        // truncation, never an unclosed block.
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"deep thoughts\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":64}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let server = LoopbackServer::sse(body);
+        let endpoint = format!("{}/v1/chat/completions", server.base_url);
+        let provider =
+            OpenAiChatCompletions::with_endpoint(&endpoint, ChatCompletionsAuth::NoAuth, [], true)
+                .unwrap();
+        let events = provider
+            .stream(test_request())
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        let kind = crate::ReasoningKind::ExposedThinking;
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::ReasoningStarted { kind },
+                ProviderEvent::ReasoningDelta {
+                    kind,
+                    text: "deep thoughts".to_owned(),
+                },
+                ProviderEvent::ReasoningCompleted { kind },
+                ProviderEvent::Incomplete {
+                    usage: Some(ProviderUsage {
+                        input_tokens: 10,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        output_tokens: 64,
+                        reasoning_tokens: None,
+                    }),
+                    reason: IncompleteReason::OutputTokens,
+                },
             ]
         );
         server.capture();
