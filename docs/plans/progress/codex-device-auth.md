@@ -6,7 +6,7 @@ evaluation backlog or authorize a paid run.
 
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
-| ENG-809.AUTH | Opt-in Codex device authorization with existing QQ storage and refresh | In review | `feat/eng-809-codex-device-auth` | Base `bd8c580b38eab0ec71c047150223989512dadd44`; offline fixtures only |
+| ENG-809.AUTH | Opt-in Codex device authorization with existing QQ storage and refresh | In review | [PR #206](https://github.com/retsu-AI/qq/pull/206) | Base `bd8c580b38eab0ec71c047150223989512dadd44`; accepted offline candidate `9897c6aebaec869195a84aaa17a02b34254c92d4` |
 
 ## 2026-09-26 — implementation start
 
