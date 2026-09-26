@@ -13,7 +13,11 @@ appended below, newest last.
 | RR5 | `Retry-After` ≤ 60 s; 529 retryable; HTTP-date | Shipped (#118) | [ENG-866](https://linear.app/retsu-ai/issue/ENG-866) | `fix/rr5-retry-after` | provider crate; minimal profile green |
 | RR6 | Reactive overflow; un-wedge admission (mid-run compaction shipped in #92) | In review | [ENG-868](https://linear.app/retsu-ai/issue/ENG-868) | `feat/eng-868-rr6-reactive-overflow` | 9 runs / 3 sessions; independent review |
 | RR7 | Estimate calibration from reported usage | In review | [ENG-869](https://linear.app/retsu-ai/issue/ENG-869) | `feat/eng-869-rr7-estimate-calibration` | deferred from F04 |
-| RR8 | Output-token handling and persisted `max_output_tokens` floor | Planned | [ENG-870](https://linear.app/retsu-ai/issue/ENG-870) | | 5 runs |
+| RR8 | Output-token handling and persisted `max_output_tokens` floor | Split into RR8.1–RR8.4 | [ENG-870](https://linear.app/retsu-ai/issue/ENG-870) | | 5 runs; the mid-tool-call re-issue item stays here |
+| RR8.1 | Empty truncated turn raises the cap once, then fails naming the cause | In review | [ENG-953](https://linear.app/retsu-ai/issue/ENG-953) | `fix/eng-953-rr8-empty-truncation` | 2 runs, 31 empty turns, ~2 h wasted |
+| RR8.2 | Chat Completions codec streams `reasoning_content` as exposed thinking | In review | [ENG-954](https://linear.app/retsu-ai/issue/ENG-954) | `fix/eng-954-rr8-gateway-reasoning` (stacked on 953) | provider; minimal profile green |
+| RR8.3 | Effort-aware output ceiling; legacy persisted defaults treated as unset | In review | [ENG-955](https://linear.app/retsu-ai/issue/ENG-955) | `fix/eng-955-rr8-effort-aware-output-cap` (stacked on 954) | |
+| RR8.4 | Sub-agent effort chosen from the roster role | In review | [ENG-956](https://linear.app/retsu-ai/issue/ENG-956) | `feat/eng-956-rr8-role-effort` (stacked on 955) | additive protocol field, no bump |
 | RR9 | Approval deadline policy | Planned | [ENG-871](https://linear.app/retsu-ai/issue/ENG-871) | | 4 timeouts |
 | RR10 | Lenient tool-argument decode | Planned | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872) | | ~11 wasted turns |
 | RR11 | Read-hash ledger persisted | Planned | [ENG-873](https://linear.app/retsu-ai/issue/ENG-873) | | 14 refusals |
@@ -188,3 +192,39 @@ acceptance fixture
 `calibration_holds_the_estimate_within_ten_percent_on_a_code_heavy_transcript`
 (eight turns at 3.1 B/t, worst error < 10 %; the default would be 22 %
 under per delta), plus the existing chain and boundary tests.
+
+### 2026-09-26 — RR8.1–RR8.4 output-cap stack (ENG-953..956)
+
+Read-only store inspection of the two recent `provider_output_truncated`
+runs on `litellm/us.anthropic.claude-fable-5-1` (`043232c6…`, `57febea3…`):
+every failing turn persisted `assistant_content_json = []` with
+`output_tokens = 16384`, and every continuation request had `input_tokens = 2`
+uncached, i.e. byte-identical to the one before. Route-wide since 09-10:
+3 935 turns, 49 truncated, 31 empty, ≈ 671 k output tokens and ≈ 2 h wall
+producing nothing; no other route shows it. Three stacked causes: the Chat
+Completions codec dropped `delta.reasoning_content` so all-thinking turns
+looked empty; with `reasoning_effort: max` Anthropic thinking shares
+`max_tokens` and ate the 16 384 default; the loop resent an unchanged request
+up to `MAX_OUTPUT_CONTINUATIONS` times. Codex avoids all three by never
+sending `max_output_tokens` on the Responses wire.
+
+RR8.1 (`qq-core` run loop + summarizer): an empty truncation doubles the cap
+toward the model ceiling once (`MAX_EMPTY_OUTPUT_RETRIES`), otherwise fails at
+once naming reasoning as the cause and both remedies. Two regressions; the
+with-text continuation tests are unchanged. RR8.2 (`qq-provider`): one
+`ExposedThinking` block per turn from `reasoning_content`, closed by the first
+visible delta / finish reason / `[DONE]`; three tests incl. the audited
+all-reasoning-then-`length` shape. RR8.3 (`src/runtime.rs`): with effort set on
+Anthropic Messages, Bedrock Converse, or an Anthropic model behind a gateway
+(canonical id or vendor segment), the compiled default resolves to the catalog
+ceiling unless `max_output_tokens` has non-compiled provenance; persisted
+2 048/4 096 (`LEGACY_DEFAULT_MAX_OUTPUT_TOKENS`) are treated as unset. RR8.4
+(`qq-protocol`/`qq-config`/`sessions`): `DelegationRosterEntry.effort` and
+`child_reasoning_effort` (fast → low, balanced → medium capped by the parent,
+strong inherits, explicit wins); written to the child's session row in the
+creation transaction. Additive protocol field, goldens unchanged, no schema
+change. Gates on the stack tip: fmt, clippy `-D warnings`, workspace tests
+(1 157 passed; the compaction/deadline timing fixtures that failed under the
+full parallel run pass in isolation, 67/67), minimal provider profile 203/203.
+Not done: the RR8 mid-tool-call re-issue item and live qualification on the
+LiteLLM route (needs a real run at `effort: max`).
