@@ -66,6 +66,7 @@ may append a **request** row; only root changes a request's status.
 | 0041 | Jev as an approval delegate for held calls only; supersedes ADR-0030's "never authorizes side effects" for the `jev_approval` lane | delegated-approval DA5 (ENG-862) | Accepted 2026-09-23: `docs/adr/0041-jev-delegated-approval.md`; no protocol or schema change |
 | 0042 | In-TUI trust prompt: client-side, root-resolved, no protocol change | onboarding-ux OB7 | Accepted 2026-09-24: `docs/adr/0042-in-tui-trust-prompt.md` |
 | 0043 | Verified root-task efficiency and evidence-gated defaults | token-efficiency TE0 | Reserved 2026-09-23; Proposed ADR-0043 |
+| 0046 | Explicit Jev consent and durable held-approval lifecycle | ENG-938 / JU0 | Reserved 2026-09-25; Proposed. Avoids draft #187's 0044/0045; root must reconcile the independent 0044 collision with ENG-937 |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -398,3 +399,17 @@ while writing ADR-0038: `commands` already has no reference to `sessions`
 (receipts survive deletion by accident today), and `delete_idle_session`
 removes every session-scoped table except the session's rows in `events` —
 the event log grows regardless of deletion, which the ADR's decision 6 fixes.
+
+### 2026-09-25 — ENG-938 / JU0 shared-file and ADR request
+
+Requested: index the user-requested Jev usefulness plan, qualification procedure,
+audit and SHA-pinned comparison of PRs 187/189 in the docs/plan/progress indexes.
+Reserve ADR-0046 for explicit consent and the held-approval lifecycle; 0044/0045
+are used in draft 187. Local ENG-937 work also reserves 0044 for failed-edit
+rollback: root must reconcile that independent collision before either lands.
+This PR does not rename another lane's ADR or change its status. Proposed index
+edits are included for root review. No architecture-as-built, runtime, protocol,
+schema, threshold or configuration changes. Isolated worktree
+`.worktrees/eng-938-jev-plan`, base `ac28bf2`; plan-only issue ENG-938.
+Status: Open for root review; implementation and paid evaluation are not authorized
+by this documentation slice. Ledger: `progress/jev-usefulness.md`.

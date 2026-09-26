@@ -457,3 +457,25 @@ plan" is met with this slice.
   `runbooks/jev.md` § "Jev as the approval delegate" covers the Jev lane.
 
 Open: acceptance 3 only, measurable from 2026-09-30. Nothing to build.
+
+### 2026-09-25 — usefulness audit; follow-up defects, no policy changes
+
+- User reports frequent human handoffs and reiterates default-off/opt-in.
+- Audited `9f2d82d`; report: [`jev-delegation-audit-2026-09-25.md`](../../design/jev-delegation-audit-2026-09-25.md).
+- Branch `docs/eng-862-jev-integration-audit`; tracked changes are docs only.
+- Vendor API/adapter research identifies confidence semantics and approximate probability precision.
+- Source findings: missing root brief, premature TUI prompts, profile activation ignored, overbroad external-action abstention, weak per-attempt observability.
+- Existing focused suites: 74 passed (approval adapter 6, config 3, core approvals 61, routing 3, headless 1).
+- Isolated probes: 3 expected failures reproduce stale activation after off, Jev-only headless premature denial, rounded-distribution rejection.
+- Probe source: `target/qq-perf/jev-audit-2026-09-25/source/`; production Rust/config untouched.
+- ENG-862 and ENG-811 read; no tracker state, PR, commit or push changes.
+- No live Jev calls, credential reads or private session-store analysis; the reported handoff percentage remains unmeasured.
+- Recommendations and acceptance are in the report; runtime repairs, calibration and live evaluation remain follow-up work.
+
+### 2026-09-25 — audit follow-up ownership
+
+ENG-938 records the planning-only follow-up in
+[`jev-usefulness.md`](jev-usefulness.md). JU1–JU8 are proposed work, not another
+DA implementation claim; the audit receipt above retains its original baseline.
+The user requested a draft docs PR and comparison with drafts 187/189, not a
+merge of those implementations. The new plan does not close DA acceptance 3.
