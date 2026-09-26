@@ -1114,6 +1114,12 @@ fn run_state_keeps_mdm_reader_and_managed_ownership_enforcement() {
     let snapshot = loader.load(&tree.request()).unwrap();
     assert_eq!(reads.load(Ordering::Relaxed), 1);
     assert_eq!(snapshot.organization(), Some("mdm"));
+    let mdm_report = snapshot.source_reports().last().unwrap();
+    assert_eq!(mdm_report.source().kind(), SourceKind::Mdm);
+    assert_eq!(
+        mdm_report.content_sha256().copied(),
+        Some(Sha256::digest(r#"(version: 1, organization: "mdm")"#.as_bytes()).into())
+    );
     assert_eq!(
         snapshot.provenance().organization().unwrap().kind(),
         SourceKind::Mdm

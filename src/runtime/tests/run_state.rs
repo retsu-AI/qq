@@ -431,7 +431,7 @@ async fn run_state_runtime_loader_rejects_consumer_and_profile_drift() {
         },
         profiles: {"other": Profile(model: "custom/test-model")},
     )"#;
-    let factory = run_state_factory(&fixture, &configured, None).unwrap();
+    let factory = run_state_factory(&fixture, configured, None).unwrap();
     let workspace = std::fs::canonicalize(fixture.path("work"))
         .unwrap()
         .display()

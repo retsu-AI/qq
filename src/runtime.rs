@@ -465,7 +465,12 @@ fn run_state_sources_digest(snapshot: &ConfigSnapshot) -> Result<String, Runtime
             update_digest(&mut digest, format!("{key:?}").as_bytes());
         }
         let Some(path) = source.path() else {
-            update_digest(&mut digest, b"no-path");
+            if let Some(content_sha256) = report.content_sha256() {
+                update_digest(&mut digest, b"virtual-content-sha256");
+                update_digest(&mut digest, content_sha256);
+            } else {
+                update_digest(&mut digest, b"no-path");
+            }
             continue;
         };
         update_digest(&mut digest, path.to_string_lossy().as_bytes());

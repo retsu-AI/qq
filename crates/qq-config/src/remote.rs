@@ -288,7 +288,7 @@ pub(super) fn load_cached(
     paths: &ConfigPaths,
     name: &str,
     probes: &mut Probes,
-) -> Result<(Document, SourceIdentity), ConfigError> {
+) -> Result<(Document, SourceIdentity, [u8; 32]), ConfigError> {
     validate_name(name)?;
     let state = OrganizationState::load(paths, probes)?;
     let enrollment = state
@@ -302,6 +302,7 @@ pub(super) fn load_cached(
     };
     validate_private_state_file(&cache_path(paths, &enrollment.cache_key))?;
     let (_, content) = read_candidate(&candidate)?;
+    let content_sha256 = Sha256::digest(content.as_bytes()).into();
     let source = remote_source(name, &enrollment.manifest_url);
     let document = Document::parse(&content, &source)?;
     if !document.matches_organization(name) {
@@ -309,14 +310,14 @@ pub(super) fn load_cached(
             name: name.to_owned(),
         });
     }
-    Ok((document, source))
+    Ok((document, source, content_sha256))
 }
 
 pub(super) fn load_cached_if_enrolled(
     paths: &ConfigPaths,
     name: &str,
     probes: &mut Probes,
-) -> Result<Option<(Document, SourceIdentity)>, ConfigError> {
+) -> Result<Option<(Document, SourceIdentity, [u8; 32])>, ConfigError> {
     if OrganizationState::load(paths, probes)?.find(name).is_none() {
         return Ok(None);
     }
@@ -904,6 +905,7 @@ mod tests {
                 .label()
                 .contains("organization other")
         );
+        assert!(snapshot.source_reports()[1].content_sha256().is_some());
         assert_eq!(
             snapshot.source_reports()[2].source().kind(),
             SourceKind::Global

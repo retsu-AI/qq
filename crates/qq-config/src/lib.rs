@@ -643,6 +643,18 @@ impl ConfigLoader {
         self.mdm_reader = reader;
         self
     }
+
+    /// Installs a deterministic virtual MDM source for cross-crate tests.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_test_mdm(mut self, origin: impl Into<String>, content: impl Into<String>) -> Self {
+        self.mdm_reader = Arc::new(managed::FixedMdmReader {
+            origin: origin.into(),
+            content: content.into(),
+        });
+        self
+    }
 }
 
 pub fn load(request: &LoadRequest) -> Result<ConfigSnapshot, ConfigError> {
@@ -1593,6 +1605,7 @@ pub struct SourceReport {
     source: SourceIdentity,
     status: SourceStatus,
     touched: Vec<ConfigKey>,
+    content_sha256: Option<[u8; 32]>,
 }
 
 impl SourceReport {
@@ -1601,7 +1614,13 @@ impl SourceReport {
             source,
             status,
             touched,
+            content_sha256: None,
         }
+    }
+
+    fn with_content_sha256(mut self, content_sha256: [u8; 32]) -> Self {
+        self.content_sha256 = Some(content_sha256);
+        self
     }
 
     #[must_use]
@@ -1617,6 +1636,13 @@ impl SourceReport {
     #[must_use]
     pub fn touched(&self) -> &[ConfigKey] {
         &self.touched
+    }
+
+    /// A non-secret fingerprint of virtual policy bytes when the source has
+    /// no filesystem path whose content can be read back for admission.
+    #[must_use]
+    pub const fn content_sha256(&self) -> Option<&[u8; 32]> {
+        self.content_sha256.as_ref()
     }
 }
 

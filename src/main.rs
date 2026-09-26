@@ -2680,6 +2680,34 @@ mod tests {
         )
     }
 
+    fn build_test_run_state_factory_with_mdm(
+        root: &Path,
+        paths: Option<&RunStatePaths>,
+        workspace: &Path,
+        load: &config::LoadRequest,
+        profile: &str,
+        mdm_content: &str,
+    ) -> Result<runtime::RuntimeFactory, runtime::RuntimeBuildError> {
+        let paths = paths.expect("state root");
+        runtime::RuntimeFactory::run_state(
+            config::ConfigLoader::new(config::ConfigPaths::new(
+                paths.config.clone(),
+                root.join("original-data"),
+                root.join("managed"),
+            ))
+            .with_test_mdm("stable test MDM origin", mdm_content)
+            .for_run_state(paths.config.clone(), paths.data.clone()),
+            auth::CredentialStore::with_backend(
+                auth::CredentialPaths::new(root.join("credentials")),
+                Arc::new(PanicKeyring),
+            ),
+            workspace.to_path_buf(),
+            paths.config.clone(),
+            load.clone(),
+            profile,
+        )
+    }
+
     #[test]
     fn run_state_cli_and_root_validation_are_opt_in_and_fail_closed() {
         let directory = run_state_tree();
@@ -2945,6 +2973,108 @@ mod tests {
             std::fs::read(root.join("data/run-state-identity.json")).unwrap(),
             identity_before,
             "rejected resumes must not replace the durable identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_run_state_rejects_changed_same_origin_mdm_before_store_or_credentials() {
+        let directory = run_state_tree();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let root_arg = root.to_str().unwrap();
+        std::fs::write(
+            root.join("config/config.ron"),
+            r#"(
+                version: 1,
+                model: "custom/test",
+                providers: {"custom": Custom(
+                    connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth),
+                    models: {"test": (name: "Test")},
+                )},
+                policy: (allow_tools: ["read_file"]),
+            )"#,
+        )
+        .unwrap();
+        for name in ["original-data", "managed", "credentials"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(root.join(name), std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+        }
+
+        let fresh = run_args("task", &["--state-root", root_arg]);
+        let (runtime, _) = prepare_headless_with_factory(
+            fresh,
+            &CliOverrides::default(),
+            |paths, workspace, load, profile| {
+                build_test_run_state_factory_with_mdm(
+                    &root,
+                    paths,
+                    workspace,
+                    load,
+                    profile,
+                    r#"(version: 1, policy: (deny_tools: ["read_file"]))"#,
+                )
+            },
+        )
+        .await
+        .expect("the initial same-origin MDM policy is admitted");
+        drop(runtime);
+
+        let session = qq_protocol::SessionId::from_bytes([11; 16]).to_string();
+        let unchanged_resume = run_args("task", &["--state-root", root_arg, "--session", &session]);
+        let (runtime, _) = prepare_headless_with_factory(
+            unchanged_resume,
+            &CliOverrides::default(),
+            |paths, workspace, load, profile| {
+                build_test_run_state_factory_with_mdm(
+                    &root,
+                    paths,
+                    workspace,
+                    load,
+                    profile,
+                    r#"(version: 1, policy: (deny_tools: ["read_file"]))"#,
+                )
+            },
+        )
+        .await
+        .expect("unchanged same-origin MDM policy may resume");
+        drop(runtime);
+
+        let database_path = root.join("data/sessions.sqlite3");
+        let identity_path = root.join("data/run-state-identity.json");
+        let database_before = std::fs::read(&database_path).unwrap();
+        let identity_before = std::fs::read(&identity_path).unwrap();
+        let changed_resume = run_args("task", &["--state-root", root_arg, "--session", &session]);
+        let error = match prepare_headless_with_factory(
+            changed_resume,
+            &CliOverrides::default(),
+            |paths, workspace, load, profile| {
+                build_test_run_state_factory_with_mdm(
+                    &root,
+                    paths,
+                    workspace,
+                    load,
+                    profile,
+                    "(version: 1, policy: (deny_tools: []))",
+                )
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("changed same-origin MDM policy resumed the recorded run state"),
+            Err(error) => error,
+        };
+        assert!(error.1.contains("differs from the recorded identity"));
+        assert!(
+            std::fs::read(database_path).unwrap() == database_before,
+            "a rejected MDM resume opened or mutated the session store"
+        );
+        assert!(
+            std::fs::read(identity_path).unwrap() == identity_before,
+            "a rejected MDM resume replaced the durable identity"
         );
     }
 
