@@ -262,12 +262,17 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use serde_json::json;
 
     use super::*;
     use crate::{
         http::{AttemptPolicy, build_direct_client},
-        request_auth::RequestAuthorizer,
+        request_auth::{
+            RequestAuthorizer, RequestCredential, RequestCredentialError, RequestCredentialFuture,
+            RequestCredentialProvider, SharedRequestCredentialProvider,
+        },
         sse::Utf8ErrorMessage,
         test_support::LoopbackServer,
     };
@@ -433,6 +438,154 @@ mod tests {
         Ok(crate::ProviderEvent::OutputTextDelta {
             text: text.to_owned(),
         })
+    }
+
+    struct FailingCredentials {
+        error: RequestCredentialError,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RequestCredentialProvider for FailingCredentials {
+        fn credential(&self) -> RequestCredentialFuture<'_> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let error = self.error.clone();
+            Box::pin(async move { Err::<RequestCredential, _>(error) })
+        }
+    }
+
+    struct RecoveringCredentials {
+        error: RequestCredentialError,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RequestCredentialProvider for RecoveringCredentials {
+        fn credential(&self) -> RequestCredentialFuture<'_> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let error = self.error.clone();
+            Box::pin(async move {
+                if call == 0 {
+                    Err(error)
+                } else {
+                    RequestCredential::bearer("test-token")
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_timeout_and_capacity_do_not_restart_before_first_event() {
+        for error in [
+            RequestCredentialError::TimedOut,
+            RequestCredentialError::CapacityUnavailable,
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let endpoint = reqwest::Url::parse(&format!(
+                "http://{}/v1/test",
+                listener.local_addr().unwrap()
+            ))
+            .unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let credentials = SharedRequestCredentialProvider::new(FailingCredentials {
+                error: error.clone(),
+                calls: Arc::clone(&calls),
+            });
+            let exchange = Arc::new(
+                HttpExchange::new(
+                    build_direct_client().unwrap(),
+                    RequestAuthorizer::request_time_bearer(credentials),
+                    Arc::from(Vec::<String>::new()),
+                )
+                .with_attempt_policy(fast(4)),
+            );
+            let attempt_exchange = Arc::clone(&exchange);
+            let stream = with_restart(&exchange, move |ledger| {
+                let exchange = Arc::clone(&attempt_exchange);
+                let endpoint = endpoint.clone();
+                Box::pin(async_stream::stream! {
+                    let result = sse_exchange(
+                        &exchange,
+                        (endpoint, HeaderMap::new()),
+                        (&json!({"model": "test-model"}), 64),
+                        decoder(),
+                        1_024 * 1_024,
+                        spec(ContentTypeGate::Strict),
+                        &ledger,
+                    ).await;
+                    match result {
+                        Err(error) => yield Err(error.into_provider_error(|_| unreachable!())),
+                        Ok(_) => panic!("credential failure must prevent a send"),
+                    }
+                })
+            });
+            let events: Vec<_> = stream.collect().await;
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "{error:?}");
+            assert_eq!(events.len(), 1, "{events:?}");
+            assert!(matches!(
+                &events[0],
+                Err(ProviderError::CredentialsUnavailable(message))
+                    if message == &error.to_string()
+            ));
+            assert!(
+                matches!(listener.accept(), Err(io_error) if io_error.kind() == std::io::ErrorKind::WouldBlock),
+                "credential failure must not reach the transport"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn temporary_refresh_and_storage_failures_can_restart_before_first_event() {
+        for error in [
+            RequestCredentialError::RefreshUnavailable,
+            RequestCredentialError::StorageUnavailable,
+        ] {
+            let server = LoopbackServer::sse("data: recovered\n\n");
+            let endpoint = reqwest::Url::parse(&format!("{}/v1/test", server.base_url)).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let credentials = SharedRequestCredentialProvider::new(RecoveringCredentials {
+                error: error.clone(),
+                calls: Arc::clone(&calls),
+            });
+            let exchange = Arc::new(
+                HttpExchange::new(
+                    build_direct_client().unwrap(),
+                    RequestAuthorizer::request_time_bearer(credentials),
+                    Arc::from(Vec::<String>::new()),
+                )
+                .with_attempt_policy(fast(4)),
+            );
+            let attempt_exchange = Arc::clone(&exchange);
+            let stream = with_restart(&exchange, move |ledger| {
+                let exchange = Arc::clone(&attempt_exchange);
+                let endpoint = endpoint.clone();
+                Box::pin(async_stream::stream! {
+                    match sse_exchange(
+                        &exchange,
+                        (endpoint, HeaderMap::new()),
+                        (&json!({"model": "test-model"}), 64),
+                        decoder(),
+                        1_024 * 1_024,
+                        spec(ContentTypeGate::Strict),
+                        &ledger,
+                    ).await {
+                        Err(error) => yield Err(error.into_provider_error(|_| unreachable!())),
+                        Ok(mut response) => {
+                            let event = response.next_event().await.unwrap().unwrap();
+                            yield Ok(crate::ProviderEvent::OutputTextDelta { text: event.data });
+                            yield Ok(crate::ProviderEvent::Completed { usage: None });
+                        }
+                    }
+                })
+            });
+            let events: Vec<_> = stream.collect().await;
+            assert_eq!(calls.load(Ordering::SeqCst), 2, "{error:?}");
+            assert_eq!(events.len(), 2, "{events:?}");
+            assert!(events.iter().all(Result::is_ok));
+            assert_eq!(
+                server.capture().request_line(),
+                Some("POST /v1/test HTTP/1.1")
+            );
+        }
     }
 
     #[tokio::test]
