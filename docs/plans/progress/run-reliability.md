@@ -352,3 +352,22 @@ advertised `max_output_continuations`) and spent a fifth turn — the branch now
 settles once the shared cap is spent (regression pins 5 → 4 turns); and the
 summarizer's empty check trims like `has_content`, so a whitespace-only reply
 is not continued three times.
+
+Round three on #200/#201 (nine comments). One real find, and the kind a
+reviewer should catch: the lifted wire cap fed the 4 MiB storage backstop at
+32 bytes per token, so a 128 000-token ceiling left 32 KiB for the prompt and
+every effort-enabled session would have been rejected before its first
+request — the reserve is now capped at the default's 512 KiB and the enlarged
+cap is understood as hidden reasoning, never transcript (test pins equal
+reserves at 16 384 and 128 000). Two cheap correctness notes taken:
+`max_output_tokens: Clear` restores compiled provenance rather than reading as
+an operator pin, and protocol.md's cap description notes the exception. Declined
+as not worth code: migrating pre-existing rows that recorded 16 384 (they
+behave exactly as before this change); `route_direct` copying the fallback
+cap (opt-in Jev routing, out of scope); nested `gateway/bedrock/anthropic.…`
+ids (hypothetical); fitting the roster effort against the discovery cache
+(the roster is built from the static catalog everywhere); an ADR for the
+descriptor bump (an optional field that is `None` for every existing config is
+not a behavioural identity change; #194's v10 was); and `reasoning_efforts`
+declared without `reasoning: true` (contradictory config, belongs in
+validation if anywhere).
