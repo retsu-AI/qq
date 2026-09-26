@@ -4415,6 +4415,32 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct PanicOnReadKeyring(Mutex<BTreeMap<String, Vec<u8>>>);
+
+    impl KeyringBackend for PanicOnReadKeyring {
+        fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
+            panic!("plan compilation attempted to read keyring entry {name:?}")
+        }
+
+        fn set(&self, name: &str, secret: &[u8]) -> Result<(), KeyringError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(name.to_owned(), secret.to_vec());
+            Ok(())
+        }
+
+        fn remove(&self, name: &str) -> Result<(), KeyringError> {
+            self.0
+                .lock()
+                .unwrap()
+                .remove(name)
+                .map(|_| ())
+                .ok_or(KeyringError::Missing)
+        }
+    }
+
     pub(super) struct RuntimeFixture {
         root: PathBuf,
     }
@@ -8620,6 +8646,99 @@ mod tests {
             factory.plan_for(&unsupported),
             Err(RuntimeBuildError::UnsupportedReasoningEffort(_))
         ));
+    }
+
+    #[test]
+    fn codex_plan_compilation_keeps_credentials_request_time() {
+        use qq_provider::ReasoningEffort;
+
+        let fixture = RuntimeFixture::new();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(PanicOnReadKeyring::default()),
+        );
+        credentials
+            .set_with_metadata(
+                "openai-codex/default",
+                b"cache-probe-must-not-resolve-this-credential",
+                false,
+                Some("openai-codex"),
+                Some("https://chatgpt.com"),
+            )
+            .unwrap();
+        let factory = fixture.factory_with_credentials(credentials);
+        let plan =
+            factory
+                .plan_for(&fixture.request(
+                    r#"(version: 1, model: "openai-codex/gpt-5.4", reasoning_effort: high)"#,
+                ))
+                .unwrap();
+
+        assert_eq!(
+            plan.descriptor().reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(plan.descriptor().provider.auth_scheme, "codex");
+        assert_eq!(
+            plan.descriptor().provider.credential,
+            CredentialReference::Profile("default".to_owned())
+        );
+    }
+
+    #[test]
+    fn codex_plan_with_no_live_cache_uses_configured_effort_ladder() {
+        use qq_provider::ReasoningEffort;
+
+        let fixture = RuntimeFixture::new();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(PanicOnReadKeyring::default()),
+        );
+        credentials
+            .set_with_metadata(
+                "openai-codex/default",
+                b"cache-probe-must-not-resolve-this-credential",
+                false,
+                Some("openai-codex"),
+                Some("https://chatgpt.com"),
+            )
+            .unwrap();
+        let factory = fixture.factory_with_credentials(credentials);
+        let request = |effort: &str| {
+            fixture.request(format!(
+                r#"(version: 1, model: "openai-codex/gpt-5.4", reasoning_effort: {effort})"#
+            ))
+        };
+
+        assert_eq!(
+            factory
+                .plan_for(&request("high"))
+                .unwrap()
+                .descriptor()
+                .reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+        match factory.plan_for(&request("max")) {
+            Err(RuntimeBuildError::ReasoningEffortNotAdvertised {
+                model,
+                effort,
+                advertised,
+            }) => {
+                assert_eq!(model, "openai-codex/gpt-5.4");
+                assert_eq!(effort, ReasoningEffort::Max);
+                assert_eq!(
+                    advertised,
+                    vec![
+                        ReasoningEffort::None,
+                        ReasoningEffort::Low,
+                        ReasoningEffort::Medium,
+                        ReasoningEffort::High,
+                        ReasoningEffort::Xhigh,
+                    ]
+                );
+            }
+            other => panic!("expected ReasoningEffortNotAdvertised, got {other:?}"),
+        }
     }
 
     #[test]
