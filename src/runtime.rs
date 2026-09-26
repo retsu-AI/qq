@@ -867,13 +867,16 @@ impl RuntimeFactory {
     ) -> Result<LoadRequest, RuntimeBuildError> {
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(workspace)?;
-        // A session created before the default rose to 16 384 persisted the
-        // then-default (2 048, later 4 096) and would pin every later run to
-        // it, costing continuation turns on each long answer (RR8). Exactly
-        // those historical defaults are treated as unset so the configured
-        // value applies; any other persisted value is a choice and is kept.
-        let max_output_tokens =
-            max_output_tokens.filter(|limit| !LEGACY_DEFAULT_MAX_OUTPUT_TOKENS.contains(limit));
+        // A session row records the effective cap of its day, not necessarily
+        // a choice: the TUI and headless paths materialise the compiled
+        // default into every new session, and older releases persisted
+        // 2 048 / 4 096. Exactly those defaults are treated as unset so the
+        // configured value (and the reasoning-aware lift) applies; any other
+        // persisted value is an operator's pick and is kept (RR8).
+        let max_output_tokens = max_output_tokens.filter(|limit| {
+            !LEGACY_DEFAULT_MAX_OUTPUT_TOKENS.contains(limit)
+                && *limit != qq_config::DEFAULT_MAX_OUTPUT_TOKENS
+        });
         let request = if self.is_isolated_tui_qa() {
             let mut overrides = RuntimeOverrides::new();
             if let Some(max_output_tokens) = max_output_tokens {
@@ -1724,22 +1727,25 @@ impl RuntimeFactory {
         let model_limit = metadata.and_then(qq_config::ModelMetadata::max_output_tokens);
         // The compiled default (16 384) is sized for visible output. Where a
         // reasoning effort is set and the model's thinking is carved out of
-        // the same `max_tokens` (Anthropic models on any wire, Bedrock
-        // Converse), that default strangles the turn: `max` effort spends it
-        // all on hidden reasoning and the run sees an empty truncation. Lift
-        // the wire cap to the catalog ceiling unless the operator set
-        // `max_output_tokens` themselves. Run budgets still bound spend.
+        // the same `max_tokens` (Anthropic models on the Messages wire or
+        // behind an OpenAI-compatible gateway), that default strangles the
+        // turn: `max` effort spends it all on hidden reasoning and the run
+        // sees an empty truncation. Lift the wire cap to the catalog ceiling
+        // unless the operator set `max_output_tokens` themselves; a managed
+        // policy ceiling still binds. Run budgets bound spend either way.
+        // Bedrock Converse is not listed: effort is unsupported on that
+        // wire and rejected at load, so the case cannot arise.
         let configured_explicitly = snapshot
             .provenance()
             .max_output_tokens()
             .is_some_and(|source| source.kind() != qq_config::SourceKind::Compiled);
-        let effort_shares_output_cap = snapshot
-            .reasoning_effort()
-            .is_some_and(|effort| effort != qq_provider::ReasoningEffort::Default)
-            && (matches!(
-                api,
-                ProviderApi::AnthropicMessages | ProviderApi::BedrockConverse
-            ) || anthropic_model_behind_a_gateway(
+        let effort_shares_output_cap = snapshot.reasoning_effort().is_some_and(|effort| {
+            !matches!(
+                effort,
+                qq_provider::ReasoningEffort::Default | qq_provider::ReasoningEffort::None
+            )
+        }) && (api == ProviderApi::AnthropicMessages
+            || anthropic_model_behind_a_gateway(
                 snapshot.model().model(),
                 metadata.and_then(qq_config::ModelMetadata::canonical_id),
             ));
@@ -1747,7 +1753,10 @@ impl RuntimeFactory {
             model_limit,
             effort_shares_output_cap && !configured_explicitly,
         ) {
-            (Some(model_limit), true) => model_limit,
+            (Some(model_limit), true) => snapshot
+                .policy()
+                .max_output_tokens()
+                .map_or(model_limit, |ceiling| model_limit.min(ceiling)),
             (Some(model_limit), false) => model_limit.min(snapshot.max_output_tokens()),
             (None, _) => snapshot.max_output_tokens(),
         };
@@ -4923,10 +4932,9 @@ mod tests {
             (Some(2_048), None),
             (Some(4_096), None),
             (Some(123), Some(123)),
-            (
-                Some(qq_config::DEFAULT_MAX_OUTPUT_TOKENS),
-                Some(qq_config::DEFAULT_MAX_OUTPUT_TOKENS),
-            ),
+            // The TUI materialises the compiled default into every new
+            // session row; it is not a choice either.
+            (Some(qq_config::DEFAULT_MAX_OUTPUT_TOKENS), None),
             (Some(32_768), Some(32_768)),
             (None, None),
         ] {
@@ -5017,9 +5025,14 @@ mod tests {
         };
         assert_eq!(gateway("reasoning_effort: max,", none()), 128_000);
         assert_eq!(gateway("", none()), qq_config::DEFAULT_MAX_OUTPUT_TOKENS);
-        // No effort → the default still caps.
+        // No effort → the default still caps. `none` disables thinking, so
+        // there is no hidden budget to make room for either.
         assert_eq!(
             resolve("AnthropicMessages", "", anthropic, none()),
+            qq_config::DEFAULT_MAX_OUTPUT_TOKENS
+        );
+        assert_eq!(
+            gateway("reasoning_effort: none,", none()),
             qq_config::DEFAULT_MAX_OUTPUT_TOKENS
         );
         // An explicit operator value wins over the lift.
@@ -5060,6 +5073,22 @@ mod tests {
                 none()
             ),
             qq_config::DEFAULT_MAX_OUTPUT_TOKENS
+        );
+        // A managed policy ceiling still binds the lifted cap. (Written last:
+        // the managed layer applies to every load in this fixture.)
+        fs::write(
+            fixture.path("managed/managed.ron"),
+            r#"(version: 1, policy: (max_output_tokens: 32000))"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resolve(
+                "AnthropicMessages",
+                "reasoning_effort: max,",
+                anthropic,
+                none()
+            ),
+            32_000
         );
     }
 
