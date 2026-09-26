@@ -2242,6 +2242,30 @@ impl plan::CompiledAgentPlan {
                         RunFailureKind::ProviderTransport,
                         "provider stream ended without a terminal event".to_owned(),
                     ));
+                } else if turn_fault.is_none()
+                    && !interrupted_turn
+                    && !truncated_turn
+                    && terminal_usage.is_none()
+                    && pending_calls.is_empty()
+                    && blocks.iter().all(|block| matches!(block, TurnBlock::Text(text) if text.is_empty()))
+                    && replay.is_none()
+                    && messages.last().is_some_and(|message| {
+                        message.content().iter().any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+                    })
+                {
+                    // The model was handed fresh tool results and the stream
+                    // carried nothing back: no text, no call, no usage. That
+                    // is a gateway that swallowed an upstream failure into a
+                    // bare terminal event, not an answer, and settling
+                    // `completed` would present silence as a finished reply.
+                    // Treat it as the transient fault it is: the same bounded
+                    // re-issue as a stream cut short. An empty reply to the
+                    // prompt itself (turn one, no results) stays a completion:
+                    // the placeholder keeps the transcript well-formed.
+                    turn_fault = Some((
+                        RunFailureKind::ProviderTransport,
+                        "provider completed the turn after tool results with no content and no usage".to_owned(),
+                    ));
                 }
 
                 if interrupted_turn || truncated_turn || turn_fault.is_some() {
@@ -5601,7 +5625,12 @@ mod tests {
                         Ok(ProviderEvent::Completed { usage: None }),
                     ]))
                 } else {
-                    Box::pin(stream::iter([Ok(ProviderEvent::Completed { usage: None })]))
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
                 }
             }
         }
@@ -5691,7 +5720,12 @@ mod tests {
                 *turn += 1;
                 drop(turn);
                 if current != 0 {
-                    return Box::pin(stream::iter([Ok(ProviderEvent::Completed { usage: None })]));
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
                 }
                 let mut events = Vec::new();
                 for index in 0..4 {
@@ -5823,7 +5857,12 @@ mod tests {
                         Ok(ProviderEvent::Completed { usage: None }),
                     ]))
                 } else {
-                    Box::pin(stream::iter([Ok(ProviderEvent::Completed { usage: None })]))
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
                 }
             }
         }
@@ -6701,7 +6740,12 @@ mod tests {
                         Ok(ProviderEvent::Completed { usage: None }),
                     ]))
                 } else {
-                    Box::pin(stream::iter([Ok(ProviderEvent::Completed { usage: None })]))
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
                 }
             }
         }
@@ -6926,7 +6970,12 @@ mod tests {
                         Ok(ProviderEvent::Completed { usage: None }),
                     ]))
                 } else {
-                    Box::pin(stream::iter([Ok(ProviderEvent::Completed { usage: None })]))
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
                 }
             }
         }
@@ -7012,7 +7061,12 @@ mod tests {
                         Ok(ProviderEvent::Completed { usage: None }),
                     ]))
                 } else {
-                    Box::pin(stream::iter([Ok(ProviderEvent::Completed { usage: None })]))
+                    Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]))
                 }
             }
         }
@@ -8443,6 +8497,114 @@ mod tests {
                 None => Box::pin(stream::iter(Vec::new())),
             }
         }
+    }
+
+    /// A gateway that swallows an upstream failure: turn one asks for a
+    /// read, then every reply to the result is exactly one `Completed`
+    /// carrying the given usage and nothing before it.
+    struct EmptyCompletionProvider {
+        calls: Arc<std::sync::atomic::AtomicU32>,
+        usage: Option<qq_provider::ProviderUsage>,
+    }
+
+    impl Provider for EmptyCompletionProvider {
+        fn stream(&self, _: ModelRequest) -> ProviderStream {
+            let turn = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if turn == 0 {
+                return Box::pin(stream::iter([
+                    Ok(ProviderEvent::ToolCallStarted {
+                        id: "read".to_owned(),
+                        name: "read_file".to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: "read".to_owned(),
+                        json: r#"{"path":"note.txt"}"#.to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallCompleted {
+                        id: "read".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]));
+            }
+            let usage = self.usage;
+            Box::pin(stream::iter([Ok(ProviderEvent::Completed { usage })]))
+        }
+    }
+
+    /// ENG-952: two production runs settled `completed` after the gateway
+    /// returned a bare `[DONE]` — no text, no calls, no usage — in reply to
+    /// fresh tool results. Silence is not an answer: it is the transient
+    /// fault a cut stream is, and takes the same bounded retry then pause.
+    #[tokio::test(start_paused = true)]
+    async fn an_empty_completion_without_usage_is_a_transient_fault_not_an_answer() {
+        let fast = TurnRecoveryPolicy::new(Duration::from_millis(1), Duration::from_millis(1));
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.txt"), "note\n").unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let runtime = Runtime::new(
+            EmptyCompletionProvider {
+                calls: Arc::clone(&calls),
+                usage: None,
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap()
+        .with_turn_recovery(fast);
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("read it")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            u32::from(MAX_TURN_RETRIES) + 2,
+            "the read turn, one empty reply, and every retry of it"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::Completed { .. })),
+            "an empty reply must never settle completed: {events:?}"
+        );
+        assert!(
+            matches!(
+                events.last(),
+                Some(RuntimeEvent::Paused { pause })
+                    if pause.kind == RunFailureKind::ProviderTransport
+                        && pause.message.contains("no content and no usage")
+            ),
+            "{events:?}"
+        );
+
+        // A provider that measured the request and genuinely returned an
+        // empty answer is a real (if useless) completion, not a fault: the
+        // run settles once and never resends.
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let runtime = Runtime::new(
+            EmptyCompletionProvider {
+                calls: Arc::clone(&calls),
+                usage: Some(qq_provider::ProviderUsage {
+                    input_tokens: 12,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_tokens: None,
+                }),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap()
+        .with_turn_recovery(fast);
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("read it")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
     }
 
     /// Two-phase retry ownership (ADR-0040). The provider owns resends while
