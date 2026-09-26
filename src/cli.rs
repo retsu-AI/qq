@@ -428,6 +428,9 @@ pub struct LoginArgs {
     /// Authenticate xAI with OAuth instead of prompting for an API key.
     #[arg(long)]
     pub oauth: bool,
+    /// Authenticate OpenAI Codex by device code without a loopback browser callback.
+    #[arg(long)]
+    pub device_auth: bool,
     /// Allow an explicit user-only plaintext file if the OS keyring is unavailable.
     #[arg(long)]
     pub allow_file: bool,
@@ -930,6 +933,24 @@ mod tests {
                     ..
                 })
             }) if provider == "xai"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "qq",
+                "auth",
+                "login",
+                "openai-codex",
+                "--device-auth"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Auth {
+                command: AuthCommand::Login(LoginArgs {
+                    provider,
+                    device_auth: true,
+                    ..
+                })
+            }) if provider == "openai-codex"
         ));
         assert!(matches!(
             Cli::try_parse_from([

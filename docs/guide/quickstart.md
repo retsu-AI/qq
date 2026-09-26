@@ -14,11 +14,19 @@ to disk in plain text unless you pass `--allow-file`.
 | Anthropic | `qq auth login anthropic` | `ANTHROPIC_API_KEY` | `anthropic/claude-sonnet-5` |
 | Google Gemini | `qq auth login google` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | `google/gemini-2.5-flash` |
 | xAI | `qq auth login xai` (API key) or `qq auth login xai --oauth` | `XAI_API_KEY` | `xai/grok-4.6` |
-| ChatGPT / Codex subscription | `qq auth login openai-codex` (opens a browser) | — | `openai-codex/gpt-5.6-luna` |
+| ChatGPT / Codex subscription | `qq auth login openai-codex` (loopback browser) or `qq auth login openai-codex --device-auth` (code for another device) | — | `openai-codex/gpt-5.6-luna` |
 | Amazon Bedrock | AWS credential chain | `AWS_PROFILE` or `AWS_ACCESS_KEY_ID`+`AWS_SECRET_ACCESS_KEY` | see [Providers](providers.md#amazon-bedrock) |
 
 `qq auth login <provider>` prompts for the key without echoing it. In a
 script, pipe it: `printenv OPENAI_API_KEY | qq auth login openai`.
+
+The Codex device option changes only the interactive authorization step. QQ
+stores and refreshes the resulting credential through the same protected
+credential store as the browser flow. A later service or cloud job therefore
+needs a durable OS-backed secret store that is available to that service
+identity; completing the device prompt does not copy a credential to another
+host. `--allow-file` remains an explicit user-only plaintext fallback and is
+not a substitute for protected unattended storage.
 
 ## 2. Tell QQ which model to use
 

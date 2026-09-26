@@ -29,7 +29,7 @@ use qq_provider::SecretRef;
 mod codex;
 mod xai;
 
-pub use codex::CodexLogin;
+pub use codex::{CodexDeviceLogin, CodexLogin};
 pub use xai::XaiLogin;
 
 pub const KEYRING_SERVICE: &str = "dev.qq";
@@ -318,6 +318,7 @@ pub struct CredentialStore {
     paths: CredentialPaths,
     keyring: Arc<dyn KeyringBackend>,
     windows_protected: Arc<dyn WindowsProtectedBackend>,
+    codex_device_client: Arc<dyn codex::CodexDeviceClient>,
     codex_client: Arc<dyn codex::CodexTokenClient>,
     codex_refresh: Arc<Mutex<()>>,
     xai_client: Arc<dyn xai::XaiTokenClient>,
@@ -676,6 +677,7 @@ impl CredentialStore {
             paths,
             keyring,
             windows_protected,
+            codex_device_client: Arc::new(codex::SystemCodexDeviceClient),
             codex_client: Arc::new(codex::SystemCodexTokenClient),
             codex_refresh: Arc::new(Mutex::new(())),
             xai_client: Arc::new(xai::SystemXaiTokenClient),

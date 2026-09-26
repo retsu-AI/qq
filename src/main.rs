@@ -1499,16 +1499,21 @@ fn auth_command(command: cli::AuthCommand) -> Result<(), Box<dyn Error>> {
         )
         .into());
     }
+    if let cli::AuthCommand::Login(arguments) = &command {
+        validate_login_mode(arguments)?;
+    }
     let store = auth::CredentialStore::system()?;
     match command {
         cli::AuthCommand::Login(arguments) => {
             let name = format!("{}/{}", arguments.provider, arguments.profile);
-            let backend = if arguments.oauth && arguments.provider != "xai" {
-                return Err(format!(
-                    "OAuth login is not supported for provider {:?}",
-                    arguments.provider
-                )
-                .into());
+            let backend = if arguments.provider == "openai-codex" && arguments.device_auth {
+                auth::validate_credential_name(&name)?;
+                let login = auth::CodexDeviceLogin::start(&store)?;
+                eprintln!(
+                    "{}",
+                    codex_device_prompt(login.verification_url(), login.user_code())
+                );
+                login.complete(&store, &arguments.profile, arguments.allow_file)?
             } else if arguments.provider == "openai-codex" {
                 auth::validate_credential_name(&name)?;
                 let login = auth::CodexLogin::start()?;
@@ -1586,6 +1591,34 @@ fn auth_command(command: cli::AuthCommand) -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+fn validate_login_mode(arguments: &cli::LoginArgs) -> Result<(), Box<dyn Error>> {
+    if arguments.oauth && arguments.device_auth {
+        return Err("--oauth and --device-auth cannot be used together".into());
+    }
+    if arguments.oauth && arguments.provider != "xai" {
+        return Err(format!(
+            "OAuth login is not supported for provider {:?}",
+            arguments.provider
+        )
+        .into());
+    }
+    if arguments.device_auth && arguments.provider != "openai-codex" {
+        return Err(format!(
+            "device authorization is not supported for provider {:?}",
+            arguments.provider
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn codex_device_prompt(verification_url: &str, user_code: &str) -> String {
+    format!(
+        "Open this exact URL on any device to sign in with OpenAI Codex:\n{}\n\nEnter code: {}\n\nThis code expires within 15 minutes. Enter it only at the URL shown above.",
+        verification_url, user_code
+    )
 }
 
 const TYPESAFE_JEV_CREDENTIAL: &str = "typesafe-jev";
@@ -1784,6 +1817,7 @@ mod tests {
             provider: "opnai".to_owned(),
             profile: "default".to_owned(),
             oauth: false,
+            device_auth: false,
             allow_file: false,
         }))
         .unwrap_err()
@@ -1796,6 +1830,62 @@ mod tests {
             assert!(error.contains(provider), "{error}");
         }
         assert!(error.contains("qq auth set NAME"), "{error}");
+    }
+
+    #[test]
+    fn auth_login_rejects_incompatible_device_modes_before_opening_the_store() {
+        let xai_device = validate_login_mode(&cli::LoginArgs {
+            provider: "xai".to_owned(),
+            profile: "default".to_owned(),
+            oauth: false,
+            device_auth: true,
+            allow_file: false,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(xai_device.contains("device authorization is not supported"));
+
+        let mixed = validate_login_mode(&cli::LoginArgs {
+            provider: "openai-codex".to_owned(),
+            profile: "default".to_owned(),
+            oauth: true,
+            device_auth: true,
+            allow_file: false,
+        })
+        .unwrap_err()
+        .to_string();
+        assert_eq!(mixed, "--oauth and --device-auth cannot be used together");
+    }
+
+    #[test]
+    fn openai_codex_browser_login_remains_the_default_mode() {
+        let arguments = cli::LoginArgs {
+            provider: "openai-codex".to_owned(),
+            profile: "default".to_owned(),
+            oauth: false,
+            device_auth: false,
+            allow_file: false,
+        };
+        validate_login_mode(&arguments).unwrap();
+        assert!(!arguments.device_auth);
+    }
+
+    #[test]
+    fn codex_device_prompt_contains_only_the_fixed_enrollment_fields() {
+        let prompt = codex_device_prompt("https://auth.openai.com/codex/device", "ABCD-EFGH");
+        assert!(prompt.contains("https://auth.openai.com/codex/device"));
+        assert!(prompt.contains("ABCD-EFGH"));
+        assert!(prompt.contains("expires within 15 minutes"));
+        assert!(prompt.contains("only at the URL shown above"));
+        for secret in [
+            "device-auth-id",
+            "authorization-code",
+            "code-verifier",
+            "access-token",
+            "refresh-token",
+        ] {
+            assert!(!prompt.contains(secret), "prompt leaked {secret}");
+        }
     }
 
     #[test]
