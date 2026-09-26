@@ -1142,6 +1142,23 @@ impl RuntimeFactory {
         snapshot: &CatalogSource<'_>,
         discovered: &BTreeMap<String, Vec<DiscoveredModel>>,
     ) -> Vec<ModelDescriptor> {
+        self.model_options_with_discovery_impl(snapshot, discovered, true)
+    }
+
+    fn model_options_for_plan(&self, snapshot: &ConfigSnapshot) -> Vec<ModelDescriptor> {
+        self.model_options_with_discovery_impl(
+            &CatalogSource::from(snapshot),
+            &BTreeMap::new(),
+            false,
+        )
+    }
+
+    fn model_options_with_discovery_impl(
+        &self,
+        snapshot: &CatalogSource<'_>,
+        discovered: &BTreeMap<String, Vec<DiscoveredModel>>,
+        require_authentication: bool,
+    ) -> Vec<ModelDescriptor> {
         let allowed = snapshot.policy.allowed_providers();
         let denied = snapshot.policy.denied_providers();
         let admitted_routes = match &self.inner.mode {
@@ -1155,7 +1172,8 @@ impl RuntimeFactory {
         'providers: for (provider_id, provider) in snapshot.providers {
             if allowed.is_some_and(|allowed| !allowed.iter().any(|id| id == provider_id))
                 || denied.iter().any(|id| id == provider_id)
-                || (admitted_routes.is_none()
+                || (require_authentication
+                    && admitted_routes.is_none()
                     && !self.provider_authenticated(provider_id, provider))
             {
                 continue;
@@ -2174,7 +2192,7 @@ impl RuntimeFactory {
             self.prepare_provider(provider_id, snapshot.model().model(), provider_config)?;
         let provider = self.inner.providers.compile(recipe)?;
         let spawn_model_routes = self
-            .configured_model_options(&snapshot)
+            .model_options_for_plan(&snapshot)
             .into_iter()
             .filter_map(|model| model.selection.model)
             .collect();

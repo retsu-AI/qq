@@ -12,7 +12,7 @@ use hmac::{Hmac, Mac};
 use qq_auth::{CredentialStore, Secret, resolve_provider_credential_with_aliases};
 use qq_config::{
     EndpointMode, HttpAccess, HttpCredential, ProviderApi, ProviderAuth, ProviderConfig,
-    ProviderKind,
+    ProviderKind, SecretRef,
 };
 use reqwest::{Url, blocking::RequestBuilder, header::AUTHORIZATION};
 use sha2::Sha256;
@@ -132,6 +132,9 @@ impl ModelDiscovery {
         let qq_config::ProviderAccess::Http(access) = provider.access()? else {
             return None;
         };
+        if cache_probe_requires_secure_store(access.auth()) {
+            return None;
+        }
         let auth = resolve_auth(access, credentials)?;
         let key = cache_key(&self.cache_key, provider_id, provider.kind(), access, &auth)?;
         self.cache
@@ -347,6 +350,21 @@ fn apply_static_headers(mut request: RequestBuilder, access: &HttpAccess) -> Req
         request = request.header(name, value.expose_value());
     }
     request
+}
+
+fn cache_probe_requires_secure_store(auth: &HttpCredential) -> bool {
+    match auth {
+        HttpCredential::Configured(ProviderAuth::NoAuth) => false,
+        HttpCredential::Configured(
+            ProviderAuth::ApiKey(reference)
+            | ProviderAuth::Bearer(reference)
+            | ProviderAuth::Header(_, reference),
+        ) => matches!(reference, SecretRef::Stored(_)),
+        HttpCredential::ApiKey { explicit, .. } => {
+            explicit.is_none() || matches!(explicit, Some(SecretRef::Stored(_)))
+        }
+        HttpCredential::OpenAiCodex { .. } | HttpCredential::XAi { .. } => true,
+    }
 }
 
 fn resolve_auth(access: &HttpAccess, credentials: &CredentialStore) -> Option<DiscoveryAuth> {
