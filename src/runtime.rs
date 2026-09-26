@@ -166,7 +166,7 @@ struct RuntimeFactoryInner {
 enum RuntimeMode {
     Standard,
     IsolatedTuiQa { root: PathBuf, workspace: PathBuf },
-    RunState(RunStateScope),
+    RunState(Box<RunStateScope>),
 }
 
 #[derive(Clone)]
@@ -174,7 +174,21 @@ struct RunStateScope {
     workspace: PathBuf,
     config_dir: PathBuf,
     request: LoadRequest,
-    admitted_sources: ConfigSources,
+    profile: String,
+    admission: RunStateAdmission,
+    admitted_sources: Vec<ConfigSources>,
+}
+
+#[derive(Clone)]
+struct RunStateAdmission {
+    model_routes: BTreeSet<String>,
+    organization: Option<String>,
+    jev_review: qq_config::JevReviewMode,
+    jev_routing: bool,
+    jev_approval: bool,
+    approval_delegate: Option<qq_config::ApprovalDelegateSetting>,
+    reasoning_effort: Option<qq_provider::ReasoningEffort>,
+    max_output_tokens: u32,
 }
 
 fn validate_tui_qa_tree(path: &Path) -> Result<(), String> {
@@ -274,19 +288,26 @@ fn validate_run_state_sources(
 ) -> Result<(), RuntimeBuildError> {
     let provenance = snapshot.provenance();
     validate_run_state_source(provenance.model(), config_dir, "model route")?;
-    validate_run_state_source(
-        provenance.provider(snapshot.model().provider()),
-        config_dir,
-        "selected provider",
-    )?;
+    let validate_provider = |provider: &str, consumer: &str| {
+        validate_run_state_source(provenance.provider(provider), config_dir, consumer)
+    };
+    validate_provider(snapshot.model().provider(), "selected provider")?;
     if snapshot.worker_model().is_some() {
         validate_run_state_source(provenance.worker_model(), config_dir, "worker model")?;
+        validate_provider(
+            snapshot.worker_model().unwrap().provider(),
+            "worker model provider",
+        )?;
     }
     if snapshot.reviewer_model().is_some() {
         validate_run_state_source(
             provenance.reviewer_model(),
             config_dir,
             "approval reviewer model",
+        )?;
+        validate_provider(
+            snapshot.reviewer_model().unwrap().provider(),
+            "approval reviewer provider",
         )?;
     }
     if snapshot.jev_review() != qq_config::JevReviewMode::Off {
@@ -306,7 +327,19 @@ fn validate_run_state_sources(
         )?;
     }
     if !snapshot.delegation().roster().is_empty() {
-        validate_run_state_source(provenance.delegation(), config_dir, "delegation route")?;
+        match provenance.delegation() {
+            Some(source) => {
+                validate_run_state_source(Some(source), config_dir, "delegation route")?
+            }
+            None if snapshot.worker_model().is_some_and(|worker| {
+                snapshot.delegation().roster().len() == 1
+                    && snapshot.delegation().roster()[0].route() == worker
+            }) => {}
+            None => validate_run_state_source(None, config_dir, "delegation route")?,
+        }
+        for entry in snapshot.delegation().roster() {
+            validate_provider(entry.route().provider(), "delegation provider")?;
+        }
     }
     if snapshot.audit().mode() != qq_config::AuditMode::Off {
         validate_run_state_source(provenance.audit(), config_dir, "audit route")?;
@@ -318,12 +351,19 @@ fn validate_run_state_sources(
             &format!("MCP server {name:?}"),
         )?;
     }
-    for name in snapshot.profiles().keys() {
+    for (name, profile) in snapshot.profiles() {
         validate_run_state_source(
             provenance.profile(name),
             config_dir,
             &format!("agent profile {name:?}"),
         )?;
+        if let Some(route) = profile.model() {
+            let provider = route
+                .split_once('/')
+                .map(|(provider, _)| provider)
+                .expect("profile routes were validated during configuration loading");
+            validate_provider(provider, &format!("agent profile {name:?} provider"))?;
+        }
     }
     for name in snapshot.packs().keys() {
         validate_run_state_source(
@@ -352,6 +392,127 @@ fn validate_run_state_sources(
         )?;
     }
     Ok(())
+}
+
+fn load_request_with_profile_defaults(
+    request: &LoadRequest,
+    profile: &qq_config::AgentProfileConfig,
+) -> LoadRequest {
+    let mut overrides = request.overrides().clone();
+    if request.overrides().model().is_none()
+        && let Some(model) = profile.model()
+    {
+        overrides = overrides.with_model(model.to_owned());
+    }
+    if request.overrides().organization().is_none()
+        && let Some(organization) = profile.organization()
+    {
+        overrides = overrides.with_organization(organization.to_owned());
+    }
+    if request.overrides().max_output_tokens().is_none()
+        && let Some(cap) = profile.max_output_tokens()
+    {
+        overrides = overrides.with_max_output_tokens(cap);
+    }
+    if request.overrides().reasoning_effort().is_none()
+        && let Some(effort) = profile.reasoning_effort()
+    {
+        overrides = overrides.with_reasoning_effort(effort);
+    }
+    if request.overrides().jev_review().is_none()
+        && let Some(mode) = profile.jev_review()
+    {
+        overrides = overrides.with_jev_review(mode);
+    }
+    if request.overrides().jev_routing().is_none()
+        && let Some(enabled) = profile.jev_routing()
+    {
+        overrides = overrides.with_jev_routing(enabled);
+    }
+    if request.overrides().jev_approval().is_none()
+        && let Some(enabled) = profile.jev_approval()
+    {
+        overrides = overrides.with_jev_approval(enabled);
+    }
+    if request.overrides().approval_delegate().is_none()
+        && let Some(setting) = profile.approval_delegate()
+    {
+        overrides = overrides.with_approval_delegate(setting);
+    }
+    request.clone().with_overrides(overrides)
+}
+
+impl RunStateAdmission {
+    fn from_snapshot(snapshot: &ConfigSnapshot, config_dir: &Path) -> Self {
+        let mut model_routes = BTreeSet::new();
+        model_routes.insert(snapshot.model().as_str().to_owned());
+        if let Some(route) = snapshot.worker_model() {
+            model_routes.insert(route.as_str().to_owned());
+        }
+        if let Some(route) = snapshot.reviewer_model() {
+            model_routes.insert(route.as_str().to_owned());
+        }
+        for entry in snapshot.delegation().roster() {
+            model_routes.insert(entry.route().as_str().to_owned());
+        }
+        for profile in snapshot.profiles().values() {
+            if let Some(route) = profile.model() {
+                model_routes.insert(route.to_owned());
+            }
+        }
+        for (provider, config) in snapshot.providers() {
+            if !snapshot
+                .provenance()
+                .provider(provider)
+                .is_some_and(|source| run_state_source_allowed(source, config_dir))
+            {
+                continue;
+            }
+            for model in config.models().keys() {
+                model_routes.insert(format!("{provider}/{model}"));
+            }
+        }
+        Self {
+            model_routes,
+            organization: snapshot.organization().map(str::to_owned),
+            jev_review: snapshot.jev_review(),
+            jev_routing: snapshot.jev_routing(),
+            jev_approval: snapshot.jev_approval(),
+            approval_delegate: snapshot.approval_delegate(),
+            reasoning_effort: snapshot.reasoning_effort(),
+            max_output_tokens: snapshot.max_output_tokens(),
+        }
+    }
+
+    fn validate(&self, snapshot: &ConfigSnapshot) -> Result<(), RuntimeBuildError> {
+        let changed = if !self.model_routes.contains(snapshot.model().as_str()) {
+            Some("model route")
+        } else if snapshot.organization() != self.organization.as_deref() {
+            Some("organization")
+        } else if snapshot.jev_review() != self.jev_review {
+            Some("Jev review")
+        } else if snapshot.jev_routing() != self.jev_routing {
+            Some("Jev routing")
+        } else if snapshot.jev_approval() != self.jev_approval {
+            Some("Jev approval")
+        } else if snapshot.approval_delegate() != self.approval_delegate {
+            Some("approval delegate")
+        } else if snapshot.reasoning_effort() != self.reasoning_effort {
+            Some("reasoning effort")
+        } else if snapshot.max_output_tokens() > self.max_output_tokens {
+            Some("maximum output tokens")
+        } else {
+            None
+        };
+        if let Some(consumer) = changed {
+            return Err(RuntimeBuildError::InvalidRunState {
+                reason: format!(
+                    "effective {consumer} differs from the captured run-state admission"
+                ),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl RuntimeFactory {
@@ -409,6 +570,7 @@ impl RuntimeFactory {
         workspace: PathBuf,
         config_dir: PathBuf,
         request: LoadRequest,
+        profile: &str,
     ) -> Result<Self, RuntimeBuildError> {
         if request.cwd() != workspace || request.has_explicit_content() {
             return Err(RuntimeBuildError::InvalidRunState {
@@ -416,18 +578,33 @@ impl RuntimeFactory {
                     .to_owned(),
             });
         }
-        let snapshot = config.load(&request)?;
-        validate_run_state_sources(&snapshot, &config_dir)?;
-        let admitted_sources = snapshot.sources().clone();
+        let base_snapshot = config.load(&request)?;
+        validate_run_state_sources(&base_snapshot, &config_dir)?;
+        let selected_profile =
+            base_snapshot
+                .profile(profile)
+                .ok_or_else(|| RuntimeBuildError::InvalidRunState {
+                    reason: format!("captured agent profile {profile:?} is not configured"),
+                })?;
+        let effective_request = load_request_with_profile_defaults(&request, &selected_profile);
+        let admitted_snapshot = config.load(&effective_request)?;
+        validate_run_state_sources(&admitted_snapshot, &config_dir)?;
+        let admission = RunStateAdmission::from_snapshot(&admitted_snapshot, &config_dir);
+        let mut admitted_sources = vec![base_snapshot.sources().clone()];
+        if !admitted_sources.contains(admitted_snapshot.sources()) {
+            admitted_sources.push(admitted_snapshot.sources().clone());
+        }
         Self::with_mode(
             config,
             credentials,
-            RuntimeMode::RunState(RunStateScope {
+            RuntimeMode::RunState(Box::new(RunStateScope {
                 workspace,
                 config_dir,
                 request,
+                profile: profile.to_owned(),
+                admission,
                 admitted_sources,
-            }),
+            })),
         )
     }
 
@@ -714,7 +891,7 @@ impl RuntimeFactory {
     /// lists nothing because it never consults the credential store for
     /// providers it does not select.
     pub fn unauthenticated_providers(&self, snapshot: &ClientSnapshot) -> Vec<ProviderRemedy> {
-        if self.is_isolated_tui_qa() {
+        if self.is_isolated_tui_qa() || matches!(self.inner.mode, RuntimeMode::RunState(_)) {
             return Vec::new();
         }
         let allowed = snapshot.policy().allowed_providers();
@@ -822,15 +999,26 @@ impl RuntimeFactory {
     ) -> Vec<ModelDescriptor> {
         let allowed = snapshot.policy.allowed_providers();
         let denied = snapshot.policy.denied_providers();
+        let admitted_routes = match &self.inner.mode {
+            RuntimeMode::RunState(scope) => Some(&scope.admission.model_routes),
+            RuntimeMode::Standard | RuntimeMode::IsolatedTuiQa { .. } => None,
+        };
+        let route_is_admitted = |provider: &str, model: &str| {
+            admitted_routes.is_none_or(|routes| routes.contains(&format!("{provider}/{model}")))
+        };
         let mut options = Vec::new();
         'providers: for (provider_id, provider) in snapshot.providers {
             if allowed.is_some_and(|allowed| !allowed.iter().any(|id| id == provider_id))
                 || denied.iter().any(|id| id == provider_id)
-                || !self.provider_authenticated(provider_id, provider)
+                || (admitted_routes.is_none()
+                    && !self.provider_authenticated(provider_id, provider))
             {
                 continue;
             }
             for (model_id, metadata) in provider.models() {
+                if !route_is_admitted(provider_id, model_id) {
+                    continue;
+                }
                 if matches!(
                     provider.kind(),
                     qq_config::ProviderKind::OpenAiCodex | qq_config::ProviderKind::Anthropic
@@ -874,6 +1062,9 @@ impl RuntimeFactory {
                     if provider.models().contains_key(&model.id) {
                         continue;
                     }
+                    if !route_is_admitted(provider_id, &model.id) {
+                        continue;
+                    }
                     if options.len() >= MAX_MODEL_OPTIONS {
                         break 'providers;
                     }
@@ -894,14 +1085,18 @@ impl RuntimeFactory {
             }
         }
         // The configured route is selectable even when the catalog does not
-        // list it, provided its provider is authenticated.
+        // list it. A run-state route was already admitted from captured
+        // configuration and must not trigger another provider-authentication
+        // probe; standard mode retains its ordinary credential check.
         if let Some(route) = snapshot.model
             && options.len() < MAX_MODEL_OPTIONS
             && !options
                 .iter()
                 .any(|option| option.selection.model.as_deref() == Some(route.as_str()))
             && let Some(provider) = snapshot.providers.get(route.provider())
-            && self.provider_authenticated(route.provider(), provider)
+            && (route_is_admitted(route.provider(), route.model())
+                && (admitted_routes.is_some()
+                    || self.provider_authenticated(route.provider(), provider)))
         {
             let metadata = provider.models().get(route.model());
             options.push(ModelDescriptor {
@@ -936,6 +1131,10 @@ impl RuntimeFactory {
                 .model()
                 .map(|route| vec![Self::isolated_tui_qa_model_option_for(snapshot, route)])
                 .unwrap_or_default();
+        }
+        if matches!(self.inner.mode, RuntimeMode::RunState(_)) {
+            return self
+                .model_options_with_discovery(&CatalogSource::from(snapshot), &BTreeMap::new());
         }
         let allowed = snapshot.policy().allowed_providers();
         let denied = snapshot.policy().denied_providers();
@@ -1094,6 +1293,40 @@ impl RuntimeFactory {
             return Ok(());
         };
         validate_run_state_sources(snapshot, &scope.config_dir)?;
+        scope.admission.validate(snapshot)?;
+        Ok(())
+    }
+
+    fn validate_run_state_sources_only(
+        &self,
+        request: &LoadRequest,
+    ) -> Result<ConfigSnapshot, RuntimeBuildError> {
+        self.validate_run_state_workspace(request.cwd())?;
+        self.validate_run_state_inputs()?;
+        let snapshot = self.inner.config.load(request)?;
+        let RuntimeMode::RunState(scope) = &self.inner.mode else {
+            return Ok(snapshot);
+        };
+        validate_run_state_sources(&snapshot, &scope.config_dir)?;
+        Ok(snapshot)
+    }
+
+    fn validate_run_state_profile(
+        &self,
+        profile: &AgentProfileId,
+    ) -> Result<(), RuntimeBuildError> {
+        let RuntimeMode::RunState(scope) = &self.inner.mode else {
+            return Ok(());
+        };
+        if profile.as_str() != scope.profile {
+            return Err(RuntimeBuildError::InvalidRunState {
+                reason: format!(
+                    "agent profile {:?} differs from the captured run-state profile {:?}",
+                    profile.as_str(),
+                    scope.profile
+                ),
+            });
+        }
         Ok(())
     }
 
@@ -1101,7 +1334,7 @@ impl RuntimeFactory {
         let RuntimeMode::RunState(scope) = &self.inner.mode else {
             return Ok(());
         };
-        if !scope.admitted_sources.is_current() {
+        if !scope.admitted_sources.iter().all(ConfigSources::is_current) {
             return Err(RuntimeBuildError::InvalidRunState {
                 reason: "a captured configuration, policy, organization, trust, or workspace source changed after run admission"
                     .to_owned(),
@@ -1604,7 +1837,14 @@ impl RuntimeFactory {
         // admission before even credential metadata is inspected. Standard
         // mode retains its established ordering.
         let admitted_snapshot = if matches!(self.inner.mode, RuntimeMode::RunState(_)) {
-            Some(self.load(request)?)
+            self.validate_run_state_profile(profile_id)?;
+            let base_snapshot = self.validate_run_state_sources_only(request)?;
+            let selected_profile = base_snapshot
+                .profile(profile_id.as_str())
+                .ok_or_else(|| RuntimeBuildError::UnknownProfile(profile_id.clone()))?;
+            let effective_request = load_request_with_profile_defaults(request, &selected_profile);
+            self.load(&effective_request)?;
+            Some(base_snapshot)
         } else {
             None
         };
@@ -1679,48 +1919,7 @@ impl RuntimeFactory {
             None => return Err(RuntimeBuildError::UnknownProfile(profile_id.clone())),
             Some(profile) if profile == qq_config::AgentProfileConfig::default() => snapshot,
             Some(profile) => {
-                let mut overrides = request.overrides().clone();
-                if request.overrides().model().is_none()
-                    && let Some(model) = profile.model()
-                {
-                    overrides = overrides.with_model(model.to_owned());
-                }
-                if request.overrides().organization().is_none()
-                    && let Some(organization) = profile.organization()
-                {
-                    overrides = overrides.with_organization(organization.to_owned());
-                }
-                if request.overrides().max_output_tokens().is_none()
-                    && let Some(cap) = profile.max_output_tokens()
-                {
-                    overrides = overrides.with_max_output_tokens(cap);
-                }
-                if request.overrides().reasoning_effort().is_none()
-                    && let Some(effort) = profile.reasoning_effort()
-                {
-                    overrides = overrides.with_reasoning_effort(effort);
-                }
-                if request.overrides().jev_review().is_none()
-                    && let Some(mode) = profile.jev_review()
-                {
-                    overrides = overrides.with_jev_review(mode);
-                }
-                if request.overrides().jev_routing().is_none()
-                    && let Some(enabled) = profile.jev_routing()
-                {
-                    overrides = overrides.with_jev_routing(enabled);
-                }
-                if request.overrides().jev_approval().is_none()
-                    && let Some(enabled) = profile.jev_approval()
-                {
-                    overrides = overrides.with_jev_approval(enabled);
-                }
-                if request.overrides().approval_delegate().is_none()
-                    && let Some(setting) = profile.approval_delegate()
-                {
-                    overrides = overrides.with_approval_delegate(setting);
-                }
-                let snapshot = self.load(&request.clone().with_overrides(overrides))?;
+                let snapshot = self.load(&load_request_with_profile_defaults(request, &profile))?;
                 if !configuration_sources.contains(snapshot.sources()) {
                     configuration_sources.push(snapshot.sources().clone());
                 }

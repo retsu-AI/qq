@@ -3,11 +3,14 @@
 use std::{
     collections::BTreeMap,
     error::Error,
-    io::{self, IsTerminal, Read},
+    io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
 };
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use qq_auth as auth;
 use qq_client as client;
@@ -246,9 +249,94 @@ type HeadlessSetupError = (headless::HeadlessStatus, String);
 
 #[derive(Clone, Debug)]
 struct RunStatePaths {
+    root: PathBuf,
     config: PathBuf,
     data: PathBuf,
     workspace: PathBuf,
+}
+
+const RUN_STATE_IDENTITY_VERSION: u32 = 1;
+const RUN_STATE_IDENTITY_FILE: &str = "run-state-identity.json";
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RunStateIdentity {
+    version: u32,
+    root: PathBuf,
+    workspace: PathBuf,
+    config_sha256: String,
+}
+
+fn current_run_state_identity(paths: &RunStatePaths) -> Result<RunStateIdentity, String> {
+    let config = paths.config.join("config.ron");
+    let bytes = std::fs::read(&config).map_err(|error| {
+        format!(
+            "could not read run-state config {}: {error}",
+            config.display()
+        )
+    })?;
+    Ok(RunStateIdentity {
+        version: RUN_STATE_IDENTITY_VERSION,
+        root: paths.root.clone(),
+        workspace: paths.workspace.clone(),
+        config_sha256: format!("{:x}", Sha256::digest(bytes)),
+    })
+}
+
+fn read_run_state_identity(paths: &RunStatePaths) -> Result<RunStateIdentity, String> {
+    let path = paths.data.join(RUN_STATE_IDENTITY_FILE);
+    let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+        format!(
+            "--session requires the recorded run-state identity {}: {error}",
+            path.display()
+        )
+    })?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || std::fs::canonicalize(&path).ok().as_ref() != Some(&path)
+    {
+        return Err("recorded run-state identity must be a canonical regular file".to_owned());
+    }
+    let bytes = std::fs::read(&path).map_err(|error| {
+        format!(
+            "could not read recorded run-state identity {}: {error}",
+            path.display()
+        )
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "recorded run-state identity {} is invalid: {error}",
+            path.display()
+        )
+    })
+}
+
+fn record_run_state_identity(
+    paths: &RunStatePaths,
+    identity: &RunStateIdentity,
+) -> Result<(), String> {
+    let path = paths.data.join(RUN_STATE_IDENTITY_FILE);
+    let bytes = serde_json::to_vec_pretty(identity)
+        .map_err(|error| format!("could not serialize run-state identity: {error}"))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| {
+            format!(
+                "could not create run-state identity {}: {error}",
+                path.display()
+            )
+        })?;
+    file.write_all(&bytes)
+        .and_then(|()| file.write_all(b"\n"))
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            format!(
+                "could not persist run-state identity {}: {error}",
+                path.display()
+            )
+        })
 }
 
 fn validate_run_state_root(
@@ -350,6 +438,9 @@ fn validate_run_state_root(
                 .to_owned(),
         );
     }
+    if !resume && std::fs::symlink_metadata(data.join(RUN_STATE_IDENTITY_FILE)).is_ok() {
+        return Err("fresh --state-root run refused an existing run-state identity".to_owned());
+    }
 
     let system = config::ConfigPaths::system().map_err(|error| error.to_string())?;
     for system_path in [system.global_dir(), system.data_dir()] {
@@ -363,6 +454,7 @@ fn validate_run_state_root(
         }
     }
     Ok(RunStatePaths {
+        root,
         config,
         data,
         workspace,
@@ -375,10 +467,8 @@ async fn prepare_headless(
     args: cli::RunArgs,
     overrides: &CliOverrides,
 ) -> Result<(qq_core::SessionRuntime, headless::HeadlessOptions), HeadlessSetupError> {
-    prepare_headless_with_factory(
-        args,
-        overrides,
-        |run_state, workspace, load| match run_state {
+    prepare_headless_with_factory(args, overrides, |run_state, workspace, load, profile| {
+        match run_state {
             None => runtime::RuntimeFactory::system(),
             Some(paths) => runtime::RuntimeFactory::run_state(
                 config::ConfigLoader::system()?
@@ -387,9 +477,10 @@ async fn prepare_headless(
                 workspace.to_path_buf(),
                 paths.config.clone(),
                 load.clone(),
+                profile,
             ),
-        },
-    )
+        }
+    })
     .await
 }
 
@@ -403,6 +494,7 @@ where
         Option<&RunStatePaths>,
         &Path,
         &config::LoadRequest,
+        &str,
     ) -> Result<runtime::RuntimeFactory, runtime::RuntimeBuildError>,
 {
     let invalid = |message: String| (headless::HeadlessStatus::InvalidConfiguration, message);
@@ -440,6 +532,22 @@ where
             ))
         })?
     };
+    let run_state_identity = run_state
+        .as_ref()
+        .map(current_run_state_identity)
+        .transpose()
+        .map_err(invalid)?;
+    if args.session.is_some()
+        && let (Some(paths), Some(current)) = (&run_state, &run_state_identity)
+    {
+        let recorded = read_run_state_identity(paths).map_err(invalid)?;
+        if recorded != *current {
+            return Err(invalid(
+                "--session run-state root, workspace, or config differs from the recorded identity"
+                    .to_owned(),
+            ));
+        }
+    }
 
     let max_cost_usd_nanos = match args.max_cost_usd {
         None => None,
@@ -506,7 +614,8 @@ where
         overrides.load_request_in(&workspace)
     }
     .map_err(|error| invalid(error.to_string()))?;
-    let factory = factory_builder(run_state.as_ref(), &workspace, &load)
+    let captured_profile = args.profile.as_deref().unwrap_or("default");
+    let factory = factory_builder(run_state.as_ref(), &workspace, &load, captured_profile)
         .map_err(|error| invalid(error.to_string()))?;
     let model_is_fallback = load.overrides().model().is_none();
     let config_factory = factory.clone();
@@ -514,6 +623,14 @@ where
         .await
         .map_err(|_| harness("configuration loading stopped unexpectedly".to_owned()))?
         .map_err(|error| invalid(error.to_string()))?;
+    if let (Some(paths), Some(expected)) = (&run_state, &run_state_identity) {
+        let current = current_run_state_identity(paths).map_err(invalid)?;
+        if current != *expected {
+            return Err(invalid(
+                "run-state root, workspace, or config changed during admission".to_owned(),
+            ));
+        }
+    }
 
     let model_metadata = snapshot
         .providers()
@@ -564,6 +681,11 @@ where
             runtime::RuntimeHandlerError::Config(error) => invalid(error.to_string()),
             runtime::RuntimeHandlerError::Sessions(error) => harness(error.to_string()),
         })?;
+    if args.session.is_none()
+        && let (Some(paths), Some(identity)) = (&run_state, &run_state_identity)
+    {
+        record_run_state_identity(paths, identity).map_err(harness)?;
+    }
 
     let options = headless::HeadlessOptions {
         prompt: args.prompt,
@@ -2494,6 +2616,32 @@ mod tests {
         directory
     }
 
+    fn build_test_run_state_factory(
+        root: &Path,
+        paths: Option<&RunStatePaths>,
+        workspace: &Path,
+        load: &config::LoadRequest,
+        profile: &str,
+    ) -> Result<runtime::RuntimeFactory, runtime::RuntimeBuildError> {
+        let paths = paths.expect("state root");
+        runtime::RuntimeFactory::run_state(
+            config::ConfigLoader::new(config::ConfigPaths::new(
+                paths.config.clone(),
+                root.join("original-data"),
+                root.join("managed"),
+            ))
+            .for_run_state(paths.config.clone(), paths.data.clone()),
+            auth::CredentialStore::with_backend(
+                auth::CredentialPaths::new(root.join("credentials")),
+                Arc::new(PanicKeyring),
+            ),
+            workspace.to_path_buf(),
+            paths.config.clone(),
+            load.clone(),
+            profile,
+        )
+    }
+
     #[test]
     fn run_state_cli_and_root_validation_are_opt_in_and_fail_closed() {
         let directory = run_state_tree();
@@ -2523,7 +2671,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn headless_run_state_uses_the_injected_backend_and_relocated_session_store() {
+    async fn headless_run_state_binds_resume_identity_and_relocates_the_session_store() {
         let directory = run_state_tree();
         let root = std::fs::canonicalize(directory.path()).unwrap();
         let root_arg = root.to_str().unwrap();
@@ -2550,30 +2698,66 @@ mod tests {
         let (runtime, options) = prepare_headless_with_factory(
             args,
             &CliOverrides::default(),
-            |paths, workspace, load| {
-                let paths = paths.expect("state root");
-                runtime::RuntimeFactory::run_state(
-                    config::ConfigLoader::new(config::ConfigPaths::new(
-                        paths.config.clone(),
-                        root.join("original-data"),
-                        root.join("managed"),
-                    ))
-                    .for_run_state(paths.config.clone(), paths.data.clone()),
-                    auth::CredentialStore::with_backend(
-                        auth::CredentialPaths::new(root.join("credentials")),
-                        Arc::new(PanicKeyring),
-                    ),
-                    workspace.to_path_buf(),
-                    paths.config.clone(),
-                    load.clone(),
-                )
+            |paths, workspace, load, profile| {
+                build_test_run_state_factory(&root, paths, workspace, load, profile)
             },
         )
         .await
         .unwrap();
         assert_eq!(options.workspace, root.join("workspace"));
         assert!(root.join("data/sessions.sqlite3").exists());
+        assert!(root.join("data/run-state-identity.json").exists());
         drop(runtime);
+
+        let session = qq_protocol::SessionId::from_bytes([9; 16]);
+        let session_arg = session.to_string();
+        let resume = run_args(
+            "task",
+            &[
+                "--state-root",
+                root_arg,
+                "--session",
+                &session_arg,
+                "--max-turns",
+                "1",
+                "--timeout-seconds",
+                "5",
+            ],
+        );
+        let (resumed, resumed_options) = prepare_headless_with_factory(
+            resume,
+            &CliOverrides::default(),
+            |paths, workspace, load, profile| {
+                build_test_run_state_factory(&root, paths, workspace, load, profile)
+            },
+        )
+        .await
+        .expect("the same root, workspace, and config identity may resume");
+        assert_eq!(resumed_options.session, Some(session));
+        drop(resumed);
+
+        std::fs::write(
+            root.join("config/config.ron"),
+            r#"(version: 1, model: "custom/test", providers: {"custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: {"test": (name: "Changed")})})"#,
+        )
+        .unwrap();
+        let changed = run_args(
+            "task",
+            &["--state-root", root_arg, "--session", &session_arg],
+        );
+        let error = match prepare_headless_with_factory(
+            changed,
+            &CliOverrides::default(),
+            |paths, workspace, load, profile| {
+                build_test_run_state_factory(&root, paths, workspace, load, profile)
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("a changed config resumed the recorded session state"),
+            Err(error) => error,
+        };
+        assert!(error.1.contains("differs from the recorded identity"));
     }
 
     /// The output schema is read and compiled before any configuration or
