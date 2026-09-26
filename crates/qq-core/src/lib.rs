@@ -929,7 +929,7 @@ impl Runtime {
             let Some(reason) = truncated else {
                 return Ok((summary, total_usage));
             };
-            if text.is_empty() && reason == qq_provider::IncompleteReason::OutputTokens {
+            if text.trim().is_empty() && reason == qq_provider::IncompleteReason::OutputTokens {
                 // Nothing visible: the cap went to hidden reasoning. A
                 // continuation would resend the same request. (A provider
                 // pause with no text is resent as the provider requires.)
@@ -2502,6 +2502,20 @@ impl plan::CompiledAgentPlan {
                                          limit was spent on reasoning. Raise `max_output_tokens` (model ceiling \
                                          {model_max_output_tokens}) or lower `reasoning_effort`",
                                         u32::from(empty_output_retries) + 1
+                                    ),
+                                };
+                                return;
+                            }
+                            // The retry counts against the run's shared
+                            // continuation cap, which the client renders
+                            // against `max_output_continuations`.
+                            if output_continuations >= MAX_OUTPUT_CONTINUATIONS {
+                                yield RuntimeEvent::Failed {
+                                    kind: RunFailureKind::ProviderOutputTruncated,
+                                    message: format!(
+                                        "the provider stopped at its output token limit ({max_output_tokens} tokens) on \
+                                         {} consecutive turns; the partial answer is in the transcript",
+                                        u32::from(MAX_OUTPUT_CONTINUATIONS) + 1
                                     ),
                                 };
                                 return;
@@ -7238,6 +7252,8 @@ mod tests {
         cut_tool_call: bool,
         /// Truncated turns stream nothing visible (all hidden reasoning).
         empty: bool,
+        /// Truncated turns from this ordinal onward stream nothing visible.
+        empty_from: usize,
         requests: Arc<Mutex<Vec<ModelRequest>>>,
     }
 
@@ -7255,7 +7271,7 @@ mod tests {
                 reasoning_tokens: None,
             });
             if turn < self.truncations {
-                let mut events = if self.empty {
+                let mut events = if self.empty || turn >= self.empty_from {
                     Vec::new()
                 } else {
                     vec![Ok(ProviderEvent::OutputTextDelta {
@@ -7297,6 +7313,7 @@ mod tests {
                 truncations: 2,
                 cut_tool_call: true,
                 empty: false,
+                empty_from: usize::MAX,
                 requests: Arc::clone(&requests),
             },
             "gpt-test",
@@ -7386,6 +7403,7 @@ mod tests {
                 truncations: usize::MAX,
                 cut_tool_call: false,
                 empty: false,
+                empty_from: usize::MAX,
                 requests: Arc::clone(&requests),
             },
             "gpt-test",
@@ -7444,6 +7462,7 @@ mod tests {
                 truncations: 1,
                 cut_tool_call: false,
                 empty: true,
+                empty_from: usize::MAX,
                 requests: Arc::clone(&requests),
             },
             "gpt-test",
@@ -7500,6 +7519,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_empty_truncation_after_the_continuation_cap_does_not_spend_another_turn() {
+        // Three visible truncations exhaust the shared continuation cap; an
+        // empty one after them must settle, not emit `continuation: 4` (past
+        // the advertised `max_output_continuations`) and spend a fifth turn.
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TruncatingProvider {
+                truncations: usize::MAX,
+                cut_tool_call: false,
+                empty: false,
+                empty_from: usize::from(MAX_OUTPUT_CONTINUATIONS),
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            1024,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("write a long answer")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::ReadOnly,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).with_max_output_tokens(256),
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            usize::from(MAX_OUTPUT_CONTINUATIONS) + 1
+        );
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            RuntimeEvent::OutputTruncated { continuation, .. }
+                if *continuation > MAX_OUTPUT_CONTINUATIONS
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Failed {
+                kind: RunFailureKind::ProviderOutputTruncated,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
     async fn an_empty_truncated_turn_at_the_ceiling_fails_at_once_naming_the_cause() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
@@ -7507,6 +7579,7 @@ mod tests {
                 truncations: usize::MAX,
                 cut_tool_call: false,
                 empty: true,
+                empty_from: usize::MAX,
                 requests: Arc::clone(&requests),
             },
             "gpt-test",
@@ -7663,6 +7736,7 @@ mod tests {
                 truncations: usize::MAX,
                 cut_tool_call: false,
                 empty: false,
+                empty_from: usize::MAX,
                 requests: Arc::clone(&requests),
             },
             "gpt-test",
