@@ -648,10 +648,24 @@ impl ConfigLoader {
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     #[must_use]
-    pub fn with_test_mdm(mut self, origin: impl Into<String>, content: impl Into<String>) -> Self {
-        self.mdm_reader = Arc::new(managed::FixedMdmReader {
+    pub fn with_test_mdm(self, origin: impl Into<String>, content: impl Into<String>) -> Self {
+        self.with_test_mdm_sequence(origin, vec![content.into()])
+    }
+
+    /// Installs a deterministic sequence of virtual MDM values for tests.
+    /// The last value repeats after the earlier values have been consumed.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_test_mdm_sequence(
+        mut self,
+        origin: impl Into<String>,
+        contents: Vec<String>,
+    ) -> Self {
+        assert!(!contents.is_empty(), "test MDM sequence must not be empty");
+        self.mdm_reader = Arc::new(managed::SequenceMdmReader {
             origin: origin.into(),
-            content: content.into(),
+            contents: std::sync::Mutex::new(contents.into()),
         });
         self
     }

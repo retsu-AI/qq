@@ -25,18 +25,24 @@ pub(super) trait MdmReader: Send + Sync {
 }
 
 #[cfg(feature = "test-support")]
-pub(super) struct FixedMdmReader {
+pub(super) struct SequenceMdmReader {
     pub(super) origin: String,
-    pub(super) content: String,
+    pub(super) contents: std::sync::Mutex<std::collections::VecDeque<String>>,
 }
 
 #[cfg(feature = "test-support")]
-impl MdmReader for FixedMdmReader {
+impl MdmReader for SequenceMdmReader {
     fn read(&self) -> Result<Option<MdmConfiguration>, ConfigError> {
-        Ok(Some(MdmConfiguration::new(
-            self.origin.clone(),
-            self.content.clone(),
-        )))
+        let mut contents = self.contents.lock().expect("test MDM sequence lock");
+        let content = if contents.len() > 1 {
+            contents.pop_front().expect("nonempty test MDM sequence")
+        } else {
+            contents
+                .front()
+                .expect("nonempty test MDM sequence")
+                .clone()
+        };
+        Ok(Some(MdmConfiguration::new(self.origin.clone(), content)))
     }
 }
 

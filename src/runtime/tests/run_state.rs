@@ -35,6 +35,38 @@ fn run_state_factory(
     )
 }
 
+fn run_state_factory_with_mdm_sequence(
+    fixture: &RuntimeFixture,
+    config: &str,
+    mdm_contents: Vec<String>,
+) -> Result<RuntimeFactory, RuntimeBuildError> {
+    let root = std::fs::canonicalize(&fixture.root).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(root.join("data"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    std::fs::write(root.join("global/config.ron"), config).unwrap();
+    let workspace = root.join("work");
+    RuntimeFactory::run_state(
+        ConfigLoader::new(ConfigPaths::new(
+            root.join("global"),
+            root.join("data"),
+            root.join("managed"),
+        ))
+        .with_test_mdm_sequence("stable runtime test MDM origin", mdm_contents),
+        CredentialStore::with_backend(
+            CredentialPaths::new(root.join("data")),
+            Arc::new(PanicKeyring),
+        ),
+        workspace.clone(),
+        root.join("global"),
+        LoadRequest::new(workspace),
+        "default",
+    )
+}
+
 fn loopback_config(extra: &str) -> String {
     format!(
         r#"(
@@ -262,6 +294,35 @@ fn run_state_rejects_consumer_changes_on_reload() {
         factory.load(&request),
         Err(RuntimeBuildError::InvalidRunState { .. })
     ));
+}
+
+#[test]
+fn run_state_plan_rejects_flapping_mdm_before_credentials_or_plan_use() {
+    let fixture = RuntimeFixture::new();
+    let configured = loopback_config(r#"policy: (allow_tools: ["read_file"]),"#);
+    let policy_a = r#"(version: 1, policy: (deny_tools: ["read_file"]))"#.to_owned();
+    let policy_b = "(version: 1, policy: (deny_tools: []))".to_owned();
+    let factory = run_state_factory_with_mdm_sequence(
+        &fixture,
+        &configured,
+        vec![policy_a.clone(), policy_a.clone(), policy_a, policy_b],
+    )
+    .unwrap();
+    let root = std::fs::canonicalize(&fixture.root).unwrap();
+    let request = factory
+        .request_for_workspace(&root.join("work"), None)
+        .unwrap();
+    let error = factory
+        .plan_for(&request)
+        .expect_err("a flapping MDM source reached plan compilation");
+    assert!(
+        error.to_string().contains("configuration sources differ"),
+        "{error}"
+    );
+    assert!(
+        !root.join("data/sessions.sqlite3").exists(),
+        "a rejected MDM plan load created a session store"
+    );
 }
 
 #[test]

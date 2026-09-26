@@ -601,6 +601,7 @@ impl RunStateAdmission {
     }
 
     fn validate(&self, snapshot: &ConfigSnapshot) -> Result<(), RuntimeBuildError> {
+        self.validate_sources(snapshot)?;
         let changed = if !self.model_routes.contains(snapshot.model().as_str()) {
             Some("model route")
         } else if snapshot.organization() != self.organization.as_deref() {
@@ -625,6 +626,16 @@ impl RunStateAdmission {
                 reason: format!(
                     "effective {consumer} differs from the captured run-state admission"
                 ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_sources(&self, snapshot: &ConfigSnapshot) -> Result<(), RuntimeBuildError> {
+        if run_state_sources_digest(snapshot)? != self.sources_sha256 {
+            return Err(RuntimeBuildError::InvalidRunState {
+                reason: "configuration sources differ from the captured run-state admission"
+                    .to_owned(),
             });
         }
         Ok(())
@@ -1442,6 +1453,7 @@ impl RuntimeFactory {
             return Ok(snapshot);
         };
         validate_run_state_sources(&snapshot, &scope.config_dir)?;
+        scope.admission.validate_sources(&snapshot)?;
         Ok(snapshot)
     }
 
@@ -1977,11 +1989,11 @@ impl RuntimeFactory {
                 .profile(profile_id.as_str())
                 .ok_or_else(|| RuntimeBuildError::UnknownProfile(profile_id.clone()))?;
             let effective_request = load_request_with_profile_defaults(request, &selected_profile);
-            self.load(&effective_request)?;
-            Some(base_snapshot)
+            Some(self.load(&effective_request)?)
         } else {
             None
         };
+        let run_state_admitted = admitted_snapshot.is_some();
         // The credential index is fingerprinted before secrets are read so a
         // rotation racing this compile is observed on the next lookup.
         if let Some(progress) = progress {
@@ -1999,10 +2011,9 @@ impl RuntimeFactory {
         };
         let mut configuration_sources = vec![snapshot.sources().clone()];
         // A named profile supplies defaults beneath the request's explicit
-        // overrides. Resolving it needs the merged configuration, so the load
-        // repeats with the profile's values applied where the request left a
-        // gap. Both loads retain their pre-read observations because the
-        // first selected the profile and the second supplied runtime values.
+        // overrides. Standard modes reload with those defaults applied. A
+        // run-state compile already holds that exact validated effective
+        // snapshot and must consume it without another virtual-source read.
         let selected_profile = snapshot.profile(profile_id.as_str());
         let model_pinned = request.overrides().model().is_some()
             || selected_profile
@@ -2051,6 +2062,7 @@ impl RuntimeFactory {
         };
         let snapshot = match selected_profile {
             None => return Err(RuntimeBuildError::UnknownProfile(profile_id.clone())),
+            Some(_) if run_state_admitted => snapshot,
             Some(profile) if profile == qq_config::AgentProfileConfig::default() => snapshot,
             Some(profile) => {
                 let snapshot = self.load(&load_request_with_profile_defaults(request, &profile))?;
