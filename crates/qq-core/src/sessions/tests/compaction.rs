@@ -3390,6 +3390,104 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
 }
 
 #[tokio::test]
+async fn a_dense_tokenizer_compacts_in_run_instead_of_failing_at_the_guard() {
+    // ENG-940: eight production runs failed with "context is estimated at N
+    // input tokens ... over the window" and `context_compaction_attempted =
+    // 0`. The loop decided whether to recover from the raw bytes/4 estimate
+    // (fits) while the admission guard judged the measured chain (over), so
+    // recovery never ran and the guard failed the run closed. Here the
+    // provider reports two bytes per token: the raw estimate of a 16k window
+    // fits until ~64 KiB of transcript, the measured chain overflows at half
+    // that. The run must compact its own turns on the measured figure and
+    // complete; no request may reach the provider over the window by the
+    // measured chain.
+    let turns = 24;
+    let mut harness = auto_compact_harness_with_loader_and_mode(
+        AutoCompactLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            scripts: vec![AutoCompactScript::Measured {
+                script: Box::new(AutoCompactScript::ShellRepeatedlyWithSummaries {
+                    turns,
+                    text: "task complete".to_owned(),
+                    summary: valid_summary("work so far"),
+                }),
+                bytes_per_token: 2,
+            }],
+            loads: StdMutex::new(0),
+            context_window: Some(16 * 1024),
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        },
+        ApprovalMode::Full,
+    )
+    .await;
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "do the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    let outcome = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, outcome, ..
+            } if *run_id == run => Some(outcome.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
+    let compactions = observed
+        .iter()
+        .filter(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+        .count();
+    assert!(
+        compactions >= 1,
+        "the measured overflow must trigger in-run compaction"
+    );
+    // Every prompt-run request fit the window by the provider's own ratio.
+    // The summarizer's requests are exempt: they read the overflowing
+    // transcript by design and the provider adjudicates them.
+    let oversized: Vec<(usize, u64)> = {
+        let requests = harness.requests.lock().unwrap();
+        requests
+            .iter()
+            .enumerate()
+            .filter(|(_, request)| {
+                !request_texts(request)
+                    .last()
+                    .is_some_and(|text| text.contains("Summarize this conversation"))
+            })
+            .map(|(index, request)| {
+                let bytes = crate::measure_messages(request.messages())
+                    + request.system().map_or(0, |system| system.len() as u64)
+                    + request
+                        .tools()
+                        .iter()
+                        .map(|tool| {
+                            (tool.name().len()
+                                + tool.description().len()
+                                + tool.input_schema().get().len())
+                                as u64
+                        })
+                        .sum::<u64>();
+                (
+                    index,
+                    bytes.div_ceil(2) + u64::from(request.max_output_tokens()),
+                )
+            })
+            .filter(|(_, measured_tokens)| *measured_tokens > 16 * 1024)
+            .collect()
+    };
+    assert!(
+        oversized.is_empty(),
+        "requests over the 16384 window at two bytes per token (index, tokens): {oversized:?}"
+    );
+    harness.runtime.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_rejected_in_run_summary_fails_the_run_closed_without_resending_the_overflow() {
     // The summarizer returns garbage (no required sections). The compaction
     // run settles failed, no marker is written, and the prompt run fails with
