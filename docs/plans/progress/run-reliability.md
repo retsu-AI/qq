@@ -19,7 +19,7 @@ appended below, newest last.
 | RR8.1 | Empty truncated turn raises the cap once, then fails naming the cause | In review | [ENG-953](https://linear.app/retsu-ai/issue/ENG-953) | `fix/eng-953-rr8-empty-truncation` | 2 runs, 31 empty turns, ~2 h wasted |
 | RR8.2 | Chat Completions codec streams `reasoning_content` as exposed thinking | In review | [ENG-954](https://linear.app/retsu-ai/issue/ENG-954) | `fix/eng-954-rr8-gateway-reasoning` (stacked on 953) | provider; minimal profile green |
 | RR8.3 | Effort-aware output ceiling; legacy persisted defaults treated as unset | In review | [ENG-955](https://linear.app/retsu-ai/issue/ENG-955) | `fix/eng-955-rr8-effort-aware-output-cap` (stacked on 954) | |
-| RR8.4 | Sub-agent effort chosen from the roster role | In review | [ENG-956](https://linear.app/retsu-ai/issue/ENG-956) | `feat/eng-956-rr8-role-effort` (stacked on 955) | additive protocol field, no bump |
+| RR8.4 | Sub-agent effort chosen from the roster role | In review | [ENG-956](https://linear.app/retsu-ai/issue/ENG-956) | `feat/eng-956-rr8-role-effort` (stacked on 955) | additive protocol field; descriptor v10 → v11 |
 | RR9 | Approval deadline policy | Planned | [ENG-871](https://linear.app/retsu-ai/issue/ENG-871) | | 4 timeouts |
 | RR10 | Lenient tool-argument decode | Planned | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872) | | ~11 wasted turns |
 | RR11 | Read-hash ledger persisted | Planned | [ENG-873](https://linear.app/retsu-ai/issue/ENG-873) | | 14 refusals |
@@ -298,3 +298,33 @@ change. Gates on the stack tip: fmt, clippy `-D warnings`, workspace tests
 full parallel run pass in isolation, 67/67), minimal provider profile 203/203.
 Not done: the RR8 mid-tool-call re-issue item and live qualification on the
 LiteLLM route (needs a real run at `effort: max`).
+
+### 2026-09-26 — RR8 stack: Codex review triage (#198–#201)
+
+Seventeen automated findings; each checked against the code and CI before
+acting. Acted on (nine): RR8.1 discarded `IncompleteReason`, so an Anthropic
+`pause_turn` with no text failed as output exhaustion (CI-confirmed regression
+of `a_paused_turn_with_no_text_resumes_from_the_original_prompt`); the retry
+also emitted `continuation: 0` on a 1-based field. RR8.2 missed OpenRouter's
+`delta.reasoning` spelling. RR8.3 bypassed a managed `policy.max_output_tokens`,
+lifted on `effort: none`, documented a Bedrock branch that load rejects before
+it can run, and — the important one — never applied to ordinary TUI/headless
+sessions because those persist the compiled default into the session row, which
+the loader then read as an explicit override; the compiled default is now
+treated as unset like the legacy 2 048/4 096. RR8.4 added a descriptor field
+without the version bump the module requires (v11 after #194 took v10; golden digest re-pinned,
+mutation test extended), and its derived effort ignored the child route's
+ladder, so `fast → gpt-4.1-mini` would send an effort the model rejects and
+`balanced → grok` (`[low, high]`) failed admission at `medium`; the root now
+fits a derived effort to the catalog entry when building the roster. The
+RR8.3 commit also referenced RR8.4's `effort` field one commit early (did not
+compile standalone); moved. Declined (eight): re-recording the raised cap in
+the run's `ResolvedModel` (per-turn `Prepared.weight` already records the
+effective cap); summarizer usage on the new empty-failure path (pre-existing
+on the sibling path); gating the cap retry on `output_token_control` (one
+bounded extra turn on Codex, which the store shows never hits this);
+closing the reasoning block on `stop` before `[DONE]` (no observable effect);
+clamping the lifted cap to the remaining run output budget (pre-existing
+after-the-turn meter semantics); the live LiteLLM check (cannot run in CI;
+still recorded above as not done); ledger and `worker_model` wording (the code
+is right: `worker_model` is a balanced entry and runs at `medium`; docs fixed).
