@@ -2877,6 +2877,14 @@ enum AutoCompactScript {
     /// last repeats. A prompt whose admission folds several summarizer steps
     /// shares one loaded runtime across all of them and its own request.
     Sequence(Vec<AutoCompactScript>),
+    /// Runs the inner script and stamps every terminal event with usage of
+    /// `request bytes / bytes_per_token` input tokens: a provider whose
+    /// tokenizer is denser than the four-bytes-per-token default, so the
+    /// measured chain says a request is bigger than the raw estimate does.
+    Measured {
+        script: Box<AutoCompactScript>,
+        bytes_per_token: u64,
+    },
 }
 
 struct AutoCompactLoader {
@@ -2940,6 +2948,47 @@ struct AutoCompactProvider {
 
 impl Provider for AutoCompactProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
+        if let AutoCompactScript::Measured {
+            script,
+            bytes_per_token,
+        } = &self.script
+        {
+            let bytes = crate::measure_messages(request.messages())
+                + request.system().map_or(0, |system| system.len() as u64)
+                + request
+                    .tools()
+                    .iter()
+                    .map(|tool| {
+                        (tool.name().len()
+                            + tool.description().len()
+                            + tool.input_schema().get().len()) as u64
+                    })
+                    .sum::<u64>();
+            let usage = qq_provider::ProviderUsage {
+                input_tokens: bytes.div_ceil(*bytes_per_token),
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                output_tokens: 1,
+                reasoning_tokens: None,
+            };
+            let inner = AutoCompactProvider {
+                requests: Arc::clone(&self.requests),
+                script: (**script).clone(),
+                served: StdMutex::new(0),
+            };
+            return Box::pin(inner.stream(request).map(move |event| match event {
+                Ok(qq_provider::ProviderEvent::Completed { .. }) => {
+                    Ok(qq_provider::ProviderEvent::Completed { usage: Some(usage) })
+                }
+                Ok(qq_provider::ProviderEvent::Incomplete { reason, .. }) => {
+                    Ok(qq_provider::ProviderEvent::Incomplete {
+                        usage: Some(usage),
+                        reason,
+                    })
+                }
+                other => other,
+            }));
+        }
         if let AutoCompactScript::Sequence(scripts) = &self.script {
             let mut served = self.served.lock().unwrap();
             let script = scripts
@@ -3308,6 +3357,7 @@ impl Provider for AutoCompactProvider {
             AutoCompactScript::Stall => Box::pin(stream::pending()),
             AutoCompactScript::Panic => panic!("injected auto-compaction provider panic"),
             AutoCompactScript::Sequence(_) => unreachable!("sequences dispatch above"),
+            AutoCompactScript::Measured { .. } => unreachable!("measured scripts dispatch above"),
         }
     }
 }

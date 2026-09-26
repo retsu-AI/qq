@@ -1658,10 +1658,61 @@ impl plan::CompiledAgentPlan {
                 } else {
                     0
                 };
-                let mut input_bytes = system_bytes
-                    .saturating_add(tool_schema_bytes)
-                    .saturating_add(reducible_message_bytes)
-                    .saturating_add(irreducible_message_bytes);
+                // The estimate every decision on this turn shares: the
+                // provider-measured chain adjusted for each component's byte
+                // delta when a compatible measurement exists, else the raw
+                // byte ratio. The session layer's admission guard judges the
+                // `Prepared` weight with exactly this figure, so recovery
+                // (stubbing, in-run compaction) must be triggered by it too;
+                // deciding on the raw ratio here while admission used the
+                // measured chain let code-heavy runs skip recovery and then
+                // fail closed at the guard with zero compaction attempts.
+                let estimate_input_tokens = |chain: Option<(u64, u64, u64, u64)>, reducible: u64, irreducible: u64| -> u64 {
+                    let message_bytes = reducible.saturating_add(irreducible);
+                    match chain {
+                        Some((previous_system, previous_tools, previous_messages, measured)) => {
+                            // Calibrate against the whole measured request,
+                            // then apply each component's delta at that ratio.
+                            let ratio = sessions::context::calibrated_bytes_per_token(
+                                measured,
+                                previous_system
+                                    .saturating_add(previous_tools)
+                                    .saturating_add(previous_messages),
+                            );
+                            let tokens = sessions::context::adjust_measured_tokens_at(
+                                measured,
+                                previous_system,
+                                system_bytes,
+                                ratio,
+                            );
+                            let tokens = sessions::context::adjust_measured_tokens_at(
+                                tokens,
+                                previous_tools,
+                                tool_schema_bytes,
+                                ratio,
+                            );
+                            sessions::context::adjust_measured_tokens_at(
+                                tokens,
+                                previous_messages,
+                                message_bytes,
+                                ratio,
+                            )
+                        }
+                        None => sessions::context::estimate_tokens(
+                            system_bytes
+                                .saturating_add(tool_schema_bytes)
+                                .saturating_add(message_bytes),
+                        ),
+                    }
+                };
+                let over_window = |estimated_input_tokens: u64| -> bool {
+                    turn_ordinal > 1
+                        && plan.runtime.context_window.is_some_and(|window| {
+                            estimated_input_tokens
+                                .saturating_add(u64::from(max_output_tokens))
+                                > u64::from(window)
+                        })
+                };
                 // Mid-run the transcript cannot be compacted, but read-only
                 // results older than the recency window are re-derivable and
                 // can be stubbed in place. Do that before a later turn is
@@ -1670,12 +1721,11 @@ impl plan::CompiledAgentPlan {
                 // chain credits the removed bytes; it runs only when the
                 // estimate says the request would not fit.
                 let would_overflow = provider_overflowed
-                    || (turn_ordinal > 1
-                        && plan.runtime.context_window.is_some_and(|window| {
-                            sessions::context::estimate_tokens(input_bytes)
-                                .saturating_add(u64::from(max_output_tokens))
-                                > u64::from(window)
-                        }));
+                    || over_window(estimate_input_tokens(
+                        compatible_request,
+                        reducible_message_bytes,
+                        irreducible_message_bytes,
+                    ));
                 if would_overflow && {
                     // Results loaded from the store carry no effect here and
                     // fall back to the built-in read-only names, exactly as
@@ -1704,10 +1754,6 @@ impl plan::CompiledAgentPlan {
                 } {
                     reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
                     irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
-                    input_bytes = system_bytes
-                        .saturating_add(tool_schema_bytes)
-                        .saturating_add(reducible_message_bytes)
-                        .saturating_add(irreducible_message_bytes);
                 }
                 // Still over the window after stubbing, or the provider said
                 // so itself: summarize this run's own earlier turns and
@@ -1720,12 +1766,11 @@ impl plan::CompiledAgentPlan {
                 // failure here is the same context failure the session layer
                 // would have raised, with the compactor's reason attached.
                 let still_overflows = std::mem::take(&mut provider_overflowed)
-                    || (turn_ordinal > 1
-                        && plan.runtime.context_window.is_some_and(|window| {
-                            sessions::context::estimate_tokens(input_bytes)
-                                .saturating_add(u64::from(max_output_tokens))
-                                > u64::from(window)
-                        }));
+                    || over_window(estimate_input_tokens(
+                        compatible_request,
+                        reducible_message_bytes,
+                        irreducible_message_bytes,
+                    ));
                 if still_overflows && let Some(compactor) = compactor.as_ref() {
                     let run_start = reducible_messages.saturating_add(1);
                     let boundary = sessions::in_run_compaction_boundary(
@@ -1751,10 +1796,6 @@ impl plan::CompiledAgentPlan {
                                 // turns; the next provider usage re-seeds it.
                                 compatible_request = None;
                                 irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
-                                input_bytes = system_bytes
-                                    .saturating_add(tool_schema_bytes)
-                                    .saturating_add(reducible_message_bytes)
-                                    .saturating_add(irreducible_message_bytes);
                                 yield RuntimeEvent::InRunCompacted { turn_ordinal, turn_cutoff };
                             }
                             Err(error) => {
@@ -1770,36 +1811,14 @@ impl plan::CompiledAgentPlan {
                     }
                 }
                 let message_bytes = reducible_message_bytes.saturating_add(irreducible_message_bytes);
-                let compatible_input_tokens = compatible_request.map(
-                    |(previous_system, previous_tools, previous_messages, measured)| {
-                        // Calibrate against the whole measured request, then
-                        // apply each component's delta at that ratio.
-                        let ratio = sessions::context::calibrated_bytes_per_token(
-                            measured,
-                            previous_system
-                                .saturating_add(previous_tools)
-                                .saturating_add(previous_messages),
-                        );
-                        let tokens = sessions::context::adjust_measured_tokens_at(
-                            measured,
-                            previous_system,
-                            system_bytes,
-                            ratio,
-                        );
-                        let tokens = sessions::context::adjust_measured_tokens_at(
-                            tokens,
-                            previous_tools,
-                            tool_schema_bytes,
-                            ratio,
-                        );
-                        sessions::context::adjust_measured_tokens_at(
-                            tokens,
-                            previous_messages,
-                            message_bytes,
-                            ratio,
-                        )
-                    },
-                );
+                // The weight the session layer admits carries the same
+                // measured figure the recovery decisions above used, so the
+                // guard cannot disagree with the loop about whether this
+                // request fits. `None` after an in-run compaction: the chain
+                // covered replaced turns and the next usage re-seeds it.
+                let compatible_input_tokens = compatible_request.map(|chain| {
+                    estimate_input_tokens(Some(chain), reducible_message_bytes, irreducible_message_bytes)
+                });
                 yield RuntimeEvent::Prepared {
                     turn_ordinal,
                     identity: prompt_identity.take(),
