@@ -870,7 +870,7 @@ impl Runtime {
             };
             let mut events = self.provider.stream(request);
             let mut text = String::new();
-            let mut truncated = false;
+            let mut truncated = None;
             let mut usage = None;
             loop {
                 let Some(event) = events.next().await else {
@@ -908,8 +908,8 @@ impl Runtime {
                         usage = reported.map(provider_usage);
                         break;
                     }
-                    Ok(ProviderEvent::Incomplete { .. }) => {
-                        truncated = true;
+                    Ok(ProviderEvent::Incomplete { reason, .. }) => {
+                        truncated = Some(reason);
                         break;
                     }
                     Err(error) => return Err(error.to_string()),
@@ -926,12 +926,13 @@ impl Runtime {
                 (Some(total), None) | (None, Some(total)) => Some(total),
                 (None, None) => None,
             };
-            if !truncated {
+            let Some(reason) = truncated else {
                 return Ok((summary, total_usage));
-            }
-            if text.is_empty() {
+            };
+            if text.is_empty() && reason == qq_provider::IncompleteReason::OutputTokens {
                 // Nothing visible: the cap went to hidden reasoning. A
-                // continuation would resend the same request.
+                // continuation would resend the same request. (A provider
+                // pause with no text is resent as the provider requires.)
                 return Err(format!(
                     "summarizer output was cut off at the output token limit ({max_output_tokens} tokens) without producing any visible text; the limit was spent on reasoning. Lower `reasoning_effort` or raise `max_output_tokens`"
                 ));
@@ -1883,6 +1884,9 @@ impl plan::CompiledAgentPlan {
                 let mut open_reasoning = None;
                 let mut interrupted_turn = false;
                 let mut truncated_turn = false;
+                // Why the provider stopped short; `Paused` must be resent as
+                // the provider requires, `OutputTokens` may not be worth it.
+                let mut truncation_reason = qq_provider::IncompleteReason::OutputTokens;
                 // A transient provider fault. The provider's own ledger
                 // (ADR-0005) already resent while nothing had streamed, at
                 // sub-minute backoff; a fault that reaches here has outlasted
@@ -2181,7 +2185,7 @@ impl plan::CompiledAgentPlan {
                             completed = true;
                             break;
                         }
-                        Ok(ProviderEvent::Incomplete { usage, reason: _ }) => {
+                        Ok(ProviderEvent::Incomplete { usage, reason }) => {
                             // The turn is a valid prefix but the model was
                             // not done. Text stands; any tool call it had
                             // begun carries incomplete arguments and is
@@ -2195,6 +2199,7 @@ impl plan::CompiledAgentPlan {
                             }
                             terminal_usage = usage.map(provider_usage);
                             truncated_turn = true;
+                            truncation_reason = reason;
                             completed = true;
                             break;
                         }
@@ -2470,14 +2475,17 @@ impl plan::CompiledAgentPlan {
                     // continued: the budget already settles the run below.
                     // Otherwise resume, bounded, or settle with the reason.
                     if !budget_final_turn {
-                        if !assistant.has_content() {
+                        if !assistant.has_content()
+                            && truncation_reason == qq_provider::IncompleteReason::OutputTokens
+                        {
                             // Nothing visible streamed: the whole cap went to
                             // hidden reasoning (or the model produced nothing).
                             // A continuation notice cannot help because there
                             // is nothing to continue and the request would be
                             // resent byte-for-byte. Raise the cap once toward
                             // the model ceiling; otherwise settle with the
-                            // cause and both remedies named.
+                            // cause and both remedies named. A provider pause
+                            // with no text is not this case: it must be resent.
                             if empty_output_retries >= MAX_EMPTY_OUTPUT_RETRIES
                                 || max_output_tokens >= model_max_output_tokens
                             {
@@ -2497,6 +2505,10 @@ impl plan::CompiledAgentPlan {
                             max_output_tokens = max_output_tokens
                                 .saturating_mul(2)
                                 .min(model_max_output_tokens);
+                            // The retry is a continuation of the same answer
+                            // (1-based, bounded by MAX_EMPTY_OUTPUT_RETRIES
+                            // plus MAX_OUTPUT_CONTINUATIONS across the run).
+                            output_continuations += 1;
                             yield RuntimeEvent::OutputTruncated {
                                 turn_ordinal,
                                 continuation: output_continuations,
@@ -7461,6 +7473,14 @@ mod tests {
             events.last(),
             Some(&RuntimeEvent::Completed { final_output: None })
         );
+        // The retry is announced as the first (1-based) continuation.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::OutputTruncated {
+                continuation: 1,
+                ..
+            }
+        )));
         // The empty partial turn is durable and flagged; no continuation
         // notice was appended because there was nothing to continue.
         assert!(events.iter().any(|event| matches!(
