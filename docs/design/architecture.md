@@ -1038,7 +1038,7 @@ a legacy `worker_model`) into the secret-free `qq_protocol::DelegationRoster`
 on the `AgentProfile`: at most eight routes, each with an operator-declared
 role (`fast`, `balanced`, `strong`), an optional note, catalog context window
 and output limit, and its blended price relative to the spawning model. The
-plan records the roster in its descriptor (version 4), renders it once into the
+plan records the roster in its descriptor (since version 4), renders it once into the
 Delegation section of the system prompt together with the spawning model's own
 route and context window, and compiles `spawn_agent` with a `role` argument
 plus an exact `model` override limited to roster routes (the declaration is

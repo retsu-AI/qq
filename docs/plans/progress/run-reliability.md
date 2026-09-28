@@ -371,3 +371,13 @@ descriptor bump (an optional field that is `None` for every existing config is
 not a behavioural identity change; #194's v10 was); and `reasoning_efforts`
 declared without `reasoning: true` (contradictory config, belongs in
 validation if anywhere).
+
+Round four (five comments). One real, mine: the visible-output check on a
+truncated turn counted a call cut mid-arguments, which the resend drops, so
+such a turn was continued three times instead of taking the empty path (now
+only a completed call counts; regression test). One doc word ("since version
+4"). Declined: the ledger row (it is here); the explicit `--max-output-tokens
+4096` being filtered at load as a legacy default (accepted and documented in
+architecture.md — distinguishing it needs a provenance column); the storage
+reserve clamp on an explicit >16 k cap (the 32 B/token estimate is ~8× real,
+and the persist-time reservation remains authoritative).
