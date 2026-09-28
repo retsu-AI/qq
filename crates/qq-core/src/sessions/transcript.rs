@@ -1131,6 +1131,14 @@ pub(super) fn append_run_turns(
         if let Some(replay) = replay {
             message = message.with_replay(replay.into());
         }
+        // A truncated turn with nothing visible (the cap went to hidden
+        // reasoning, or a provider pause before any text) was neither
+        // appended nor followed by a notice in the live run: the request was
+        // resent as it stood. Replay mirrors that so the assembled context is
+        // the request the model actually saw.
+        if truncated && !message.has_content() && results.is_empty() {
+            continue;
+        }
         context.push(message);
         if !results.is_empty() {
             context.push(Message::tool_results(results));
