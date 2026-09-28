@@ -2307,10 +2307,11 @@ impl plan::CompiledAgentPlan {
                     }
                     // Only fully streamed calls could be executed; an interrupt
                     // or truncation executes none, so the partial turn carries
-                    // text alone. A call the model did stream is still
-                    // visible output: that truncation is continued, not
-                    // treated as an all-reasoning turn.
-                    streamed_visible_output = !pending_calls.is_empty();
+                    // text alone. A call the model did finish streaming is
+                    // still visible output: that truncation is continued, not
+                    // treated as an all-reasoning turn. A call cut mid-
+                    // arguments is not: the resend would carry nothing new.
+                    streamed_visible_output = pending_calls.iter().any(|call| call.completed);
                     blocks.retain(|block| matches!(block, TurnBlock::Text(_)));
                     pending_calls.clear();
                 }
@@ -7568,6 +7569,42 @@ mod tests {
                 kind: RunFailureKind::ProviderOutputTruncated,
                 ..
             })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_cut_mid_arguments_with_no_text_is_an_empty_truncation() {
+        // A call cut before it completed is dropped from the resend, so a
+        // turn holding only that is as empty as one with nothing at all: at
+        // the ceiling it fails at once rather than resending three times.
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TruncatingProvider {
+                truncations: usize::MAX,
+                cut_tool_call: true,
+                empty: true,
+                empty_from: usize::MAX,
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(
+                vec![Message::user("think hard")],
+                directory.path().to_owned(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Failed {
+                kind: RunFailureKind::ProviderOutputTruncated,
+                message,
+            }) if message.contains("without producing any visible output")
         ));
     }
 
