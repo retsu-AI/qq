@@ -31,7 +31,7 @@ impl TypeSafeTaskRouter {
         if !pinned {
             models.extend(
                 factory
-                    .configured_model_options(snapshot)
+                    .model_options_for_plan(snapshot)
                     .into_iter()
                     .filter(|option| {
                         option.selection.model.as_deref() != Some(fallback.route.as_str())

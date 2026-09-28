@@ -488,6 +488,23 @@ synchronous gate before its single request is enqueued), so a `list_changed`
 that lands while a call waits for a permit refuses the call instead of
 running it against an unreviewed tool set; see [`tools.md` § MCP](tools.md#mcp).
 
+Plan compilation reads the selected provider's credential from secure
+storage and nothing else on the provider path. The `spawn_agent` route list
+and Jev routing candidates admit a provider when its credential is *present*
+(a name in the credential index, a set environment variable, an inline value,
+`NoAuth`, or a configured AWS source) without reading the secret; a child or
+routed choice whose credential then fails to resolve fails at its own load,
+where the router already falls back to the configured choice. The isolated
+TUI QA profile offers only its fixture route. The optional model-discovery
+cache lookup uses a cached result only when the cache scope can be derived
+without secure-store I/O: Codex, XAI, stored secret references, and a
+built-in API-key fallback without an explicit non-stored reference skip the
+cache probe and use the configured reasoning ladder. Model catalogs shown to a
+client still resolve each credential. HTTP MCP servers with a stored bearer
+resolve it when their registry entry is built (once per registry-cache miss,
+not per compile); live discovery and provider requests resolve credentials
+through their existing paths.
+
 Credential rotation is tracked separately by an opaque `CredentialEpoch` owned
 by `qq-auth`: every durable credential write advances the store's index
 revision, including in-place rotation of an existing entry. The root records
