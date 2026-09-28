@@ -1245,6 +1245,7 @@ mod tests {
                     route: "custom/worker".to_owned(),
                     role: qq_protocol::DelegationRole::Balanced,
                     note: Some("everyday".to_owned()),
+                    effort: None,
                     context_window: Some(200_000),
                     max_output_tokens: Some(8_192),
                     relative_cost_permille: Some(400),
@@ -1309,7 +1310,7 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v10\0{\"version\":10,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v11\0{\"version\":11,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
@@ -1317,10 +1318,10 @@ mod tests {
         // from a different encoding.
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "bbce38425d8bcca413cfc55b8b5970860aefc7a9e6db57f19a47810be1efe223"
+            "21138d846da89ce3db4ae1f5213358c5e44666be585fe6746315b0e2b0786bda"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v10\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v11\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }
@@ -1428,6 +1429,12 @@ mod tests {
             (
                 "delegation.relative_cost",
                 Box::new(|d| d.delegation.roster[0].relative_cost_permille = None),
+            ),
+            (
+                "delegation.effort",
+                Box::new(|d| {
+                    d.delegation.roster[0].effort = Some(qq_provider::ReasoningEffort::Low);
+                }),
             ),
             (
                 "delegation.default_role",

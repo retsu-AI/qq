@@ -18,7 +18,7 @@ pub use capabilities::{
     AgentProfileSummary, CAPABILITIES_VERSION, CapabilitiesRequest, DelegationCapabilities,
     DelegationRole, DelegationRoster, DelegationRosterEntry, EventCapabilities, LimitCapabilities,
     PackSummary, ServerCapabilities, SkillCapabilities, SkillSummary, SteeringCapabilities,
-    ToolCapabilities, ToolHostSummary, WorkspaceToolCapabilities,
+    ToolCapabilities, ToolHostSummary, WorkspaceToolCapabilities, child_reasoning_effort,
 };
 pub use headless::{
     HeadlessApproval, HeadlessOutcome, HeadlessRecord, HeadlessRecordRef, HeadlessStatus,

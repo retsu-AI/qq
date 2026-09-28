@@ -1038,7 +1038,7 @@ a legacy `worker_model`) into the secret-free `qq_protocol::DelegationRoster`
 on the `AgentProfile`: at most eight routes, each with an operator-declared
 role (`fast`, `balanced`, `strong`), an optional note, catalog context window
 and output limit, and its blended price relative to the spawning model. The
-plan records the roster in its descriptor (version 4), renders it once into the
+plan records the roster in its descriptor (since version 4), renders it once into the
 Delegation section of the system prompt together with the spawning model's own
 route and context window, and compiles `spawn_agent` with a `role` argument
 plus an exact `model` override limited to roster routes (the declaration is
@@ -1053,6 +1053,22 @@ over the whole subtree by a bounded recursive query, inclusive accounting sums
 the same subtree, and each depth claims runs from its own permit pool so
 parents awaiting children at any level cannot starve the level below.
 
+
+A child's reasoning effort is chosen at spawn from the roster entry it resolved
+through (`qq_protocol::child_reasoning_effort`), not inherited verbatim: an
+entry's explicit `effort` wins; otherwise `fast` runs at `low` and `balanced`
+at `medium`, each capped by the parent's own pin so a child never thinks harder
+than the run that delegated to it, and `strong` inherits the parent's. Where
+the root builds the roster from a catalog it knows, a derived effort is fitted
+to the child's route first: a model without reasoning takes `default` (nothing
+is sent) and a model whose advertised ladder lacks the derived level takes the
+highest rung at or below it, so a default role never makes its child
+unspawnable. An explicit entry `effort` is validated at the child's load like
+any other pin. The chosen effort is written to the child's session row in the
+same transaction that creates it, so the loader, replay, and every client see
+the same value. The deprecated `worker_model` is a `balanced` roster entry and
+runs at `medium` like one; audits, which resolve no roster entry, inherit.
+Descriptor version 11 records the roster entry's effort.
 A root run's candidate final answer may be audited before it completes. The
 plan carries an `AuditPolicy` (`off`, `heuristic`, or `always`; `off` is the
 default because an audit is a second full agent run whose benefit on coding

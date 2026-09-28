@@ -3140,16 +3140,18 @@ fn delegation_roster(
         .map(blended)
         .filter(|price| *price > 0);
     let config = snapshot.delegation();
+    let parent_effort = snapshot.reasoning_effort();
     qq_protocol::DelegationRoster {
         roster: config
             .roster()
             .iter()
             .map(|entry| {
                 let metadata = metadata(entry.route());
-                qq_protocol::DelegationRosterEntry {
+                let mut roster_entry = qq_protocol::DelegationRosterEntry {
                     route: entry.route().as_str().to_owned(),
                     role: delegation_role(entry.role()),
                     note: entry.note().map(str::to_owned),
+                    effort: entry.effort(),
                     context_window: metadata.and_then(qq_config::ModelMetadata::context_window),
                     max_output_tokens: metadata
                         .and_then(qq_config::ModelMetadata::max_output_tokens),
@@ -3162,7 +3164,42 @@ fn delegation_roster(
                         (Some(current), Some(entry)) => u32::try_from(entry * 1000 / current).ok(),
                         _ => None,
                     },
+                };
+                // An effort the role derives is fitted to the route here,
+                // where the catalog is known, so a default role never makes
+                // its child unspawnable: a model without reasoning takes
+                // `Default` (nothing is sent); a model with an advertised
+                // ladder takes the highest level at or below the derived one,
+                // or its lowest. A route the catalog does not know is left to
+                // derive at spawn. An operator's explicit `effort` is kept
+                // verbatim and validated at the child's load like any pin.
+                if roster_entry.effort.is_none()
+                    && let Some(derived) =
+                        qq_protocol::child_reasoning_effort(&roster_entry, parent_effort)
+                    && let Some(metadata) = metadata
+                {
+                    use qq_provider::ReasoningEffort;
+                    let ladder = metadata.reasoning_efforts();
+                    let rank = |effort: ReasoningEffort| {
+                        ReasoningEffort::ALL
+                            .iter()
+                            .position(|level| *level == effort)
+                    };
+                    roster_entry.effort = if !metadata.reasoning() {
+                        Some(ReasoningEffort::Default)
+                    } else if ladder.is_empty() || ladder.contains(&derived) {
+                        Some(derived)
+                    } else {
+                        let derived_rank = rank(derived);
+                        ladder
+                            .iter()
+                            .copied()
+                            .filter(|level| rank(*level) <= derived_rank)
+                            .max_by_key(|level| rank(*level))
+                            .or_else(|| ladder.iter().copied().min_by_key(|level| rank(*level)))
+                    };
                 }
+                roster_entry
             })
             .collect(),
         default_role: delegation_role(config.default_role()),
@@ -5651,6 +5688,68 @@ mod tests {
     }
 
     #[test]
+    fn a_derived_roster_effort_is_fitted_to_the_child_route() {
+        // RR8.4 review: the role's derived effort (fast → low, balanced →
+        // medium) must be one the child's route accepts, or the default role
+        // makes the child unspawnable. An explicit entry effort is untouched.
+        use qq_provider::ReasoningEffort;
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let snapshot = factory
+            .load(&fixture.request(
+                r#"(
+                    version: 1,
+                    model: "custom/main",
+                    reasoning_effort: max,
+                    delegation: (
+                        roster: [
+                            (route: "custom/plain", role: fast),
+                            (route: "custom/two-rung", role: balanced),
+                            (route: "custom/full", role: balanced),
+                            (route: "custom/unknown", role: fast),
+                            (route: "custom/pinned", role: strong, effort: medium),
+                        ],
+                        default_role: balanced,
+                    ),
+                    providers: {
+                        "custom": Custom(
+                            connection: (
+                                base_url: "http://127.0.0.1:1/v1",
+                                api: OpenAiChatCompletions,
+                                auth: NoAuth,
+                            ),
+                            models: {
+                                "main": (name: "Main", reasoning: true),
+                                "plain": (name: "No reasoning"),
+                                "two-rung": (name: "Two rungs", reasoning: true, reasoning_efforts: [low, high]),
+                                "full": (name: "Full ladder", reasoning: true, reasoning_efforts: [low, medium, high]),
+                                "pinned": (name: "Pinned", reasoning: true, reasoning_efforts: [low, high]),
+                            },
+                        ),
+                    },
+                )"#,
+            ))
+            .unwrap();
+        let roster = delegation_roster(&snapshot, snapshot.model());
+        let efforts: Vec<_> = roster.roster.iter().map(|entry| entry.effort).collect();
+        assert_eq!(
+            efforts,
+            vec![
+                // A model without reasoning: nothing is sent on the wire.
+                Some(ReasoningEffort::Default),
+                // `medium` is not advertised; the highest rung below it is.
+                Some(ReasoningEffort::Low),
+                // Advertised as derived.
+                Some(ReasoningEffort::Medium),
+                // Not in the catalog: left to derive at spawn (low).
+                None,
+                // An explicit entry effort is kept verbatim.
+                Some(ReasoningEffort::Medium),
+            ]
+        );
+    }
+
+    #[test]
     fn resolved_model_rejects_output_limits_the_codec_cannot_represent() {
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
@@ -8048,7 +8147,7 @@ mod tests {
                 "descriptor leaked {forbidden}"
             );
         }
-        assert!(canonical.starts_with("qq-agent-plan-descriptor-v10\0{"));
+        assert!(canonical.starts_with("qq-agent-plan-descriptor-v11\0{"));
     }
 
     #[test]

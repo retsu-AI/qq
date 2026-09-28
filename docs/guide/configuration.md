@@ -284,7 +284,12 @@ delegation: (
 )
 ```
 
-Up to 8 roster entries. Each route must resolve like `model`.
+Up to 8 roster entries. Each route must resolve like `model`. An entry may pin
+the reasoning effort its children run at with `effort: low` (any effort value);
+without it, `fast` children run at `low` and `balanced` at `medium`, never above
+the parent's own effort, fitted to what the route's catalog entry advertises
+(a model without reasoning is sent none), while `strong` children inherit the
+parent's. The deprecated `worker_model` counts as a `balanced` entry.
 Design: [`../design/architecture.md`](../design/architecture.md) and
 [`../plans/supervised-delegation.md`](../plans/supervised-delegation.md).
 

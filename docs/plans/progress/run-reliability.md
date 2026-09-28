@@ -15,7 +15,11 @@ appended below, newest last.
 | RR6 | Reactive overflow; un-wedge admission (mid-run compaction shipped in #92) | In review | [ENG-868](https://linear.app/retsu-ai/issue/ENG-868) | `feat/eng-868-rr6-reactive-overflow` | 9 runs / 3 sessions; independent review |
 | RR7 | Estimate calibration from reported usage | In review | [ENG-869](https://linear.app/retsu-ai/issue/ENG-869) | `feat/eng-869-rr7-estimate-calibration` | deferred from F04 |
 | RR7.1 | Use measured admission occupancy for in-run recovery | In review | [ENG-940](https://linear.app/retsu-ai/issue/ENG-940) | `fix/eng-940-measured-context-recovery` | Eight observed failures; zero compaction attempts |
-| RR8 | Output-token handling and persisted `max_output_tokens` floor | Planned | [ENG-870](https://linear.app/retsu-ai/issue/ENG-870) | | 5 runs |
+| RR8 | Output-token handling and persisted `max_output_tokens` floor | Split into RR8.1–RR8.4 | [ENG-870](https://linear.app/retsu-ai/issue/ENG-870) | | 5 runs; the mid-tool-call re-issue item stays here |
+| RR8.1 | Empty truncated turn raises the cap once, then fails naming the cause | In review | [ENG-953](https://linear.app/retsu-ai/issue/ENG-953) | `fix/eng-953-rr8-empty-truncation` | 2 runs, 31 empty turns, ~2 h wasted |
+| RR8.2 | Chat Completions codec streams `reasoning_content` as exposed thinking | In review | [ENG-954](https://linear.app/retsu-ai/issue/ENG-954) | `fix/eng-954-rr8-gateway-reasoning` (stacked on 953) | provider; minimal profile green |
+| RR8.3 | Effort-aware output ceiling; legacy persisted defaults treated as unset | In review | [ENG-955](https://linear.app/retsu-ai/issue/ENG-955) | `fix/eng-955-rr8-effort-aware-output-cap` (stacked on 954) | |
+| RR8.4 | Sub-agent effort chosen from the roster role | In review | [ENG-956](https://linear.app/retsu-ai/issue/ENG-956) | `feat/eng-956-rr8-role-effort` (stacked on 955) | additive protocol field; descriptor v10 → v11 |
 | RR9 | Approval deadline policy | Planned | [ENG-871](https://linear.app/retsu-ai/issue/ENG-871) | | 4 timeouts |
 | RR10 | Lenient tool-argument decode | Planned | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872) | | ~11 wasted turns |
 | RR11 | Read-hash ledger persisted | Planned | [ENG-873](https://linear.app/retsu-ai/issue/ENG-873) | | 14 refusals |
@@ -258,3 +262,122 @@ now runs with `None`, `"\n"`, and `" \n\t"` preludes, a `"ok"` prelude
 control still completes in 2 sends, and
 `an_empty_completion_after_tool_results_and_steering_is_still_a_fault`
 queues steering before the run so its request ends in a user message.
+
+### 2026-09-26 — RR8.1–RR8.4 output-cap stack (ENG-953..956)
+
+Read-only store inspection of the two recent `provider_output_truncated`
+runs on `litellm/us.anthropic.claude-fable-5-1` (`043232c6…`, `57febea3…`):
+every failing turn persisted `assistant_content_json = []` with
+`output_tokens = 16384`, and every continuation request had `input_tokens = 2`
+uncached, i.e. byte-identical to the one before. Route-wide since 09-10:
+3 935 turns, 49 truncated, 31 empty, ≈ 671 k output tokens and ≈ 2 h wall
+producing nothing; no other route shows it. Three stacked causes: the Chat
+Completions codec dropped `delta.reasoning_content` so all-thinking turns
+looked empty; with `reasoning_effort: max` Anthropic thinking shares
+`max_tokens` and ate the 16 384 default; the loop resent an unchanged request
+up to `MAX_OUTPUT_CONTINUATIONS` times. Codex avoids all three by never
+sending `max_output_tokens` on the Responses wire.
+
+RR8.1 (`qq-core` run loop + summarizer): an empty truncation doubles the cap
+toward the model ceiling once (`MAX_EMPTY_OUTPUT_RETRIES`), otherwise fails at
+once naming reasoning as the cause and both remedies. Two regressions; the
+with-text continuation tests are unchanged. RR8.2 (`qq-provider`): one
+`ExposedThinking` block per turn from `reasoning_content`, closed by the first
+visible delta / finish reason / `[DONE]`; three tests incl. the audited
+all-reasoning-then-`length` shape. RR8.3 (`src/runtime.rs`): with effort set on
+Anthropic Messages, Bedrock Converse, or an Anthropic model behind a gateway
+(canonical id or vendor segment), the compiled default resolves to the catalog
+ceiling unless `max_output_tokens` has non-compiled provenance; persisted
+2 048/4 096 (`LEGACY_DEFAULT_MAX_OUTPUT_TOKENS`) are treated as unset. RR8.4
+(`qq-protocol`/`qq-config`/`sessions`): `DelegationRosterEntry.effort` and
+`child_reasoning_effort` (fast → low, balanced → medium capped by the parent,
+strong inherits, explicit wins); written to the child's session row in the
+creation transaction. Additive protocol field, goldens unchanged, no schema
+change. Gates on the stack tip: fmt, clippy `-D warnings`, workspace tests
+(1 157 passed; the compaction/deadline timing fixtures that failed under the
+full parallel run pass in isolation, 67/67), minimal provider profile 203/203.
+Not done: the RR8 mid-tool-call re-issue item and live qualification on the
+LiteLLM route (needs a real run at `effort: max`).
+
+### 2026-09-26 — RR8 stack: Codex review triage (#198–#201)
+
+Seventeen automated findings; each checked against the code and CI before
+acting. Acted on (nine): RR8.1 discarded `IncompleteReason`, so an Anthropic
+`pause_turn` with no text failed as output exhaustion (CI-confirmed regression
+of `a_paused_turn_with_no_text_resumes_from_the_original_prompt`); the retry
+also emitted `continuation: 0` on a 1-based field. RR8.2 missed OpenRouter's
+`delta.reasoning` spelling. RR8.3 bypassed a managed `policy.max_output_tokens`,
+lifted on `effort: none`, documented a Bedrock branch that load rejects before
+it can run, and — the important one — never applied to ordinary TUI/headless
+sessions because those persist the compiled default into the session row, which
+the loader then read as an explicit override; the compiled default is now
+treated as unset like the legacy 2 048/4 096. RR8.4 added a descriptor field
+without the version bump the module requires (v11 after #194 took v10; golden digest re-pinned,
+mutation test extended), and its derived effort ignored the child route's
+ladder, so `fast → gpt-4.1-mini` would send an effort the model rejects and
+`balanced → grok` (`[low, high]`) failed admission at `medium`; the root now
+fits a derived effort to the catalog entry when building the roster. The
+RR8.3 commit also referenced RR8.4's `effort` field one commit early (did not
+compile standalone); moved. Declined (eight): re-recording the raised cap in
+the run's `ResolvedModel` (per-turn `Prepared.weight` already records the
+effective cap); summarizer usage on the new empty-failure path (pre-existing
+on the sibling path); gating the cap retry on `output_token_control` (one
+bounded extra turn on Codex, which the store shows never hits this);
+closing the reasoning block on `stop` before `[DONE]` (no observable effect);
+clamping the lifted cap to the remaining run output budget (pre-existing
+after-the-turn meter semantics); the live LiteLLM check (cannot run in CI;
+still recorded above as not done); ledger and `worker_model` wording (the code
+is right: `worker_model` is a balanced entry and runs at `medium`; docs fixed).
+
+Round two (three more on #198, one on #200). Acted on: a turn that streamed a
+complete tool call and then hit the cap with no text was classified as
+all-reasoning because truncation cleanup drops pending calls before the check
+(now continued like any truncation); an empty truncated turn was persisted as
+truncated and replay appended an empty assistant message plus the continuation
+notice the live run never sent (replay now skips it); and the compiled-default
+filter from round one would have discarded an explicit `--max-output-tokens
+16384`, so it is withdrawn and the cause fixed instead: pickers, the configured
+default, the worker selection and the headless path no longer materialise the
+compiled default into `ModelSelection`, so a row pins a cap only when it was
+chosen. Declined: clamping the compaction cap-raise retry to the remaining
+context window — the summarizer input was selected against an 8 192 reserve
+and the ceiling is well above it, so the retry overflows only for a transcript
+already at the window edge, where the original request was about to fail
+anyway; not worth a second selection pass. Rebased onto `main` after #194
+took descriptor v10; ours is v11.
+
+Round three (two on #198). Acted on both: after three visible truncations an
+empty one entered the cap-raise branch, pushed `continuation` to 4 (past the
+advertised `max_output_continuations`) and spent a fifth turn — the branch now
+settles once the shared cap is spent (regression pins 5 → 4 turns); and the
+summarizer's empty check trims like `has_content`, so a whitespace-only reply
+is not continued three times.
+
+Round three on #200/#201 (nine comments). One real find, and the kind a
+reviewer should catch: the lifted wire cap fed the 4 MiB storage backstop at
+32 bytes per token, so a 128 000-token ceiling left 32 KiB for the prompt and
+every effort-enabled session would have been rejected before its first
+request — the reserve is now capped at the default's 512 KiB and the enlarged
+cap is understood as hidden reasoning, never transcript (test pins equal
+reserves at 16 384 and 128 000). Two cheap correctness notes taken:
+`max_output_tokens: Clear` restores compiled provenance rather than reading as
+an operator pin, and protocol.md's cap description notes the exception. Declined
+as not worth code: migrating pre-existing rows that recorded 16 384 (they
+behave exactly as before this change); `route_direct` copying the fallback
+cap (opt-in Jev routing, out of scope); nested `gateway/bedrock/anthropic.…`
+ids (hypothetical); fitting the roster effort against the discovery cache
+(the roster is built from the static catalog everywhere); an ADR for the
+descriptor bump (an optional field that is `None` for every existing config is
+not a behavioural identity change; #194's v10 was); and `reasoning_efforts`
+declared without `reasoning: true` (contradictory config, belongs in
+validation if anywhere).
+
+Round four (five comments). One real, mine: the visible-output check on a
+truncated turn counted a call cut mid-arguments, which the resend drops, so
+such a turn was continued three times instead of taking the empty path (now
+only a completed call counts; regression test). One doc word ("since version
+4"). Declined: the ledger row (it is here); the explicit `--max-output-tokens
+4096` being filtered at load as a legacy default (accepted and documented in
+architecture.md — distinguishing it needs a provenance column); the storage
+reserve clamp on an explicit >16 k cap (the 32 B/token estimate is ~8× real,
+and the persist-time reservation remains authoritative).
