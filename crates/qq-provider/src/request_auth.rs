@@ -217,11 +217,15 @@ impl RequestAuthorizer {
 }
 
 fn request_credential_error(error: RequestCredentialError) -> ProviderError {
-    let kind = match &error {
-        RequestCredentialError::TimedOut | RequestCredentialError::CapacityUnavailable => {
-            return ProviderError::CredentialsUnavailable(error.to_string());
-        }
-        RequestCredentialError::Missing { .. }
+    let kind = match error {
+        // A load that timed out or found no loader capacity already waited
+        // its full bound; resending would wait it again before the first
+        // event, so it is terminal like a rejected credential. It stays a
+        // `ResponseFailed` rather than `CredentialsUnavailable`, which means
+        // "no credential configured" to the live-provider canary.
+        RequestCredentialError::TimedOut
+        | RequestCredentialError::CapacityUnavailable
+        | RequestCredentialError::Missing { .. }
         | RequestCredentialError::Invalid
         | RequestCredentialError::RefreshRejected => ProviderErrorKind::Authentication,
         RequestCredentialError::RefreshUnavailable
@@ -365,7 +369,8 @@ mod tests {
             assert_eq!(provider_error.kind(), ProviderErrorKind::Authentication);
             assert!(matches!(
                 provider_error,
-                ProviderError::CredentialsUnavailable(got) if got == message
+                ProviderError::ResponseFailed { kind: ProviderErrorKind::Authentication, message: got }
+                    if got == message
             ));
         }
 

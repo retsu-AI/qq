@@ -113,7 +113,9 @@ has been yielded the request is never resent, so a retry can never duplicate
 output; a body that ends after events is the adapter's protocol error. Auth
 and other client errors are never retried. A request-time credential load
 that times out (65 s) or finds the loader at capacity is an authentication
-fault too, surfaced as `CredentialsUnavailable`: the restart loop already
+fault too (`ResponseFailed` of kind `Authentication`; not
+`CredentialsUnavailable`, which the live-provider canary reads as "no
+credential configured" and skips): the restart loop already
 waited the full bound once, and resending would wait it again (up to four
 minutes before the first token), so the request fails at once with the cause
 named. Refresh, storage, and worker failures stay unavailable-class and are

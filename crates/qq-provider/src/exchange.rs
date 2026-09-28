@@ -523,7 +523,7 @@ mod tests {
             assert_eq!(events.len(), 1, "{events:?}");
             assert!(matches!(
                 &events[0],
-                Err(ProviderError::CredentialsUnavailable(message))
+                Err(ProviderError::ResponseFailed { kind: ProviderErrorKind::Authentication, message })
                     if message == &error.to_string()
             ));
             assert!(

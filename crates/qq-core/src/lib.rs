@@ -9046,7 +9046,10 @@ mod tests {
                     self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let message = self.message.to_owned();
                     Box::pin(stream::once(async move {
-                        Err(ProviderError::CredentialsUnavailable(message))
+                        Err(ProviderError::ResponseFailed {
+                            kind: qq_provider::ProviderErrorKind::Authentication,
+                            message,
+                        })
                     }))
                 }
             }
