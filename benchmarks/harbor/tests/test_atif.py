@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import runpy
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,18 +15,35 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 SMOKE_TASK = Path(__file__).resolve().parents[1] / "smoke-task"
 
 
+def current_protocol_version() -> int:
+    return runpy.run_path(str(FIXTURES.parent / "make_fixtures.py"))["PROTOCOL_VERSION"]
+
+
 class AtifConversionTests(unittest.TestCase):
+    def test_fixture_generator_uses_current_protocol_without_writing_fixtures(self) -> None:
+        generator = runpy.run_path(str(FIXTURES.parent / "make_fixtures.py"))
+        trace = generator["Trace"]()
+        trace.trial()
+        self.assertEqual(trace.lines[0]["protocol_version"], current_protocol_version())
+
     def test_all_durable_trace_shapes_convert_deterministically(self) -> None:
-        for trace in sorted(FIXTURES.glob("*.trace.jsonl")):
+        traces = sorted(FIXTURES.glob("*.trace.jsonl"))
+        self.assertTrue(traces)
+        protocol_version = current_protocol_version()
+        for trace in traces:
             with self.subTest(trace=trace.name):
-                first = convert_trace(load_trace(trace))
+                records = load_trace(trace)
+                trial = records[0]
+                self.assertEqual(trial["type"], "trial")
+                self.assertEqual(trial["protocol_version"], protocol_version)
+                first = convert_trace(records)
                 second = convert_trace(load_trace(trace))
                 self.assertEqual(first, second)
                 self.assertEqual(first["schema_version"], ATIF_SCHEMA_VERSION)
                 self.assertEqual(first["agent"]["name"], "qq")
                 self.assertTrue(first["steps"])
                 qq = first["extra"]["qq"]
-                self.assertEqual(qq["protocol_version"], 23)
+                self.assertEqual(qq["protocol_version"], trial["protocol_version"])
                 self.assertEqual(qq["qq_source_revision"], "fixture-revision")
                 self.assertEqual(qq["outcome"]["prompt_identity"]["version"], 7)
                 json.dumps(first)

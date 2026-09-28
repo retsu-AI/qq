@@ -15,6 +15,7 @@ Usage: python tests/make_fixtures.py  (from benchmarks/harbor/)
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -27,10 +28,23 @@ CHILD_SESSION = "ae" * 16
 CHILD_RUN = "af" * 16
 
 QQ_VERSION = "0.1.0"
-# Keep generated trace identity aligned with qq_protocol::PROTOCOL_VERSION.
-# Version 23 adds checkpoint_reviewed; traces need not contain that optional
-# event, but they must identify the wire contract their envelopes target.
-PROTOCOL_VERSION = 23
+PROTOCOL_SOURCE = Path(__file__).resolve().parents[3] / "crates/qq-protocol/src/lib.rs"
+
+
+def current_protocol_version() -> int:
+    """Read qq_protocol::PROTOCOL_VERSION so generated traces identify the
+    current wire contract instead of a number that drifts from the Rust source."""
+    versions = re.findall(
+        r"^pub const PROTOCOL_VERSION: u16 = (\d+);$",
+        PROTOCOL_SOURCE.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    if len(versions) != 1:
+        raise RuntimeError("expected one authoritative Rust PROTOCOL_VERSION declaration")
+    return int(versions[0])
+
+
+PROTOCOL_VERSION = current_protocol_version()
 MODEL = {"model": "anthropic/claude-sonnet-4-5", "max_output_tokens": 32000}
 PROMPT_IDENTITY = {
     "version": 7,
