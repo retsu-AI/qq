@@ -381,3 +381,21 @@ only a completed call counts; regression test). One doc word ("since version
 architecture.md — distinguishing it needs a provenance column); the storage
 reserve clamp on an explicit >16 k cap (the 32 B/token estimate is ~8× real,
 and the persist-time reservation remains authoritative).
+
+### 2026-09-28 — a timed-out credential load fails the request instead of restarting it
+
+`request_credential_error` mapped `RequestCredentialError::TimedOut` (the 65 s
+request-time load bound) and `CapacityUnavailable` to `ProviderErrorKind::
+Unavailable`, which `with_restart` treats as transient: a Keychain that hung
+once was asked again up to four times, several minutes before the first token
+with no event to show for it. Both now surface as an authentication-kind
+`ResponseFailed` (not `CredentialsUnavailable`, which the live canary skips as
+"no credential"), so neither the provider restart loop nor the core turn
+retry resends; refresh, storage, and worker failures stay unavailable-class and
+keep their retry. Tests: `timed_out_and_exhausted_credential_loads_are_
+terminal_for_this_request`, `credential_timeout_and_capacity_do_not_restart_
+before_first_event` (one credential call, zero sends), `temporary_refresh_and_
+storage_failures_can_restart_before_first_event`, and the core-level
+`credential_load_timeout_does_not_retry_the_turn`. Extracted from #189
+(`53dad75`, kept with `-x`); the `--state-root`, admission and Jev feedback
+commits that PR also carried are not taken. `providers.md` records the boundary.
