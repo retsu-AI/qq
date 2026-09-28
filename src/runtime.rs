@@ -531,6 +531,8 @@ impl RuntimeFactory {
         (plan, decision)
     }
 
+    /// The authenticated configured catalog; tests assert on it directly.
+    #[cfg(test)]
     pub fn configured_model_options(&self, snapshot: &ConfigSnapshot) -> Vec<ModelDescriptor> {
         if self.is_isolated_tui_qa() {
             vec![Self::isolated_tui_qa_model_option(snapshot)]
@@ -663,14 +665,30 @@ impl RuntimeFactory {
         snapshot: &CatalogSource<'_>,
         discovered: &BTreeMap<String, Vec<DiscoveredModel>>,
     ) -> Vec<ModelDescriptor> {
-        self.model_options_with_discovery_impl(snapshot, discovered, true)
+        self.model_options_with_discovery_impl(snapshot, discovered, RouteAdmission::Authenticated)
     }
 
-    fn model_options_for_plan(&self, snapshot: &ConfigSnapshot) -> Vec<ModelDescriptor> {
+    /// The `spawn_agent` routes and Jev routing candidates for a plan. It
+    /// must not read secure
+    /// storage (a keyring read per configured provider on every compile is
+    /// a `securityd` round trip each on macOS), so providers are admitted on
+    /// whether a credential is present in the index or environment, not on
+    /// resolving it. A present-but-unusable credential fails at the child's
+    /// own request, where it is read anyway.
+    pub(super) fn model_options_for_plan(&self, snapshot: &ConfigSnapshot) -> Vec<ModelDescriptor> {
+        if self.is_isolated_tui_qa() {
+            return vec![Self::isolated_tui_qa_model_option(snapshot)];
+        }
+        // An unreadable index admits no stored credential, as resolving
+        // each one would have.
+        let registered: BTreeSet<String> = match self.inner.credentials.list() {
+            Ok(records) => records.into_iter().map(|record| record.name).collect(),
+            Err(_) => BTreeSet::new(),
+        };
         self.model_options_with_discovery_impl(
             &CatalogSource::from(snapshot),
             &BTreeMap::new(),
-            false,
+            RouteAdmission::CredentialPresent(&registered),
         )
     }
 
@@ -678,15 +696,21 @@ impl RuntimeFactory {
         &self,
         snapshot: &CatalogSource<'_>,
         discovered: &BTreeMap<String, Vec<DiscoveredModel>>,
-        require_authentication: bool,
+        admission: RouteAdmission<'_>,
     ) -> Vec<ModelDescriptor> {
+        let admitted = |provider_id: &str, provider: &ProviderConfig| match admission {
+            RouteAdmission::Authenticated => self.provider_authenticated(provider_id, provider),
+            RouteAdmission::CredentialPresent(registered) => {
+                provider_credential_present(provider, registered)
+            }
+        };
         let allowed = snapshot.policy.allowed_providers();
         let denied = snapshot.policy.denied_providers();
         let mut options = Vec::new();
         'providers: for (provider_id, provider) in snapshot.providers {
             if allowed.is_some_and(|allowed| !allowed.iter().any(|id| id == provider_id))
                 || denied.iter().any(|id| id == provider_id)
-                || (require_authentication && !self.provider_authenticated(provider_id, provider))
+                || !admitted(provider_id, provider)
             {
                 continue;
             }
@@ -759,7 +783,7 @@ impl RuntimeFactory {
                 .iter()
                 .any(|option| option.selection.model.as_deref() == Some(route.as_str()))
             && let Some(provider) = snapshot.providers.get(route.provider())
-            && (!require_authentication || self.provider_authenticated(route.provider(), provider))
+            && admitted(route.provider(), provider)
         {
             let metadata = provider.models().get(route.model());
             options.push(ModelDescriptor {
@@ -2187,6 +2211,77 @@ fn effective_provider_api(
 /// Which input the AWS default credential chain would pick up from this
 /// process's environment, named for a human, without calling AWS. `None`
 /// means the chain has nothing local to start from (IMDS is not probed).
+/// How a model catalog admits a provider's routes.
+#[derive(Clone, Copy)]
+enum RouteAdmission<'a> {
+    /// Resolve the credential (reads secure storage): the catalog a client
+    /// is shown.
+    Authenticated,
+    /// A credential is present in the index (these names) or environment;
+    /// nothing is read from secure storage.
+    CredentialPresent(&'a BTreeSet<String>),
+}
+
+/// [`RuntimeFactory::provider_authenticated`] without the secret read: the
+/// same credential sources, checked for presence. Endpoint binding is not
+/// checked; a mismatch fails at the request that reads the credential.
+fn provider_credential_present(provider: &ProviderConfig, registered: &BTreeSet<String>) -> bool {
+    let reference_present = |reference: &qq_config::SecretRef| match reference {
+        qq_config::SecretRef::Env(variable) => environment_variable_set(variable),
+        qq_config::SecretRef::Stored(name) => registered.contains(name.as_str()),
+        qq_config::SecretRef::Value(_) => true,
+    };
+    match provider.access() {
+        Some(ProviderAccess::Http(access)) => match access.auth() {
+            HttpCredential::Configured(auth) => match auth {
+                ProviderAuth::NoAuth => true,
+                ProviderAuth::ApiKey(reference)
+                | ProviderAuth::Bearer(reference)
+                | ProviderAuth::Header(_, reference) => reference_present(reference),
+            },
+            HttpCredential::ApiKey {
+                explicit,
+                stored_name,
+                environment_variable,
+                alternate_variables,
+                ..
+            } => match explicit {
+                Some(reference) => reference_present(reference),
+                None => {
+                    registered.contains(*stored_name)
+                        || std::iter::once(*environment_variable)
+                            .chain(alternate_variables.iter().copied())
+                            .any(environment_variable_set)
+                }
+            },
+            HttpCredential::OpenAiCodex { profile } => registered.contains(&format!(
+                "openai-codex/{}",
+                profile.as_deref().unwrap_or("default")
+            )),
+            HttpCredential::XAi { api_key, profile } => match api_key {
+                Some(reference) => reference_present(reference),
+                None => {
+                    registered.contains(&format!("xai/{}", profile.as_deref().unwrap_or("default")))
+                        || environment_variable_set("XAI_API_KEY")
+                }
+            },
+        },
+        Some(
+            ProviderAccess::AmazonBedrock { auth, .. }
+            | ProviderAccess::AmazonBedrockMantle { auth, .. },
+        ) => match auth {
+            BedrockAuth::ApiKey(reference) => reference_present(reference),
+            BedrockAuth::Aws(AwsAuth::Profile(profile)) => aws_profile_configured(profile),
+            BedrockAuth::Aws(AwsAuth::DefaultChain) => aws_default_chain_source().is_some(),
+        },
+        None => false,
+    }
+}
+
+fn environment_variable_set(variable: &str) -> bool {
+    std::env::var_os(variable).is_some_and(|value| !value.is_empty())
+}
+
 pub(crate) fn aws_default_chain_source() -> Option<&'static str> {
     if std::env::var_os("AWS_ACCESS_KEY_ID").is_some()
         && std::env::var_os("AWS_SECRET_ACCESS_KEY").is_some()
@@ -6457,6 +6552,13 @@ mod tests {
         }
 
         assert_eq!(factory.configured_model_options(&snapshot).len(), 1);
+        // The compiled plan advertises the same single fixture route to
+        // `spawn_agent`, not the unused credential-bearing provider.
+        let plan = factory.plan_for(&request).unwrap();
+        assert_eq!(
+            plan.descriptor().tools.spawn_model_routes,
+            vec!["custom/test-model".to_owned()]
+        );
 
         let catalog = ModelCatalogRequest {
             workspace: workspace.display().to_string(),
@@ -8365,6 +8467,61 @@ mod tests {
             1,
             "plan compilation probed the secure store for unselected providers"
         );
+    }
+
+    #[test]
+    fn plan_spawn_routes_offer_only_providers_with_a_credential_present() {
+        // Regression: routes were briefly built with no credential check at
+        // all, so every built-in provider's catalog (64 routes by default)
+        // was advertised to `spawn_agent` and could crowd the bounded list.
+        let fixture = RuntimeFixture::new();
+        let keyring = Arc::new(SlowKeyring {
+            inner: MemoryKeyring::default(),
+            delay: Duration::ZERO,
+            reads: AtomicU64::new(0),
+        });
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            keyring.clone(),
+        );
+        credentials.set("present", "sk-present", false).unwrap();
+        fs::write(
+            fixture.path("global/config.ron"),
+            r#"(
+                version: 1,
+                model: "present/m",
+                providers: {
+                    "present": Custom(
+                        connection: (base_url: "http://127.0.0.1:1/a", api: OpenAiResponses, auth: Bearer(Stored("present"))),
+                        models: { "m": (name: "m") },
+                    ),
+                    "absent": Custom(
+                        connection: (base_url: "http://127.0.0.1:1/b", api: OpenAiResponses, auth: Bearer(Stored("absent"))),
+                        models: { "m": (name: "m") },
+                    ),
+                    "open": Custom(
+                        connection: (base_url: "http://127.0.0.1:1/c", api: OpenAiResponses, auth: NoAuth),
+                        models: { "m": (name: "m") },
+                    ),
+                },
+            )"#,
+        )
+        .unwrap();
+        let factory = fixture.factory_with_credentials(credentials);
+        let plan = factory
+            .plan_for(&fixture.request(r#"(version: 1, model: "present/m")"#))
+            .unwrap();
+        let routes = &plan.descriptor().tools.spawn_model_routes;
+        assert!(routes.iter().any(|route| route == "present/m"));
+        assert!(routes.iter().any(|route| route == "open/m"));
+        assert!(!routes.iter().any(|route| route.starts_with("absent/")));
+        for builtin in ["anthropic/", "google/", "openai/", "xai/"] {
+            assert!(
+                !routes.iter().any(|route| route.starts_with(builtin)),
+                "{builtin} has no credential but was offered: {routes:?}"
+            );
+        }
+        assert_eq!(keyring.reads.load(Ordering::Relaxed), 1);
     }
 
     /// Not a correctness test: prints the cold-compile cost of `plan_for` with

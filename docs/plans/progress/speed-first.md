@@ -830,6 +830,18 @@ fails at its own request, where the credential is read anyway) and the cache
 probe is skipped whenever its scope would need secure-store I/O. One read
 remains: the selected provider's own credential.
 
+Review follow-up (same PR): the first cut dropped the credential check
+entirely, which advertised every built-in provider's catalog (64 routes on a
+default config against 17 before) and let unauthenticated providers crowd the
+bounded list; it also bypassed the isolated QA profile's single-route guard,
+and Jev routing candidates still probed every provider. Routes and routing
+candidates now admit a provider on credential *presence* (index name,
+environment variable, inline value, `NoAuth`, AWS source) read from one index
+load, with no secret read; isolated QA offers only its fixture route.
+Regression tests `plan_spawn_routes_offer_only_providers_with_a_credential_
+present` and the extended `isolated_tui_qa_policy_survives_runtime_callbacks_
+and_reconnect`.
+
 Measured with `plan_compile_with_slow_keyring` (5 ms per read, release,
 50 iterations, cold compile median): 1/4/16 stored-credential providers went
 from 10.5 / 25.6 / 86.2 ms to 5.2 / 5.4 / 5.7 ms; keyring reads per compile
