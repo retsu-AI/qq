@@ -371,7 +371,12 @@ async fn prepare_headless(
     let model = qq_protocol::ModelSelection {
         model_is_fallback,
         model: Some(snapshot.model().as_str().to_owned()),
-        max_output_tokens: Some(snapshot.max_output_tokens()),
+        // A `--max-output-tokens` or configured cap is the session's pin; the
+        // compiled default is not recorded as one.
+        max_output_tokens: runtime::chosen_max_output_tokens(
+            snapshot.max_output_tokens(),
+            snapshot.provenance(),
+        ),
         organization: snapshot.organization().map(str::to_owned),
     };
     let handler = runtime::RuntimeHandler::open_with(factory, snapshot.approval_timeout())

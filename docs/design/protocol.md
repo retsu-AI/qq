@@ -1564,7 +1564,11 @@ once after runtime resolution and before the provider stream is polled. Its
 `route` is the effective QQ selection, while `provider_model` is the exact
 identifier placed in provider-neutral requests. The output cap is the minimum
 of the configured cap and known model metadata; unknown model metadata leaves
-the configured cap unchanged. Optional organization and named credential
+the configured cap unchanged. One exception: with a reasoning effort set on a
+route whose thinking is billed inside the same cap and no operator-chosen
+`max_output_tokens`, the cap is the model ceiling (bounded by any managed
+policy ceiling); see the resolved-model section of `architecture.md`. The
+descriptor records whatever was actually sent. Optional organization and named credential
 profile identify the selected non-secret routing/auth context. Credential
 values, API keys, access tokens, and secret hashes are never represented.
 Pricing retains its provenance, and the capability fields describe controls

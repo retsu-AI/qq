@@ -436,6 +436,39 @@ fn reasoning_effort_is_explicit_layered_and_distinct_from_omission() {
 }
 
 #[test]
+fn clearing_max_output_tokens_restores_compiled_provenance() {
+    // A layer that clears the cap restores the default; that is not a chosen
+    // cap, so the provenance is the compiled source again rather than the
+    // clearing layer (which would read as an explicit operator pin).
+    let tree = TempTree::new();
+    tree.write("global/config.ron", "(version: 1, max_output_tokens: 4096)");
+    let set = tree.loader().load(&tree.request()).unwrap();
+    assert_eq!(set.max_output_tokens(), 4_096);
+    assert_eq!(
+        set.provenance()
+            .max_output_tokens()
+            .map(SourceIdentity::kind),
+        Some(SourceKind::Global)
+    );
+    let cleared = tree
+        .loader()
+        .load(
+            &tree
+                .request()
+                .with_explicit_content("(version: 1, max_output_tokens: Clear)"),
+        )
+        .unwrap();
+    assert_eq!(cleared.max_output_tokens(), DEFAULT_MAX_OUTPUT_TOKENS);
+    assert_eq!(
+        cleared
+            .provenance()
+            .max_output_tokens()
+            .map(SourceIdentity::kind),
+        Some(SourceKind::Compiled)
+    );
+}
+
+#[test]
 fn reasoning_effort_clear_and_workspace_changes_obey_trust() {
     let tree = TempTree::new();
     tree.write("global/config.ron", "(version: 1, reasoning_effort: high)");

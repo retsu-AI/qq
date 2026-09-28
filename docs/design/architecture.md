@@ -344,6 +344,23 @@ selection and refer back to the run instead of copying the full descriptor.
 Historical rows remain explicitly unknown rather than being reinterpreted
 through current configuration.
 
+
+The output cap resolves as the lesser of the catalog's model ceiling and the
+configured `max_output_tokens` (compiled default 16 384), with one exception:
+when a reasoning effort other than `none` is set and the model's thinking is
+billed inside the same `max_tokens` (Anthropic Messages, or an Anthropic model
+behind an OpenAI-compatible gateway, recognised by the catalog canonical id or
+the vendor segment of the gateway id), the compiled default would be spent on
+hidden reasoning before any visible output, so the wire cap is the catalog
+ceiling instead, still bounded by a managed `policy.max_output_tokens`. A
+`max_output_tokens` the operator set in any configuration layer or override is
+honoured verbatim; run budgets bound spend either way. A new session row pins
+`max_output_tokens` only when the cap has non-compiled provenance (a
+configuration layer, `--max-output-tokens`, a profile, a picker); the compiled
+default is never persisted as a choice. Rows from older releases that recorded
+the then-default (2 048, 4 096) are treated as unset at load so the configured
+value and the lift apply; an operator who pins exactly one of those two values
+on such a row is the accepted cost of that repair.
 Version-2 resolved models also carry an optional opaque provider request-shape
 identity built once by the root from the effective adapter, API, endpoint mode,
 safe normalized endpoint, explicit region, and non-secret authorization shape.

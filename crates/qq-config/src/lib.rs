@@ -1958,6 +1958,11 @@ impl ClientSnapshot {
     pub fn source_reports(&self) -> &[SourceReport] {
         &self.reports
     }
+
+    #[must_use]
+    pub const fn provenance(&self) -> &ConfigProvenance {
+        &self.provenance
+    }
 }
 
 /// Shared filesystem evidence for one configuration load. Contains paths and

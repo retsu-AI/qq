@@ -1,5 +1,11 @@
 const STORAGE_CONTEXT_BYTES: u64 = 4 * 1024 * 1024;
 const CONSERVATIVE_OUTPUT_BYTES_PER_TOKEN: u64 = 32;
+/// Most storage bytes reserved for one turn's persisted output, whatever the
+/// wire cap: the reserve the 16 384-token default yields (512 KiB). A larger
+/// wire cap exists to hold hidden reasoning, which is never persisted as
+/// transcript; reserving 32 bytes for each of a 128 000-token ceiling would
+/// leave a 4 MiB store 32 KiB for the whole prompt.
+const MAX_OUTPUT_STORAGE_RESERVE_BYTES: u64 = 16_384 * CONSERVATIVE_OUTPUT_BYTES_PER_TOKEN;
 /// Bytes of provider-neutral request text per estimated input token when no
 /// provider measurement covers the request. English prose and source code
 /// tokenize at roughly 3.5–4.5 bytes per token on every current tokenizer;
@@ -223,6 +229,7 @@ pub(crate) fn plan(input: ContextInput) -> ContextPlan {
     let output_tokens = u64::from(input.max_output_tokens);
     let storage_reserve_bytes = output_tokens
         .saturating_mul(CONSERVATIVE_OUTPUT_BYTES_PER_TOKEN)
+        .min(MAX_OUTPUT_STORAGE_RESERVE_BYTES)
         .saturating_add(if input.compaction == CompactionDisposition::Eligible {
             COMPACTION_STORAGE_ENVELOPE_BYTES
         } else {
@@ -836,6 +843,35 @@ mod tests {
                 .unwrap()
                 .contains("new session")
         );
+    }
+
+    #[test]
+    fn a_lifted_wire_cap_does_not_consume_the_storage_backstop() {
+        // RR8.3: the effort-aware lift raises the wire cap to the model
+        // ceiling (128 000 on Claude). Reserving 32 bytes per token of that
+        // would leave a 4 MiB store 32 KiB for the prompt and reject every
+        // effort-enabled session before its first request.
+        let plan_for = |max_output_tokens| {
+            plan(ContextInput {
+                context_window: Some(1_000_000),
+                max_output_tokens,
+                system_bytes: 200 * 1024,
+                tool_schema_bytes: 32 * 1024,
+                reducible_message_bytes: 512 * 1024,
+                irreducible_message_bytes: 16 * 1024,
+                compatible_input_tokens: None,
+                compaction: CompactionDisposition::Eligible,
+            })
+        };
+        let ContextPlan::Send { estimate: lifted } = plan_for(128_000) else {
+            panic!("a lifted cap must not overflow the storage backstop");
+        };
+        let ContextPlan::Send { estimate: default } = plan_for(16_384) else {
+            panic!("the default cap sends");
+        };
+        assert_eq!(lifted.storage_reserve_bytes, default.storage_reserve_bytes);
+        // The window arithmetic still sees the real wire cap.
+        assert_eq!(lifted.output_reserve_tokens, 128_000);
     }
 
     #[test]
