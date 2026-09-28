@@ -39,6 +39,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | [`run-snapshots.md`](./run-snapshots.md) | Proposed: reversible mutating-run state |
 | [`mid-run-compaction.md`](./mid-run-compaction.md) | Compact and continue one run at a safe turn boundary (audit F03, ENG-793). MRC-0..3 shipped (#92, ADR-0039); open: MRC-4 surfaces, MRC-5 live evidence |
 | [`lsp-diagnostics.md`](./lsp-diagnostics.md) | Proposed: diagnostics integration |
+| [`jev.md`](./jev.md) | The only Jev plan: JV1–JV3 defect repairs (activation, headless, precision), JV4–JV6 context, hold lifecycle and receipts, JV7–JV8 shadow then pilot, JV9 opt-in UX, JV10–JV12 speed, JV13 qualification. Proposed |
 | [`templates/`](./templates/) | Slice header, pre-flight, receipt, PR body; review checklist |
 | [`progress/`](./progress/) | One ledger per plan, root ledger, decisions needed, gate evidence |
 
@@ -59,6 +60,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | — | Quiet-host recordings: Phase 5a H0 tail comparison; H20 eight-stream p95 then the 50→20 ms budget | `speed-first-…` | Implemented; tails not repeatable on the shared host; retained, not waived |
 | — | Seven H22 deferrals (`StaticHttpAuth`, headless writer, config parse-once, reviewer via `PlanCache`, run-loop enums, args-parse-once, `Arc` calls) | `speed-first-…` § Bundled Fixes | Each is its own slice when that code is next opened |
 | — | Run snapshots, LSP diagnostics | proposed plans | No scheduled slice |
+| — | JV1–JV3 Jev defect repairs (parallel), then JV4–JV6 | [`jev.md`](./jev.md) | Opted-in users are prompted for most held calls; the design doc's findings 3–6 are defects, not policy. Awaiting plan acceptance |
 | — | TE1 offline efficiency baseline, then TE2/TE4 | [`token-efficiency.md`](token-efficiency.md) | Measurement first; paid runs remain with ENG-809 and existing reliability priorities are unchanged |
 
 ## Ownership
@@ -73,6 +75,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | Reversible mutating-run state | `run-snapshots.md` |
 | Mid-run compaction and continuation | `mid-run-compaction.md` |
 | Diagnostics integration | `lsp-diagnostics.md` |
+| Jev review, routing, approval delegate, observer; their qualification | [`jev.md`](./jev.md); design [`../design/jev.md`](../design/jev.md) |
 | First-run and configuration UX, user guide, install paths, community files | `onboarding-ux.md` |
 | Run outcome policy: turn recovery, `Paused`, mid-run compaction, checkpoint, admission validation, tool-argument leniency, approval deadline | `run-reliability.md` |
 | Who settles a held approval: Jev, `reviewer_model`, or the human; delegate grants, the delegate clock, the session switch | shipped (ENG-862, protocol 28); as built in [`../design/tools.md`](../design/tools.md) § Approval Policy and [ADR-0041](../adr/0041-jev-delegated-approval.md); receipt [`progress/delegated-approval.md`](./progress/delegated-approval.md) |
@@ -96,6 +99,3 @@ in [`progress/root.md`](./progress/root.md) as before.
   `../design/`, not in the plan.
 - When a plan is fully shipped, move any durable contract into `../design/`,
   delete the plan, and update this index.
-
-Optional Jev stacked repairs: [`jev-opt-in.md`](jev-opt-in.md);
-[ledger](progress/jev-opt-in.md).
