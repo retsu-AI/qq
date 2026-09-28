@@ -488,11 +488,12 @@ synchronous gate before its single request is enqueued), so a `list_changed`
 that lands while a call waits for a permit refuses the call instead of
 running it against an unreviewed tool set; see [`tools.md` § MCP](tools.md#mcp).
 
-Plan compilation reads no secure storage. The spawn-route list is assembled
-from the configured catalog without an authentication probe (a child that
-names an unauthenticated route fails at its own request, where the credential
-is read anyway), and the optional model-discovery cache lookup uses a cached
-result only when the cache scope can be derived without secure-store I/O:
+Plan compilation reads secure storage once, for the selected provider's own
+credential. The spawn-route list is assembled from the configured catalog
+without an authentication probe per provider (a child that names an
+unauthenticated route fails at its own request, where the credential is read
+anyway), and the optional model-discovery cache lookup uses a cached result
+only when the cache scope can be derived without secure-store I/O:
 Codex, XAI, stored secret references, and a built-in API-key fallback without
 an explicit non-stored reference skip the cache probe and use the configured
 reasoning ladder. Model catalogs still check authentication when a client asks

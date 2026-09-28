@@ -8275,6 +8275,146 @@ mod tests {
         );
     }
 
+    /// A keyring whose every read costs a fixed delay, standing in for a
+    /// secure store (macOS `securityd`) that is slow rather than absent.
+    struct SlowKeyring {
+        inner: MemoryKeyring,
+        delay: Duration,
+        reads: AtomicU64,
+    }
+
+    impl KeyringBackend for SlowKeyring {
+        fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(self.delay);
+            self.inner.get(name)
+        }
+
+        fn set(&self, name: &str, secret: &[u8]) -> Result<(), KeyringError> {
+            self.inner.set(name, secret)
+        }
+
+        fn remove(&self, name: &str) -> Result<(), KeyringError> {
+            self.inner.remove(name)
+        }
+    }
+
+    /// Writes a config with `count` custom providers, each authenticated by a
+    /// stored bearer credential, and returns the factory over `keyring`.
+    fn factory_with_stored_credential_providers(
+        fixture: &RuntimeFixture,
+        keyring: Arc<dyn KeyringBackend>,
+        count: usize,
+    ) -> RuntimeFactory {
+        let credentials =
+            CredentialStore::with_backend(CredentialPaths::new(fixture.path("data")), keyring);
+        let mut providers = String::new();
+        for index in 0..count {
+            credentials
+                .set(&format!("bench-{index}"), "sk-bench-secret", false)
+                .unwrap();
+            providers.push_str(&format!(
+                r#""p{index}": Custom(
+                    connection: (
+                        base_url: "http://127.0.0.1:1/v{index}",
+                        api: OpenAiResponses,
+                        auth: Bearer(Stored("bench-{index}")),
+                    ),
+                    models: {{ "m": (name: "m") }},
+                ),
+                "#
+            ));
+        }
+        fs::write(
+            fixture.path("global/config.ron"),
+            format!(
+                r#"(
+                    version: 1,
+                    model: "p0/m",
+                    providers: {{ {providers} }},
+                )"#
+            ),
+        )
+        .unwrap();
+        fixture.factory_with_credentials(credentials)
+    }
+
+    #[test]
+    fn plan_compilation_reads_only_the_selected_providers_credential() {
+        let fixture = RuntimeFixture::new();
+        let keyring = Arc::new(SlowKeyring {
+            inner: MemoryKeyring::default(),
+            delay: Duration::ZERO,
+            reads: AtomicU64::new(0),
+        });
+        let factory = factory_with_stored_credential_providers(&fixture, keyring.clone(), 12);
+        let plan = factory
+            .plan_for(&fixture.request(r#"(version: 1, model: "p0/m")"#))
+            .unwrap();
+        // Every configured route is still offered to `spawn_agent` (alongside
+        // the built-in catalog); a child naming one that is not authenticated
+        // fails at its own request.
+        let routes = &plan.descriptor().tools.spawn_model_routes;
+        for index in 0..12 {
+            assert!(routes.iter().any(|route| route == &format!("p{index}/m")));
+        }
+        // One read: the selected provider's own credential, which its
+        // compiled recipe needs. The other eleven are not probed.
+        assert_eq!(
+            keyring.reads.load(Ordering::Relaxed),
+            1,
+            "plan compilation probed the secure store for unselected providers"
+        );
+    }
+
+    /// Not a correctness test: prints the cold-compile cost of `plan_for` with
+    /// N stored-credential providers behind a keyring that takes 5 ms per read,
+    /// the shape a macOS Keychain shows under load. Run with
+    /// `cargo test -p qq --release -- --ignored plan_compile_with_slow_keyring --nocapture`.
+    /// Before the spawn-route probe left plan compilation this cost
+    /// (N + 1) x delay per compile; it is now one read, independent of N.
+    #[test]
+    #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
+    fn plan_compile_with_slow_keyring() {
+        let iterations: u32 = std::env::var("QQ_BENCH_ITERATIONS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(50);
+        for count in [1usize, 4, 16] {
+            let fixture = RuntimeFixture::new();
+            let keyring = Arc::new(SlowKeyring {
+                inner: MemoryKeyring::default(),
+                delay: Duration::from_millis(5),
+                reads: AtomicU64::new(0),
+            });
+            let factory =
+                factory_with_stored_credential_providers(&fixture, keyring.clone(), count);
+            let request = fixture.request(r#"(version: 1, model: "p0/m")"#);
+            let mut samples = Vec::with_capacity(iterations as usize);
+            for index in 0..iterations {
+                fs::write(
+                    fixture.path("work/AGENTS.md"),
+                    format!("Be brief. Iteration {index}.\n"),
+                )
+                .unwrap();
+                let started = std::time::Instant::now();
+                let (_, lookup) = factory
+                    .plan_with_lookup(&request, &AgentProfileId::default())
+                    .unwrap();
+                samples.push(started.elapsed());
+                assert_eq!(lookup, PlanLookup::Compiled);
+            }
+            samples.sort();
+            let median = samples[samples.len() / 2];
+            let p95 = samples[((samples.len() - 1) as f64 * 0.95).round() as usize];
+            println!(
+                "plan_for cold compile, {count} stored-credential providers: median {median:?} \
+                 p95 {p95:?}, keyring reads {} ({iterations} iterations)",
+                keyring.reads.load(Ordering::Relaxed)
+            );
+        }
+    }
+
     #[test]
     fn reviewer_verdict_parses_strictly_and_escalates_everything_else() {
         assert!(matches!(

@@ -816,3 +816,25 @@ newest tag.
 
 Shipped: H22.2. In progress: none. Blocked: none. Next: quiet-host
 recordings; Phase 7 on R6.
+
+### 2026-09-28 — plan compilation stops probing every provider's credential
+
+`RuntimeFactory::load` built the `spawn_agent` route list with
+`configured_model_options`, which calls `provider_authenticated` (a secure-store
+read) for every configured provider, and `ModelDiscovery::cached` resolved a
+credential just to derive its cache key. Each plan compile therefore cost N+1
+keyring reads; on macOS each is a `securityd` round trip, so a busy Keychain
+put tens of milliseconds ahead of the first token per compile. The route list
+is now assembled without the probe (a child naming an unauthenticated route
+fails at its own request, where the credential is read anyway) and the cache
+probe is skipped whenever its scope would need secure-store I/O. One read
+remains: the selected provider's own credential.
+
+Measured with `plan_compile_with_slow_keyring` (5 ms per read, release,
+50 iterations, cold compile median): 1/4/16 stored-credential providers went
+from 10.5 / 25.6 / 86.2 ms to 5.2 / 5.4 / 5.7 ms; keyring reads per compile
+from N+1 to 1. Regression test
+`plan_compilation_reads_only_the_selected_providers_credential` (13 → 1 reads
+at N = 12) and the contributor's `PanicOnReadKeyring` tests. Extracted from
+#189 (`927ab0b`, `b0ae622`, `2415d79`, kept with `-x`); no protocol, schema,
+or Jev change.
