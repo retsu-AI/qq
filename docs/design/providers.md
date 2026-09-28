@@ -111,7 +111,13 @@ budget would make any failure slower than 30 s unretryable, which is what a
 gateway that loses a request looks like. Once one `ProviderEvent`
 has been yielded the request is never resent, so a retry can never duplicate
 output; a body that ends after events is the adapter's protocol error. Auth
-and other client errors are never retried. When the policy is exhausted the
+and other client errors are never retried. A request-time credential load
+that times out (65 s) or finds the loader at capacity is an authentication
+fault too, surfaced as `CredentialsUnavailable`: the restart loop already
+waited the full bound once, and resending would wait it again (up to four
+minutes before the first token), so the request fails at once with the cause
+named. Refresh, storage, and worker failures stay unavailable-class and are
+retried, since the next attempt can succeed. When the policy is exhausted the
 final error message records the attempts spent. Nothing above the provider —
 not the core run loop, not the session layer — retries a turn. Operational
 probes use `ProviderCompiler::compile_for_canary`, which disables direct HTTP
