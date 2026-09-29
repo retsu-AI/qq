@@ -546,6 +546,31 @@ impl ConfigLoader {
         loader::grant_pending_trust(self, request)
     }
 
+    /// Grants the pending set only when it is exactly what the user was
+    /// shown: every pending file must be pending at a `(path, digest)` in
+    /// `reviewed`. Otherwise nothing is written and
+    /// [`ConfigError::TrustChanged`] carries the current set to show again.
+    pub fn grant_reviewed_trust(
+        &self,
+        request: &LoadRequest,
+        reviewed: &[ProcessTrust],
+    ) -> Result<Vec<PendingTrust>, ConfigError> {
+        loader::grant_reviewed_trust(self, request, reviewed)
+    }
+
+    /// The current pending set, refused with [`ConfigError::TrustChanged`]
+    /// when it holds a file at a digest outside `reviewed`. Read-only: the
+    /// check a process-scoped grant makes before admitting what was shown.
+    pub fn reviewed_pending_trust(
+        &self,
+        request: &LoadRequest,
+        reviewed: &[ProcessTrust],
+    ) -> Result<Vec<PendingTrust>, ConfigError> {
+        let pending = loader::pending_trust(self, request)?;
+        loader::ensure_reviewed(&pending, reviewed)?;
+        Ok(pending)
+    }
+
     /// The project sources under the request's directory whose sensitive
     /// content no trust record covers, root first. Read-only: the same scan
     /// [`Self::grant_pending_trust`] performs before it writes, so a prompt
@@ -1753,6 +1778,16 @@ impl PendingTrust {
         &self.digest
     }
 
+    /// The `(path, digest)` a prompt that showed this entry answers for.
+    /// `None` only for a virtual source, which is never pending.
+    #[must_use]
+    pub fn reviewed(&self) -> Option<ProcessTrust> {
+        self.source.path().map(|path| ProcessTrust {
+            path: path.to_owned(),
+            digest: self.digest.clone(),
+        })
+    }
+
     /// The sensitive configuration keys the file declares (`model`,
     /// `providers`, `mcp`, `policy.allow_shell_prefixes`, …), so a user can
     /// see what trusting it admits.
@@ -2662,6 +2697,11 @@ pub enum ConfigError {
         pending: Vec<PendingTrust>,
         reports: Vec<SourceReport>,
     },
+    /// A trust answer was given for content that has since changed: a file
+    /// is pending at a digest the prompt did not show. Nothing was trusted;
+    /// `pending` is the current set to review.
+    #[error("project configuration changed while it was being reviewed; review it again")]
+    TrustChanged { pending: Vec<PendingTrust> },
     #[error("failed to serialize configuration state: {message}")]
     StateSerialization { message: String },
     #[error("trust state has unsupported version {version}; expected 1")]
