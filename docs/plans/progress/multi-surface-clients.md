@@ -127,3 +127,17 @@ Open: `ClientPort: Send` bound (port.rs) is still native-only shaped; W3.
 W2 merged as #19 (`e0c8121`) on 2026-09-10; the row above had stayed at "In
 review". Phase A (W1, S1, S3) and W2 are the shipped set; S2 and S4 wait on
 ADR-0015/0016 and the rustls root request. No slice in progress.
+
+
+### 2026-09-28 — fleet-clients design proposed
+
+Wrote `docs/plans/fleet-clients.md`: the multi-machine experience (fleet rail,
+cross-machine inbox, composer target chips, fan-out, jobs view, inbox-first
+mobile), a Leptos + Tauri 2 recommendation for the ADR-0017 spike with a
+measured gate, a speed-budget table, and the reference-harness gap analysis
+(`.source/opencode`, `.source/codex`, `.source/pi`, `.source/fx`). It maps onto
+the existing slices and proposes new ones: S7 (server-scoped stream, summary
+tier, history paging), W4 (durable outbox and cache, `qq-fleet`), W5
+(`qq-render`), U8 (Web Push). No slice status changed; the new slices need the
+lead's acceptance before rows are added. Web Push versus the "no push
+service" non-goal is open (plan §12 item 5). Docs only, no code.
