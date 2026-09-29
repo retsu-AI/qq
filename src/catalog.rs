@@ -26,7 +26,7 @@ const FAILURE_CACHE_TTL: Duration = Duration::from_secs(5);
 // Codex gates `/models` on a supported Codex client version, not QQ's package
 // version. Keep this at least as high as the newest listed model's
 // `minimal_client_version`.
-const CODEX_MODELS_CLIENT_VERSION: &str = "0.156.1";
+const CODEX_MODELS_CLIENT_VERSION: &str = "0.159.0";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DiscoveredModel {
@@ -745,7 +745,7 @@ mod tests {
             let mut request = [0_u8; 4096];
             let length = stream.read(&mut request).unwrap();
             let request = std::str::from_utf8(&request[..length]).unwrap();
-            assert!(request.starts_with("GET /v1/models?client_version=0.156.1 HTTP/1.1\r\n"));
+            assert!(request.starts_with("GET /v1/models?client_version=0.159.0 HTTP/1.1\r\n"));
             let headers = request.to_ascii_lowercase();
             assert!(headers.contains("authorization: bearer test-token\r\n"));
             assert!(headers.contains("chatgpt-account-id: test-account\r\n"));

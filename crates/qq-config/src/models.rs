@@ -275,6 +275,19 @@ const MODELS: &[ModelDefinition] = &[
     },
     model! {
         catalogs: OPENAI_API,
+        wire: "gpt-6.1-sol",
+        canonical: "openai/gpt-6.1-sol",
+        name: "GPT-6.1 Sol",
+        reasoning: true,
+        efforts: FRONTIER_EFFORTS,
+        limits: 1_050_000 / 128_000,
+        pricing: tiered(2_000, 10_000, 100, 2_500, PricingTierDefinition {
+            above_input_tokens: 272_000, input: 4_000, output: 15_000,
+            cache_read: Some(200), cache_write: Some(5_000),
+        })
+    },
+    model! {
+        catalogs: OPENAI_API,
         wire: "gpt-6-astra",
         canonical: "openai/gpt-6-astra",
         name: "GPT-6 Astra",
@@ -349,6 +362,7 @@ const MODELS: &[ModelDefinition] = &[
     model! { catalogs: OPENAI_API, wire: "gpt-4o", canonical: "openai/gpt-4o", name: "GPT-4o", reasoning: false, limits: 128_000 / 16_384, pricing: metered(2_500, 10_000, 1_250, 0) },
     model! { catalogs: OPENAI_API, wire: "gpt-4o-mini", canonical: "openai/gpt-4o-mini", name: "GPT-4o mini", reasoning: false, limits: 128_000 / 16_384, pricing: metered(150, 600, 75, 0) },
     model! { catalogs: OPENAI_CODEX, wire: "gpt-6-astra", canonical: "openai/gpt-6-astra", name: "GPT-6 Astra", reasoning: true, efforts: FRONTIER_EFFORTS, limits: 272_000 / 128_000, pricing: None },
+    model! { catalogs: OPENAI_CODEX, wire: "gpt-6.1-sol", canonical: "openai/gpt-6.1-sol", name: "GPT-6.1 Sol", reasoning: true, efforts: FRONTIER_EFFORTS, limits: 272_000 / 128_000, pricing: None },
     model! { catalogs: OPENAI_CODEX, wire: "gpt-5.6-sol", canonical: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", reasoning: true, efforts: GPT6_EFFORTS, limits: 272_000 / 128_000, pricing: None },
     model! { catalogs: OPENAI_CODEX, wire: "gpt-5.6-terra", canonical: "openai/gpt-5.6-terra", name: "GPT-5.6 Terra", reasoning: true, efforts: GPT6_EFFORTS, limits: 272_000 / 128_000, pricing: None },
     model! { catalogs: OPENAI_CODEX, wire: "gpt-5.6-luna", canonical: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", reasoning: true, efforts: GPT6_EFFORTS, limits: 272_000 / 128_000, pricing: None },
@@ -467,6 +481,39 @@ mod tests {
         let models = builtin_models(BuiltinCatalog::OpenAiApi);
         assert_eq!(models["gpt-6-sol"].context_window(), Some(1_050_000));
         assert_eq!(models["gpt-6-luna"].context_window(), Some(1_050_000));
+    }
+
+    #[test]
+    fn gpt61_sol_is_available_through_direct_and_codex_routes() {
+        let openai = builtin_models(BuiltinCatalog::OpenAiApi);
+        let codex = builtin_models(BuiltinCatalog::OpenAiCodex);
+
+        for models in [&openai, &codex] {
+            let model = &models["gpt-6.1-sol"];
+            assert_eq!(model.canonical_id(), Some("openai/gpt-6.1-sol"));
+            assert_eq!(model.name(), Some("GPT-6.1 Sol"));
+            assert!(model.reasoning());
+            // `none` and `minimal` are documented as unsupported.
+            assert_eq!(model.reasoning_efforts(), FRONTIER_EFFORTS);
+            assert_eq!(model.max_output_tokens(), Some(128_000));
+        }
+        assert_eq!(openai["gpt-6.1-sol"].context_window(), Some(1_050_000));
+        assert_eq!(codex["gpt-6.1-sol"].context_window(), Some(272_000));
+        assert!(codex["gpt-6.1-sol"].pricing().is_none());
+
+        let pricing = openai["gpt-6.1-sol"]
+            .pricing()
+            .expect("gpt-6.1-sol ships API pricing");
+        assert_eq!(pricing.input_usd_nanos_per_token, 2_000);
+        assert_eq!(pricing.output_usd_nanos_per_token, 10_000);
+        assert_eq!(pricing.cache_read_usd_nanos_per_token, Some(100));
+        let tier = pricing
+            .context_tier
+            .as_ref()
+            .expect("gpt-6.1-sol prices long context separately");
+        assert_eq!(tier.above_input_tokens, 272_000);
+        assert_eq!(tier.input_usd_nanos_per_token, 4_000);
+        assert_eq!(tier.output_usd_nanos_per_token, 15_000);
     }
 
     #[test]
