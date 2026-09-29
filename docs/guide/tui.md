@@ -151,7 +151,10 @@ notice reads `trusted N file(s)` or `trusted for this session`, and the
 empty state continues as above (`no model`, a credential remedy, or `Alt-N
 creates the first session.`). If this `qq` attached to a server on another
 host, `t` and `s` say to run `qq trust` there instead: trust is a decision
-about files on the host that runs the server. Details and what "sensitive"
+about files on the host that runs the server. Either answer covers only the
+content the prompt showed: if a listed file's sensitive sections change while
+the prompt is open (a `git pull`, an editor save), nothing is trusted and the
+prompt redraws with the new content to answer again. Details and what "sensitive"
 means in [Permissions and trust](permissions.md#project-trust).
 
 ## Your first session

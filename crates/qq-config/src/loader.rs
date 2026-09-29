@@ -429,6 +429,26 @@ pub(super) fn grant_pending_trust(
     loader: &ConfigLoader,
     request: &LoadRequest,
 ) -> Result<Vec<PendingTrust>, ConfigError> {
+    grant_trust(loader, request, None)
+}
+
+pub(super) fn grant_reviewed_trust(
+    loader: &ConfigLoader,
+    request: &LoadRequest,
+    reviewed: &[ProcessTrust],
+) -> Result<Vec<PendingTrust>, ConfigError> {
+    grant_trust(loader, request, Some(reviewed))
+}
+
+/// Records the pending set. With `reviewed`, the set is re-scanned under the
+/// state lock and refused when any file is pending at a digest the user was
+/// not shown: a prompt answers for the content it displayed, not for
+/// whatever the file holds when the key is pressed.
+fn grant_trust(
+    loader: &ConfigLoader,
+    request: &LoadRequest,
+    reviewed: Option<&[ProcessTrust]>,
+) -> Result<Vec<PendingTrust>, ConfigError> {
     let cwd = canonical_working_directory(&request.cwd)?;
     let _state_lock = TrustStateLock::acquire(&loader.paths)?;
     let mut probes = Probes::default();
@@ -437,6 +457,9 @@ pub(super) fn grant_pending_trust(
     // trust` (or the TUI's persist choice) from recording the file.
     let mut trust = TrustState::load(&loader.paths, probes)?;
     let pending = scan_pending_trust(&cwd, &trust, probes)?;
+    if let Some(reviewed) = reviewed {
+        ensure_reviewed(&pending, reviewed)?;
+    }
 
     if !pending.is_empty() {
         for item in &pending {
@@ -451,6 +474,25 @@ pub(super) fn grant_pending_trust(
         trust.save(&loader.paths)?;
     }
     Ok(pending)
+}
+
+/// `Ok` when every pending file is pending at a digest in `reviewed`. A
+/// reviewed file that is no longer pending (trusted meanwhile) is fine.
+pub(super) fn ensure_reviewed(
+    pending: &[PendingTrust],
+    reviewed: &[ProcessTrust],
+) -> Result<(), ConfigError> {
+    let unreviewed = pending.iter().any(|item| {
+        !reviewed.iter().any(|grant| {
+            item.source().path() == Some(grant.path.as_path()) && item.digest() == grant.digest
+        })
+    });
+    if unreviewed {
+        return Err(ConfigError::TrustChanged {
+            pending: pending.to_vec(),
+        });
+    }
+    Ok(())
 }
 
 /// Every project configuration file from the VCS root down to `cwd` whose

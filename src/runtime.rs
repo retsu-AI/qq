@@ -381,28 +381,36 @@ impl RuntimeFactory {
         }
     }
 
-    /// Answer the TUI's trust prompt. `Persist` records every pending file
-    /// exactly as `qq trust` does; `Session` admits them for this process
-    /// only. Either way the configuration is then loaded and the client's
-    /// model state recomputed. Blocking: trust-state I/O, the load, and
-    /// credential probes. An empty pending set with `Session` is not an
-    /// error: the files were trusted meanwhile (another `qq trust`) and the
-    /// load simply succeeds.
+    /// Answer the TUI's trust prompt for exactly the files it showed.
+    /// `reviewed` is the `(path, digest)` of every file on the prompt;
+    /// when the pending set now holds a file at any other digest (it was
+    /// edited while the prompt was open) nothing is trusted and
+    /// `ConfigError::TrustChanged` carries the set to show again.
+    /// `Persist` records the files exactly as `qq trust` does; `Session`
+    /// admits them for this process only. Either way the configuration is
+    /// then loaded and the client's model state recomputed. Blocking:
+    /// trust-state I/O, the load, and credential probes. An empty pending
+    /// set is not an error: the files were trusted meanwhile (another `qq
+    /// trust`) and the load simply succeeds.
     pub fn resolve_trust(
         &self,
         request: &LoadRequest,
         choice: TrustResolution,
+        reviewed: &[ProcessTrust],
     ) -> Result<TrustGranted, RuntimeBuildError> {
         let trusted: Vec<String> = match choice {
             TrustResolution::Persist => self
                 .inner
                 .config
-                .grant_pending_trust(request)?
+                .grant_reviewed_trust(request, reviewed)?
                 .iter()
                 .map(|item| item.source().label().to_owned())
                 .collect(),
             TrustResolution::Session => {
-                let pending = self.inner.config.pending_trust(request)?;
+                let pending = self
+                    .inner
+                    .config
+                    .reviewed_pending_trust(request, reviewed)?;
                 let mut grants = Vec::with_capacity(pending.len());
                 let mut labels = Vec::with_capacity(pending.len());
                 for item in &pending {
@@ -3939,7 +3947,7 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use futures_util::stream;
     use qq_auth::{CredentialPaths, KeyringBackend, KeyringError};
-    use qq_config::{ConfigPaths, ProviderKind, RuntimeOverrides, UsageType};
+    use qq_config::{ConfigPaths, PendingTrust, ProviderKind, RuntimeOverrides, UsageType};
     use qq_core::Runtime;
     use qq_protocol::{
         CommandId, CommandOutcome, ModelSelection, RunId, RunPromptIdentity, RunStatus,
@@ -6800,6 +6808,8 @@ mod tests {
             other => panic!("expected TrustRequired, got {other:?}"),
         };
         assert_eq!(pending.len(), 1);
+        let reviewed: Vec<ProcessTrust> =
+            pending.iter().filter_map(PendingTrust::reviewed).collect();
         assert_eq!(
             pending[0]
                 .declarations()
@@ -6809,7 +6819,7 @@ mod tests {
             ["model openai/gpt-5.6", "MCP tool → tool"]
         );
         let granted = factory
-            .resolve_trust(&request, TrustResolution::Session)
+            .resolve_trust(&request, TrustResolution::Session, &reviewed)
             .unwrap();
         assert_eq!(granted.trusted, [pending[0].source().label().to_owned()]);
         assert_eq!(
@@ -6837,7 +6847,7 @@ mod tests {
 
         // Persist: recorded on disk, so a fresh factory loads too.
         let granted = fresh
-            .resolve_trust(&request, TrustResolution::Persist)
+            .resolve_trust(&request, TrustResolution::Persist, &reviewed)
             .unwrap();
         assert_eq!(granted.trusted.len(), 1);
         assert!(fixture.path("data/trust.ron").exists());
@@ -6850,9 +6860,73 @@ mod tests {
         // Persist with nothing pending is not an error: the load runs and
         // the answer names no file.
         let again = fresh
-            .resolve_trust(&request, TrustResolution::Persist)
+            .resolve_trust(&request, TrustResolution::Persist, &[])
             .unwrap();
         assert!(again.trusted.is_empty());
+    }
+
+    #[test]
+    fn a_trust_answer_covers_only_the_content_the_prompt_showed() {
+        // A project file edited while the prompt is open (a `git pull`
+        // adds an MCP server) must not be trusted by the key pressed for
+        // the old content, under either answer. The error carries the new
+        // set, and answering for that set succeeds.
+        let fixture = RuntimeFixture::new();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        );
+        credentials
+            .set("openai/default", "test-secret", false)
+            .unwrap();
+        fs::create_dir_all(fixture.path("work/.qq")).unwrap();
+        let config = fixture.path("work/.qq/config.ron");
+        fs::write(&config, r#"(version: 1, model: "openai/gpt-5.6")"#).unwrap();
+        let request = LoadRequest::new(fs::canonicalize(fixture.path("work")).unwrap());
+        let factory = fixture.factory_with_credentials(credentials);
+        let shown = match factory.load_for_client(&request) {
+            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { pending, .. })) => pending,
+            other => panic!("expected TrustRequired, got {other:?}"),
+        };
+        let reviewed: Vec<ProcessTrust> = shown.iter().filter_map(PendingTrust::reviewed).collect();
+
+        fs::write(
+            &config,
+            r#"(version: 1, model: "openai/gpt-5.6", mcp: {"evil": Stdio(command: "evil")})"#,
+        )
+        .unwrap();
+        for choice in [TrustResolution::Session, TrustResolution::Persist] {
+            let current = match factory.resolve_trust(&request, choice, &reviewed) {
+                Err(RuntimeBuildError::Config(ConfigError::TrustChanged { pending })) => pending,
+                other => panic!("expected TrustChanged for {choice:?}, got {other:?}"),
+            };
+            assert_eq!(current.len(), 1);
+            assert_ne!(current[0].digest(), shown[0].digest());
+            assert!(
+                current[0]
+                    .declarations()
+                    .iter()
+                    .any(|declaration| declaration.to_string() == "MCP evil → evil")
+            );
+        }
+        assert!(!fixture.path("data/trust.ron").exists(), "nothing recorded");
+        assert!(
+            factory.process_trust().unwrap().is_empty(),
+            "nothing admitted"
+        );
+
+        let current = factory
+            .inner
+            .config
+            .pending_trust(&request)
+            .unwrap()
+            .iter()
+            .filter_map(PendingTrust::reviewed)
+            .collect::<Vec<_>>();
+        let granted = factory
+            .resolve_trust(&request, TrustResolution::Session, &current)
+            .unwrap();
+        assert_eq!(granted.trusted.len(), 1);
     }
 
     #[test]
@@ -6882,8 +6956,17 @@ mod tests {
             factory.plan_for(&before),
             Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
         ));
+        let request = LoadRequest::new(&workspace);
+        let reviewed: Vec<ProcessTrust> = factory
+            .inner
+            .config
+            .pending_trust(&request)
+            .unwrap()
+            .iter()
+            .filter_map(PendingTrust::reviewed)
+            .collect();
         factory
-            .resolve_trust(&LoadRequest::new(&workspace), TrustResolution::Session)
+            .resolve_trust(&request, TrustResolution::Session, &reviewed)
             .unwrap();
         let after = factory.request_for_workspace(&workspace, None).unwrap();
         assert_eq!(after.process_trust().len(), 1);

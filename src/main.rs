@@ -577,21 +577,15 @@ async fn interactive(
         Ok::<_, runtime::RuntimeBuildError>((loaded, tui, themes))
     })
     .await??;
-    let (model_state, pending_trust) = match loaded {
-        Ok(state) => (state, Vec::new()),
+    let (model_state, pending_trust, reviewed_trust) = match loaded {
+        Ok(state) => (state, Vec::new(), Vec::new()),
         Err(pending) => (
             runtime::TuiModelState::default(),
+            trust_notices(&pending),
             pending
                 .iter()
-                .map(|item| qq_tui::PendingTrustNotice {
-                    path: item.source().label().to_owned(),
-                    declarations: item
-                        .declarations()
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect(),
-                })
-                .collect(),
+                .filter_map(config::PendingTrust::reviewed)
+                .collect::<Vec<_>>(),
         ),
     };
     let runtime::TuiModelState {
@@ -692,42 +686,69 @@ async fn interactive(
     // I/O, configuration load, credential probes) and hand back what the
     // now-loadable configuration provides. The server the loop connected to
     // must be ours: a remote server's files cannot be read or trusted here.
+    // Either answer covers only the `(path, digest)` pairs the prompt showed;
+    // a file edited while it was open re-prompts with the new content.
     let trust: qq_tui::TrustResolver = {
         let factory = factory.clone();
         let request = environment_request.clone();
+        let reviewed = Arc::new(std::sync::Mutex::new(reviewed_trust));
         Box::new(move |choice| {
             let factory = factory.clone();
             let request = request.clone();
             let owns_server = Arc::clone(&owns_server);
+            let reviewed = Arc::clone(&reviewed);
             Box::pin(async move {
                 if !owns_server.load(std::sync::atomic::Ordering::Acquire) {
-                    return Err(
+                    return Err(qq_tui::TrustFailure::from(
                         "this client is attached to a server it does not own; run `qq trust` on the server host"
                             .to_owned(),
-                    );
+                    ));
                 }
                 tokio::task::spawn_blocking(move || {
                     let choice = match choice {
                         qq_tui::TrustChoice::Persist => runtime::TrustResolution::Persist,
                         qq_tui::TrustChoice::Session => runtime::TrustResolution::Session,
                     };
-                    let granted = factory
-                        .resolve_trust(&request, choice)
-                        .map_err(|error| error.to_string())?;
-                    Ok(qq_tui::TrustResolved {
-                        trusted: granted.trusted,
-                        model: granted.state.tui_model,
-                        models: granted.state.models.into_iter().map(Into::into).collect(),
-                        unauthenticated_providers: granted
-                            .state
-                            .unauthenticated_providers
-                            .into_iter()
-                            .map(tui_provider_remedy)
-                            .collect(),
-                    })
+                    // Only this resolver touches the list, and the loop
+                    // awaits one resolution at a time; a poisoned lock is
+                    // a failed answer, never an empty (trust-nothing) set.
+                    let Ok(mut reviewed) = reviewed.lock() else {
+                        return Err(qq_tui::TrustFailure::from(
+                            "trust review state is unavailable".to_owned(),
+                        ));
+                    };
+                    match factory.resolve_trust(&request, choice, &reviewed) {
+                        Ok(granted) => Ok(qq_tui::TrustResolved {
+                            trusted: granted.trusted,
+                            model: granted.state.tui_model,
+                            models: granted.state.models.into_iter().map(Into::into).collect(),
+                            unauthenticated_providers: granted
+                                .state
+                                .unauthenticated_providers
+                                .into_iter()
+                                .map(tui_provider_remedy)
+                                .collect(),
+                        }),
+                        Err(runtime::RuntimeBuildError::Config(
+                            config::ConfigError::TrustChanged { pending },
+                        )) => {
+                            *reviewed = pending
+                                .iter()
+                                .filter_map(config::PendingTrust::reviewed)
+                                .collect();
+                            Err(qq_tui::TrustFailure {
+                                reason: "project configuration changed while the prompt was open; review it again"
+                                    .to_owned(),
+                                changed: Some(trust_notices(&pending)),
+                            })
+                        }
+                        Err(error) => Err(qq_tui::TrustFailure::from(error.to_string())),
+                    }
                 })
                 .await
-                .map_err(|_| "trust resolution stopped unexpectedly".to_owned())?
+                .map_err(|_| {
+                    qq_tui::TrustFailure::from("trust resolution stopped unexpectedly".to_owned())
+                })?
             })
         })
     };
@@ -1419,6 +1440,22 @@ fn tui_action_name(action: qq_tui::Action) -> &'static str {
         qq_tui::Action::CancelRun => "cancel_run",
         qq_tui::Action::InterruptRun => "interrupt_run",
     }
+}
+
+/// The trust prompt's rendering of pending files: path plus one line per
+/// declaration, nothing secret.
+fn trust_notices(pending: &[config::PendingTrust]) -> Vec<qq_tui::PendingTrustNotice> {
+    pending
+        .iter()
+        .map(|item| qq_tui::PendingTrustNotice {
+            path: item.source().label().to_owned(),
+            declarations: item
+                .declarations()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        })
+        .collect()
 }
 
 fn trust_command(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
