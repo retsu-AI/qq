@@ -1,6 +1,6 @@
 # Onboarding and configuration UX audit — 2026-09-22
 
-**Kind:** research (design). Motivates [`../plans/onboarding-ux.md`](../plans/onboarding-ux.md).
+**Kind:** research (design). Motivated the onboarding plan, closed 2026-09-25 with every finding addressed; receipt in [`../plans/progress/onboarding-ux.md`](../plans/progress/onboarding-ux.md).
 **Method:** read the vendored sources of Codex, OpenCode, Pi, and fx under
 `.source/`, traced QQ's own first-run paths in `src/main.rs`, `qq-config`,
 `qq-auth`, and `qq-tui`, and ran a fresh-machine simulation (empty

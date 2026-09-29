@@ -30,7 +30,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | [`workflow.md`](./workflow.md) | Slice protocol, ledger rules, review, escalation, dispatch skeletons |
 | [`token-efficiency.md`](token-efficiency.md) | TE0–TE8: task-tree economics, tools, selective discovery, evidence reuse and context experiments; reuses existing D6b/T13/cache owners |
 | [`speed-first-extensible-agent-harness.md`](./speed-first-extensible-agent-harness.md) | Backend plan, collapsed to what is open: two quiet-host recordings, seven H22 deferrals, Phases 7–9 gated. Shipped design lives in `architecture.md` § Extension Contract and § Performance Discipline |
-| [`onboarding-ux.md`](./onboarding-ux.md) | From `git clone` to a working agent in one minute: user guide, actionable startup errors, TUI opens without a model or credential, `qq doctor`, `qq init`, install script/brew/nix, in-TUI trust prompt, docs-truth CI. OB0 in review; OB1–OB11 open |
+| [`guide-expansion.md`](./guide-expansion.md) | Correct the shipped guide (GE0), add concepts and workflows pages for newcomers, and write the eight pages the docs site dropped; each guarded by docs-truth. Successor to onboarding UX (closed 2026-09-25; receipt in `progress/onboarding-ux.md`) |
 | [`run-reliability.md`](./run-reliability.md) | Sessions finish: turn-level recovery and `Paused`, reactive overflow and un-wedged admission, tolerant checkpoint, admission-time slash validation, lenient tool arguments. RR1–RR12 open; from the 2026-09-21 audit |
 | [`terminal-bench-readiness.md`](./terminal-bench-readiness.md) | Harness reliability and Terminal-Bench program; R6–R8 open (R6 candidate designs moved to `tool-layer.md`) |
 | [`tool-layer.md`](./tool-layer.md) | Slim, safe, token-efficient built-ins. T1–T9 and T12 shipped (v0.1.0, #45, #49, #50); open: T11 `view_image`, T13 ablations, T14 `select_tools` index; T10 `terminal` gated |
@@ -39,6 +39,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | [`run-snapshots.md`](./run-snapshots.md) | Proposed: reversible mutating-run state |
 | [`mid-run-compaction.md`](./mid-run-compaction.md) | Compact and continue one run at a safe turn boundary (audit F03, ENG-793). MRC-0..3 shipped (#92, ADR-0039); open: MRC-4 surfaces, MRC-5 live evidence |
 | [`lsp-diagnostics.md`](./lsp-diagnostics.md) | Proposed: diagnostics integration |
+| [`jev.md`](./jev.md) | The only Jev plan: JV1–JV3 defect repairs (activation, headless, precision), JV4–JV6 context, hold lifecycle and receipts, JV7–JV8 shadow then pilot, JV9 opt-in UX, JV10–JV12 speed, JV13 qualification. Proposed |
 | [`templates/`](./templates/) | Slice header, pre-flight, receipt, PR body; review checklist |
 | [`progress/`](./progress/) | One ledger per plan, root ledger, decisions needed, gate evidence |
 
@@ -47,7 +48,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | # | Next slice | Plan | Why now |
 | ---: | --- | --- | --- |
 | 0 | RR1–RR3 (checkpoint tolerance, slash admission, Jev outcome), then RR4 turn recovery | [`run-reliability.md`](./run-reliability.md) | 27 % of real prompt runs fail and 73 % of those are harness decisions on recoverable situations; 8.5 h of completed work discarded in the sampled store. Blocks daily use |
-| 1 | OB1–OB2 (TUI opens without a model / credential), then OB6 install paths | [`onboarding-ux.md`](./onboarding-ux.md) | Every new user hits the first minute; the audit found the TUI exits or opens blank where every reference harness asks. Install today is a manual archive download |
+| 1 | GE0 guide corrections, then GE10 concepts, GE5 keybindings, GE4 environment, then GE2, GE3, GE1, GE9 | [`guide-expansion.md`](./guide-expansion.md) | The site is live and states five false things today; after that come the definitions and references newcomers look for and cannot find. Small, independent, and each extends the docs-truth net |
 | 2 | Live qualification of the context-usability stack | — (one manual run; record in `progress/root.md`) | C1–C6 shipped (#56–#64) on fixtures only. Confirm on a real long session: `cache_read_input_tokens > 0` on turn 2 of an Anthropic/Bedrock session, and a ~700 KB transcript on a 200k model sends and compacts |
 | 3 | Harness-audit findings F03–F28 triage | [`../design/harness-scale-audit-2026-09-16.md`](../design/harness-scale-audit-2026-09-16.md) § Proposed work order | F01/F02/F14 shipped; the remaining findings have no owning plan yet. Largest: true mid-run summarization (F03; C2 stubs stale reads but defers the summarizer cutoff) |
 | 4 | T13 ablation harness (A0–A4s arms) | `tool-layer.md` | Every tool-layer target (≥25 % fewer calls, ≥35 % fewer tokens) is unmeasured until this runs; it also feeds R6's evidence gate for T10 and H10 |
@@ -59,6 +60,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | — | Quiet-host recordings: Phase 5a H0 tail comparison; H20 eight-stream p95 then the 50→20 ms budget | `speed-first-…` | Implemented; tails not repeatable on the shared host; retained, not waived |
 | — | Seven H22 deferrals (`StaticHttpAuth`, headless writer, config parse-once, reviewer via `PlanCache`, run-loop enums, args-parse-once, `Arc` calls) | `speed-first-…` § Bundled Fixes | Each is its own slice when that code is next opened |
 | — | Run snapshots, LSP diagnostics | proposed plans | No scheduled slice |
+| — | JV1–JV3 Jev defect repairs (parallel), then JV4–JV6 | [`jev.md`](./jev.md) | Opted-in users are prompted for most held calls; the design doc's findings 3–6 are defects, not policy. Awaiting plan acceptance |
 | — | TE1 offline efficiency baseline, then TE2/TE4 | [`token-efficiency.md`](token-efficiency.md) | Measurement first; paid runs remain with ENG-809 and existing reliability priorities are unchanged |
 
 ## Ownership
@@ -73,7 +75,9 @@ in [`progress/root.md`](./progress/root.md) as before.
 | Reversible mutating-run state | `run-snapshots.md` |
 | Mid-run compaction and continuation | `mid-run-compaction.md` |
 | Diagnostics integration | `lsp-diagnostics.md` |
-| First-run and configuration UX, user guide, install paths, community files | `onboarding-ux.md` |
+| Jev review, routing, approval delegate, observer; their qualification | [`jev.md`](./jev.md); design [`../design/jev.md`](../design/jev.md) |
+| First-run and configuration UX, install paths, community files | shipped (onboarding UX, ENG-875); receipt in `progress/onboarding-ux.md` |
+| User guide pages and the docs site's content | `guide-expansion.md` |
 | Run outcome policy: turn recovery, `Paused`, mid-run compaction, checkpoint, admission validation, tool-argument leniency, approval deadline | `run-reliability.md` |
 | Who settles a held approval: Jev, `reviewer_model`, or the human; delegate grants, the delegate clock, the session switch | shipped (ENG-862, protocol 28); as built in [`../design/tools.md`](../design/tools.md) § Approval Policy and [ADR-0041](../adr/0041-jev-delegated-approval.md); receipt [`progress/delegated-approval.md`](./progress/delegated-approval.md) |
 | Reference audit of Codex, OpenCode, Pi, and fx; findings F01–F28 | [`../design/harness-scale-audit-2026-09-16.md`](../design/harness-scale-audit-2026-09-16.md) (research, not a plan; F03–F28 unowned) |
@@ -96,6 +100,3 @@ in [`progress/root.md`](./progress/root.md) as before.
   `../design/`, not in the plan.
 - When a plan is fully shipped, move any durable contract into `../design/`,
   delete the plan, and update this index.
-
-Optional Jev stacked repairs: [`jev-opt-in.md`](jev-opt-in.md);
-[ledger](progress/jev-opt-in.md).

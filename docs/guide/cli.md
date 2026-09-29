@@ -158,7 +158,7 @@ between global packs and your global config.
 
 ## `qq jev …`
 
-Optional TypeSafe Jev review. `setup [--allow-file]` stores the API key;
+Optional TypeSafe Jev. `setup [--allow-file]` stores the API key and enables nothing;
 `observe` assesses completed runs on the running local server without gating
 them. [`../runbooks/jev.md`](../runbooks/jev.md) explains what the observer
 reads and how its receipts resume.
