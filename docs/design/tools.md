@@ -1396,11 +1396,18 @@ fields stay managed-only:
   `TrustDeclaration`s — routes, provider names and kinds, MCP names with
   command or URL, grant counts, pack ids — never a secret, argument list,
   or environment value). Bare `qq` in a client that owns the server opens
-  the TUI on that set; `t` calls `grant_pending_trust`, the same write `qq
-  trust` performs, and `s` admits the `(path, digest)` pairs for the
-  process only through `LoadRequest::with_process_trust`, which every load
-  the embedded server makes for that workspace carries and which is part
-  of the plan cache key. Headless surfaces and a client attached to a
+  the TUI on that set, and the composition root keeps the `(path, digest)`
+  pairs the prompt displayed. Either answer covers exactly those pairs: `t`
+  calls `grant_reviewed_trust` (the same write `qq trust` performs, but
+  re-scanned under the trust-state lock) and `s` checks the set with
+  `reviewed_pending_trust` before admitting it for the process only through
+  `LoadRequest::with_process_trust`, which every load the embedded server
+  makes for that workspace carries and which is part of the plan cache key.
+  If any file is pending at a digest the prompt did not show (edited while
+  it was open), both refuse with `ConfigError::TrustChanged { pending }`,
+  write and admit nothing, and the TUI redraws the prompt with the current
+  set. `qq trust` itself still grants the current set, because it prints
+  what it records. Headless surfaces and a client attached to a
   server elsewhere keep the `TrustRequired` error: trust is decided on the
   host that holds `trust.ron`. No protocol type is involved.
 - **Promotion.** The approval prompt's workspace-lifetime choice appends
