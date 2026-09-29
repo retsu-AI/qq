@@ -2,7 +2,8 @@
 
 ## 2026-09-29 GPT-6.1 Sol (ENG-983)
 
-- Added `gpt-6.1-sol` to the OpenAI API catalog (1.05M/128K, low–max, $2/$10 per MTok, 272K long-context tier at 2x input/cache and 1.5x output) and the Codex fallback catalog (272K, low–max), per the official model page and openai/codex `models.json` (`minimal_client_version` 0.153.0, below the pinned 0.156.1, so live discovery also lists it).
+- Added `gpt-6.1-sol` to the OpenAI API catalog (1.05M/128K, low–max, $2/$10 per MTok, 272K long-context tier at 2x input/cache and 1.5x output) and the Codex fallback catalog (272K, low–max), per the official model page and openai/codex `models.json` (`minimal_client_version` 0.153.0, already below the previous 0.156.1 pin).
+- Bumped the Codex discovery client version from 0.156.1 to 0.159.0, the latest stable openai/codex release, so the pin tracks upstream rather than the minimum.
 - Existing `gpt-6-sol` entries are unchanged; Codex still lists it.
 - Passed: focused catalog tests, `cargo fmt --check`, workspace all-target/all-feature Clippy, `cargo test --workspace`. No live inference was run.
 
