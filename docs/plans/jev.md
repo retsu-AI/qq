@@ -1,7 +1,7 @@
 # Jev: first-class, opt-in, and worth turning on
 
-**Status:** Proposed 2026-09-28. JV0 (this plan) is in progress. No slice has
-started. Merging it doesn't enable Jev or authorize implementation or paid
+**Status:** Proposed 2026-09-28. JV0 (this plan) is in review. No
+implementation slice (JV1–JV13) has started. Merging it doesn't enable Jev or authorize implementation or paid
 evaluation.
 **Tracking:** ENG-791 (parent). JV slices get their own issues when started.
 ENG-938 and draft #193 are folded in here. ENG-811 owns paid evaluation and
@@ -284,5 +284,7 @@ ships, move durable content into `design/jev.md` and delete this file.
 2. Immediate stop vs. next-run Off semantics for JV9.
 3. The pilot's authority and data-egress scope (JV8) and the A13 utility
    gate.
-4. The product role of #187's session ladder and Strict completion, and
-   whether #189's feedback fix is transplanted on its own.
+4. Whether any of #187's session ladder or Strict completion returns in a
+   later slice. (#187 is being closed; #189 was reduced to the credential
+   timeout fix and merged as `7885f2c`, and its feedback-attribution commits
+   were not taken.)

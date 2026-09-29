@@ -1,7 +1,7 @@
 # Ledger — Jev
 
 Plan: [`../jev.md`](../jev.md). Design: [`../../design/jev.md`](../../design/jev.md).
-One writer per session per `workflow.md` § 3.
+One writer per ledger per `workflow.md` § 3.
 
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |

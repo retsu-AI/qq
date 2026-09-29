@@ -112,9 +112,13 @@ decides calls the approval mode already holds, before `reviewer_model` and
 before you (ADR-0041). The mode stays the ceiling. `Forbidden` shell shapes,
 blocked hosts, managed denies and `ask_user` never reach Jev.
 
-**What Jev sees.** Only the approval preview: the command or diff, the host,
-the task brief (child sessions only), recent action names, grants, and the
-mode. Each section is limited to 8 KiB and secret-masked.
+**What Jev sees.** Only the approval preview. The task brief (child sessions
+only), shell command, edit diff, and other tool arguments are each limited to
+8 KiB and secret-masked. These are sent **verbatim, without masking**: the
+workspace path, the shell working directory, the edit path, recent action
+names with their paths (each path cut to 120 bytes), the granted tool names,
+and the granted shell prefixes. The whole request is limited to 64 KiB; a
+larger one is not sent and the call falls through.
 
 **How it decides.** An answer counts only when confidence and the winning
 probability are both at least 0.7. Otherwise the call falls through to
@@ -178,9 +182,12 @@ part is. Store receipts with the same care as session history.
 
 ## Turning everything off
 
-1. **Configuration.** Set `jev_review: off`, `jev_routing: false` and
-   `jev_approval: false`, or use the matching `QQ_JEV_*=off` overrides on
-   the server.
+1. **Configuration.** On the server, set `QQ_JEV_CHECKPOINTS=off`,
+   `QQ_JEV_ROUTING=off` and `QQ_JEV_APPROVAL=off`. These beat every profile.
+   Top-level `jev_review: off` / `jev_routing: false` / `jev_approval: false`
+   are not enough on their own: a selected profile that sets `jev_review` or
+   `jev_routing` still wins (see Precedence), so clear those profile values
+   too if you use configuration instead of the overrides.
 2. **Restart.** Restart the local server or runtime so approval activation
    is re-read (see limitations).
 3. **Stop observers.** Stop any `qq jev observe` processes.

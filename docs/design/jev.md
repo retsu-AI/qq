@@ -180,8 +180,13 @@ and missing authority as model uncertainty.
 
 ## 4. Direction
 
-**Jev replaces an LLM turn or a human interruption. It never adds a serial
-wait to the hot path.** The rules below follow from that.
+This section is the target the [plan](../plans/jev.md) builds toward, not
+behavior as built; §§ 2–3 describe today. Where it differs from today, the
+owning JV slice is the change (for example, `enforce` does add a serial
+review today: finding 8, JV12).
+
+**Jev replaces an LLM turn or a human interruption. It should never add a
+serial wait to the hot path.** The rules below follow from that.
 
 - **Code owns authority; Jev answers the semantic questions code cannot.**
   - Classify every action by effect: local read, recoverable workspace
@@ -271,12 +276,14 @@ than any judge.
 ## 5. Provenance
 
 This document replaces the following, which were deleted in the
-consolidation. Git history retains them.
+consolidation. Git history retains them except where noted.
 
 - `design/jev-runtime-review-2026-09-18.md`: review of #72. Its opt-in
   contract shipped in #74–#78 and ADR-0030.
-- `design/jev-delegation-audit-2026-09-25.md`: now § 1 and § 3. Its probe
-  source is under `target/qq-perf/jev-audit-2026-09-25/`.
+- `design/jev-delegation-audit-2026-09-25.md`: now § 1 and § 3. It was
+  never on `main`; the original is commit `0c1cbd6`, kept by GitHub at
+  `refs/pull/193/head` (`git fetch origin pull/193/head`). Its probe source
+  was local (`target/qq-perf/jev-audit-2026-09-25/`) and is not retained.
 - `plans/jev-opt-in.md` and `plans/progress/jev-opt-in.md`: J1–J9 shipped.
   The receipt is summarized in the [ledger](../plans/progress/jev.md).
 
