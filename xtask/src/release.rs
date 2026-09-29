@@ -168,6 +168,25 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
     // entries without touching dependency resolution.
     cargo(&root, &["update", "--workspace", "--offline"])?;
 
+    // Install pins and `--version` samples in the guide follow the release.
+    let mut rewritten_docs = Vec::new();
+    for path in versioned_doc_paths(&root)? {
+        let text = std::fs::read_to_string(&path).map_err(|source| ReleaseError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        let (updated, count) = rewrite_version_tokens(&text, current, requested);
+        if count == 0 {
+            continue;
+        }
+        std::fs::write(&path, updated).map_err(|source| ReleaseError::Write {
+            path: path.clone(),
+            source,
+        })?;
+        let relative = path.strip_prefix(&root).unwrap_or(&path).to_owned();
+        rewritten_docs.push((relative, count));
+    }
+
     // The changelog is read from git before anything is committed, so the
     // bump commit itself is never listed.
     let subjects = changelog::subjects_since_last_tag(&root)?;
@@ -195,16 +214,24 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
     if args.no_commit {
         println!("bumped {current} -> {requested} (not committed)");
         println!("  {} entries in {}", subjects.len(), changelog::FILE_NAME);
+        for (path, count) in &rewritten_docs {
+            println!("  {}: {count} version reference(s)", path.display());
+        }
         return Ok(());
     }
 
     let message = format!("chore(release): v{requested}");
-    git(
-        &root,
-        &["add", "Cargo.toml", "Cargo.lock", changelog::FILE_NAME],
-        Stdio::inherit(),
-    )?
-    .success_or("git", "add")?;
+    let mut staged: Vec<String> = ["Cargo.toml", "Cargo.lock", changelog::FILE_NAME]
+        .map(str::to_owned)
+        .to_vec();
+    staged.extend(
+        rewritten_docs
+            .iter()
+            .map(|(path, _)| path.to_string_lossy().into_owned()),
+    );
+    let mut add = vec!["add", "--"];
+    add.extend(staged.iter().map(String::as_str));
+    git(&root, &add, Stdio::inherit())?.success_or("git", "add")?;
     git(&root, &["commit", "-q", "-m", &message], Stdio::inherit())?.success_or("git", "commit")?;
 
     println!("bumped {current} -> {requested}");
@@ -214,9 +241,74 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
         changelog::FILE_NAME,
         subjects.len()
     );
+    for (path, count) in &rewritten_docs {
+        println!("  {}: {count} version reference(s)", path.display());
+    }
     println!("next: push this branch, open a PR titled \"{message}\", merge it, then");
     println!("      git switch main && git pull --ff-only && cargo xtask release --tag");
     Ok(())
+}
+
+/// Files whose QQ version strings follow the release: the user guide and the
+/// README. The root crate's docs-truth test fails when any of them names a
+/// version other than the manifest's, so the bump must carry them along.
+const VERSIONED_DOCS: [&str; 2] = ["docs/guide", "README.md"];
+
+/// Every Markdown file under [`VERSIONED_DOCS`], sorted.
+fn versioned_doc_paths(root: &Path) -> Result<Vec<PathBuf>, ReleaseError> {
+    let mut paths = Vec::new();
+    for entry in VERSIONED_DOCS {
+        let path = root.join(entry);
+        if !path.is_dir() {
+            paths.push(path);
+            continue;
+        }
+        let listing = std::fs::read_dir(&path).map_err(|source| ReleaseError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        for file in listing {
+            let file = file.map_err(|source| ReleaseError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            let file = file.path();
+            if file.extension().is_some_and(|extension| extension == "md") {
+                paths.push(file);
+            }
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// Replaces every whole `current` version token in `text` with `requested`
+/// and returns the new text with the number replaced. A token is whole when
+/// it is not part of a longer dotted number: `0.1.4` matches in `v0.1.4` and
+/// `qq 0.1.4 (`, never inside `10.1.4` or `0.1.4.1`.
+pub fn rewrite_version_tokens(text: &str, current: Version, requested: Version) -> (String, usize) {
+    let current = current.to_string();
+    let requested = requested.to_string();
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut replaced = 0;
+    let mut copied = 0;
+    for (at, _) in text.match_indices(&current) {
+        let end = at + current.len();
+        let joined_before = at > 0 && (bytes[at - 1].is_ascii_digit() || bytes[at - 1] == b'.');
+        let joined_after = end < bytes.len()
+            && (bytes[end].is_ascii_digit()
+                || (bytes[end] == b'.' && bytes.get(end + 1).is_some_and(u8::is_ascii_digit)));
+        if joined_before || joined_after {
+            continue;
+        }
+        out.push_str(&text[copied..at]);
+        out.push_str(&requested);
+        copied = end;
+        replaced += 1;
+    }
+    out.push_str(&text[copied..]);
+    (out, replaced)
 }
 
 /// Creates `vX.Y.Z` from the manifest version on a clean `main` that matches
@@ -396,6 +488,36 @@ mod tests {
         let manifest = "[package]\nname = \"qq\"\nversion = \"0.1.0\"\n";
         let error = bump_workspace_version(manifest, Version::parse("0.2.0").unwrap()).unwrap_err();
         assert!(matches!(error, ReleaseError::VersionLineMissing), "{error}");
+    }
+
+    #[test]
+    fn rewrites_whole_version_tokens_only() {
+        let current = Version::parse("0.1.4").unwrap();
+        let requested = Version::parse("0.2.0").unwrap();
+        let text = "--version 0.1.4 --dir x\nnix run github:o/qq/v0.1.4\n`qq 0.1.4 (abc 2026-09-22)`\n\
+                    10.1.4 and 0.1.40 and 0.1.4.1 and client 0.156.1 stay\nends 0.1.4.\n";
+        let (updated, count) = rewrite_version_tokens(text, current, requested);
+        assert_eq!(count, 4, "{updated}");
+        assert_eq!(
+            updated,
+            "--version 0.2.0 --dir x\nnix run github:o/qq/v0.2.0\n`qq 0.2.0 (abc 2026-09-22)`\n\
+             10.1.4 and 0.1.40 and 0.1.4.1 and client 0.156.1 stay\nends 0.2.0.\n"
+        );
+        let (unchanged, none) = rewrite_version_tokens("no versions here", current, requested);
+        assert_eq!((unchanged.as_str(), none), ("no versions here", 0));
+    }
+
+    #[test]
+    fn versioned_docs_cover_the_guide_and_readme() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let paths = versioned_doc_paths(&root).unwrap();
+        assert!(paths.iter().any(|path| path.ends_with("README.md")));
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.ends_with("docs/guide/install.md"))
+        );
+        assert!(paths.iter().all(|path| path.is_file()), "{paths:?}");
     }
 
     /// `main` carries the version of the last release until the next bump PR.

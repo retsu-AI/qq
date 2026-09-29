@@ -285,14 +285,17 @@ The TUI lost its server and could not reconnect; the reason follows. If a
 
 ### `qq server already running at …`
 
-Only one user-scoped server runs per machine; the TUI and `qq run` connect
-to it. Stop it to bind another address.
+Only one user-scoped server runs per machine, and every `qq` TUI attaches
+to it. Stop it (`Ctrl-C` in its terminal) to bind another address; that
+cancels its queued and running runs.
 
-### The sessions database is locked / `StoreBusy`
+### `session store is owned by another running qq process`
 
-Another QQ process owns the store (an advisory lock protects it). Find it
-with `ps`, or wait for it to exit. Two machines must not share one data
-directory.
+`qq run` exits `4` with this when a `qq` TUI or `qq serve` is open: all three
+use the same session store, and only one process may own it (an advisory
+lock protects it). `qq run` does not connect to the running server. Close
+the TUI or stop `qq serve`, or send the prompt from the TUI instead. Two
+machines must not share one data directory.
 
 ## Getting more detail
 
