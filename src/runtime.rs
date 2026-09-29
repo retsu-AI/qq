@@ -398,6 +398,19 @@ impl RuntimeFactory {
         choice: TrustResolution,
         reviewed: &[ProcessTrust],
     ) -> Result<TrustGranted, RuntimeBuildError> {
+        self.resolve_trust_with(request, choice, reviewed, || {})
+    }
+
+    /// [`Self::resolve_trust`] with a hook run between the grant and the
+    /// post-grant load, where a concurrent edit can land; tests use it to
+    /// place that edit deterministically.
+    fn resolve_trust_with(
+        &self,
+        request: &LoadRequest,
+        choice: TrustResolution,
+        reviewed: &[ProcessTrust],
+        after_grant: impl FnOnce(),
+    ) -> Result<TrustGranted, RuntimeBuildError> {
         let trusted: Vec<String> = match choice {
             TrustResolution::Persist => self
                 .inner
@@ -434,7 +447,20 @@ impl RuntimeFactory {
             }
         };
         let request = request.clone().with_process_trust(self.process_trust()?);
-        let snapshot = self.load_for_client(&request)?;
+        after_grant();
+        // A file rewritten after the grant's scan but before this load is
+        // pending again at a digest nobody reviewed. That is the same event
+        // as an edit while the prompt was open, so report it the same way:
+        // the TUI redraws the prompt with the new content instead of showing
+        // a generic error over the old declarations.
+        let snapshot = match self.load_for_client(&request) {
+            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { pending, .. })) => {
+                return Err(RuntimeBuildError::Config(ConfigError::TrustChanged {
+                    pending,
+                }));
+            }
+            other => other?,
+        };
         Ok(TrustGranted {
             trusted,
             state: self.tui_model_state(&snapshot, &request),
@@ -6932,6 +6958,54 @@ mod tests {
             .resolve_trust(&request, TrustResolution::Session, &current)
             .unwrap();
         assert_eq!(granted.trusted.len(), 1);
+    }
+
+    #[test]
+    fn an_edit_after_the_grant_scan_redraws_the_prompt_instead_of_failing() {
+        // Review (#213): a file rewritten after the grant's scan but before
+        // the post-grant load made that load fail `TrustRequired`, a generic
+        // error over the old declarations. It is the same event as an edit
+        // while the prompt was open and must come back as `TrustChanged`
+        // carrying the new content. The hook places the edit exactly there.
+        let fixture = RuntimeFixture::new();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        );
+        credentials
+            .set("openai/default", "test-secret", false)
+            .unwrap();
+        fs::create_dir_all(fixture.path("work/.qq")).unwrap();
+        let config = fixture.path("work/.qq/config.ron");
+        fs::write(&config, r#"(version: 1, model: "openai/gpt-5.6")"#).unwrap();
+        let request = LoadRequest::new(fs::canonicalize(fixture.path("work")).unwrap());
+        let factory = fixture.factory_with_credentials(credentials);
+        let shown = match factory.load_for_client(&request) {
+            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { pending, .. })) => pending,
+            other => panic!("expected TrustRequired, got {other:?}"),
+        };
+        let reviewed: Vec<ProcessTrust> = shown.iter().filter_map(PendingTrust::reviewed).collect();
+        let edit = || {
+            fs::write(
+                &config,
+                r#"(version: 1, model: "openai/gpt-5.6", mcp: {"late": Stdio(command: "late")})"#,
+            )
+            .unwrap();
+        };
+        let result =
+            factory.resolve_trust_with(&request, TrustResolution::Session, &reviewed, edit);
+        let current = match result {
+            Err(RuntimeBuildError::Config(ConfigError::TrustChanged { pending })) => pending,
+            other => panic!("expected TrustChanged, got {other:?}"),
+        };
+        assert_eq!(current.len(), 1);
+        assert!(
+            current[0]
+                .declarations()
+                .iter()
+                .any(|declaration| declaration.to_string() == "MCP late → late"),
+            "the redraw carries the content that was actually written"
+        );
     }
 
     #[test]
