@@ -35,6 +35,8 @@ pub enum InitError {
     InvalidChoice { answer: String },
     #[error("{} already exists; pass --force to overwrite", path.display())]
     AlreadyExists { path: PathBuf },
+    #[error("{} is a symbolic link; qq init writes only a regular file it owns", path.display())]
+    Symlink { path: PathBuf },
     #[error("failed to write {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -155,6 +157,28 @@ pub fn run<R: BufRead, W: Write>(
          )\n"
     );
 
+    // A symlinked `.qq` or `config.ron` (a repository can ship either) would
+    // make `--force` write through to wherever it points. Refuse both. This
+    // is a check before the open, not O_NOFOLLOW (no libc dependency for one
+    // flag): swapping a link in between needs write access to the directory,
+    // which already grants what the link would.
+    for candidate in [&directory, &path] {
+        match fs::symlink_metadata(candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(InitError::Symlink {
+                    path: candidate.clone(),
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(InitError::Io {
+                    path: candidate.clone(),
+                    source,
+                });
+            }
+        }
+    }
     // The global directory holds credentials-adjacent state, so it is created
     // private like the data directory; a project's `.qq` is repository content.
     let mut builder = fs::DirBuilder::new();
@@ -450,6 +474,38 @@ mod tests {
             fixture.check().unwrap().unwrap().model().as_str(),
             "xai/grok-4.6"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn force_refuses_to_write_through_a_symlinked_project_config() {
+        // A repository can ship `.qq/config.ron` as a link to a file
+        // elsewhere; `--force` must not truncate the link's target.
+        let fixture = Fixture::new();
+        let outside = fixture.workspace.parent().unwrap().join("outside.txt");
+        fs::write(&outside, "precious").unwrap();
+        let project = fixture.workspace.join(".qq");
+        fs::create_dir_all(&project).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join("config.ron")).unwrap();
+
+        let (result, _) = fixture.run(args(true, Some("openai/gpt-5.6"), true));
+        assert!(
+            matches!(result, Err(InitError::Symlink { ref path }) if *path == project.join("config.ron")),
+            "{result:?}"
+        );
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "precious");
+
+        // A symlinked `.qq` directory is refused the same way.
+        fs::remove_dir_all(&project).unwrap();
+        let elsewhere = fixture.workspace.parent().unwrap().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &project).unwrap();
+        let (result, _) = fixture.run(args(true, Some("openai/gpt-5.6"), true));
+        assert!(
+            matches!(result, Err(InitError::Symlink { .. })),
+            "{result:?}"
+        );
+        assert!(!elsewhere.join("config.ron").exists());
     }
 
     #[test]

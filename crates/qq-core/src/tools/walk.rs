@@ -6,7 +6,10 @@
 //! whether each child is excluded. Traversal order and bounds are the calling
 //! tool's business; this module owns what "ignored" means.
 
-use std::time::{Instant, SystemTime};
+use std::{
+    io::Read as _,
+    time::{Instant, SystemTime},
+};
 
 use ignore::{
     Match,
@@ -193,10 +196,31 @@ fn directory_matcher(workspace: &Workspace, dir: &str) -> Option<Gitignore> {
     builder.build().ok()
 }
 
+/// Largest ignore file read. Real ones are a few KiB; a larger one is almost
+/// certainly not a pattern list, and reading it would stall every walk of
+/// its directory. An oversized file is ignored as if absent.
+pub(crate) const MAX_IGNORE_FILE_BYTES: u64 = 256 * 1024;
+
 fn add_ignore_file(workspace: &Workspace, builder: &mut GitignoreBuilder, path: &str) -> bool {
-    let Ok(content) = workspace.root().read_to_string(path) else {
+    // Only a regular file: a FIFO or device would block the blocking walk
+    // at open, and a symlink is not followed anywhere else in the walk.
+    match workspace.root().symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_IGNORE_FILE_BYTES => {}
+        Ok(_) | Err(_) => return false,
+    }
+    let Ok(file) = workspace.root().open(path) else {
         return false;
     };
+    // The size was a hint: bound the read in case the file grew since.
+    let mut content = String::new();
+    if file
+        .take(MAX_IGNORE_FILE_BYTES + 1)
+        .read_to_string(&mut content)
+        .is_err()
+        || content.len() as u64 > MAX_IGNORE_FILE_BYTES
+    {
+        return false;
+    }
     for line in content.lines() {
         // A malformed pattern is skipped, as git does; the rest still apply.
         let _ = builder.add_line(None, line);

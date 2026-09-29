@@ -466,7 +466,10 @@ workspace sees the same tree. These three are the whole list, on purpose:
 the user's global git excludes are not read — they would make the tree
 depend on which editors a developer has installed, and each one is another
 file probe per directory on the `search` hot path. A rule from one of them
-that should apply here is one explicit line in `.qqignore`. Hidden entries and a fixed generated-directory list (`target`,
+that should apply here is one explicit line in `.qqignore`. Only a regular
+file of at most 256 KiB is read as an ignore file; a FIFO, device, symlink,
+or larger file is treated as absent, so an ignore file can neither block a
+walk nor make it read unbounded input. Hidden entries and a fixed generated-directory list (`target`,
 `node_modules`, `dist`, `build`, `.venv`, `__pycache__`) are excluded by
 default; `include_ignored` lifts all of that except `.git`, whose objects
 are never useful results. Symlinks are reported and never followed. Files

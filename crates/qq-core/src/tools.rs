@@ -1067,6 +1067,51 @@ mod tests {
         assert!(escaped_len(&result.model_text) <= search::SEARCH_BOUNDS.max_bytes);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_or_oversized_ignore_file_is_skipped_not_read() {
+        // A FIFO `.gitignore` used to block the walk at open forever, and an
+        // ignore file of any size was read whole. Both are now ignored as if
+        // absent; a normal `.qqignore` beside them still applies.
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let status = std::process::Command::new("mkfifo")
+            .arg(root.join(".gitignore"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let oversized = format!(
+            "a.md\n{}",
+            "#".repeat(usize::try_from(walk::MAX_IGNORE_FILE_BYTES).unwrap())
+        );
+        fs::write(root.join(".ignore"), oversized).unwrap();
+        fs::write(root.join(".qqignore"), "b.md\n").unwrap();
+        fs::write(root.join("a.md"), "a").unwrap();
+        fs::write(root.join("b.md"), "b").unwrap();
+        let workspace = Workspace::open(root).unwrap();
+        let state = FileState::default();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let tree = run_tool(&workspace, &state, "tree", r#"{"depth":1}"#);
+            let _ = sender.send(tree);
+        });
+        let tree = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the walk does not block on a FIFO ignore file");
+        assert!(!tree.is_error, "{}", tree.model_text);
+        assert!(
+            tree.model_text.contains("a.md"),
+            "oversized .ignore is not applied: {}",
+            tree.model_text
+        );
+        assert!(
+            !tree.model_text.contains("b.md"),
+            ".qqignore still applies: {}",
+            tree.model_text
+        );
+    }
+
     #[test]
     fn tree_fills_breadth_first_with_counts_chains_and_ignored_markers() {
         let directory = tempfile::tempdir().unwrap();
