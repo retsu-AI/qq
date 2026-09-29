@@ -542,6 +542,12 @@ impl RuntimeFactory {
                         }
                         None => qq_core::CheckpointSelection::Disabled,
                     }),
+                    approval_delegate: Some(match plan.descriptor().approval_delegate.as_ref() {
+                        Some(identity) => {
+                            qq_core::ApprovalDelegateSelection::DelegateIdentity(identity.clone())
+                        }
+                        None => qq_core::ApprovalDelegateSelection::Disabled,
+                    }),
                     workspace: plan.workspace_path().display().to_string(),
                     profile: plan.descriptor().profile.clone(),
                 },
@@ -1720,7 +1726,11 @@ impl RuntimeFactory {
                 .with_shell_policy(shell)
                 .with_network_policy(network)
                 .with_approval_delegate(approval_delegate)
-                .with_jev_approval(snapshot.jev_approval())
+                .with_approval_delegate_identity(
+                    snapshot
+                        .jev_approval()
+                        .then(|| approval::JEV_APPROVAL_IDENTITY.to_owned()),
+                )
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone());
@@ -1775,9 +1785,7 @@ impl RuntimeFactory {
         let mut bindings = LiveBindings {
             provider: provider_config.access().cloned(),
             mcp: None,
-            runtime: crate::plan::RuntimeSwitches {
-                jev_approval: snapshot.jev_approval(),
-            },
+            runtime: crate::plan::RuntimeSwitches {},
         };
         if let Some(progress) = progress {
             progress.set(qq_core::RuntimeLoadStage::LoadingTools);
@@ -2505,6 +2513,25 @@ impl RuntimeLoader for RuntimeFactory {
                 }
                 if let Some(organization) = request.model.organization {
                     overrides = overrides.with_organization(organization);
+                }
+                // A reload (routing, owned child) keeps the parent's approval
+                // delegate: disabled stays disabled whatever the file now
+                // says, and only the delegate this build knows is honoured.
+                if let Some(selection) = &request.approval_delegate {
+                    let enabled = match selection {
+                        qq_core::ApprovalDelegateSelection::Disabled => false,
+                        qq_core::ApprovalDelegateSelection::DelegateIdentity(identity)
+                            if identity == approval::JEV_APPROVAL_IDENTITY =>
+                        {
+                            true
+                        }
+                        qq_core::ApprovalDelegateSelection::DelegateIdentity(identity) => {
+                            return Err(RuntimeBuildError::InheritedApprovalDelegate(
+                                identity.clone(),
+                            ));
+                        }
+                    };
+                    overrides = overrides.with_jev_approval(enabled);
                 }
                 load = load.with_overrides(overrides);
                 let plan =
@@ -3886,6 +3913,8 @@ pub enum RuntimeBuildError {
     InheritedCheckpoint(String),
     #[error("unsupported inherited routing identity: {0}")]
     InheritedRouting(String),
+    #[error("unsupported inherited approval delegate identity: {0}")]
+    InheritedApprovalDelegate(String),
     #[error("TYPESAFE_API_KEY cannot be encoded as an authorization header")]
     JevKeyInvalid,
     #[error("the TypeSafe JEV client could not be constructed")]
@@ -3940,6 +3969,7 @@ impl RuntimeBuildError {
             | Self::PackRequiresNewerProtocol { .. }
             | Self::InheritedCheckpoint(_)
             | Self::InheritedRouting(_)
+            | Self::InheritedApprovalDelegate(_)
             | Self::JevKeyRequired
             | Self::JevKeyInvalid
             | Self::UnsupportedReasoningEffort(_)
@@ -6053,6 +6083,7 @@ mod tests {
                 &factory,
                 RuntimeLoadRequest {
                     routing: None,
+                    approval_delegate: None,
                     reasoning_effort: None,
                     checkpoint: None,
                     workspace: workspace.display().to_string(),
@@ -6653,6 +6684,7 @@ mod tests {
             &factory,
             RuntimeLoadRequest {
                 routing: None,
+                approval_delegate: None,
                 reasoning_effort: None,
                 checkpoint: None,
                 workspace: workspace.display().to_string(),
@@ -8455,7 +8487,7 @@ mod tests {
                 "descriptor leaked {forbidden}"
             );
         }
-        assert!(canonical.starts_with("qq-agent-plan-descriptor-v11\0{"));
+        assert!(canonical.starts_with("qq-agent-plan-descriptor-v12\0{"));
     }
 
     #[test]
@@ -8787,6 +8819,7 @@ mod tests {
             .to_string();
         let request = RuntimeLoadRequest {
             routing: None,
+            approval_delegate: None,
             reasoning_effort: None,
             workspace,
             model: ModelSelection::default(),
@@ -8801,6 +8834,7 @@ mod tests {
             &factory,
             RuntimeLoadRequest {
                 routing: None,
+                approval_delegate: None,
                 reasoning_effort: None,
                 checkpoint: Some(qq_core::CheckpointSelection::ReviewerIdentity(
                     "unknown/reviewer".into(),
@@ -9062,9 +9096,10 @@ mod tests {
 
     #[test]
     fn an_on_disk_jev_approval_edit_replaces_the_cached_plan() {
-        // Review (#214): `jev_approval` is outside the plan digest, so an
-        // edit to only that field used to revalidate the cached generation
-        // and keep the old plan; turning it off kept sending previews to Jev.
+        // Review (#214): an edit to only `jev_approval` used to revalidate the
+        // cached generation and keep the old plan; turning it off kept
+        // sending previews to Jev. Activation is now in the descriptor, so
+        // the edit yields a new digest and a new plan.
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
         let config = fixture.path("global/config.ron");
@@ -9085,7 +9120,16 @@ mod tests {
             .unwrap();
         assert_eq!(lookup, PlanLookup::Compiled, "the edit must not revalidate");
         assert!(!off.jev_approval());
-        assert_eq!(on.digest(), off.digest(), "still outside the digest");
+        assert_ne!(
+            on.digest(),
+            off.digest(),
+            "activation is durable plan identity (descriptor approval_delegate)"
+        );
+        assert_eq!(
+            on.descriptor().approval_delegate.as_deref(),
+            Some(approval::JEV_APPROVAL_IDENTITY)
+        );
+        assert_eq!(off.descriptor().approval_delegate, None);
 
         // An unrelated byte change with the same setting still revalidates.
         fs::write(&config, format!("{}\n// comment\n", document(false))).unwrap();
@@ -9411,6 +9455,7 @@ mod tests {
         let factory = fixture.factory();
         let request = RuntimeLoadRequest {
             routing: Some(qq_core::RoutingSelection::Disabled),
+            approval_delegate: None,
             checkpoint: None,
             reasoning_effort: None,
             workspace: fs::canonicalize(fixture.path("work"))
@@ -9439,6 +9484,84 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.message.contains("inherited routing identity"));
+    }
+
+    #[tokio::test]
+    async fn a_reload_keeps_the_parent_approval_delegate_whatever_the_file_now_says() {
+        // Review (#214): routing and owned children reload their runtime;
+        // a configuration edit between the parent's compile and that reload
+        // must not turn Jev approval on (or off) for the same run tree.
+        let fixture = RuntimeFixture::new();
+        let config = fixture.path("global/config.ron");
+        let document = |enabled: bool| {
+            format!(
+                r#"(version: 1, model: "custom/test", jev_approval: {enabled},
+                    providers: {{ "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: {{ "test": (name: "test") }}) }})"#
+            )
+        };
+        fs::write(&config, document(true)).unwrap();
+        let factory = fixture.factory();
+        let request = RuntimeLoadRequest {
+            routing: None,
+            approval_delegate: Some(qq_core::ApprovalDelegateSelection::Disabled),
+            checkpoint: None,
+            reasoning_effort: None,
+            workspace: fs::canonicalize(fixture.path("work"))
+                .unwrap()
+                .display()
+                .to_string(),
+            model: ModelSelection::default(),
+            profile: AgentProfileId::default(),
+        };
+        let inherited_off = RuntimeLoader::load(&factory, request.clone())
+            .await
+            .unwrap();
+        assert!(!inherited_off.plan.jev_approval(), "parent off stays off");
+
+        fs::write(&config, document(false)).unwrap();
+        let inherited_on = RuntimeLoader::load(
+            &factory,
+            RuntimeLoadRequest {
+                approval_delegate: Some(qq_core::ApprovalDelegateSelection::DelegateIdentity(
+                    approval::JEV_APPROVAL_IDENTITY.to_owned(),
+                )),
+                ..request.clone()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(inherited_on.plan.jev_approval(), "parent on stays on");
+
+        let root = RuntimeLoader::load(
+            &factory,
+            RuntimeLoadRequest {
+                approval_delegate: None,
+                ..request.clone()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!root.plan.jev_approval(), "a root resolves the file");
+
+        let result = RuntimeLoader::load(
+            &factory,
+            RuntimeLoadRequest {
+                approval_delegate: Some(qq_core::ApprovalDelegateSelection::DelegateIdentity(
+                    "unknown/delegate".to_owned(),
+                )),
+                ..request
+            },
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("unknown approval delegate accepted"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .message
+                .contains("inherited approval delegate identity")
+        );
     }
 
     #[test]
