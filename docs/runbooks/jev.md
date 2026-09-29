@@ -104,8 +104,13 @@ parent's routing activation.
 
 **Pinned effort without Jev.** You can pin effort in configuration
 (`reasoning_effort: high`, `Profile(reasoning_effort: Some(low))`) or with
-`/effort` in the TUI. Values are `none`, `minimal`, `low`, `medium`, `high`
-and `xhigh`. This is a fixed choice, not routing.
+`/effort` in the TUI. Values are `none`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, `max`, and `default` (let the provider choose, overriding a
+configured value). When QQ knows the selected model's accepted efforts (from
+its catalog entry or live discovery), any value other than `default` outside
+that set fails at plan time naming the accepted ones; for a model with no
+known set, a value it rejects fails at the provider instead. This is a fixed
+choice, not routing.
 
 ## Approval delegate — `jev_approval`
 

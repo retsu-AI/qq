@@ -39,7 +39,9 @@ release is a bump PR followed by a tag on the merged result.
 2. Open a PR titled `chore(release): v0.1.5` and merge it once CI is green.
    Review the changelog section in the diff: it is the release's user-facing
    summary, and a commit that landed with a wrong Conventional Commit type
-   shows up in the wrong group here.
+   shows up in the wrong group here. Add the Upgrading block (below) when a
+   contract or configuration changed. Do **not** move the guide's version
+   pins here: the site deploys on merge, before the tag's assets exist.
 
 3. Tag the merged `main` and push the tag.
 
@@ -63,9 +65,15 @@ release is a bump PR followed by a tag on the merged result.
    --dir /tmp/qq-check` prints the new version, and `Formula/qq.rb` in the tap
    carries it.
 
+6. Only now, with the release's assets published, open a follow-up
+   `docs(guide):` PR that moves the guide's version pins and example
+   outputs (`docs/guide/install.md`, `cli.md`, `troubleshooting.md`) to the
+   new version and contracts. Before this point they would name a release
+   that cannot be downloaded.
+
 ## Changelog
 
-`CHANGELOG.md` at the repository root is generated, never edited by hand.
+`CHANGELOG.md` at the repository root is generated; the only hand-written part is a release's Upgrading block (below).
 `cargo xtask release X.Y.Z` reads `git log <newest v* tag>..HEAD
 --format=%s --no-merges` (every commit when no tag exists) and prepends one
 section above the previous release:

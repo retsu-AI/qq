@@ -159,12 +159,13 @@ Next free number: 0053. Reserve here before opening a PR that adds an ADR.
 | 2026-09-11 | tool-layer plan | `docs/plans/README.md`, `docs/README.md` | Plan row, priority entry, catalog link | Done |
 | 2026-09-12 | tool-layer T2 | root `Cargo.toml`, `Cargo.lock` | Add `ignore = "0.4"` and `regex = "1"` to `[workspace.dependencies]` for `qq-core` (no version bumps; `regex` was already locked via tree-sitter) | Done (#32; `Cargo.toml` rows present) |
 | 2026-09-14 | tool-layer T6 (ahead of start) | root `Cargo.toml`, `Cargo.lock` | Promote `tree-sitter` and `tree-sitter-bash` to `[workspace.dependencies]` for the shell classifier (`approval/classify.rs`); `qq-tui` already depends on `tree-sitter = "0.26"` / `tree-sitter-bash = "0.25"` directly; promote those rows to the workspace table and point `qq-tui` at them so `qq-core` shares one version. No lock delta | Done (#40; `Cargo.toml` `[workspace.dependencies]`, both crates `.workspace = true`) |
-| 2026-09-20 | tui-redesign | `AGENTS.md` § Git And Reviews | Linear team is `ENG` (per the 2026-09-19 entry below and the live board), not `DEV`; fix the reference and the branch-name examples | Open |
+| 2026-09-20 | tui-redesign | `AGENTS.md` § Git And Reviews | Linear team is `ENG` (per the 2026-09-19 entry below and the live board), not `DEV`; fix the reference and the branch-name examples | Done (AGENTS.md reads `ENG` with `feat/eng-123-…` examples; closed in the v0.1.5 release stack, ENG-976) |
 | 2026-09-20 | tui-redesign | `docs/plans/README.md`, `docs/README.md`, `docs/design/architecture.md` § repository map (`qq-tui` bullet) | Plan row and priority entry for `tui-redesign.md`. The `docs/README.md` index entry and a one-sentence `architecture.md` pointer to `docs/design/layout.md` were made in the L1 PR (index and pointer only; no boundary change) | Partly done (L1) |
 | 2026-09-21 | run-reliability RR4 | root `Cargo.toml`, `Cargo.lock` (RR5: `httpdate = "1"` workspace row, already in the lock via hyper); `crates/qq-protocol` `PROTOCOL_VERSION` 25 → 26 (`run_turn_retrying`, `paused`); `docs/adr/README.md`; `docs/design/architecture.md` § run loop | Turn recovery per ADR-0040 | Done in the RR4 PR |
 | 2026-09-24 | delegated-approval DA6 (ENG-862) | `crates/qq-protocol` `PROTOCOL_VERSION` 27 → 28 (`tool_approval_resolved.delegate`, `tool_approval_escalated`, `set_approval_delegate` / `approval_delegate_set`, `SessionSummary.approval_delegate`, `/delegate` reserved); `docs/README.md` and `docs/plans/README.md` rows (target contract deleted, plan closed) | The delegate identity must be on the stream for a supervisor to tell Jev from `reviewer_model`; the plan's acceptance requires it | Done in the DA6 PR |
 | 2026-09-24 | onboarding-ux OB7 (ENG-881) | `docs/adr/README.md` (ADR-0042 row); `crates/qq-client/src/port.rs` `ClientRequest::Models` (client-internal enum, not wire) | The trust prompt is client-side per ADR-0042; **no `PROTOCOL_VERSION` change** (stays 28). The plan's "needs a protocol addition" note is superseded by the ADR | Done in the OB7 PR |
 | 2026-09-25 | mcp-pinning MP1 (ENG-939) | `Cargo.lock` (`sha2` for `qq-mcp`, already locked via other crates); `crates/qq-core/src/plan/descriptor.rs` `DESCRIPTOR_VERSION` 9 → 10 (`McpServerDescriptor.pin`); `docs/adr/README.md` (ADR-0046 row); `docs/design/architecture.md` § compiled plan identity; `docs/design/protocol.md` descriptor note; `docs/guide/cli.md` (`qq mcp inspect`) | The configured pin must be in durable plan identity or pinned and unpinned plans share a digest | Done in the ENG-939 PR |
+| 2026-09-28 | release v0.1.5 (ENG-968) | `docs/runbooks/release.md` § Versioning; `docs/design/architecture.md` § run loop and reasoning effort; root `Cargo.toml` / `Cargo.lock` version bump (release PR) | Adopt 0ver (contract bumps no longer force MINOR) and correct post-v0.1.4 drift before tagging | In review (stack ENG-969 … ENG-977) |
 
 Shared files: root `Cargo.toml` and `Cargo.lock` version bumps,
 `rust-toolchain.toml`, `flake.nix`, `.github/workflows/*`,
@@ -427,3 +428,18 @@ while writing ADR-0038: `commands` already has no reference to `sessions`
 (receipts survive deletion by accident today), and `delete_idle_session`
 removes every session-scoped table except the session's rows in `events` —
 the event log grows regardless of deletion, which the ADR's decision 6 fixes.
+
+### 2026-09-28 — v0.1.5 release-readiness stack (ENG-968)
+
+Release review of `main` at `7885f2c` (v0.1.4 + 36 commits): workspace tests
+1948/0/6, clippy and fmt clean, minimal provider profile 203 passed, CI green.
+Versioning moves to 0ver (ENG-969): contract bumps since v0.1.4 (protocol
+27 → 30, store 35 → 39, descriptor 9 → 11) ship as a PATCH, listed in the
+release PR. Stacked fixes: trust prompt answers only for shown digests
+(ENG-970); Jev approval follows the run's plan, off wins (ENG-971, audit
+finding 5); headless auto waits for Jev (ENG-972, finding 4); empty-truncation
+raise reachable in sessions (ENG-973); init symlink refusal and bounded ignore
+files (ENG-974; `search_walk` unchanged within noise); schema-35 upgrade test
+(ENG-975); docs drift (ENG-976); release bump (ENG-977). Deferred, not
+release fixes: audit findings 1, 3, 6–8 (PR #193), ENG-870 remaining RR8
+goals, Merkle index robustness, ENG-834 size budget.

@@ -472,13 +472,14 @@ with runtime overrides first. A session pin (`/effort`, `set_session_effort`)
 takes precedence for that session's next run. Descriptor version 9 records the
 choice and its cache key distinguishes overrides. Every model turn uses the
 compiled choice; omission uses provider defaults, while explicit `none` requests
-disabled reasoning. This does not enable Jev. HTTP OpenAI Responses/Chat adapters carry
-effort; other adapter families reject it before credential lookup. Capability
-means transport support, not that every remote model accepts every effort value.
-The bundled catalog records the ladder each OpenAI-shaped route documents
-(`ModelMetadata::reasoning_efforts`, surfaced as `ModelDescriptor.reasoning_efforts`);
-Anthropic-shaped routes advertise none because their adapters never transmit
-effort. A pin outside a non-empty ladder is a plan-time `ReasoningEffortNotAdvertised`
+disabled reasoning and explicit `default` overrides a configured value with the
+provider's own choice. This does not enable Jev. HTTP OpenAI Responses/Chat
+adapters and Anthropic Messages (`output_config.effort`, `low` through `max`)
+carry effort; other adapter families reject it before credential lookup.
+Capability means transport support, not that every remote model accepts every
+effort value. The bundled catalog records the ladder each route documents
+(`ModelMetadata::reasoning_efforts`, surfaced as `ModelDescriptor.reasoning_efforts`),
+and Anthropic discovery fills it for live models. A pin outside a non-empty ladder is a plan-time `ReasoningEffortNotAdvertised`
 error naming the accepted values, so the operator sees it before the provider
 would fail the turn. An empty ladder is unknown, not unsupported, and is not
 checked.
