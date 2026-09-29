@@ -83,7 +83,12 @@ its qualification procedure to § Qualification procedure.
   `progress/jev-opt-in.md`.
 - The uncommitted 2026-09-25 audit entry in `progress/delegated-approval.md`
   moved here.
-- Reserved ADR-0047 in `progress/root.md`.
+- Reserved ADR-0047 in `progress/root.md` and added it as a Proposed draft,
+  carried from #193's "0046" (decisions 1–7 and the hold-phase table).
+  Carried #193's acceptance clauses that had no counterpart in A1–A13, and its
+  qualification steps (run record, zero-connection proof, arm purposes, per-decision
+  fields, statistics). #193's PR comparison was not carried: #187 is closing and
+  #189 merged as the credential-timeout fix.
 - ADR-0028/0030/0034/0041 are unchanged; they are immutable.
 - Docs only: no Rust, config, protocol or schema changes. Worktree
   `.worktrees/jev-consolidation`, base `main` `1e91895`. ENG-938 and #193 are

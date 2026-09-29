@@ -62,7 +62,7 @@ total cost to an independently verified result.
 | JV2 | Headless waits for the delegate (finding 4) | JV0 | `src/main.rs`, `src/headless.rs` | A2 |
 | JV3 | Precision-safe parsing in all three adapters (finding 6) | JV0 | `src/runtime/{approval,routing}.rs`, checkpoint parser in `src/runtime.rs` | A3 |
 | JV4 | Effective task context in approval requests (finding 2) | JV1 | `qq-core/src/sessions/{runtime,tool_calls}.rs`, approval adapter | A4 |
-| JV5 | Durable hold lifecycle: delegate-pending, human-required, and clients that follow it (finding 3); ADR-0047 | JV2 | `qq-core/src/sessions/approvals.rs`, tool-call persistence, `qq-protocol`, `qq-client`, `qq-tui`, `src/headless.rs` | A5 |
+| JV5 | Durable hold lifecycle: delegate-pending, human-required, and clients that follow it (finding 3); [ADR-0047](../adr/0047-jev-approval-hold-lifecycle.md) | JV2 | `qq-core/src/sessions/approvals.rs`, tool-call persistence, `qq-protocol`, `qq-client`, `qq-tui`, `src/headless.rs` | A5 |
 | JV6 | Per-attempt receipts and pre-dispatch spend admission (finding 7) | JV5 | Approval gate, core budget, session store, protocol accounting | A6 |
 | JV7 | Shadow calibration: score a candidate policy on real holds without settling them | JV4, JV6 | Approval adapter, evaluation projection | A7 |
 | JV8 | Layered approval pilot: effect classes, narrow parallel questions, per-turn batching (findings 1, 7) | JV7 and the owner accepting the pilot scope | Approval adapter and composition, pilot fixtures | A8 |
@@ -96,6 +96,8 @@ Every behavior bullet below is a failing test first, then green.
 - The effective approval activation is part of plan identity.
 - Revocation that races a result cannot create a grant. Off never executes a
   held action.
+- `/delegate on` does not enable Jev. Turning Jev off does not silently
+  remove existing exact grants; they stay visible and separately revocable.
 - Caches are bounded. There is no filesystem scan per tool call.
 
 **A2 — headless.**
@@ -109,7 +111,9 @@ Every behavior bullet below is a failing test first, then green.
   parse. Large mass errors, wrong labels, impossible winners and ties fail
   closed.
 - A value straddling the threshold because of rounding stays uncertain.
-- Raw scores are stored before any normalization.
+- Raw scores are stored before any normalization, and the remote answer is
+  shown next to QQ's local classification.
+- The rounding interval is confirmed with TypeSafe before rollout.
 - Thresholds are unchanged, and the policy identity is bumped.
 - Covered in all three adapters.
 
@@ -120,6 +124,9 @@ Every behavior bullet below is a failing test first, then green.
 - Child restrictions are carried. Omissions and truncation are flagged.
 - Secrets are masked in every field, and Unicode bounds hold.
 - Missing essential facts produce `missing_evidence`, never an approval.
+- No full transcript is sent by default.
+- Tests cover a long history, earlier test results outside the evidence
+  window, and cancellation while context is being assembled.
 
 **A5 — lifecycle.**
 - No tool runs before a durable approval. There is exactly one terminal
@@ -135,7 +142,13 @@ Every behavior bullet below is a failing test first, then green.
   - reconnect mid-review;
   - restart;
   - late replies;
-  - `/delegate off`.
+  - `/delegate off`;
+  - cancellation and deadline during review;
+  - a final Deny versus an advisory Deny that escalates under `ask`.
+- The human wait keeps the no-server-deadline contract. Headless reports
+  needs-input only after genuine escalation.
+- An old client against a new server is refused with an actionable message,
+  and the downgrade path is documented.
 - Protocol and schema versions are allocated against the actual merge base.
   Historical fixtures are kept.
 
@@ -148,7 +161,13 @@ Every behavior bullet below is a failing test first, then green.
   uncertain send.
 - Per attempt, the receipt records the raw distribution and confidence,
   parse result, policy identity, typed reason, latency and spend.
+- Receipts also carry the task revision, delegate identity, and request and
+  evidence hashes.
 - These stay out of receipts: raw secrets and full arguments.
+- An LLM fallback without a maximum price cannot run under a hard cost limit.
+  A budget reservation is not a second actual charge.
+- Tests cover late known usage, a persistence failure, and cancellation
+  between the Jev attempt and the fallback.
 
 **A7 — shadow.**
 - The candidate policy scores every eligible hold, is recorded next to the
@@ -174,6 +193,8 @@ Every behavior bullet below is a failing test first, then green.
   - cross-workspace access;
   - instructions embedded in tool output.
 - Thresholds come from A7 data.
+- Actions from MCP tools whose effect is unknown keep the existing policy.
+- A missing-evidence answer never runs the read it asks for itself.
 
 **A9 — opt-in.**
 - `/jev` shows each capability's effective value with its source, active and
@@ -217,6 +238,9 @@ rule. It ships only if it wins; otherwise it is recorded as dropped.
   - p95 latency and cost per verified success regress by at most 5%.
 - Insufficient precision is inconclusive, not a pass.
 - Any severe false approval stops the pilot.
+- Rollout ships only the evaluated policy version. Migration takes a backup
+  first and there is no automatic downgrade. Stopping a pilot keeps its
+  receipts and unknown spend.
 
 ## Qualification procedure (JV7, JV13)
 
@@ -224,9 +248,20 @@ rule. It ships only if it wins; otherwise it is recorded as dropped.
   numeric spend ceiling, per-run limits, a whole-experiment limit, and a
   named stop owner in the ledger. ENG-809 approves spend; an issue or plan
   is not authorization.
+- **Record the run.** Exact QQ commit, build and platform; task fixtures and
+  revisions; approval mode and grants; provider, model and effort; Jev model
+  and policy identities; configuration provenance; evaluator version; seeds;
+  initial workspace hashes; limits. Check PRs at their merged heads, not
+  their titles.
 - **Credential-free first.** Use memory credentials and loopback fakes. Real
   keys, global config and live server discovery stay out of subprocess
-  environments. A fixture that reaches the real service is an incident.
+  environments. A fixture that reaches the real service is an incident and an
+  unknown-spend receipt, not a harmless pass.
+  - Prove zero remote connections when off, malformed, untrusted, cancelled
+    before admission, or over budget.
+  - Check old wire and store fixtures with new code. Never run an older
+    binary against a forward-migrated session store.
+  - Test a reviewer outage separately from a semantic rejection.
 - **Arms.** Fix them before sampling:
   - `JV-off`
   - `JV-repaired` (JV1–JV6 at current policy)
@@ -235,8 +270,19 @@ rule. It ships only if it wins; otherwise it is recorded as dropped.
   - `JV-routing`
   - `JV-advisory`
 
-  Keep other settings equal. A comparison across QQ revisions carries a
-  matched `JV-off` on both.
+  | Arm | Purpose |
+  | --- | --- |
+  | `JV-off` | No Jev; ordinary policy plus the same configured LLM fallback |
+  | `JV-repaired` | JV1–JV6 repairs at the current question and threshold policy |
+  | `JV-shadow` | The JV8 candidate scored without settling holds; separately opted in and billed |
+  | `JV-pilot` | The accepted JV8 policy; no other Jev capability |
+  | `JV-routing` | JV10 only, against a fixed authorized fallback with the same limits |
+  | `JV-advisory` | The explicit observer or accepted final checks; separate from approval |
+
+  Keep other settings equal; a deliberate routing difference is the variable,
+  not a fixed-model comparison. A comparison across QQ revisions carries a
+  matched `JV-off` on both. Qualify components before a combination, and do
+  not infer a combined benefit by adding isolated percentages.
 - **Stratify.**
   - coding vs. research;
   - root vs. child;
@@ -245,7 +291,8 @@ rule. It ships only if it wins; otherwise it is recorded as dropped.
   - evidence completeness.
 
   Static refusals are not abstentions, and reads that bypass approval are
-  not missing approvals.
+  not missing approvals. Safety labels are human-created with the exact task
+  and effect context; another model's agreement is not a label.
 - **Classify every hold into one path.**
   - static policy;
   - not opted in;
@@ -257,13 +304,26 @@ rule. It ships only if it wins; otherwise it is recorded as dropped.
   - LLM fallback;
   - human-required;
   - early human override.
+- **Per decision, record** eligibility, consent and its source, action and
+  task revision hashes, evidence completeness, attempt identity, the raw
+  label, distribution and confidence, the parser result, QQ policy identity
+  and result, per-stage timestamps, settled or unknown spend, the fallback,
+  and the actual human outcome. Events that predate these fields are marked
+  missing: do not reconstruct receipts from logs, and **missing cost is not
+  zero**.
 - **Report.**
-  - human-required phases and actual answers, separately;
-  - interruptions per task and per active agent-hour;
+  - human-required phases and actual answers, separately, counted per unique
+    hold (`ToolApprovalRequested` is not an escalation metric);
+  - interruptions per task and per active agent-hour, with failed and
+    censored runs kept in the denominator;
   - false approve by severity and false deny, with intervals;
   - p50/p95 of end-to-end time, approval wait and critical-path review time;
   - total cost per verified success, including all Jev and fallback spend;
   - unknown-accounting coverage (TE1).
+- **Statistics.** Size the sample for the 2-point non-inferiority margin; a
+  small pilot may be inconclusive. Use paired outcomes where tasks and seeds
+  match, state the interval method, and keep discordant pairs. Shadow
+  classification alone never enables the pilot.
 - **Honesty rules.**
   - No tuning on the held-out set, relabeling failures, sampling until
     significant, or silently relaxing a budget.
