@@ -13,7 +13,8 @@ under `target/qq-perf/` and never committed.
 | [`supervised-delegation.md`](./supervised-delegation.md) | agent on the delegation plan | D6b paired evaluation and default decisions |
 | [`multi-surface-clients.md`](./multi-surface-clients.md) | agent on the multi-surface plan | W, S, U, D, M slices and the tracer-bullet gate |
 | [`tool-layer.md`](./tool-layer.md) | agent on the tool-layer plan | T1–T14 built-in tool slices and the A0–A5 ablation |
-| [`run-reliability.md`](./run-reliability.md) | agent on the run-reliability plan | RR1–RR12: turn recovery, mid-run compaction, checkpoint tolerance, admission validation, tool leniency |
+| [`run-reliability.md`](./run-reliability.md) | agent on the run-reliability plan | RR1–RR12: turn recovery, checkpoint tolerance, admission validation, tool leniency (RR12's loop result moved to autonomous-core AC4) |
+| [`autonomous-core.md`](./autonomous-core.md) | agent on the autonomous-core plan | AC0–AC16: soak harness, reset scopes, continuation, goal and loop guard, `qq-harness`, tool features, store write amplification |
 | [`delegated-approval.md`](./delegated-approval.md) | closed 2026-09-24 (receipt) | DA1–DA6 shipped: reviewer denial is final, two clocks, `approval_delegate`, exact delegate grants, `jev_approval` (ADR-0041), `/delegate` and delegate identity on the wire (protocol 28). Acceptance 3 (one week of use) to be recorded |
 | [`onboarding-ux.md`](./onboarding-ux.md) | agent on the onboarding plan | OB0–OB11: user guide, startup error text, TUI without model/credential, doctor, init, install paths, trust prompt, docs-truth CI |
 | [`mcp-pinning.md`](./mcp-pinning.md) | agent on ENG-939 | MP1: MCP tool-set pinning taken over from contributed #163/#165/#171 — dispatch-time enforcement, descriptor v10, `qq mcp inspect` (ADR-0046) |

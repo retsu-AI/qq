@@ -47,6 +47,12 @@ below is for people changing QQ.
   (27 % of prompt runs failed, 73 % of those by harness policy), how Codex,
   OpenCode, Pi, and fx keep runs alive, and findings R01–R12 (research; owned
   by `plans/run-reliability.md`).
+- [`core-autonomy-audit-2026-09-28.md`](design/core-autonomy-audit-2026-09-28.md)
+  — what stops `qq-core` from running one task unattended for hours and
+  from being embedded: per-run bounds that never reset, no continuation of
+  paused or interrupted runs, no loop guard or durable goal, composition
+  locked in the binary, store write amplification (research; owned by
+  `plans/autonomous-core.md`).
 
 ## Decisions — `adr/`
 

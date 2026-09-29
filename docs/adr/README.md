@@ -54,6 +54,9 @@ written.
 
 - [ADR-0043: optimize verified task efficiency, not individual turn size](0043-verified-task-efficiency.md) — Proposed (token-efficiency TE0).
 - [ADR-0046: pin an MCP server's advertised tool set in configuration and plan identity; enforce the pin at dispatch](0046-mcp-tool-set-pinning.md) — Accepted (ENG-939; supersedes the contributed #163/#165/#171 design; `DESCRIPTOR_VERSION` 9 → 10).
+- [ADR-0048: a run's bounds reset at its seams, and a stopped unattended run continues itself](0048-run-bounds-reset-at-seams-and-continuation.md) — Proposed (autonomous-core AC2–AC6); extends ADR-0039/0040.
+- [ADR-0049: a run carries a durable goal re-stated after every compaction; loops and idle goals are runtime policy](0049-durable-run-goal-and-loop-guard.md) — Proposed (autonomous-core AC4, AC7–AC9).
+- [ADR-0050: composition moves from the binary into a `qq-harness` library; `qq-core` gets tool features and a tested embedding example](0050-qq-harness-composition-library.md) — Proposed (autonomous-core AC10–AC13); refines ADR-0027.
 
 ## When to write one
 

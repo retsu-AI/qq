@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-09-20
 **Deciders:** ENG-793 (audit F03; ROOT-5 "true mid-run summarization" deferral)
-**Implements:** [`architecture.md` § run loop step 3](../design/architecture.md#runtime), [`mid-run-compaction.md`](../plans/mid-run-compaction.md) (supersedes its Durable Protocol; see § Alternatives)
+**Implements:** [`architecture.md` § run loop step 3](../design/architecture.md#runtime), `docs/plans/mid-run-compaction.md` (supersedes its Durable Protocol; see § Alternatives). That plan was deleted on 2026-09-28; read it with `git log -- docs/plans/mid-run-compaction.md`. Its open MRC-4/MRC-5 moved to [`autonomous-core.md`](../plans/autonomous-core.md) AC14 and Goal 5
 
 ## Context
 
