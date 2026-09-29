@@ -2915,6 +2915,16 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
             .unwrap();
         assert_eq!(delegate, None, "no session override is invented");
     }
+    let focused_transcript = |snapshot: &qq_protocol::WorkspaceSnapshot| {
+        snapshot
+            .focused
+            .as_ref()
+            .expect("the session is focused")
+            .messages
+            .iter()
+            .map(|message| (message.role, message.state, message.output.clone()))
+            .collect::<Vec<_>>()
+    };
     let snapshot = runtime
         .snapshot(SnapshotRequest {
             workspace_id,
@@ -2926,11 +2936,15 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
         .await
         .unwrap();
     assert_eq!(snapshot.sessions.len(), 1);
-    let transcript = serde_json::to_string(&snapshot).unwrap();
-    assert!(
-        transcript.contains("written by v0.1.4"),
-        "the prompt survives the upgrade: {transcript}"
-    );
+    // The message rows themselves, not the summary title (which copies the
+    // first prompt and would survive lost history).
+    let migrated = focused_transcript(&snapshot);
+    assert_eq!(migrated.len(), 2, "{migrated:?}");
+    assert_eq!(migrated[0].0, qq_protocol::MessageRole::User);
+    assert_eq!(migrated[0].2, "written by v0.1.4");
+    assert_eq!(migrated[1].0, qq_protocol::MessageRole::Assistant);
+    assert_eq!(migrated[1].1, qq_protocol::MessageState::Complete);
+    assert!(!migrated[1].2.is_empty(), "the assistant reply survives");
     runtime
         .command(
             CommandId::generate().unwrap(),
@@ -2941,11 +2955,46 @@ async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
         )
         .await
         .unwrap();
-    runtime.shutdown().await.unwrap();
+    // `close` releases the store's single-writer lock; `shutdown` alone
+    // stops the scheduler but keeps the store open.
+    runtime.close().await.unwrap();
 
-    // Reopening the upgraded store is a no-op.
-    let (connection, _) = open_database(&path).unwrap();
-    assert_eq!(version(&connection), STORE_SCHEMA_VERSION.to_string());
+    // Reopening the upgraded store is a no-op: the version, the delegate
+    // written above and the transcript all come back unchanged.
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(path.clone()),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(version(&connection), STORE_SCHEMA_VERSION.to_string());
+        let delegate: Option<String> = connection
+            .query_row(
+                "SELECT approval_delegate FROM sessions WHERE id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(delegate.as_deref(), Some("off"));
+    }
+    let reopened = runtime
+        .snapshot(SnapshotRequest {
+            workspace_id,
+            focused_session_id: Some(session_id),
+            include_sessions: Vec::new(),
+            session_limit: 8,
+            message_limit: 8,
+        })
+        .await
+        .unwrap();
+    assert_eq!(focused_transcript(&reopened), migrated);
+    assert_eq!(
+        reopened.focused.as_ref().unwrap().summary.approval_delegate,
+        Some(qq_protocol::ApprovalDelegate::Off)
+    );
+    runtime.shutdown().await.unwrap();
 }
 
 #[test]
