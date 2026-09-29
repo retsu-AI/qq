@@ -122,6 +122,7 @@ pub struct AgentProfile {
     turn_recovery: crate::TurnRecoveryPolicy,
     approval_delegate: crate::approval::ApprovalDelegate,
     jev_approval: bool,
+    output_ceiling: Option<u32>,
     adapter_build: String,
     provenance: Vec<String>,
     credential_epoch: CredentialEpoch,
@@ -166,6 +167,7 @@ impl AgentProfile {
             turn_recovery: crate::TurnRecoveryPolicy::default(),
             approval_delegate: crate::approval::ApprovalDelegate::default(),
             jev_approval: false,
+            output_ceiling: None,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -202,6 +204,16 @@ impl AgentProfile {
     #[must_use]
     pub const fn with_jev_approval(mut self, enabled: bool) -> Self {
         self.jev_approval = enabled;
+        self
+    }
+
+    /// The model's catalog output limit, bounded by policy: how far a run may
+    /// raise a turn's cap once when the whole cap went to hidden reasoning.
+    /// Not part of the digest: the plan's request cap is, and this only
+    /// bounds a recovery of it.
+    #[must_use]
+    pub const fn with_output_ceiling(mut self, output_ceiling: Option<u32>) -> Self {
+        self.output_ceiling = output_ceiling;
         self
     }
 
@@ -248,6 +260,7 @@ impl AgentProfile {
             turn_recovery: runtime.turn_recovery,
             approval_delegate: runtime.approval_delegate,
             jev_approval: runtime.jev_approval,
+            output_ceiling: runtime.output_ceiling,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -555,6 +568,7 @@ impl CompiledAgentPlan {
             turn_recovery,
             approval_delegate,
             jev_approval,
+            output_ceiling,
             adapter_build,
             provenance,
             credential_epoch,
@@ -576,6 +590,7 @@ impl CompiledAgentPlan {
             resolved_model.max_output_tokens,
         )?
         .with_context_window(resolved_model.context_window)
+        .with_output_ceiling(output_ceiling)
         .with_spawn_model_routes(spawn_model_routes)
         .with_delegation(delegation)
         .with_audit(audit)
@@ -934,6 +949,12 @@ impl CompiledAgentPlan {
     #[must_use]
     pub const fn jev_approval(&self) -> bool {
         self.runtime.jev_approval
+    }
+
+    /// The highest cap the empty-truncation recovery may raise a turn to.
+    #[must_use]
+    pub const fn output_ceiling(&self) -> Option<u32> {
+        self.runtime.output_ceiling
     }
 
     pub(crate) fn workspace_handle(&self) -> Workspace {

@@ -110,7 +110,8 @@ impl LoadedRuntime {
             .with_context_cache(Arc::clone(&runtime.context_cache))
             .with_turn_recovery(runtime.turn_recovery)
             .with_approval_delegate(runtime.approval_delegate)
-            .with_jev_approval(runtime.jev_approval);
+            .with_jev_approval(runtime.jev_approval)
+            .with_output_ceiling(runtime.output_ceiling);
         Ok(Self::new(CompiledAgentPlan::compile_blocking(profile)?))
     }
 
