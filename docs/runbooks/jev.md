@@ -70,7 +70,9 @@ in a child session, resolves the current configuration.
 **Limits and failures.** Review is bounded to 32 requests and 2 corrections
 per run, 5 s per request, and 64 KiB per response. It shares the run's token
 and cost allowance. A RED verdict after corrections, or an unavailable
-reviewer, is recorded as evidence, and the run completes. A positive verdict
+reviewer during the run, is recorded as evidence, and the run completes. A
+missing TypeSafe key is different: the plan does not compile and the run
+does not start (`JevKeyRequired`). A positive verdict
 is support, not proof.
 
 **`enforce` is slow.** It admits one executable tool call per model turn,
@@ -134,7 +136,9 @@ Jev never approves on failure.
 
 **What a verdict does.** A deny is final under `auto` and `supervised`, and
 advice under `ask`. An approve may record the exact command or host for the
-session, nothing wider. Spend counts as reviewer spend.
+session, nothing wider. Spend counts as reviewer spend only for a returned
+verdict; a request that a human, cancellation or deadline overtakes may be
+billed without being counted (design finding 7, fixed by JV6).
 
 `/delegate off` withdraws both approval delegates for the session. It does
 not disable review or routing, and it does not revoke earlier grants.

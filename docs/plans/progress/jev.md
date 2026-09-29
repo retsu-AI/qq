@@ -5,7 +5,7 @@ One writer per ledger per `workflow.md` § 3.
 
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
-| JV0 | Consolidate Jev docs | In review | `docs/eng-791-jev-consolidation` | This entry |
+| JV0 | Consolidate Jev docs | In review | [#210](https://github.com/retsu-AI/qq/pull/210) | This entry |
 | JV1 | Effective activation, reliable Off | Planned | — | Parallel with JV2, JV3 |
 | JV2 | Headless waits for the delegate | Planned | — | |
 | JV3 | Precision-safe parsing | Planned | — | |

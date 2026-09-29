@@ -1,7 +1,7 @@
 # ADR-0047 — Explicit Jev consent and a durable held-approval lifecycle
 
 **Status:** Proposed. Nothing in this document changes behavior; JV1–JV6
-implement it. Pending maintainer acceptance.
+and JV9 (server-side Off) implement it. Pending maintainer acceptance.
 **Date:** 2026-09-28 (drafted 2026-09-25 as #193's "ADR-0046", renumbered
 because 0046 is MCP tool-set pinning).
 **Would supersede:** [ADR-0041](0041-jev-delegated-approval.md) decision 5's

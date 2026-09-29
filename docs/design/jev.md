@@ -68,7 +68,8 @@ Sources, accessed 2026-09-25:
 Four capabilities, each off by default and enabled independently. A stored
 TypeSafe key is not consent; turning one capability on never turns on
 another (ADR-0030). All four use the pinned model `jev-1.13.0`, a fixed
-endpoint, bounded masked requests, and typed parsers. A malformed or missing
+endpoint, bounded requests (approval sends paths and grant lists unmasked;
+see the [runbook](../runbooks/jev.md#approval-delegate--jev_approval)), and typed parsers. A malformed or missing
 answer is always treated as "no decision", never as a positive one.
 
 | Capability | Setting | When it runs | Bounds | On no decision |
