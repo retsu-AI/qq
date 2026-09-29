@@ -281,20 +281,93 @@ pub(crate) fn template_contains(template: &[TemplatePart], fragment: &[TemplateP
     (0..template.len()).any(|start| at(&template[start..], fragment))
 }
 
-/// `source` with every `#[cfg(test)]` item removed: from the attribute to
-/// the end of the item it gates — the matching `}` of its first block, or
-/// its `;` when it has none (`mod x;`, `use …;`). Any test module name and
-/// any test-only function, constant or import is excluded. Braces inside
-/// string and char literals are skipped so they cannot unbalance the count.
+/// Whether a `cfg(…)` predicate keeps its item out of a default non-test
+/// build: `test`; `all(…)` with any such part; `any(…)` whose every part is
+/// such, or a `feature = "…"` (dev features such as `test-support` and
+/// `bench-support` are not default). `any(test, target_os = "macos")`
+/// ships on macOS, so it is production.
+pub(crate) fn cfg_requires_test(predicate: &str) -> bool {
+    fn split_top(list: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let (mut depth, mut start) = (0usize, 0);
+        for (index, character) in list.char_indices() {
+            match character {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    parts.push(list[start..index].trim());
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(list[start..].trim());
+        parts.retain(|part| !part.is_empty());
+        parts
+    }
+    let predicate = predicate.trim();
+    if predicate == "test" {
+        return true;
+    }
+    if let Some(inner) = predicate
+        .strip_prefix("all(")
+        .and_then(|p| p.strip_suffix(')'))
+    {
+        return split_top(inner).into_iter().any(cfg_requires_test);
+    }
+    if let Some(inner) = predicate
+        .strip_prefix("any(")
+        .and_then(|p| p.strip_suffix(')'))
+    {
+        return split_top(inner)
+            .into_iter()
+            .all(|part| cfg_requires_test(part) || part.starts_with("feature"));
+    }
+    false
+}
+
+/// Every `#[cfg(…)]` attribute in `source` as `(start, end, predicate)`.
+fn cfg_attributes(source: &str) -> Vec<(usize, usize, &str)> {
+    let mut found = Vec::new();
+    for (start, _) in source.match_indices("#[cfg(") {
+        let open = start + "#[cfg(".len();
+        let mut depth = 1usize;
+        for (offset, character) in source[open..].char_indices() {
+            match character {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let close = open + offset;
+                        let end = source[close..]
+                            .find(']')
+                            .map_or(close + 1, |at| close + at + 1);
+                        found.push((start, end, &source[open..close]));
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    found
+}
+
+/// `source` with every test-only item removed (see [`cfg_requires_test`]):
+/// from the attribute to the end of the item it gates — the matching `}` of
+/// its first block, or its `;` when it has none (`mod x;`, `use …;`). Any
+/// test module name and any test-only function, constant or import is
+/// excluded. Braces inside string and char literals are skipped so they
+/// cannot unbalance the count.
 pub(crate) fn without_test_items(source: &str) -> String {
-    const ATTRIBUTE: &str = "#[cfg(test)]";
     let bytes = source.as_bytes();
     let mut out = String::with_capacity(source.len());
     let mut copied = 0;
-    let mut search = 0;
-    while let Some(found) = source[search..].find(ATTRIBUTE) {
-        let start = search + found;
-        let mut index = start + ATTRIBUTE.len();
+    for (start, attribute_end, predicate) in cfg_attributes(source) {
+        if start < copied || !cfg_requires_test(predicate) {
+            continue;
+        }
+        let mut index = attribute_end;
         let mut depth = 0usize;
         let mut end = bytes.len();
         while index < bytes.len() {
@@ -335,7 +408,6 @@ pub(crate) fn without_test_items(source: &str) -> String {
         }
         out.push_str(&source[copied..start]);
         copied = end.min(bytes.len());
-        search = copied;
     }
     out.push_str(&source[copied..]);
     out
@@ -367,8 +439,11 @@ pub(crate) fn production_module_files(roots: &[std::path::PathBuf]) -> Vec<std::
         let mut previous_gated = false;
         for line in live.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("#[cfg(") && trimmed.contains("test") {
-                previous_gated = true;
+            if let Some(predicate) = trimmed
+                .strip_prefix("#[cfg(")
+                .and_then(|rest| rest.strip_suffix(")]"))
+            {
+                previous_gated = cfg_requires_test(predicate);
                 continue;
             }
             let declaration = trimmed
@@ -754,6 +829,33 @@ mod tests {
         assert_eq!(
             string_literals(source),
             ["one two", "raw \"q\"", "say \"hi\""]
+        );
+    }
+
+    #[test]
+    fn cfg_predicates_that_need_test_are_test_only() {
+        for test_only in [
+            "test",
+            "all(test, unix)",
+            "all(test, any(unix, windows))",
+            "all(test, feature = \"native\")",
+            "any(test, feature = \"bench-support\")",
+        ] {
+            assert!(cfg_requires_test(test_only), "{test_only}");
+        }
+        for production in [
+            "unix",
+            "feature = \"native\"",
+            "any(test, target_os = \"macos\", target_os = \"windows\")",
+            "not(test)",
+        ] {
+            assert!(!cfg_requires_test(production), "{production}");
+        }
+        let source = "#[cfg(all(test, feature = \"native\"))]\nmod tests { fn f() { \"gone\"; } }\n#[cfg(any(test, target_os = \"macos\"))]\nfn mac() { \"kept\"; }\n";
+        let kept = string_literals(&without_test_items(source));
+        assert!(
+            kept.contains(&"kept".to_owned()) && !kept.contains(&"gone".to_owned()),
+            "{kept:?}"
         );
     }
 
