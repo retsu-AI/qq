@@ -111,7 +111,10 @@ and `xhigh`. This is a fixed choice, not routing.
 
 Enable it with `jev_approval: true` or `QQ_JEV_APPROVAL=on`. Jev then
 decides calls the approval mode already holds, before `reviewer_model` and
-before you (ADR-0041). The mode stays the ceiling. `Forbidden` shell shapes,
+before you (ADR-0041). Whether a held call reaches the delegates at all is the
+separate `approval_delegate` setting (or `/delegate`): the default `by_mode`
+consults them under `auto` and `supervised` but sends `ask` straight to you;
+`on` consults them under `ask` too; `off` never does. The mode stays the ceiling. `Forbidden` shell shapes,
 blocked hosts, managed denies and `ask_user` never reach Jev.
 
 **What Jev sees.** Only the approval preview. The task brief (child sessions
