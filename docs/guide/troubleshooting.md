@@ -14,6 +14,7 @@ ok    model            anthropic/claude-sonnet-5
 fail  credential       anthropic: none found
                        run `qq auth login anthropic` or set ANTHROPIC_API_KEY
 ok    credential store 0 stored (keyring)
+ok    mcp              none declared
 ok    server           none running; qq starts one on demand
 ok    workspace        /home/you/repo (AGENTS.md)
 ok    data             /home/you/.local/share/qq (no sessions yet)

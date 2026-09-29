@@ -148,7 +148,9 @@ Bedrock Mantle exposes the same models over the OpenAI Responses, OpenAI
 Chat Completions, or Anthropic Messages protocols:
 
 ```ron
-"bedrock-mantle": AmazonBedrockMantle(region: "us-east-1", api: AnthropicMessages, auth: Aws(DefaultChain)),
+providers: {
+    "bedrock-mantle": AmazonBedrockMantle(region: "us-east-1", api: AnthropicMessages, auth: Aws(DefaultChain)),
+}
 ```
 
 Both need the default build; `--no-default-features` builds refuse Bedrock

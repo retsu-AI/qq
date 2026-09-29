@@ -167,6 +167,8 @@ Per model under a provider (all optional):
 
 What the agent may do without asking, and what it may never do.
 
+Any layer (your config, a trusted project):
+
 ```ron
 policy: (
     // Grants: run without a prompt under `auto`.
@@ -175,15 +177,23 @@ policy: (
     allow_hosts: ["docs.rs", "*.github.com"],
     shell_env: ["CARGO_HOME"],            // extra env vars shell may pass through
     builtin_preference: hint,             // off | hint | strict
-
-    // Catalog shaping.
     exposed_tools: ["read_file", "search", "edit_file", "shell"],
+)
+```
+
+Administrators only, in `managed.ron` or MDM (anywhere else is an error):
+
+```ron managed.ron
+policy: (
     allowed_providers: ["anthropic", "openai"],
     denied_providers: ["xai"],
     max_output_tokens: 32000,
     require_https: true,
     allow_custom_providers: true,
     allow_literal_secrets: false,
+    deny_tools: ["write_file"],
+    deny_shell_prefixes: ["git push"],
+    deny_hosts: ["*.internal.example.com"],
 )
 ```
 
@@ -243,7 +253,7 @@ packs: {
 
 `pack.ron`:
 
-```ron
+```ron pack.ron
 (
     schema: 1,
     id: "reviewer",
@@ -260,7 +270,7 @@ packs: {
             mcp: [],                       // subset of this pack's mcp; absent = all
         ),
     },
-    mcp: { … same shape as config `mcp` … },
+    mcp: {},                               // same shape as config `mcp`
 )
 ```
 
@@ -313,7 +323,7 @@ twelve or more tool calls, or spawned a child.
 Terminal preferences live in a separate document, loaded from
 `<global>/tui.ron` then `.qq/tui.ron` root-to-leaf.
 
-```ron
+```ron tui.ron
 (
     version: 1,
     theme: "ink",           // qq | ink | ember | gruvbox | tokyonight | catppuccin | dracula | nord | solarized | onedark | rose-pine | kanagawa | everforest | monokai | <your-theme>

@@ -107,7 +107,7 @@ verify it.
 ### Continuing a session
 
 ```sh
-qq run --session 01J… "Now add the same flag to the docs"
+qq run --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012 "Now add the same flag to the docs"
 ```
 
 Submits into an existing idle root session of this workspace, keeping its

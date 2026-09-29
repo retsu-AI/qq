@@ -85,6 +85,41 @@ pub(crate) fn labelled_numbers(text: &str, label: &str) -> Vec<(usize, u64)> {
     found
 }
 
+/// A fenced block in a guide page: its info string (`sh`, `ron`,
+/// `ron config.ron`), the 1-based line of the opening fence, and its body.
+pub(crate) struct Fence<'a> {
+    pub info: &'a str,
+    pub line: usize,
+    pub body: String,
+}
+
+/// Every fenced block in `text`, in order.
+pub(crate) fn fences(text: &str) -> Vec<Fence<'_>> {
+    let mut found = Vec::new();
+    let mut open: Option<Fence<'_>> = None;
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if let Some(info) = trimmed.strip_prefix("```") {
+            match open.take() {
+                Some(fence) => found.push(fence),
+                None => {
+                    open = Some(Fence {
+                        info: info.trim(),
+                        line: index + 1,
+                        body: String::new(),
+                    });
+                }
+            }
+            continue;
+        }
+        if let Some(fence) = open.as_mut() {
+            fence.body.push_str(line);
+            fence.body.push('\n');
+        }
+    }
+    found
+}
+
 /// The concatenated text of every `docs/guide/*.md` page.
 pub(crate) fn guide_text() -> String {
     let guide = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/guide");
@@ -439,5 +474,443 @@ mod tests {
             &guide,
             names.into_iter().map(|name| ("TUI slash command", name)),
         );
+    }
+
+    #[test]
+    fn fences_carry_info_line_and_body() {
+        let text = "intro\n```ron config.ron\n(version: 1)\n```\n\n  ```sh\nqq\n  ```\n";
+        let found = fences(text);
+        assert_eq!(found.len(), 2);
+        assert_eq!(
+            (found[0].info, found[0].line, found[0].body.as_str()),
+            ("ron config.ron", 2, "(version: 1)\n")
+        );
+        assert_eq!(
+            (found[1].info, found[1].line, found[1].body.as_str()),
+            ("sh", 6, "qq\n")
+        );
+    }
+
+    /// Where a guide RON sample is loaded, from the fence info string:
+    /// `ron` is `config.ron`, `ron managed.ron` / `ron pack.ron` /
+    /// `ron tui.ron` name the others. A sample that does not start with `(`
+    /// is a fragment of that file and is wrapped in `(version: 1, …)`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SampleFile {
+        /// `<global>/config.ron`.
+        Config,
+        /// `<managed>/managed.ron`: administrator-only keys are allowed.
+        Managed,
+        /// `<global>/packs/<id>/pack.ron`.
+        Pack,
+        /// `<global>/tui.ron`.
+        Tui,
+    }
+
+    impl SampleFile {
+        fn from_info(info: &str) -> Option<Self> {
+            match info.strip_prefix("ron")?.trim() {
+                "" | "config.ron" => Some(Self::Config),
+                "managed.ron" => Some(Self::Managed),
+                "pack.ron" => Some(Self::Pack),
+                "tui.ron" => Some(Self::Tui),
+                other => panic!("unknown RON sample file `{other}` in a ```ron fence"),
+            }
+        }
+    }
+
+    /// An isolated configuration root: global, data, managed, workspace.
+    struct SampleRoot {
+        _root: tempfile::TempDir,
+        loader: qq_config::ConfigLoader,
+        global: std::path::PathBuf,
+        managed: std::path::PathBuf,
+        workspace: std::path::PathBuf,
+    }
+
+    impl SampleRoot {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let canonical = root.path().canonicalize().unwrap();
+            let global = canonical.join("config");
+            let data = canonical.join("data");
+            let managed = canonical.join("managed");
+            let workspace = canonical.join("workspace");
+            for directory in [&global, &data, &managed, &workspace] {
+                fs::create_dir_all(directory).unwrap();
+            }
+            Self {
+                loader: qq_config::ConfigLoader::new(qq_config::ConfigPaths::new(
+                    global.clone(),
+                    data,
+                    managed.clone(),
+                )),
+                global,
+                managed,
+                workspace,
+                _root: root,
+            }
+        }
+
+        fn write(path: &Path, content: &str) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+
+        /// Loads `sample` as `file`; the error is the loader's own message.
+        fn load(&self, file: SampleFile, sample: &str) -> Result<Vec<String>, String> {
+            let request = qq_config::LoadRequest::new(&self.workspace);
+            match file {
+                SampleFile::Config | SampleFile::Managed => {
+                    let path = if file == SampleFile::Config {
+                        self.global.join("config.ron")
+                    } else {
+                        self.managed.join("managed.ron")
+                    };
+                    Self::write(&path, sample);
+                    // `"id": Pack(path: "dir")` declares a pack directory
+                    // relative to the declaring file; give it a manifest so
+                    // the declaration itself is what gets checked.
+                    let mut rest = sample;
+                    while let Some(at) = rest.find(": Pack(path: \"") {
+                        let id = rest[..at].rsplit('"').nth(1).unwrap_or_default();
+                        let tail = &rest[at + ": Pack(path: \"".len()..];
+                        let directory = &tail[..tail.find('"').unwrap_or(0)];
+                        Self::write(
+                            &path.parent().unwrap().join(directory).join("pack.ron"),
+                            &format!("(schema: 1, id: \"{id}\", version: \"1\")"),
+                        );
+                        rest = tail;
+                    }
+                }
+                SampleFile::Pack => {
+                    let id = sample
+                        .split_once("id: \"")
+                        .and_then(|(_, rest)| rest.split_once('"'))
+                        .map(|(id, _)| id)
+                        .ok_or("pack.ron sample has no `id: \"…\"`")?;
+                    Self::write(&self.global.join(format!("packs/{id}/pack.ron")), sample);
+                }
+                SampleFile::Tui => {
+                    Self::write(&self.global.join("tui.ron"), sample);
+                    return crate::load_tui_config(&self.loader, &self.workspace)
+                        .map(|_| Vec::new())
+                        .map_err(|error| error.to_string());
+                }
+            }
+            let snapshot = self
+                .loader
+                .check(&request)
+                .map_err(|error| error.to_string())?;
+            let Some(snapshot) = snapshot else {
+                return Ok(Vec::new());
+            };
+            let mut routes = vec![snapshot.model().as_str().to_owned()];
+            routes.extend(
+                [snapshot.worker_model(), snapshot.reviewer_model()]
+                    .into_iter()
+                    .flatten()
+                    .map(|route| route.as_str().to_owned()),
+            );
+            routes.extend(
+                snapshot
+                    .delegation()
+                    .roster()
+                    .iter()
+                    .map(|entry| entry.route().as_str().to_owned()),
+            );
+            routes.extend(
+                snapshot
+                    .profiles()
+                    .values()
+                    .filter_map(|profile| profile.model().map(str::to_owned)),
+            );
+            // A route the guide shows must be one a user can select: its
+            // provider exists and lists the model.
+            let mut unknown = Vec::new();
+            for route in &routes {
+                let (provider, model) = route.split_once('/').unwrap();
+                let listed = snapshot
+                    .providers()
+                    .get(provider)
+                    .is_some_and(|config| config.models().contains_key(model));
+                if !listed {
+                    unknown.push(route.clone());
+                }
+            }
+            if unknown.is_empty() {
+                Ok(routes)
+            } else {
+                Err(format!(
+                    "routes not in their provider's catalog: {unknown:?}"
+                ))
+            }
+        }
+    }
+
+    /// Every ```ron block in the guide loads through the real loader as the
+    /// file it belongs to, and every model route it names is in the catalog.
+    /// A sample that a user copies must work; a key the loader stops
+    /// accepting fails here instead of on a user's machine.
+    #[test]
+    fn every_ron_sample_in_the_guide_loads() {
+        let mut failures = Vec::new();
+        let mut loaded = 0;
+        for (name, text) in guide_pages() {
+            for fence in fences(&text) {
+                let Some(context) = SampleFile::from_info(fence.info) else {
+                    continue;
+                };
+                let body = fence.body.trim();
+                let document = if body.starts_with('(') {
+                    body.to_owned()
+                } else {
+                    match context {
+                        SampleFile::Pack => {
+                            failures.push(format!(
+                                "  {name}:{}: a pack.ron fragment cannot be loaded; show the whole manifest",
+                                fence.line
+                            ));
+                            continue;
+                        }
+                        SampleFile::Config | SampleFile::Managed | SampleFile::Tui => {
+                            format!("(\n    version: 1,\n{body}\n)")
+                        }
+                    }
+                };
+                match SampleRoot::new().load(context, &document) {
+                    Ok(_) => loaded += 1,
+                    Err(error) => {
+                        failures.push(format!("  {name}:{} (as {context:?}): {error}", fence.line))
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "these guide RON samples do not load; fix the sample, or title the fence \
+             (```ron managed.ron, ```ron pack.ron, ```ron tui.ron) if it belongs to \
+             another file:\n{}",
+            failures.join("\n")
+        );
+        assert!(loaded >= 15, "only {loaded} RON samples found");
+    }
+
+    /// Every `qq …` line a user may copy, from ```sh blocks and from inline
+    /// code spans, parses with the real CLI. Placeholders in capitals
+    /// (`PROMPT`, `NAME`, `ID`), `…`, `<…>` and `[…]` mark a synopsis, not a
+    /// command, and are skipped.
+    #[test]
+    fn every_qq_command_in_the_guide_parses() {
+        use clap::Parser as _;
+
+        fn words(line: &str) -> Option<Vec<String>> {
+            let command = line.split(" #").next().unwrap().trim();
+            let command = command.trim_end_matches('\\').trim();
+            let mut words = Vec::new();
+            let mut current = String::new();
+            let mut quote: Option<char> = None;
+            let mut has_word = false;
+            for character in command.chars() {
+                match (quote, character) {
+                    (None, '"' | '\'') => {
+                        quote = Some(character);
+                        has_word = true;
+                    }
+                    (Some(open), _) if character == open => quote = None,
+                    (None, ' ') => {
+                        if has_word {
+                            words.push(std::mem::take(&mut current));
+                            has_word = false;
+                        }
+                    }
+                    _ => {
+                        current.push(character);
+                        has_word = true;
+                    }
+                }
+            }
+            if quote.is_some() {
+                return None;
+            }
+            if has_word {
+                words.push(current);
+            }
+            Some(words)
+        }
+
+        fn is_synopsis(words: &[String]) -> bool {
+            words.iter().any(|word| {
+                word.contains('…')
+                    || word.starts_with('<')
+                    || word.starts_with('[')
+                    || (word.len() > 1
+                        && word
+                            .chars()
+                            .all(|c| c.is_ascii_uppercase() || c == '_' || c == '/'))
+            })
+        }
+
+        let mut checked = 0;
+        let mut failures = Vec::new();
+        for (name, text) in guide_pages() {
+            let mut candidates: Vec<(usize, String)> = Vec::new();
+            for fence in fences(&text) {
+                // Untitled fences hold output (`qq doctor`, the TUI layout).
+                if fence.info != "sh" {
+                    continue;
+                }
+                let mut continued = String::new();
+                for (offset, line) in fence.body.lines().enumerate() {
+                    let joined = format!("{continued}{}", line.trim());
+                    if line.trim_end().ends_with('\\') {
+                        continued = format!("{} ", joined.trim_end_matches('\\').trim());
+                        continue;
+                    }
+                    continued.clear();
+                    // `QQ_MODEL=x qq …`: environment assignments before the command.
+                    let command = joined
+                        .split(' ')
+                        .skip_while(|word| word.contains('=') && !word.starts_with('-'))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if command == "qq" || command.starts_with("qq ") {
+                        candidates.push((fence.line + 1 + offset, command));
+                    }
+                }
+            }
+            for (index, line) in text.lines().enumerate() {
+                let mut rest = line;
+                while let Some(open) = rest.find("`qq") {
+                    let after = &rest[open + 1..];
+                    let Some(close) = after.find('`') else {
+                        break;
+                    };
+                    let span = &after[..close];
+                    // `qq 0.1.4 (…)` and the TUI's `qq  project › …` top row
+                    // are output, not commands.
+                    let output = span.strip_prefix("qq ").is_some_and(|rest| {
+                        rest.starts_with(|c: char| c.is_ascii_digit() || c == ' ')
+                    });
+                    if (span == "qq" || span.starts_with("qq ")) && !output {
+                        candidates.push((index + 1, format!("inline:{span}")));
+                    }
+                    rest = &after[close + 1..];
+                }
+            }
+            for (line, command) in candidates {
+                // Prose names a command (`qq run`, `qq run --approval`)
+                // without all of its arguments; an invocation must be whole.
+                let (inline, command) = match command.strip_prefix("inline:") {
+                    Some(span) => (true, span.to_owned()),
+                    None => (false, command),
+                };
+                let Some(words) = words(&command) else {
+                    failures.push(format!("  {name}:{line}: unbalanced quotes in `{command}`"));
+                    continue;
+                };
+                if is_synopsis(&words) || IGNORED_QQ_SPANS.contains(&command.as_str()) {
+                    continue;
+                }
+                checked += 1;
+                if let Err(error) = crate::cli::Cli::try_parse_from(&words) {
+                    use clap::error::ErrorKind;
+                    let names_a_flag = words.last().is_some_and(|word| word.starts_with("--"));
+                    let accepted = match error.kind() {
+                        // `--help` and `--version` "fail" by printing.
+                        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => true,
+                        ErrorKind::MissingRequiredArgument
+                        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => inline,
+                        ErrorKind::InvalidValue => inline && names_a_flag,
+                        _ => false,
+                    };
+                    if !accepted {
+                        let first = error.to_string();
+                        let first = first.lines().next().unwrap_or_default();
+                        failures.push(format!("  {name}:{line}: `{command}`: {first}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "these `qq` commands in the guide do not parse with this build's CLI:\n{}",
+            failures.join("\n")
+        );
+        assert!(checked >= 40, "only {checked} qq commands checked");
+    }
+
+    /// Inline `qq …` spans that quote output rather than a command.
+    const IGNORED_QQ_SPANS: &[&str] = &["qq server already running at …"];
+
+    /// The `qq doctor` sample lists every check, in order, in the real
+    /// layout; the resume sample is exactly what `resume_hint` prints; the
+    /// exit-code tables list every status with its real code.
+    #[test]
+    fn output_samples_in_the_guide_match_the_code() {
+        let pages = guide_pages();
+        let page = |file: &str| {
+            pages
+                .iter()
+                .find(|(name, _)| name == file)
+                .map(|(_, text)| text.as_str())
+                .unwrap_or_else(|| panic!("docs/guide/{file} is missing"))
+        };
+
+        let doctor = fences(page("troubleshooting.md"))
+            .into_iter()
+            .find(|fence| fence.body.starts_with("qq "))
+            .expect("troubleshooting.md has a `qq doctor` sample");
+        let listed: Vec<&str> = doctor
+            .body
+            .lines()
+            .filter_map(|line| {
+                let (status, rest) = line.split_once(' ')?;
+                matches!(status, "ok" | "warn" | "fail" | "skip").then_some(rest.trim_start())
+            })
+            .map(|rest| {
+                crate::doctor::CHECK_NAMES
+                    .iter()
+                    .copied()
+                    .filter(|check| rest.starts_with(check))
+                    .max_by_key(|check| check.len())
+                    .unwrap_or(rest)
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            crate::doctor::CHECK_NAMES,
+            "troubleshooting.md's `qq doctor` sample must list every check in order"
+        );
+
+        let hint = crate::cli::resume_hint(qq_protocol::SessionId::from_bytes([0; 16]));
+        let example = hint.replace(&"0".repeat(32), "1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012");
+        let quickstart = page("quickstart.md");
+        assert!(
+            quickstart.contains(&example),
+            "quickstart.md must show the resume hint exactly as qq prints it:\n{example}"
+        );
+
+        for file in ["headless.md"] {
+            let text = page(file);
+            for status in qq_protocol::HeadlessStatus::ALL {
+                let row = format!("| {} | `{}` |", status.code(), status.as_str());
+                let merged = format!("| {} | `", status.code());
+                assert!(
+                    text.contains(&row)
+                        || text
+                            .lines()
+                            .any(|line| line.starts_with(&merged) && line.contains(status.as_str())),
+                    "{file}'s exit-code table has no row for {} `{}`",
+                    status.code(),
+                    status.as_str()
+                );
+            }
+        }
     }
 }
