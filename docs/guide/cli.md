@@ -11,7 +11,7 @@ Accepted by every command:
 | `--model PROVIDER/MODEL` | override the configured route for this invocation |
 | `--max-output-tokens N` | override the generation cap |
 | `--organization NAME` | select an enrolled organization manifest |
-| `-V`, `--version` | `qq 0.1.5 (abc1234 2026-09-28)` |
+| `-V`, `--version` | `qq 0.1.4 (abc1234 2026-09-22)` |
 
 ## `qq` — interactive
 
@@ -158,7 +158,7 @@ between global packs and your global config.
 
 ## `qq jev …`
 
-Optional TypeSafe Jev review. `setup [--allow-file]` stores the API key;
+Optional TypeSafe Jev. `setup [--allow-file]` stores the API key and enables nothing;
 `observe` assesses completed runs on the running local server without gating
 them. [`../runbooks/jev.md`](../runbooks/jev.md) explains what the observer
 reads and how its receipts resume.

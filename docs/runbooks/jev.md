@@ -1,62 +1,56 @@
-# Optional Jev review and routing
+# Jev operator runbook
 
-## Passive advisory observation
+How to turn QQ's optional TypeSafe Jev capabilities on, see what they do,
+and turn them off. Design and known limitations:
+[`../design/jev.md`](../design/jev.md). Planned changes:
+[`../plans/jev.md`](../plans/jev.md). This page describes only what ships
+today.
 
-Run an independent observer against an already running local QQ server:
+## Before you enable anything
 
-```sh
-qq jev observe --workspace-id WORKSPACE_ID --session-id SESSION_ID \
-  --receipts ./jev-advisory.jsonl --max-cost-usd 0.10
-```
-
-This explicit command enables observation only for its lifetime. It does not
-enable runtime review or routing, change run outcomes, request repairs, or delay
-the server's next run. Omit `--session-id` to observe task sessions throughout
-the selected workspace. The default duration is 300 seconds and the request
-limit is 32; use `--duration-seconds`, `--max-requests`, and
-`--max-total-tokens` to reduce the finite allowance.
-
-The observer assesses newly completed runs using masked, bounded evidence from
-the server's recent snapshot window. Missing original task or final-answer
-evidence produces an unavailable receipt without inference. It does not read
-workspace files or retrieve omitted history. Selected evidence cannot establish
-the correctness of an entire run.
-
-The JSONL receipt file is exclusively locked and synced before dispatch and
-settlement. Resume with the same file, scope and budget flags to retain its
-cursor and spending limits. A pending request after interruption has unknown
-spend and prevents further dispatch from that journal; it is never automatically
-retried. Admission reserves a worst-case request before spending, so observation
-can stop before the nominal allowance is fully consumed.
-
-Receipts distinguish `recorded_run` from `external_advisory` spend. Combined
-totals remain unknown when either component is unknown. Advisory spending uses
-its own explicit allowance and does not modify the completed run's accounting.
-Receipts are also printed to stdout after durable recording. Store them with the
-same care as session history; masking does not guarantee removal of all secrets.
-
-## Runtime review and routing
-
-QQ runs without Jev by default, including when a TypeSafe credential is stored.
-`qq jev setup` stores an endpoint-bound credential; it does not enable reviews.
-Jev receives task text and selected evidence, so enable it only for work whose
-contents you allow TypeSafe to process. Masking is not a privacy boundary.
-
-Choose the review boundary explicitly:
+QQ runs without Jev by default, including when a TypeSafe credential is
+stored. The four capabilities are enabled separately, and none enables
+another.
 
 ```sh
-QQ_JEV_CHECKPOINTS=final qq     # assess final candidates; keep tool batching
-QQ_JEV_CHECKPOINTS=enforce qq  # assess each tool result and final candidate
-QQ_JEV_CHECKPOINTS=off qq      # override configured review without deleting a key
+qq jev setup                    # store an endpoint-bound credential; enables nothing
+qq auth status typesafe-jev     # credential metadata
+qq auth logout typesafe-jev     # remove it (not needed to turn Jev off)
 ```
 
-The same settings apply to `qq ask`, `qq run` and `qq serve`. For a remote
-client, the server resolves its own configuration/environment. These are
-server-side controls, not environment variables a client forwards implicitly.
-Unknown environment values fail configuration instead of silently enabling or
-disabling review.
+Jev receives masked task text and bounded evidence or previews. Enable it
+only for work whose contents you allow TypeSafe to process. Masking is
+defense in depth, not a privacy boundary.
 
-Persistent configuration and named profiles use existing QQ layering and trust:
+Workspace and profile activation require current workspace trust. The
+`--tui-qa-root` fixture rejects every enabled Jev capability.
+
+```ron
+(
+    version: 1,
+    jev_review: off,
+    jev_routing: false,
+    jev_approval: false,
+)
+```
+
+Inspect values with `qq config show` and sources with
+`qq config explain <key>`.
+
+## Checkpoint review — `jev_review`
+
+```sh
+QQ_JEV_CHECKPOINTS=final qq     # assess final candidates; tool batching unchanged
+QQ_JEV_CHECKPOINTS=enforce qq   # assess each tool result and the final candidate
+QQ_JEV_CHECKPOINTS=off qq       # override configured review without deleting the key
+```
+
+The same settings apply to `qq ask`, `qq run` and `qq serve`.
+
+**Precedence.** Environment and runtime overrides beat profiles, and
+profiles beat top-level values. For a remote client, the server resolves its
+own configuration. A client's environment is not forwarded. Unknown values
+fail configuration rather than silently enabling or disabling review.
 
 ```ron
 (
@@ -69,104 +63,148 @@ Persistent configuration and named profiles use existing QQ layering and trust:
 )
 ```
 
-Choose a profile using the existing `--profile` option or session profile
-selection. Explicit environment/runtime overrides win over profiles, which win
-over top-level settings. Workspace activation and changes to profile activation
-require current workspace trust. Active runs keep their compiled profile;
-spawned work inherits that fixed review choice and profile. A later user-submitted
-prompt, including one in a child session, resolves its current configuration.
-Legacy parent-owned work without a recorded reviewer stays off.
+**Active runs and children.** An active run keeps its compiled profile, and
+spawned work inherits that review choice. A later user prompt, including one
+in a child session, resolves the current configuration.
 
-Inspect configured values with `qq config show`, provenance with
-`qq config explain jev_review`, and credential metadata with
-`qq auth status typesafe-jev`. Remove credentials with
-`qq auth logout typesafe-jev` when desired; removal is not required to turn off.
+**Limits and failures.** Review is bounded to 32 requests and 2 corrections
+per run, 5 s per request, and 64 KiB per response. It shares the run's token
+and cost allowance. A RED verdict after corrections, or an unavailable
+reviewer during the run, is recorded as evidence, and the run completes. A
+missing TypeSafe key is different: the plan does not compile and the run
+does not start (`JevKeyRequired`). A positive verdict
+is support, not proof.
 
-`enforce` is an advanced mode: it currently admits one executable tool call per
-model turn and fails if an assessment is unavailable. It adds inference latency
-and does not reverse tool side effects. Approval and sandbox policy still own
-execution authorization. No Jev speed or quality improvement is claimed without
-a paired task evaluation.
+**`enforce` is slow.** It admits one executable tool call per model turn,
+adds serial inference latency, and can't undo side effects. Use `final`
+unless you need per-result review.
 
-Implementation/qualification progress for the stacked work is in
-[`../plans/progress/jev-opt-in.md`](../plans/progress/jev-opt-in.md).
+## Model and effort routing — `jev_routing`
 
-Review is bounded to 32 requests and two corrections per run, five seconds per
-request, and 64 KiB per response. It consumes the same run token/cost allowance.
-Pending review and its final criterion outcomes are visible in event streams;
-known reviewer usage and estimated cost are recorded with the verdict. Interrupted
-requests have unknown spend. A positive verdict is evidence support, not proof.
-For current pinned pricing and uncertainty policy, see the architecture document.
+Enable routing with any of `QQ_JEV_ROUTING=on`, `jev_routing: true`, or
+`Profile(jev_routing: true)`. `QQ_JEV_ROUTING=off` overrides configured
+activation. A missing key fails configuration.
 
-Model/effort routing is independently opt-in: use `QQ_JEV_ROUTING=on`, trusted
-`jev_routing: true`, or `Profile(jev_routing: true)`. `QQ_JEV_ROUTING=off` overrides
-configured activation. Routing does not enable review. It chooses once before
-ordinary provider preparation from at most eight authorized configured models;
-explicit model choices stay fixed. Missing credentials fail configuration.
+**How it chooses.** Routing picks once, before run preparation, from the
+configured fallback plus at most seven other authorized models. Explicit
+model and effort pins stay fixed. When only one choice is available, routing
+skips inference. Low confidence, a timeout, an invalid reply or an
+unavailable selection keeps the configured choice, visibly.
 
-Automatic effort requires a model declaration, for example:
+**Automatic effort needs a declaration.** Declare only the efforts the
+remote model actually supports:
 
 ```ron
 models: { "my-model": (reasoning_efforts: [low, medium, high]) }
 ```
 
-Declare only values the remote model supports. Adapter transport support alone
-is insufficient; unknown model support preserves omitted effort. Pinned effort
-remains fixed, including explicit `none`. One available choice skips inference.
-Requests contain masked task text and bounded model metadata. Low confidence,
-timeout, invalid responses or unavailable selected routes visibly retain the
-configured choice. Session decisions and spend are durable; direct `ask` reports
-them on stderr and remains ephemeral. Routing spends count against session run
-budgets. Owned children inherit the parent's routing activation; later user
-prompts resolve current configuration.
+**Receipts.** Decisions and spend are durable in sessions and count against
+run budgets. Direct `ask` reports them on stderr. Owned children inherit the
+parent's routing activation.
 
-## Jev as the approval delegate
+**Pinned effort without Jev.** You can pin effort in configuration
+(`reasoning_effort: high`, `Profile(reasoning_effort: Some(low))`) or with
+`/effort` in the TUI. Values are `none`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, `max`, and `default` (let the provider choose, overriding a
+configured value). When QQ knows the selected model's accepted efforts (from
+its catalog entry or live discovery), any value other than `default` outside
+that set fails at plan time naming the accepted ones; for a model with no
+known set, a value it rejects fails at the provider instead. This is a fixed
+choice, not routing.
 
-`jev_approval: true` (or `QQ_JEV_APPROVAL=on`) makes Jev the first delegate
-for tool calls the session's approval mode holds, ahead of `reviewer_model`
-and the human (ADR-0041). It is independent of review and routing and does
-not enable them; a stored key with it off is never read. Like the other Jev
-capabilities it is trust-gated in project files and profiles and refused by
-the credential-free `--tui-qa-root` fixture.
+## Approval delegate — `jev_approval`
 
-Jev sees the approval preview only: the command or the diff, the host, the
-task brief, recent action names, the session's grants, and the mode. Each
-section is bounded to 8 KiB and secret-masked; the transcript is not sent. It
-answers one `choice` question (`approve`, `deny`, `abstain`) and the answer
-counts only when confidence and the winning probability both reach 0.7 under
-the pinned `jev-1.13.0` contract. `abstain`, low confidence, a malformed
-reply, a transport failure, a 5 s timeout, or a missing key falls through to
-`reviewer_model`, then to you, with the reason attached to the prompt. Jev is
-never failed open to approve. A Jev deny is final under `auto` and
-`supervised` and advice under `ask`, exactly like a reviewer-model deny; a
-Jev approve may record the exact command or host for the session and nothing
-wider. `Forbidden` shell shapes, blocked hosts, managed denies, and
-`ask_user` never reach it.
+Enable it with `jev_approval: true` or `QQ_JEV_APPROVAL=on`. Jev then
+decides calls the approval mode already holds, before `reviewer_model` and
+before you (ADR-0041). Whether a held call reaches the delegates at all is the
+separate `approval_delegate` setting (or `/delegate`): the default `by_mode`
+consults them under `auto` and `supervised` but sends `ask` straight to you;
+`on` consults them under `ask` too; `off` never does. The mode stays the ceiling. `Forbidden` shell shapes,
+blocked hosts, managed denies and `ask_user` never reach Jev.
 
-Spend counts against the run's budget as reviewer spend. The setting is
-resolved with the run's profile, like `jev_review` and `jev_routing`: a
-profile's `jev_approval: false` turns Jev off for runs of that profile even
-when the top level turns it on, and an edit to `false` applies to the next
-run without restarting the server. Inspect the setting
-with `qq config show` and `qq config explain jev_approval`.
+The setting is resolved with the run's profile, like `jev_review` and
+`jev_routing`: a profile's `jev_approval: false` turns Jev off for runs of
+that profile even when the top level turns it on, a profile-only `true`
+enables it, and an edit takes effect on the next run without restarting the
+server (a run in progress keeps the plan it started with). Inspect the
+setting with `qq config show` and `qq config explain jev_approval`.
 
-Explicit effort can be pinned independently of Jev in trusted configuration:
+**What Jev sees.** Only the approval preview. The task brief (child sessions
+only), shell command, edit diff, and other tool arguments are each limited to
+8 KiB and secret-masked. These are sent **verbatim, without masking**: the
+workspace path, the shell working directory, the edit path, recent action
+names with their paths (each path cut to 120 bytes), the granted tool names,
+and the granted shell prefixes. The whole request is limited to 64 KiB; a
+larger one is not sent and the call falls through.
 
-```ron
-(
-    version: 1,
-    reasoning_effort: high,
-    profiles: { "quick": Profile(reasoning_effort: Some(low)) },
-)
+**How it decides.** An answer counts only when confidence and the winning
+probability are both at least 0.7. Otherwise the call falls through to
+`reviewer_model`, then to you, with the reason attached. Fall-through
+triggers:
+- abstain or low confidence;
+- a malformed reply;
+- a transport failure;
+- a 5 s timeout;
+- a missing key.
+
+Jev never approves on failure.
+
+**What a verdict does.** A deny is final under `auto` and `supervised`, and
+advice under `ask`. An approve may record the exact command or host for the
+session, nothing wider. Spend counts as reviewer spend only for a returned
+verdict; a request that a human, cancellation or deadline overtakes may be
+billed without being counted (design finding 7, fixed by JV6).
+
+`/delegate off` withdraws both approval delegates for the session. It does
+not disable review or routing, and it does not revoke earlier grants.
+
+### Known limitations (tracked in the plan)
+
+- **You may be prompted before Jev answers.** The TUI shows "approval
+  needed" as soon as a call is held. Jev may settle it moments later, and
+  answering first drops Jev's decision. Fixed by JV5.
+- **Root sessions send no task brief,** so Jev and the fallback often
+  abstain or deny for lack of a stated need. Fixed by JV4.
+- **Headless `qq run` with Jev but no `reviewer_model`** denies held calls
+  immediately. Configure a `reviewer_model` as well. Fixed by JV2.
+- **Rounded Jev replies can be rejected as malformed** and fall through.
+  Fixed by JV3.
+
+## Passive advisory observer — `qq jev observe`
+
+```sh
+qq jev observe --workspace-id WORKSPACE_ID --session-id SESSION_ID \
+  --receipts ./jev-advisory.jsonl --max-cost-usd 0.10
 ```
 
-Values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and
-`default` (let the provider choose, overriding a configured value); each model
-accepts only its advertised subset. Omission
-preserves provider defaults; top-level `Clear` removes an inherited setting.
-Profile values override top-level settings; explicit runtime overrides win.
-In the TUI, `/effort` pins the focused session (or the default for new sessions);
-`default` restores configured/profile omission. `qq config show` and
-`qq config explain reasoning_effort` expose the configured value and source. Unsupported adapter families reject the choice before credential lookup.
-Remote model restrictions still apply. This is a pinned choice, not automatic
-routing; it makes no speed or quality promise.
+**What it does.** Observation is enabled only while the command runs. It
+never enables review or routing, changes run outcomes, or delays the next
+run. Omit `--session-id` to observe all task sessions in the workspace.
+
+**Limits.** Defaults are 300 s and 32 requests. `--duration-seconds`,
+`--max-requests` and `--max-total-tokens` reduce the allowance.
+
+**What it reads.** Masked, bounded evidence from the server's recent
+snapshot window. Missing task or final-answer evidence produces an
+unavailable receipt. It does not read workspace files.
+
+**The receipt journal.** The JSONL file is locked and synced before dispatch
+and settlement. Resume with the same file, scope and budget flags. A pending
+request left by an interruption has unknown spend, blocks further dispatch
+from that journal, and is never retried. Receipts separate `recorded_run`
+from `external_advisory` spend, and a combined total is unknown when either
+part is. Store receipts with the same care as session history.
+
+## Turning everything off
+
+1. **Configuration.** On the server, set `QQ_JEV_CHECKPOINTS=off`,
+   `QQ_JEV_ROUTING=off` and `QQ_JEV_APPROVAL=off`. These beat every profile.
+   Top-level `jev_review: off` / `jev_routing: false` / `jev_approval: false`
+   are not enough on their own: a selected profile that sets `jev_review` or
+   `jev_routing` still wins (see Precedence), so clear those profile values
+   too if you use configuration instead of the overrides.
+2. **Next run.** Approval activation is resolved for each new run; a run
+   already in progress keeps the plan it started with.
+3. **Stop observers.** Stop any `qq jev observe` processes.
+4. **Optional.** `qq auth logout typesafe-jev`. Removing the key doesn't
+   undo earlier grants or side effects.

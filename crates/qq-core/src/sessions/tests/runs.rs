@@ -1795,6 +1795,7 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
         Arc::new(TruncatingLoader {
             requests: Arc::clone(&requests),
             empty: false,
+            output_ceiling: None,
         }),
     )
     .await
@@ -1944,6 +1945,80 @@ async fn truncated_turns_persist_publish_and_replay_the_continuation_notice() {
 }
 
 #[tokio::test]
+async fn a_raised_output_cap_is_what_the_retried_turn_records() {
+    // Review (#216): the empty-truncation raise sends the retry with a larger
+    // cap, but every model_turns row and model_turn_completed event recorded
+    // the claim-time cap. Each turn's durable model must name the cap sent.
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        Arc::new(TruncatingLoader {
+            requests: Arc::clone(&requests),
+            empty: true,
+            output_ceiling: Some(4096),
+        }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, cursor) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session(&runtime, workspace_id, None).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("unexpected receipt")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: cursor,
+        })
+        .unwrap();
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![InputPart::text("think hard".to_owned())],
+                limits: qq_protocol::RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let finished = collect_through_finished(&mut events).await;
+    let sent: Vec<u32> = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(ModelRequest::max_output_tokens)
+        .collect();
+    assert_eq!(sent, vec![1024, 2048], "one raise");
+    let published: Vec<Option<u32>> = finished
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::ModelTurnCompleted { model, .. } => Some(model.max_output_tokens),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(published, vec![Some(1024), Some(2048)]);
+    let connection = Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+    let mut statement = connection
+        .prepare("SELECT model_json FROM model_turns ORDER BY turn_ordinal")
+        .unwrap();
+    let stored: Vec<Option<u32>> = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|json| {
+            serde_json::from_str::<ModelSelection>(&json.unwrap())
+                .unwrap()
+                .max_output_tokens
+        })
+        .collect();
+    assert_eq!(stored, vec![Some(1024), Some(2048)]);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn an_empty_truncated_turn_replays_without_the_continuation_notice() {
     // RR8.1: a session run's cap is the model ceiling, so an empty
     // truncation fails the run at once; the empty turn is still persisted
@@ -1957,6 +2032,7 @@ async fn an_empty_truncated_turn_replays_without_the_continuation_notice() {
         Arc::new(TruncatingLoader {
             requests: Arc::clone(&requests),
             empty: true,
+            output_ceiling: None,
         }),
     )
     .await

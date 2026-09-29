@@ -1763,6 +1763,10 @@ impl RuntimeFactory {
         let mut bindings = LiveBindings {
             provider: provider_config.access().cloned(),
             mcp: None,
+            runtime: crate::plan::RuntimeSwitches {
+                jev_approval: snapshot.jev_approval(),
+                output_ceiling,
+            },
         };
         if let Some(progress) = progress {
             progress.set(qq_core::RuntimeLoadStage::LoadingTools);
@@ -5395,6 +5399,19 @@ mod tests {
             plan("name: \"M\", max_output_tokens: 128000").output_ceiling(),
             Some(32_000)
         );
+
+        // Review (#216): lowering only the managed ceiling (still above the
+        // 16 384 request cap, so the digest is unchanged) must replace the
+        // cached plan, not revalidate the one compiled under 32 000.
+        let before = plan("name: \"M\", max_output_tokens: 128000");
+        fs::write(
+            fixture.path("managed/managed.ron"),
+            r#"(version: 1, policy: (max_output_tokens: 20000))"#,
+        )
+        .unwrap();
+        let after = plan("name: \"M\", max_output_tokens: 128000");
+        assert_eq!(before.digest(), after.digest(), "outside the digest");
+        assert_eq!(after.output_ceiling(), Some(20_000));
     }
 
     #[test]
@@ -9027,6 +9044,42 @@ mod tests {
                 .approval_delegate(),
             qq_core::ApprovalDelegate::On
         );
+    }
+
+    #[test]
+    fn an_on_disk_jev_approval_edit_replaces_the_cached_plan() {
+        // Review (#214): `jev_approval` is outside the plan digest, so an
+        // edit to only that field used to revalidate the cached generation
+        // and keep the old plan; turning it off kept sending previews to Jev.
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let config = fixture.path("global/config.ron");
+        let request = LoadRequest::new(fixture.path("work"));
+        let document = |enabled: bool| {
+            format!(
+                r#"(version: 1, model: "custom/test", jev_approval: {enabled},
+                    providers: {{ "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: {{ "test": (name: "test") }}) }})"#
+            )
+        };
+        fs::write(&config, document(true)).unwrap();
+        let on = factory.plan_for(&request).unwrap();
+        assert!(on.jev_approval());
+
+        fs::write(&config, document(false)).unwrap();
+        let (off, lookup) = factory
+            .plan_with_lookup(&request, &AgentProfileId::default())
+            .unwrap();
+        assert_eq!(lookup, PlanLookup::Compiled, "the edit must not revalidate");
+        assert!(!off.jev_approval());
+        assert_eq!(on.digest(), off.digest(), "still outside the digest");
+
+        // An unrelated byte change with the same setting still revalidates.
+        fs::write(&config, format!("{}\n// comment\n", document(false))).unwrap();
+        let (same, lookup) = factory
+            .plan_with_lookup(&request, &AgentProfileId::default())
+            .unwrap();
+        assert_eq!(lookup, PlanLookup::Revalidated);
+        assert!(Arc::ptr_eq(&off, &same));
     }
 
     #[test]

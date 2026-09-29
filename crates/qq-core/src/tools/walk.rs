@@ -202,15 +202,31 @@ fn directory_matcher(workspace: &Workspace, dir: &str) -> Option<Gitignore> {
 pub(crate) const MAX_IGNORE_FILE_BYTES: u64 = 256 * 1024;
 
 fn add_ignore_file(workspace: &Workspace, builder: &mut GitignoreBuilder, path: &str) -> bool {
-    // Only a regular file: a FIFO or device would block the blocking walk
-    // at open, and a symlink is not followed anywhere else in the walk.
-    match workspace.root().symlink_metadata(path) {
+    // Open first, then check what was opened, so the file cannot be swapped
+    // between a check and the open. On Unix the open neither follows a
+    // symlink (a symlink is not followed anywhere else in the walk) nor
+    // blocks on a FIFO or device (O_NONBLOCK); the type and size checks then
+    // run on the open descriptor.
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt as _;
+        let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+        // Both flags fit in an i32 on every Unix target.
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "open(2) takes flags as a C int; these bits are small positive values"
+        )]
+        options.custom_flags(flags.bits() as i32);
+    }
+    let Ok(file) = workspace.root().open_with(path, &options) else {
+        return false;
+    };
+    match file.metadata() {
         Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_IGNORE_FILE_BYTES => {}
         Ok(_) | Err(_) => return false,
     }
-    let Ok(file) = workspace.root().open(path) else {
-        return false;
-    };
     // The size was a hint: bound the read in case the file grew since.
     let mut content = String::new();
     if file
@@ -430,5 +446,41 @@ impl ScanBudget {
             return Some(StopReason::Time);
         }
         None
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ignore_file_swapped_for_a_fifo_or_link_after_listing_is_not_read() {
+        // Review (#217): the type check used to run before the open, so a
+        // file replaced by a FIFO in between blocked the walk at open. The
+        // open is now non-blocking and no-follow, and the type is checked on
+        // the opened descriptor. These are the states such a swap leaves.
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(root.join(".gitignore"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::write(root.join("outside-patterns"), "*.md\n").unwrap();
+        std::os::unix::fs::symlink(root.join("outside-patterns"), root.join(".ignore")).unwrap();
+        let workspace = Workspace::open(&root).unwrap();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut builder = GitignoreBuilder::new("");
+            let fifo = add_ignore_file(&workspace, &mut builder, ".gitignore");
+            let link = add_ignore_file(&workspace, &mut builder, ".ignore");
+            let _ = sender.send((fifo, link));
+        });
+        let (fifo, link) = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("opening a FIFO ignore file must not block");
+        assert!(!fifo, "a FIFO is not an ignore file");
+        assert!(!link, "a symlinked ignore file is not followed");
     }
 }

@@ -39,7 +39,11 @@ release is a bump PR followed by a tag on the merged result.
 2. Open a PR titled `chore(release): v0.1.5` and merge it once CI is green.
    Review the changelog section in the diff: it is the release's user-facing
    summary, and a commit that landed with a wrong Conventional Commit type
-   shows up in the wrong group here.
+   shows up in the wrong group here. Add the Upgrading block (below) when a
+   contract or configuration changed. In the same PR, and only there, move
+   the guide's version pins and example outputs (`docs/guide/install.md`,
+   `cli.md`, `troubleshooting.md`) to the new version: before the tag exists
+   they would point at a release that cannot be downloaded.
 
 3. Tag the merged `main` and push the tag.
 
@@ -150,17 +154,19 @@ the contract versions below, not by crate versions.
 
 | Contract | Constant | Decides |
 | --- | --- | --- |
-| Wire protocol | `qq_protocol::PROTOCOL_VERSION` | client ↔ server; exact match enforced by both sides |
-| Capabilities | `qq_protocol::CAPABILITIES_VERSION` | shape of `/v1/capabilities` |
-| Plan descriptor | `qq_core::plan::DESCRIPTOR_VERSION` | compiled agent plan cache |
-| Store schema | `qq_core::STORE_SCHEMA_VERSION` | opening a session store (forward-only migrations) |
+| Wire protocol | `qq_protocol::PROTOCOL_VERSION` | client ↔ server; the only value checked across a connection (exact match, both sides) |
+| Capabilities | `qq_protocol::CAPABILITIES_VERSION` | shape of `/v1/capabilities`; advertised for clients to read, never refused on |
+| Plan descriptor | `qq_core::plan::DESCRIPTOR_VERSION` | local: part of the compiled plan digest and cache key |
+| Store schema | `qq_core::STORE_SCHEMA_VERSION` | local: checked when a session store is opened (forward-only migrations) |
 
 ### Choosing the product number (0ver)
 
-QQ uses [0ver](https://0ver.org): the product version is `0.MINOR.PATCH`
-and `MAJOR` stays `0`. The product number orders releases; it does not
-promise compatibility. Compatibility is carried by the contract versions
-above, which every build prints and both sides of a connection check.
+QQ uses [0ver](https://0ver.org) ([ADR-0051](../adr/0051-zerover-product-versioning.md)):
+the product version is `0.MINOR.PATCH` and `MAJOR` stays `0`. The product
+number orders releases; it does not promise compatibility. Compatibility is
+carried by the contract versions above, each checked where it matters: the
+protocol at every connection, the descriptor in plan identity, the store
+schema when a store opens. `qq version` prints all four.
 
 - **`PATCH`** is the normal release step, whatever it contains: fixes,
   features, and contract bumps alike. A release that bumps a contract or
@@ -171,13 +177,18 @@ above, which every build prints and both sides of a connection check.
 - **`MAJOR`** does not change. Moving off `0` would be its own decision and
   ADR, not a release step.
 
-Because the number does not signal breakage, the release PR must: list every
-contract constant that changed since the previous tag (old → new) in its
-body, and state what a user upgrading from the previous release must do
-(for example: restart a long-running `qq serve`; configuration values that
-no longer load and their replacements; the store migrates forward and the
-previous release cannot open it afterwards). The changelog's
-`**breaking:**` bullets come from `!` commits and are the per-change record.
+Because the number does not signal breakage, every release whose contracts
+or configuration changed carries an **Upgrading** block at the top of its
+`CHANGELOG.md` section, written by hand in the bump PR right under the
+generated `## X.Y.Z — date` heading: each contract constant that changed
+since the previous tag (old → new) and what a user upgrading must do (for
+example: restart a long-running `qq serve`; configuration values that no
+longer load and their replacements; the store migrates forward and the
+previous release cannot open it afterwards, so back it up first). The
+`Release` workflow publishes that whole section as the GitHub release body
+(above GitHub's generated notes) and fails if the section is missing, so the
+steps reach users, not only reviewers. The generated `**breaking:**` bullets
+come from `!` commits and are the per-change record; do not edit them.
 
 `qq version` prints all of it together:
 

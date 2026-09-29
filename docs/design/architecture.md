@@ -62,7 +62,8 @@ synced external receipt journal. It cannot change authoritative outcomes or gate
 the next run. Pending dispatch is recorded before inference; interrupted requests
 remain unknown and are not automatically retried. External advisory accounting
 stays separate from the completed run, and combined totals preserve uncertainty.
-See the [Jev runbook](../runbooks/jev.md) for scope and restart behavior.
+See [`jev.md`](jev.md) for the Jev design and the [Jev runbook](../runbooks/jev.md)
+for scope and restart behavior.
 
 Keeping the TUI and server in one executable provides a zero-setup local path
 while still allowing several TUI or future browser clients to attach to a
