@@ -59,6 +59,8 @@ written.
 - [ADR-0049: a run carries a durable goal re-stated after every compaction; loops and idle goals are runtime policy](0049-durable-run-goal-and-loop-guard.md) — Proposed (autonomous-core AC4, AC7–AC9).
 - [ADR-0050: composition moves from the binary into a `qq-harness` library; `qq-core` gets tool features and a tested embedding example](0050-qq-harness-composition-library.md) — Proposed (autonomous-core AC10–AC13); refines ADR-0027.
 
+- [ADR-0051: 0ver product versioning; compatibility is carried by contract versions](0051-zerover-product-versioning.md) — Accepted (v0.1.5 release, ENG-969; replaces the runbook's MINOR-on-contract-bump rule).
+
 ## When to write one
 
 Write an ADR when a change:

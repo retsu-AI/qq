@@ -72,6 +72,7 @@ may append a **request** row; only root changes a request's status.
 | 0048 | Run bounds reset at seams; `ContinueRun` and opt-in auto-continue of paused/interrupted runs | autonomous-core AC2–AC6 | Proposed 2026-09-28: `docs/adr/0048-run-bounds-reset-at-seams-and-continuation.md` |
 | 0049 | Durable run goal re-stated after compaction; completion audit; always-on loop guard; continue-if-idle | autonomous-core AC4, AC7–AC9 | Proposed 2026-09-28: `docs/adr/0049-durable-run-goal-and-loop-guard.md` |
 | 0050 | `qq-harness` composition library; `qq-core` tool features, embedding example and surface hygiene | autonomous-core AC10–AC13 | Proposed 2026-09-28: `docs/adr/0050-qq-harness-composition-library.md` |
+| 0051 | 0ver product versioning; compatibility carried by contract versions | v0.1.5 release (ENG-969), PR #212 | Accepted 2026-09-28: `docs/adr/0051-zerover-product-versioning.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -143,7 +144,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0051. Reserve here before opening a PR that adds an ADR.
+Next free number: 0052. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 

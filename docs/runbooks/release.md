@@ -25,18 +25,18 @@ release is a bump PR followed by a tag on the merged result.
 
    ```sh
    git switch main && git pull --ff-only
-   git switch -c chore/release-0.2.0
-   cargo xtask release 0.2.0
-   git push -u origin chore/release-0.2.0
+   git switch -c chore/release-0.1.5
+   cargo xtask release 0.1.5
+   git push -u origin chore/release-0.1.5
    ```
 
    This rewrites `[workspace.package] version` in `Cargo.toml` (every crate
-   inherits it), refreshes `Cargo.lock`, prepends a `## 0.2.0 — YYYY-MM-DD`
+   inherits it), refreshes `Cargo.lock`, prepends a `## 0.1.5 — YYYY-MM-DD`
    section to `CHANGELOG.md` (see below), and commits all three as
-   `chore(release): v0.2.0`. It refuses a dirty worktree. Use `--no-commit`
+   `chore(release): v0.1.5`. It refuses a dirty worktree. Use `--no-commit`
    to inspect the bump and the changelog section first.
 
-2. Open a PR titled `chore(release): v0.2.0` and merge it once CI is green.
+2. Open a PR titled `chore(release): v0.1.5` and merge it once CI is green.
    Review the changelog section in the diff: it is the release's user-facing
    summary, and a commit that landed with a wrong Conventional Commit type
    shows up in the wrong group here.
@@ -46,7 +46,7 @@ release is a bump PR followed by a tag on the merged result.
    ```sh
    git switch main && git pull --ff-only
    cargo xtask release --tag
-   git push origin v0.2.0
+   git push origin v0.1.5
    ```
 
    `--tag` reads the version from the manifest and refuses to run unless the
@@ -71,7 +71,7 @@ release is a bump PR followed by a tag on the merged result.
 section above the previous release:
 
 ```markdown
-## 0.2.0 — 2026-09-24
+## 0.1.5 — 2026-09-24
 
 ### Features
 - provider: add compiled provider cache (#123)
@@ -150,24 +150,53 @@ the contract versions below, not by crate versions.
 
 | Contract | Constant | Decides |
 | --- | --- | --- |
-| Wire protocol | `qq_protocol::PROTOCOL_VERSION` | client ↔ server; exact match enforced by both sides |
-| Capabilities | `qq_protocol::CAPABILITIES_VERSION` | shape of `/v1/capabilities` |
-| Plan descriptor | `qq_core::plan::DESCRIPTOR_VERSION` | compiled agent plan cache |
-| Store schema | `qq_core::STORE_SCHEMA_VERSION` | opening a session store (forward-only migrations) |
+| Wire protocol | `qq_protocol::PROTOCOL_VERSION` | client ↔ server; the only value compared across a connection, and only by the client: it refuses a server whose advertised `ServerInfo.protocol_version` differs. The server does not check callers |
+| Capabilities | `qq_protocol::CAPABILITIES_VERSION` | shape of `/v1/capabilities`; advertised for clients to read, never refused on |
+| Plan descriptor | `qq_core::plan::DESCRIPTOR_VERSION` | local: part of the compiled plan digest and cache key |
+| Store schema | `qq_core::STORE_SCHEMA_VERSION` | local: checked when a session store is opened (forward-only migrations) |
 
-Choosing the product number: any contract bump → `MINOR` while `0.x`
-(`MAJOR` after `1.0`); a user-visible feature → `MINOR`; fixes only → `PATCH`.
+### Choosing the product number (0ver)
+
+QQ uses [0ver](https://0ver.org) ([ADR-0051](../adr/0051-zerover-product-versioning.md)):
+the product version is `0.MINOR.PATCH` and `MAJOR` stays `0`. The product
+number orders releases; it does not promise compatibility. Compatibility is
+carried by the contract versions above, each checked where it matters: the
+protocol by a client before it attaches (a stale or custom client that skips
+that check is not refused by the server), the descriptor in plan identity,
+the store schema when a store opens. `qq version` prints all four.
+
+- **`PATCH`** is the normal release step, whatever it contains: fixes,
+  features, and contract bumps alike. A release that bumps a contract or
+  carries a `!` commit is still a `PATCH` release.
+- **`MINOR`** is a deliberate milestone the lead chooses (a new major
+  capability or a reset of expectations), never an automatic consequence
+  of a contract bump.
+- **`MAJOR`** does not change. Moving off `0` would be its own decision and
+  ADR, not a release step.
+
+Because the number does not signal breakage, every release whose contracts
+or configuration changed carries an **Upgrading** block at the top of its
+`CHANGELOG.md` section, written by hand in the bump PR right under the
+generated `## X.Y.Z — date` heading: each contract constant that changed
+since the previous tag (old → new) and what a user upgrading must do (for
+example: restart a long-running `qq serve`; configuration values that no
+longer load and their replacements; the store migrates forward and the
+previous release cannot open it afterwards, so back it up first). The
+`Release` workflow publishes that whole section as the GitHub release body
+(above GitHub's generated notes) and fails if the section is missing, so the
+steps reach users, not only reviewers. The generated `**breaking:**` bullets
+come from `!` commits and are the per-change record; do not edit them.
 
 `qq version` prints all of it together:
 
 ```text
-qq 0.2.0 (151fe94 2026-09-09)
+qq 0.1.5 (151fe94 2026-09-09)
 protocol 21, capabilities 1, descriptor 6, store schema 28
 ```
 
 (Illustrative; `docs/design/protocol.md` § Versioning carries the current
 contract numbers.) The server reports the same build as
-`0.2.0+151fe94.2026-09-09` (semver build
+`0.1.5+151fe94.2026-09-09` (semver build
 metadata, no spaces) in `/v1/health`, the discovery file, and capabilities.
 A long-running `qq serve` left over from before an upgrade is therefore
 distinguishable from the TUI that connects to it even when the protocol
@@ -178,7 +207,7 @@ deployment needs it.
 ## What `qq --version` prints
 
 ```text
-qq 0.2.0 (151fe94 2026-09-09)
+qq 0.1.5 (151fe94 2026-09-09)
 ```
 
 `build.rs` embeds the short SHA and commit date at compile time, adding
@@ -205,7 +234,7 @@ at the time of writing; on a private plan the `ubuntu-24.04-arm` and
 
 ## Recovering from a bad release
 
-- **Tag pushed, workflow failed.** Fix on `main`, then cut the next patch
+- **Tag pushed, workflow failed.** Fix on `main`, then cut the next `PATCH`
   version; do not move or reuse a tag that has been pushed.
 - **Tag pushed at a commit that is not on `main`** (for example the bump was
   tagged before its PR merged). The `verify` job fails and nothing is
