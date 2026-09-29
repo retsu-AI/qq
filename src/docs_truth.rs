@@ -281,6 +281,66 @@ pub(crate) fn template_contains(template: &[TemplatePart], fragment: &[TemplateP
     (0..template.len()).any(|start| at(&template[start..], fragment))
 }
 
+/// `source` with every `#[cfg(test)]` item removed: from the attribute to
+/// the end of the item it gates — the matching `}` of its first block, or
+/// its `;` when it has none (`mod x;`, `use …;`). Any test module name and
+/// any test-only function, constant or import is excluded. Braces inside
+/// string and char literals are skipped so they cannot unbalance the count.
+pub(crate) fn without_test_items(source: &str) -> String {
+    const ATTRIBUTE: &str = "#[cfg(test)]";
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut copied = 0;
+    let mut search = 0;
+    while let Some(found) = source[search..].find(ATTRIBUTE) {
+        let start = search + found;
+        let mut index = start + ATTRIBUTE.len();
+        let mut depth = 0usize;
+        let mut end = bytes.len();
+        while index < bytes.len() {
+            match bytes[index] {
+                b'"' => {
+                    index += 1;
+                    while index < bytes.len() && bytes[index] != b'"' {
+                        index += if bytes[index] == b'\\' { 2 } else { 1 };
+                    }
+                }
+                b'\'' if bytes.get(index + 2) == Some(&b'\'') => index += 2,
+                b'\'' if bytes.get(index + 1) == Some(&b'\\') => {
+                    while index + 1 < bytes.len() && bytes[index + 1] != b'\'' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                    while index < bytes.len() && bytes[index] != b'\n' {
+                        index += 1;
+                    }
+                }
+                b'{' => depth += 1,
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        end = index + 1;
+                        break;
+                    }
+                }
+                b';' if depth == 0 => {
+                    end = index + 1;
+                    break;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        out.push_str(&source[copied..start]);
+        copied = end.min(bytes.len());
+        search = copied;
+    }
+    out.push_str(&source[copied..]);
+    out
+}
+
 /// The concatenated text of every `docs/guide/*.md` page.
 pub(crate) fn guide_text() -> String {
     let guide = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/guide");
@@ -643,6 +703,15 @@ mod tests {
         assert_eq!(
             string_literals(source),
             ["one two", "raw \"q\"", "say \"hi\""]
+        );
+    }
+
+    #[test]
+    fn test_items_are_removed_whatever_they_are_named() {
+        let source = "fn live() { \"kept\"; }\n#[cfg(test)]\nmod docs_truth;\n#[cfg(test)]\nmod probe_tests { fn f() { let _ = \"}\"; \"gone\"; } }\n#[cfg(test)]\npub(crate) fn helper() -> &'static str { \"gone too\" }\nfn also_live() { \"kept too\"; }\n";
+        assert_eq!(
+            string_literals(&without_test_items(source)),
+            ["kept", "kept too"]
         );
     }
 
@@ -1282,14 +1351,18 @@ mod tests {
                 continue;
             };
             let slash = spans(&row[1]);
-            let keys: Vec<&str> = spans(&row[2])
-                .into_iter()
-                .filter(|key| !CONTEXTUAL_KEYS.contains(key))
-                .collect();
-            if slash != command.slash || keys != command.default_chords {
+            let keys = spans(&row[2]);
+            let mut expected: Vec<&str> = command.default_chords.to_vec();
+            expected.extend(
+                CONTEXTUAL_KEYS
+                    .iter()
+                    .filter(|(title, _)| *title == command.title)
+                    .map(|(_, key)| *key),
+            );
+            if slash != command.slash || keys != expected {
                 problems.push(format!(
-                    "  \"{}\": guide has {slash:?} / {keys:?}, registry has {:?} / {:?}",
-                    command.title, command.slash, command.default_chords
+                    "  \"{}\": guide has {slash:?} / {keys:?}, expected {:?} / {expected:?}",
+                    command.title, command.slash
                 ));
             }
         }
@@ -1307,26 +1380,87 @@ mod tests {
         );
     }
 
-    /// Keys the guide lists beside a command that the registry does not own
-    /// because they depend on state: `?` only on an empty composer, `Enter`
-    /// steers only while a run is active, `Esc` walks to the parent only when
-    /// nothing else claims it, `Esc Esc` cancels only while running.
-    const CONTEXTUAL_KEYS: &[&str] = &["?", "Enter", "Esc", "Esc Esc"];
+    /// `(registry title, key)` for keys the guide lists after a command's
+    /// registry chords that the key handler binds by state rather than the
+    /// registry: `?` only on an empty composer, `Enter` steers only while a
+    /// run is active, `Esc` walks to the parent only when nothing else claims
+    /// it, `Esc Esc` cancels only while running. Each is checked on exactly
+    /// its row; the registry keeps the first two commands chord-free (see
+    /// `commands::tests`' contextual list).
+    const CONTEXTUAL_KEYS: &[(&str, &str)] = &[
+        ("show every command and key", "?"),
+        ("focus the parent session", "Esc"),
+        ("cancel the active run", "Esc Esc"),
+        ("steer the active run with the draft", "Enter"),
+    ];
 
     /// Parts of a quoted message rendered from data, with the format
     /// placeholder that renders them. A heading may quote the rendered text
     /// when the data is a fixed list the reader should see.
     const RENDERED: &[(&str, &str)] = &[
         ("openai, anthropic, google, xai, openai-codex", "{}"),
-        ("registered in keyring", "registered in {backend}"),
+        ("registered in OS keyring", "registered in {backend}"),
     ];
 
+    /// An empty keyring, for rendering missing-credential messages.
+    struct EmptyKeyring;
+
+    impl qq_auth::KeyringBackend for EmptyKeyring {
+        fn get(&self, _: &str) -> Result<Vec<u8>, qq_auth::KeyringError> {
+            Err(qq_auth::KeyringError::Missing)
+        }
+        fn set(&self, _: &str, _: &[u8]) -> Result<(), qq_auth::KeyringError> {
+            Ok(())
+        }
+        fn remove(&self, _: &str) -> Result<(), qq_auth::KeyringError> {
+            Ok(())
+        }
+    }
+
+    /// Headings QQ composes at run time rather than from one literal are
+    /// rendered through the real code path and compared exactly.
+    #[tokio::test]
+    async fn composed_troubleshooting_messages_are_rendered_exactly() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = qq_auth::CredentialStore::with_backend(
+            qq_auth::CredentialPaths::new(directory.path()),
+            std::sync::Arc::new(EmptyKeyring),
+        );
+        let provider = store.xai_request_credentials("default", None);
+        let error = qq_provider::RequestCredentialProvider::credential(&provider)
+            .await
+            .unwrap_err();
+        // `request_credential_error` wraps it as the provider error the user sees.
+        let rendered = qq_provider::ProviderError::ResponseFailed {
+            kind: qq_provider::ProviderErrorKind::Authentication,
+            message: error.to_string(),
+        }
+        .to_string();
+        let pages = guide_pages();
+        let text = &pages
+            .iter()
+            .find(|(name, _)| name == "troubleshooting.md")
+            .unwrap()
+            .1;
+        assert!(
+            text.contains(&format!("### `{rendered}`")),
+            "troubleshooting.md must quote the xAI missing-credential message exactly:\n{rendered}"
+        );
+    }
+
     /// Troubleshooting headings that quote text QQ relays but does not
-    /// write: a provider's own error body.
-    const QUOTED_ELSEWHERE: &[(&str, &str)] = &[(
-        "provider returned HTTP 400: Invalid JSON payload received. Unknown name \"additionalProperties\"…",
-        "Gemini's response body, relayed after QQ's `provider returned HTTP {status}` prefix",
-    )];
+    /// write: a provider's own error body, or a message composed at run time
+    /// and rendered exactly by `composed_troubleshooting_messages_are_rendered_exactly`.
+    const QUOTED_ELSEWHERE: &[(&str, &str)] = &[
+        (
+            "provider response failed: no credential for provider `xai`: run `qq auth login xai --oauth` or `qq auth login xai` or set the environment variable `XAI_API_KEY`",
+            "composed from the login list; rendered and compared exactly in its own test",
+        ),
+        (
+            "provider returned HTTP 400: Invalid JSON payload received. Unknown name \"additionalProperties\"…",
+            "Gemini's response body, relayed after QQ's `provider returned HTTP {status}` prefix",
+        ),
+    ];
 
     /// Every troubleshooting heading that quotes a message quotes one the
     /// code can print: each literal run of three or more words between the
@@ -1354,14 +1488,7 @@ mod tests {
                     && !file.ends_with("_tests.rs")
                 {
                     let text = fs::read_to_string(&path).unwrap();
-                    // The inline test module, not the first `#[cfg(test)]`:
-                    // that attribute also gates single items such as
-                    // `#[cfg(test)] mod docs_truth;` near the top of a file.
-                    let production = text
-                        .split("#[cfg(test)]\nmod tests")
-                        .next()
-                        .unwrap_or_default();
-                    literals.extend(string_literals(production));
+                    literals.extend(string_literals(&without_test_items(&text)));
                 }
             }
         }
@@ -1380,6 +1507,11 @@ mod tests {
             crate::LOGIN_PROVIDERS.join(", "),
             "RENDERED quotes the login provider list; keep it equal to LOGIN_PROVIDERS"
         );
+        assert_eq!(
+            RENDERED[1].0,
+            format!("registered in {}", qq_auth::CredentialBackend::Keyring),
+            "RENDERED quotes the keyring backend's display name; keep it equal to it"
+        );
         let mut quoted = 0;
         let mut invented = Vec::new();
         for (heading, _) in QUOTED_ELSEWHERE {
@@ -1396,20 +1528,17 @@ mod tests {
             if QUOTED_ELSEWHERE.iter().any(|(entry, _)| *entry == message) {
                 continue;
             }
-            let mut rest = message.replace('…', "\u{0}");
-            for delimiter in ['`', '"'] {
-                let mut out = String::new();
-                for (index, part) in rest.split(delimiter).enumerate() {
-                    out.push_str(if index % 2 == 1 { "\u{0}" } else { part });
-                }
-                rest = out;
-            }
+            // `…` marks rendered data and becomes a hole; quoted spans stay
+            // literal, so fixed commands (`qq ask "<prompt>"`) and quoted
+            // names are compared too. A span of rendered data is written as
+            // `…` in the heading, or matches the template's own `{…}` hole.
+            let rest = message.replace('…', "{}");
             // Each clause (split at `:` / `;` and at placeholders) of two
             // or more words must occur in one production literal. Clauses
             // may come from different literals: QQ composes messages
             // (`{provider} needs a credential: {remedy}`).
             let clauses: Vec<Vec<TemplatePart>> = rest
-                .split(['\u{0}', ':', ';'])
+                .split([':', ';'])
                 .map(|clause| clause.trim_matches(|c: char| " ,.'".contains(c)))
                 .filter(|clause| clause.split_whitespace().count() >= 2)
                 .map(|clause| {
