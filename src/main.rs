@@ -1284,6 +1284,17 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
             if let Some(delegate) = profile.approval_delegate() {
                 parts.push(format!("approval_delegate={}", delegate.as_str()));
             }
+            // A profile's Jev settings override the top level for its runs;
+            // listed so `qq config show` answers what a profile will do.
+            if let Some(enabled) = profile.jev_approval() {
+                parts.push(format!("jev_approval={enabled}"));
+            }
+            if let Some(enabled) = profile.jev_routing() {
+                parts.push(format!("jev_routing={enabled}"));
+            }
+            if let Some(mode) = profile.jev_review() {
+                parts.push(format!("jev_review={}", mode.as_str()));
+            }
             if let Some(tokens) = profile.max_output_tokens() {
                 parts.push(format!("max_output_tokens={tokens}"));
             }

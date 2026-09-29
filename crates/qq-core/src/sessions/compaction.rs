@@ -159,6 +159,7 @@ pub(super) fn start_auto_compaction(
         ClaimedRun {
             checkpoint: None,
             routing: None,
+            approval_delegate: None,
             identity: RunIdentity {
                 workspace_id: original.identity.workspace_id,
                 session_id: original.identity.session_id,
