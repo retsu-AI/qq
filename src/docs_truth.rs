@@ -341,6 +341,57 @@ pub(crate) fn without_test_items(source: &str) -> String {
     out
 }
 
+/// Every source file a non-test build compiles, found by following
+/// `mod name;` declarations from each crate root. A declaration inside a
+/// `#[cfg(test)]` item, or gated by one (`#[cfg(test)] mod x;`,
+/// `#[cfg(any(test, feature = "…"))] pub mod x;`), is not followed, so
+/// test-only files — whatever they are named, and wherever the gate is —
+/// never count as production.
+pub(crate) fn production_module_files(roots: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut pending: Vec<std::path::PathBuf> = roots.to_vec();
+    while let Some(file) = pending.pop() {
+        let Ok(text) = fs::read_to_string(&file) else {
+            continue;
+        };
+        // `src/a.rs` declares children in `src/a/`; a crate root or
+        // `mod.rs`-free layout keeps them beside it.
+        let stem = file.file_stem().unwrap().to_string_lossy().into_owned();
+        let parent = file.parent().unwrap();
+        let children = if matches!(stem.as_str(), "main" | "lib") {
+            parent.to_owned()
+        } else {
+            parent.join(&stem)
+        };
+        let live = without_test_items(&text);
+        let mut previous_gated = false;
+        for line in live.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("#[cfg(") && trimmed.contains("test") {
+                previous_gated = true;
+                continue;
+            }
+            let declaration = trimmed
+                .trim_start_matches("pub(crate) ")
+                .trim_start_matches("pub(super) ")
+                .trim_start_matches("pub ");
+            if let Some(name) = declaration
+                .strip_prefix("mod ")
+                .and_then(|rest| rest.strip_suffix(';'))
+                && !previous_gated
+            {
+                pending.push(children.join(format!("{name}.rs")));
+            }
+            if !trimmed.starts_with("#[") {
+                previous_gated = false;
+            }
+        }
+        files.push(file);
+    }
+    files.sort();
+    files
+}
+
 /// The concatenated text of every `docs/guide/*.md` page.
 pub(crate) fn guide_text() -> String {
     let guide = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/guide");
@@ -713,6 +764,22 @@ mod tests {
             string_literals(&without_test_items(source)),
             ["kept", "kept too"]
         );
+    }
+
+    #[test]
+    fn production_modules_exclude_test_gated_files() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let files = production_module_files(&[
+            root.join("src/main.rs"),
+            root.join("crates/qq-tui/src/lib.rs"),
+        ]);
+        let has = |relative: &str| files.contains(&root.join(relative));
+        assert!(has("src/main.rs") && has("src/cli.rs") && has("src/runtime.rs"));
+        assert!(has("crates/qq-tui/src/app.rs"));
+        // Gated on the parent's `mod` line, not in the file itself.
+        assert!(!has("src/docs_truth.rs"), "{files:?}");
+        assert!(!has("crates/qq-tui/src/fixtures.rs"), "{files:?}");
+        assert!(!has("crates/qq-tui/src/app/tests.rs"), "{files:?}");
     }
 
     #[test]
@@ -1231,6 +1298,16 @@ mod tests {
         let rows = table_after(text, "## `policy`");
         for row in &rows {
             let managed_only = row[1] == "managed layers only";
+            // A key any layer may set says so: `any layer`, or `any; …`
+            // qualifying how layers combine. Anything else is wrong guidance.
+            let any_layer = row[1] == "any layer" || row[1].starts_with("any; ");
+            if !managed_only && !any_layer {
+                wrong.push(format!(
+                    "  \"{}\" is neither `managed layers only` nor `any layer` / `any; …`",
+                    row[1]
+                ));
+                continue;
+            }
             for key in spans(&row[0]) {
                 if !qq_config::POLICY_FIELD_NAMES.contains(&key) {
                     wrong.push(format!("  `{key}` is not a policy key the loader accepts"));
@@ -1471,26 +1548,13 @@ mod tests {
         // Only string literals from non-test code: comments, test modules,
         // and `tests/` fixtures never print a message a user sees.
         let mut literals: Vec<String> = Vec::new();
-        let mut directories = vec![root.join("src")];
+        let mut roots = vec![root.join("src/main.rs")];
         for entry in fs::read_dir(root.join("crates")).unwrap() {
-            directories.push(entry.unwrap().path().join("src"));
+            roots.push(entry.unwrap().path().join("src/lib.rs"));
         }
-        while let Some(directory) = directories.pop() {
-            for entry in fs::read_dir(&directory).unwrap() {
-                let path = entry.unwrap().path();
-                let file = path.file_name().unwrap().to_string_lossy();
-                if path.is_dir() {
-                    if file != "tests" {
-                        directories.push(path);
-                    }
-                } else if path.extension().is_some_and(|extension| extension == "rs")
-                    && file != "tests.rs"
-                    && !file.ends_with("_tests.rs")
-                {
-                    let text = fs::read_to_string(&path).unwrap();
-                    literals.extend(string_literals(&without_test_items(&text)));
-                }
-            }
+        for file in production_module_files(&roots) {
+            let text = fs::read_to_string(&file).unwrap();
+            literals.extend(string_literals(&without_test_items(&text)));
         }
         let templates: Vec<Vec<TemplatePart>> = literals
             .iter()

@@ -175,7 +175,7 @@ y once   a session   w workspace   n deny
 | `w` | write the grant into `.qq/config.ron` and run, when the grant fits | every session in this workspace |
 | `n` | deny; the model receives the denial as a tool error and continues | — |
 | `Shift-Y` / `Shift-N` | decide and then steer the run with a note | — |
-| `Esc` | leave the prompt open; `Ctrl-G` jumps back to it | — |
+| `Esc` | deny, like `n` | — |
 
 "Same shape" means: an exact tool name for edits, writes, MCP tools, and
 `fetch` hosts; a **word-boundary prefix** for shell. Approving `cargo test
