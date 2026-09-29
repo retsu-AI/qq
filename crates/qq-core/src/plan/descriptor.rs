@@ -11,10 +11,10 @@ use super::PlanCompileError;
 /// Version of the descriptor's canonical encoding. Bump it whenever a field is
 /// added, removed, renamed, or its normalization changes, so historical digests
 /// are never compared against a different encoding.
-pub const DESCRIPTOR_VERSION: u16 = 11;
+pub const DESCRIPTOR_VERSION: u16 = 12;
 
 /// Domain separator prepended to the canonical bytes before hashing.
-const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v11\0";
+const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v12\0";
 
 /// Where a credential comes from, without its value. Two plans that read the
 /// same environment variable or stored credential name share a reference and
@@ -195,6 +195,13 @@ pub struct AgentPlanDescriptor {
     /// Optional pre-run routing policy identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<String>,
+    /// Identity of the delegate consulted first for held calls (Jev approval,
+    /// ADR-0052); absent means that delegate is off. Recorded so a run's
+    /// durable plan says whether it authorized an external approval
+    /// delegate, and so owned children and routed reloads inherit it (version
+    /// 12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_delegate: Option<String>,
     /// Fingerprint of the authorized candidates and selection constraints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_configuration: Option<String>,
