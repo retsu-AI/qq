@@ -62,20 +62,33 @@ a goal.
    So a write within the field bounds never fails this check, and a later
    change to the rendering cannot overflow unnoticed.
 
-   **Storage.** One `session_goals` row per session in the session store.
-   Every change is written in the same transaction as the event it
-   publishes. There is no second database and no in-memory copy.
+   **Storage.** Goals live in a `session_goals` table in the session store,
+   one row per goal ever set. A partial unique index allows at most one
+   *live* goal (not cleared or replaced) per session. A cleared or replaced
+   goal keeps its row as history, so `runs.goal_id` always resolves. Every
+   change is written in the same transaction as the event it publishes.
+   There is no second database and no in-memory copy.
 
    **Editing and replacing.** The client's `set_goal` command passes the
    `goal_id` and `revision` it expects to change. With the current id, it
    is an edit and `revision` goes up by one. With no id, or another id, it
-   replaces the goal in one transaction. Replacing a goal that is still
-   unfinished requires `replace: true`.
+   replaces the goal. Replacing a goal that is still unfinished requires
+   `replace: true`. Replace and clear run in one transaction that:
+   - marks the old row as history;
+   - cancels any queued goal run or check run of the old goal (settled
+     `cancelled`, charged nothing);
+   - requests cancellation of a running one;
+   - clears `pending_run_id`.
+
+   No run of the old goal can start after that transaction.
 
    **The model cannot create or extend a goal.** It cannot create one,
    change the objective, check or budget, or resume a stopped goal. It can
    only edit the checklist and notes and propose a status, through one
-   built-in tool, `update_goal`. That tool has effect class `ReadOnly`.
+   built-in tool, `update_goal`. That tool needs no approval, but it is not
+   in the `ReadOnly` parallel batch (`lib.rs:3372–3396`). It is dispatched
+   serially in request order, like a mutating call, so two calls in one turn
+   apply in the order the model made them.
 2. **A run sees the goal as it was when the run was claimed, and only that
    revision.** Claiming a run records the goal's `(goal_id, revision)` on
    it, or nothing if the session has no active goal.
@@ -128,9 +141,16 @@ a goal.
      always the rendered goal block plus the last check result. It never
      re-submits the user's prompt and never uses the generic
      `TURN_RETRY_CONTINUE_NOTICE`.
-   - **User prompts come first.** A user prompt always runs before the next
-     goal run. While the goal is active it sees the goal and gets
-     `update_goal` for the checklist and notes, and it counts against the
+   - **User prompts come first,** enforced at admission, not only when the
+     driver decides. Admitting a user prompt in the same transaction:
+     - cancels any **queued, unclaimed** goal run (settled `cancelled`,
+       charged nothing);
+     - clears `pending_run_id`.
+
+     The driver re-queues after the prompt's run settles. A goal run that
+     was already claimed keeps running, and the prompt queues behind it as
+     prompts do today. While the goal is active a prompt run sees the goal,
+     gets `update_goal` for the checklist and notes, and counts against the
      goal budget.
      - Only a goal-origin run can propose `achieved`. In a user-prompt run,
        `update_goal` rejects `status` with a result.
@@ -145,8 +165,13 @@ a goal.
    A goal budget holds `max_goal_runs`, `max_total_tokens`,
    `max_cost_usd_nanos`, an absolute `deadline_ms`, and `per_run` limits.
    - **Always bounded.** A goal must set a deadline and a run cap. The
-     configured defaults are 24 h and 200 runs, and managed policy can lower
-     or raise the ceilings. An unbounded goal cannot be created.
+     configured defaults are 24 h and 200 runs, under shipped ceilings of
+     7 d and 2 000. Managed policy can only lower the ceilings, never raise
+     them. An unbounded goal cannot be created.
+   - **What counts as a goal run.** A run counts against `max_goal_runs`
+     only if it committed at least one model turn. A run that failed or
+     paused before any turn (a provider outage, say) is charged its tokens
+     and cost but not a run, so a long outage cannot use up the run cap.
    - **Clamping at start.** Any run that starts while the goal is active,
      goal-origin or user prompt, has its `RunLimits` clamped to the goal's
      remainder **when it starts, not when it is queued**. Remainder here
@@ -156,9 +181,16 @@ a goal.
      (`budget.rs:92–95`), so this is new work. For goal runs the starting
      value is `per_run`; for user prompts it is the prompt's own limits.
      This supersedes ADR-0048's "successor carries the chain remainder" for
-     goal runs: the goal's remainder already covers it. The existing
-     `BudgetMeter` gives the last run its tool-free wrap-up turn and settles
-     `budget_exhausted` on its own.
+     goal runs: the goal's remainder already covers it. When the token,
+     cost or deadline remainder runs out mid-run, the existing
+     `BudgetMeter` gives that run its tool-free wrap-up turn and settles
+     `budget_exhausted`.
+   - **The last run under the run cap.** `BudgetMeter` cannot see the run
+     cap, so the driver handles it. When a goal run is the last one the
+     cap allows, the driver sets `max_model_turns` to `per_run` turns plus
+     the reserved final response, and its first message says it is the
+     final goal run and must end with a handoff in `notes`. The run cap
+     therefore also ends with a wrap-up.
    - **Accounting.** Every settlement path goes through `settle_run`
      (`settlement.rs:168`). That includes normal completion, reserved-run
      failure, panic settlement and startup recovery, which today builds a
@@ -180,9 +212,14 @@ a goal.
    `audit_pending` is set, the driver queues nothing but the audit.
    - **With a check command, the check is itself a run.** It is a
      `RunKind::GoalCheck` run with no model, queued as soon as the claiming
-     run settles. It holds the session's active slot like any run, so
-     nothing else can edit the workspace while it runs, and a client can
-     cancel it.
+     run settles, and a client can cancel it.
+     - **The check has the workspace to itself.** It takes a
+       workspace-wide exclusion, not just the session slot, because runs
+       from other sessions may otherwise work in the same workspace at the
+       same time (`tools.md:1440–1442`). The check waits until no run in the
+       workspace is active, and no run in that workspace is claimed while it
+       holds the exclusion. The wait and the hold are both bounded by the
+       check timeout.
      - Cancelling a check is an explicit cancel, so the goal becomes
        `paused { user }` with `audit_pending` kept.
      - It executes through a dedicated runner in `sessions/`, not through
@@ -192,11 +229,22 @@ a goal.
        directory, which is the containment every shell call has today.
        There is no process sandbox yet (speed-first H10), and this ADR does
        not claim one.
-     - **Authority** is the client's: `set_goal` is the approval. It is
-       recorded and shown to every client. It is refused unless the setting
-       client is allowed to run shell in that workspace (the same trust
-       check as `--allow-shell`).
-     - Exit 0 makes the goal `achieved`.
+     - **Authority is an explicit, durable grant for the exact command.**
+       A `set_goal` carrying a check does not activate the goal. It holds
+       an ordinary approval for that exact command string, shown to every
+       client like any held call. Answering it records an exact-match
+       grant on the goal, and the goal becomes active.
+       - The command must pass the shell classifier (`Forbidden` is
+         refused) and managed policy denies. Both are re-checked before
+         every run of the check.
+       - Changing the check in an edit needs a new approval.
+       - Nothing about the caller's transport or CLI flags is trusted.
+     - **A result applies only to the revision it checked.** The check
+       records the `(goal_id, revision)` it ran against. If a client edited
+       the goal while it ran, the result is recorded but not applied: the
+       goal stays `active`, `audit_pending` is cleared, and the next goal
+       run sees the stale result.
+     - Exit 0 at the current revision makes the goal `achieved`.
      - Any other result keeps it `active`. The output tail, at most 4 KiB,
        goes into the next goal run's first message.
      - Three failed checks in a row set it `blocked { check_failing }`.
@@ -208,8 +256,12 @@ a goal.
      becomes `blocked { audit_exhausted }`, never an endless
      `audit_pending`.
 
-   A restart that finds `audit_pending` re-queues the check or the audit,
-   so no crash turns a claim into a completion.
+   A restart that finds `audit_pending` with no check started re-queues the
+   audit or check, so no crash turns a claim into a completion. A check
+   that was **running** when the process died is never repeated
+   automatically, because it is an arbitrary command with possible side
+   effects. The goal becomes `paused { needs_user: check_interrupted }`
+   and keeps `audit_pending`, and a client's `resume` re-runs the check.
 6. **Stopping and waiting are durable and bounded.**
    - **Waits.** `update_goal { wait: { seconds ≤ 86 400, reason } }` sets
      `next_run_at` to that time, for example while waiting on a CI run or a
@@ -217,35 +269,51 @@ a goal.
      clients.
    - **Transient provider trouble** (a `ProviderRetry` pause) keeps the goal
      `active`. `next_run_at` backs off 1 min, 2 min, 4 min and so on, up to
-     `max_backoff` (default 30 min), so outages lasting days cost a handful
-     of attempts. Any successful run resets the backoff.
+     `max_backoff` (default 30 min). That is at most 48 attempts a day.
+     Attempts that commit no model turn don't count against the run cap
+     (decision 4), so a multi-day outage costs tokens only for turns that
+     actually happened and ends at the deadline, not at the run cap. Any
+     run that commits a turn resets the backoff.
    - **Non-transient failures pause the goal immediately:** authentication,
      configuration, or rejected credentials. The goal becomes
      `paused { needs_user }` with the cause. After three consecutive failed
      goal runs of any other kind, it becomes `blocked { repeated_failure }`.
    - **Approvals nobody answers.** A goal run whose tool call is held for
-     approval waits at most `goal_approval_wait` (default 10 min). After
-     that the run is cancelled and the goal becomes
-     `paused { needs_user: approval }`, naming the held call. A held
-     approval can never use up the goal deadline. Headless, and a
-     configured approval delegate, behave as they do today, and a denial is
-     an ordinary result the model sees.
+     approval waits at most `min(goal_approval_wait, time to the goal
+     deadline)`, where `goal_approval_wait` defaults to 10 min. When that
+     wait expires, including when the deadline is what expires, the run is
+     cancelled and the goal becomes `paused { needs_user: approval }`,
+     naming the held call. That pause takes precedence over
+     `budget_exhausted`, so a held approval never looks like a spent
+     budget. Resuming after the deadline needs a client to raise the
+     deadline. Headless, and a configured approval delegate, behave as they
+     do today, and a denial is an ordinary result the model sees.
    - **No progress.** A `RunPause::NoProgress` from the loop guard (§ 8)
      increases the no-progress streak, and the next goal run is fresh.
      Two in a row set the goal `blocked { no_progress }`.
    - **Model-declared blocker.** A goal-origin run can propose `blocked`
      with a reason, and that is applied as is.
-7. **Pausing is a runtime rule, not client behaviour.** An explicit
-   `CancelRun` of a goal run or a check run pauses the goal
-   (`paused { user }`) in the same transaction, for every client. An
-   interrupting prompt or steer does not (decision 3). The client commands
-   are:
+7. **Pausing is a runtime rule, not client behaviour.** Two things pause a
+   goal (`paused { user }`) for every client:
+   - an explicit `CancelRun` of a goal run or a check run;
+   - `goal_control { pause }`.
+
+   Both run in one transaction that:
+   - cancels any **queued** goal run or check run (settled `cancelled`);
+   - requests cancellation of a **running** one;
+   - clears `pending_run_id`.
+
+   So a paused goal has no autonomous work left once the cancel settles. A
+   running check is cancelled the same way, and its result is discarded.
+   An interrupting prompt or steer does not pause (decision 3). The client
+   commands are:
    - `goal_control { pause | resume | clear }`, where resume resets the
      streaks and `next_run_at` and keeps `audit_pending`;
    - `set_goal`.
 
-   `clear` archives the goal row and publishes `goal_cleared`. A run
-   claimed against a cleared goal finishes normally and charges nothing
+   `clear` marks the goal row as history, invalidates its runs the same way
+   (decision 1), and publishes `goal_cleared`. A run that was already
+   running against a cleared goal and ignores cancellation charges nothing
    (decision 2).
 8. **Loop guard, for every run.** This decision is unchanged from the first
    draft of this ADR.

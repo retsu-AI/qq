@@ -10,12 +10,12 @@ appended below, newest last.
 | AC1 | `RunState` extraction by reset scope | Planned | | | No behaviour change; independent review |
 | AC2 | Bounds reset at seams | Planned | | | ADR-0048 § 1 |
 | AC3 | No single-shot fatal faults | Planned | | | ADR-0048 § 2 |
-| AC4 | Loop guard | Planned | | | ADR-0049 § 4; takes RR12's loop item |
+| AC4 | Loop guard | Planned | | | ADR-0049 § 8; takes RR12's loop item; lands in the goal PR with goals G0 |
 | AC5 | `ContinueRun` | Planned | | | ADR-0048 § 3; protocol bump (continuation) |
 | AC6 | `AutoContinue` policy | Planned | | | ADR-0048 § 4; same bump as AC5 |
-| AC7 | Goal record and re-statement | Planned | | | ADR-0049 § 1–2; protocol bump (goal) |
-| AC8 | Completion audit | Planned | | | ADR-0049 § 3 |
-| AC9 | Continue-if-idle | Planned | | | ADR-0049 § 5 |
+| AC7 | Goal record and re-statement | Moved | | | Now `goals.md` G0 |
+| AC8 | Completion audit | Moved | | | Now `goals.md` G3 |
+| AC9 | Continue-if-idle | Moved | | | Now `goals.md` G2 |
 | AC10 | `qq-core` embedding surface + example | Planned | | | ADR-0050 § 1 |
 | AC11 | `tool-fetch` feature; minimal profile CI | Planned | | | ADR-0050 § 3 |
 | AC12 | `qq-harness` crate (three mechanical moves) | Planned | | | ADR-0050 § 2 |

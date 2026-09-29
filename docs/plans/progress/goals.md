@@ -4,8 +4,8 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| G0 | Protocol and store | Planned | | | Goal PR, with G1 |
-| G1 | The goal in runs, `update_goal` | Planned | | | |
+| G0 | The goal PR: protocol, store, goal in runs, `update_goal`, and autonomous-core AC4 | Planned | | | One PR, one protocol bump |
+| G1 | — | Merged into G0 | | | |
 | G2 | The driver | Planned | | | Depends on autonomous-core AC5 |
 | G3 | Completion check | Planned | | | |
 | G4 | Surfaces: `/goal`, `qq run --goal`, `qq goal` | Planned | | | |
@@ -55,3 +55,29 @@ source and found 12 problems. All were fixed:
   not pause the goal.
 - **Descriptor and prefix claims** were restated honestly.
 - **The size bound** now includes the check tail (16 KiB).
+
+### 2026-09-28 — Codex review on #226 (17 comments on `ccc8b47`)
+
+All 17 were checked, and none were file-list comments. All 17 are fixed.
+- The design faults:
+  - the check takes a workspace-wide exclusion, since other sessions can
+    run in the same workspace (`tools.md:1440–1442`);
+  - the check is authorized by an exact-command held approval (a server
+    command has no `--allow-shell` caller, `src/cli.rs:207`);
+  - pause, replace and clear cancel queued work and ask running work to
+    cancel;
+  - `update_goal` is dispatched serially (`lib.rs:3372–3396`);
+  - the approval wait is clamped to the deadline, and its pause takes
+    precedence;
+  - stale check results are ignored;
+  - a check interrupted by a crash pauses the goal instead of re-running;
+  - `session_goals` keeps history rows;
+  - the last run under the cap gets a wrap-up;
+  - runs with no committed turn don't count toward the cap, so an outage
+    only uses up the deadline;
+  - a user prompt cancels an unclaimed goal run;
+  - `qq run --goal` returns on any non-`active` state;
+  - managed ceilings can only be lowered;
+  - G0 and G1 merged into one goal PR that includes AC4;
+  - the stale AC7–AC9 ledger rows and the § 4 → § 8 references are fixed.
+- None were declined.

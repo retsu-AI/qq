@@ -63,32 +63,42 @@ Measured acceptance:
 ## How it works
 
 ```text
-client: set_goal{objective, check?, budget}  ──►  session_goals row (active, rev 1)
-                                                        │ event goal_updated
+client: set_goal{objective, check?, budget}  ──►  session_goals row (rev 1)
+     with a check: goal waits on a held approval for that exact command, then active
+     without one: active at once                        │ event goal_updated
 goal driver (session layer), when the session is idle (no run/check queued or running,
   no user prompt waiting), the goal is active and not audit_pending, and now ≥ next_run_at:
   one transaction: pending_run_id unset → queue a run with RunOrigin::Goal{goal_id, rev}
      first message = rendered goal + last check output (a notice, never the user's prompt)
      predecessor paused (ProviderRetry) or interrupted → ADR-0048 successor (no call re-executed)
      predecessor completed, failed, or NoProgress     → fresh run
+     last run the cap allows → capped turns + a "final goal run, hand off in notes" message
+  a user prompt admitted now cancels this run if it is still unclaimed; it runs first
   run starts: RunLimits = per_run clamped to the goal's remainder AT START
      (tokens, cost, time to deadline; permit waits and backoff count)
-  run executes: model works, calls update_goal{checklist, notes, status?, wait?}
+  run executes: model works, calls update_goal{checklist, notes, status?, wait?} (serially)
   run settles (every path goes through settle_run, recovery included) ──► same transaction:
-     charge goal counters, clear pending_run_id, apply the outcome:
+     charge goal counters (a run counts toward the cap only if it committed a turn),
+     clear pending_run_id, apply the outcome:
      completed + achieved claimed → audit_pending → queue GoalCheck run (or one audit turn)
+         GoalCheck takes a workspace-wide exclusion; the result applies only to the revision checked
          check exit 0 → achieved (terminal)   check failed → active, output kept for next run
          3 failed checks → blocked{check_failing}   audit allowance spent → blocked{audit_exhausted}
      completed, still active       → next_run_at = now (or the model's wait)
      paused (ProviderRetry)        → next_run_at = now + backoff (1m, 2m, 4m … 30m cap)
      paused (NoProgress) ×2        → blocked{no_progress}
-     approval held > 10 min        → run cancelled, paused{needs_user: approval}
+     approval held past min(10 min, time to deadline) → run cancelled, paused{needs_user: approval}
      failed (auth / config)        → paused{needs_user}
      failed ×3 (other)             → blocked{repeated_failure}
-     explicit CancelRun (run/check)→ paused{user}
      budget remainder spent        → budget_exhausted
-restart: recovery settles interrupted runs through settle_run, re-queues a pending check or
-  audit, and the driver continues. ADR-0048 AutoContinue never touches runs with a goal snapshot
+client: CancelRun of a goal/check run, or goal_control pause ──► one transaction: paused{user},
+  cancel queued goal work, request cancellation of running work, clear pending_run_id
+client: set_goal replace, or goal_control clear ──► the old goal becomes a history row; its
+  queued work is cancelled and its running work is asked to cancel, the same way
+restart: recovery settles interrupted runs through settle_run and re-queues an unstarted check or
+  audit. A check that was running → paused{needs_user: check_interrupted}, never re-run
+  automatically. Then the driver continues. ADR-0048 AutoContinue never touches runs with a
+  goal snapshot
 ```
 
 A user prompt sent while the goal is active always runs before the next goal
@@ -98,7 +108,7 @@ run:
 - it can edit the checklist and notes, but cannot propose `achieved` or
   `blocked`;
 - if it interrupts a running goal run, it redirects that run and the goal
-  does not pause. Only an explicit cancel pauses the goal.
+  does not pause. Only an explicit cancel or `/goal pause` pauses the goal.
 
 ## What the model sees
 
@@ -126,8 +136,8 @@ external, call update_goal with wait. If you are truly blocked, say why with
 status blocked.
 ```
 
-The `update_goal` tool has effect class `ReadOnly` and needs no approval.
-Its arguments:
+The `update_goal` tool needs no approval, but it is dispatched serially in
+request order, never in the parallel read batch. Its arguments:
 - `checklist`: edits to items, as add, set state or drop;
 - `notes`: a handoff note of at most 1 KiB for the next run;
 - `status`, optional: `achieved` with evidence, or `blocked` with a reason;
@@ -154,10 +164,15 @@ the run, and the **runtime** pauses the goal. The status line then shows
 
 **Headless and scripting:**
 - `qq run --goal "<objective>" [--check CMD] [--goal-deadline 24h]
-  [--goal-max-runs N] [--max-cost-usd X]` stays in the foreground until the
-  goal reaches a terminal state. It prints one JSONL record per goal run,
-  followed by a final `goal` record, and the exit status reflects the goal
-  outcome.
+  [--goal-max-runs N] [--max-cost-usd X]` stays in the foreground while the
+  goal is `active`. It **returns as soon as the goal leaves `active`**:
+  achieved, blocked, budget exhausted, or paused, including
+  `paused { needs_user }`. It never waits for a human it cannot reach. It
+  prints one JSONL record per goal run, then a final `goal` record with the
+  state and reason. The exit status is 0 only for `achieved`; each other
+  state has its own non-zero status, defined in `headless-contract.md`
+  under G4. A paused goal stays in the store, so `qq goal resume` or
+  another `qq run --goal --session ID` picks it up.
 - `qq goal set|show|pause|resume|clear --session ID` drives a goal held by
   `qq serve`, which keeps working on it while no client is attached.
 
@@ -184,24 +199,29 @@ Managed policy can lower any ceiling.
 
 | ID | Goal | Area (starting point; see autonomous-core § Task index for the ownership rule) | Acceptance |
 | --- | --- | --- | --- |
-| G0 | Protocol and store: `session_goals`, `runs.goal_*`, `set_goal`/`goal_control`, the events, `SessionSnapshot.goal`, `RunOrigin`; reducer state. There is no driver yet, so a goal is only state | `qq-protocol`, `sessions/{commands,store,snapshots}`, schema, `qq-client::state` | Set, edit (revision CAS), replace (needs `replace`), pause, resume and clear round-trip in order, and a stale revision is rejected. Snapshot and reconnect show the goal. Rendered-size rejection at the boundary. Protocol fixtures. Sessions without a goal are unchanged |
-| G1 | The goal in runs: the claim snapshot of `(goal_id, revision)`; the goal block in the first message, after compaction and on a revision change; `update_goal` (checklist, notes, status proposal from goal-origin runs only, wait), checked against the claimed `goal_id` | `sessions/{claim,transcript,compaction}`, `tools/goal.rs`, `catalog.rs` include flag, `plan/descriptor.rs` | The maximum-size goal, check tail included, appears verbatim after each of ≥ 3 compactions. A queued prompt's run sees the goal only if the goal was active at its claim. **Stale claim:** a run claimed before `clear` or replace changes nothing through `update_goal`. A run claimed before a client edit merges item edits without overwriting client fields. A user-prompt run's `status` is rejected as a result. Golden: a goal-less request is byte-identical to `main` |
-| G2 | The driver: an idle wake-up that queues one goal run under the `pending_run_id` guard; limits clamped at start for every run while the goal is active; goal accounting inside `settle_run` for every path; the outcome table; the approval-wait pause; the startup sweep; backoff and waits; `AutoContinue` skipping goal runs. Depends on autonomous-core AC5 (`ContinueRun`) | `sessions/{scheduler,settlement,runtime,claim}`, `runtime/budget.rs` | The scripted multi-day acceptance (Goal 1) on a simulated clock. Two runtimes racing still queue one run. Exactly-10-run exhaustion (Goal 2). **Every settlement path**, including a kill mid-run followed by recovery and a panic, charges the goal and clears `pending_run_id`. A goal run that waits 20 min for a permit is clamped to the remaining deadline. A user prompt with unbounded limits is clamped to the goal's remainder. A held approval pauses the goal after `approval_wait`. An auth failure gives `paused{needs_user}`. Cancel gives `paused{user}`, and an interrupting prompt does not pause. `AutoContinue` never continues a goal run |
-| G3 | Completion: `audit_pending`; a `GoalCheck` run with a dedicated runner (own timeout up to 60 min, workspace working directory, 4 KiB tail) that holds the active slot; trust check at `set_goal`; failure output passed to the next run; three-strike and audit-exhausted blocks; audit turn when there is no check; restart re-queues a pending check | `sessions/{settlement,scheduler}`, `sessions/goal_check.rs` (new), `runtime/run_loop.rs` | Goal 3's cases. While a check runs, no prompt or goal run starts. Cancelling a check gives `paused{user}` with `audit_pending` kept. A kill during a check re-queues it on restart. A check from a client without shell trust is refused at `set_goal`. The 9th audit gives `blocked{audit_exhausted}` |
+| G0 | **The goal PR, one PR with one `PROTOCOL_VERSION` bump:** protocol and store (`session_goals` with history rows and one live goal per session, `runs.goal_*`, `set_goal`/`goal_control`, the events, `SessionSnapshot.goal`, `RunOrigin`, reason-tagged `RunPause`) plus the goal in runs (the claim snapshot; the goal block in the first message, after compaction and on a revision change; the serially dispatched `update_goal`, checked against the claimed `goal_id`) plus autonomous-core AC4 (the loop guard). There is no driver yet | `qq-protocol`, `sessions/{commands,store,snapshots,claim,transcript,compaction}`, schema, `qq-client::state`, `tools/goal.rs`, `catalog.rs` include flag, `plan/descriptor.rs`, `runtime/loop_guard.rs` | Set, edit (revision CAS), replace (needs `replace`), pause, resume and clear round-trip in order, and a stale revision is rejected. Replace and clear keep history rows. Snapshot and reconnect show the goal. Rendered-size rejection at the boundary. The maximum-size goal, check tail included, appears verbatim after each of ≥ 3 compactions. A queued prompt's run sees the goal only if the goal was active at its claim. **Stale claim:** a run claimed before `clear` or replace changes nothing through `update_goal`, and one claimed before a client edit merges item edits without overwriting client fields. Two `update_goal` calls in one turn apply in request order. A user-prompt run's `status` is rejected as a result. AC4's acceptance. Protocol fixtures. Golden: a goal-less request is byte-identical to `main` |
+| G1 | *(merged into G0: the goal PR)* | — | — |
+| G2 | The driver: an idle wake-up that queues one goal run under the `pending_run_id` guard; limits clamped at start for every run while the goal is active; goal accounting inside `settle_run` for every path; the outcome table; the approval-wait pause; the startup sweep; backoff and waits; `AutoContinue` skipping goal runs. Depends on autonomous-core AC5 (`ContinueRun`) | `sessions/{scheduler,settlement,runtime,claim}`, `runtime/budget.rs` | The scripted multi-day acceptance (Goal 1) on a simulated clock. Both runtimes racing still queue one run. **A prompt admitted after a goal run is queued but before it is claimed cancels that run and runs first.** Pause, replace and clear each cancel queued goal work and request cancellation of running work in one transaction. Exactly-10-run exhaustion (Goal 2), with the 10th run ending in a wrap-up handoff. A 3-day scripted outage exhausts nothing but the deadline, because runs with no committed turn aren't counted. **Every settlement path**, including a kill mid-run followed by recovery and a panic, charges the goal and clears `pending_run_id`. A goal run that waits 20 min for a permit is clamped to the remaining deadline. A user prompt with unbounded limits is clamped to the goal's remainder. A held approval pauses the goal after `min(approval_wait, time to deadline)`, and that pause wins over `budget_exhausted`. An auth failure gives `paused{needs_user}`. Cancel gives `paused{user}`, and an interrupting prompt does not pause. `AutoContinue` never continues a goal run |
+| G3 | Completion: `audit_pending`; a `GoalCheck` run with a dedicated runner (own timeout up to 60 min, workspace working directory, 4 KiB tail) that takes a **workspace-wide** exclusion; the check's exact-command grant, approved through an ordinary held approval at `set_goal` and re-checked against the classifier and managed denies before every run; results applied only to the revision checked; failure output passed to the next run; three-strike and audit-exhausted blocks; audit turn when there is no check; restart re-queues an unstarted check and pauses on an interrupted one | `sessions/{settlement,scheduler,approvals}`, `sessions/goal_check.rs` (new), `runtime/run_loop.rs` | Goal 3's cases. While a check runs, no run in the **workspace** starts, including other sessions'. A goal with a check stays inactive until the check approval is answered, and a `Forbidden` check is refused. A check that finishes after a client edit does not mark the new revision achieved. Cancelling or pausing during a check cancels it and discards its result. A kill during a check gives `paused{needs_user: check_interrupted}`, never an automatic re-run. The 9th audit gives `blocked{audit_exhausted}` |
 | G4 | Surfaces: the `/goal` panel, form and status line; `qq run --goal` and `qq goal …`; `[goals]` config and the guide pages | `qq-tui`, `src/{cli,headless}.rs`, `qq-config`, `docs/guide/` | TUI snapshot tests for each state. Headless goldens for the goal records and exit statuses. Docs-truth covers `/goal` and the config keys |
 | G5 | Evidence | ledger, ENG-809 | Goal 5, recorded with its cost |
 
-Order: autonomous-core AC4 and AC5 first, then G0, then G1 and G2. G3 depends
-on G2, and G4 on G0, since its read-only panel works as soon as the state
-exists. G0 and G1 together form the "goal" protocol PR that autonomous-core
-already reserves.
+Order:
+- autonomous-core AC5 (`ContinueRun`) must land before G2;
+- **G0 is the goal PR**, which includes autonomous-core AC4;
+- G2 depends on G0 and AC5;
+- G3 depends on G2;
+- G4 depends on G0, since its read-only panel works as soon as the state
+  exists.
+
+There is no separate G1 slice.
 
 ## Open questions
 
-1. **Check trust.** `set_goal` refuses a check unless the setting client may
-   run shell in that workspace. Is "may run shell" the right test? The
-   proposal is the same trust check as `--allow-shell` and the project trust
-   prompt, so a remote client can't smuggle in a command.
+1. **Check approval.** A check is approved once, for its exact command,
+   through an ordinary held approval (ADR-0049 § 5). Should a managed policy
+   be able to require that approval come from a human, never from the
+   approval delegate? The proposal is yes, by default.
 2. **Deadline default.** Is 24 h the right default, given that the ceiling
    is 7 d? It is set in configuration, so this is only about the shipped
    value.
