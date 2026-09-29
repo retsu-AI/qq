@@ -327,6 +327,7 @@ async fn prepare_headless(
         .map_err(|error| invalid(error.to_string()))?;
     let model_is_fallback = load.overrides().model().is_none();
     let overrides_jev_approval = load.overrides().jev_approval();
+    let overrides_approval_delegate = load.overrides().approval_delegate();
     let config_factory = factory.clone();
     let snapshot = tokio::task::spawn_blocking(move || config_factory.load(&load))
         .await
@@ -396,6 +397,20 @@ async fn prepare_headless(
             .and_then(|selected| selected.jev_approval()),
         overrides_jev_approval,
     );
+    // The run's `approval_delegate` with plan-compile precedence: override,
+    // selected profile, top level; absent is `by_mode`.
+    let configured_delegate = match overrides_approval_delegate
+        .or_else(|| {
+            snapshot
+                .profile(profile.as_str())
+                .and_then(|selected| selected.approval_delegate())
+        })
+        .or(snapshot.approval_delegate())
+    {
+        None => qq_protocol::ApprovalDelegate::ByMode,
+        Some(qq_config::ApprovalDelegateSetting::On) => qq_protocol::ApprovalDelegate::On,
+        Some(qq_config::ApprovalDelegateSetting::Off) => qq_protocol::ApprovalDelegate::Off,
+    };
     let options = headless::HeadlessOptions {
         prompt: args.prompt,
         workspace,
@@ -412,6 +427,7 @@ async fn prepare_headless(
             cli::RunApproval::Full => headless::HeadlessApproval::Full,
         },
         reviewer_configured,
+        configured_delegate,
         allow_tools: args.allow_tools,
         allow_shell_prefixes: args.allow_shell_prefixes,
         allow_hosts: args.allow_hosts,

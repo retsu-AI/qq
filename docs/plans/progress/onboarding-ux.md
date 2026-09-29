@@ -1,8 +1,10 @@
-# Ledger — Onboarding UX
+# Ledger — Onboarding UX (closed 2026-09-25)
 
-Plan: [`../onboarding-ux.md`](../onboarding-ux.md). Only the agent working
-this plan edits this file. Current state on top; dated entries appended
-below, newest last.
+Receipt for a completed plan. The plan document was removed when its last
+slice shipped (workflow § 1: plans are deleted when shipped); its goal,
+acceptance, slice table, and research are preserved in the entries below and
+in [`../../design/onboarding-audit-2026-09-22.md`](../../design/onboarding-audit-2026-09-22.md).
+Successor: [`../guide-expansion.md`](../guide-expansion.md). Read-only.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |

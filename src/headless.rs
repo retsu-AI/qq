@@ -64,11 +64,18 @@ pub struct HeadlessOptions {
     /// Source of the pricing table used for durable accounting.
     pub pricing_provenance: Option<String>,
     pub approval: HeadlessApproval,
-    /// Whether a held call has an approval delegate to wait for: a
+    /// Whether a held call has an approval delegate that exists: a
     /// `reviewer_model`, or Jev when the run's resolved `jev_approval` is on.
-    /// With one, `auto` holds an escalated call briefly so the delegate can
-    /// approve it, instead of denying the moment the request is published.
+    /// Whether one is *consulted* also depends on `approval_delegate`, which
+    /// the run applies with the session's own override (see
+    /// `configured_delegate`). With a consulted delegate, `auto` holds an
+    /// escalated call briefly so the delegate can approve it, instead of
+    /// denying the moment the request is published.
     pub reviewer_configured: bool,
+    /// The resolved `approval_delegate` setting (override, profile, top
+    /// level). A resumed session's persisted override wins over it, exactly
+    /// as the session gate applies it.
+    pub configured_delegate: qq_protocol::ApprovalDelegate,
     /// Tools whose held calls are approved for the session on first request.
     pub allow_tools: Vec<String>,
     /// Shell prefixes (word-boundary, as the policy matches them) whose held
@@ -194,6 +201,9 @@ struct RunHandle {
     session_id: SessionId,
     run_id: RunId,
     subscribe_after: qq_protocol::EventCursor,
+    /// A held root call under `auto` waits for a delegate rather than being
+    /// denied at once (see `submit`).
+    wait_for_delegate: bool,
 }
 
 struct AcceptedRunGuard {
@@ -509,7 +519,7 @@ async fn submit(
         ));
     };
 
-    let (session_id, subscribe_after) = match options.session {
+    let (session_id, subscribe_after, session_delegate) = match options.session {
         None => {
             let created = send(
                 sessions,
@@ -529,7 +539,7 @@ async fn submit(
                     "session creation returned an unexpected outcome",
                 ));
             };
-            (session_id, created.committed_through)
+            (session_id, created.committed_through, None)
         }
         Some(session_id) => {
             // Store ownership was taken when the runtime opened and its
@@ -617,9 +627,17 @@ async fn submit(
                 .await?;
                 after = receipt.committed_through;
             }
-            (session_id, after)
+            (session_id, after, summary.approval_delegate)
         }
     };
+    // Whether a held root call waits for a delegate: one exists and the
+    // effective delegate setting (the session's override, else the
+    // configured one) consults it under this run's approval mode. Without
+    // that, waiting only delays a denial nobody else will issue.
+    let wait_for_delegate = options.reviewer_configured
+        && session_delegate
+            .unwrap_or(options.configured_delegate)
+            .consults_reviewer(approval_mode(options.approval));
 
     // Budgets are core-owned: the runtime enforces them and settles the run
     // with a typed outcome, so this adapter only relays and renders.
@@ -663,6 +681,7 @@ async fn submit(
         // is the snapshot cursor (or the last settings write), not the
         // session's history.
         subscribe_after,
+        wait_for_delegate,
     })
 }
 
@@ -985,7 +1004,7 @@ async fn stream_run(
                                 Some(ApprovalDecision::ApproveForSession { grant })
                             }
                             (None, HeadlessApproval::Full) => Some(ApprovalDecision::ApproveOnce),
-                            (None, HeadlessApproval::Auto) if options.reviewer_configured || !ours => {
+                            (None, HeadlessApproval::Auto) if handle.wait_for_delegate || !ours => {
                                 if let Some(run_id) = envelope.run_id {
                                     let sessions = sessions.clone();
                                     let tool_call_id = tool_call.id;
@@ -2065,6 +2084,7 @@ mod tests {
             pricing_provenance: Some("test fixture".to_owned()),
             approval: HeadlessApproval::ReadOnly,
             reviewer_configured: false,
+            configured_delegate: qq_protocol::ApprovalDelegate::ByMode,
             allow_tools: Vec::new(),
             allow_shell_prefixes: Vec::new(),
             allow_hosts: Vec::new(),
@@ -3512,6 +3532,99 @@ mod tests {
         let (status, _, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
         assert_eq!(status, HeadlessStatus::Completed);
         assert!(stderr.contains("[tool] shell approved by jev"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn a_delegate_that_is_configured_but_switched_off_does_not_delay_the_denial() {
+        // Review (#215): with a delegate configured but `approval_delegate:
+        // off` (configured or the session's own override), the gate never
+        // consults it, so waiting the reviewer grace only delays the denial.
+        // The held call must be denied at once and never reach the reviewer.
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let workspace = root.join("work");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let workspace = std::fs::canonicalize(&workspace).unwrap();
+        for name in ["scratch0", "scratch1"] {
+            std::fs::create_dir_all(workspace.join(name)).unwrap();
+        }
+        let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+        runtime_options.approval_reviewer = Some(Arc::new(JevApproves));
+        let sessions = SessionRuntime::open(
+            runtime_options,
+            Arc::new(ProviderLoader(|| DangerousShellProvider {
+                turn: Mutex::new(0),
+            })),
+        )
+        .await
+        .unwrap();
+        let fixture = Fixture {
+            sessions,
+            workspace,
+            _directory: directory,
+        };
+
+        let mut options = options(&fixture.workspace);
+        options.approval = HeadlessApproval::Auto;
+        options.reviewer_configured = true;
+        options.configured_delegate = qq_protocol::ApprovalDelegate::Off;
+        let started = std::time::Instant::now();
+        let (status, stdout, _) = tokio::time::timeout(
+            REVIEWER_DENY_GRACE / 2,
+            run_to_end(&fixture, options.clone(), std::future::pending()),
+        )
+        .await
+        .expect("the denial must not wait for a delegate that is switched off");
+        assert!(started.elapsed() < REVIEWER_DENY_GRACE / 2);
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        let resolutions: Vec<&serde_json::Value> = event_records(&records)
+            .into_iter()
+            .filter(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
+            .map(|record| &record["envelope"]["event"])
+            .collect();
+        assert!(!resolutions.is_empty(), "{stdout}");
+        assert!(
+            resolutions
+                .iter()
+                .all(|event| event["resolution"] == "denied" && event.get("delegate").is_none()),
+            "{resolutions:?}"
+        );
+
+        // A resumed session whose own override is `off` wins over a
+        // configured `by_mode`, exactly as the session gate applies it.
+        let session_id: SessionId = records[0]["session_id"].as_str().unwrap().parse().unwrap();
+        send(
+            &fixture.sessions,
+            SessionCommand::SetApprovalDelegate {
+                session_id,
+                delegate: Some(qq_protocol::ApprovalDelegate::Off),
+            },
+        )
+        .await
+        .unwrap();
+        let resumed = HeadlessOptions {
+            session: Some(session_id),
+            approval: HeadlessApproval::Auto,
+            reviewer_configured: true,
+            configured_delegate: qq_protocol::ApprovalDelegate::ByMode,
+            ..options
+        };
+        let (status, stdout, _) = tokio::time::timeout(
+            REVIEWER_DENY_GRACE / 2,
+            run_to_end(&fixture, resumed, std::future::pending()),
+        )
+        .await
+        .expect("the session's off override must not wait either");
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        assert!(
+            event_records(&records)
+                .into_iter()
+                .filter(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
+                .all(|record| record["envelope"]["event"]["resolution"] == "denied"),
+            "{stdout}"
+        );
     }
 
     #[tokio::test]

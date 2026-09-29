@@ -1415,6 +1415,11 @@ impl plan::CompiledAgentPlan {
             // per run: the catalog limit (policy-bounded), which is above the
             // configured cap whenever the catalog knows one.
             let mut empty_output_retries = 0_u16;
+            // Consecutive truncated turns that produced nothing at all (not
+            // even a complete tool call). Only these are "spent on
+            // reasoning" in the terminal diagnostic; a raise taken for a
+            // call-then-cut turn consumes the allowance but not this count.
+            let mut reasoning_only_truncations = 0_u16;
             // The session owner supplies the original execution admission,
             // including time spent loading or automatically compacting.
             let mut budget = BudgetMeter::new(limits, pricing, started);
@@ -2538,15 +2543,22 @@ impl plan::CompiledAgentPlan {
                             // case: it must be resent.
                             let can_raise = empty_output_retries < MAX_EMPTY_OUTPUT_RETRIES
                                 && max_output_tokens < output_ceiling;
+                            if streamed_visible_output {
+                                reasoning_only_truncations = 0;
+                            } else {
+                                reasoning_only_truncations =
+                                    reasoning_only_truncations.saturating_add(1);
+                            }
                             if !can_raise && !streamed_visible_output {
                                 yield RuntimeEvent::Failed {
                                     kind: RunFailureKind::ProviderOutputTruncated,
                                     message: format!(
                                         "the provider stopped at its output token limit ({max_output_tokens} tokens) \
-                                         without producing any visible output on {} consecutive turns; the \
+                                         without producing any visible output on {} consecutive turn{}; the \
                                          limit was spent on reasoning. Raise `max_output_tokens` (model ceiling \
                                          {output_ceiling}) or lower `reasoning_effort`",
-                                        u32::from(empty_output_retries) + 1
+                                        reasoning_only_truncations,
+                                        if reasoning_only_truncations == 1 { "" } else { "s" }
                                     ),
                                 };
                                 return;
@@ -2602,6 +2614,7 @@ impl plan::CompiledAgentPlan {
                             continuation: output_continuations,
                         };
                         if assistant.has_content() {
+                            reasoning_only_truncations = 0;
                             irreducible_message_bytes = irreducible_message_bytes
                                 .saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
@@ -7314,6 +7327,9 @@ mod tests {
     /// text; every later turn answers `done`.
     struct CallThenCutProvider {
         requests: Arc<Mutex<Vec<ModelRequest>>>,
+        /// After the call-then-cut turn, every later turn is cut with nothing
+        /// visible (all reasoning) instead of answering.
+        then_empty: bool,
     }
 
     impl Provider for CallThenCutProvider {
@@ -7340,6 +7356,11 @@ mod tests {
                         reason: qq_provider::IncompleteReason::OutputTokens,
                     }),
                 ]))
+            } else if self.then_empty {
+                Box::pin(stream::iter([Ok(ProviderEvent::Incomplete {
+                    usage: None,
+                    reason: qq_provider::IncompleteReason::OutputTokens,
+                })]))
             } else {
                 Box::pin(stream::iter([
                     Ok(ProviderEvent::OutputTextDelta {
@@ -7749,6 +7770,7 @@ mod tests {
         let runtime = Runtime::new(
             CallThenCutProvider {
                 requests: Arc::clone(&requests),
+                then_empty: false,
             },
             "gpt-test",
             256,
@@ -7856,6 +7878,7 @@ mod tests {
         let runtime = Runtime::new(
             CallThenCutProvider {
                 requests: Arc::clone(&requests),
+                then_empty: false,
             },
             "gpt-test",
             256,
@@ -7875,6 +7898,37 @@ mod tests {
             events.last(),
             Some(&RuntimeEvent::Completed { final_output: None })
         );
+    }
+
+    #[tokio::test]
+    async fn the_reasoning_diagnostic_counts_only_turns_that_produced_nothing() {
+        // Review (#216): a call-then-cut turn takes the one raise, then the
+        // retried turn is a genuine all-reasoning cut at the ceiling. The
+        // failure must count one empty turn, not attribute the earlier turn
+        // (which streamed a complete call) to reasoning too.
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            CallThenCutProvider {
+                requests: Arc::clone(&requests),
+                then_empty: true,
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap()
+        .with_output_ceiling(Some(512));
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("go")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        let Some(RuntimeEvent::Failed { kind, message }) = events.last() else {
+            panic!("expected a failure, got {:?}", events.last());
+        };
+        assert_eq!(*kind, RunFailureKind::ProviderOutputTruncated);
+        assert!(message.contains("on 1 consecutive turn;"), "{message}");
+        assert!(message.contains("(512 tokens)"), "{message}");
     }
 
     #[tokio::test]
