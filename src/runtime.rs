@@ -1421,6 +1421,7 @@ impl RuntimeFactory {
             explicit_config_content: request.explicit_content().map(str::to_owned),
             jev_review: request.overrides().jev_review(),
             jev_routing: request.overrides().jev_routing(),
+            jev_approval: request.overrides().jev_approval(),
             approval_delegate: request.overrides().approval_delegate(),
             reasoning_effort: request.overrides().reasoning_effort(),
             process_trust: crate::plan::ProcessTrustFingerprint::of(request.process_trust()),
@@ -1693,6 +1694,7 @@ impl RuntimeFactory {
                 .with_shell_policy(shell)
                 .with_network_policy(network)
                 .with_approval_delegate(approval_delegate)
+                .with_jev_approval(snapshot.jev_approval())
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone());
@@ -7838,6 +7840,7 @@ mod tests {
             explicit_config_content: None,
             jev_review: None,
             jev_routing: None,
+            jev_approval: None,
             approval_delegate: None,
             reasoning_effort: None,
             process_trust: None,
@@ -8980,6 +8983,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn jev_approval_reaches_the_plan_from_config_profile_and_override_and_follows_edits() {
+        // Audit finding 5: activation is the compiled plan's merged value,
+        // not a separate profile-less reload. A profile's off beats a
+        // top-level on, a profile-only on enables, an override wins, and a
+        // configuration edit to off is seen by the next plan without any
+        // credential change.
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let document = |top: &str| {
+            format!(
+                r#"(
+            version: 1, model: "custom/test"{top},
+            profiles: {{
+                "quiet": Profile(jev_approval: false),
+                "jev": Profile(jev_approval: true),
+            }},
+            providers: {{ "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: {{ "test": (name: "test") }}) }},
+        )"#
+            )
+        };
+        let request = fixture.request(document(", jev_approval: true"));
+        assert!(factory.plan_for(&request).unwrap().jev_approval());
+        let quiet = AgentProfileId::new("quiet").unwrap();
+        let jev = AgentProfileId::new("jev").unwrap();
+        assert!(
+            !factory
+                .plan_for_profile(&request, &quiet)
+                .unwrap()
+                .jev_approval(),
+            "a profile's explicit off wins over the top-level on"
+        );
+        let overridden = request
+            .clone()
+            .with_overrides(request.overrides().clone().with_jev_approval(false));
+        assert!(
+            !factory
+                .plan_for_profile(&overridden, &jev)
+                .unwrap()
+                .jev_approval(),
+            "an explicit override wins over the profile"
+        );
+        assert!(
+            factory
+                .plan_for_profile(&request, &jev)
+                .unwrap()
+                .jev_approval(),
+            "the override is its own cache slot"
+        );
+
+        // Edit to off (no credential change): the next plan observes it.
+        let request = fixture.request(document(""));
+        assert!(!factory.plan_for(&request).unwrap().jev_approval());
+        assert!(
+            factory
+                .plan_for_profile(&request, &jev)
+                .unwrap()
+                .jev_approval(),
+            "profile-only activation enables"
+        );
+    }
     /// A pin outside a route's advertised ladder fails at plan time with the
     /// accepted set named; a route that advertises nothing accepts any pin
     /// (unknown is not unsupported), and a pin inside the ladder compiles.

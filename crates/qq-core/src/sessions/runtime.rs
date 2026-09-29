@@ -109,7 +109,8 @@ impl LoadedRuntime {
         profile = profile
             .with_context_cache(Arc::clone(&runtime.context_cache))
             .with_turn_recovery(runtime.turn_recovery)
-            .with_approval_delegate(runtime.approval_delegate);
+            .with_approval_delegate(runtime.approval_delegate)
+            .with_jev_approval(runtime.jev_approval);
         Ok(Self::new(CompiledAgentPlan::compile_blocking(profile)?))
     }
 
@@ -395,6 +396,11 @@ pub struct ReviewRequest {
     /// Tool names and shell prefixes the session has been granted.
     pub granted_tools: Vec<String>,
     pub granted_shell_prefixes: Vec<String>,
+    /// The run's compiled plan opted Jev in as the first delegate
+    /// (`jev_approval` after profile and override merging). A reviewer that
+    /// composes Jev consults it only when this is set; it never re-derives
+    /// the choice from configuration.
+    pub jev_approval: bool,
 }
 
 /// What the reviewer's own provider call cost, charged to the reviewed run.

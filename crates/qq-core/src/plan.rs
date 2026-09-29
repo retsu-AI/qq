@@ -121,6 +121,7 @@ pub struct AgentProfile {
     network: crate::tools::network::NetworkPolicy,
     turn_recovery: crate::TurnRecoveryPolicy,
     approval_delegate: crate::approval::ApprovalDelegate,
+    jev_approval: bool,
     adapter_build: String,
     provenance: Vec<String>,
     credential_epoch: CredentialEpoch,
@@ -164,6 +165,7 @@ impl AgentProfile {
             network: crate::tools::network::NetworkPolicy::default(),
             turn_recovery: crate::TurnRecoveryPolicy::default(),
             approval_delegate: crate::approval::ApprovalDelegate::default(),
+            jev_approval: false,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -190,6 +192,16 @@ impl AgentProfile {
         delegate: crate::approval::ApprovalDelegate,
     ) -> Self {
         self.approval_delegate = delegate;
+        self
+    }
+
+    /// Whether the effective configuration (profile and overrides merged)
+    /// opted Jev in as the first approval delegate. Carried to every held
+    /// call of this plan's runs so the reviewer never re-derives it from a
+    /// partial load. Not part of the digest, like the delegate setting.
+    #[must_use]
+    pub const fn with_jev_approval(mut self, enabled: bool) -> Self {
+        self.jev_approval = enabled;
         self
     }
 
@@ -235,6 +247,7 @@ impl AgentProfile {
             network: runtime.network.as_ref().clone(),
             turn_recovery: runtime.turn_recovery,
             approval_delegate: runtime.approval_delegate,
+            jev_approval: runtime.jev_approval,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -541,6 +554,7 @@ impl CompiledAgentPlan {
             network,
             turn_recovery,
             approval_delegate,
+            jev_approval,
             adapter_build,
             provenance,
             credential_epoch,
@@ -568,7 +582,8 @@ impl CompiledAgentPlan {
         .with_shell_policy(shell)
         .with_network_policy(network)
         .with_turn_recovery(turn_recovery)
-        .with_approval_delegate(approval_delegate);
+        .with_approval_delegate(approval_delegate)
+        .with_jev_approval(jev_approval);
         if let Some(effort) = reasoning_effort {
             runtime = runtime.with_reasoning_effort(effort);
         }
@@ -913,6 +928,12 @@ impl CompiledAgentPlan {
     #[must_use]
     pub const fn approval_delegate(&self) -> crate::approval::ApprovalDelegate {
         self.runtime.approval_delegate
+    }
+
+    /// Whether this plan's held calls go to Jev before the reviewer model.
+    #[must_use]
+    pub const fn jev_approval(&self) -> bool {
+        self.runtime.jev_approval
     }
 
     pub(crate) fn workspace_handle(&self) -> Workspace {

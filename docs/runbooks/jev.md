@@ -143,7 +143,11 @@ Jev approve may record the exact command or host for the session and nothing
 wider. `Forbidden` shell shapes, blocked hosts, managed denies, and
 `ask_user` never reach it.
 
-Spend counts against the run's budget as reviewer spend. Inspect the setting
+Spend counts against the run's budget as reviewer spend. The setting is
+resolved with the run's profile, like `jev_review` and `jev_routing`: a
+profile's `jev_approval: false` turns Jev off for runs of that profile even
+when the top level turns it on, and an edit to `false` applies to the next
+run without restarting the server. Inspect the setting
 with `qq config show` and `qq config explain jev_approval`.
 
 Explicit effort can be pinned independently of Jev in trusted configuration:

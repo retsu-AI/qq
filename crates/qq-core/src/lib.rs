@@ -778,6 +778,8 @@ pub struct Runtime {
     pub(crate) turn_recovery: TurnRecoveryPolicy,
     /// Who settles the calls the session's approval mode holds.
     pub(crate) approval_delegate: approval::ApprovalDelegate,
+    /// Jev is the first approval delegate for this runtime's held calls.
+    pub(crate) jev_approval: bool,
 }
 
 impl Runtime {
@@ -829,6 +831,7 @@ impl Runtime {
             network: Arc::new(tools::network::NetworkPolicy::default()),
             turn_recovery: TurnRecoveryPolicy::default(),
             approval_delegate: approval::ApprovalDelegate::default(),
+            jev_approval: false,
         })
     }
 
@@ -846,6 +849,14 @@ impl Runtime {
     #[must_use]
     pub const fn with_approval_delegate(mut self, delegate: approval::ApprovalDelegate) -> Self {
         self.approval_delegate = delegate;
+        self
+    }
+
+    /// Marks held calls as opted in to Jev (`ReviewRequest::jev_approval`).
+    /// Inert unless the installed reviewer composes Jev.
+    #[must_use]
+    pub const fn with_jev_approval(mut self, enabled: bool) -> Self {
+        self.jev_approval = enabled;
         self
     }
 

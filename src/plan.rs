@@ -57,6 +57,7 @@ pub struct PlanKey {
     pub explicit_config_content: Option<String>,
     pub jev_review: Option<qq_config::JevReviewMode>,
     pub jev_routing: Option<bool>,
+    pub jev_approval: Option<bool>,
     pub approval_delegate: Option<qq_config::ApprovalDelegateSetting>,
     pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
     /// Fingerprint of the request's process-scoped trust grants, so a plan
@@ -640,6 +641,7 @@ mod tests {
             explicit_config_content: None,
             jev_review: None,
             jev_routing: None,
+            jev_approval: None,
             approval_delegate: None,
             reasoning_effort: None,
             process_trust: None,

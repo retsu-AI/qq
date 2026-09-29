@@ -206,6 +206,7 @@ async fn prepare_execution(
             cancellation.clone(),
             loaded.plan.network_policy(),
             loaded.plan.approval_delegate(),
+            loaded.plan.jev_approval(),
         ))
     };
     // The claim carried the session's file hashes, so nothing here waits on
