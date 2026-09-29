@@ -27,6 +27,9 @@ below is for people changing QQ.
 - [`headless-contract.md`](design/headless-contract.md) — `qq run` JSONL/exit
   contract and the supervisor boundary.
 - [`providers.md`](design/providers.md) — provider validation standard.
+- [`jev.md`](design/jev.md) — optional TypeSafe Jev: what it is, the four
+  capabilities as built, why it hands work back today, and the direction the
+  [Jev plan](plans/jev.md) follows. The only Jev design doc.
 - [`tools.md`](design/tools.md) — tool loop, built-in tools and their
   bounding/spill boundary, containment, edit semantics, shell classification,
   `@` mentions, approvals, MCP and embedded hosts.
@@ -69,6 +72,8 @@ evidence.
 
 ## Runbooks — `runbooks/`
 
+- [`jev.md`](runbooks/jev.md) — enable, inspect, and turn off Jev review,
+  routing, approval, and the advisory observer.
 - [`local-dev.md`](runbooks/local-dev.md) — toolchain, gates, test
   environment, worktrees.
 - [`tui-qa.md`](runbooks/tui-qa.md) — explicit credential-free, loopback-only
@@ -101,9 +106,6 @@ these files at build time ([`runbooks/website.md`](runbooks/website.md)).
    stay under `target/qq-perf/` and out of Git.
 5. Research that motivated a plan lives in `design/`, not in the plan.
 
-Jev: [review and direction](design/jev-runtime-review-2026-09-18.md),
-[opt-in runbook](runbooks/jev.md), [implementation plan](plans/jev-opt-in.md).
-Delegated approval, including Jev as an approval delegate:
-[as built](design/tools.md#approval-policy), [ADR-0041](adr/0041-jev-delegated-approval.md),
+Delegated approval: [as built](design/tools.md#approval-policy),
 [operator guide](guide/permissions.md#who-decides-a-held-call),
 [receipt](plans/progress/delegated-approval.md).
