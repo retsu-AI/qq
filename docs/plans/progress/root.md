@@ -68,13 +68,15 @@ may append a **request** row; only root changes a request's status.
 | 0043 | Verified root-task efficiency and evidence-gated defaults | token-efficiency TE0 | Reserved 2026-09-23; Proposed ADR-0043 |
 | 0044, 0045 | Session mode and strict verification | ENG-791 strict-verification stack (#187) | Reserved |
 | 0046 | MCP tool-set pinning in configuration and plan identity, enforced at dispatch; `DESCRIPTOR_VERSION` 9 → 10 | ENG-939 (supersedes contributed #163/#165/#171) | Accepted 2026-09-25: `docs/adr/0046-mcp-tool-set-pinning.md` |
+| 0047 | Durable held-approval lifecycle: delegate-pending and human-required phases; clients follow server phase | Jev plan JV5 (ENG-791) | Proposed 2026-09-28 (`0047-jev-approval-hold-lifecycle.md`); replaces draft #193's colliding "0046" proposal |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
 docs. Root owns required architecture/protocol/doc-index amendments and any
 benchmark registration. No dependency additions planned. R2/R3 work in this
 stack follows explicit optional routing; it does not inherit mandatory global
-checkpoint activation. Ledger: `progress/jev-opt-in.md`.
+checkpoint activation. Ledger: `progress/jev-opt-in.md` (since consolidated
+into `progress/jev.md`, 2026-09-28).
 
 2026-09-18 — JEV checkpoint hardening remains in progress on
 `feat/jev-runtime-checkpoints`: complete task/tool payloads now fail closed
@@ -138,7 +140,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0047. Reserve here before opening a PR that adds an ADR.
+Next free number: 0048. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
