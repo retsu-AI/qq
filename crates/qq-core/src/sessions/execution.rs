@@ -1646,7 +1646,7 @@ async fn finish_prepared_run(
 
 async fn execute_started_run(
     inner: Arc<SessionRuntimeInner>,
-    claimed: ClaimedRun,
+    mut claimed: ClaimedRun,
     mut cancellation: watch::Receiver<bool>,
     prepared: PreparedExecution,
     resources: &RunResources,
@@ -2244,6 +2244,10 @@ async fn execute_started_run(
                 );
                 current_occupancy_basis = Some(basis);
                 accounting.request_basis = basis;
+                // Each turn's durable model record names the cap actually
+                // sent. The empty-truncation recovery raises it mid-run, so
+                // the claim-time value would misstate the retried turn.
+                claimed.model.max_output_tokens = Some(weight.max_output_tokens);
             }
             RunInput::Event(Some(RuntimeEvent::ActivityChanged { activity })) => {
                 if internal {

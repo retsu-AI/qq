@@ -124,6 +124,7 @@ pub struct AgentProfile {
     /// Identity of the delegate consulted first for held calls (Jev), or
     /// `None` when that delegate is off. In the descriptor (version 12).
     approval_delegate_identity: Option<String>,
+    output_ceiling: Option<crate::OutputCeiling>,
     adapter_build: String,
     provenance: Vec<String>,
     credential_epoch: CredentialEpoch,
@@ -168,6 +169,7 @@ impl AgentProfile {
             turn_recovery: crate::TurnRecoveryPolicy::default(),
             approval_delegate: crate::approval::ApprovalDelegate::default(),
             approval_delegate_identity: None,
+            output_ceiling: None,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -207,6 +209,19 @@ impl AgentProfile {
     #[must_use]
     pub fn with_approval_delegate_identity(mut self, identity: Option<String>) -> Self {
         self.approval_delegate_identity = identity;
+        self
+    }
+
+    /// The model's catalog output limit, bounded by policy: how far a run may
+    /// raise a turn's cap once when the whole cap went to hidden reasoning.
+    /// Not part of the digest: the plan's request cap is, and this only
+    /// bounds a recovery of it.
+    #[must_use]
+    pub const fn with_output_ceiling(
+        mut self,
+        output_ceiling: Option<crate::OutputCeiling>,
+    ) -> Self {
+        self.output_ceiling = output_ceiling;
         self
     }
 
@@ -256,6 +271,7 @@ impl AgentProfile {
                 .approval_delegate_identity
                 .as_deref()
                 .map(str::to_owned),
+            output_ceiling: runtime.output_ceiling,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -563,6 +579,7 @@ impl CompiledAgentPlan {
             turn_recovery,
             approval_delegate,
             approval_delegate_identity,
+            output_ceiling,
             adapter_build,
             provenance,
             credential_epoch,
@@ -584,6 +601,7 @@ impl CompiledAgentPlan {
             resolved_model.max_output_tokens,
         )?
         .with_context_window(resolved_model.context_window)
+        .with_output_ceiling(output_ceiling)
         .with_spawn_model_routes(spawn_model_routes)
         .with_delegation(delegation)
         .with_audit(audit)
@@ -947,6 +965,12 @@ impl CompiledAgentPlan {
     #[must_use]
     pub fn jev_approval(&self) -> bool {
         self.descriptor.approval_delegate.is_some()
+    }
+
+    /// The highest cap the empty-truncation recovery may raise a turn to.
+    #[must_use]
+    pub const fn output_ceiling(&self) -> Option<crate::OutputCeiling> {
+        self.runtime.output_ceiling
     }
 
     pub(crate) fn workspace_handle(&self) -> Workspace {

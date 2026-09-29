@@ -146,7 +146,12 @@ pub struct LiveBindings {
 
 /// Digest-excluded plan settings that must still invalidate a cached plan.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RuntimeSwitches {}
+pub struct RuntimeSwitches {
+    /// The empty-truncation raise ceiling (catalog limit, policy-bounded):
+    /// a lowered managed ceiling must not keep serving a plan compiled
+    /// under the higher one.
+    pub output_ceiling: Option<qq_core::OutputCeiling>,
+}
 
 impl PartialEq for LiveBindings {
     fn eq(&self, other: &Self) -> bool {

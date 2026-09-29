@@ -115,7 +115,8 @@ impl LoadedRuntime {
                     .approval_delegate_identity
                     .as_deref()
                     .map(str::to_owned),
-            );
+            )
+            .with_output_ceiling(runtime.output_ceiling);
         Ok(Self::new(CompiledAgentPlan::compile_blocking(profile)?))
     }
 

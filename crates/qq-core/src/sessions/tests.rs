@@ -3756,15 +3756,29 @@ struct TruncatingLoader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
     /// The truncated turn streams nothing visible (all hidden reasoning).
     empty: bool,
+    /// The plan's empty-truncation raise ceiling (`None`: cannot raise).
+    output_ceiling: Option<u32>,
 }
 
 impl RuntimeLoader for TruncatingLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
         let empty = self.empty;
+        let output_ceiling = self.output_ceiling;
         Box::pin(async move {
             Runtime::new(TruncatingProvider { requests, empty }, "test-model", 1024)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+                .map(|runtime| {
+                    loaded_runtime(
+                        runtime.with_output_ceiling(output_ceiling.map(|tokens| {
+                            crate::OutputCeiling {
+                                tokens,
+                                policy_bound: false,
+                            }
+                        })),
+                        &request.workspace,
+                        None,
+                    )
+                })
                 .map_err(|error| RuntimeLoadError {
                     kind: RunFailureKind::Configuration,
                     message: error.to_string(),

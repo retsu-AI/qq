@@ -1603,6 +1603,23 @@ impl RuntimeFactory {
             }
         };
         let resolved_model = self.resolved_model_for_snapshot(&snapshot)?;
+        // How far the empty-truncation recovery may raise a turn's cap: the
+        // catalog limit, never past a managed policy ceiling.
+        let output_ceiling = snapshot
+            .providers()
+            .get(snapshot.model().provider())
+            .and_then(|provider| provider.models().get(snapshot.model().model()))
+            .and_then(qq_config::ModelMetadata::max_output_tokens)
+            .map(|limit| match snapshot.policy().max_output_tokens() {
+                Some(ceiling) if ceiling < limit => qq_core::OutputCeiling {
+                    tokens: ceiling,
+                    policy_bound: true,
+                },
+                _ => qq_core::OutputCeiling {
+                    tokens: limit,
+                    policy_bound: false,
+                },
+            });
         if snapshot
             .reasoning_effort()
             .is_some_and(|effort| effort != qq_provider::ReasoningEffort::Default)
@@ -1731,6 +1748,7 @@ impl RuntimeFactory {
                         .jev_approval()
                         .then(|| approval::JEV_APPROVAL_IDENTITY.to_owned()),
                 )
+                .with_output_ceiling(output_ceiling)
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone());
@@ -1785,7 +1803,7 @@ impl RuntimeFactory {
         let mut bindings = LiveBindings {
             provider: provider_config.access().cloned(),
             mcp: None,
-            runtime: crate::plan::RuntimeSwitches {},
+            runtime: crate::plan::RuntimeSwitches { output_ceiling },
         };
         if let Some(progress) = progress {
             progress.set(qq_core::RuntimeLoadStage::LoadingTools);
@@ -5407,6 +5425,66 @@ mod tests {
                 none()
             ),
             32_000
+        );
+    }
+
+    #[test]
+    fn a_plan_carries_the_catalog_output_ceiling_bounded_by_policy() {
+        // ENG-973: the resolved cap stays the configured 16 384, but the
+        // empty-truncation raise may reach the catalog limit, never past a
+        // managed policy ceiling, and nothing when the catalog is silent.
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let plan = |models: &str| {
+            let request = LoadRequest::new(fixture.path("work")).with_explicit_content(format!(
+                r#"(version: 1, model: "custom/test-model",
+                    providers: {{ "custom": Custom(connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth), models: {{"test-model": ({models})}}) }})"#
+            ));
+            factory.plan_for(&request).unwrap()
+        };
+        let known = plan("name: \"M\", max_output_tokens: 128000");
+        assert_eq!(
+            known.resolved_model().max_output_tokens,
+            qq_config::DEFAULT_MAX_OUTPUT_TOKENS
+        );
+        assert_eq!(
+            known.output_ceiling(),
+            Some(qq_core::OutputCeiling {
+                tokens: 128_000,
+                policy_bound: false
+            })
+        );
+        assert_eq!(plan("name: \"M\"").output_ceiling(), None);
+        fs::write(
+            fixture.path("managed/managed.ron"),
+            r#"(version: 1, policy: (max_output_tokens: 32000))"#,
+        )
+        .unwrap();
+        assert_eq!(
+            plan("name: \"M\", max_output_tokens: 128000").output_ceiling(),
+            Some(qq_core::OutputCeiling {
+                tokens: 32_000,
+                policy_bound: true
+            })
+        );
+
+        // Review (#216): lowering only the managed ceiling (still above the
+        // 16 384 request cap, so the digest is unchanged) must replace the
+        // cached plan, not revalidate the one compiled under 32 000.
+        let before = plan("name: \"M\", max_output_tokens: 128000");
+        fs::write(
+            fixture.path("managed/managed.ron"),
+            r#"(version: 1, policy: (max_output_tokens: 20000))"#,
+        )
+        .unwrap();
+        let after = plan("name: \"M\", max_output_tokens: 128000");
+        assert_eq!(before.digest(), after.digest(), "outside the digest");
+        assert_eq!(
+            after.output_ceiling(),
+            Some(qq_core::OutputCeiling {
+                tokens: 20_000,
+                policy_bound: true
+            })
         );
     }
 
