@@ -434,7 +434,7 @@ the event log grows regardless of deletion, which the ADR's decision 6 fixes.
 Release review of `main` at `7885f2c` (v0.1.4 + 36 commits): workspace tests
 1948/0/6, clippy and fmt clean, minimal provider profile 203 passed, CI green.
 Versioning moves to 0ver (ENG-969): contract bumps since v0.1.4 (protocol
-27 → 30, store 35 → 39, descriptor 9 → 11) ship as a PATCH, listed in the
+27 → 30, store 35 → 39, descriptor 9 → 12) ship as a PATCH, listed in the
 release PR. Stacked fixes: trust prompt answers only for shown digests
 (ENG-970); Jev approval follows the run's plan, off wins (ENG-971, audit
 finding 5); headless auto waits for Jev (ENG-972, finding 4); empty-truncation

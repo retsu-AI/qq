@@ -172,8 +172,6 @@ not disable review or routing, and it does not revoke earlier grants.
   answering first drops Jev's decision. Fixed by JV5.
 - **Root sessions send no task brief,** so Jev and the fallback often
   abstain or deny for lack of a stated need. Fixed by JV4.
-- **Headless `qq run` with Jev but no `reviewer_model`** denies held calls
-  immediately. Configure a `reviewer_model` as well. Fixed by JV2.
 - **Rounded Jev replies can be rejected as malformed** and fall through.
   Fixed by JV3.
 
