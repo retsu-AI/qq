@@ -35,7 +35,10 @@ A bound on a run measures what the *next request* would carry or what the
 1. **Seams.** Each bound gets a documented reset scope:
    - The context reservation is re-based to the post-compaction assembly in
      the same transaction that commits the in-run marker.
-   - Model and reasoning text bytes are counted per window.
+   - Streamed model text bytes (`MAX_RUN_MODEL_TEXT_BYTES`) are counted per
+     window. Reasoning bytes (`MAX_RUN_REASONING_BYTES`) are already counted
+     per provider turn (`reasoning_bytes` is initialized inside the turn
+     loop, `lib.rs:1888`) and stay that way.
    - `empty_output_retries` is counted per streak of consecutive truncated
      turns.
 
@@ -46,20 +49,54 @@ A bound on a run measures what the *next request* would carry or what the
    `paused` (transient) or fails (rejected output), and never discards the
    durable turns. An empty checkpoint reply takes the placeholder path
    already used for an empty turn.
-3. **`ContinueRun`.** A new session command re-admits the latest `paused` or
-   `interrupted` prompt run of a session as a new run with the same prompt,
-   `RunLimits` remainder, output contract and grants. The new run is linked
-   by `continues_run_id`. Its context is the committed history plus
-   `TURN_RETRY_CONTINUE_NOTICE`. It is idempotent on `CommandId`. A tool
-   call whose result was never recorded is settled as
-   `INTERRUPTED_TOOL_RESULT` before the continuation starts and is **never
+3. **`ContinueRun { session, run_id }`.** A new session command names the
+   stopped run explicitly. It is admitted only if all of these hold:
+   - `run_id` is `paused` or `interrupted`;
+   - it is the session's **latest prompt run**: no later prompt has been
+     queued, started or settled;
+   - it has no successor yet.
+
+   Otherwise it is a typed rejection (`not_continuable`, `superseded`,
+   `already_continued`). The last condition is a store invariant, not a
+   check: `runs.continues_run_id` carries a `UNIQUE` index, and the successor
+   row is inserted in the same transaction that verifies the first two. Two
+   distinct commands (two clients, or a client racing `AutoContinue`) cannot
+   both create a successor, because the loser gets `already_continued`. The
+   same `CommandId` stays idempotent as for every command.
+
+   The successor is a new run linked by `continues_run_id`. It carries:
+   - the output contract and the session grants;
+   - the **remainder** of every caller `RunLimits` bound, computed from the
+     predecessor chain's committed accounting: turns, tool calls, each token
+     class and cost minus what the chain spent. The duration deadline is the
+     original absolute deadline, so cooldown time is charged.
+
+   It does **not** re-submit the prompt as a user message. The predecessor's
+   prompt and turns are already in committed history. The successor's queued
+   message is a runtime notice (`TURN_RETRY_CONTINUE_NOTICE`, framed `[QQ
+   runtime notice; not a user instruction]`), and claim assembly treats a
+   continuation's message as a notice, not a second copy of the task.
+
+   A tool call whose result was never recorded is settled as
+   `INTERRUPTED_TOOL_RESULT` in that same transaction and is **never
    re-executed**.
 4. **`AutoContinue` policy**, off by default:
-   `SessionRuntimeOptions.auto_continue: Option<AutoContinuePolicy { cooldown, max_continuations, until }>`.
-   - With it set, the runtime submits `ContinueRun` itself after `cooldown`
+   `SessionRuntimeOptions.auto_continue: Option<AutoContinuePolicy { cooldown: Duration, max_continuations: u16 }>`.
+   - With it set, the runtime issues `ContinueRun` itself after `cooldown`
      for a `paused` run, and at startup recovery for an `interrupted` run.
-   - It stops at `max_continuations` or the original run deadline,
-     whichever comes first.
+     Each issue uses the same admission, so it loses cleanly to a client
+     that continued or prompted first.
+   - It stops at the first of two limits: `max_continuations` counted along
+     the `continues_run_id` chain, or the original run's absolute deadline
+     (`RunLimits.max_duration_ms` from its first start). There is no
+     separate cutoff field; a caller who wants a wall-clock stop sets the
+     run's duration limit. The scheduled time is stored
+     (`auto_continue_scheduled { run_id, at_ms }`), so a restart neither
+     loses nor re-arms a pending continuation.
+   - It never continues a pause whose reason means continuing would repeat
+     the same failure. Today that is `RunPause.reason = no_progress`
+     (ADR-0049). Only an explicit `ContinueRun`, a new prompt or a steer
+     continues such a run.
    - Continuations are ordinary runs: durable, observable, cancellable. A
      cancel or new prompt from a client cancels the pending continuation.
 
@@ -67,8 +104,8 @@ A bound on a run measures what the *next request* would carry or what the
 
 - `PROTOCOL_VERSION` bump: the `continue_run` command, `continued_from` on
   `RunStarted`/`RunSummary`, and `auto_continue_scheduled { run_id, at_ms }`.
-  Store schema bump for `runs.continues_run_id` and the scheduled-continuation
-  row. Headless golden streams for the new records.
+  Store schema bump for `runs.continues_run_id` (with a `UNIQUE` index) and
+  the scheduled-continuation row. Headless golden streams for the new records.
 - Interactive behavior is unchanged: `auto_continue` is `None` and the
   TUI shows `paused`/`interrupted` as today, plus a "continue" action.
 - A continuation is a new run, so accounting, budgets and events stay per run.
@@ -86,6 +123,7 @@ A bound on a run measures what the *next request* would carry or what the
 | Retry to the run deadline inside turn recovery | Holds a scheduler slot and a live task through a multi-hour outage, and does nothing for a crash; the cooldown continuation frees both |
 | Raise the caps (64 MiB, 5 retries) | Moves the cliff; a 12-hour run still hits it |
 | Supervisor re-prompts `continue` | Loses the run's limits, contract and grants, and adds a user turn the model reads as a new instruction (ADR-0039 § Why Not Simpler) |
+| Replace in-run compaction with end-and-continue | ADR-0039 rejected this for a *live* run: it would lose owned-child ownership and split one task at every window. Continuation here applies only to a run that has already settled, whose children have already been settled by the same recovery path (`settlement.rs:1003–1040`), so there is no live ownership to lose |
 
 ## Evidence / references
 

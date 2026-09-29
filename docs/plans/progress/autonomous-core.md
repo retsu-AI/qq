@@ -43,3 +43,38 @@ These are the first failing tests AC0 must reproduce. ADR numbers 0048–0050
 were reserved in `root.md`; 0047 is held by the Jev plan (#210).
 `mid-run-compaction.md` was deleted. ADR-0039 records its design, and its
 open MRC-4 and MRC-5 moved here as AC14 and Goal 5.
+
+### 2026-09-28 — Codex review on #211 (22 comments)
+
+Each comment was checked against source at `7885f2c` before acting. Twenty
+were correct and are fixed in the plan and ADRs. Two were correct as
+observations but are addressed differently from what they suggested (see #211
+replies).
+
+- ADR-0048: `ContinueRun` now names `run_id`. It is admitted only for the
+  session's latest prompt run, and `UNIQUE(continues_run_id)` makes
+  successors race-safe. It carries the chain's `RunLimits` remainder against
+  the original absolute deadline. It uses a continuation notice instead of
+  re-queuing the prompt (claim pushes the queued message as
+  `Message::user`, `claim.rs:942`). The `until` field is dropped, and
+  `no_progress` is never auto-continued. Reasoning bytes stay per turn
+  (`lib.rs:1888`).
+- ADR-0049: the goal is bound to its run chain and activated at claim. The
+  bounds are shrunk (4 KiB objective, 32 × 128 B) so it renders whole in
+  8 KiB. The completion audit has its own allowance (ADR-0014's
+  `repair_turns` is whole-run and needs an output contract). The loop guard
+  counts consecutive identical `(call, result)` pairs and is cleared by
+  progress events. Continue-if-idle is a `ContinueRun` admission case.
+  `update_goal` is in every catalog and exposed by the per-run include
+  filter (`catalog.rs:570–594`), so plan identity is unchanged.
+- ADR-0050: the input is raw configuration or `LoadRequest`
+  (`qq_config::Document` is `pub(super)`). The one-dependency claim is
+  proved by a separate `tests/embed-smoke` crate. AC12.1 carries the shared
+  `src/runtime.rs` helpers so each move builds.
+- Plan: protocol pairs are single PRs. AC10 owns `qq-core/Cargo.toml` for
+  the `test-support` dev-dependency. AC15 coalesces activity only when a
+  following event is queued and owns every text reader. AC16 gates on
+  `prune`, since archive does not free bytes (ADR-0038 § 4).
+- ADR-0039: the Implements line is restored byte-for-byte; the note is an
+  appended clarification.
+- `plans/README.md`: the RR8 remainder (ENG-870) is listed as open.

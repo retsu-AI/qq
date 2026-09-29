@@ -36,19 +36,25 @@ Codex solved the same problem with a facade crate (`codex-core-api`) and a
      under `spawn_blocking`;
    - a crate-level doc on the lifecycle: open, create session, submit,
      subscribe, answer approval, shut down.
-2. **New crate `qq-harness`: the composition library.** It turns a `qq-config`
-   `Document` plus credentials into a `RuntimeLoader`: provider recipe,
+2. **New crate `qq-harness`: the composition library.** It turns
+   configuration plus credentials into a `RuntimeLoader`: provider recipe,
    `ResolvedModel`, `PlanCache`, MCP bridge, approval reviewer, workspace
-   grant authority. It also provides `drive_to_outcome(session, prompt) ->
-   RunOutcome`, the headless driver without its JSONL writer. The binary
-   depends on it and keeps CLI, TUI and server wiring, JSONL output and
-   onboarding. This is not a placeholder crate: the binary is its first
-   consumer on the day it lands, and `crates/qq-harness/examples/embed.rs`
-   (AC12) is its second. `architecture.md` § Extension Contract forbids a
-   "tool-host, context, or addon crate". `qq-harness` is none of those: it
-   holds no extension lane, only the root package's "translate external
-   config, compile/cache plans, wire concrete adapters" row. That row's owner
-   changes from "Root package" to `qq-harness`.
+   grant authority. Its inputs are raw configuration text or the public
+   `qq_config::LoadRequest`, never `qq_config::Document` (which is
+   `pub(super)`). Any type its public signatures name is re-exported from
+   `qq_harness`, so an embedder needs one dependency. It also provides
+   `drive_to_outcome(session, prompt) -> RunOutcome`, the headless driver
+   without its JSONL writer. The binary depends on it and keeps CLI, TUI and
+   server wiring, JSONL output and onboarding. This is not a placeholder
+   crate: the binary is its first consumer on the day it lands. The second
+   is `tests/embed-smoke/`, a separate workspace crate whose manifest
+   depends **only** on `qq-harness` (plus `tokio`). An in-package example
+   would not prove the one-dependency claim, because Cargo examples can use
+   all of the package's dependencies. `architecture.md` § Extension
+   Contract forbids a "tool-host, context, or addon crate". `qq-harness` is
+   none of those: it holds no extension lane, only the root package's
+   "translate external config, compile/cache plans, wire concrete adapters"
+   row. That row's owner changes from "Root package" to `qq-harness`.
 3. **Tool features on `qq-core`.**
    - `tool-fetch` (on by default) gates `tools/fetch.rs` and `htmd`.
    - `tree-sitter-bash` stays mandatory: the `Forbidden` classifier
@@ -81,7 +87,10 @@ Codex solved the same problem with a facade crate (`codex-core-api`) and a
   binary, never an in-process link, and the crate docs say so.
 - Risk: the move is large. It lands as mechanical moves, each with no
   behaviour change and the workspace gates green, before any API changes
-  (plan AC12.1–AC12.3).
+  (plan AC12.1–AC12.3). The binary has no library target, so the first move
+  carries the shared helpers the moved files import (`RuntimeBuildError`,
+  `describe_endpoint`, `LiveBindings`). Every move PR then compiles on its
+  own.
 
 ## Alternatives considered
 
