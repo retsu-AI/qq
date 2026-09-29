@@ -150,7 +150,7 @@ the contract versions below, not by crate versions.
 
 | Contract | Constant | Decides |
 | --- | --- | --- |
-| Wire protocol | `qq_protocol::PROTOCOL_VERSION` | client ↔ server; the only value checked across a connection (exact match, both sides) |
+| Wire protocol | `qq_protocol::PROTOCOL_VERSION` | client ↔ server; the only value compared across a connection, and only by the client: it refuses a server whose advertised `ServerInfo.protocol_version` differs. The server does not check callers |
 | Capabilities | `qq_protocol::CAPABILITIES_VERSION` | shape of `/v1/capabilities`; advertised for clients to read, never refused on |
 | Plan descriptor | `qq_core::plan::DESCRIPTOR_VERSION` | local: part of the compiled plan digest and cache key |
 | Store schema | `qq_core::STORE_SCHEMA_VERSION` | local: checked when a session store is opened (forward-only migrations) |
@@ -161,8 +161,9 @@ QQ uses [0ver](https://0ver.org) ([ADR-0051](../adr/0051-zerover-product-version
 the product version is `0.MINOR.PATCH` and `MAJOR` stays `0`. The product
 number orders releases; it does not promise compatibility. Compatibility is
 carried by the contract versions above, each checked where it matters: the
-protocol at every connection, the descriptor in plan identity, the store
-schema when a store opens. `qq version` prints all four.
+protocol by a client before it attaches (a stale or custom client that skips
+that check is not refused by the server), the descriptor in plan identity,
+the store schema when a store opens. `qq version` prints all four.
 
 - **`PATCH`** is the normal release step, whatever it contains: fixes,
   features, and contract bumps alike. A release that bumps a contract or
