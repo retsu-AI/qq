@@ -120,6 +120,167 @@ pub(crate) fn fences(text: &str) -> Vec<Fence<'_>> {
     found
 }
 
+/// The contents of every Rust string literal in `source`: normal literals
+/// with `\`-newline continuations joined and escapes kept as written, and
+/// raw literals verbatim. Character literals and comments are skipped.
+pub(crate) fn string_literals(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index += 2;
+            }
+            b'\'' => {
+                // A char literal (`'"'`, `'\\''`, `'\u{1}'`) is skipped whole
+                // so its quote never opens a string; a lifetime (`'a`) has
+                // no closing quote nearby and advances one byte.
+                let body = if bytes.get(index + 1) == Some(&b'\\') {
+                    index + 3
+                } else {
+                    index + 2
+                };
+                let close = bytes[body.min(bytes.len())..]
+                    .iter()
+                    .take(8)
+                    .position(|byte| *byte == b'\'');
+                index = match close {
+                    Some(at) if bytes.get(index + 1) == Some(&b'\\') || at == 0 => body + at + 1,
+                    _ => index + 1,
+                };
+            }
+            b'r' if matches!(bytes.get(index + 1), Some(b'"' | b'#'))
+                && (index == 0
+                    || !(bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_')) =>
+            {
+                let hashes = bytes[index + 1..]
+                    .iter()
+                    .take_while(|byte| **byte == b'#')
+                    .count();
+                let open = index + 1 + hashes;
+                if bytes.get(open) != Some(&b'"') {
+                    index += 1;
+                    continue;
+                }
+                let terminator = format!("\"{}", "#".repeat(hashes));
+                let body = open + 1;
+                let end = source[body..]
+                    .find(&terminator)
+                    .map_or(source.len(), |at| body + at);
+                found.push(source[body..end].to_owned());
+                index = end + terminator.len();
+            }
+            b'"' => {
+                let mut literal = String::new();
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'"' {
+                    if bytes[index] == b'\\' && bytes.get(index + 1) == Some(&b'\n') {
+                        index += 2;
+                        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                            index += 1;
+                        }
+                        continue;
+                    }
+                    if bytes[index] == b'\\' && index + 1 < bytes.len() {
+                        match bytes[index + 1] {
+                            b'"' => literal.push('"'),
+                            b'\\' => literal.push('\\'),
+                            b'n' => literal.push('\n'),
+                            other => {
+                                literal.push('\\');
+                                literal.push(char::from(other));
+                            }
+                        }
+                        index += 2;
+                        continue;
+                    }
+                    let character = source[index..].chars().next().unwrap();
+                    literal.push(character);
+                    index += character.len_utf8();
+                }
+                found.push(literal);
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    found
+}
+
+/// One element of a format template: a literal character, or a `{…}`
+/// placeholder that renders to any text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TemplatePart {
+    Char(char),
+    Hole,
+}
+
+/// `text` with every `{…}` placeholder collapsed to one [`TemplatePart::Hole`].
+/// `{{` and `}}` are literal braces, as in `format!`.
+pub(crate) fn template_pattern(text: &str) -> Vec<TemplatePart> {
+    let mut parts = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+                parts.push(TemplatePart::Char('{'));
+            }
+            '}' if chars.peek() == Some(&'}') => {
+                chars.next();
+                parts.push(TemplatePart::Char('}'));
+            }
+            '{' => {
+                for inner in chars.by_ref() {
+                    if inner == '}' {
+                        break;
+                    }
+                }
+                parts.push(TemplatePart::Hole);
+            }
+            other => parts.push(TemplatePart::Char(other)),
+        }
+    }
+    parts
+}
+
+/// Whether `fragment` occurs in `template`, where a `{…}` hole in the
+/// template matches one rendered token (no whitespace) and a hole in the
+/// fragment only meets a hole.
+pub(crate) fn template_contains(template: &[TemplatePart], fragment: &[TemplatePart]) -> bool {
+    fn at(template: &[TemplatePart], fragment: &[TemplatePart]) -> bool {
+        match (template.first(), fragment.first()) {
+            (_, None) => true,
+            (None, Some(_)) => false,
+            (Some(TemplatePart::Hole), Some(TemplatePart::Hole)) => {
+                at(&template[1..], &fragment[1..])
+            }
+            (Some(TemplatePart::Hole), Some(_)) => {
+                let token = fragment
+                    .iter()
+                    .take_while(|part| !matches!(part, TemplatePart::Char(c) if c.is_whitespace() || *c == '`'))
+                    .count();
+                (1..=token).any(|take| at(&template[1..], &fragment[take..]))
+            }
+            (Some(expected), Some(actual)) => {
+                expected == actual && at(&template[1..], &fragment[1..])
+            }
+        }
+    }
+    (0..template.len()).any(|start| at(&template[start..], fragment))
+}
+
 /// The concatenated text of every `docs/guide/*.md` page.
 pub(crate) fn guide_text() -> String {
     let guide = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/guide");
@@ -473,6 +634,37 @@ mod tests {
         assert_documented(
             &guide,
             names.into_iter().map(|name| ("TUI slash command", name)),
+        );
+    }
+
+    #[test]
+    fn string_literals_skip_comments_and_join_continuations() {
+        let source = "// \"not a literal\"\nlet c = '\"';\nlet a = \"one \\\n    two\";\n/* \"no\" */ let r = r#\"raw \"q\"\"#;\nfn f<'a>(x: &'a str) {}\nlet e = \"say \\\"hi\\\"\";\n";
+        assert_eq!(
+            string_literals(source),
+            ["one two", "raw \"q\"", "say \"hi\""]
+        );
+    }
+
+    #[test]
+    fn templates_match_rendered_tokens_only() {
+        let template =
+            template_pattern("run qq auth login {provider_id} or set {environment_variable}");
+        let found = |text: &str| template_contains(&template, &template_pattern(text));
+        assert!(found("run qq auth login openai or set OPENAI_API_KEY"));
+        assert!(found("login {} or set"));
+        assert!(!found("run qq auth signin openai or set OPENAI_API_KEY"));
+        // A hole is one token, not a whole sentence.
+        assert!(!found("run qq auth login any words at all or set X"));
+        assert_eq!(
+            template_pattern("{{x}} {y}"),
+            [
+                TemplatePart::Char('{'),
+                TemplatePart::Char('x'),
+                TemplatePart::Char('}'),
+                TemplatePart::Char(' '),
+                TemplatePart::Hole
+            ]
         );
     }
 
@@ -971,7 +1163,14 @@ mod tests {
         for row in &rows {
             let managed_only = row[1] == "managed layers only";
             for key in spans(&row[0]) {
-                seen.insert(key);
+                if !qq_config::POLICY_FIELD_NAMES.contains(&key) {
+                    wrong.push(format!("  `{key}` is not a policy key the loader accepts"));
+                    continue;
+                }
+                if !seen.insert(key) {
+                    wrong.push(format!("  `{key}` has more than one row"));
+                    continue;
+                }
                 let expected = qq_config::MANAGED_ONLY_POLICY_FIELD_NAMES.contains(&key);
                 if expected != managed_only {
                     wrong.push(format!(
@@ -999,8 +1198,10 @@ mod tests {
         );
     }
 
-    /// The precedence table's override row names every `QQ_*` variable the
-    /// loader reads, and the MDM row names both MDM sources.
+    /// Each `QQ_*` variable the loader reads appears as an exact code span
+    /// in its own precedence row — `QQ_CONFIG` in "explicit file",
+    /// `QQ_CONFIG_CONTENT` in "inline document", the rest in "overrides" —
+    /// and nowhere else in the table; the MDM row names both MDM sources.
     #[test]
     fn precedence_table_names_every_override_and_mdm_source() {
         let pages = guide_pages();
@@ -1010,28 +1211,52 @@ mod tests {
             .unwrap()
             .1;
         let rows = table_after(text, "## Files and precedence");
-        let row = |layer: &str| {
-            rows.iter()
-                .find(|row| row[1] == layer)
-                .unwrap_or_else(|| panic!("the precedence table has no `{layer}` row"))
-                .join(" ")
-        };
-        let overrides = row("overrides");
-        let explicit = format!("{} {}", row("explicit file"), row("inline document"));
-        let mut missing: Vec<&str> = qq_config::ENVIRONMENT_VARIABLES
+        let mut problems = Vec::new();
+        for name in qq_config::ENVIRONMENT_VARIABLES {
+            let layer = match name {
+                "QQ_CONFIG" => "explicit file",
+                "QQ_CONFIG_CONTENT" => "inline document",
+                _ => "overrides",
+            };
+            let found: Vec<&str> = rows
+                .iter()
+                .filter(|row| {
+                    spans(&row[2])
+                        .iter()
+                        .any(|span| span.split(['=', ' ']).next() == Some(name))
+                })
+                .map(|row| row[1].as_str())
+                .collect();
+            if found != [layer] {
+                problems.push(format!(
+                    "  `{name}` belongs in \"{layer}\" only; found in {found:?}"
+                ));
+            }
+        }
+        for row in &rows {
+            for span in spans(&row[2]) {
+                let variable = span.split(['=', ' ']).next().unwrap_or_default();
+                if variable.starts_with("QQ_")
+                    && !qq_config::ENVIRONMENT_VARIABLES.contains(&variable)
+                {
+                    problems.push(format!("  `{variable}` is not a variable the loader reads"));
+                }
+            }
+        }
+        let mdm = rows
             .iter()
-            .copied()
-            .filter(|name| !overrides.contains(name) && !explicit.contains(name))
-            .collect();
-        let mdm = row("MDM");
+            .find(|row| row[1] == "MDM")
+            .map(|row| row[2].as_str())
+            .unwrap_or_default();
         for source in ["macOS", "Windows"] {
             if !mdm.contains(source) {
-                missing.push(source);
+                problems.push(format!("  the MDM row does not name {source}"));
             }
         }
         assert!(
-            missing.is_empty(),
-            "configuration.md's precedence table does not name {missing:?}"
+            problems.is_empty(),
+            "configuration.md's precedence table is wrong:\n{}",
+            problems.join("\n")
         );
     }
 
@@ -1045,6 +1270,12 @@ mod tests {
         let rows = table_after(text, "## Every command");
         let mut problems = Vec::new();
         let registry: Vec<qq_tui::CommandRow> = qq_tui::command_rows().collect();
+        let mut titles = BTreeSet::new();
+        for row in &rows {
+            if !titles.insert(row[0].as_str()) {
+                problems.push(format!("  \"{}\" has more than one row", row[0]));
+            }
+        }
         for command in &registry {
             let Some(row) = rows.iter().find(|row| row[0] == command.title) else {
                 problems.push(format!("  no row titled \"{}\"", command.title));
@@ -1087,7 +1318,7 @@ mod tests {
     /// when the data is a fixed list the reader should see.
     const RENDERED: &[(&str, &str)] = &[
         ("openai, anthropic, google, xai, openai-codex", "{}"),
-        ("keyring", "{backend}"),
+        ("registered in keyring", "registered in {backend}"),
     ];
 
     /// Troubleshooting headings that quote text QQ relays but does not
@@ -1103,7 +1334,9 @@ mod tests {
     #[test]
     fn troubleshooting_headings_quote_real_messages() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut source = String::new();
+        // Only string literals from non-test code: comments, test modules,
+        // and `tests/` fixtures never print a message a user sees.
+        let mut literals: Vec<String> = Vec::new();
         let mut directories = vec![root.join("src")];
         for entry in fs::read_dir(root.join("crates")).unwrap() {
             directories.push(entry.unwrap().path().join("src"));
@@ -1111,32 +1344,31 @@ mod tests {
         while let Some(directory) = directories.pop() {
             for entry in fs::read_dir(&directory).unwrap() {
                 let path = entry.unwrap().path();
+                let file = path.file_name().unwrap().to_string_lossy();
                 if path.is_dir() {
-                    directories.push(path);
-                } else if path.extension().is_some_and(|extension| extension == "rs") {
-                    // Line continuations (`\` + newline + indent) join the
-                    // literal the way the compiler does.
-                    let text = fs::read_to_string(&path).unwrap();
-                    let mut joined = String::with_capacity(text.len());
-                    let mut lines = text.lines().peekable();
-                    while let Some(line) = lines.next() {
-                        match line.strip_suffix('\\') {
-                            Some(head) => {
-                                joined.push_str(head);
-                                if let Some(next) = lines.peek_mut() {
-                                    *next = next.trim_start();
-                                }
-                            }
-                            None => {
-                                joined.push_str(line);
-                                joined.push('\n');
-                            }
-                        }
+                    if file != "tests" {
+                        directories.push(path);
                     }
-                    source.push_str(&joined);
+                } else if path.extension().is_some_and(|extension| extension == "rs")
+                    && file != "tests.rs"
+                    && !file.ends_with("_tests.rs")
+                {
+                    let text = fs::read_to_string(&path).unwrap();
+                    // The inline test module, not the first `#[cfg(test)]`:
+                    // that attribute also gates single items such as
+                    // `#[cfg(test)] mod docs_truth;` near the top of a file.
+                    let production = text
+                        .split("#[cfg(test)]\nmod tests")
+                        .next()
+                        .unwrap_or_default();
+                    literals.extend(string_literals(production));
                 }
             }
         }
+        let templates: Vec<Vec<TemplatePart>> = literals
+            .iter()
+            .map(|literal| template_pattern(literal))
+            .collect();
         let pages = guide_pages();
         let text = &pages
             .iter()
@@ -1172,17 +1404,43 @@ mod tests {
                 }
                 rest = out;
             }
-            for fragment in rest.split('\u{0}') {
-                let fragment = fragment.trim_matches(|c: char| " :;,.'".contains(c));
-                if fragment.split_whitespace().count() >= 3
-                    && !source.contains(fragment)
-                    && !RENDERED.iter().any(|(rendered, template)| {
-                        fragment.contains(rendered)
-                            && source.contains(&fragment.replace(rendered, template))
-                    })
-                {
-                    invented.push(format!("  \"{fragment}\" (from `{message}`)"));
-                }
+            // Each clause (split at `:` / `;` and at placeholders) of two
+            // or more words must occur in one production literal. Clauses
+            // may come from different literals: QQ composes messages
+            // (`{provider} needs a credential: {remedy}`).
+            let clauses: Vec<Vec<TemplatePart>> = rest
+                .split(['\u{0}', ':', ';'])
+                .map(|clause| clause.trim_matches(|c: char| " ,.'".contains(c)))
+                .filter(|clause| clause.split_whitespace().count() >= 2)
+                .map(|clause| {
+                    let clause = RENDERED
+                        .iter()
+                        .fold(clause.to_owned(), |text, (rendered, template)| {
+                            text.replace(rendered, template)
+                        });
+                    template_pattern(&clause)
+                })
+                .collect();
+            let missing: Vec<String> = clauses
+                .iter()
+                .filter(|clause| {
+                    !templates
+                        .iter()
+                        .any(|template| template_contains(template, clause))
+                })
+                .map(|clause| {
+                    clause
+                        .iter()
+                        .map(|part| match part {
+                            TemplatePart::Char(c) => c.to_string(),
+                            TemplatePart::Hole => "{}".to_owned(),
+                        })
+                        .collect()
+                })
+                .collect();
+            let printed = missing.is_empty();
+            if !printed {
+                invented.push(format!("  `{message}`: no literal prints {missing:?}"));
             }
         }
         assert!(

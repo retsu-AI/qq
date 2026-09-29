@@ -56,8 +56,9 @@ below works the same either way.
 | delete every empty session | | `/prune` |
 
 \* `Esc` focuses the parent only when nothing else claims it: it first
-clears a transcript selection, closes a workspace view, dismisses a notice,
-and while a run is active arms `Esc Esc` to cancel it. `Alt-Up` is not a
+clears a transcript selection, closes a workspace view, dismisses an error
+notice for the focused session, and while a run is active arms `Esc Esc` to
+cancel it. Informational notices do not claim it. `Alt-Up` is not a
 focus key; it pulls back the newest queued draft.
 
 QQ names a session from its first prompt. Sessions persist in SQLite; quit
@@ -252,7 +253,7 @@ searchable palette that runs the highlighted command on `Enter`.
 Keys shown beside `?`, `Enter`, `Esc`, and `Esc Esc` apply only in context:
 `?` on an empty composer, `Enter` steers only while a run is active, `Esc`
 focuses the parent only when there is no transcript selection, open view,
-notice, or active run to claim it, and `Esc Esc` cancels only while running.
+error notice, or active run to claim it, and `Esc Esc` cancels only while running.
 The keys for creating sessions, the navigator, cancel, and interrupt are
 defaults; rebind them in [`tui.ron`](configuration.md#tuiron).
 
