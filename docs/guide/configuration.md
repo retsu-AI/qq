@@ -199,10 +199,10 @@ policy: (
 
 | Key | Who may set it | Meaning |
 | --- | --- | --- |
-| `allow_tools` | any layer | tool names approved for the workspace. Grants layer: `"name"` adds, `Remove("name")` drops one a lower layer added |
-| `allow_shell_prefixes` | any layer | shell commands approved by word-boundary prefix: `"cargo test"` covers `cargo test -p x`, never `cargo test \| sh` |
-| `allow_hosts` | any layer | hosts `fetch` may reach under `auto`; exact or `*.suffix` |
-| `shell_env` | any layer | variable names passed to shell children beyond `PATH HOME LANG TERM TMPDIR` |
+| `allow_tools` | any layer except an organization manifest | tool names approved for the workspace. Grants layer: `"name"` adds, `Remove("name")` drops one a lower layer added |
+| `allow_shell_prefixes` | any layer except an organization manifest | shell commands approved by word-boundary prefix: `"cargo test"` covers `cargo test -p x`, never `cargo test \| sh` |
+| `allow_hosts` | any layer except an organization manifest | hosts `fetch` may reach under `auto`; exact or `*.suffix` |
+| `shell_env` | any layer except an organization manifest | variable names passed to shell children beyond `PATH HOME LANG TERM TMPDIR` |
 | `builtin_preference` | any; only tightens | how hard the model is steered from shell habits to built-in tools |
 | `exposed_tools` | any; intersects | the tool catalog; empty list exposes nothing |
 | `allowed_providers` / `denied_providers` | managed layers only | which providers a model route may use; denies accumulate |
@@ -213,7 +213,9 @@ policy: (
 | `deny_tools`, `deny_shell_prefixes`, `deny_hosts` | managed layers only | remove grants no matter who declared them |
 
 "Managed layers" are `managed.ron`, `managed.d/`, and MDM (rows 9 and 10
-above). Setting one of these anywhere else fails with `managed-only policy
+above). An organization manifest may not plant approval grants: `qq org enroll`
+and `qq org refresh` reject one that sets `allow_tools`,
+`allow_shell_prefixes`, `allow_hosts`, or `shell_env`. Setting one of these anywhere else fails with `managed-only policy
 settings are only allowed in managed configuration`; to cap output tokens
 for yourself, set the top-level `max_output_tokens` instead.
 

@@ -483,6 +483,16 @@ pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 9] = [
     "deny_hosts",
 ];
 
+/// The `policy` approval grants an organization manifest may not set;
+/// there they are [`ConfigError::RemotePolicyGrantsForbidden`](crate::ConfigError).
+/// Every other layer may.
+pub const ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES: [&str; 4] = [
+    "allow_tools",
+    "allow_shell_prefixes",
+    "allow_hosts",
+    "shell_env",
+];
+
 /// Every top-level key a configuration document accepts, as spelled in RON,
 /// in declaration order. See [`POLICY_FIELD_NAMES`].
 pub const DOCUMENT_FIELD_NAMES: [&str; 19] = [

@@ -1399,13 +1399,15 @@ mod tests {
         let mut wrong = Vec::new();
         let rows = table_after(text, "## `policy`");
         for row in &rows {
+            const NOT_ORGANIZATION: &str = "any layer except an organization manifest";
             let managed_only = row[1] == "managed layers only";
-            // A key any layer may set says so: `any layer`, or `any; …`
+            let not_organization = row[1] == NOT_ORGANIZATION;
+            // A key every layer may set says so: `any layer`, or `any; …`
             // qualifying how layers combine. Anything else is wrong guidance.
             let any_layer = row[1] == "any layer" || row[1].starts_with("any; ");
-            if !managed_only && !any_layer {
+            if !managed_only && !not_organization && !any_layer {
                 wrong.push(format!(
-                    "  \"{}\" is neither `managed layers only` nor `any layer` / `any; …`",
+                    "  \"{}\" is not `managed layers only`, `{NOT_ORGANIZATION}`, `any layer` or `any; …`",
                     row[1]
                 ));
                 continue;
@@ -1419,17 +1421,18 @@ mod tests {
                     wrong.push(format!("  `{key}` has more than one row"));
                     continue;
                 }
-                let expected = qq_config::MANAGED_ONLY_POLICY_FIELD_NAMES.contains(&key);
-                if expected != managed_only {
-                    wrong.push(format!(
-                        "  `{key}` says \"{}\" but is {}",
-                        row[1],
-                        if expected {
-                            "managed-only"
-                        } else {
-                            "settable by any layer"
-                        }
-                    ));
+                let is_managed_only = qq_config::MANAGED_ONLY_POLICY_FIELD_NAMES.contains(&key);
+                let is_not_organization =
+                    qq_config::ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES.contains(&key);
+                if (is_managed_only, is_not_organization) != (managed_only, not_organization) {
+                    let truth = if is_managed_only {
+                        "managed layers only".to_owned()
+                    } else if is_not_organization {
+                        NOT_ORGANIZATION.to_owned()
+                    } else {
+                        "any layer".to_owned()
+                    };
+                    wrong.push(format!("  `{key}` says \"{}\" but is {truth}", row[1]));
                 }
             }
         }
@@ -1440,8 +1443,7 @@ mod tests {
         }
         assert!(
             wrong.is_empty(),
-            "configuration.md § policy \"Who may set it\" is wrong; managed-only keys read \
-             `managed layers only`:\n{}",
+            "configuration.md § policy \"Who may set it\" is wrong:\n{}",
             wrong.join("\n")
         );
     }

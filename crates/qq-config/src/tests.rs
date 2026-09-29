@@ -4240,13 +4240,16 @@ fn published_document_field_names_match_the_struct_and_all_parse() {
 }
 
 #[test]
-fn published_managed_only_policy_keys_are_exactly_the_ones_a_user_layer_rejects() {
-    // Every policy key alone, from a user layer and from a managed layer.
-    // The published list is what the guide marks administrator-only; it
-    // must be exactly the set the loader refuses outside managed sources.
+fn published_policy_key_lists_are_exactly_what_each_layer_rejects() {
+    // Every policy key alone, from each kind of layer. The published lists
+    // are what the guide's "who may set it" column says; they must be
+    // exactly the sets the loader refuses.
     let global = SourceIdentity::virtual_source(SourceKind::Global, "docs-truth user layer");
     let managed = SourceIdentity::virtual_source(SourceKind::Managed, "docs-truth managed layer");
+    let mdm = SourceIdentity::virtual_source(SourceKind::Mdm, "docs-truth MDM layer");
+    let remote = SourceIdentity::virtual_source(SourceKind::Remote, "docs-truth organization");
     let mut rejected = Vec::new();
+    let mut rejected_remotely = Vec::new();
     for name in POLICY_FIELD_NAMES {
         let value = match name {
             "max_output_tokens" => "1000",
@@ -4259,15 +4262,25 @@ fn published_managed_only_policy_keys_are_exactly_the_ones_a_user_layer_rejects(
             _ => r#"["openai"]"#,
         };
         let content = format!("(version: 1, policy: ({name}: {value}))");
-        document::Document::parse(&content, &managed)
-            .unwrap_or_else(|error| panic!("{name} should load from a managed layer: {error}"));
+        for administrator in [&managed, &mdm] {
+            document::Document::parse(&content, administrator).unwrap_or_else(|error| {
+                panic!("{name} should load from {administrator:?}: {error}")
+            });
+        }
         match document::Document::parse(&content, &global) {
             Ok(_) => {}
             Err(ConfigError::PolicyOutsideManaged { .. }) => rejected.push(name),
             Err(other) => panic!("{name} from a user layer: unexpected {other}"),
         }
+        match document::Document::parse(&content, &remote) {
+            Ok(_) => {}
+            Err(ConfigError::PolicyOutsideManaged { .. }) => {}
+            Err(ConfigError::RemotePolicyGrantsForbidden { .. }) => rejected_remotely.push(name),
+            Err(other) => panic!("{name} from an organization: unexpected {other}"),
+        }
     }
     assert_eq!(rejected, MANAGED_ONLY_POLICY_FIELD_NAMES);
+    assert_eq!(rejected_remotely, ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES);
 }
 
 #[test]
