@@ -482,10 +482,16 @@ pub(super) fn ensure_reviewed(
     pending: &[PendingTrust],
     reviewed: &[ProcessTrust],
 ) -> Result<(), ConfigError> {
+    // Indexed once: `config.d` fragments are unbounded in count, so a
+    // pairwise comparison would be quadratic per key press.
+    let reviewed: BTreeSet<(&Path, &str)> = reviewed
+        .iter()
+        .map(|grant| (grant.path.as_path(), grant.digest.as_str()))
+        .collect();
     let unreviewed = pending.iter().any(|item| {
-        !reviewed.iter().any(|grant| {
-            item.source().path() == Some(grant.path.as_path()) && item.digest() == grant.digest
-        })
+        item.source()
+            .path()
+            .is_none_or(|path| !reviewed.contains(&(path, item.digest())))
     });
     if unreviewed {
         return Err(ConfigError::TrustChanged {

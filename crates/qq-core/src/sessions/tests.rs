@@ -1976,6 +1976,7 @@ fn denial_capacity_fixture(
     let claimed = ClaimedRun {
         checkpoint: None,
         routing: None,
+        approval_delegate: None,
         identity: RunIdentity {
             workspace_id,
             session_id,
@@ -3768,7 +3769,12 @@ impl RuntimeLoader for TruncatingLoader {
             Runtime::new(TruncatingProvider { requests, empty }, "test-model", 1024)
                 .map(|runtime| {
                     loaded_runtime(
-                        runtime.with_output_ceiling(output_ceiling),
+                        runtime.with_output_ceiling(output_ceiling.map(|tokens| {
+                            crate::OutputCeiling {
+                                tokens,
+                                policy_bound: false,
+                            }
+                        })),
                         &request.workspace,
                         None,
                     )

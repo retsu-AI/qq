@@ -71,17 +71,18 @@ pub use runtime::{
     MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
 };
 pub use sessions::{
-    ApprovalReviewer, CheckpointSelection, DelegateIdentity, GrantPromotionFuture, GrantSeedFuture,
-    LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN,
-    MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT, MAX_GRANT_BYTES, MAX_PENDING_PROMPTS,
-    MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES,
-    MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent,
-    PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest,
-    ReviewSpend, ReviewVerdict, RoutingSelection, RuntimeLoadError, RuntimeLoadFuture,
-    RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION,
-    SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions,
-    SlashCommandError, SpawnModelValidationFuture, TaskRouter, TaskRoutingFuture,
-    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
+    ApprovalDelegateSelection, ApprovalReviewer, CheckpointSelection, DelegateIdentity,
+    GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING,
+    MAX_CONCURRENT_CHILDREN_PER_RUN, MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT,
+    MAX_GRANT_BYTES, MAX_PENDING_PROMPTS, MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES,
+    MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN,
+    PersistenceFault, PublishedEvent, PublishedEventStream, RecentAction, ReviewDecision,
+    ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend, ReviewVerdict, RoutingSelection,
+    RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage,
+    RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime, SessionRuntimeError,
+    SessionRuntimeOptions, SlashCommandError, SpawnModelValidationFuture, TaskRouter,
+    TaskRoutingFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
+    run_cost,
 };
 /// Merkle index over the workspace tree the tools see: the change-detection
 /// primitive for run-snapshot checkpoints (`docs/plans/run-snapshots.md`).
@@ -144,6 +145,16 @@ pub const MAX_OUTPUT_CONTINUATIONS: u16 = 3;
 /// retry doubles the cap (bounded by the model's ceiling) and a second empty
 /// turn settles the run with the cause named.
 pub const MAX_EMPTY_OUTPUT_RETRIES: u16 = 1;
+
+/// The highest output cap the empty-truncation recovery may raise a turn to:
+/// the model's catalog limit, lowered to a managed `policy.max_output_tokens`
+/// when one is set below it. `policy_bound` says which one binds, so the
+/// terminal diagnostic names a remedy that can work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputCeiling {
+    pub tokens: u32,
+    pub policy_bound: bool,
+}
 /// Sent after a truncated turn is committed so the model resumes rather than
 /// restarts. Assistant/user alternation is preserved because the partial
 /// assistant message precedes it.
@@ -759,7 +770,7 @@ pub struct Runtime {
     /// model's catalog limit, bounded by policy. `None` (no catalog limit, or
     /// an embedded runtime) means the cap cannot be raised past
     /// `max_output_tokens`.
-    output_ceiling: Option<u32>,
+    output_ceiling: Option<OutputCeiling>,
     context_window: Option<u32>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     /// External tool hosts in contribution order. A compiled plan snapshots
@@ -783,8 +794,9 @@ pub struct Runtime {
     pub(crate) turn_recovery: TurnRecoveryPolicy,
     /// Who settles the calls the session's approval mode holds.
     pub(crate) approval_delegate: approval::ApprovalDelegate,
-    /// Jev is the first approval delegate for this runtime's held calls.
-    pub(crate) jev_approval: bool,
+    /// Identity of the first approval delegate (Jev) for this runtime's held
+    /// calls; `None` means it is off.
+    pub(crate) approval_delegate_identity: Option<Arc<str>>,
 }
 
 impl Runtime {
@@ -837,7 +849,7 @@ impl Runtime {
             network: Arc::new(tools::network::NetworkPolicy::default()),
             turn_recovery: TurnRecoveryPolicy::default(),
             approval_delegate: approval::ApprovalDelegate::default(),
-            jev_approval: false,
+            approval_delegate_identity: None,
         })
     }
 
@@ -858,11 +870,12 @@ impl Runtime {
         self
     }
 
-    /// Marks held calls as opted in to Jev (`ReviewRequest::jev_approval`).
-    /// Inert unless the installed reviewer composes Jev.
+    /// Names the first approval delegate for held calls (Jev), recorded in
+    /// the plan descriptor; `ReviewRequest::jev_approval` is set when it is
+    /// present. Inert unless the installed reviewer composes that delegate.
     #[must_use]
-    pub const fn with_jev_approval(mut self, enabled: bool) -> Self {
-        self.jev_approval = enabled;
+    pub fn with_approval_delegate_identity(mut self, identity: Option<Arc<str>>) -> Self {
+        self.approval_delegate_identity = identity;
         self
     }
 
@@ -999,7 +1012,7 @@ impl Runtime {
     /// cap went to hidden reasoning (see [`MAX_EMPTY_OUTPUT_RETRIES`]). A
     /// value at or below `max_output_tokens` disables the raise.
     #[must_use]
-    pub const fn with_output_ceiling(mut self, output_ceiling: Option<u32>) -> Self {
+    pub const fn with_output_ceiling(mut self, output_ceiling: Option<OutputCeiling>) -> Self {
         self.output_ceiling = output_ceiling;
         self
     }
@@ -1364,11 +1377,15 @@ impl plan::CompiledAgentPlan {
         let model_max_output_tokens = plan.runtime.max_output_tokens;
         // The empty-truncation raise may go past the configured cap up to the
         // catalog ceiling; never below the configured cap itself.
+        let ceiling_by_policy = plan
+            .runtime
+            .output_ceiling
+            .is_some_and(|ceiling| ceiling.policy_bound);
         let output_ceiling = plan
             .runtime
             .output_ceiling
             .map_or(model_max_output_tokens, |ceiling| {
-                ceiling.max(model_max_output_tokens)
+                ceiling.tokens.max(model_max_output_tokens)
             });
         let catalog = Arc::clone(&plan.catalog);
         let skills = Arc::clone(&plan.skills);
@@ -2555,10 +2572,21 @@ impl plan::CompiledAgentPlan {
                                     message: format!(
                                         "the provider stopped at its output token limit ({max_output_tokens} tokens) \
                                          without producing any visible output on {} consecutive turn{}; the \
-                                         limit was spent on reasoning. Raise `max_output_tokens` (model ceiling \
-                                         {output_ceiling}) or lower `reasoning_effort`",
+                                         limit was spent on reasoning. {}",
                                         reasoning_only_truncations,
-                                        if reasoning_only_truncations == 1 { "" } else { "s" }
+                                        if reasoning_only_truncations == 1 { "" } else { "s" },
+                                        if ceiling_by_policy {
+                                            format!(
+                                                "Managed policy caps output at {output_ceiling} tokens, so raising \
+                                                 `max_output_tokens` cannot help: lower `reasoning_effort` or ask the \
+                                                 administrator to raise `policy.max_output_tokens`"
+                                            )
+                                        } else {
+                                            format!(
+                                                "Raise `max_output_tokens` (model ceiling {output_ceiling}) or lower \
+                                                 `reasoning_effort`"
+                                            )
+                                        }
                                     ),
                                 };
                                 return;
@@ -2628,6 +2656,9 @@ impl plan::CompiledAgentPlan {
                     }
                 } else {
                     output_continuations = 0;
+                    // A turn that completed (text or tool calls) ends any run
+                    // of reasoning-only truncations the diagnostic counts.
+                    reasoning_only_truncations = 0;
                 }
 
                 if interrupted_turn {
@@ -7815,7 +7846,10 @@ mod tests {
             256,
         )
         .unwrap()
-        .with_output_ceiling(Some(4096));
+        .with_output_ceiling(Some(OutputCeiling {
+            tokens: 4096,
+            policy_bound: false,
+        }));
         let directory = tempfile::tempdir().unwrap();
         let events = runtime
             .run_messages_in_workspace(
@@ -7850,7 +7884,10 @@ mod tests {
             256,
         )
         .unwrap()
-        .with_output_ceiling(Some(4096));
+        .with_output_ceiling(Some(OutputCeiling {
+            tokens: 4096,
+            policy_bound: false,
+        }));
         let events = runtime
             .run_messages_in_workspace(
                 vec![Message::user("think hard")],
@@ -7884,7 +7921,10 @@ mod tests {
             256,
         )
         .unwrap()
-        .with_output_ceiling(Some(4096));
+        .with_output_ceiling(Some(OutputCeiling {
+            tokens: 4096,
+            policy_bound: false,
+        }));
         let directory = tempfile::tempdir().unwrap();
         let events = runtime
             .run_messages_in_workspace(vec![Message::user("go")], directory.path().to_owned())
@@ -7916,7 +7956,10 @@ mod tests {
             256,
         )
         .unwrap()
-        .with_output_ceiling(Some(512));
+        .with_output_ceiling(Some(OutputCeiling {
+            tokens: 512,
+            policy_bound: false,
+        }));
         let directory = tempfile::tempdir().unwrap();
         let events = runtime
             .run_messages_in_workspace(vec![Message::user("go")], directory.path().to_owned())
@@ -7929,6 +7972,115 @@ mod tests {
         assert_eq!(*kind, RunFailureKind::ProviderOutputTruncated);
         assert!(message.contains("on 1 consecutive turn;"), "{message}");
         assert!(message.contains("(512 tokens)"), "{message}");
+    }
+
+    /// Turn 0: nothing visible, cut. Turn 1: a complete `read_file` call that
+    /// finishes normally. Turn 2 onward: nothing visible, cut.
+    struct EmptyThenToolThenEmptyProvider {
+        requests: Arc<Mutex<Vec<ModelRequest>>>,
+    }
+
+    impl Provider for EmptyThenToolThenEmptyProvider {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            let mut requests = self.requests.lock().unwrap();
+            let turn = requests.len();
+            requests.push(request);
+            drop(requests);
+            let cut = || {
+                Ok(ProviderEvent::Incomplete {
+                    usage: None,
+                    reason: qq_provider::IncompleteReason::OutputTokens,
+                })
+            };
+            if turn == 1 {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::ToolCallStarted {
+                        id: "read".to_owned(),
+                        name: "read_file".to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: "read".to_owned(),
+                        json: r#"{"path":"notes.txt"}"#.to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallCompleted {
+                        id: "read".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            } else {
+                Box::pin(stream::iter([cut()]))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_completed_tool_turn_resets_the_reasoning_only_streak() {
+        // Review (#216): empty (takes the raise) -> a completed tool turn ->
+        // empty at the ceiling reported two consecutive reasoning-only turns;
+        // the tool turn in between was visible work.
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            EmptyThenToolThenEmptyProvider {
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap()
+        .with_output_ceiling(Some(OutputCeiling {
+            tokens: 512,
+            policy_bound: false,
+        }));
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("notes.txt"), "hello").unwrap();
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("go")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(requests.lock().unwrap().len(), 3);
+        let Some(RuntimeEvent::Failed { kind, message }) = events.last() else {
+            panic!("expected a failure, got {:?}", events.last());
+        };
+        assert_eq!(*kind, RunFailureKind::ProviderOutputTruncated);
+        assert!(message.contains("on 1 consecutive turn;"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_policy_bound_ceiling_names_the_policy_not_max_output_tokens() {
+        // Review (#216): when managed policy, not the model, set the raise
+        // ceiling, "raise `max_output_tokens`" cannot help and the number is
+        // not the model's.
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TruncatingProvider {
+                truncations: usize::MAX,
+                cut_tool_call: false,
+                empty: true,
+                empty_from: usize::MAX,
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap()
+        .with_output_ceiling(Some(OutputCeiling {
+            tokens: 512,
+            policy_bound: true,
+        }));
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("go")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+        let Some(RuntimeEvent::Failed { message, .. }) = events.last() else {
+            panic!("expected a failure, got {:?}", events.last());
+        };
+        assert!(
+            message.contains("Managed policy caps output at 512"),
+            "{message}"
+        );
+        assert!(message.contains("policy.max_output_tokens"), "{message}");
+        assert!(!message.contains("model ceiling"), "{message}");
     }
 
     #[tokio::test]

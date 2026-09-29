@@ -121,8 +121,15 @@ The setting is resolved with the run's profile, like `jev_review` and
 `jev_routing`: a profile's `jev_approval: false` turns Jev off for runs of
 that profile even when the top level turns it on, a profile-only `true`
 enables it, and an edit takes effect on the next run without restarting the
-server (a run in progress keeps the plan it started with). Inspect the
-setting with `qq config show` and `qq config explain jev_approval`.
+server (a run in progress, its routed reload and its owned children keep the
+plan it started with). Inspect it in two places: `qq config show` prints the
+top-level `jev_approval` and, under `profiles:`, each profile's own
+`jev_approval` when it sets one; the value a run uses is the profile's when
+set, else the top level. `qq config explain jev_approval` names the source of
+the top-level value and `qq config explain profile.NAME` the file that
+defines the profile. A started run records it durably: its plan descriptor's
+`approval_delegate` names the Jev approval identity when on and is absent
+when off.
 
 **What Jev sees.** Only the approval preview. The task brief (child sessions
 only), shell command, edit diff, and other tool arguments are each limited to
