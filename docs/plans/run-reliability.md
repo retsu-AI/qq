@@ -4,9 +4,9 @@
 
 | | |
 | --- | --- |
-| Now | RR1–RR5 shipped (#108, #116, #117, #118, #120). RR6, RR7 in review. RR9 shipped by delegated-approval DA2. Next: RR8 |
-| Shipped | RR1 (#108), RR2 (#116), RR3 (#117), RR5 (#118), RR4 (#120, protocol 26, ADR-0040), RR9 (delegated-approval DA2) |
-| Open | RR6–RR8, RR10–RR12 (Linear milestone "Run Reliability", ENG-868–ENG-874) |
+| Now | RR1–RR7 and RR9 shipped; RR8 shipped as RR8.1–RR8.4 except the mid-tool-call re-issue item. Next: RR10, RR11 |
+| Shipped | RR1 (#108), RR2 (#116), RR3 (#117), RR5 (#118), RR4 (#120, protocol 26, ADR-0040), RR6 (#126), RR7 (#127), RR7.1 (#195), RR4.1 (#196), RR8.1–RR8.4 (#198–#201), RR9 (delegated-approval DA2) |
+| Open | RR8 mid-tool-call re-issue (ENG-870), RR10 (ENG-872), RR11 (ENG-873), RR12 stream leniency and latency stats (ENG-874). RR12's identical-call loop result moved to [`autonomous-core.md`](./autonomous-core.md) AC4; `ResumeRun` (RR4 note below) was not built and is now AC5/AC6 there (ADR-0048) |
 | Ledger | [`progress/run-reliability.md`](./progress/run-reliability.md) |
 
 ## Goal
@@ -69,7 +69,7 @@ tokens with no result.
 | RR9 | Approval: no server deadline for interactive sessions; immediate deny-as-result headless; option plumbed from config | R07 | `sessions.rs`, `sessions/approvals.rs`, `src/runtime.rs`, `qq-config` | **Shipped in delegated-approval DA2** (ENG-862): `approval_timeout: Option<Duration>` defaults to `None`; `approval_timeout_seconds` (1–86400) reaches `SessionRuntimeOptions`; the delegate has its own 20 s clock; headless denies immediately without a delegate and after the delegate's window with one |
 | RR10 | Lenient tool-argument decode: stringified arrays, clamped integers, dropped unknown fields (noted); `{}` for MCP no-arg tools; unknown tool name → result | R08 | `crates/qq-core/src/tools/dispatch.rs`, `tools/search.rs`, `src/mcp.rs` | 11 observed malformed calls execute with a note; `exec` extra `command` still rejects |
 | RR11 | Persist the read-hash ledger with the session; edit accepted when stored hash matches | R09 | `crates/qq-core/src/tools/edit.rs`, `sessions/{store,transcript}.rs` (schema bump) | Read in run 1, edit in run 2 succeeds; file changed → refusal carries current hash |
-| RR12 | Stream leniency (auto-close reasoning, synthesize ids, display cap for reasoning) and 3-identical-call loop result; per-turn latency in `RunStats` | R10, R11, R12 | `crates/qq-core/src/lib.rs`, `qq-protocol` stats | Fixtures for each quirk; loop fixture returns result not execution |
+| RR12 | Stream leniency (auto-close reasoning, synthesize ids, display cap for reasoning); per-turn latency in `RunStats`. The 3-identical-call loop result moved to `autonomous-core.md` AC4 (ADR-0049) | R10, R12 | `crates/qq-core/src/lib.rs`, `qq-protocol` stats | Fixtures for each quirk |
 
 Order: RR1–RR3 (one PR each, no design risk) → RR4+RR5 → RR6+RR7 → RR8–RR11
 → RR12. RR4 and RR6 require independent review per `workflow.md` § 4.
@@ -99,8 +99,10 @@ is kept and `OUTPUT_TRUNCATED_CONTINUE_NOTICE` follows. Attempt count resets
 on a completed turn so a 3-hour run survives many isolated blips. Pre-header
 connection failures use 5 → 60 s backoff to the run deadline (F02 already
 enforces the deadline across sleeps). `Paused` is a new `RunOutcome` and
-session status; `ResumeRun` re-admits it as a continuation without a new
-prompt. Protocol version bump; headless golden updated.
+session status. As shipped (ADR-0040), there is no `ResumeRun` and
+pre-header failures are not retried to the deadline; the next prompt
+continues the session. Continuation of a paused or interrupted run is
+[`autonomous-core.md`](./autonomous-core.md) AC5/AC6 (ADR-0048).
 
 ### Reactive overflow and un-wedging (RR6)
 
