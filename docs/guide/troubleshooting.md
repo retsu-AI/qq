@@ -286,15 +286,18 @@ The TUI lost its server and could not reconnect; the reason follows. If a
 ### `qq server already running at …`
 
 Only one user-scoped server runs per machine, and every `qq` TUI attaches
-to it. Stop it (`Ctrl-C` in its terminal) to bind another address; that
-cancels its queued and running runs.
+to it — including a server another open `qq` started. Stop it (`Ctrl-C` in
+its terminal, or quit the `qq` that started it) to bind another address;
+that cancels its queued and running runs.
 
 ### `session store is owned by another running qq process`
 
-`qq run` exits `4` with this when a `qq` TUI or `qq serve` is open: all three
-use the same session store, and only one process may own it (an advisory
-lock protects it). `qq run` does not connect to the running server. Close
-the TUI or stop `qq serve`, or send the prompt from the TUI instead. Two
+`qq run` exits `4` with this when another process owns the session store: a
+`qq` TUI, `qq serve`, or another `qq run` still working. Only one process may
+own the store (an advisory lock protects it), and `qq run` does not connect
+to a running server. Close the TUI or stop `qq serve`, send the prompt from
+the TUI instead, or run jobs one after another. Concurrent CI jobs on one
+machine each need their own data directory (`XDG_DATA_HOME` on Linux). Two
 machines must not share one data directory.
 
 ## Getting more detail

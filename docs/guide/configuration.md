@@ -247,7 +247,7 @@ packs: {
 (
     schema: 1,
     id: "reviewer",
-    version: "0.1.0",
+    version: "2026.09",                  // the pack's own version; any 1–64 bytes
     name: "Code reviewer",
     requires: (protocol: 14),
     profiles: {

@@ -254,28 +254,48 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
 /// version other than the manifest's, so the bump must carry them along.
 const VERSIONED_DOCS: [&str; 2] = ["docs/guide", "README.md"];
 
-/// Every Markdown file under [`VERSIONED_DOCS`], sorted.
+/// Marks a line whose version strings are not QQ's (an upstream client, an
+/// example pack): the release leaves the line alone and docs-truth does not
+/// hold it to the workspace version. Shared with `src/docs_truth.rs`.
+pub const NOT_QQ_VERSION: &str = "<!-- not-qq-version -->";
+
+/// The tracked Markdown files under [`VERSIONED_DOCS`], sorted. Only what
+/// `git ls-files` reports is rewritten, and only regular files: an
+/// untracked draft or a symlink is never read, written, or committed.
 fn versioned_doc_paths(root: &Path) -> Result<Vec<PathBuf>, ReleaseError> {
+    let mut args = vec!["ls-files", "-z", "--"];
+    args.extend(VERSIONED_DOCS);
+    let output = ProcessCommand::new("git")
+        .args(&args)
+        .current_dir(root)
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|source| ReleaseError::Launch {
+            program: "git",
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(ReleaseError::Failed {
+            program: "git",
+            args: args.join(" "),
+            status: output.status,
+        });
+    }
     let mut paths = Vec::new();
-    for entry in VERSIONED_DOCS {
-        let path = root.join(entry);
-        if !path.is_dir() {
-            paths.push(path);
+    for name in output.stdout.split(|byte| *byte == 0) {
+        let Ok(name) = std::str::from_utf8(name) else {
+            continue;
+        };
+        if !name.ends_with(".md") {
             continue;
         }
-        let listing = std::fs::read_dir(&path).map_err(|source| ReleaseError::Read {
+        let path = root.join(name);
+        let metadata = std::fs::symlink_metadata(&path).map_err(|source| ReleaseError::Read {
             path: path.clone(),
             source,
         })?;
-        for file in listing {
-            let file = file.map_err(|source| ReleaseError::Read {
-                path: path.clone(),
-                source,
-            })?;
-            let file = file.path();
-            if file.extension().is_some_and(|extension| extension == "md") {
-                paths.push(file);
-            }
+        if metadata.is_file() {
+            paths.push(path);
         }
     }
     paths.sort();
@@ -285,29 +305,36 @@ fn versioned_doc_paths(root: &Path) -> Result<Vec<PathBuf>, ReleaseError> {
 /// Replaces every whole `current` version token in `text` with `requested`
 /// and returns the new text with the number replaced. A token is whole when
 /// it is not part of a longer dotted number: `0.1.4` matches in `v0.1.4` and
-/// `qq 0.1.4 (`, never inside `10.1.4` or `0.1.4.1`.
+/// `qq 0.1.4 (`, never inside `10.1.4` or `0.1.4.1`. Lines carrying
+/// [`NOT_QQ_VERSION`] are left unchanged.
 pub fn rewrite_version_tokens(text: &str, current: Version, requested: Version) -> (String, usize) {
     let current = current.to_string();
     let requested = requested.to_string();
-    let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut replaced = 0;
-    let mut copied = 0;
-    for (at, _) in text.match_indices(&current) {
-        let end = at + current.len();
-        let joined_before = at > 0 && (bytes[at - 1].is_ascii_digit() || bytes[at - 1] == b'.');
-        let joined_after = end < bytes.len()
-            && (bytes[end].is_ascii_digit()
-                || (bytes[end] == b'.' && bytes.get(end + 1).is_some_and(u8::is_ascii_digit)));
-        if joined_before || joined_after {
+    for line in text.split_inclusive('\n') {
+        if line.contains(NOT_QQ_VERSION) {
+            out.push_str(line);
             continue;
         }
-        out.push_str(&text[copied..at]);
-        out.push_str(&requested);
-        copied = end;
-        replaced += 1;
+        let bytes = line.as_bytes();
+        let mut copied = 0;
+        for (at, _) in line.match_indices(&current) {
+            let end = at + current.len();
+            let joined_before = at > 0 && (bytes[at - 1].is_ascii_digit() || bytes[at - 1] == b'.');
+            let joined_after = end < bytes.len()
+                && (bytes[end].is_ascii_digit()
+                    || (bytes[end] == b'.' && bytes.get(end + 1).is_some_and(u8::is_ascii_digit)));
+            if joined_before || joined_after {
+                continue;
+            }
+            out.push_str(&line[copied..at]);
+            out.push_str(&requested);
+            copied = end;
+            replaced += 1;
+        }
+        out.push_str(&line[copied..]);
     }
-    out.push_str(&text[copied..]);
     (out, replaced)
 }
 
@@ -505,6 +532,57 @@ mod tests {
         );
         let (unchanged, none) = rewrite_version_tokens("no versions here", current, requested);
         assert_eq!((unchanged.as_str(), none), ("no versions here", 0));
+
+        // A marked line keeps a foreign version even when it equals QQ's.
+        let marked = format!("pack version: \"0.1.4\", {NOT_QQ_VERSION}\nqq 0.1.4\n");
+        let (updated, count) = rewrite_version_tokens(&marked, current, requested);
+        assert_eq!(count, 1);
+        assert_eq!(
+            updated,
+            format!("pack version: \"0.1.4\", {NOT_QQ_VERSION}\nqq 0.2.0\n")
+        );
+    }
+
+    #[test]
+    fn not_qq_version_marker_matches_the_docs_truth_test() {
+        let docs_truth = include_str!("../../src/docs_truth.rs");
+        assert!(
+            docs_truth.contains(&format!(
+                "const NOT_QQ_VERSION: &str = \"{NOT_QQ_VERSION}\";"
+            )),
+            "src/docs_truth.rs must use the same NOT_QQ_VERSION marker"
+        );
+    }
+
+    #[test]
+    fn versioned_docs_skip_untracked_files_and_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let git = |args: &[&str]| {
+            let status = ProcessCommand::new("git")
+                .args(args)
+                .current_dir(root)
+                .stdout(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::create_dir_all(root.join("docs/guide")).unwrap();
+        std::fs::write(root.join("docs/guide/install.md"), "0.1.4").unwrap();
+        std::fs::write(root.join("README.md"), "0.1.4").unwrap();
+        git(&["add", "docs/guide/install.md", "README.md"]);
+        std::fs::write(root.join("docs/guide/draft.md"), "0.1.4").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("README.md"), root.join("docs/guide/link.md"))
+            .unwrap();
+        #[cfg(unix)]
+        git(&["add", "docs/guide/link.md"]);
+        let paths = versioned_doc_paths(root).unwrap();
+        assert_eq!(
+            paths,
+            [root.join("README.md"), root.join("docs/guide/install.md")]
+        );
     }
 
     #[test]

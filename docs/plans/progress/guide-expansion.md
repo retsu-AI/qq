@@ -82,54 +82,21 @@ later slices into GE0:
 
 Filed ENG-979 (GE0), ENG-980 (GE10) and ENG-981 (GE9) under ENG-928.
 
-### 2026-09-29 — GE0.1 in review
+### 2026-09-29 — GE0.1 in review (#222)
 
-Two new docs-truth tests in `src/docs_truth.rs` fail CI on version drift:
-
-- `every_product_version_in_the_guide_is_this_release`: every
-  `MAJOR.MINOR.PATCH` in `docs/guide/` and `README.md` equals
-  `CARGO_PKG_VERSION`, unless it is listed in `FOREIGN_VERSIONS` with a
-  reason. There are two entries: the Codex client `0.156.1` and the example
-  pack's `0.1.0`.
-- `every_compatibility_number_in_the_guide_is_this_builds`: every
-  `protocol N`, `capabilities N`, `descriptor N`, and `store schema N` in
-  the guide equals this build's. `design/protocol.md` must read
-  `PROTOCOL_VERSION = <current>` and have a `Version <current> …`
-  paragraph.
-
-Both failed first (red) on nine stale references:
-- `0.1.2` in `cli.md`.
-- `0.1.3` in seven places in `install.md` and in the `troubleshooting.md`
-  doctor sample.
-- protocol 27, descriptor 9 and store schema 34 in that doctor sample.
-
-`cargo xtask release X.Y.Z` now rewrites whole old-version tokens in
-`docs/guide/*.md` and `README.md` and commits them with the bump, so a
-release cannot make the guide fail. I checked this with a real
-`cargo xtask release 0.1.5 --no-commit` in a throwaway worktree: it
-rewrote 9 references, left `0.156.1` and `0.1.0` alone, and docs-truth
-passed on the bumped tree.
-
-`design/protocol.md` now reads 30, with Version 29 (`max`, store 37) and
-Version 30 (`default`, store 38 envelope, store 39) paragraphs from
-`fec9e78` and `5bed55d`.
-
-Prose corrections, each checked on a build of this branch with an isolated
-home:
-- `tui.md`: the intro and the new §Exiting say an owning TUI's quit cancels
-  runs, and that runs survive only under `qq serve`.
-- `headless.md` §`qq serve`: the same, plus `qq run`/`qq ask` never use a
-  server, and exit `4` when the store is owned (exit-code table row too).
-- `troubleshooting.md`: the "already running" entry no longer says `qq run`
-  connects. The `StoreBusy` heading now quotes the real message,
-  `session store is owned by another running qq process`.
-
-Build checks on this branch:
-- `qq serve` with `qq run` gives exit `4` and that message.
-- `SessionRuntime::shutdown` calls `settlement_cancel` for every unfinished
-  run (`crates/qq-core/src/sessions/runtime.rs`), covered by
-  `shutdown_cancels_running_and_queued_prompts_before_returning`.
-
-Verification: `cargo fmt --check`, `cargo clippy --workspace --all-targets
---all-features -D warnings`, `cargo test --workspace` (0 failures), the
-exact-test guard, and `nub run build` (479 links resolve).
+- Tests (`src/docs_truth.rs`):
+  - `every_product_version_in_the_guide_is_this_release`: guide and README
+    versions must equal `CARGO_PKG_VERSION`; a foreign version sits on a
+    `<!-- not-qq-version -->` line.
+  - `every_compatibility_number_in_the_guide_is_this_builds`: protocol,
+    capabilities, descriptor, and store schema must match this build, and
+    `design/protocol.md` must name the current version.
+- `xtask`: `cargo xtask release` rewrites tracked, regular guide/README
+  files only, skips marked lines, and commits them with the bump. Checked
+  with `release 0.1.5 --no-commit`. 4 tests added.
+- Red on 9 stale versions and doctor numbers; `design/protocol.md` was at 28
+  with no 29/30 entries.
+- Prose checked on a build: a quitting owner cancels its runs; a second TUI
+  attaches to the first; `qq run` exits `4` when any other qq process
+  (including another `qq run`) owns the store.
+- Workspace fmt, clippy and tests pass; the site builds.

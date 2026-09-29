@@ -219,51 +219,43 @@ mod tests {
         );
     }
 
-    /// `(file, token, why)` for version-shaped strings in the guide and the
-    /// README that are not QQ's own version.
-    const FOREIGN_VERSIONS: &[(&str, &str, &str)] = &[
-        (
-            "providers.md",
-            "0.156.1",
-            "the Codex client version sent for discovery",
-        ),
-        ("configuration.md", "0.1.0", "an example pack's own version"),
-    ];
+    /// The line marker the release tool also honours: a version on a line
+    /// carrying it is not QQ's. Kept as a literal so the root crate does not
+    /// depend on `xtask`; `xtask`'s own test pins the same text.
+    const NOT_QQ_VERSION: &str = "<!-- not-qq-version -->";
 
     /// Every QQ version a user reads — install pins, `--version` samples,
     /// release tags — is the workspace version, and `cargo xtask release`
-    /// rewrites them in the bump PR. A new version-shaped string must be
-    /// QQ's own or be listed in `FOREIGN_VERSIONS` with its reason.
+    /// rewrites them in the bump PR. A version that is not QQ's (an upstream
+    /// client, an example pack) sits on a line marked `NOT_QQ_VERSION`; the
+    /// exemption is that exact line, not every equal token on the page.
     #[test]
     fn every_product_version_in_the_guide_is_this_release() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let readme = fs::read_to_string(root.join("README.md")).unwrap();
         let mut pages = guide_pages();
         pages.push(("README.md".to_owned(), readme));
-        for (file, token, _) in FOREIGN_VERSIONS {
-            assert!(
-                pages
-                    .iter()
-                    .any(|(name, text)| name == file && text.contains(token)),
-                "FOREIGN_VERSIONS entry {file} {token} no longer appears; remove it"
-            );
-        }
         let current = env!("CARGO_PKG_VERSION");
         let mut stale = Vec::new();
+        let mut marked = 0;
         for (name, text) in &pages {
+            let lines: Vec<&str> = text.lines().collect();
             for (line, token) in version_tokens(text) {
-                let foreign = FOREIGN_VERSIONS
-                    .iter()
-                    .any(|(file, allowed, _)| file == name && *allowed == token);
-                if token != current && !foreign {
+                if lines[line - 1].contains(NOT_QQ_VERSION) {
+                    marked += 1;
+                } else if token != current {
                     stale.push(format!("  {name}:{line}: {token}"));
                 }
             }
         }
         assert!(
+            marked >= 1,
+            "expected the marked Codex client version in providers.md"
+        );
+        assert!(
             stale.is_empty(),
-            "these name a QQ version other than {current} (this build); use {current}, or add \
-             a FOREIGN_VERSIONS entry if the string is not QQ's version:\n{}",
+            "these name a QQ version other than {current} (this build); use {current}, or \
+             end the line with `{NOT_QQ_VERSION}` if the string is not QQ's version:\n{}",
             stale.join("\n")
         );
     }
@@ -282,6 +274,7 @@ mod tests {
             ),
             ("descriptor ", u64::from(qq_core::plan::DESCRIPTOR_VERSION)),
             ("store schema ", u64::from(qq_core::STORE_SCHEMA_VERSION)),
+            ("store-schema ", u64::from(qq_core::STORE_SCHEMA_VERSION)),
         ];
         let mut stale = Vec::new();
         for (name, text) in guide_pages() {

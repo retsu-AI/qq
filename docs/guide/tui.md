@@ -1,9 +1,10 @@
 # The TUI
 
 `qq` opens the terminal UI in the current directory. It attaches to the
-running `qq serve` if there is one; otherwise it starts a server inside
-itself that lives exactly as long as the TUI does (see [Exiting](#exiting)).
-Everything below works the same either way.
+user's running server if there is one — a `qq serve`, or the server another
+open `qq` started — and otherwise starts one inside itself that lives
+exactly as long as that `qq` does (see [Exiting](#exiting)). Everything
+below works the same either way.
 
 ## Layout
 
@@ -250,13 +251,14 @@ both ways to continue it.
 
 What happens to running work depends on who owns the server:
 
-- **This `qq` started it** (the default: no `qq serve` was running): quitting
-  stops the server and cancels every queued and running run in the
-  workspace store, children included. The sessions, their history, and
-  every tool result already recorded stay; resume with `qq --session ID`
-  and send the next prompt.
-- **It attached to a `qq serve`**: quitting only disconnects. Runs keep
-  going on the server; attach again with `qq` or `qq --session ID`.
+- **This `qq` started it** (no server was running when it opened): quitting
+  stops the server and cancels every queued and running run on it —
+  including runs started from other `qq` windows attached to it — children
+  included. Those windows lose their connection. The sessions, their
+  history, and every tool result already recorded stay; resume with
+  `qq --session ID` and send the next prompt.
+- **It attached to an existing server** (a `qq serve`, or another open
+  `qq`): quitting only disconnects. Runs keep going on that server.
 
 To keep long runs alive while you close the terminal, start `qq serve` in
 another terminal (or a multiplexer) first, then open `qq`.
