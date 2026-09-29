@@ -158,10 +158,13 @@ pub fn run<R: BufRead, W: Write>(
     );
 
     // A symlinked `.qq` or `config.ron` (a repository can ship either) would
-    // make `--force` write through to wherever it points. Refuse both. This
-    // is a check before the open, not O_NOFOLLOW (no libc dependency for one
-    // flag): swapping a link in between needs write access to the directory,
-    // which already grants what the link would.
+    // make `--force` write through to wherever it points. On Unix both
+    // refusals are atomic with the write: the directory is opened with
+    // O_NOFOLLOW|O_DIRECTORY and the file is opened relative to that handle
+    // with O_NOFOLLOW, so neither path can be swapped for a link after it is
+    // checked (another writer in the directory could otherwise redirect the
+    // truncation to any file this user can write). Elsewhere a pre-open
+    // check is the best available.
     for candidate in [&directory, &path] {
         match fs::symlink_metadata(candidate) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -194,21 +197,13 @@ pub fn run<R: BufRead, W: Write>(
             source,
         });
     }
-    let mut options = fs::OpenOptions::new();
-    options
-        .write(true)
-        .create_new(!args.force)
-        .create(args.force)
-        .truncate(args.force);
-    #[cfg(unix)]
-    if !args.project {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = match options.open(&path) {
+    let mut file = match open_config_file(&directory, &path, args.force, !args.project) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             return Err(InitError::AlreadyExists { path });
+        }
+        Err(error) if is_symlink_refusal(&error) => {
+            return Err(InitError::Symlink { path });
         }
         Err(source) => return Err(InitError::Io { path, source }),
     };
@@ -264,6 +259,71 @@ pub fn run<R: BufRead, W: Write>(
     match written {
         Ok(()) => Ok(()),
         Err(error) => Err(InitError::Terminal(error)),
+    }
+}
+
+/// Opens `path` (inside `directory`) for writing without following a symlink
+/// at either level. `force` truncates an existing file; otherwise the file
+/// must be new. `private` creates it `0o600`.
+#[cfg(unix)]
+fn open_config_file(
+    directory: &Path,
+    path: &Path,
+    force: bool,
+    private: bool,
+) -> io::Result<fs::File> {
+    use rustix::fs::{Mode, OFlags};
+    let Some(name) = path.file_name() else {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    };
+    let dir = rustix::fs::open(
+        directory,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let mut flags = OFlags::WRONLY | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    if force {
+        flags |= OFlags::TRUNC;
+    } else {
+        flags |= OFlags::EXCL;
+    }
+    let mode = if private {
+        Mode::from_bits_truncate(0o600)
+    } else {
+        Mode::from_bits_truncate(0o666)
+    };
+    let fd = rustix::fs::openat(&dir, name, flags, mode)?;
+    Ok(fs::File::from(fd))
+}
+
+#[cfg(not(unix))]
+fn open_config_file(
+    _directory: &Path,
+    path: &Path,
+    force: bool,
+    _private: bool,
+) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(!force)
+        .create(force)
+        .truncate(force)
+        .open(path)
+}
+
+/// ELOOP (final component is a symlink under O_NOFOLLOW) or ENOTDIR (the
+/// directory handle was a symlink under O_NOFOLLOW|O_DIRECTORY).
+fn is_symlink_refusal(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        let code = error.raw_os_error();
+        code == Some(rustix::io::Errno::LOOP.raw_os_error())
+            || code == Some(rustix::io::Errno::NOTDIR.raw_os_error())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
     }
 }
 
@@ -506,6 +566,46 @@ mod tests {
             "{result:?}"
         );
         assert!(!elsewhere.join("config.ron").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_open_itself_refuses_links_swapped_in_after_the_check() {
+        // Review (#217): the pre-open check can be raced, so the open must
+        // refuse on its own. Calling it on paths that are already links is
+        // exactly the state a swap after the check leaves behind.
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("outside.txt");
+        fs::write(&outside, "precious").unwrap();
+
+        // The file became a link.
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let config = project.join("config.ron");
+        std::os::unix::fs::symlink(&outside, &config).unwrap();
+        let error = open_config_file(&project, &config, true, false).unwrap_err();
+        assert!(is_symlink_refusal(&error), "{error:?}");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "precious");
+
+        // The directory became a link.
+        let elsewhere = root.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let linked = root.path().join("linked");
+        std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+        let error = open_config_file(&linked, &linked.join("config.ron"), true, false).unwrap_err();
+        assert!(is_symlink_refusal(&error), "{error:?}");
+        assert!(!elsewhere.join("config.ron").exists());
+
+        // A regular target still opens, and `force: false` refuses to clobber.
+        let real = project.join("real.ron");
+        open_config_file(&project, &real, false, true).unwrap();
+        let again = open_config_file(&project, &real, false, true).unwrap_err();
+        assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
