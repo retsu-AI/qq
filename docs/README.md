@@ -57,6 +57,11 @@ below is for people changing QQ.
   paused or interrupted runs, no loop guard or durable goal, composition
   locked in the binary, store write amplification (research; owned by
   `plans/autonomous-core.md`).
+- [`goal-reference-survey-2026-09-28.md`](design/goal-reference-survey-2026-09-28.md)
+  — how Codex (thread goals), OpenCode (`todowrite`), Pi (`finishTurn`)
+  and fx (the stop hook) pursue one objective over time, their weaknesses,
+  and the positions QQ's `/goal` takes (research; owned by
+  `plans/goals.md`).
 
 ## Decisions — `adr/`
 

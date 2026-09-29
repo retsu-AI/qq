@@ -157,3 +157,17 @@ owned paths are a starting area, and each slice also owns every consumer a
 type or wire change forces, with `cargo build --workspace` as the gate. New
 state must reach snapshots and reducer state in the PR that adds it. Further
 file-level findings belong in each slice's own PR, not in this plan.
+
+### 2026-09-28 — AC7–AC9 moved to the goals plan
+
+The `/goal` design follow-up (`plans/goals.md`) revised ADR-0049 before it
+was accepted. A goal is now a session object, pursued by a runtime goal
+driver across runs, rather than being bound to one prompt's continuation
+chain. AC7–AC9 become goals G0–G3.
+
+Changes here:
+- AC4 (the loop guard) stays in this plan. It still pairs with the goal
+  protocol PR for one `PROTOCOL_VERSION` bump.
+- AC5's `ContinueRun` no longer admits completed runs. The goal driver
+  queues a fresh goal run for those.
+- The goal-audit counters are gone from the reset-scope table.

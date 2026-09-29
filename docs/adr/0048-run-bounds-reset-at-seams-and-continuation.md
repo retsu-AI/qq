@@ -83,7 +83,7 @@ A bound on a run measures what the *next request* would carry or what the
    The successor is a new run linked by `continues_run_id`. It carries:
    - the output contract, with the **remaining** `repair_turns` (ADR-0014)
      rather than a fresh allowance. The spent count is persisted on the run
-     as `output_repairs_used`, alongside the goal-audit counts (ADR-0049);
+     as `output_repairs_used`;
    - the session grants;
    - the **remainder** of every cumulative `RunLimits` bound, computed from
      the predecessor chain's committed accounting: `max_model_turns`,
@@ -129,6 +129,9 @@ A bound on a run measures what the *next request* would carry or what the
      how a client adds direction after a pause.
    - Continuations are ordinary runs: durable, observable, cancellable. A
      cancel or new prompt from a client cancels the pending continuation.
+   - `AutoContinue` never continues a run that has a goal snapshot. The
+     goal driver (ADR-0049 § 3) is that run's only scheduler, and it uses
+     the goal's own limits and first message.
 
 ## Consequences
 

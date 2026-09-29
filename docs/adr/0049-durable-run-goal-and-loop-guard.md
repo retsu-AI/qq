@@ -1,168 +1,329 @@
-# ADR-0049 — A run carries a durable goal the runtime re-states after every compaction; loops and idle goals are runtime policy
+# ADR-0049 — A session goal is pursued by the runtime across runs, restarts and days; completion is checked, budgets are enforced, loops are guarded
 
-**Status:** Proposed
+**Status:** Proposed. Revised 2026-09-28 by the goals plan, before
+acceptance, from a run-chain goal to a session goal. See § Alternatives.
 **Date:** 2026-09-28
-**Deciders:** lead; second reviewer required (run loop, protocol, tool catalog)
-**Implements:** [`autonomous-core.md` § AC4, AC7–AC9](../plans/autonomous-core.md); audit [`core-autonomy-audit-2026-09-28.md`](../design/core-autonomy-audit-2026-09-28.md) A3, A4. Takes the identical-call loop result from run-reliability RR12
+**Deciders:** lead; second reviewer required (run loop, store, protocol, tool catalog)
+**Implements:** [`goals.md`](../plans/goals.md) G1–G5 (was autonomous-core AC7–AC9); [`autonomous-core.md`](../plans/autonomous-core.md) AC4 (loop guard). Research: [`goal-reference-survey-2026-09-28.md`](../design/goal-reference-survey-2026-09-28.md), audit [`core-autonomy-audit-2026-09-28.md`](../design/core-autonomy-audit-2026-09-28.md) A3, A4
 
 ## Context
 
-Over hours, a run's objective survives only as prose inside repeated
-summaries. Each in-run compaction re-summarizes the previous summary
-(ADR-0039), and nothing measures what survives (F28). Nothing notices a
-model that repeats the same failing call or makes no progress, so it spends
-until a caller budget stops it. Unattended runs usually have no such
-budget. Every reference harness that runs for hours keeps some structured
-state apart from the transcript:
+The task is "keep working on X until it is done, for hours or days". No
+single run covers that. It spans many runs, provider outages, process
+restarts, credential expiry, waits on CI, and user prompts mixed in. Today
+QQ has nothing that outlives a run.
 
-- Codex has a thread goal plus `update_plan`.
-- OpenCode has `todowrite`.
-- fx has execution memory.
+Codex is the only reference with a real goal. It has one goal per thread
+and continues the thread whenever it goes idle, but four gaps need fixing:
+- completion and "blocked" are prompt text only;
+- the no-progress counters live in memory and reset on restart;
+- pause-on-interrupt is done by each client;
+- the only budget is tokens.
 
-Every reference harness also detects repetition: OpenCode's doom loop, fx's
-repeated-failure notices, and Codex's no-progress audit. QQ must add these
-without a planner, DAG or hook framework, and without adding tokens to runs
-that do not use them.
+OpenCode's todo list is durable but is never shown to the model again. Pi
+and fx have a stop-or-continue hook with no goal behind it. QQ also needs
+repetition detection for every run (the loop guard below), with or without
+a goal.
 
 ## Decision
 
-1. **Goal record, bound to a run.** A goal belongs to the prompt run that
-   carries it and to that run's continuation chain (ADR-0048). It is not a
-   session-wide slot. The run holds:
-   - `objective`: the text given at prompt time, or the prompt itself when
-     `goal: true`, at most 2 KiB;
-   - `checklist`: at most 24 items, each `{ id: u8 (assigned by the runtime, 1–24), text ≤ 120 B, state: pending | in_progress | done | dropped }`;
-   - `status`: `active | achieved_pending_audit | achieved | blocked | abandoned`.
+1. **A goal belongs to a session, and only a client creates it.** A session
+   has at most one live goal. The goal record holds:
 
-   The canonical rendering is also the size check. Every write (`SubmitPrompt.goal`,
-   `SetGoal`, `update_goal`) renders the record exactly as assembly will,
-   framing included, and is rejected if that exceeds `MAX_GOAL_RENDER_BYTES`
-   = 8 KiB. The per-field bounds keep the worst case well under that (about
-   2 KiB + 24 × (120 B + about 24 B of id, state and separators) + about
-   200 B of framing, roughly 5.6 KiB), so the check never rejects a record
-   within the field bounds. Because the check is on the rendered form, no
-   future rendering change can overflow silently.
+   | Field | Bound | Who writes it |
+   | --- | --- | --- |
+   | `goal_id` (UUID) and `revision: u32` | fixed | runtime |
+   | `objective` | 2 KiB | client |
+   | `check` (optional shell command, plus a timeout, default 10 min, at most 60 min) | 1 KiB | client |
+   | `budget` (below) | — | client |
+   | `checklist` (items `{ id: u8, text, state: pending, in_progress, done or dropped }`) | 24 items of 120 B each | model |
+   | `notes`, a handoff note | 1 KiB | model |
+   | `status` | — | runtime (via model proposals) |
+   | `counters` | — | runtime |
 
-   It is stored in `run_goals` keyed by the root of the continuation chain,
-   with every change as a `goal_updated` event. A goal given with a queued
-   prompt is inert until that prompt's run is **claimed**. It never changes
-   what an earlier, still-running run sees.
+   **Status** is `active`, `paused`, `achieved`, `blocked` or
+   `budget_exhausted`. An active goal can also have `audit_pending` set.
+   Paused, blocked and exhausted goals carry a typed reason.
 
-   It is set by `SubmitPrompt.goal` (at admission) or `SetGoal { run_id }`
-   (only for the named run's chain, and only while that chain is active or
-   stopped). The model changes it only through one built-in tool,
-   `update_goal`. That tool takes checklist edits and a status proposal with
-   evidence, and it is effect class `ReadOnly`, so it never needs approval.
-2. **Re-statement, not memory.** After every in-run or between-run
-   compaction, and on every continuation (ADR-0048), assembly places the
-   run's goal **complete and verbatim** right after the summary. It is
-   rendered from the durable record and never truncated, because every write
-   was checked against `MAX_GOAL_RENDER_BYTES` in its rendered form
-   (decision 1). It is never summarized. Runs without a goal pay zero bytes.
-3. **Completion is audited against the goal.** The model cannot set
-   `achieved` directly. An `update_goal` proposing it durably moves the goal
-   to `achieved_pending_audit` and records the audit allowance state, in the
-   same transaction that publishes `goal_updated`. The same happens when a
-   goal run ends a turn with no tool call while items are unchecked. The
-   runtime then sends one bounded completion-audit notice listing the
-   unchecked items. The goal becomes `achieved` only when the model confirms
-   with evidence in the audit turn. Otherwise it returns to `active` or the
-   model marks it `blocked`.
+   **Counters** are goal runs, tokens, cost, audits, check failures, the
+   no-progress streak and the failure streak.
 
-   A restart, pause or continuation that finds `achieved_pending_audit`
-   treats the goal as still `active` and re-issues the audit in the
-   successor, so no crash can turn a proposal into an unaudited completion.
+   **Size check.** Every write renders the goal exactly as the model will
+   see it, including the largest possible check-output tail (4 KiB). The
+   write is rejected if that exceeds `MAX_GOAL_RENDER_BYTES` (16 KiB). The
+   largest possible goal renders at about 12 KiB:
+   - 2 KiB objective;
+   - 1 KiB check;
+   - 24 × about 144 B of checklist;
+   - 1 KiB notes;
+   - 4 KiB check tail;
+   - framing.
 
-   The audit has **its own allowance**, independent of ADR-0014's
-   `repair_turns`. A goal run need not have an output contract, and
-   `repair_turns` is a caller-set whole-run bound that must not start
-   resetting. The allowance is `MAX_GOAL_AUDITS_PER_WINDOW = 1`, reset at
-   each in-run compaction, and at most `MAX_GOAL_AUDITS_PER_RUN = 8`
-   counted along the continuation chain and persisted with the goal. After
-   that, the run completes and the goal stays `active`, so a client or
-   continue-if-idle decides. Audit turns are ordinary turns against the
-   caller's budgets. This is not a second judge.
-4. **Loop guard.** The guard works only on **observed** results. It never
-   predicts a result it has not seen. It keeps two separate structures:
-   - a **repeat counter** for the current consecutive run of identical
-     executed `(tool name, canonical-argument hash, result hash)` triples;
-   - a **seen set** of every such triple observed in the current slice,
-     bounded at 4 096 hashes (16-byte hashes, 64 KiB), with eviction
-     counted as "seen". It is cleared only at a slice boundary or by a
-     *mutation event*: a successful call with effect class other than
-     `ReadOnly`, a checklist change, or an applied steer.
+   So a write within the field bounds never fails this check, and a later
+   change to the rendering cannot overflow unnoticed.
 
-   A triple not in the seen set is **novel**. Novelty is the read-side
-   progress signal, so a large read-only audit keeps producing novel triples
-   and is never paused. A short cycle (`A, B, A, B, …`) stops being novel
-   after one pass, and does not clear anything.
-   - After **two** consecutive executed identical calls that both returned
-     the identical **error**, the **next** identical call is not executed.
-     It gets a rejection result naming the repetition, so the third call is
-     the rejected one.
-   - After **four** consecutive executed identical triples, the next
-     identical call is rejected the same way. An identical call whose
-     observed result changed (a re-read after an edit, polling a changing
-     endpoint) is a different triple, so it restarts the counter.
-   - After `N` slices with no novel triple, no mutation event and no new
-     assistant text, the run settles `paused { reason: no_progress }`. `N`
-     defaults to 2 (512 calls). An alternating cycle trips it; a read-heavy
-     audit does not. ADR-0048 never auto-continues this reason.
+   **Storage.** One `session_goals` row per session in the session store.
+   Every change is written in the same transaction as the event it
+   publishes. There is no second database and no in-memory copy.
 
-   Both are on for every run, goal or not, and both are cheap: a hash per
-   call.
-5. **Continue-if-idle.** `ContinueRun` (ADR-0048) also admits a `completed`
-   run whose chain's goal is still `active`. The other admission conditions
-   are the same: it is the session's latest prompt run, and a `UNIQUE`
-   successor applies. With `AutoContinue` enabled, the runtime issues that
-   command once per cooldown, under the same `max_continuations` and
-   deadline. A completed run without an active goal stays a typed rejection.
-   With auto-continue off, the goal is only state and a client decides.
+   **Editing and replacing.** The client's `set_goal` command passes the
+   `goal_id` and `revision` it expects to change. With the current id, it
+   is an edit and `revision` goes up by one. With no id, or another id, it
+   replaces the goal in one transaction. Replacing a goal that is still
+   unfinished requires `replace: true`.
+
+   **The model cannot create or extend a goal.** It cannot create one,
+   change the objective, check or budget, or resume a stopped goal. It can
+   only edit the checklist and notes and propose a status, through one
+   built-in tool, `update_goal`. That tool has effect class `ReadOnly`.
+2. **A run sees the goal as it was when the run was claimed, and only that
+   revision.** Claiming a run records the goal's `(goal_id, revision)` on
+   it, or nothing if the session has no active goal.
+   - That snapshot decides whether the run gets `update_goal` and the goal
+     block. Tool exposure uses the existing per-run include filter
+     (`catalog.rs:570–594`).
+   - A goal set while a run is in progress takes effect from the next claim.
+   - The run's `update_goal` calls, and settlement's goal accounting,
+     compare against the claimed `goal_id`:
+     - if the goal was cleared or replaced since the claim, `update_goal`
+       returns a result saying so and changes nothing, and settlement
+       charges nothing to the new goal;
+     - if a client edited the goal since the claim (a higher revision),
+       the model's checklist and notes edits are applied to the current
+       revision, item by item, but never overwrite a client field.
+
+   The goal block is rendered from the durable record and never truncated.
+   It appears in three places:
+   - as the first message of a goal run;
+   - right after the summary on every in-run and between-run compaction;
+   - once per window after a revision change.
+
+   The block is an ordinary framed runtime-notice message
+   (`[QQ runtime notice; not a user instruction]`), not system-prompt text.
+   The system prompt still changes once when a goal starts or stops,
+   because it names the run's tools and `update_goal` then appears or
+   disappears (`plan.rs:459–470`). Across revisions the prefix stays
+   stable. Runs without a goal pay zero bytes.
+3. **The runtime drives the goal, not the client.** While a goal is
+   `active` and not `audit_pending`, the session layer's **goal driver**
+   keeps it moving. When all of these hold:
+   - no run or check is queued or running;
+   - no user prompt is waiting;
+   - `now ≥ next_run_at`;
+
+   it queues exactly one **goal run**: `RunOrigin::Goal { goal_id,
+   revision }`.
+   - **Checking and inserting** happen in one transaction.
+     `session_goals.pending_run_id` guards it, so two drivers can never
+     queue two runs.
+   - **After a paused or interrupted run**, other than
+     `RunPause::NoProgress`, the goal run is an ADR-0048 successor.
+     Unrecorded calls are settled as interrupted and never re-executed.
+     This is the only continuation of a goal run: ADR-0048 `AutoContinue`
+     skips every run that has a goal snapshot, so one run never has two
+     schedulers.
+   - **After a completed, failed or `NoProgress` run**, the goal run is a
+     fresh run.
+   - **The first message** of a goal run, whether fresh or successor, is
+     always the rendered goal block plus the last check result. It never
+     re-submits the user's prompt and never uses the generic
+     `TURN_RETRY_CONTINUE_NOTICE`.
+   - **User prompts come first.** A user prompt always runs before the next
+     goal run. While the goal is active it sees the goal and gets
+     `update_goal` for the checklist and notes, and it counts against the
+     goal budget.
+     - Only a goal-origin run can propose `achieved`. In a user-prompt run,
+       `update_goal` rejects `status` with a result.
+     - A prompt that interrupts a goal run, or a steer with `interrupt`,
+       redirects the goal run rather than pausing the goal. Only an
+       explicit cancel pauses (decision 7).
+   - **Hosting.** The driver runs in whichever process hosts the
+     `SessionRuntime` for the store: the TUI's runtime, `qq serve`, or
+     `qq run --goal`. At startup, recovery wakes every active goal whose
+     `next_run_at` has passed, so a restart or reboot loses nothing.
+4. **Budgets are enforced through `RunLimits`, never through prompt text.**
+   A goal budget holds `max_goal_runs`, `max_total_tokens`,
+   `max_cost_usd_nanos`, an absolute `deadline_ms`, and `per_run` limits.
+   - **Always bounded.** A goal must set a deadline and a run cap. The
+     configured defaults are 24 h and 200 runs, and managed policy can lower
+     or raise the ceilings. An unbounded goal cannot be created.
+   - **Clamping at start.** Any run that starts while the goal is active,
+     goal-origin or user prompt, has its `RunLimits` clamped to the goal's
+     remainder **when it starts, not when it is queued**. Remainder here
+     means tokens, cost and time left until the goal deadline, so time spent
+     waiting for a permit or in backoff is charged. Today's limits are fixed
+     at insert (`commands.rs:598–600`) and the duration counts from start
+     (`budget.rs:92–95`), so this is new work. For goal runs the starting
+     value is `per_run`; for user prompts it is the prompt's own limits.
+     This supersedes ADR-0048's "successor carries the chain remainder" for
+     goal runs: the goal's remainder already covers it. The existing
+     `BudgetMeter` gives the last run its tool-free wrap-up turn and settles
+     `budget_exhausted` on its own.
+   - **Accounting.** Every settlement path goes through `settle_run`
+     (`settlement.rs:168`). That includes normal completion, reserved-run
+     failure, panic settlement and startup recovery, which today builds a
+     `ClaimedRun` with default limits (`settlement.rs:1061–1107`).
+     `settle_run` reads `runs.goal_id` from the row itself, not from the
+     claim, then in the same transaction:
+     - charges the goal counters from the run's committed accounting,
+       children included;
+     - applies the outcome rules;
+     - clears `pending_run_id`.
+
+     No path can therefore lose spend or leave the guard set.
+   - **Exhaustion.** When a run's exhaustion came from the goal's remainder,
+     or no run is left, the goal becomes `budget_exhausted`. Raising the
+     budget is a client edit, and it resumes the goal.
+5. **Completion is checked, not believed.** A goal-origin run calls
+   `update_goal { status: achieved, evidence }`, and the goal becomes
+   `audit_pending` in the same transaction that publishes it. While
+   `audit_pending` is set, the driver queues nothing but the audit.
+   - **With a check command, the check is itself a run.** It is a
+     `RunKind::GoalCheck` run with no model, queued as soon as the claiming
+     run settles. It holds the session's active slot like any run, so
+     nothing else can edit the workspace while it runs, and a client can
+     cancel it.
+     - Cancelling a check is an explicit cancel, so the goal becomes
+       `paused { user }` with `audit_pending` kept.
+     - It executes through a dedicated runner in `sessions/`, not through
+       the model-facing `shell` tool: that tool's 600 s timeout cap
+       (`tools/shell.rs:23`) and approval gate do not apply.
+     - It runs in the session workspace, with the workspace as its working
+       directory, which is the containment every shell call has today.
+       There is no process sandbox yet (speed-first H10), and this ADR does
+       not claim one.
+     - **Authority** is the client's: `set_goal` is the approval. It is
+       recorded and shown to every client. It is refused unless the setting
+       client is allowed to run shell in that workspace (the same trust
+       check as `--allow-shell`).
+     - Exit 0 makes the goal `achieved`.
+     - Any other result keeps it `active`. The output tail, at most 4 KiB,
+       goes into the next goal run's first message.
+     - Three failed checks in a row set it `blocked { check_failing }`.
+   - **Without a check command:** the next goal run is a single audit turn.
+     Only confirming evidence makes the goal `achieved`. Otherwise the goal
+     returns to `active`.
+   - **Audit allowance:** one per window and 8 per goal, separate from
+     ADR-0014's `repair_turns`. When the allowance is exhausted, the goal
+     becomes `blocked { audit_exhausted }`, never an endless
+     `audit_pending`.
+
+   A restart that finds `audit_pending` re-queues the check or the audit,
+   so no crash turns a claim into a completion.
+6. **Stopping and waiting are durable and bounded.**
+   - **Waits.** `update_goal { wait: { seconds ≤ 86 400, reason } }` sets
+     `next_run_at` to that time, for example while waiting on a CI run or a
+     review. A wait never moves the deadline, and the reason is shown to
+     clients.
+   - **Transient provider trouble** (a `ProviderRetry` pause) keeps the goal
+     `active`. `next_run_at` backs off 1 min, 2 min, 4 min and so on, up to
+     `max_backoff` (default 30 min), so outages lasting days cost a handful
+     of attempts. Any successful run resets the backoff.
+   - **Non-transient failures pause the goal immediately:** authentication,
+     configuration, or rejected credentials. The goal becomes
+     `paused { needs_user }` with the cause. After three consecutive failed
+     goal runs of any other kind, it becomes `blocked { repeated_failure }`.
+   - **Approvals nobody answers.** A goal run whose tool call is held for
+     approval waits at most `goal_approval_wait` (default 10 min). After
+     that the run is cancelled and the goal becomes
+     `paused { needs_user: approval }`, naming the held call. A held
+     approval can never use up the goal deadline. Headless, and a
+     configured approval delegate, behave as they do today, and a denial is
+     an ordinary result the model sees.
+   - **No progress.** A `RunPause::NoProgress` from the loop guard (§ 8)
+     increases the no-progress streak, and the next goal run is fresh.
+     Two in a row set the goal `blocked { no_progress }`.
+   - **Model-declared blocker.** A goal-origin run can propose `blocked`
+     with a reason, and that is applied as is.
+7. **Pausing is a runtime rule, not client behaviour.** An explicit
+   `CancelRun` of a goal run or a check run pauses the goal
+   (`paused { user }`) in the same transaction, for every client. An
+   interrupting prompt or steer does not (decision 3). The client commands
+   are:
+   - `goal_control { pause | resume | clear }`, where resume resets the
+     streaks and `next_run_at` and keeps `audit_pending`;
+   - `set_goal`.
+
+   `clear` archives the goal row and publishes `goal_cleared`. A run
+   claimed against a cleared goal finishes normally and charges nothing
+   (decision 2).
+8. **Loop guard, for every run.** This decision is unchanged from the first
+   draft of this ADR.
+   - **Observed results only.** The guard never predicts a result it hasn't
+     seen. It keeps two structures:
+     - a repeat counter for the current run of identical executed
+       `(tool name, canonical-argument hash, result hash)` triples;
+     - a seen set of every triple observed in the current slice, capped at
+       4 096 hashes, with an evicted hash still counted as seen. The seen
+       set is cleared only at a slice boundary or by a *mutation event*: a
+       successful non-`ReadOnly` call, a checklist change, or an applied
+       steer.
+   - **Novelty is the read-side progress signal.** A triple not in the seen
+     set is novel. A large read-only audit keeps producing novel triples; a
+     short cycle stops being novel after one pass.
+   - **Rejecting repeats.** After two consecutive identical calls that both
+     returned the identical error, the next identical call is rejected
+     instead of executed. The same happens after four consecutive identical
+     triples.
+   - **Pausing.** After two slices (512 calls) with no novel triple, no
+     mutation event and no new assistant text, the run settles
+     `paused` with `RunPause::NoProgress`.
 
 ## Consequences
 
-- `PROTOCOL_VERSION` bump: `goal` on `SubmitPrompt`, the `set_goal`
-  command, and `goal_updated` / `goal_audit_requested` events. `RunPause`
-  becomes reason-tagged: `RunPause::ProviderRetry { kind, message,
-  turn_ordinal, attempts }` (today's fields, unchanged meaning) or
-  `RunPause::NoProgress { turn_ordinal, slices, calls }`. No field has to
-  carry a made-up value for the other reason. Both wire shapes get protocol
-  fixtures.
-  `ContinueRun` admission gains the completed-with-goal case. Store schema:
-  a `run_goals` table.
-- **Plan identity.** `update_goal` is in **every** compiled plan's catalog,
-  so the compiled plan and `PlanCache` key do not depend on goal state. It
-  is exposed to the model per run by the existing per-run include filter
-  (`catalog.rs:570–594`, the same one that gates `spawn_agent`,
-  `search_history` and `load_skill`) as a new `ToolHost::UpdateGoal` with an
-  `include.update_goal` flag: present when the run's chain has a goal,
-  absent otherwise. A goal-less request is byte-identical to today because
-  the tool schema is not sent. `DESCRIPTOR_VERSION` bumps once for the added
-  built-in.
-- TUI and web show a checklist from `goal_updated` without reading the
-  transcript, which is the token-efficient surface the frontends need.
-- The loop guard changes behaviour for every run. It ships behind the soak
-  fixtures (AC0) and T13 ablation evidence that it does not reject
-  legitimate polling. Polling a live process handle is exempt by effect
-  class once the terminal tool (T10) exists.
-- Risk: models over-use `update_goal`. The tool description and the fact that
-  it returns nothing but an acknowledgement keep the cost to one short call.
-  TE1 measures it.
+- **Wire changes** (one `PROTOCOL_VERSION` bump, the goal PR):
+  - `set_goal` and `goal_control` commands;
+  - `goal_updated { goal: GoalSnapshot }` (a full snapshot, bounded, sent
+    only on change) and `goal_cleared` events;
+  - `SessionSnapshot.goal`;
+  - `RunOrigin` on run start and in run summaries;
+  - reason-tagged `RunPause` (`ProviderRetry { … }` with today's fields, and
+    `NoProgress { turn_ordinal, slices, calls }`).
+- **Store schema:** a `session_goals` table, plus `runs.goal_id` and
+  `runs.goal_revision`, and a `goal_check` run kind. `DESCRIPTOR_VERSION` goes
+  up once for `update_goal`. That bump changes every plan digest once; after
+  it, goal and goal-less runs share one compiled plan.
+- **ADR-0048 changes:**
+  - `AutoContinue` skips runs with a goal snapshot;
+  - a goal successor's limits are the goal clamp computed at start, not the
+    chain remainder;
+  - its first message is the goal block.
+- **Clients** show goal status, the checklist, notes, the next wake time and
+  budget use from `goal_updated` and the snapshot, without reading the
+  transcript. That is the token-cheap surface the TUI and web clients need.
+  The TUI gets `/goal`, and `qq run --goal` / `qq goal` cover headless and
+  scripting ([`goals.md`](../plans/goals.md) § Surfaces).
+- **Risk: a goal runs code while nobody watches.** Goal runs keep the
+  session's approval mode. A held approval pauses the goal after
+  `goal_approval_wait` rather than using up its budget. The check command
+  is set only by a client that is trusted to run shell there. There is no
+  process sandbox until H10. A goal cannot outlive its deadline or run cap.
+- **Risk: the loop guard changes behaviour for every run.** It ships behind
+  the AC0 soak fixtures and the T13 ablation.
 
 ## Alternatives considered
 
-| Alternative | Why not (now) |
+| Alternative | Why not |
 | --- | --- |
-| Pin the first user message verbatim after compaction and do nothing else | Keeps the ask but not progress; the model re-does finished items or declares victory early |
-| A planner/sub-task DAG in core | Supervisor territory (ADR-0009); no consumer; heavy |
-| Stop-hook callbacks for external supervisors | A synchronous callback on the completion path is a new extension lane with timeout and trust questions; the goal status plus `ContinueRun` gives a supervisor the same control asynchronously |
-| Model-side loop detection by prompt only | Unenforced; the references that rely on it (Codex) still add runtime limits |
+| First draft of this ADR: a goal bound to one prompt's continuation chain | A `/goal` outlives any one prompt: user prompts come in between, and runs end in every outcome over days. Binding the goal at claim time instead keeps the property the first draft needed (a queued prompt never sees another run's goal) without tying the goal to one chain |
+| Codex's model: the model may create goals; completion is prompt-only; counters live in memory; the client pauses on interrupt | A goal must be something only a user starts. A claim should be checked against evidence, not trusted. Counters must survive restarts. Every client should behave the same |
+| A separate goal database, or an in-memory goal cache | Both split state, which is what forces Codex to use semaphores and compare-and-swap guards. One row next to the runs it governs, written in the runs' own transactions, needs neither |
+| A stop hook where an external callback decides whether to continue | That adds a synchronous extension point with timeout and trust questions. `goal_control`, `set_goal` and the events give a supervisor the same control asynchronously |
+| An always-on continue loop with no goal (Pi's `finishTurn: continue`) | It runs forever with no stopping condition. Every continuation here draws on a bounded, durable budget |
+| Put the goal in the system prompt | Every revision would invalidate the provider's prompt cache. A notice message costs the same bytes and keeps the cached prefix stable |
 
 ## Evidence / references
 
-Audit A3/A4. Codex `codex-rs/ext/goal/src/runtime.rs:425`,
-`templates/goals/continuation.md`, `protocol/src/plan_tool.rs`; OpenCode
-`src/tool/todo.ts`, `src/session/processor.ts:29`; fx
-`src/core/agent/runtime/orchestrator.zig:82–87`,
-`runtime/execution_memory.zig`. QQ: `sessions.rs:417`, `:453`;
-`lib.rs:111`, `:1658`.
+- Survey: [`goal-reference-survey-2026-09-28.md`](../design/goal-reference-survey-2026-09-28.md).
+- Codex: `codex-rs/ext/goal/src/runtime.rs:425–523`, `accounting.rs:133–230`,
+  `state/src/runtime/goals.rs:499–611`.
+- OpenCode: `src/session/todo.ts:29–50`, `src/session/processor.ts:29`.
+- Pi: `packages/agent/src/agent-loop.ts:285–313`.
+- fx: `src/core/hooks/runtime.zig:416–459`.
+- QQ:
+  - the per-run include filter, `catalog.rs:570–594`;
+  - `BudgetMeter`'s final-response and exhaustion behaviour,
+    `runtime/budget.rs`;
+  - the run limits and the pause outcome,
+    `qq-protocol/src/sessions.rs:919–961, 1135`;
+  - `SteerRun` rejecting finished runs, `sessions/commands.rs:731`.
