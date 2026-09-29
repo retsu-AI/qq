@@ -326,6 +326,7 @@ async fn prepare_headless(
         .load_request_in(&workspace)
         .map_err(|error| invalid(error.to_string()))?;
     let model_is_fallback = load.overrides().model().is_none();
+    let overrides_jev_approval = load.overrides().jev_approval();
     let config_factory = factory.clone();
     let snapshot = tokio::task::spawn_blocking(move || config_factory.load(&load))
         .await
@@ -387,6 +388,14 @@ async fn prepare_headless(
             runtime::RuntimeHandlerError::Sessions(error) => harness(error.to_string()),
         })?;
 
+    let reviewer_configured = approval_delegate_configured(
+        snapshot.reviewer_model().is_some(),
+        snapshot.jev_approval(),
+        snapshot
+            .profile(profile.as_str())
+            .and_then(|selected| selected.jev_approval()),
+        overrides_jev_approval,
+    );
     let options = headless::HeadlessOptions {
         prompt: args.prompt,
         workspace,
@@ -402,7 +411,7 @@ async fn prepare_headless(
             cli::RunApproval::Auto => headless::HeadlessApproval::Auto,
             cli::RunApproval::Full => headless::HeadlessApproval::Full,
         },
-        reviewer_configured: snapshot.reviewer_model().is_some(),
+        reviewer_configured,
         allow_tools: args.allow_tools,
         allow_shell_prefixes: args.allow_shell_prefixes,
         allow_hosts: args.allow_hosts,
@@ -1458,6 +1467,24 @@ fn trust_notices(pending: &[config::PendingTrust]) -> Vec<qq_tui::PendingTrustNo
         .collect()
 }
 
+/// Whether a held call of a headless run has an approval delegate to wait
+/// for: a `reviewer_model`, or Jev as the run's plan will resolve
+/// `jev_approval` (an explicit override, then the selected profile, then the
+/// top level, as `compile_generation` merges them). Without one, `auto`
+/// denies a held call at once; with one it waits for the delegate's verdict.
+const fn approval_delegate_configured(
+    reviewer_model: bool,
+    top_level_jev_approval: bool,
+    profile_jev_approval: Option<bool>,
+    override_jev_approval: Option<bool>,
+) -> bool {
+    let jev = match (override_jev_approval, profile_jev_approval) {
+        (Some(enabled), _) | (None, Some(enabled)) => enabled,
+        (None, None) => top_level_jev_approval,
+    };
+    reviewer_model || jev
+}
+
 fn trust_command(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
     let loader = config::ConfigLoader::system()?;
     let pending = loader.grant_pending_trust(&overrides.load_request()?)?;
@@ -2004,6 +2031,42 @@ mod tests {
             r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test-model": (name: "Test model") }) })"#,
         );
         factory.load(&request).unwrap();
+    }
+
+    #[test]
+    fn headless_auto_waits_for_jev_when_the_run_resolves_jev_approval_on() {
+        // Audit finding 4: a Jev-only configuration (no reviewer_model)
+        // made headless `auto` deny root held calls before Jev answered.
+        // Precedence matches plan compilation: override, profile, top level.
+        assert!(!approval_delegate_configured(false, false, None, None));
+        assert!(approval_delegate_configured(true, false, None, None));
+        assert!(approval_delegate_configured(false, true, None, None));
+        assert!(!approval_delegate_configured(
+            false,
+            true,
+            Some(false),
+            None
+        ));
+        assert!(approval_delegate_configured(false, false, Some(true), None));
+        assert!(!approval_delegate_configured(
+            false,
+            true,
+            Some(true),
+            Some(false)
+        ));
+        assert!(approval_delegate_configured(
+            false,
+            false,
+            Some(false),
+            Some(true)
+        ));
+        // A reviewer model is a delegate whatever Jev's setting.
+        assert!(approval_delegate_configured(
+            true,
+            true,
+            Some(false),
+            Some(false)
+        ));
     }
 
     #[test]

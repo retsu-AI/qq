@@ -64,8 +64,9 @@ pub struct HeadlessOptions {
     /// Source of the pricing table used for durable accounting.
     pub pricing_provenance: Option<String>,
     pub approval: HeadlessApproval,
-    /// Whether the workspace configuration declares a reviewer model. With a
-    /// reviewer, `auto` holds an escalated call briefly so the reviewer can
+    /// Whether a held call has an approval delegate to wait for: a
+    /// `reviewer_model`, or Jev when the run's resolved `jev_approval` is on.
+    /// With one, `auto` holds an escalated call briefly so the delegate can
     /// approve it, instead of denying the moment the request is published.
     pub reviewer_configured: bool,
     /// Tools whose held calls are approved for the session on first request.
