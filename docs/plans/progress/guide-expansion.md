@@ -8,7 +8,7 @@ appended below, newest last.
 | --- | --- | --- | --- | --- |
 | GE0.1 | versions checked; prose corrections | In review | `fix/eng-979-ge0-1-versions` | ENG-979; stacked on #186 |
 | GE0.2 | samples run in CI | In review | `fix/eng-979-ge0-2-samples` | ENG-979; stacked on GE0.1 |
-| GE0.3 | reference tables mirror the code | Planned | | ENG-979; stacked on GE0.2 |
+| GE0.3 | reference tables mirror the code | In review | `fix/eng-979-ge0-3-tables` | ENG-979; stacked on GE0.2 |
 | GE10 | `concepts.md` | Planned | | ENG-980 |
 | GE1 | `agents.md` | Planned | | ENG-929; after GE0, GE10, GE4, GE5 |
 | GE2 | `sessions.md` | Planned | | ENG-930; after GE0; ADR-0038 is Proposed — label it |
@@ -120,4 +120,24 @@ Filed ENG-979 (GE0), ENG-980 (GE10) and ENG-981 (GE9) under ENG-928.
   - ULID `01J…` session ids (real ids are 32 hex).
 - Each test also caught a planted defect of its kind: flag, subcommand,
   route, MCP key, pack enum, chord, doctor row.
+- Workspace fmt, clippy and tests pass; the site builds.
+
+### 2026-09-29 — GE0.3 in review (#224)
+
+- Tests:
+  - `qq-config`: `MANAGED_ONLY_POLICY_FIELD_NAMES` must equal the set a
+    user layer is refused, checked key by key.
+  - `src/docs_truth.rs`: the policy, precedence and TUI command tables and
+    the troubleshooting headings are checked against the code.
+- `qq-tui`: exports `command_rows()`. The `tui.ron` defaults move to
+  `settings::default_chords`, so the builder and the registry share one
+  source.
+- Red on:
+  - 6 policy keys marked "any";
+  - a precedence table missing 2 `QQ_*` variables and the Windows MDM
+    source;
+  - `Alt-Up` documented as focusing the parent;
+  - a grouped command table the test could not check.
+- Planted defects caught: a key marked "any", a dropped override, a changed
+  chord, a reworded message.
 - Workspace fmt, clippy and tests pass; the site builds.

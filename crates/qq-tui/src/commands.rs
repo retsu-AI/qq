@@ -440,6 +440,29 @@ pub fn slash_names() -> impl Iterator<Item = &'static str> {
     COMMANDS.iter().flat_map(|spec| spec.slash.iter().copied())
 }
 
+/// One registry row as the user guide shows it: what it does, its slash
+/// spellings, and its default chords (`tui.ron` may rebind the ones with an
+/// action). For the docs-truth test that holds the guide's command table
+/// to this registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandRow {
+    pub title: &'static str,
+    pub slash: &'static [&'static str],
+    pub default_chords: &'static [&'static str],
+}
+
+/// Every registry command in presentation order.
+pub fn command_rows() -> impl Iterator<Item = CommandRow> {
+    COMMANDS.iter().map(|spec| CommandRow {
+        title: spec.title,
+        slash: spec.slash,
+        default_chords: match spec.action {
+            Some(action) => crate::settings::default_chords(action),
+            None => spec.chords,
+        },
+    })
+}
+
 /// Slash entries matching `token` as a subsequence after the `/`. `token`
 /// must start with `/` and contain no whitespace, otherwise nothing matches:
 /// a slash token followed by arguments is a prompt for the runtime, not a

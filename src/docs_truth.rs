@@ -913,4 +913,287 @@ mod tests {
             }
         }
     }
+
+    /// The rows of the first Markdown table after the heading `## {heading}`
+    /// in `text`, as cells (outer pipes stripped, the separator row
+    /// dropped). A `\|` inside a cell is a literal pipe.
+    fn table_after(text: &str, heading: &str) -> Vec<Vec<String>> {
+        let marker = format!("\n{heading}\n");
+        let start = text
+            .find(&marker)
+            .unwrap_or_else(|| panic!("no `{heading}` heading"));
+        let mut rows = Vec::new();
+        let mut in_table = false;
+        for line in text[start + marker.len()..].lines() {
+            if !line.starts_with('|') {
+                if in_table {
+                    break;
+                }
+                continue;
+            }
+            in_table = true;
+            let inner = line.trim().trim_start_matches('|').trim_end_matches('|');
+            let cells: Vec<String> = inner
+                .replace("\\|", "\u{0}")
+                .split('|')
+                .map(|cell| cell.trim().replace('\u{0}', "|"))
+                .collect();
+            if cells
+                .iter()
+                .all(|cell| cell.chars().all(|c| c == '-' || c == ':'))
+            {
+                continue;
+            }
+            rows.push(cells);
+        }
+        rows.remove(0);
+        rows
+    }
+
+    /// Every code span in `cell`, in order.
+    fn spans(cell: &str) -> Vec<&str> {
+        cell.split('`').skip(1).step_by(2).collect()
+    }
+
+    /// `configuration.md`'s policy table marks exactly the keys a user layer
+    /// is refused as `managed layers only`, and names every policy key.
+    #[test]
+    fn policy_table_marks_exactly_the_managed_only_keys() {
+        let pages = guide_pages();
+        let text = &pages
+            .iter()
+            .find(|(name, _)| name == "configuration.md")
+            .unwrap()
+            .1;
+        let mut seen = BTreeSet::new();
+        let mut wrong = Vec::new();
+        let rows = table_after(text, "## `policy`");
+        for row in &rows {
+            let managed_only = row[1] == "managed layers only";
+            for key in spans(&row[0]) {
+                seen.insert(key);
+                let expected = qq_config::MANAGED_ONLY_POLICY_FIELD_NAMES.contains(&key);
+                if expected != managed_only {
+                    wrong.push(format!(
+                        "  `{key}` says \"{}\" but is {}",
+                        row[1],
+                        if expected {
+                            "managed-only"
+                        } else {
+                            "settable by any layer"
+                        }
+                    ));
+                }
+            }
+        }
+        for key in qq_config::POLICY_FIELD_NAMES {
+            if !seen.contains(key) {
+                wrong.push(format!("  `{key}` has no row"));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "configuration.md § policy \"Who may set it\" is wrong; managed-only keys read \
+             `managed layers only`:\n{}",
+            wrong.join("\n")
+        );
+    }
+
+    /// The precedence table's override row names every `QQ_*` variable the
+    /// loader reads, and the MDM row names both MDM sources.
+    #[test]
+    fn precedence_table_names_every_override_and_mdm_source() {
+        let pages = guide_pages();
+        let text = &pages
+            .iter()
+            .find(|(name, _)| name == "configuration.md")
+            .unwrap()
+            .1;
+        let rows = table_after(text, "## Files and precedence");
+        let row = |layer: &str| {
+            rows.iter()
+                .find(|row| row[1] == layer)
+                .unwrap_or_else(|| panic!("the precedence table has no `{layer}` row"))
+                .join(" ")
+        };
+        let overrides = row("overrides");
+        let explicit = format!("{} {}", row("explicit file"), row("inline document"));
+        let mut missing: Vec<&str> = qq_config::ENVIRONMENT_VARIABLES
+            .iter()
+            .copied()
+            .filter(|name| !overrides.contains(name) && !explicit.contains(name))
+            .collect();
+        let mdm = row("MDM");
+        for source in ["macOS", "Windows"] {
+            if !mdm.contains(source) {
+                missing.push(source);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "configuration.md's precedence table does not name {missing:?}"
+        );
+    }
+
+    /// `tui.md` "Every command" has one row per registry command whose
+    /// slashes and default keys are exactly the registry's, so a rebound
+    /// default, a new command, or a removed chord fails here.
+    #[test]
+    fn tui_command_table_is_the_registry() {
+        let pages = guide_pages();
+        let text = &pages.iter().find(|(name, _)| name == "tui.md").unwrap().1;
+        let rows = table_after(text, "## Every command");
+        let mut problems = Vec::new();
+        let registry: Vec<qq_tui::CommandRow> = qq_tui::command_rows().collect();
+        for command in &registry {
+            let Some(row) = rows.iter().find(|row| row[0] == command.title) else {
+                problems.push(format!("  no row titled \"{}\"", command.title));
+                continue;
+            };
+            let slash = spans(&row[1]);
+            let keys: Vec<&str> = spans(&row[2])
+                .into_iter()
+                .filter(|key| !CONTEXTUAL_KEYS.contains(key))
+                .collect();
+            if slash != command.slash || keys != command.default_chords {
+                problems.push(format!(
+                    "  \"{}\": guide has {slash:?} / {keys:?}, registry has {:?} / {:?}",
+                    command.title, command.slash, command.default_chords
+                ));
+            }
+        }
+        for row in &rows {
+            if !registry.iter().any(|command| command.title == row[0]) {
+                problems.push(format!("  \"{}\" is not a registry command", row[0]));
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "tui.md § Every command does not match the command registry \
+             (crates/qq-tui/src/commands.rs); one row per command, titled as the registry \
+             titles it:\n{}",
+            problems.join("\n")
+        );
+    }
+
+    /// Keys the guide lists beside a command that the registry does not own
+    /// because they depend on state: `?` only on an empty composer, `Enter`
+    /// steers only while a run is active, `Esc` walks to the parent only when
+    /// nothing else claims it, `Esc Esc` cancels only while running.
+    const CONTEXTUAL_KEYS: &[&str] = &["?", "Enter", "Esc", "Esc Esc"];
+
+    /// Parts of a quoted message rendered from data, with the format
+    /// placeholder that renders them. A heading may quote the rendered text
+    /// when the data is a fixed list the reader should see.
+    const RENDERED: &[(&str, &str)] = &[
+        ("openai, anthropic, google, xai, openai-codex", "{}"),
+        ("keyring", "{backend}"),
+    ];
+
+    /// Troubleshooting headings that quote text QQ relays but does not
+    /// write: a provider's own error body.
+    const QUOTED_ELSEWHERE: &[(&str, &str)] = &[(
+        "provider returned HTTP 400: Invalid JSON payload received. Unknown name \"additionalProperties\"…",
+        "Gemini's response body, relayed after QQ's `provider returned HTTP {status}` prefix",
+    )];
+
+    /// Every troubleshooting heading that quotes a message quotes one the
+    /// code can print: each literal run of three or more words between the
+    /// placeholders (`…`, a quoted name) appears in the source.
+    #[test]
+    fn troubleshooting_headings_quote_real_messages() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut source = String::new();
+        let mut directories = vec![root.join("src")];
+        for entry in fs::read_dir(root.join("crates")).unwrap() {
+            directories.push(entry.unwrap().path().join("src"));
+        }
+        while let Some(directory) = directories.pop() {
+            for entry in fs::read_dir(&directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    // Line continuations (`\` + newline + indent) join the
+                    // literal the way the compiler does.
+                    let text = fs::read_to_string(&path).unwrap();
+                    let mut joined = String::with_capacity(text.len());
+                    let mut lines = text.lines().peekable();
+                    while let Some(line) = lines.next() {
+                        match line.strip_suffix('\\') {
+                            Some(head) => {
+                                joined.push_str(head);
+                                if let Some(next) = lines.peek_mut() {
+                                    *next = next.trim_start();
+                                }
+                            }
+                            None => {
+                                joined.push_str(line);
+                                joined.push('\n');
+                            }
+                        }
+                    }
+                    source.push_str(&joined);
+                }
+            }
+        }
+        let pages = guide_pages();
+        let text = &pages
+            .iter()
+            .find(|(name, _)| name == "troubleshooting.md")
+            .unwrap()
+            .1;
+        assert_eq!(
+            RENDERED[0].0,
+            crate::LOGIN_PROVIDERS.join(", "),
+            "RENDERED quotes the login provider list; keep it equal to LOGIN_PROVIDERS"
+        );
+        let mut quoted = 0;
+        let mut invented = Vec::new();
+        for (heading, _) in QUOTED_ELSEWHERE {
+            assert!(
+                text.contains(&format!("### `{heading}`")),
+                "QUOTED_ELSEWHERE entry `{heading}` no longer heads a section; remove it"
+            );
+        }
+        for heading in text.lines().filter_map(|line| line.strip_prefix("### ")) {
+            let Some(message) = heading.strip_prefix('`').and_then(|h| h.strip_suffix('`')) else {
+                continue;
+            };
+            quoted += 1;
+            if QUOTED_ELSEWHERE.iter().any(|(entry, _)| *entry == message) {
+                continue;
+            }
+            let mut rest = message.replace('…', "\u{0}");
+            for delimiter in ['`', '"'] {
+                let mut out = String::new();
+                for (index, part) in rest.split(delimiter).enumerate() {
+                    out.push_str(if index % 2 == 1 { "\u{0}" } else { part });
+                }
+                rest = out;
+            }
+            for fragment in rest.split('\u{0}') {
+                let fragment = fragment.trim_matches(|c: char| " :;,.'".contains(c));
+                if fragment.split_whitespace().count() >= 3
+                    && !source.contains(fragment)
+                    && !RENDERED.iter().any(|(rendered, template)| {
+                        fragment.contains(rendered)
+                            && source.contains(&fragment.replace(rendered, template))
+                    })
+                {
+                    invented.push(format!("  \"{fragment}\" (from `{message}`)"));
+                }
+            }
+        }
+        assert!(
+            quoted >= 20,
+            "only {quoted} quoted troubleshooting headings"
+        );
+        assert!(
+            invented.is_empty(),
+            "troubleshooting.md quotes text no QQ source prints; copy the message from the \
+             code:\n{}",
+            invented.join("\n")
+        );
+    }
 }

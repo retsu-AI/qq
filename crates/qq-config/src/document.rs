@@ -468,6 +468,21 @@ pub const POLICY_FIELD_NAMES: [&str; 15] = [
     "deny_hosts",
 ];
 
+/// The `policy` keys only managed and MDM sources may set; anywhere else is
+/// [`ConfigError::PolicyOutsideManaged`](crate::ConfigError). The user guide
+/// marks exactly these as administrator-only.
+pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 9] = [
+    "allowed_providers",
+    "denied_providers",
+    "max_output_tokens",
+    "require_https",
+    "allow_custom_providers",
+    "allow_literal_secrets",
+    "deny_tools",
+    "deny_shell_prefixes",
+    "deny_hosts",
+];
+
 /// Every top-level key a configuration document accepts, as spelled in RON,
 /// in declaration order. See [`POLICY_FIELD_NAMES`].
 pub const DOCUMENT_FIELD_NAMES: [&str; 19] = [
@@ -532,6 +547,8 @@ pub(super) struct PolicyPatch {
 
 impl PolicyPatch {
     /// Fields only administrator-controlled (Managed/MDM) sources may set.
+    /// [`MANAGED_ONLY_POLICY_FIELD_NAMES`] publishes the same set; a test
+    /// holds the two equal.
     fn has_managed_only_fields(&self) -> bool {
         self.allowed_providers.is_some()
             || self.denied_providers.is_some()

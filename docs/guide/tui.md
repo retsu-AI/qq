@@ -50,12 +50,15 @@ below works the same either way.
 | new child session (sub-agent under the focused one) | `Alt-C` | |
 | open the session list; type to search names | | `/sessions`, `/resume` |
 | the focused session's agent tree | | `/agents` |
-| focus parent / first child / next / previous sibling | `Alt-Up`* / `Alt-Down` / `Alt-Right` / `Alt-Left` | |
+| focus parent / first child / next / previous sibling | `Esc`* / `Alt-Down` / `Alt-Right` / `Alt-Left` | |
 | jump to the next session that needs you | `Ctrl-G` | |
 | delete the highlighted session in the list (confirms) | `Ctrl-D` | |
 | delete every empty session | | `/prune` |
 
-\* `Alt-Up` edits the newest queued draft when one exists.
+\* `Esc` focuses the parent only when nothing else claims it: it first
+clears a transcript selection, closes a workspace view, dismisses a notice,
+and while a run is active arms `Esc Esc` to cancel it. `Alt-Up` is not a
+focus key; it pulls back the newest queued draft.
 
 QQ names a session from its first prompt. Sessions persist in SQLite; quit
 and come back with `qq --session ID` (the exit message prints it) or pick
@@ -202,33 +205,56 @@ with the focused session's details.
 with your current bindings. `Ctrl-K` or `/commands` opens the same list as a
 searchable palette that runs the highlighted command on `Enter`.
 
-| Area | Slash | Default key |
+| Command | Slash | Default key |
 | --- | --- | --- |
-| help | `/help` | `F1`, `?` on empty composer |
-| command palette | `/commands` | `Ctrl-K` |
-| sessions list | `/sessions`, `/resume` | |
-| agent tree | `/agents` | |
-| session navigator | | `Ctrl-T` |
-| new session | `/new`, `/clear` | `Alt-N` |
-| child session | | `Alt-C` |
-| compact / rollback | `/compact`, `/rollback` | |
-| prune empty sessions | `/prune` | |
-| next needs-you | | `Ctrl-G` |
-| approve / deny elsewhere | | `Alt-A` / `Alt-D` |
-| cancel run | | `Ctrl-X`, `Esc Esc` |
-| interrupt and steer | | `Alt-S` |
-| queue draft / edit queued | | `Ctrl-Enter`, `Ctrl-Q` / `Alt-Up` |
-| model / profile / approval / delegate / theme | `/models`, `/profile`, `/approval`, `/delegate`, `/theme` | |
-| skills and commands | `/skills` | |
-| tool detail / select call | | `Ctrl-O` / `Ctrl-Up`, `Ctrl-Down` |
-| reasoning | | `Alt-R` |
-| sidebar / inspector | | `Ctrl-\` / `Alt-I` |
-| mouse capture | `/mouse` | |
-| attention / changes | `/attention`, `/changes` | |
-| external editor | `/editor` | `Alt-E` |
-| prompt history | | `Ctrl-R` |
-| trust prompt: trust / this session / quit | | `t` / `s` / `q` |
-| quit | `/quit`, `/exit` | `Ctrl-C` |
+| show every command and key | `/help` | `F1`, `?` |
+| open the command palette | `/commands` | `Ctrl-K` |
+| open sessions | `/sessions`, `/resume` |  |
+| open the focused session's agent tree | `/agents` |  |
+| toggle the session navigator |  | `Ctrl-T` |
+| create a session | `/new`, `/clear` | `Alt-N` |
+| create a child session |  | `Alt-C` |
+| compact session context | `/compact` |  |
+| undo the newest compaction | `/rollback` |  |
+| delete every empty session | `/prune` |  |
+| focus the parent session |  | `Esc` |
+| focus the first child session |  | `Alt-Down` |
+| focus the next sibling session |  | `Alt-Right` |
+| focus the previous sibling session |  | `Alt-Left` |
+| jump to the next session that needs you |  | `Ctrl-G` |
+| approve the waiting call in another session |  | `Alt-A` |
+| deny the waiting call in another session |  | `Alt-D` |
+| cancel the active run |  | `Ctrl-X`, `Esc Esc` |
+| steer the active run with the draft |  | `Enter` |
+| interrupt the active run and steer it with the draft |  | `Alt-S` |
+| queue the draft until the run finishes |  | `Ctrl-Enter`, `Ctrl-Q` |
+| edit the newest queued draft |  | `Alt-Up` |
+| choose a model | `/models` |  |
+| choose an agent profile | `/profile` |  |
+| choose an approval mode | `/approval` |  |
+| choose reasoning effort | `/effort` |  |
+| choose who settles held approvals | `/delegate` |  |
+| list workspace commands and skills | `/skills` |  |
+| choose a theme | `/theme` |  |
+| toggle tool call detail |  | `Ctrl-O` |
+| select the previous tool call |  | `Ctrl-Up` |
+| select the next tool call |  | `Ctrl-Down` |
+| toggle reasoning detail |  | `Alt-R` |
+| toggle the session sidebar |  | `Ctrl-\` |
+| toggle the inspector pane |  | `Alt-I` |
+| toggle mouse capture | `/mouse` |  |
+| show everything that needs you | `/attention` |  |
+| show every file agents changed | `/changes` |  |
+| edit the draft in $EDITOR | `/editor` | `Alt-E` |
+| search prompt history |  | `Ctrl-R` |
+| exit QQ | `/quit`, `/exit` | `Ctrl-C` |
+
+Keys shown beside `?`, `Enter`, `Esc`, and `Esc Esc` apply only in context:
+`?` on an empty composer, `Enter` steers only while a run is active, `Esc`
+focuses the parent only when there is no transcript selection, open view,
+notice, or active run to claim it, and `Esc Esc` cancels only while running.
+The keys for creating sessions, the navigator, cancel, and interrupt are
+defaults; rebind them in [`tui.ron`](configuration.md#tuiron).
 
 Scrolling: mouse wheel, `PageUp` / `PageDown`, `Shift-Up` / `Shift-Down`,
 `Ctrl-Home` / `Ctrl-End` for top and live tail. Hold `Shift` to select text

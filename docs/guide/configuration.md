@@ -36,9 +36,9 @@ Sections `delegation` and `audit` replace as a whole.
 | 5 | project layers, repository root first, current directory last | per directory: `.qq/packs/<id>/pack.ron` (trusted only), `qq.ron`, `.qq/config.ron`, `.qq/config.d/*.ron` |
 | 6 | explicit file | `QQ_CONFIG=/path/to/file.ron` |
 | 7 | inline document | `QQ_CONFIG_CONTENT='(version: 1, …)'` |
-| 8 | overrides | `--model` / `QQ_MODEL`, `--organization` / `QQ_ORGANIZATION`, `--max-output-tokens`, `QQ_JEV_CHECKPOINTS`, `QQ_JEV_ROUTING` |
+| 8 | overrides | `--model` / `QQ_MODEL`, `--organization` / `QQ_ORGANIZATION`, `--max-output-tokens`, `QQ_JEV_CHECKPOINTS`, `QQ_JEV_ROUTING`, `QQ_JEV_APPROVAL`, `QQ_APPROVAL_DELEGATE` |
 | 9 | managed | `/etc/qq/managed.ron` + `managed.d/` (Linux), `/Library/Application Support/qq/` (macOS), `%ProgramData%\qq\` (Windows); must be root-owned |
-| 10 | MDM | macOS managed preferences |
+| 10 | MDM | macOS forced preference `dev.qq` / `ManagedConfig`; Windows policy `HKLM\Software\Policies\dev.qq\ManagedConfig` (`REG_SZ`); none on Linux |
 
 `<global>` is `~/.config/qq` on Linux, `~/Library/Application
 Support/dev.qq.qq` on macOS, `%APPDATA%\qq\qq\config` on Windows;
@@ -205,12 +205,17 @@ policy: (
 | `shell_env` | any layer | variable names passed to shell children beyond `PATH HOME LANG TERM TMPDIR` |
 | `builtin_preference` | any; only tightens | how hard the model is steered from shell habits to built-in tools |
 | `exposed_tools` | any; intersects | the tool catalog; empty list exposes nothing |
-| `allowed_providers` / `denied_providers` | any; denies accumulate | which providers a model route may use |
-| `max_output_tokens` | any; only lowers | ceiling for the top-level key |
-| `require_https` | any; default `true` | reject `http://` custom endpoints (loopback exempt) |
-| `allow_custom_providers` | any; default `true` | allow `Custom`/`LiteLlm` declarations |
-| `allow_literal_secrets` | any; default `false` | allow `Value(...)` |
+| `allowed_providers` / `denied_providers` | managed layers only | which providers a model route may use; denies accumulate |
+| `max_output_tokens` | managed layers only | ceiling for the top-level key; only lowers |
+| `require_https` | managed layers only | reject `http://` custom endpoints (loopback exempt); default `true` |
+| `allow_custom_providers` | managed layers only | allow `Custom`/`LiteLlm` declarations; default `true` |
+| `allow_literal_secrets` | managed layers only | allow `Value(...)`; default `false` |
 | `deny_tools`, `deny_shell_prefixes`, `deny_hosts` | managed layers only | remove grants no matter who declared them |
+
+"Managed layers" are `managed.ron`, `managed.d/`, and MDM (rows 9 and 10
+above). Setting one of these anywhere else fails with `managed-only policy
+settings are only allowed in managed configuration`; to cap output tokens
+for yourself, set the top-level `max_output_tokens` instead.
 
 The approval prompt's `w` key appends to `allow_tools` /
 `allow_shell_prefixes` / `allow_hosts` in the project's `.qq/config.ron`.
