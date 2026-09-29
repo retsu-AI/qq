@@ -160,7 +160,9 @@ Explicit effort can be pinned independently of Jev in trusted configuration:
 )
 ```
 
-Values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`. Omission
+Values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and
+`default` (let the provider choose, overriding a configured value); each model
+accepts only its advertised subset. Omission
 preserves provider defaults; top-level `Clear` removes an inherited setting.
 Profile values override top-level settings; explicit runtime overrides win.
 In the TUI, `/effort` pins the focused session (or the default for new sessions);

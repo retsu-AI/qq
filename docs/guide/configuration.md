@@ -67,7 +67,7 @@ repository should not commit; this repository's `.gitignore` excludes
 | `worker_model` | `"PROVIDER/MODEL"` | none | deprecated; use `delegation.roster` |
 | `organization` | string | none | which enrolled organization manifest applies (`qq org`) |
 | `max_output_tokens` | integer | `16384` | cap on generated tokens per model turn; a model's own limit applies if lower |
-| `reasoning_effort` | `none` `minimal` `low` `medium` `high` `xhigh` | provider default | effort hint for reasoning models that accept one |
+| `reasoning_effort` | `none` `minimal` `low` `medium` `high` `xhigh` `max` `default` | provider default | effort hint for reasoning models that accept one; a value the selected model does not advertise fails at plan time naming the accepted ones ([providers](providers.md)) |
 | `jev_review` | `off` `final` `enforce` | `off` | optional TypeSafe Jev checkpoints; see [`../runbooks/jev.md`](../runbooks/jev.md) |
 | `jev_routing` | bool | `false` | optional Jev model routing |
 | `jev_approval` | bool | `false` | Jev decides held approvals before `reviewer_model` and you; see [`../runbooks/jev.md`](../runbooks/jev.md#jev-as-the-approval-delegate) |

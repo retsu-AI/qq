@@ -11,7 +11,7 @@ Accepted by every command:
 | `--model PROVIDER/MODEL` | override the configured route for this invocation |
 | `--max-output-tokens N` | override the generation cap |
 | `--organization NAME` | select an enrolled organization manifest |
-| `-V`, `--version` | `qq 0.1.2 (abc1234 2026-09-22)` |
+| `-V`, `--version` | `qq 0.1.5 (abc1234 2026-09-28)` |
 
 ## `qq` — interactive
 

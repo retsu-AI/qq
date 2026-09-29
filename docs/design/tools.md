@@ -1123,7 +1123,7 @@ validated when the document loads so a typo fails configuration rather
 than quarantining the server at first use. The composition root parses it
 into `McpServerSettings::pin` (an `McpToolSetDigest`), so `qq-mcp`
 compares digests, never text. The pin is also recorded on the plan
-descriptor's `McpServerDescriptor` (`DESCRIPTOR_VERSION` 10), so a pinned
+descriptor's `McpServerDescriptor` (`DESCRIPTOR_VERSION` 10 and later), so a pinned
 and an unpinned declaration of the same server compile to distinct plan
 digests and a run's durable identity names the tool set it was admitted
 against.
