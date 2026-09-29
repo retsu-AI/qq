@@ -2825,6 +2825,7 @@ dependencies = [
  "reqwest",
  "ron",
  "rpassword",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",

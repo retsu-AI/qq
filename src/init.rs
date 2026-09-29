@@ -35,6 +35,8 @@ pub enum InitError {
     InvalidChoice { answer: String },
     #[error("{} already exists; pass --force to overwrite", path.display())]
     AlreadyExists { path: PathBuf },
+    #[error("{} is a symbolic link; qq init writes only a regular file it owns", path.display())]
+    Symlink { path: PathBuf },
     #[error("failed to write {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -155,6 +157,31 @@ pub fn run<R: BufRead, W: Write>(
          )\n"
     );
 
+    // A symlinked `.qq` or `config.ron` (a repository can ship either) would
+    // make `--force` write through to wherever it points. On Unix both
+    // refusals are atomic with the write: the directory is opened with
+    // O_NOFOLLOW|O_DIRECTORY and the file is opened relative to that handle
+    // with O_NOFOLLOW, so neither path can be swapped for a link after it is
+    // checked (another writer in the directory could otherwise redirect the
+    // truncation to any file this user can write). Elsewhere a pre-open
+    // check is the best available.
+    for candidate in [&directory, &path] {
+        match fs::symlink_metadata(candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(InitError::Symlink {
+                    path: candidate.clone(),
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(InitError::Io {
+                    path: candidate.clone(),
+                    source,
+                });
+            }
+        }
+    }
     // The global directory holds credentials-adjacent state, so it is created
     // private like the data directory; a project's `.qq` is repository content.
     let mut builder = fs::DirBuilder::new();
@@ -170,21 +197,13 @@ pub fn run<R: BufRead, W: Write>(
             source,
         });
     }
-    let mut options = fs::OpenOptions::new();
-    options
-        .write(true)
-        .create_new(!args.force)
-        .create(args.force)
-        .truncate(args.force);
-    #[cfg(unix)]
-    if !args.project {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = match options.open(&path) {
+    let mut file = match open_config_file(&directory, &path, args.force, !args.project) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             return Err(InitError::AlreadyExists { path });
+        }
+        Err(error) if is_symlink_refusal(&error) => {
+            return Err(InitError::Symlink { path });
         }
         Err(source) => return Err(InitError::Io { path, source }),
     };
@@ -240,6 +259,71 @@ pub fn run<R: BufRead, W: Write>(
     match written {
         Ok(()) => Ok(()),
         Err(error) => Err(InitError::Terminal(error)),
+    }
+}
+
+/// Opens `path` (inside `directory`) for writing without following a symlink
+/// at either level. `force` truncates an existing file; otherwise the file
+/// must be new. `private` creates it `0o600`.
+#[cfg(unix)]
+fn open_config_file(
+    directory: &Path,
+    path: &Path,
+    force: bool,
+    private: bool,
+) -> io::Result<fs::File> {
+    use rustix::fs::{Mode, OFlags};
+    let Some(name) = path.file_name() else {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    };
+    let dir = rustix::fs::open(
+        directory,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let mut flags = OFlags::WRONLY | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    if force {
+        flags |= OFlags::TRUNC;
+    } else {
+        flags |= OFlags::EXCL;
+    }
+    let mode = if private {
+        Mode::from_bits_truncate(0o600)
+    } else {
+        Mode::from_bits_truncate(0o666)
+    };
+    let fd = rustix::fs::openat(&dir, name, flags, mode)?;
+    Ok(fs::File::from(fd))
+}
+
+#[cfg(not(unix))]
+fn open_config_file(
+    _directory: &Path,
+    path: &Path,
+    force: bool,
+    _private: bool,
+) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(!force)
+        .create(force)
+        .truncate(force)
+        .open(path)
+}
+
+/// ELOOP (final component is a symlink under O_NOFOLLOW) or ENOTDIR (the
+/// directory handle was a symlink under O_NOFOLLOW|O_DIRECTORY).
+fn is_symlink_refusal(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        let code = error.raw_os_error();
+        code == Some(rustix::io::Errno::LOOP.raw_os_error())
+            || code == Some(rustix::io::Errno::NOTDIR.raw_os_error())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
     }
 }
 
@@ -449,6 +533,78 @@ mod tests {
         assert_eq!(
             fixture.check().unwrap().unwrap().model().as_str(),
             "xai/grok-4.6"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn force_refuses_to_write_through_a_symlinked_project_config() {
+        // A repository can ship `.qq/config.ron` as a link to a file
+        // elsewhere; `--force` must not truncate the link's target.
+        let fixture = Fixture::new();
+        let outside = fixture.workspace.parent().unwrap().join("outside.txt");
+        fs::write(&outside, "precious").unwrap();
+        let project = fixture.workspace.join(".qq");
+        fs::create_dir_all(&project).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join("config.ron")).unwrap();
+
+        let (result, _) = fixture.run(args(true, Some("openai/gpt-5.6"), true));
+        assert!(
+            matches!(result, Err(InitError::Symlink { ref path }) if *path == project.join("config.ron")),
+            "{result:?}"
+        );
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "precious");
+
+        // A symlinked `.qq` directory is refused the same way.
+        fs::remove_dir_all(&project).unwrap();
+        let elsewhere = fixture.workspace.parent().unwrap().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &project).unwrap();
+        let (result, _) = fixture.run(args(true, Some("openai/gpt-5.6"), true));
+        assert!(
+            matches!(result, Err(InitError::Symlink { .. })),
+            "{result:?}"
+        );
+        assert!(!elsewhere.join("config.ron").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_open_itself_refuses_links_swapped_in_after_the_check() {
+        // Review (#217): the pre-open check can be raced, so the open must
+        // refuse on its own. Calling it on paths that are already links is
+        // exactly the state a swap after the check leaves behind.
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("outside.txt");
+        fs::write(&outside, "precious").unwrap();
+
+        // The file became a link.
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let config = project.join("config.ron");
+        std::os::unix::fs::symlink(&outside, &config).unwrap();
+        let error = open_config_file(&project, &config, true, false).unwrap_err();
+        assert!(is_symlink_refusal(&error), "{error:?}");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "precious");
+
+        // The directory became a link.
+        let elsewhere = root.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let linked = root.path().join("linked");
+        std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+        let error = open_config_file(&linked, &linked.join("config.ron"), true, false).unwrap_err();
+        assert!(is_symlink_refusal(&error), "{error:?}");
+        assert!(!elsewhere.join("config.ron").exists());
+
+        // A regular target still opens, and `force: false` refuses to clobber.
+        let real = project.join("real.ron");
+        open_config_file(&project, &real, false, true).unwrap();
+        let again = open_config_file(&project, &real, false, true).unwrap_err();
+        assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o600
         );
     }
 
