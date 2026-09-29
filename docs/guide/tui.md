@@ -55,9 +55,9 @@ below works the same either way.
 | delete the highlighted session in the list (confirms) | `Ctrl-D` | |
 | delete every empty session | | `/prune` |
 
-\* `Esc` focuses the parent only when nothing else claims it. At an
-approval prompt it denies the call and at a question it declines, so it
-never moves focus there. Otherwise it first closes an open `@` completion
+\* `Esc` focuses the parent only when nothing else claims it. A pending
+approval or question claims it (see below), so it never moves focus there.
+Otherwise it first closes an open `@` completion
 list, clears a transcript selection, closes a workspace view, dismisses an
 error notice for the focused session, and while a run is active arms
 `Esc Esc` to cancel it. Informational notices do not claim it. `Alt-Up` is not a
@@ -89,7 +89,9 @@ asks because: unlisted_program
 y once   a session   w workspace   n deny
 ```
 
-`y` / `a` / `w` / `n` (`Esc` also denies); `Shift-Y` / `Shift-N` decide and steer with a note.
+`y` / `a` / `w` / `n`; `Shift-Y` / `Shift-N` decide and steer with a note.
+`Esc` denies, like `n`, except while a note is being typed, when it drops the
+note and leaves the prompt open.
 `Alt-A` / `Alt-D` answer the oldest waiting call in *another* session.
 `/attention` lists everything waiting across the workspace. Details in
 [Permissions and trust](permissions.md#the-approval-prompt).
