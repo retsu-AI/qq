@@ -1765,6 +1765,7 @@ impl RuntimeFactory {
             mcp: None,
             runtime: crate::plan::RuntimeSwitches {
                 jev_approval: snapshot.jev_approval(),
+                output_ceiling,
             },
         };
         if let Some(progress) = progress {
@@ -5398,6 +5399,19 @@ mod tests {
             plan("name: \"M\", max_output_tokens: 128000").output_ceiling(),
             Some(32_000)
         );
+
+        // Review (#216): lowering only the managed ceiling (still above the
+        // 16 384 request cap, so the digest is unchanged) must replace the
+        // cached plan, not revalidate the one compiled under 32 000.
+        let before = plan("name: \"M\", max_output_tokens: 128000");
+        fs::write(
+            fixture.path("managed/managed.ron"),
+            r#"(version: 1, policy: (max_output_tokens: 20000))"#,
+        )
+        .unwrap();
+        let after = plan("name: \"M\", max_output_tokens: 128000");
+        assert_eq!(before.digest(), after.digest(), "outside the digest");
+        assert_eq!(after.output_ceiling(), Some(20_000));
     }
 
     #[test]

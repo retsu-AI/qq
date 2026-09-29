@@ -147,6 +147,10 @@ pub struct LiveBindings {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeSwitches {
     pub jev_approval: bool,
+    /// The empty-truncation raise ceiling (catalog limit, policy-bounded):
+    /// a lowered managed ceiling must not keep serving a plan compiled
+    /// under the higher one.
+    pub output_ceiling: Option<u32>,
 }
 
 impl PartialEq for LiveBindings {
