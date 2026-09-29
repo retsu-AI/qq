@@ -4,6 +4,7 @@
 
 | | |
 | --- | --- |
+| Linear | [ENG-982](https://linear.app/retsu-ai/issue/ENG-982) (design) |
 | Now | Design only. Nothing below is built. The decision record is [ADR-0049](../adr/0049-durable-run-goal-and-loop-guard.md), revised here and still Proposed |
 | Research | [`../design/goal-reference-survey-2026-09-28.md`](../design/goal-reference-survey-2026-09-28.md) |
 | Ledger | [`progress/goals.md`](./progress/goals.md) |
