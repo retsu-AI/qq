@@ -203,23 +203,16 @@ pub(crate) const MAX_IGNORE_FILE_BYTES: u64 = 256 * 1024;
 
 fn add_ignore_file(workspace: &Workspace, builder: &mut GitignoreBuilder, path: &str) -> bool {
     // Open first, then check what was opened, so the file cannot be swapped
-    // between a check and the open. On Unix the open neither follows a
-    // symlink (a symlink is not followed anywhere else in the walk) nor
-    // blocks on a FIFO or device (O_NONBLOCK); the type and size checks then
-    // run on the open descriptor.
+    // between a check and the open. The open neither follows a symlink (a
+    // symlink is not followed anywhere else in the walk) nor blocks on a FIFO
+    // or device; the type and size checks then run on the open descriptor.
+    // Both are set on cap-primitives' own options, not as raw flags: its
+    // manual path resolution (macOS, or Linux without openat2) honours only
+    // its own `follow` setting and would otherwise follow the link.
     let mut options = cap_std::fs::OpenOptions::new();
     options.read(true);
-    #[cfg(unix)]
-    {
-        use cap_std::fs::OpenOptionsExt as _;
-        let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
-        // Both flags fit in an i32 on every Unix target.
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "open(2) takes flags as a C int; these bits are small positive values"
-        )]
-        options.custom_flags(flags.bits() as i32);
-    }
+    options._cap_fs_ext_follow(cap_primitives::fs::FollowSymlinks::No);
+    options._cap_fs_ext_nonblock(true);
     let Ok(file) = workspace.root().open_with(path, &options) else {
         return false;
     };
