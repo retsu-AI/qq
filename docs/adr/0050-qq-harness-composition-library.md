@@ -30,8 +30,10 @@ Codex solved the same problem with a facade crate (`codex-core-api`) and a
    It gains:
    - a runnable, CI-tested `examples/embed.rs` that uses only public items;
    - `Runtime::resolved_model()` (public);
-   - `LoadedRuntime::from_runtime(runtime, profile)`, which compiles the
-     embedded plan;
+   - `LoadedRuntime::from_runtime(runtime, profile, workspace)`, which
+     compiles the embedded plan against an explicit, canonicalized
+     workspace. It never uses the process's current directory; a test
+     changes the current directory and asserts the plan is identical.
    - an async `CompiledAgentPlan::compile` that runs the blocking compile
      under `spawn_blocking`;
    - a crate-level doc on the lifecycle: open, create session, submit,
@@ -89,8 +91,10 @@ Codex solved the same problem with a facade crate (`codex-core-api`) and a
   the reference embedding of `qq-harness`. `architecture.md` § Repository
   Layout, § Extension Contract (owner table) and `AGENTS.md` § Repository
   Map gain the crate.
-- Dependency direction: `qq-harness → {qq-core, qq-config, qq-mcp, qq-provider,
-  qq-auth}`. Nothing depends on `qq-harness` except the binary and embedders.
+- Dependency direction: `qq-harness → {qq-core, qq-protocol, qq-config,
+  qq-mcp, qq-provider, qq-auth}`. `qq-harness` re-exports the protocol types
+  its signatures name (`RunOutcome`, `RunLimits`, `ModelSelection`, …).
+  Nothing depends on `qq-harness` except the binary and embedders.
 - The breaking changes in decision 4 land in one PR with an `!` commit, as
   ADR-0027 § 5 requires.
 - ADR-0009 is unchanged. Linking `qq-harness` is for clients (a TUI, a

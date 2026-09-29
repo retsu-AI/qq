@@ -122,9 +122,11 @@ A bound on a run measures what the *next request* would carry or what the
      (`auto_continue_scheduled { run_id, at_ms }`), so a restart neither
      loses nor re-arms a pending continuation.
    - It never continues a pause whose reason means continuing would repeat
-     the same failure. Today that is `RunPause.reason = no_progress`
-     (ADR-0049). Only an explicit `ContinueRun`, a new prompt or a steer
-     continues such a run.
+     the same failure. Today that is `RunPause::NoProgress` (ADR-0049). Only
+     an explicit `ContinueRun` or a new prompt continues such a run. A steer
+     does not, because `SteerRun` targets a live run and rejects a finished
+     one (`RunAlreadyFinished`, `sessions/commands.rs:731`); a new prompt is
+     how a client adds direction after a pause.
    - Continuations are ordinary runs: durable, observable, cancellable. A
      cancel or new prompt from a client cancels the pending continuation.
 

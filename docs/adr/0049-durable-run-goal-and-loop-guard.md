@@ -83,32 +83,31 @@ that do not use them.
    continue-if-idle decides. Audit turns are ordinary turns against the
    caller's budgets. This is not a second judge.
 4. **Loop guard.** The guard works only on **observed** results. It never
-   predicts a result it has not seen.
+   predicts a result it has not seen. It keeps two separate structures:
+   - a **repeat counter** for the current consecutive run of identical
+     executed `(tool name, canonical-argument hash, result hash)` triples;
+   - a **seen set** of every such triple observed in the current slice,
+     bounded at 4 096 hashes (16-byte hashes, 64 KiB), with eviction
+     counted as "seen". It is cleared only at a slice boundary or by a
+     *mutation event*: a successful call with effect class other than
+     `ReadOnly`, a checklist change, or an applied steer.
 
-   The loop keeps a bounded ring of executed
-   `(tool name, canonical-argument hash, result hash)`. The ring is cleared
-   by any *progress event*:
-   - a successful call with effect class other than `ReadOnly`;
-   - a checklist change;
-   - a steer;
-   - a successful call whose `(call, result)` pair is new to the ring.
-
-   The last case means distinct reads are progress and only a re-observed
-   pair is not.
+   A triple not in the seen set is **novel**. Novelty is the read-side
+   progress signal, so a large read-only audit keeps producing novel triples
+   and is never paused. A short cycle (`A, B, A, B, …`) stops being novel
+   after one pass, and does not clear anything.
    - After **two** consecutive executed identical calls that both returned
      the identical **error**, the **next** identical call is not executed.
      It gets a rejection result naming the repetition, so the third call is
      the rejected one.
-   - After **four** consecutive executed identical `(call, result)` pairs
-     with no progress event between them, the next identical call is
-     rejected the same way. An identical call whose observed result changed
-     (a re-read after an edit, polling a changing endpoint) resets the
-     count, because the pair is new.
-   - After `N` slices in which no progress event occurred and no new
-     assistant text was produced, the run settles
-     `paused { reason: no_progress }`. `N` defaults to 2 (512 calls). A
-     read-heavy audit of a large repository keeps producing new pairs, so it
-     never trips this. ADR-0048 never auto-continues this reason.
+   - After **four** consecutive executed identical triples, the next
+     identical call is rejected the same way. An identical call whose
+     observed result changed (a re-read after an edit, polling a changing
+     endpoint) is a different triple, so it restarts the counter.
+   - After `N` slices with no novel triple, no mutation event and no new
+     assistant text, the run settles `paused { reason: no_progress }`. `N`
+     defaults to 2 (512 calls). An alternating cycle trips it; a read-heavy
+     audit does not. ADR-0048 never auto-continues this reason.
 
    Both are on for every run, goal or not, and both are cheap: a hash per
    call.
@@ -123,9 +122,14 @@ that do not use them.
 ## Consequences
 
 - `PROTOCOL_VERSION` bump: `goal` on `SubmitPrompt`, the `set_goal`
-  command, and `goal_updated` / `goal_audit_requested` events. `RunPause.reason`
-  gains `no_progress`. `ContinueRun` admission gains the completed-with-goal
-  case. Store schema: a `run_goals` table.
+  command, and `goal_updated` / `goal_audit_requested` events. `RunPause`
+  becomes reason-tagged: `RunPause::ProviderRetry { kind, message,
+  turn_ordinal, attempts }` (today's fields, unchanged meaning) or
+  `RunPause::NoProgress { turn_ordinal, slices, calls }`. No field has to
+  carry a made-up value for the other reason. Both wire shapes get protocol
+  fixtures.
+  `ContinueRun` admission gains the completed-with-goal case. Store schema:
+  a `run_goals` table.
 - **Plan identity.** `update_goal` is in **every** compiled plan's catalog,
   so the compiled plan and `PlanCache` key do not depend on goal state. It
   is exposed to the model per run by the existing per-run include filter

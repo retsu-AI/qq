@@ -132,3 +132,28 @@ claims in my own audit.
 - The goal PR (AC4+AC7) owns `qq-client/src/state/reduce.rs`: its match is
   exhaustive (`:117`), and the `Paused` notice (`:700–708`) always says
   "retries".
+
+### 2026-09-28 — Codex fourth pass on #211 (9 comments on `bbf70a4`) and a process change
+
+Four were design faults and are fixed:
+- the loop guard was defeated by an `A, B, A, B` cycle; it now keeps a
+  slice-scoped seen set separate from the repeat counter;
+- "a steer continues a `no_progress` pause" was wrong, since `SteerRun`
+  rejects finished runs (`commands.rs:731`);
+- `from_runtime` now takes an explicit workspace;
+- `RunPause` is reason-tagged (`ProviderRetry` / `NoProgress`), so no field
+  holds a made-up value.
+
+`qq-protocol` is added to `qq-harness`'s dependency direction.
+
+One is declined. Appending a clarification to ADR-0039 is allowed
+(`adr/README.md:4–5`), and the first review round asked for exactly that.
+
+Four were "slice X doesn't list file Y": session execution and store,
+`qq-server`'s exhaustive matches, snapshot and client state, and
+`qq-protocol`. Each was true. Each round produced more of them, because the
+plan tried to enumerate every file before the code exists. The plan now says
+owned paths are a starting area, and each slice also owns every consumer a
+type or wire change forces, with `cargo build --workspace` as the gate. New
+state must reach snapshots and reducer state in the PR that adds it. Further
+file-level findings belong in each slice's own PR, not in this plan.
