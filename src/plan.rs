@@ -137,20 +137,20 @@ pub struct LiveBindings {
     pub provider: Option<ProviderAccess>,
     pub mcp: Option<Arc<crate::mcp::WiredMcpRegistry>>,
     /// Behavior the compiled plan carries but deliberately keeps out of its
-    /// digest (who settles a held call is not what the model may do). A
-    /// configuration edit that changes only one of these must still replace
-    /// the cached generation rather than be revalidated into it.
+    /// digest. A configuration edit that changes only one of these must
+    /// still replace the cached generation rather than be revalidated into
+    /// it. (`jev_approval` is in the digest itself as the descriptor's
+    /// `approval_delegate`, so an edit to it already yields a new digest.)
     pub runtime: RuntimeSwitches,
 }
 
 /// Digest-excluded plan settings that must still invalidate a cached plan.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeSwitches {
-    pub jev_approval: bool,
     /// The empty-truncation raise ceiling (catalog limit, policy-bounded):
     /// a lowered managed ceiling must not keep serving a plan compiled
     /// under the higher one.
-    pub output_ceiling: Option<u32>,
+    pub output_ceiling: Option<qq_core::OutputCeiling>,
 }
 
 impl PartialEq for LiveBindings {

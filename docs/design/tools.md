@@ -1226,11 +1226,13 @@ open to approve. Whether Jev is consulted is the held call's compiled plan
 the run's `jev_approval` after profile and override merging
 (`ReviewRequest::jev_approval`), so a profile's `jev_approval: false` wins
 over a top-level on, a profile-only on enables, and a configuration edit
-applies to the next run with no credential change or restart (the value is
-part of the cached generation's live bindings, so the edit replaces the plan
-rather than revalidating it). The
-reviewer never reloads configuration itself; it caches only the TypeSafe
-client, one entry per credential epoch. A stored key with `jev_approval` off
+applies to the next root run with no credential change or restart. The value
+is in the plan descriptor as `approval_delegate` (so it is durable run
+identity and an edit yields a new plan), and a run's routed reload and owned
+children inherit it rather than re-reading configuration. The
+reviewer never reloads configuration itself; it caches only a built TypeSafe
+client, one entry per credential epoch (a failed key read is retried at the
+next hold). A stored key with `jev_approval` off
 is never read (ADR-0030). `ReviewVerdict` names the
 delegate that decided; a delegate-recorded grant row carries it as
 `source = 'jev'` or `source = 'delegate'` (§ Grant Lifetimes), and the

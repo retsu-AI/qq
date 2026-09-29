@@ -180,10 +180,24 @@ async fn prepare_execution(
             },
         });
     }
+    let delegate_identity = loaded.plan.descriptor().approval_delegate.as_deref();
+    if claimed
+        .approval_delegate
+        .as_ref()
+        .is_some_and(|selection| !selection.matches(delegate_identity))
+    {
+        return Err(RunOutcome::Failed {
+            failure: RunFailure {
+                kind: RunFailureKind::Configuration,
+                message: "child loader did not preserve the parent's approval delegate".to_owned(),
+            },
+        });
+    }
     claimed.checkpoint = Some(CheckpointSelection::from_identity(identity));
     claimed.routing = Some(RoutingSelection::from_identity(
         loaded.plan.descriptor().routing.as_deref(),
     ));
+    claimed.approval_delegate = Some(ApprovalDelegateSelection::from_identity(delegate_identity));
     let deadline = RunDeadline::new(claimed.limits, execution_started);
     if let Some(deadline) = deadline.filter(|deadline| deadline.expired()) {
         return Err(RunOutcome::BudgetExhausted {
@@ -675,6 +689,9 @@ async fn route_run(
             checkpoint: Some(CheckpointSelection::from_identity(
                 loaded.plan.descriptor().checkpoint.as_deref(),
             )),
+            approval_delegate: Some(ApprovalDelegateSelection::from_identity(
+                loaded.plan.descriptor().approval_delegate.as_deref(),
+            )),
             workspace: claimed.workspace.clone(),
             model: decision.model.clone(),
             profile: claimed.profile.clone(),
@@ -700,6 +717,8 @@ async fn route_run(
                     && selected.plan.descriptor().routing == loaded.plan.descriptor().routing
                     && selected.plan.descriptor().checkpoint
                         == loaded.plan.descriptor().checkpoint
+                    && selected.plan.descriptor().approval_delegate
+                        == loaded.plan.descriptor().approval_delegate
                     && selected.plan.descriptor().profile == loaded.plan.descriptor().profile =>
             {
                 decision.model = ModelSelection {
@@ -766,6 +785,7 @@ pub(super) async fn execute_run(
             reasoning_effort: claimed.reasoning_effort,
             checkpoint: claimed.checkpoint.clone(),
             routing: claimed.routing.clone(),
+            approval_delegate: claimed.approval_delegate.clone(),
             workspace: claimed.workspace.clone(),
             model: claimed.model.clone(),
             profile: claimed.profile.clone(),
