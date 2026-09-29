@@ -173,13 +173,18 @@ schema when a store opens. `qq version` prints all four.
 - **`MAJOR`** does not change. Moving off `0` would be its own decision and
   ADR, not a release step.
 
-Because the number does not signal breakage, the release PR must: list every
-contract constant that changed since the previous tag (old → new) in its
-body, and state what a user upgrading from the previous release must do
-(for example: restart a long-running `qq serve`; configuration values that
-no longer load and their replacements; the store migrates forward and the
-previous release cannot open it afterwards). The changelog's
-`**breaking:**` bullets come from `!` commits and are the per-change record.
+Because the number does not signal breakage, every release whose contracts
+or configuration changed carries an **Upgrading** block at the top of its
+`CHANGELOG.md` section, written by hand in the bump PR right under the
+generated `## X.Y.Z — date` heading: each contract constant that changed
+since the previous tag (old → new) and what a user upgrading must do (for
+example: restart a long-running `qq serve`; configuration values that no
+longer load and their replacements; the store migrates forward and the
+previous release cannot open it afterwards, so back it up first). The
+`Release` workflow publishes that whole section as the GitHub release body
+(above GitHub's generated notes) and fails if the section is missing, so the
+steps reach users, not only reviewers. The generated `**breaking:**` bullets
+come from `!` commits and are the per-change record; do not edit them.
 
 `qq version` prints all of it together:
 
