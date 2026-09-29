@@ -2059,6 +2059,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
     let parent = ClaimedRun {
         checkpoint: None,
         routing: None,
+        approval_delegate: None,
         identity: RunIdentity {
             workspace_id,
             session_id,

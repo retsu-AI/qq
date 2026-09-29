@@ -204,6 +204,8 @@ struct RunHandle {
     /// A held root call under `auto` waits for a delegate rather than being
     /// denied at once (see `submit`).
     wait_for_delegate: bool,
+    /// The same for an owned child's held call (supervised mode).
+    child_waits_for_delegate: bool,
 }
 
 struct AcceptedRunGuard {
@@ -630,14 +632,17 @@ async fn submit(
             (session_id, after, summary.approval_delegate)
         }
     };
-    // Whether a held root call waits for a delegate: one exists and the
-    // effective delegate setting (the session's override, else the
-    // configured one) consults it under this run's approval mode. Without
-    // that, waiting only delays a denial nobody else will issue.
+    // Whether a held call waits for a delegate: one exists and the effective
+    // delegate setting (the session's override, else the configured one)
+    // consults it under the call's approval mode. Without that, waiting only
+    // delays a denial nobody else will issue. Owned children copy the root
+    // session's override at spawn and run `supervised`, so their check uses
+    // the same setting under that mode.
+    let effective_delegate = session_delegate.unwrap_or(options.configured_delegate);
     let wait_for_delegate = options.reviewer_configured
-        && session_delegate
-            .unwrap_or(options.configured_delegate)
-            .consults_reviewer(approval_mode(options.approval));
+        && effective_delegate.consults_reviewer(approval_mode(options.approval));
+    let child_waits_for_delegate = options.reviewer_configured
+        && effective_delegate.consults_reviewer(qq_protocol::ApprovalMode::Supervised);
 
     // Budgets are core-owned: the runtime enforces them and settles the run
     // with a typed outcome, so this adapter only relays and renders.
@@ -682,6 +687,7 @@ async fn submit(
         // session's history.
         subscribe_after,
         wait_for_delegate,
+        child_waits_for_delegate,
     })
 }
 
@@ -865,18 +871,35 @@ async fn stream_run(
                     }
                     // The delegate passed: say why, so the unattended deny that
                     // follows (or the allowlist answer) reads as a consequence.
+                    // Unattended `auto` has no human to wait for, so the
+                    // escalation is answered at once instead of at the end
+                    // of the reviewer grace. Under `ask` a real client owns
+                    // the prompt and headless never waits there.
                     SessionEvent::ToolApprovalEscalated {
-                        delegate, reason, ..
-                    } if ours && text => {
-                        let _ = match delegate {
-                            Some(delegate) => writeln!(
+                        tool_call_id, delegate, reason,
+                    } => {
+                        if ours && text {
+                            let _ = match delegate {
+                                Some(delegate) => writeln!(
+                                    stderr,
+                                    "[tool] {} passed to the human: {}",
+                                    delegate.as_str(),
+                                    concise(reason)
+                                ),
+                                None => writeln!(stderr, "[tool] {}", concise(reason)),
+                            };
+                        }
+                        let unattended = !ours || options.approval == HeadlessApproval::Auto;
+                        if unattended && let Some(run_id) = envelope.run_id {
+                            respond_approval(
+                                sessions,
+                                run_id,
+                                *tool_call_id,
+                                ApprovalDecision::Deny,
                                 stderr,
-                                "[tool] {} passed to the human: {}",
-                                delegate.as_str(),
-                                concise(reason)
-                            ),
-                            None => writeln!(stderr, "[tool] {}", concise(reason)),
-                        };
+                            )
+                            .await;
+                        }
                     }
                     SessionEvent::ToolCallFinished { tool_call } if ours => {
                         if tool_call.state == ToolCallState::Denied {
@@ -1004,7 +1027,10 @@ async fn stream_run(
                                 Some(ApprovalDecision::ApproveForSession { grant })
                             }
                             (None, HeadlessApproval::Full) => Some(ApprovalDecision::ApproveOnce),
-                            (None, HeadlessApproval::Auto) if handle.wait_for_delegate || !ours => {
+                            (None, HeadlessApproval::Auto)
+                                if (ours && handle.wait_for_delegate)
+                                    || (!ours && handle.child_waits_for_delegate) =>
+                            {
                                 if let Some(run_id) = envelope.run_id {
                                     let sessions = sessions.clone();
                                     let tool_call_id = tool_call.id;
@@ -3465,15 +3491,36 @@ mod tests {
     }
 
     /// A reviewer that approves everything and says Jev decided.
+    /// A fake Jev that approves after 100 ms: slower than the event that
+    /// publishes the hold, so a headless client that denied on the spot
+    /// would win the race and the test would see `denied`.
     struct JevApproves;
 
     impl qq_core::ApprovalReviewer for JevApproves {
         fn review(&self, _request: qq_core::ReviewRequest) -> qq_core::ReviewFuture {
             Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
                 qq_core::ReviewVerdict::free(qq_core::ReviewDecision::Approve)
                     .by(qq_core::DelegateIdentity::Jev)
             })
         }
+    }
+
+    /// A loaded configuration with `jev_approval: true` and no
+    /// `reviewer_model`, read by the real loader from an explicit document.
+    fn jev_only_snapshot(workspace: &Path) -> qq_config::ConfigSnapshot {
+        let root = workspace.parent().unwrap();
+        let loader = qq_config::ConfigLoader::new(qq_config::ConfigPaths::new(
+            root.join("cfg-global"),
+            root.join("cfg-data"),
+            root.join("cfg-managed"),
+        ));
+        loader
+            .load(&qq_config::LoadRequest::new(workspace).with_explicit_content(
+                r#"(version: 1, model: "test/model", jev_approval: true,
+                    providers: { "test": Custom(connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth), models: { "model": (name: "m") }) })"#,
+            ))
+            .unwrap()
     }
 
     #[tokio::test]
@@ -3508,7 +3555,19 @@ mod tests {
 
         let mut options = options(&fixture.workspace);
         options.approval = HeadlessApproval::Auto;
-        options.reviewer_configured = true;
+        // Jev plan A2: the delegate options come from a real Jev-only
+        // configuration (no `reviewer_model`), resolved exactly as
+        // `prepare_headless` resolves them, not from a hand-set flag.
+        let snapshot = jev_only_snapshot(&fixture.workspace);
+        let (reviewer_configured, configured_delegate) = crate::headless_delegate_options(
+            &snapshot,
+            &qq_protocol::AgentProfileId::default(),
+            None,
+            None,
+        );
+        assert!(snapshot.reviewer_model().is_none());
+        options.reviewer_configured = reviewer_configured;
+        options.configured_delegate = configured_delegate;
         let (status, stdout, _) =
             run_to_end(&fixture, options.clone(), std::future::pending()).await;
         assert_eq!(status, HeadlessStatus::Completed);
@@ -3532,6 +3591,78 @@ mod tests {
         let (status, _, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
         assert_eq!(status, HeadlessStatus::Completed);
         assert!(stderr.contains("[tool] shell approved by jev"), "{stderr}");
+    }
+
+    /// A delegate that gives up on every held call (Jev abstaining, or no
+    /// key and no `reviewer_model`).
+    struct DelegateEscalates;
+
+    impl qq_core::ApprovalReviewer for DelegateEscalates {
+        fn review(&self, _request: qq_core::ReviewRequest) -> qq_core::ReviewFuture {
+            Box::pin(async {
+                qq_core::ReviewVerdict::free(qq_core::ReviewDecision::Escalate {
+                    reason: "Jev abstained".to_owned(),
+                })
+                .by(qq_core::DelegateIdentity::Jev)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn an_escalation_is_denied_at_once_not_after_the_reviewer_grace() {
+        // Review (#215): the delegate's escalation is published the moment it
+        // gives up, but headless `auto` kept waiting out the 20 s grace per
+        // held call although no one else could approve it.
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let workspace = root.join("work");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let workspace = std::fs::canonicalize(&workspace).unwrap();
+        for name in ["scratch0", "scratch1"] {
+            std::fs::create_dir_all(workspace.join(name)).unwrap();
+        }
+        let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+        runtime_options.approval_reviewer = Some(Arc::new(DelegateEscalates));
+        let sessions = SessionRuntime::open(
+            runtime_options,
+            Arc::new(ProviderLoader(|| DangerousShellProvider {
+                turn: Mutex::new(0),
+            })),
+        )
+        .await
+        .unwrap();
+        let fixture = Fixture {
+            sessions,
+            workspace,
+            _directory: directory,
+        };
+        let mut options = options(&fixture.workspace);
+        options.approval = HeadlessApproval::Auto;
+        options.reviewer_configured = true;
+        let (status, stdout, _) = tokio::time::timeout(
+            REVIEWER_DENY_GRACE / 2,
+            run_to_end(&fixture, options, std::future::pending()),
+        )
+        .await
+        .expect("two escalated holds must not each wait out the grace");
+        assert_eq!(status, HeadlessStatus::Completed);
+        let records = parse_records(&stdout);
+        let events: Vec<&serde_json::Value> = event_records(&records)
+            .into_iter()
+            .map(|record| &record["envelope"]["event"])
+            .collect();
+        let escalated = events
+            .iter()
+            .filter(|event| event["type"] == "tool_approval_escalated")
+            .count();
+        let denied = events
+            .iter()
+            .filter(|event| {
+                event["type"] == "tool_approval_resolved" && event["resolution"] == "denied"
+            })
+            .count();
+        assert_eq!(escalated, 2, "{stdout}");
+        assert_eq!(denied, 2, "each escalation is answered with a denial");
     }
 
     #[tokio::test]

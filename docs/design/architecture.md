@@ -355,7 +355,11 @@ the vendor segment of the gateway id), the compiled default would be spent on
 hidden reasoning before any visible output, so the wire cap is the catalog
 ceiling instead, still bounded by a managed `policy.max_output_tokens`. A
 `max_output_tokens` the operator set in any configuration layer or override is
-honoured verbatim; run budgets bound spend either way. A new session row pins
+honoured verbatim as the request cap; the one exception is the empty-truncation
+recovery below (§ run loop), which may send a single retry with the cap
+doubled toward the catalog limit, still bounded by a managed
+`policy.max_output_tokens`. A hard ceiling is the policy value, not the
+configured one; run budgets bound spend either way. A new session row pins
 `max_output_tokens` only when the cap has non-compiled provenance (a
 configuration layer, `--max-output-tokens`, a profile, a picker); the compiled
 default is never persisted as a choice. Rows from older releases that recorded
@@ -745,8 +749,12 @@ per run (`MAX_EMPTY_OUTPUT_RETRIES`) toward the plan's output ceiling: the
 catalog's model limit bounded by `policy.max_output_tokens`, which sits above
 the configured cap whenever the catalog knows the model (a plan without one
 cannot raise). When the raise is spent or unavailable, an all-reasoning turn
-settles at once with the cause and both remedies (`max_output_tokens`,
-`reasoning_effort`) named and the ceiling stated; a turn that streamed a
+settles at once with the cause, the ceiling, and the remedies that can work:
+`max_output_tokens` or `reasoning_effort` when the model limit binds, or
+`reasoning_effort` and the managed policy when `policy.max_output_tokens`
+binds. The count of consecutive empty turns it reports is reset by any turn
+that produced text or a complete call, so a raise taken for a call-then-cut
+turn is not attributed to reasoning; a turn that streamed a
 complete call is continued like any visible truncation. The summarizer applies the
 same rule and fails its step rather than continuing an empty reply. Such an
 empty truncated turn is persisted as truncated but replays as nothing, matching
