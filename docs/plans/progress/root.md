@@ -69,6 +69,8 @@ may append a **request** row; only root changes a request's status.
 | 0044, 0045 | Session mode and strict verification | ENG-791 strict-verification stack (#187) | Reserved |
 | 0046 | MCP tool-set pinning in configuration and plan identity, enforced at dispatch; `DESCRIPTOR_VERSION` 9 → 10 | ENG-939 (supersedes contributed #163/#165/#171) | Accepted 2026-09-25: `docs/adr/0046-mcp-tool-set-pinning.md` |
 | 0047 | Durable held-approval lifecycle: delegate-pending and human-required phases; clients follow server phase | Jev plan JV5 (ENG-791) | Proposed 2026-09-28 (`0047-jev-approval-hold-lifecycle.md`); replaces draft #193's colliding "0046" proposal |
+| 0048–0050 | Run bounds, durable run goal, harness composition library | autonomous-core plan, open PR #211 | Held by #211 (not yet on `main`); listed so the next reservation does not collide |
+| 0051 | 0ver product versioning; compatibility carried by contract versions | v0.1.5 release (ENG-969), PR #212 | Accepted 2026-09-28: `docs/adr/0051-zerover-product-versioning.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -140,7 +142,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0048. Reserve here before opening a PR that adds an ADR.
+Next free number: 0052. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 

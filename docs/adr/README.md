@@ -56,6 +56,8 @@ written.
 - [ADR-0046: pin an MCP server's advertised tool set in configuration and plan identity; enforce the pin at dispatch](0046-mcp-tool-set-pinning.md) — Accepted (ENG-939; supersedes the contributed #163/#165/#171 design; `DESCRIPTOR_VERSION` 9 → 10).
 - [ADR-0047: explicit Jev consent and a durable held-approval lifecycle](0047-jev-approval-hold-lifecycle.md) — Proposed (Jev plan JV1–JV6; from draft #193).
 
+- [ADR-0051: 0ver product versioning; compatibility is carried by contract versions](0051-zerover-product-versioning.md) — Accepted (v0.1.5 release, ENG-969; replaces the runbook's MINOR-on-contract-bump rule).
+
 ## When to write one
 
 Write an ADR when a change:
