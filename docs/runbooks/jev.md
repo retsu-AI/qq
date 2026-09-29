@@ -117,6 +117,20 @@ consults them under `auto` and `supervised` but sends `ask` straight to you;
 `on` consults them under `ask` too; `off` never does. The mode stays the ceiling. `Forbidden` shell shapes,
 blocked hosts, managed denies and `ask_user` never reach Jev.
 
+The setting is resolved with the run's profile, like `jev_review` and
+`jev_routing`: a profile's `jev_approval: false` turns Jev off for runs of
+that profile even when the top level turns it on, a profile-only `true`
+enables it, and an edit takes effect on the next run without restarting the
+server (a run in progress, its routed reload and its owned children keep the
+plan it started with). Inspect it in two places: `qq config show` prints the
+top-level `jev_approval` and, under `profiles:`, each profile's own
+`jev_approval` when it sets one; the value a run uses is the profile's when
+set, else the top level. `qq config explain jev_approval` names the source of
+the top-level value and `qq config explain profile.NAME` the file that
+defines the profile. A started run records it durably: its plan descriptor's
+`approval_delegate` names the Jev approval identity when on and is absent
+when off.
+
 **What Jev sees.** Only the approval preview. The task brief (child sessions
 only), shell command, edit diff, and other tool arguments are each limited to
 8 KiB and secret-masked. These are sent **verbatim, without masking**: the
@@ -153,10 +167,6 @@ not disable review or routing, and it does not revoke earlier grants.
   answering first drops Jev's decision. Fixed by JV5.
 - **Root sessions send no task brief,** so Jev and the fallback often
   abstain or deny for lack of a stated need. Fixed by JV4.
-- **Turning `jev_approval` off in config needs a restart** of the local
-  server or runtime, and a profile's `jev_approval` is ignored. Set it at
-  top level or with `QQ_JEV_APPROVAL`, and restart after changing it. Fixed
-  by JV1.
 - **Headless `qq run` with Jev but no `reviewer_model`** denies held calls
   immediately. Configure a `reviewer_model` as well. Fixed by JV2.
 - **Rounded Jev replies can be rejected as malformed** and fall through.
@@ -195,8 +205,8 @@ part is. Store receipts with the same care as session history.
    are not enough on their own: a selected profile that sets `jev_review` or
    `jev_routing` still wins (see Precedence), so clear those profile values
    too if you use configuration instead of the overrides.
-2. **Restart.** Restart the local server or runtime so approval activation
-   is re-read (see limitations).
+2. **Next run.** Approval activation is resolved for each new run; a run
+   already in progress keeps the plan it started with.
 3. **Stop observers.** Stop any `qq jev observe` processes.
 4. **Optional.** `qq auth logout typesafe-jev`. Removing the key doesn't
    undo earlier grants or side effects.

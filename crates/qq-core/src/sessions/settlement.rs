@@ -610,6 +610,7 @@ pub(super) fn settle_panicked_execution(
             let active_claim = ClaimedRun {
                 checkpoint: None,
                 routing: None,
+                approval_delegate: None,
                 identity: RunIdentity {
                     workspace_id: original.identity.workspace_id,
                     session_id: original.identity.session_id,
@@ -1061,6 +1062,7 @@ pub(super) fn recover_interrupted_runs(
         let claimed = ClaimedRun {
             checkpoint: None,
             routing: None,
+            approval_delegate: None,
             identity: RunIdentity {
                 workspace_id,
                 session_id,

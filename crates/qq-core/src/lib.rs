@@ -71,17 +71,18 @@ pub use runtime::{
     MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
 };
 pub use sessions::{
-    ApprovalReviewer, CheckpointSelection, DelegateIdentity, GrantPromotionFuture, GrantSeedFuture,
-    LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN,
-    MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT, MAX_GRANT_BYTES, MAX_PENDING_PROMPTS,
-    MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES,
-    MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent,
-    PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest,
-    ReviewSpend, ReviewVerdict, RoutingSelection, RuntimeLoadError, RuntimeLoadFuture,
-    RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION,
-    SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions,
-    SlashCommandError, SpawnModelValidationFuture, TaskRouter, TaskRoutingFuture,
-    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
+    ApprovalDelegateSelection, ApprovalReviewer, CheckpointSelection, DelegateIdentity,
+    GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING,
+    MAX_CONCURRENT_CHILDREN_PER_RUN, MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT,
+    MAX_GRANT_BYTES, MAX_PENDING_PROMPTS, MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES,
+    MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN,
+    PersistenceFault, PublishedEvent, PublishedEventStream, RecentAction, ReviewDecision,
+    ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend, ReviewVerdict, RoutingSelection,
+    RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage,
+    RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime, SessionRuntimeError,
+    SessionRuntimeOptions, SlashCommandError, SpawnModelValidationFuture, TaskRouter,
+    TaskRoutingFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
+    run_cost,
 };
 /// Merkle index over the workspace tree the tools see: the change-detection
 /// primitive for run-snapshot checkpoints (`docs/plans/run-snapshots.md`).
@@ -778,6 +779,9 @@ pub struct Runtime {
     pub(crate) turn_recovery: TurnRecoveryPolicy,
     /// Who settles the calls the session's approval mode holds.
     pub(crate) approval_delegate: approval::ApprovalDelegate,
+    /// Identity of the first approval delegate (Jev) for this runtime's held
+    /// calls; `None` means it is off.
+    pub(crate) approval_delegate_identity: Option<Arc<str>>,
 }
 
 impl Runtime {
@@ -829,6 +833,7 @@ impl Runtime {
             network: Arc::new(tools::network::NetworkPolicy::default()),
             turn_recovery: TurnRecoveryPolicy::default(),
             approval_delegate: approval::ApprovalDelegate::default(),
+            approval_delegate_identity: None,
         })
     }
 
@@ -846,6 +851,15 @@ impl Runtime {
     #[must_use]
     pub const fn with_approval_delegate(mut self, delegate: approval::ApprovalDelegate) -> Self {
         self.approval_delegate = delegate;
+        self
+    }
+
+    /// Names the first approval delegate for held calls (Jev), recorded in
+    /// the plan descriptor; `ReviewRequest::jev_approval` is set when it is
+    /// present. Inert unless the installed reviewer composes that delegate.
+    #[must_use]
+    pub fn with_approval_delegate_identity(mut self, identity: Option<Arc<str>>) -> Self {
+        self.approval_delegate_identity = identity;
         self
     }
 

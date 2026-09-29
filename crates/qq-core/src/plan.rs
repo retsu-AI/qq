@@ -121,6 +121,9 @@ pub struct AgentProfile {
     network: crate::tools::network::NetworkPolicy,
     turn_recovery: crate::TurnRecoveryPolicy,
     approval_delegate: crate::approval::ApprovalDelegate,
+    /// Identity of the delegate consulted first for held calls (Jev), or
+    /// `None` when that delegate is off. In the descriptor (version 12).
+    approval_delegate_identity: Option<String>,
     adapter_build: String,
     provenance: Vec<String>,
     credential_epoch: CredentialEpoch,
@@ -164,6 +167,7 @@ impl AgentProfile {
             network: crate::tools::network::NetworkPolicy::default(),
             turn_recovery: crate::TurnRecoveryPolicy::default(),
             approval_delegate: crate::approval::ApprovalDelegate::default(),
+            approval_delegate_identity: None,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -190,6 +194,19 @@ impl AgentProfile {
         delegate: crate::approval::ApprovalDelegate,
     ) -> Self {
         self.approval_delegate = delegate;
+        self
+    }
+
+    /// The identity of the delegate the effective configuration (profile and
+    /// overrides merged) opted in ahead of the reviewer model for held calls
+    /// (Jev approval), or `None`. Part of the descriptor, so durable run
+    /// identity records whether an external approval delegate was
+    /// authorized, and owned children and routed reloads inherit it
+    /// (ADR-0052). The installed reviewer consults that delegate only when
+    /// this is set.
+    #[must_use]
+    pub fn with_approval_delegate_identity(mut self, identity: Option<String>) -> Self {
+        self.approval_delegate_identity = identity;
         self
     }
 
@@ -235,6 +252,10 @@ impl AgentProfile {
             network: runtime.network.as_ref().clone(),
             turn_recovery: runtime.turn_recovery,
             approval_delegate: runtime.approval_delegate,
+            approval_delegate_identity: runtime
+                .approval_delegate_identity
+                .as_deref()
+                .map(str::to_owned),
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -541,6 +562,7 @@ impl CompiledAgentPlan {
             network,
             turn_recovery,
             approval_delegate,
+            approval_delegate_identity,
             adapter_build,
             provenance,
             credential_epoch,
@@ -568,7 +590,8 @@ impl CompiledAgentPlan {
         .with_shell_policy(shell)
         .with_network_policy(network)
         .with_turn_recovery(turn_recovery)
-        .with_approval_delegate(approval_delegate);
+        .with_approval_delegate(approval_delegate)
+        .with_approval_delegate_identity(approval_delegate_identity.as_deref().map(Arc::from));
         if let Some(effort) = reasoning_effort {
             runtime = runtime.with_reasoning_effort(effort);
         }
@@ -780,6 +803,10 @@ impl CompiledAgentPlan {
             delegation: runtime.delegation.as_ref().clone(),
             audit: AuditDescriptor::from(runtime.audit),
             checkpoint: runtime.checkpoint_identity.as_deref().map(str::to_owned),
+            approval_delegate: runtime
+                .approval_delegate_identity
+                .as_deref()
+                .map(str::to_owned),
             routing_configuration: runtime
                 .task_router
                 .as_ref()
@@ -913,6 +940,13 @@ impl CompiledAgentPlan {
     #[must_use]
     pub const fn approval_delegate(&self) -> crate::approval::ApprovalDelegate {
         self.runtime.approval_delegate
+    }
+
+    /// Whether this plan's held calls go to its first approval delegate (Jev)
+    /// before the reviewer model: the descriptor's `approval_delegate`.
+    #[must_use]
+    pub fn jev_approval(&self) -> bool {
+        self.descriptor.approval_delegate.is_some()
     }
 
     pub(crate) fn workspace_handle(&self) -> Workspace {
@@ -1261,6 +1295,7 @@ mod tests {
             },
             checkpoint: None,
             routing: None,
+            approval_delegate: None,
             routing_configuration: None,
             reasoning_effort: None,
             skills: SkillIndexDescriptor {
@@ -1310,7 +1345,7 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v11\0{\"version\":11,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v12\0{\"version\":12,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
@@ -1318,10 +1353,10 @@ mod tests {
         // from a different encoding.
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "21138d846da89ce3db4ae1f5213358c5e44666be585fe6746315b0e2b0786bda"
+            "2f6f25fab3e6d0625cb56a896779e236f1f506f04f5817b6a4d5c0325377c984"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v11\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v12\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }
@@ -1451,6 +1486,10 @@ mod tests {
             (
                 "checkpoint",
                 Box::new(|d| d.checkpoint = Some("typesafe/jev/enforce".to_owned())),
+            ),
+            (
+                "approval_delegate",
+                Box::new(|d| d.approval_delegate = Some("typesafe/jev/approval".to_owned())),
             ),
             (
                 "routing",

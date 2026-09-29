@@ -109,7 +109,13 @@ impl LoadedRuntime {
         profile = profile
             .with_context_cache(Arc::clone(&runtime.context_cache))
             .with_turn_recovery(runtime.turn_recovery)
-            .with_approval_delegate(runtime.approval_delegate);
+            .with_approval_delegate(runtime.approval_delegate)
+            .with_approval_delegate_identity(
+                runtime
+                    .approval_delegate_identity
+                    .as_deref()
+                    .map(str::to_owned),
+            );
         Ok(Self::new(CompiledAgentPlan::compile_blocking(profile)?))
     }
 
@@ -267,6 +273,31 @@ impl CheckpointSelection {
     }
 }
 
+/// A run that reloads its runtime (routing, owned children) keeps the first
+/// approval delegate its plan was compiled with, never a newly enabled or
+/// disabled workspace default. Roots leave this absent to resolve config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalDelegateSelection {
+    Disabled,
+    DelegateIdentity(String),
+}
+
+impl ApprovalDelegateSelection {
+    pub(crate) fn from_identity(identity: Option<&str>) -> Self {
+        match identity {
+            None => Self::Disabled,
+            Some(identity) => Self::DelegateIdentity(identity.to_owned()),
+        }
+    }
+
+    pub(crate) fn matches(&self, identity: Option<&str>) -> bool {
+        match self {
+            Self::Disabled => identity.is_none(),
+            Self::DelegateIdentity(expected) => identity == Some(expected.as_str()),
+        }
+    }
+}
+
 /// Owned children retain the parent's routing policy, including disabled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoutingSelection {
@@ -294,6 +325,9 @@ pub struct RuntimeLoadRequest {
     pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
     pub checkpoint: Option<CheckpointSelection>,
     pub routing: Option<RoutingSelection>,
+    /// The first approval delegate a reload must keep; `None` for a root,
+    /// which resolves configuration.
+    pub approval_delegate: Option<ApprovalDelegateSelection>,
     pub workspace: String,
     pub model: ModelSelection,
     /// Configured agent profile the session selected. Loaders that know no
@@ -395,6 +429,11 @@ pub struct ReviewRequest {
     /// Tool names and shell prefixes the session has been granted.
     pub granted_tools: Vec<String>,
     pub granted_shell_prefixes: Vec<String>,
+    /// The run's compiled plan opted Jev in as the first delegate
+    /// (`jev_approval` after profile and override merging). A reviewer that
+    /// composes Jev consults it only when this is set; it never re-derives
+    /// the choice from configuration.
+    pub jev_approval: bool,
 }
 
 /// What the reviewer's own provider call cost, charged to the reviewed run.

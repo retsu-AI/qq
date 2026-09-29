@@ -1221,9 +1221,19 @@ probability both at least 0.7 under the pinned `jev-1.13.0` contract) is the
 delegate's verdict. `abstain`, low confidence, a malformed reply, a transport
 failure, a timeout, or a missing key falls through to `reviewer_model`, then
 to the human, with the reason attached to the escalation. Jev is never failed
-open to approve. Whether Jev is consulted is the held call's workspace
-configuration, read per hold and cached per credential epoch; a stored key
-with `jev_approval` off is never read (ADR-0030). `ReviewVerdict` names the
+open to approve. Whether Jev is consulted is the held call's compiled plan
+([ADR-0052](../adr/0052-jev-approval-activation-from-plan.md)):
+the run's `jev_approval` after profile and override merging
+(`ReviewRequest::jev_approval`), so a profile's `jev_approval: false` wins
+over a top-level on, a profile-only on enables, and a configuration edit
+applies to the next root run with no credential change or restart. The value
+is in the plan descriptor as `approval_delegate` (so it is durable run
+identity and an edit yields a new plan), and a run's routed reload and owned
+children inherit it rather than re-reading configuration. The
+reviewer never reloads configuration itself; it caches only a built TypeSafe
+client, one entry per credential epoch (a failed key read is retried at the
+next hold). A stored key with `jev_approval` off
+is never read (ADR-0030). `ReviewVerdict` names the
 delegate that decided; a delegate-recorded grant row carries it as
 `source = 'jev'` or `source = 'delegate'` (§ Grant Lifetimes), and the
 `tool_approval_resolved` event carries it as `delegate: jev | reviewer`
