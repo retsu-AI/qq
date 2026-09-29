@@ -78,3 +78,31 @@ replies).
 - ADR-0039: the Implements line is restored byte-for-byte; the note is an
   appended clarification.
 - `plans/README.md`: the RR8 remainder (ENG-870) is listed as open.
+
+### 2026-09-28 — Codex second pass on #211 (10 comments on `b78f0ec`)
+
+All ten were checked against source and are correct; all are fixed.
+
+- Goal size: the second-pass bounds still did not fit. The goal is now a
+  2 KiB objective and 24 × 120 B items with runtime-assigned `u8` ids, and
+  every write is checked against `MAX_GOAL_RENDER_BYTES` in rendered form.
+- Continuation also carries `max_tool_output_bytes` and `max_children`,
+  keeps `max_concurrent_children` unchanged, and carries the remaining
+  `repair_turns` (`lib.rs:1606`). An exhaustive `RunLimits` field test is
+  added.
+- AC11 owns fetch's four external consumers (`approval.rs:266`,
+  `sessions/approvals.rs:123`, `tools/dispatch.rs:181`, `tools/specs.rs:11`).
+- Loop guard: only observed results count, and the call after the threshold
+  is the one rejected. A new `(call, result)` pair is progress, so read-only
+  audits never pause.
+- Rebase: the marker commits inside `compact()` before the splice
+  (`in_run_compaction.rs:188`), so the retained weight travels in
+  `InRunCompactionRequest`.
+- AC9 owns headless, which returns on its own run's `RunFinished`
+  (`headless.rs:1230`).
+- `achieved_pending_audit` is persisted before publishing.
+- `RuntimeLoadStage` stays a closed `u8` enum
+  (`RuntimeLoadProgress(Arc<AtomicU8>)`).
+
+My own error, fixed at the same time: the effect class is `ReadOnly`
+(`catalog.rs:73`), not `Read`.

@@ -56,7 +56,17 @@ Codex solved the same problem with a facade crate (`codex-core-api`) and a
    "translate external config, compile/cache plans, wire concrete adapters"
    row. That row's owner changes from "Root package" to `qq-harness`.
 3. **Tool features on `qq-core`.**
-   - `tool-fetch` (on by default) gates `tools/fetch.rs` and `htmd`.
+   - `tool-fetch` (on by default) gates `tools/fetch.rs` and `htmd`. The
+     fetch module has four consumers outside itself, and each gets a
+     feature-off path:
+     - `approval.rs:266` uses `fetch::target_host`;
+     - `sessions/approvals.rs:123` uses `fetch::preview`;
+     - `tools/dispatch.rs:181–188` uses `FetchArgs` and `fetch`;
+     - `tools/specs.rs:11` uses `MAX_URL_BYTES`.
+
+     The `Network` effect class and the approval host check stay
+     unconditional. With the feature off, no tool of that class is compiled
+     in, so the match arm is unreachable by construction, not removed.
    - `tree-sitter-bash` stays mandatory: the `Forbidden` classifier
      (ADR-0020) is a safety invariant, not a tool.
    - The minimal embedding profile `--no-default-features` builds and passes
@@ -68,8 +78,10 @@ Codex solved the same problem with a facade crate (`codex-core-api`) and a
    - Loose root `MAX_*` bounds move under `qq_core::limits`.
    - Bench re-exports move behind a `bench-support` feature.
    - Jev `checkpoint`/`routing` on `RuntimeLoadRequest` become one
-     `Option<Box<ProductExtensions>>`, and the Jev load stage becomes
-     `RuntimeLoadStage::Extension(&'static str)`.
+     `Option<Box<ProductExtensions>>`, a typed struct owned by `qq-core`.
+     `RuntimeLoadStage` stays a closed, exhaustive `#[repr(u8)]` enum (so
+     `RuntimeLoadProgress`'s `AtomicU8` still round-trips). The Jev stage is
+     renamed `ResolvingExtensionCredential`, not replaced by a string.
 
 ## Consequences
 

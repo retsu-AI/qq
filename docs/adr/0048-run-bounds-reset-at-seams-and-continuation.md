@@ -34,7 +34,15 @@ A bound on a run measures what the *next request* would carry or what the
 
 1. **Seams.** Each bound gets a documented reset scope:
    - The context reservation is re-based to the post-compaction assembly in
-     the same transaction that commits the in-run marker.
+     the same transaction that commits the in-run marker. The summary is not
+     known until the summarizer replies, so the run loop does not measure
+     the new weight afterwards. `InRunCompactionRequest` gains the weight
+     of the retained part (system, tool-schema and retained-turn bytes,
+     which the loop already holds). `finish_in_run_compaction` adds the
+     framed summary it is committing and writes `context_base_bytes`,
+     zeroing `context_increment_bytes`, in the marker's transaction. A crash
+     leaves either the old marker with the old reservation, or the new
+     marker with the new one.
    - Streamed model text bytes (`MAX_RUN_MODEL_TEXT_BYTES`) are counted per
      window. Reasoning bytes (`MAX_RUN_REASONING_BYTES`) are already counted
      per provider turn (`reasoning_bytes` is initialized inside the turn
@@ -65,11 +73,23 @@ A bound on a run measures what the *next request* would carry or what the
    same `CommandId` stays idempotent as for every command.
 
    The successor is a new run linked by `continues_run_id`. It carries:
-   - the output contract and the session grants;
-   - the **remainder** of every caller `RunLimits` bound, computed from the
-     predecessor chain's committed accounting: turns, tool calls, each token
-     class and cost minus what the chain spent. The duration deadline is the
-     original absolute deadline, so cooldown time is charged.
+   - the output contract, with the **remaining** `repair_turns` (ADR-0014)
+     rather than a fresh allowance. The spent count is persisted on the run
+     as `output_repairs_used`, alongside the goal-audit counts (ADR-0049);
+   - the session grants;
+   - the **remainder** of every cumulative `RunLimits` bound, computed from
+     the predecessor chain's committed accounting: `max_model_turns`,
+     `max_tool_calls`, `max_total_tokens`, `max_input_tokens`,
+     `max_output_tokens`, `max_cost_usd_nanos`, `max_tool_output_bytes` and
+     `max_children`, each minus what the chain spent. The duration deadline
+     is the original absolute deadline, so cooldown time is charged;
+   - `max_concurrent_children` unchanged, because it is a concurrency cap,
+     not an allowance. The predecessor's children are already settled by
+     recovery.
+
+   Adding a field to `RunLimits` later requires stating how it crosses a
+   continuation. A test enumerates the struct's fields so that a new field
+   without such a rule fails.
 
    It does **not** re-submit the prompt as a user message. The predecessor's
    prompt and turns are already in committed history. The successor's queued

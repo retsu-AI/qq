@@ -30,54 +30,85 @@ that do not use them.
    carries it and to that run's continuation chain (ADR-0048). It is not a
    session-wide slot. The run holds:
    - `objective`: the text given at prompt time, or the prompt itself when
-     `goal: true`, at most 4 KiB;
-   - `checklist`: at most 32 items, each `{ id, text ≤ 128 B, state: pending | in_progress | done | dropped }`;
-   - `status`: `active | achieved | blocked | abandoned`.
+     `goal: true`, at most 2 KiB;
+   - `checklist`: at most 24 items, each `{ id: u8 (assigned by the runtime, 1–24), text ≤ 120 B, state: pending | in_progress | done | dropped }`;
+   - `status`: `active | achieved_pending_audit | achieved | blocked | abandoned`.
 
-   These bounds are chosen so the whole record, framed, renders in at most
-   8 KiB. It is stored in `run_goals` keyed by the root of the continuation
-   chain, with every change as a `goal_updated` event. A goal given with a
-   queued prompt is inert until that prompt's run is **claimed**. It never
-   changes what an earlier, still-running run sees.
+   The canonical rendering is also the size check. Every write (`SubmitPrompt.goal`,
+   `SetGoal`, `update_goal`) renders the record exactly as assembly will,
+   framing included, and is rejected if that exceeds `MAX_GOAL_RENDER_BYTES`
+   = 8 KiB. The per-field bounds keep the worst case well under that (about
+   2 KiB + 24 × (120 B + about 24 B of id, state and separators) + about
+   200 B of framing, roughly 5.6 KiB), so the check never rejects a record
+   within the field bounds. Because the check is on the rendered form, no
+   future rendering change can overflow silently.
+
+   It is stored in `run_goals` keyed by the root of the continuation chain,
+   with every change as a `goal_updated` event. A goal given with a queued
+   prompt is inert until that prompt's run is **claimed**. It never changes
+   what an earlier, still-running run sees.
 
    It is set by `SubmitPrompt.goal` (at admission) or `SetGoal { run_id }`
    (only for the named run's chain, and only while that chain is active or
    stopped). The model changes it only through one built-in tool,
    `update_goal`. That tool takes checklist edits and a status proposal with
-   evidence, and it is effect class `Read`, so it never needs approval.
+   evidence, and it is effect class `ReadOnly`, so it never needs approval.
 2. **Re-statement, not memory.** After every in-run or between-run
    compaction, and on every continuation (ADR-0048), assembly places the
    run's goal **complete and verbatim** right after the summary. It is
-   rendered from the durable record and never truncated: the storage bounds
-   in decision 1 guarantee it fits in 8 KiB. It is never summarized. Runs
-   without a goal pay zero bytes.
-3. **Completion is audited against the goal.** When a goal run's model
-   proposes `achieved`, or ends a turn with no tool call while checklist
-   items are unchecked, the runtime sends one bounded completion-audit
-   notice listing them. The run then completes only after the model confirms
-   with evidence or marks the goal `blocked`.
+   rendered from the durable record and never truncated, because every write
+   was checked against `MAX_GOAL_RENDER_BYTES` in its rendered form
+   (decision 1). It is never summarized. Runs without a goal pay zero bytes.
+3. **Completion is audited against the goal.** The model cannot set
+   `achieved` directly. An `update_goal` proposing it durably moves the goal
+   to `achieved_pending_audit` and records the audit allowance state, in the
+   same transaction that publishes `goal_updated`. The same happens when a
+   goal run ends a turn with no tool call while items are unchecked. The
+   runtime then sends one bounded completion-audit notice listing the
+   unchecked items. The goal becomes `achieved` only when the model confirms
+   with evidence in the audit turn. Otherwise it returns to `active` or the
+   model marks it `blocked`.
+
+   A restart, pause or continuation that finds `achieved_pending_audit`
+   treats the goal as still `active` and re-issues the audit in the
+   successor, so no crash can turn a proposal into an unaudited completion.
 
    The audit has **its own allowance**, independent of ADR-0014's
    `repair_turns`. A goal run need not have an output contract, and
    `repair_turns` is a caller-set whole-run bound that must not start
    resetting. The allowance is `MAX_GOAL_AUDITS_PER_WINDOW = 1`, reset at
-   each in-run compaction, and at most `MAX_GOAL_AUDITS_PER_RUN = 8`. After
+   each in-run compaction, and at most `MAX_GOAL_AUDITS_PER_RUN = 8`
+   counted along the continuation chain and persisted with the goal. After
    that, the run completes and the goal stays `active`, so a client or
    continue-if-idle decides. Audit turns are ordinary turns against the
    caller's budgets. This is not a second judge.
-4. **Loop guard.** The loop keeps a bounded ring of
-   `(tool name, canonical-argument hash, result hash)`, cleared by any
-   *progress event*: a successful mutating call (effect class other than
-   `Read`), a checklist change, or a steer.
-   - The third **consecutive** identical call with an identical **error**
-     result becomes a rejection result, not an execution.
-   - The fifth consecutive identical `(call, result)` pair with no progress
-     event between them is also rejected. An identical call whose result
-     changed (a re-read after an edit, polling a changing endpoint) is not a
-     repeat.
-   - After `N` slices with no progress event and no new assistant text, the
-     run settles `paused { reason: no_progress }`. `N` defaults to 2 (512
-     calls). ADR-0048 never auto-continues this reason.
+4. **Loop guard.** The guard works only on **observed** results. It never
+   predicts a result it has not seen.
+
+   The loop keeps a bounded ring of executed
+   `(tool name, canonical-argument hash, result hash)`. The ring is cleared
+   by any *progress event*:
+   - a successful call with effect class other than `ReadOnly`;
+   - a checklist change;
+   - a steer;
+   - a successful call whose `(call, result)` pair is new to the ring.
+
+   The last case means distinct reads are progress and only a re-observed
+   pair is not.
+   - After **two** consecutive executed identical calls that both returned
+     the identical **error**, the **next** identical call is not executed.
+     It gets a rejection result naming the repetition, so the third call is
+     the rejected one.
+   - After **four** consecutive executed identical `(call, result)` pairs
+     with no progress event between them, the next identical call is
+     rejected the same way. An identical call whose observed result changed
+     (a re-read after an edit, polling a changing endpoint) resets the
+     count, because the pair is new.
+   - After `N` slices in which no progress event occurred and no new
+     assistant text was produced, the run settles
+     `paused { reason: no_progress }`. `N` defaults to 2 (512 calls). A
+     read-heavy audit of a large repository keeps producing new pairs, so it
+     never trips this. ADR-0048 never auto-continues this reason.
 
    Both are on for every run, goal or not, and both are cheap: a hash per
    call.
