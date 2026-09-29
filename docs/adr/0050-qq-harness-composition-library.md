@@ -100,9 +100,11 @@ Codex solved the same problem with a facade crate (`codex-core-api`) and a
 - Risk: the move is large. It lands as mechanical moves, each with no
   behaviour change and the workspace gates green, before any API changes
   (plan AC12.1–AC12.3). The binary has no library target, so the first move
-  carries the shared helpers the moved files import (`RuntimeBuildError`,
-  `describe_endpoint`, `LiveBindings`). Every move PR then compiles on its
-  own.
+  carries the helpers the moved files import (`describe_endpoint`,
+  `LiveBindings`, and an MCP-specific error split out of
+  `RuntimeBuildError`). `RuntimeBuildError` stays in the binary until
+  AC12.2, because one variant wraps `crate::catalog::ModelDiscoveryError`
+  (`src/runtime.rs:3841`). Every move PR then compiles on its own.
 
 ## Alternatives considered
 

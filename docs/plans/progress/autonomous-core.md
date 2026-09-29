@@ -106,3 +106,29 @@ All ten were checked against source and are correct; all are fixed.
 
 My own error, fixed at the same time: the effect class is `ReadOnly`
 (`catalog.rs:73`), not `Read`.
+
+### 2026-09-28 — Codex third pass on #211 (6 comments on `6fafe68`)
+
+All six were checked against source and are correct. Two of them correct
+claims in my own audit.
+
+- **Audit A2 was wrong:** in-run compaction *is* capped. It shares
+  `runs.context_compaction_attempted` with the between-run fold and is
+  refused at 32 (`sessions/compaction.rs:613–622`). ADR-0048 § 1 now stops
+  charging in-run compactions to that budget. AC2(d) needs 40 successful
+  compactions, and the soak needs ≥ 40.
+- **Audit C1 overstated the fsync cost:** activity is already on the
+  output lane (`store.rs:1162`), the worker already folds queued output and
+  control writes into one commit (`store/worker.rs:239–300`), and chunk plus
+  event are one job. AC15 is now measure-first. It keeps ADR-0003's
+  committed JSON, drops the chunk-reference idea, and closes with no code if
+  AC0 shows no bottleneck.
+- AC16 is a workspace, multi-session retention gate. A single live session
+  cannot be pruned (ADR-0038), so plan Goal 2 now says "linear with a
+  measured constant" for it.
+- AC12.1 leaves `RuntimeBuildError` in the binary (`CatalogClientUnavailable`
+  wraps `crate::catalog::ModelDiscoveryError`, `src/runtime.rs:3841`) and
+  splits an MCP error out of it.
+- The goal PR (AC4+AC7) owns `qq-client/src/state/reduce.rs`: its match is
+  exhaustive (`:117`), and the `Paused` notice (`:700–708`) always says
+  "retries".

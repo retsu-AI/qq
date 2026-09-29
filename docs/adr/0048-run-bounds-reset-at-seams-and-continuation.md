@@ -49,6 +49,14 @@ A bound on a run measures what the *next request* would carry or what the
      loop, `lib.rs:1888`) and stay that way.
    - `empty_output_retries` is counted per streak of consecutive truncated
      turns.
+   - In-run compactions stop drawing on `MAX_COMPACTION_STEPS` (32). That
+     counter (`runs.context_compaction_attempted`) stays the between-run
+     fold's budget, whose purpose is bounding one pre-run fold. Today every
+     in-run compaction also increments it and the 33rd is refused
+     (`sessions/compaction.rs:613–622`), which ends a long run. Each in-run
+     compaction must still shrink the context (ADR-0039's shrinkage check)
+     and is charged to the caller's token and cost limits like any turn.
+     That is the bound on how many can run.
 
    Caller `RunLimits` stay lifetime bounds. They are the explicit off switch.
 2. **One recovery policy for every provider turn.** The in-run summarizer

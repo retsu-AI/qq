@@ -77,9 +77,18 @@ adds about 105 KiB, so it never gets near the limit.
 | Turn recovery exhausted | `lib.rs:153–195`; `MAX_TURN_RETRIES` = 5 (`qq-protocol/src/lib.rs:76`) | `Paused`. Five retries at 2→60 s plus four provider attempts at 0.5→8 s cover about 2–3 minutes of outage. Nothing resumes a paused run. ADR-0040 § Alternatives deferred `resume_run`, and `run-reliability.md` § RR4's "connection failures retry to the run deadline" was not built |
 | Process crash or restart | `sessions/settlement.rs:958–1110` | Every `running` run settles `Interrupted`. Queued runs stay eligible; no running run continues |
 
-Between-run fold steps are limited by `MAX_COMPACTION_STEPS` = 32
-(`sessions/context.rs:162`, `execution.rs:1243–1247`). That limit applies to
-the pre-run fold only; in-run compaction has no count limit.
+`MAX_COMPACTION_STEPS` = 32 (`sessions/context.rs:162`) is charged per
+prompt run and is shared by both kinds of compaction:
+- the between-run fold checks it at `execution.rs:1243–1247`;
+- every in-run compaction increments the same
+  `runs.context_compaction_attempted` counter and is refused once it reaches
+  32 (`sessions/compaction.rs:613–622`).
+
+The refusal returns `None`, which the compactor reports as `Unavailable`
+and the loop fails as `Policy` (`lib.rs:1823–1831`). A run that has to
+compact a 33rd time therefore fails, however well every earlier compaction
+went. (Corrected 2026-09-28 after review on #211: the first draft said
+in-run compaction had no count limit.)
 
 ### A3 — Nothing detects a run that is busy but getting nowhere (V)
 
@@ -190,16 +199,26 @@ features.
 ### C1 — Store write amplification (V, cost H)
 
 - `synchronous = FULL` (`sessions/store/schema.rs:106`; ADR-0002) plus an
-  8 ms output batch (`sessions.rs:344`) means up to about 125 fsyncs/s per
-  active stream. The worker groups at most 16 output jobs per commit
-  (`store/worker.rs:17`).
-- Every streamed chunk is written twice: a `message_chunks` row
-  (`streaming.rs:91`, `:104–122`) and a `TextAppended` event whose JSON
-  carries the same text (`streaming.rs:92–100`).
-- `ActivityChanged` gets its own awaited store job
-  (`execution.rs:2231`), including the one right before the first token.
+  8 ms output batch (`sessions.rs:344`) means up to about 125 commits, and
+  so fsyncs, per second for one stream with nothing else queued. With many
+  streams the worker already folds every output job queued behind the first,
+  and waiting control writes, into one commit, up to 16 jobs
+  (`store/worker.rs:17`, `:239–300`). So the fsync count is bounded by the
+  batch window, not by stream count times chunk count.
+- Every streamed chunk is written twice, but in **one** job and commit: a
+  `message_chunks` row (`streaming.rs:91`, `:104–122`) and a `TextAppended`
+  event whose JSON carries the same text (`streaming.rs:92–100`). The cost
+  is WAL bytes and encoding CPU, not an extra fsync.
+- `ActivityChanged` is its own awaited store job (`execution.rs:2231`), on
+  the output lane (`store.rs:1162`), so it joins a group when output is
+  queued behind it. It costs a commit of its own only when nothing else is
+  queued, which is the case for the one right before the first token. (This
+  bullet and the previous one were corrected 2026-09-28 after review on
+  #211; the first draft counted both as extra fsyncs.)
 - Cost at 32–100 concurrent streams is not measured. The
   `store_output_batch` bench covers batching, not fsync count per stream.
+  Whether single-stream commit rate matters at all is exactly what AC0
+  should measure before AC15 changes anything.
 
 ### C2 — Unbounded retention (V)
 
@@ -263,7 +282,7 @@ multi-worker scheduling, memory products) stays in the supervisor.
 | 1 | 4 MiB per-run context reservation is not re-based by in-run compaction (A1) | V; regression test first | Ends every long tool-heavy run |
 | 2 | 16 MiB model text and single empty-output retry are per-run (A1) | V | Ends long chatty or reasoning-heavy runs |
 | 3 | `Paused` and `Interrupted` have no continuation path (A2) | V | Any outage over about 3 minutes, and any restart, ends autonomy |
-| 4 | In-run summarizer failure and empty checkpoint are fatal (A2) | V | One flaky turn ends hours of work |
+| 4 | In-run summarizer failure and empty checkpoint are fatal; the 33rd in-run compaction of a run is refused (A2) | V | One flaky turn, or enough hours, ends the work |
 | 5 | No loop or no-progress detection (A3) | V | Unbounded spend with no result |
 | 6 | No durable objective (A4) | V | Silent scope loss after N compactions |
 | 7 | `execute` structure (A5) | V | Makes 1–5 hard to fix safely |
