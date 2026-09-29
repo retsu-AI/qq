@@ -66,7 +66,7 @@ repository should not commit; this repository's `.gitignore` excludes
 | `reviewer_model` | `"PROVIDER/MODEL"` | none | model used for `supervised` approval and the final-answer audit |
 | `worker_model` | `"PROVIDER/MODEL"` | none | deprecated; use `delegation.roster` |
 | `organization` | string | none | which enrolled organization manifest applies (`qq org`) |
-| `max_output_tokens` | integer | `16384` | cap on generated tokens per model turn; a model's own limit applies if lower |
+| `max_output_tokens` | integer | `16384` | cap on generated tokens per model turn; a model's own limit applies if lower. One exception: when a turn is cut at this cap with nothing visible (all hidden reasoning) or right after a complete tool call, that one retry is sent with the cap doubled, up to the model's limit and never past a managed `policy.max_output_tokens`, at most once per run. Use `policy.max_output_tokens` for a hard ceiling; run budgets still bound spend |
 | `reasoning_effort` | `none` `minimal` `low` `medium` `high` `xhigh` `max` `default` | provider default | effort hint for reasoning models that accept one. `default` lets the provider choose. Any other value outside the model's known accepted set (catalog or discovery) fails at plan time naming the accepted ones; with no known set, a rejected value fails at the provider ([providers](providers.md)) |
 | `jev_review` | `off` `final` `enforce` | `off` | optional TypeSafe Jev checkpoints; see [`../runbooks/jev.md`](../runbooks/jev.md) |
 | `jev_routing` | bool | `false` | optional Jev model routing |

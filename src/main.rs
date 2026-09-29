@@ -389,28 +389,12 @@ async fn prepare_headless(
             runtime::RuntimeHandlerError::Sessions(error) => harness(error.to_string()),
         })?;
 
-    let reviewer_configured = approval_delegate_configured(
-        snapshot.reviewer_model().is_some(),
-        snapshot.jev_approval(),
-        snapshot
-            .profile(profile.as_str())
-            .and_then(|selected| selected.jev_approval()),
+    let (reviewer_configured, configured_delegate) = headless_delegate_options(
+        &snapshot,
+        &profile,
         overrides_jev_approval,
+        overrides_approval_delegate,
     );
-    // The run's `approval_delegate` with plan-compile precedence: override,
-    // selected profile, top level; absent is `by_mode`.
-    let configured_delegate = match overrides_approval_delegate
-        .or_else(|| {
-            snapshot
-                .profile(profile.as_str())
-                .and_then(|selected| selected.approval_delegate())
-        })
-        .or(snapshot.approval_delegate())
-    {
-        None => qq_protocol::ApprovalDelegate::ByMode,
-        Some(qq_config::ApprovalDelegateSetting::On) => qq_protocol::ApprovalDelegate::On,
-        Some(qq_config::ApprovalDelegateSetting::Off) => qq_protocol::ApprovalDelegate::Off,
-    };
     let options = headless::HeadlessOptions {
         prompt: args.prompt,
         workspace,
@@ -1284,6 +1268,17 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
             if let Some(delegate) = profile.approval_delegate() {
                 parts.push(format!("approval_delegate={}", delegate.as_str()));
             }
+            // A profile's Jev settings override the top level for its runs;
+            // listed so `qq config show` answers what a profile will do.
+            if let Some(enabled) = profile.jev_approval() {
+                parts.push(format!("jev_approval={enabled}"));
+            }
+            if let Some(enabled) = profile.jev_routing() {
+                parts.push(format!("jev_routing={enabled}"));
+            }
+            if let Some(mode) = profile.jev_review() {
+                parts.push(format!("jev_review={}", mode.as_str()));
+            }
             if let Some(tokens) = profile.max_output_tokens() {
                 parts.push(format!("max_output_tokens={tokens}"));
             }
@@ -1481,6 +1476,41 @@ fn trust_notices(pending: &[config::PendingTrust]) -> Vec<qq_tui::PendingTrustNo
                 .collect(),
         })
         .collect()
+}
+
+/// The headless run's delegate options, from the loaded configuration as
+/// `prepare_headless` builds them: whether a delegate exists (a
+/// `reviewer_model`, or Jev as the run resolves `jev_approval`), and the
+/// resolved `approval_delegate` (override, then the selected profile, then
+/// the top level; absent is `by_mode`).
+fn headless_delegate_options(
+    snapshot: &config::ConfigSnapshot,
+    profile: &qq_protocol::AgentProfileId,
+    override_jev_approval: Option<bool>,
+    override_approval_delegate: Option<config::ApprovalDelegateSetting>,
+) -> (bool, qq_protocol::ApprovalDelegate) {
+    let selected = snapshot.profile(profile.as_str());
+    let reviewer_configured = approval_delegate_configured(
+        snapshot.reviewer_model().is_some(),
+        snapshot.jev_approval(),
+        selected
+            .as_ref()
+            .and_then(config::AgentProfileConfig::jev_approval),
+        override_jev_approval,
+    );
+    let configured_delegate = match override_approval_delegate
+        .or_else(|| {
+            selected
+                .as_ref()
+                .and_then(config::AgentProfileConfig::approval_delegate)
+        })
+        .or(snapshot.approval_delegate())
+    {
+        None => qq_protocol::ApprovalDelegate::ByMode,
+        Some(config::ApprovalDelegateSetting::On) => qq_protocol::ApprovalDelegate::On,
+        Some(config::ApprovalDelegateSetting::Off) => qq_protocol::ApprovalDelegate::Off,
+    };
+    (reviewer_configured, configured_delegate)
 }
 
 /// Whether a held call of a headless run has an approval delegate to wait

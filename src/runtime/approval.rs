@@ -32,18 +32,17 @@ pub struct JevApprovalReviewer {
     fallback: Arc<dyn ApprovalReviewer>,
     endpoint: Arc<str>,
     /// The TypeSafe client for the current credential epoch. The key is
-    /// global, so one entry: a rotated or newly stored key replaces it. A
-    /// missing key is observed at the first opted-in hold and remembered for
-    /// the epoch, not at startup, so an operator who set `jev_approval: on`
-    /// without a key still gets the reviewer and the human.
+    /// global, so one entry: a rotated or newly stored key replaces it. Only
+    /// a built client is cached; a missing key or a failed read is retried
+    /// at the next opted-in hold, so an operator who set `jev_approval: on`
+    /// without a key still gets the reviewer and the human meanwhile.
     cache: Arc<std::sync::Mutex<Option<CachedJevClient>>>,
 }
 
 #[derive(Clone)]
 struct CachedJevClient {
     epoch: qq_protocol::CredentialEpoch,
-    /// `Err` is remembered too so a missing key is not re-read on every hold.
-    client: Result<reqwest::Client, &'static str>,
+    client: reqwest::Client,
 }
 
 impl JevApprovalReviewer {
@@ -84,21 +83,25 @@ impl JevApprovalReviewer {
             && let Some(cached) = cache.as_ref()
             && cached.epoch == epoch
         {
-            return cached.client.clone();
+            return Ok(cached.client.clone());
         }
         let client =
             typesafe_http_client(&self.factory.inner.credentials).map_err(|error| match error {
                 RuntimeBuildError::JevKeyRequired => "no TypeSafe key is stored",
                 RuntimeBuildError::JevKeyInvalid => "the TypeSafe key is not a valid header",
                 _ => "the TypeSafe client could not be constructed",
-            });
+            })?;
+        // Only a built client is cached. A failure (a keyring that was
+        // briefly locked, a client builder error, a key added outside the
+        // store) is retried at the next opted-in hold rather than pinned for
+        // the whole credential epoch, which only durable writes advance.
         if let Ok(mut cache) = self.cache.lock() {
             *cache = Some(CachedJevClient {
                 epoch,
                 client: client.clone(),
             });
         }
-        client
+        Ok(client)
     }
 }
 
@@ -693,6 +696,73 @@ mod tests {
         assert!(reason.contains("no TypeSafe key is stored"), "{reason}");
         assert!(reason.contains("reviewer unavailable"), "{reason}");
         assert_eq!(verdict.spend.cost_usd_nanos, Some(0));
+    }
+
+    /// A keyring whose first `n` reads fail as unavailable (a locked or busy
+    /// store), then behaves like memory.
+    struct FlakyKeyring {
+        failures: std::sync::atomic::AtomicUsize,
+        inner: crate::runtime::tests::MemoryKeyring,
+    }
+
+    impl qq_auth::KeyringBackend for FlakyKeyring {
+        fn get(&self, name: &str) -> Result<Vec<u8>, qq_auth::KeyringError> {
+            use std::sync::atomic::Ordering;
+            if self
+                .failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(qq_auth::KeyringError::Unavailable);
+            }
+            self.inner.get(name)
+        }
+        fn set(&self, name: &str, secret: &[u8]) -> Result<(), qq_auth::KeyringError> {
+            self.inner.set(name, secret)
+        }
+        fn remove(&self, name: &str) -> Result<(), qq_auth::KeyringError> {
+            self.inner.remove(name)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transient_key_read_failure_is_retried_at_the_next_hold() {
+        // Review (#214): the first opted-in hold's failure was cached for the
+        // whole credential epoch, which only durable writes advance, so a
+        // keyring that was briefly unavailable disabled Jev until restart.
+        let asked = Arc::new(StdMutex::new(Vec::new()));
+        let fallback = Arc::new(RecordingFallback {
+            asked: Arc::clone(&asked),
+            verdict: ReviewVerdict::free(ReviewDecision::Escalate {
+                reason: "reviewer unavailable".to_owned(),
+            }),
+        });
+        let keyring: Arc<dyn qq_auth::KeyringBackend> = Arc::new(FlakyKeyring {
+            failures: std::sync::atomic::AtomicUsize::new(1),
+            inner: crate::runtime::tests::MemoryKeyring::default(),
+        });
+        let writer: Arc<dyn qq_auth::KeyringBackend> = Arc::clone(&keyring);
+        let (factory, workspace) = factory_with(OPTED_IN, Some(b"test-key"), keyring, writer);
+        let reviewer =
+            JevApprovalReviewer::new(factory, fallback).with_endpoint("http://127.0.0.1:1/unused");
+
+        let first = reviewer.review(request_in(&workspace)).await;
+        assert_eq!(
+            first.spend.cost_usd_nanos,
+            Some(0),
+            "no Jev attempt: key unreadable"
+        );
+        assert!(
+            reviewer.cache.lock().unwrap().is_none(),
+            "the failure is not cached"
+        );
+
+        let second = reviewer.review(request_in(&workspace)).await;
+        assert_eq!(
+            second.spend.cost_usd_nanos, None,
+            "Jev is attempted once the keyring recovers, with no credential write"
+        );
+        assert!(reviewer.cache.lock().unwrap().is_some());
     }
 
     #[tokio::test]
