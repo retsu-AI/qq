@@ -225,17 +225,28 @@ mod tests {
     const NOT_QQ_VERSION: &str = "<!-- not-qq-version -->";
 
     /// Every QQ version a user reads — install pins, `--version` samples,
-    /// release tags — is the workspace version, and `cargo xtask release`
-    /// rewrites them in the bump PR. A version that is not QQ's (an upstream
-    /// client, an example pack) sits on a line marked `NOT_QQ_VERSION`; the
-    /// exemption is that exact line, not every equal token on the page.
+    /// release tags — is one version, and it is this build's or the release
+    /// before it. The bump PR leaves the pins on the previous release (the
+    /// site deploys on merge, before the new tag's assets exist); once they
+    /// are published, `cargo xtask release --docs` moves them all at once.
+    /// A version that is not QQ's (an upstream client, an example pack) sits
+    /// on a line marked `NOT_QQ_VERSION`; the exemption is that exact line.
     #[test]
-    fn every_product_version_in_the_guide_is_this_release() {
+    fn every_product_version_in_the_guide_is_one_current_release() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let readme = fs::read_to_string(root.join("README.md")).unwrap();
+        let changelog = fs::read_to_string(root.join("CHANGELOG.md")).unwrap();
         let mut pages = guide_pages();
         pages.push(("README.md".to_owned(), readme));
         let current = env!("CARGO_PKG_VERSION");
+        // Release headings are `## X.Y.Z — date`, newest first. The previous
+        // release is the first one that is not this build's version.
+        let previous = changelog
+            .lines()
+            .filter_map(|line| line.strip_prefix("## ")?.split(' ').next())
+            .find(|version| *version != current);
+        let allowed: Vec<&str> = [Some(current), previous].into_iter().flatten().collect();
+        let mut found = BTreeSet::new();
         let mut stale = Vec::new();
         let mut marked = 0;
         for (name, text) in &pages {
@@ -243,9 +254,12 @@ mod tests {
             for (line, token) in version_tokens(text) {
                 if lines[line - 1].contains(NOT_QQ_VERSION) {
                     marked += 1;
-                } else if token != current {
+                    continue;
+                }
+                if !allowed.contains(&token) {
                     stale.push(format!("  {name}:{line}: {token}"));
                 }
+                found.insert(token);
             }
         }
         assert!(
@@ -254,9 +268,16 @@ mod tests {
         );
         assert!(
             stale.is_empty(),
-            "these name a QQ version other than {current} (this build); use {current}, or \
-             end the line with `{NOT_QQ_VERSION}` if the string is not QQ's version:\n{}",
+            "these name a QQ version other than {} (this build, or the release before it \
+             until `cargo xtask release --docs` moves the pins); end the line with \
+             `{NOT_QQ_VERSION}` if the string is not QQ's version:\n{}",
+            allowed.join(" or "),
             stale.join("\n")
+        );
+        assert!(
+            found.len() <= 1,
+            "the guide names more than one QQ version ({found:?}); move every pin together \
+             with `cargo xtask release --docs`"
         );
     }
 

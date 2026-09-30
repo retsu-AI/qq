@@ -25,15 +25,23 @@ pub struct ReleaseArgs {
     /// workspace version. Bumps, writes the `CHANGELOG.md` section from the
     /// Conventional Commit subjects since the last tag, and commits on the
     /// current branch.
-    #[arg(required_unless_present = "tag", conflicts_with = "tag")]
+    #[arg(
+        required_unless_present_any = ["tag", "docs"],
+        conflicts_with_all = ["tag", "docs"]
+    )]
     version: Option<String>,
     /// Update `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md` but do not commit.
     #[arg(long, conflicts_with = "tag")]
     no_commit: bool,
     /// Tag the checked-out `main` with the manifest version. Run after the
     /// bump PR has merged and `main` is pulled.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "docs")]
     tag: bool,
+    /// Move the guide's and README's version pins from the previous release
+    /// to the manifest version. Run once the release's assets are
+    /// published (runbook step 6); writes the files and does not commit.
+    #[arg(long)]
+    docs: bool,
 }
 
 #[derive(Debug, Error)]
@@ -61,6 +69,8 @@ pub enum ReleaseError {
     },
     #[error("`[workspace.package] version = \"...\"` not found in Cargo.toml")]
     VersionLineMissing,
+    #[error("CHANGELOG.md has no release before {0}; nothing to move the guide from")]
+    NoPreviousRelease(Version),
     #[error("the worktree has uncommitted changes; commit or stash them first")]
     DirtyWorktree,
     #[error("tag v{0} already exists")]
@@ -143,6 +153,9 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
     if args.tag {
         return tag_main(&root, &manifest);
     }
+    if args.docs {
+        return move_doc_pins(&root, &manifest);
+    }
 
     let requested_text = args.version.as_deref().unwrap_or_default();
     let requested = Version::parse(requested_text)
@@ -167,25 +180,6 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
     // Every member inherits `version.workspace = true`; refresh their lock
     // entries without touching dependency resolution.
     cargo(&root, &["update", "--workspace", "--offline"])?;
-
-    // Install pins and `--version` samples in the guide follow the release.
-    let mut rewritten_docs = Vec::new();
-    for path in versioned_doc_paths(&root)? {
-        let text = std::fs::read_to_string(&path).map_err(|source| ReleaseError::Read {
-            path: path.clone(),
-            source,
-        })?;
-        let (updated, count) = rewrite_version_tokens(&text, current, requested);
-        if count == 0 {
-            continue;
-        }
-        std::fs::write(&path, updated).map_err(|source| ReleaseError::Write {
-            path: path.clone(),
-            source,
-        })?;
-        let relative = path.strip_prefix(&root).unwrap_or(&path).to_owned();
-        rewritten_docs.push((relative, count));
-    }
 
     // The changelog is read from git before anything is committed, so the
     // bump commit itself is never listed.
@@ -214,24 +208,22 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
     if args.no_commit {
         println!("bumped {current} -> {requested} (not committed)");
         println!("  {} entries in {}", subjects.len(), changelog::FILE_NAME);
-        for (path, count) in &rewritten_docs {
-            println!("  {}: {count} version reference(s)", path.display());
-        }
         return Ok(());
     }
 
     let message = format!("chore(release): v{requested}");
-    let mut staged: Vec<String> = ["Cargo.toml", "Cargo.lock", changelog::FILE_NAME]
-        .map(str::to_owned)
-        .to_vec();
-    staged.extend(
-        rewritten_docs
-            .iter()
-            .map(|(path, _)| path.to_string_lossy().into_owned()),
-    );
-    let mut add = vec!["add", "--"];
-    add.extend(staged.iter().map(String::as_str));
-    git(&root, &add, Stdio::inherit())?.success_or("git", "add")?;
+    git(
+        &root,
+        &[
+            "add",
+            "--",
+            "Cargo.toml",
+            "Cargo.lock",
+            changelog::FILE_NAME,
+        ],
+        Stdio::inherit(),
+    )?
+    .success_or("git", "add")?;
     git(&root, &["commit", "-q", "-m", &message], Stdio::inherit())?.success_or("git", "commit")?;
 
     println!("bumped {current} -> {requested}");
@@ -241,17 +233,63 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
         changelog::FILE_NAME,
         subjects.len()
     );
-    for (path, count) in &rewritten_docs {
-        println!("  {}: {count} version reference(s)", path.display());
-    }
     println!("next: push this branch, open a PR titled \"{message}\", merge it, then");
     println!("      git switch main && git pull --ff-only && cargo xtask release --tag");
     Ok(())
 }
 
+/// Moves every whole token of the previous release (the newest
+/// `CHANGELOG.md` release below the manifest version) in [`VERSIONED_DOCS`]
+/// to the manifest version. The bump PR leaves the pins alone, because the
+/// site deploys on merge before the tag's assets exist; docs-truth accepts
+/// either version until this runs.
+fn move_doc_pins(root: &Path, manifest: &str) -> Result<(), ReleaseError> {
+    let (_, current) = bump_workspace_version(manifest, Version::parse("0.0.0").unwrap())?;
+    let changelog_path = root.join(changelog::FILE_NAME);
+    let changelog =
+        std::fs::read_to_string(&changelog_path).map_err(|source| ReleaseError::Read {
+            path: changelog_path,
+            source,
+        })?;
+    let previous =
+        previous_release(&changelog, current).ok_or(ReleaseError::NoPreviousRelease(current))?;
+    let mut moved = 0;
+    for path in versioned_doc_paths(root)? {
+        let text = std::fs::read_to_string(&path).map_err(|source| ReleaseError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        let (updated, count) = rewrite_version_tokens(&text, previous, current);
+        if count == 0 {
+            continue;
+        }
+        std::fs::write(&path, updated).map_err(|source| ReleaseError::Write {
+            path: path.clone(),
+            source,
+        })?;
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        println!("  {}: {count} version reference(s)", relative.display());
+        moved += count;
+    }
+    println!("moved {moved} guide pin(s) {previous} -> {current} (not committed)");
+    println!("next: update the doctor and --version samples' commit and date, then open a");
+    println!("      docs(guide): PR");
+    Ok(())
+}
+
+/// The newest `## X.Y.Z — date` release in `changelog` below `current`.
+fn previous_release(changelog: &str, current: Version) -> Option<Version> {
+    changelog
+        .lines()
+        .filter_map(|line| Version::parse(line.strip_prefix("## ")?.split(' ').next()?))
+        .filter(|version| *version < current)
+        .max()
+}
+
 /// Files whose QQ version strings follow the release: the user guide and the
 /// README. The root crate's docs-truth test fails when any of them names a
-/// version other than the manifest's, so the bump must carry them along.
+/// version other than the manifest's or the previous release's, and
+/// `--docs` moves them.
 const VERSIONED_DOCS: [&str; 2] = ["docs/guide", "README.md"];
 
 /// Marks a line whose version strings are not QQ's (an upstream client, an
@@ -541,6 +579,22 @@ mod tests {
             updated,
             format!("pack version: \"0.1.4\", {NOT_QQ_VERSION}\nqq 0.2.0\n")
         );
+    }
+
+    #[test]
+    fn previous_release_is_the_newest_changelog_release_below_the_manifest() {
+        let changelog = "# Changelog\n\n## 0.1.6 — 2026-10-01\n\n### Fixes\n- x\n\n\
+                         ## 0.1.5 — 2026-09-29\n\n## 0.1.4 — 2026-09-22\n";
+        let version = |text| Version::parse(text).unwrap();
+        assert_eq!(
+            previous_release(changelog, version("0.1.6")),
+            Some(version("0.1.5"))
+        );
+        assert_eq!(
+            previous_release(changelog, version("0.1.5")),
+            Some(version("0.1.4"))
+        );
+        assert_eq!(previous_release(changelog, version("0.1.4")), None);
     }
 
     #[test]
