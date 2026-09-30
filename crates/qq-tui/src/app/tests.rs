@@ -4570,7 +4570,7 @@ fn trust_prompt_owns_input_and_maps_t_s_q_to_effects() {
             .is_empty()
     );
     let effects: Vec<Effect> = app
-        .note_trust_failure("trust state unavailable")
+        .note_trust_failure("trust state unavailable".to_owned().into())
         .into_iter()
         .collect();
     assert_eq!(effects, [Effect::Redraw(Redraw::Immediate)]);
@@ -4591,7 +4591,7 @@ fn trust_prompt_owns_input_and_maps_t_s_q_to_effects() {
             Effect::ResolveTrust(TrustChoice::Session),
         ]
     );
-    app.note_trust_failure("still no");
+    app.note_trust_failure("still no".to_owned().into());
 
     for code in [KeyCode::Char('q'), KeyCode::Esc] {
         let effects: Vec<Effect> = app

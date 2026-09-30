@@ -100,7 +100,7 @@ async fn prune_deletes_only_idle_sessions_without_messages() {
 fn version_one_migration_is_atomic_and_marks_historical_cost_unknown() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
-    let connection = Connection::open(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -186,7 +186,7 @@ fn version_five_migration_defaults_existing_messages_to_turn_zero() {
     {
         // A version-5 store whose messages table predates turn_ordinal,
         // holding one completed legacy run.
-        let connection = Connection::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -299,7 +299,7 @@ fn version_six_migration_adds_the_display_column_and_keeps_existing_calls_bare()
     {
         // A version-6 store whose tool_calls table predates display_json,
         // holding one completed edit call.
-        let connection = Connection::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -367,7 +367,7 @@ fn version_seven_migration_adds_compaction_storage_and_run_kinds() {
     {
         // A version-7 store whose runs table predates internal run kinds
         // and that has no compaction storage.
-        let connection = Connection::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -424,7 +424,7 @@ fn version_ten_migration_adds_context_and_child_ownership_without_guessing() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     {
-        let connection = Connection::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -513,7 +513,7 @@ fn version_eleven_migration_adds_child_ownership_and_preserves_context() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     {
-        let connection = Connection::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -571,7 +571,7 @@ fn version_twelve_migration_adds_prompt_identity_without_guessing() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     {
-        let connection = Connection::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -626,7 +626,7 @@ fn version_twelve_migration_adds_prompt_identity_without_guessing() {
 fn version_thirteen_migration_adds_per_turn_audit_columns() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
-    let connection = Connection::open(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -670,7 +670,7 @@ fn version_thirteen_migration_adds_per_turn_audit_columns() {
 fn version_fourteen_migration_adds_chunks_and_incremental_capacity_columns() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
-    let connection = Connection::open(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -738,7 +738,7 @@ fn version_fourteen_migration_adds_chunks_and_incremental_capacity_columns() {
 fn version_fourteen_store_with_implicit_primary_key_outbox_migrates() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
-    let connection = Connection::open(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -2741,7 +2741,7 @@ fn r4_append_only_chunk_scaling_diagnostic() {
 fn version_fourteen_store_missing_audit_columns_is_rejected() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
-    let connection = Connection::open(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -2826,6 +2826,175 @@ fn malformed_version_thirty_one_routing_column_is_rejected() {
         open_database(&path),
         Err(SessionRuntimeError::CONSTRAINT)
     ));
+}
+
+#[tokio::test]
+async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
+    // Release gate (ENG-975): v0.1.4 shipped schema 35. A store holding a
+    // real session and a completed prompt must open under the current
+    // runtime, migrate forward exactly once, keep its transcript, and accept
+    // the post-35 commands (the session approval delegate, schema 36).
+    let version = |connection: &rusqlite::Connection| {
+        connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (workspace_id, session_id) = {
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(path.clone()),
+            Arc::new(ScriptedLoader),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let CommandOutcome::SessionCreated { session_id } =
+            create_session(&runtime, workspace_id, None).await.outcome
+        else {
+            panic!("unexpected receipt")
+        };
+        let queued = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::text("written by v0.1.4".to_owned())],
+                    limits: qq_protocol::RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: queued.committed_through,
+            })
+            .unwrap();
+        collect_through_finished(&mut events).await;
+        runtime.shutdown().await.unwrap();
+        (workspace_id, session_id)
+    };
+
+    // Rewind the file to the v0.1.4 shape: no session delegate column,
+    // schema_version 35.
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute("ALTER TABLE sessions DROP COLUMN approval_delegate", [])
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE metadata SET value = '35' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+    }
+
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(path.clone()),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(version(&connection), STORE_SCHEMA_VERSION.to_string());
+        let delegate: Option<String> = connection
+            .query_row(
+                "SELECT approval_delegate FROM sessions WHERE id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(delegate, None, "no session override is invented");
+    }
+    let focused_transcript = |snapshot: &qq_protocol::WorkspaceSnapshot| {
+        snapshot
+            .focused
+            .as_ref()
+            .expect("the session is focused")
+            .messages
+            .iter()
+            .map(|message| (message.role, message.state, message.output.clone()))
+            .collect::<Vec<_>>()
+    };
+    let snapshot = runtime
+        .snapshot(SnapshotRequest {
+            workspace_id,
+            focused_session_id: Some(session_id),
+            include_sessions: Vec::new(),
+            session_limit: 8,
+            message_limit: 8,
+        })
+        .await
+        .unwrap();
+    assert_eq!(snapshot.sessions.len(), 1);
+    // The message rows themselves, not the summary title (which copies the
+    // first prompt and would survive lost history).
+    let migrated = focused_transcript(&snapshot);
+    assert_eq!(migrated.len(), 2, "{migrated:?}");
+    assert_eq!(migrated[0].0, qq_protocol::MessageRole::User);
+    assert_eq!(migrated[0].2, "written by v0.1.4");
+    assert_eq!(migrated[1].0, qq_protocol::MessageRole::Assistant);
+    assert_eq!(migrated[1].1, qq_protocol::MessageState::Complete);
+    assert!(!migrated[1].2.is_empty(), "the assistant reply survives");
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetApprovalDelegate {
+                session_id,
+                delegate: Some(qq_protocol::ApprovalDelegate::Off),
+            },
+        )
+        .await
+        .unwrap();
+    // `close` releases the store's single-writer lock; `shutdown` alone
+    // stops the scheduler but keeps the store open.
+    runtime.close().await.unwrap();
+
+    // Reopening the upgraded store is a no-op: the version, the delegate
+    // written above and the transcript all come back unchanged.
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(path.clone()),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(version(&connection), STORE_SCHEMA_VERSION.to_string());
+        let delegate: Option<String> = connection
+            .query_row(
+                "SELECT approval_delegate FROM sessions WHERE id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(delegate.as_deref(), Some("off"));
+    }
+    let reopened = runtime
+        .snapshot(SnapshotRequest {
+            workspace_id,
+            focused_session_id: Some(session_id),
+            include_sessions: Vec::new(),
+            session_limit: 8,
+            message_limit: 8,
+        })
+        .await
+        .unwrap();
+    assert_eq!(focused_transcript(&reopened), migrated);
+    assert_eq!(
+        reopened.focused.as_ref().unwrap().summary.approval_delegate,
+        Some(qq_protocol::ApprovalDelegate::Off)
+    );
+    runtime.shutdown().await.unwrap();
 }
 
 #[test]

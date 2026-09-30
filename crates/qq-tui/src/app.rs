@@ -105,8 +105,28 @@ pub struct TrustResolved {
 
 /// The composition root's answer to a trust choice. Runs off the event loop;
 /// `Err` is shown as an error notice and the prompt stays.
-pub type TrustFuture =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<TrustResolved, String>> + Send>>;
+pub type TrustFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<TrustResolved, TrustFailure>> + Send>,
+>;
+
+/// Why a trust choice was not applied. `changed` carries the current
+/// pending files when they differ from what the prompt showed (a file was
+/// edited while it was open): the prompt is redrawn with them and nothing
+/// was trusted, so the user answers again for what they now see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustFailure {
+    pub reason: String,
+    pub changed: Option<Vec<PendingTrustNotice>>,
+}
+
+impl From<String> for TrustFailure {
+    fn from(reason: String) -> Self {
+        Self {
+            reason,
+            changed: None,
+        }
+    }
+}
 
 /// Resolves a [`TrustChoice`]. Only a client that owns the server (and so
 /// can read and record trust for the files on this host) has one; a client
@@ -542,10 +562,14 @@ impl App {
     }
 
     /// The trust choice could not be resolved; the prompt stays and the
-    /// reason shows as an error.
-    pub fn note_trust_failure(&mut self, reason: &str) -> Effects {
+    /// reason shows as an error. When the files changed under the prompt it
+    /// now lists the current set.
+    pub fn note_trust_failure(&mut self, failure: TrustFailure) -> Effects {
         self.trust_resolving = false;
-        self.set_error_for(None, reason.to_owned());
+        if let Some(changed) = failure.changed {
+            self.pending_trust = changed;
+        }
+        self.set_error_for(None, failure.reason);
         Effects::redraw(Redraw::Immediate)
     }
 

@@ -1674,6 +1674,56 @@ fn pending_trust_scans_without_writing_and_declarations_name_what_is_admitted() 
 }
 
 #[test]
+fn a_reviewed_grant_refuses_content_edited_after_it_was_shown() {
+    // The TUI prompt shows a digest; the key press must not trust a newer
+    // one. Nothing is written, and the error carries the current set.
+    let tree = TempTree::new();
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    let request = LoadRequest::new(tree.path("work"));
+    let loader = tree.loader();
+    let shown: Vec<ProcessTrust> = loader
+        .pending_trust(&request)
+        .unwrap()
+        .iter()
+        .filter_map(PendingTrust::reviewed)
+        .collect();
+    assert_eq!(shown.len(), 1);
+
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6", mcp: {"x": Stdio(command: "x")})"#,
+    );
+    let Err(ConfigError::TrustChanged { pending }) = loader.grant_reviewed_trust(&request, &shown)
+    else {
+        panic!("expected TrustChanged");
+    };
+    assert_eq!(pending.len(), 1);
+    assert!(!tree.path("data/trust.ron").exists());
+    assert!(matches!(
+        loader.reviewed_pending_trust(&request, &shown),
+        Err(ConfigError::TrustChanged { .. })
+    ));
+
+    // Answering for the current content records it.
+    let current: Vec<ProcessTrust> = pending.iter().filter_map(PendingTrust::reviewed).collect();
+    assert_eq!(
+        loader.grant_reviewed_trust(&request, &current).unwrap(),
+        pending
+    );
+    assert!(loader.pending_trust(&request).unwrap().is_empty());
+    // Nothing pending: any review (even the stale one) is a no-op success.
+    assert!(
+        loader
+            .grant_reviewed_trust(&request, &shown)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn process_trust_admits_pending_files_without_writing_and_repends_on_edit() {
     // OB7 "this session": the request carries path + digest; the load
     // succeeds, the durable state is untouched, and a change to the

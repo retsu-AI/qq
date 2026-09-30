@@ -6,7 +6,10 @@
 //! whether each child is excluded. Traversal order and bounds are the calling
 //! tool's business; this module owns what "ignored" means.
 
-use std::time::{Instant, SystemTime};
+use std::{
+    io::Read as _,
+    time::{Instant, SystemTime},
+};
 
 use ignore::{
     Match,
@@ -193,10 +196,40 @@ fn directory_matcher(workspace: &Workspace, dir: &str) -> Option<Gitignore> {
     builder.build().ok()
 }
 
+/// Largest ignore file read. Real ones are a few KiB; a larger one is almost
+/// certainly not a pattern list, and reading it would stall every walk of
+/// its directory. An oversized file is ignored as if absent.
+pub(crate) const MAX_IGNORE_FILE_BYTES: u64 = 256 * 1024;
+
 fn add_ignore_file(workspace: &Workspace, builder: &mut GitignoreBuilder, path: &str) -> bool {
-    let Ok(content) = workspace.root().read_to_string(path) else {
+    // Open first, then check what was opened, so the file cannot be swapped
+    // between a check and the open. The open neither follows a symlink (a
+    // symlink is not followed anywhere else in the walk) nor blocks on a FIFO
+    // or device; the type and size checks then run on the open descriptor.
+    // Both are set on cap-primitives' own options, not as raw flags: its
+    // manual path resolution (macOS, or Linux without openat2) honours only
+    // its own `follow` setting and would otherwise follow the link.
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true);
+    options._cap_fs_ext_follow(cap_primitives::fs::FollowSymlinks::No);
+    options._cap_fs_ext_nonblock(true);
+    let Ok(file) = workspace.root().open_with(path, &options) else {
         return false;
     };
+    match file.metadata() {
+        Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_IGNORE_FILE_BYTES => {}
+        Ok(_) | Err(_) => return false,
+    }
+    // The size was a hint: bound the read in case the file grew since.
+    let mut content = String::new();
+    if file
+        .take(MAX_IGNORE_FILE_BYTES + 1)
+        .read_to_string(&mut content)
+        .is_err()
+        || content.len() as u64 > MAX_IGNORE_FILE_BYTES
+    {
+        return false;
+    }
     for line in content.lines() {
         // A malformed pattern is skipped, as git does; the rest still apply.
         let _ = builder.add_line(None, line);
@@ -406,5 +439,41 @@ impl ScanBudget {
             return Some(StopReason::Time);
         }
         None
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ignore_file_swapped_for_a_fifo_or_link_after_listing_is_not_read() {
+        // Review (#217): the type check used to run before the open, so a
+        // file replaced by a FIFO in between blocked the walk at open. The
+        // open is now non-blocking and no-follow, and the type is checked on
+        // the opened descriptor. These are the states such a swap leaves.
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(root.join(".gitignore"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::write(root.join("outside-patterns"), "*.md\n").unwrap();
+        std::os::unix::fs::symlink(root.join("outside-patterns"), root.join(".ignore")).unwrap();
+        let workspace = Workspace::open(&root).unwrap();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut builder = GitignoreBuilder::new("");
+            let fifo = add_ignore_file(&workspace, &mut builder, ".gitignore");
+            let link = add_ignore_file(&workspace, &mut builder, ".ignore");
+            let _ = sender.send((fifo, link));
+        });
+        let (fifo, link) = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("opening a FIFO ignore file must not block");
+        assert!(!fifo, "a FIFO is not an ignore file");
+        assert!(!link, "a symlinked ignore file is not followed");
     }
 }

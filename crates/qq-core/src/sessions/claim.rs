@@ -131,6 +131,9 @@ pub(super) struct ClaimedRun {
     pub(super) reasoning_effort: Option<qq_provider::ReasoningEffort>,
     pub(super) checkpoint: Option<CheckpointSelection>,
     pub(super) routing: Option<RoutingSelection>,
+    /// The parent's first approval delegate, inherited by an owned child;
+    /// `None` for a root or user-initiated run, which resolves config.
+    pub(super) approval_delegate: Option<ApprovalDelegateSelection>,
     /// State the executor needs before its first provider request, read in
     /// the claim transaction so it needs no further store round trips: the
     /// cancellation flag as of the claim, the session's known file hashes,
@@ -172,6 +175,7 @@ impl ClaimedRun {
             reasoning_effort: self.reasoning_effort,
             checkpoint: self.checkpoint.clone(),
             routing: self.routing.clone(),
+            approval_delegate: self.approval_delegate.clone(),
             cancel_requested: false,
             file_state: Vec::new(),
             pending_steering: Vec::new(),
@@ -585,8 +589,8 @@ pub(super) fn reserve_next_run_recoverable(
         }
         None => (false, false),
     };
-    let (checkpoint, routing) = if user_initiated || !has_owner {
-        (None, None)
+    let (checkpoint, routing, approval_delegate) = if user_initiated || !has_owner {
+        (None, None, None)
     } else {
         #[derive(serde::Deserialize)]
         struct ParentReview {
@@ -594,6 +598,8 @@ pub(super) fn reserve_next_run_recoverable(
             checkpoint: Option<String>,
             #[serde(default)]
             routing: Option<String>,
+            #[serde(default)]
+            approval_delegate: Option<String>,
         }
         let identity = parent_descriptor
             .as_deref()
@@ -609,6 +615,11 @@ pub(super) fn reserve_next_run_recoverable(
                 identity
                     .as_ref()
                     .and_then(|descriptor| descriptor.routing.as_deref()),
+            )),
+            Some(ApprovalDelegateSelection::from_identity(
+                identity
+                    .as_ref()
+                    .and_then(|descriptor| descriptor.approval_delegate.as_deref()),
             )),
         )
     };
@@ -750,6 +761,7 @@ pub(super) fn reserve_next_run_recoverable(
         reasoning_effort,
         checkpoint,
         routing,
+        approval_delegate,
         approval_mode,
         depth,
         root_run_id,

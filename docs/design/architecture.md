@@ -355,7 +355,11 @@ the vendor segment of the gateway id), the compiled default would be spent on
 hidden reasoning before any visible output, so the wire cap is the catalog
 ceiling instead, still bounded by a managed `policy.max_output_tokens`. A
 `max_output_tokens` the operator set in any configuration layer or override is
-honoured verbatim; run budgets bound spend either way. A new session row pins
+honoured verbatim as the request cap; the one exception is the empty-truncation
+recovery below (§ run loop), which may send a single retry with the cap
+doubled toward the catalog limit, still bounded by a managed
+`policy.max_output_tokens`. A hard ceiling is the policy value, not the
+configured one; run budgets bound spend either way. A new session row pins
 `max_output_tokens` only when the cap has non-compiled provenance (a
 configuration layer, `--max-output-tokens`, a profile, a picker); the compiled
 default is never persisted as a choice. Rows from older releases that recorded
@@ -468,13 +472,14 @@ with runtime overrides first. A session pin (`/effort`, `set_session_effort`)
 takes precedence for that session's next run. Descriptor version 9 records the
 choice and its cache key distinguishes overrides. Every model turn uses the
 compiled choice; omission uses provider defaults, while explicit `none` requests
-disabled reasoning. This does not enable Jev. HTTP OpenAI Responses/Chat adapters carry
-effort; other adapter families reject it before credential lookup. Capability
-means transport support, not that every remote model accepts every effort value.
-The bundled catalog records the ladder each OpenAI-shaped route documents
-(`ModelMetadata::reasoning_efforts`, surfaced as `ModelDescriptor.reasoning_efforts`);
-Anthropic-shaped routes advertise none because their adapters never transmit
-effort. A pin outside a non-empty ladder is a plan-time `ReasoningEffortNotAdvertised`
+disabled reasoning and explicit `default` overrides a configured value with the
+provider's own choice. This does not enable Jev. HTTP OpenAI Responses/Chat
+adapters and Anthropic Messages (`output_config.effort`, `low` through `max`)
+carry effort; other adapter families reject it before credential lookup.
+Capability means transport support, not that every remote model accepts every
+effort value. The bundled catalog records the ladder each route documents
+(`ModelMetadata::reasoning_efforts`, surfaced as `ModelDescriptor.reasoning_efforts`),
+and Anthropic discovery fills it for live models. A pin outside a non-empty ladder is a plan-time `ReasoningEffortNotAdvertised`
 error naming the accepted values, so the operator sees it before the provider
 would fail the turn. An empty ladder is unknown, not unsupported, and is not
 checked.
@@ -736,14 +741,21 @@ message to keep role alternation, and issues the next turn with tools
 available. Context assembly replays that notice after every truncated turn so
 the durable transcript matches the requests the provider saw. Past the cap the
 run settles as `provider_output_truncated`, naming the limit and turn count. A
-turn cut at the output limit with nothing visible streamed (no text, refusal,
-or tool call: the whole cap went to hidden reasoning) is not continued, because
-there is nothing to continue and the resend would be byte-identical; the loop
-instead doubles
-the request's output cap toward the resolved model's ceiling once per run
-(`MAX_EMPTY_OUTPUT_RETRIES`) and, if the next turn is empty again or the cap
-was already at the ceiling, settles at once with the cause and both remedies
-(`max_output_tokens`, `reasoning_effort`) named. The summarizer applies the
+turn cut at the output limit with no text is not continued with a notice while
+its cap can still grow, because the resend would be byte-identical: the whole
+cap went to hidden reasoning, or the model streamed a complete tool call that
+the cut then dropped. The loop instead doubles the request's output cap once
+per run (`MAX_EMPTY_OUTPUT_RETRIES`) toward the plan's output ceiling: the
+catalog's model limit bounded by `policy.max_output_tokens`, which sits above
+the configured cap whenever the catalog knows the model (a plan without one
+cannot raise). When the raise is spent or unavailable, an all-reasoning turn
+settles at once with the cause, the ceiling, and the remedies that can work:
+`max_output_tokens` or `reasoning_effort` when the model limit binds, or
+`reasoning_effort` and the managed policy when `policy.max_output_tokens`
+binds. The count of consecutive empty turns it reports is reset by any turn
+that produced text or a complete call, so a raise taken for a call-then-cut
+turn is not attributed to reasoning; a turn that streamed a
+complete call is continued like any visible truncation. The summarizer applies the
 same rule and fails its step rather than continuing an empty reply. Such an
 empty truncated turn is persisted as truncated but replays as nothing, matching
 the live request. A provider pause with no text is resent, not treated as

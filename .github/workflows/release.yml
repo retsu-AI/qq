@@ -155,6 +155,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+          path: src
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -167,6 +172,23 @@ jobs:
           cat ./*.sha256 > SHA256SUMS
           rm ./*.sha256
           ls -la
+      # The release body is this version's CHANGELOG.md section (upgrade
+      # notes, contract changes, entries) above GitHub's generated notes, so
+      # a breaking PATCH release (ADR-0051) ships its upgrade steps to users.
+      - name: Extract release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.verify.outputs.version }}"
+          awk -v heading="## ${version} " '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' src/CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "CHANGELOG.md has no section for ${version}" >&2
+            exit 1
+          fi
       - name: Create release
         shell: bash
         env:
@@ -176,6 +198,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "qq v${{ needs.verify.outputs.version }}" \
+            --notes-file notes.md \
             --generate-notes \
             --verify-tag \
             dist/*
