@@ -1,8 +1,8 @@
 # ADR-0053 — Decision models get a provider seam in `qq-provider` and their own `qq-decision` crate
 
-**Status:** Proposed
+**Status:** Accepted 2026-09-30 (owner decision on PR #231: reverse the no-new-crate rule)
 **Date:** 2026-09-30
-**Deciders:** lead; second reviewer required (crate boundary, approval authority)
+**Deciders:** owner (accepted); a second reviewer still reviews DM1's crate boundary and any change to approval authority
 **Implements:** [decision-model plan](../plans/decision-models.md) DM1–DM8;
 design [`decision-models.md` § 5–6](../design/decision-models.md#5-architecture).
 Reverses the Jev plan's "no new crates, no decision framework" non-goal and

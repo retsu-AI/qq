@@ -75,4 +75,4 @@ may append a **request** row; only root changes a request's status.
 | 0051 | 0ver product versioning; compatibility carried by contract versions | v0.1.5 release (ENG-969), PR #212 | Accepted 2026-09-28: `docs/adr/0051-zerover-product-versioning.md` |
 | 0052 | Jev approval activation from the compiled plan; supersedes ADR-0041 decision 5's activation | v0.1.5 release (ENG-971), PR #214 | Accepted 2026-09-28: `docs/adr/0052-jev-approval-activation-from-plan.md` |
 | 0054 | Progress means output: stall reports, a sub-agent answers its brief, non-blocking delegation | autonomous-core AP1–AP5 (ENG-978) | Proposed 2026-09-30: `docs/adr/0054-progress-means-output.md` |
-| 0053 | Decision-model provider seam in `qq-provider` and a `qq-decision` crate; reverses the Jev plan's no-new-crate non-goal | decision-models DM0 (ENG-985) | Proposed 2026-09-30: `docs/adr/0053-decision-model-seam-and-crate.md` |
+| 0053 | Decision-model provider seam in `qq-provider` and a `qq-decision` crate; reverses the Jev plan's no-new-crate non-goal | decision-models DM0 (ENG-985) | Accepted 2026-09-30 (owner, PR #231): `docs/adr/0053-decision-model-seam-and-crate.md` |

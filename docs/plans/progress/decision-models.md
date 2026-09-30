@@ -8,7 +8,7 @@ One writer per ledger per `workflow.md` § 3. This was `progress/jev.md` until
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
 | DM0 | Decision-model plan, design, ADR-0053, doc rename | In review | ENG-985 | This PR |
-| DM1 | Decision seam in `qq-provider`; `qq-decision` crate | Planned | — | Needs ADR-0053 accepted; root request for `Cargo.toml` |
+| DM1 | Decision seam in `qq-provider`; `qq-decision` crate | Planned | — | ADR-0053 accepted; root request for `Cargo.toml` |
 | DM2 | System One adapter on `HttpExchange` | Planned | — | |
 | DM3 | Move consumers into `qq-decision`, behavior-identical | Planned | — | J8 off-path gate |
 | DM4 | Interpretation and precision (absorbs JV3) | Planned | — | |
@@ -142,5 +142,8 @@ its qualification procedure to § Qualification procedure.
   from link paths.
 - Status corrections: JV0, JV1 activation and JV2 are merged on `main`
   (`08694a3`, `a944be8`, `0e2eb64`).
+- **Owner decision, 2026-09-30:** reverse the no-new-crate rule. ADR-0053
+  is now Accepted, and the indexes and the root reservation say so. Plan
+  acceptance and closing ENG-938 / #193 are still open.
 - Docs only: no Rust, config, protocol or schema change. Worktree
   `.worktrees/eng-985-decisions`, base `origin/main` `0bd8f6b`.
