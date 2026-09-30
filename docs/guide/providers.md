@@ -88,9 +88,9 @@ For Codex, a successful response replaces implicit bundled entries: hidden or
 retired models no longer linger in the picker. Explicit `models` declarations
 and the currently selected route remain visible; neither grants account access.
 Failed discovery falls back to the bundled catalog. Results are cached for five
-minutes. QQ sends Codex client version `0.159.0` for discovery (the latest
-stable upstream release when GPT-6.1 Sol shipped); upgrading a separately installed Codex CLI
-does not change QQ's discovery version.
+minutes. For discovery QQ sends the Codex client version it was built for,
+not its own version or that of a Codex CLI you have installed:
+`0.159.0`, the latest stable upstream release when GPT-6.1 Sol shipped. <!-- not-qq-version -->
 
 GPT-6 Sol/Luna support `none`, `low`, `medium`, `high`, `xhigh`, and `max`.
 GPT-6 Astra supports `low` through `max`, but not `none` or `minimal`.

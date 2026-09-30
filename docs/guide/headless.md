@@ -68,7 +68,7 @@ Grants use the same shapes as the TUI's approve-for-session
 | 1 | `task_failed` | the agent reported failure, the run failed, or the answer never satisfied the schema |
 | 2 | `invalid_configuration` | QQ refused to start: config, model, credential, pricing, or flag error |
 | 3 | `timed_out` / `budget_exhausted` | a limit was reached |
-| 4 | `harness_failure` | QQ itself failed (store, provider protocol, internal) |
+| 4 | `harness_failure` | QQ itself failed (store, provider protocol, internal), or another `qq` process owns the session store |
 | 5 | `needs_input` | the agent asked a question and nobody was there; the question is in the event stream |
 | 130 | `interrupted` | Ctrl-C |
 
@@ -138,11 +138,20 @@ qq serve --bind 127.0.0.1:4711
 qq serve --allow-origin https://app.example.com
 ```
 
-Runs the user-scoped server in the foreground. The TUI starts one in the
-background automatically when none is running; `qq serve` is for keeping
-sessions alive across TUI restarts, for several clients on one machine, and
+Runs the user-scoped server in the foreground until `Ctrl-C`. Without it,
+each `qq` starts a server inside itself when none is running, and quitting
+that `qq` cancels its runs ([Exiting](tui.md#exiting)). `qq serve` is for
+keeping runs going after the TUI quits, for several TUIs on one machine, and
 for remote clients over a private network. It prints `qq server listening
-at ADDR`; a second `qq serve` reports the existing one.
+at ADDR`; a second `qq serve` reports the existing one. Stopping it cancels
+every queued and running run, as quitting an owning TUI does.
+
+`qq run` and `qq ask` never use a server. `qq run` opens the session store
+itself, so it cannot run while another process holds that store — a TUI,
+`qq serve`, or another `qq run` — and exits `4` with `session store is owned
+by another running qq process`. Queue the work from the TUI, run jobs one
+after another, or give concurrent CI jobs separate data directories
+(`XDG_DATA_HOME` on Linux).
 
 The wire protocol is HTTP + SSE with resumable event cursors; see
 [`../design/protocol.md`](../design/protocol.md). Remote authentication

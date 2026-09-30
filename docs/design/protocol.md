@@ -212,6 +212,22 @@ reject the new enum value. Store schema 37 and 39 gate the same values on disk.
 Golden fixtures live under `crates/qq-protocol/tests/fixtures/v30/`; `v23`–`v29`
 are retained decode-only.
 
+Version 29 adds `max` to the reasoning-effort vocabulary (every
+`reasoning_effort` / `effort` field and `ModelDescriptor.reasoning_efforts`),
+for models whose top rung is above `xhigh`. No field was added or renamed;
+the version moves because an older client rejects the new value. Store
+schema 37 persists it.
+
+Version 30 adds `default` to the same vocabulary: an explicit pin meaning
+"override the configured effort and send none", distinct from the absent
+field (inherit the configuration or profile) and from `none` (disable
+reasoning on models that advertise it). `default` is never sent on a
+provider wire and is not listed in `reasoning_efforts`. Older clients reject
+the value. Store schema 38 adds the provider continuation envelope that
+replays signed reasoning; schema 39 persists `default`. Golden fixtures live under
+`crates/qq-protocol/tests/fixtures/v30/`; `v23`–`v29` are retained
+decode-only.
+
 Clients and servers must agree on this value.
 
 - `GET /v1/health` returns `ServerInfo.protocol_version`.

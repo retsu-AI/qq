@@ -42,6 +42,7 @@ release is a bump PR followed by a tag on the merged result.
    shows up in the wrong group here. Add the Upgrading block (below) when a
    contract or configuration changed. Do **not** move the guide's version
    pins here: the site deploys on merge, before the tag's assets exist.
+   Docs-truth accepts the previous release's pins until step 6.
 
 3. Tag the merged `main` and push the tag.
 
@@ -67,9 +68,24 @@ release is a bump PR followed by a tag on the merged result.
 
 6. Only now, with the release's assets published, open a follow-up
    `docs(guide):` PR that moves the guide's version pins and example
-   outputs (`docs/guide/install.md`, `cli.md`, `troubleshooting.md`) to the
-   new version and contracts. Before this point they would name a release
-   that cannot be downloaded.
+   outputs to the new version and contracts. Before this point they would
+   name a release that cannot be downloaded.
+
+   ```sh
+   cargo xtask release --docs    # every pin in docs/guide and README.md
+   ```
+
+   `--docs` replaces each whole token of the previous release (the
+   `CHANGELOG.md` release below the manifest) with the manifest version and
+   does not commit. Then update the commit and date in the `--version` and
+   `qq doctor` samples by hand.
+
+   The root crate's docs-truth tests fail CI when the guide or README names
+   a QQ version other than the manifest's or the previous release's, mixes
+   the two, or states a protocol, capabilities, descriptor, or store-schema
+   number other than this build's. A version string that is not QQ's (a
+   pack's own version, an upstream client) goes on a line ending with
+   `<!-- not-qq-version -->`.
 
 ## Changelog
 
