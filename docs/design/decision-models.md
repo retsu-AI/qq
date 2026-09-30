@@ -18,7 +18,7 @@ This document covers:
 - where this makes QQ different from other harnesses (§ 7).
 
 Sections 1–3 describe the system as built. Sections 4–7 are the target the
-[decision-model plan](../plans/decision-models.md) builds toward. Proposed
+[decision-model plan](../plans/decision-models.md) builds toward. Accepted
 [ADR-0053](../adr/0053-decision-model-seam-and-crate.md) records the crate
 boundary. Operator procedure is in the
 [runbook](../runbooks/decision-models.md), and progress in the
