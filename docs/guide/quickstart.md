@@ -102,9 +102,12 @@ how to resume:
 
 ```
 To continue this session:
-  qq --session 01J…
-  qq run --session 01J… "<prompt>"
+  qq --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012
+  qq run --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012 "<prompt>"
 ```
+
+Session ids are 32 hexadecimal characters; `/sessions` in the TUI lists
+them.
 
 ## 5. A project you cloned
 

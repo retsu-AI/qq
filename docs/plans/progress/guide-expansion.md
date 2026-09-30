@@ -7,7 +7,7 @@ appended below, newest last.
 | Slice | Page | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | GE0.1 | versions checked; prose corrections | In review | `fix/eng-979-ge0-1-versions` | ENG-979; stacked on #186 |
-| GE0.2 | samples run in CI | Planned | | ENG-979; stacked on GE0.1 |
+| GE0.2 | samples run in CI | In review | `fix/eng-979-ge0-2-samples` | ENG-979; stacked on GE0.1 |
 | GE0.3 | reference tables mirror the code | Planned | | ENG-979; stacked on GE0.2 |
 | GE10 | `concepts.md` | Planned | | ENG-980 |
 | GE1 | `agents.md` | Planned | | ENG-929; after GE0, GE10, GE4, GE5 |
@@ -99,4 +99,25 @@ Filed ENG-979 (GE0), ENG-980 (GE10) and ENG-981 (GE9) under ENG-928.
 - Prose checked on a build: a quitting owner cancels its runs; a second TUI
   attaches to the first; `qq run` exits `4` when any other qq process
   (including another `qq run`) owns the store.
+- Workspace fmt, clippy and tests pass; the site builds.
+
+### 2026-09-29 — GE0.2 in review (#223)
+
+- Tests (`src/docs_truth.rs`):
+  - `every_ron_sample_in_the_guide_loads`: every ```ron block loads through
+    the real loader as the file its fence names; its model routes must be
+    in the catalog.
+  - `every_qq_command_in_the_guide_parses`: every `qq …` sample goes
+    through the real `Cli`.
+  - `output_samples_in_the_guide_match_the_code`: the doctor sample, resume
+    hint, and exit-code table match the code.
+- Red on:
+  - the policy sample, which mixed in managed-only keys (now split into a
+    separate `managed.ron` sample);
+  - pack and Mantle samples that were not valid RON;
+  - a truncated MCP `pin`;
+  - a missing doctor `mcp` row;
+  - ULID `01J…` session ids (real ids are 32 hex).
+- Each test also caught a planted defect of its kind: flag, subcommand,
+  route, MCP key, pack enum, chord, doctor row.
 - Workspace fmt, clippy and tests pass; the site builds.
