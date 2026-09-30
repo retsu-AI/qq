@@ -1,22 +1,34 @@
-# Ledger — Jev
+# Ledger — decision models
 
-Plan: [`../jev.md`](../jev.md). Design: [`../../design/jev.md`](../../design/jev.md).
-One writer per ledger per `workflow.md` § 3.
+Plan: [`../decision-models.md`](../decision-models.md). Design:
+[`../../design/decision-models.md`](../../design/decision-models.md).
+One writer per ledger per `workflow.md` § 3. This was `progress/jev.md` until
+2026-09-30.
 
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
-| JV0 | Consolidate Jev docs | In review | [#210](https://github.com/retsu-AI/qq/pull/210) | This entry |
-| JV1 | Effective activation, reliable Off | Activation in review | [#214](https://github.com/retsu-AI/qq/pull/214) (ENG-971) | Plan-carried activation, off wins, edit replaces cached plan, bounded client cache (ADR-0052). Still open from A1: env/runtime-off and trust-change cases as named tests, revocation racing a result, server-side Off (JV9) |
-| JV2 | Headless waits for the delegate | In review | [#215](https://github.com/retsu-AI/qq/pull/215) (ENG-972) | Flag follows resolved `jev_approval` and `approval_delegate` |
-| JV3 | Precision-safe parsing | Planned | — | |
+| DM0 | Decision-model plan, design, ADR-0053, doc rename | In review | ENG-985 | This PR |
+| DM1 | Decision seam in `qq-provider`; `qq-decision` crate | Planned | — | Needs ADR-0053 accepted; root request for `Cargo.toml` |
+| DM2 | System One adapter on `HttpExchange` | Planned | — | |
+| DM3 | Move consumers into `qq-decision`, behavior-identical | Planned | — | J8 off-path gate |
+| DM4 | Interpretation and precision (absorbs JV3) | Planned | — | |
+| DM5 | OpenAI Decisions adapter | Blocked (no published API reference as of 2026-09-30) | — | |
+| DM6 | `decision_models` configuration and aliases | Planned | — | Owner decision 2 |
+| DM7 | Calibration table, shadow-only rule | Planned | — | After JV6 |
+| DM8 | Neutral names in core and protocol | Planned | — | With JV5's protocol bump |
+| DM9 | OpenAI vs Jev paired shadow comparison | Planned | — | ENG-809 spend approval |
+| JV0 | Consolidate Jev docs | Shipped (`08694a3`, #210) | [#210](https://github.com/retsu-AI/qq/pull/210) | |
+| JV1 | Effective activation, reliable Off | Activation shipped (`a944be8`, #214) | [#214](https://github.com/retsu-AI/qq/pull/214) (ENG-971) | Plan-carried activation, off wins, edit replaces cached plan, bounded client cache (ADR-0052). Still open from A1: env/runtime-off and trust-change cases as named tests, revocation racing a result, server-side Off (JV9) |
+| JV2 | Headless waits for the delegate | Shipped (`0e2eb64`, #215) | [#215](https://github.com/retsu-AI/qq/pull/215) (ENG-972) | Flag follows resolved `jev_approval` and `approval_delegate` |
+| JV3 | Precision-safe parsing | Planned | — | Lands in DM4 |
 | JV4 | Effective task context | Planned | — | After JV1 |
 | JV5 | Durable hold lifecycle (ADR-0047) | Planned | — | After JV2 |
 | JV6 | Per-attempt receipts, spend admission | Planned | — | After JV5 |
 | JV7 | Shadow calibration | Planned | — | Needs ENG-809 spend approval |
 | JV8 | Layered approval pilot | Planned | — | Needs owner scope decision |
-| JV9 | `/jev` panel, preset, server-side Off | Planned | — | Coordinate with #187 |
+| JV9 | `/decisions` panel, preset, server-side Off | Planned | — | Coordinate with #187, #166, #170 |
 | JV10 | Routing by adequacy | Planned | — | ENG-815 |
-| JV11 | One acceleration experiment | Planned | — | |
+| JV11 | One acceleration experiment | Planned | — | Drawn from DX1–DX6 |
 | JV12 | `enforce` batching or relabel | Planned | — | |
 | JV13 | Paired qualification | Planned | — | ENG-811 |
 
@@ -64,7 +76,7 @@ base `9f2d82d`). Findings are now `design/jev.md` § 3.
 **Superseded proposal.** ENG-938 / draft #193 (`plans/jev-usefulness.md`,
 the PR 187/189 comparison, `runbooks/jev-qualification.md`, and a proposed
 ADR "0046" that collides with the accepted MCP-pinning ADR-0046). Content is
-folded into `plans/jev.md`: its slices JU1–JU8 map to JV1–JV8 and JV10, and
+folded into `plans/jev.md` (now `plans/decision-models.md`): its slices JU1–JU8 map to JV1–JV8 and JV10, and
 its qualification procedure to § Qualification procedure.
 
 ## Entries
@@ -97,3 +109,38 @@ its qualification procedure to § Qualification procedure.
   `git diff --check` is clean. The website build was not run because
   `website/node_modules` is incomplete (`html-escaper` missing after
   `nub install`).
+
+### 2026-09-30 — DM0 decision-model plan
+
+- User direction: first-class, opt-in support for both Jev and OpenAI's
+  Decisions API. Transport and credentials go in `qq-provider` and
+  `qq-auth`. Decision making goes in a new crate, designed for decision
+  models not yet released. Rename the Jev docs, and keep thinking about
+  what sets QQ apart from Codex, CC, OpenCode and Pi.
+- Research, using three read-only sub-agents plus direct fetches:
+  - **OpenAI.** Only the DevDay recap (primary) and press coverage exist.
+    There is no API reference: `developers.openai.com/api/docs/guides/decisions`
+    returns 404. Design § 1.2 separates confirmed facts from unknowns, and
+    DM5 is blocked on the published contract.
+  - **Same wire family.** OpenRouter `alpha.decisions`, LLM Gateway,
+    OpenDecision and OpenClaw's `decisionModel` role share Jev's wire
+    shape (design § 1.3).
+  - **Code survey.** About 1,750 non-test lines of Jev code in the binary,
+    with three copies of the parse, threshold and usage logic and a private
+    HTTP client outside `qq-provider` (ADR-0053 § Evidence).
+  - **Competitors.** Codex Guardian V2 (a Luna one-token scorer), fx's Jev
+    reviewer (records probabilities but doesn't gate on them), and
+    OpenCode's `DOOM_LOOP`. Design § 7 lists differentiators X1–X14; the
+    plan's DX1–DX6 are the experiments.
+- Renamed `design/jev.md` → `design/decision-models.md`, `plans/jev.md` →
+  `plans/decision-models.md`, this ledger, and `runbooks/jev.md` →
+  `runbooks/decision-models.md`, using `git mv`. Every inbound link was
+  updated.
+- Reserved ADR-0053 (Proposed). It reverses the Jev plan's "no new crate"
+  non-goal and ADR-0047's rejected alternative. ADR-0047's other decisions
+  stand, and immutable ADRs 0028/0030/0034/0041/0052 are unchanged apart
+  from link paths.
+- Status corrections: JV0, JV1 activation and JV2 are merged on `main`
+  (`08694a3`, `a944be8`, `0e2eb64`).
+- Docs only: no Rust, config, protocol or schema change. Worktree
+  `.worktrees/eng-985-decisions`, base `origin/main` `0bd8f6b`.
