@@ -13,7 +13,7 @@ appended below, newest last.
 | AP3b | Stall report and child answer | Planned | | | ADR-0054 § 1, § 3; before AC1; independent review |
 | AP4 | Non-blocking delegation | Planned | | | ADR-0054 § 4; independent review; `DESCRIPTOR_VERSION` bump |
 | AP5 | Evidence after AP3b and AP4 | Planned | | | Goal 6; 7-day windows |
-| AC0 | Soak and resource harness | Planned | | | First; reproduces findings 1–3 as failing tests |
+| AC0 | Soak and resource harness | In progress | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | `test/eng-986-ac0-soak` | AC0.1 characterization fixtures first; baseline `0bd8f6b` |
 | AC1 | `RunState` extraction by reset scope | Planned | | | No behaviour change; independent review; after AP3b |
 | AC2 | Bounds reset at seams | Planned | | | ADR-0048 § 1 |
 | AC3 | No single-shot fatal faults | Planned | | | ADR-0048 § 2; empty-checkpoint item moved to AP3a |
@@ -244,3 +244,27 @@ has a root request row. Review (independent, read-only): two blocking items,
 both fixed. A golden test now pins the root prompt and tools against
 version 14's hashes except for the new bullet and `task` text; two planted
 edits made it fail. A read-only root test was added.
+
+### 2026-09-30 — v0.1.6 stack started, AC0 (ENG-986)
+
+User accepted AC0–AC16 plus the session `/goal` design in
+[PR #226](https://github.com/retsu-AI/qq/pull/226) (ENG-982); that design
+supersedes AC7–AC9 rather than creating a second goal implementation. Goal
+reconciliation must precede AC4/G0, but does not block AC0. Read-only
+sub-agents investigated AC0 fixtures and the goal/protocol dependencies.
+
+Worktrees: `.worktrees/v016-baseline` detached at `0bd8f6b`, and
+`.worktrees/eng-986-ac0` on `test/eng-986-ac0-soak`. Dirty main fleet docs and
+existing worktrees are untouched. AC0.1 owns the deterministic soak,
+characterization regressions, process-kill fixture, resource report and
+standalone turn-overhead bench; AC0.2 closes the remaining H0 registration
+and concurrency/fsync qualification gates. No runtime behavior change.
+
+Pre-change: existing 48-turn multi-window regression passes (1 test, 1.44 s).
+`context_assembly` medians at 10/1,000/10,000 archived runs are
+47.581/51.350/54.259 µs. Evidence:
+`target/qq-perf/ac0-2026-09-30/`. I/O pressure exceeded 20%; only 17 GiB disk
+space remained. These are diagnostic baselines, not quiet-host tail
+qualification. New completion-oracle failures are recorded against unchanged
+production code; default characterization assertions stay green until their
+owning behavior slices flip them.
