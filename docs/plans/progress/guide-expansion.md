@@ -9,7 +9,7 @@ appended below, newest last.
 | GE0.1 | versions checked; prose corrections | In review | `fix/eng-979-ge0-1-versions` | ENG-979; stacked on #186 |
 | GE0.2 | samples run in CI | In review | `fix/eng-979-ge0-2-samples` | ENG-979; stacked on GE0.1 |
 | GE0.3 | reference tables mirror the code | In review | `fix/eng-979-ge0-3-tables` | ENG-979; stacked on GE0.2 |
-| GE10 | `concepts.md` | Planned | | ENG-980 |
+| GE10 | `concepts.md` | In review | `docs/eng-980-ge10-concepts` | ENG-980; stacked on GE0.3 |
 | GE1 | `agents.md` | Planned | | ENG-929; after GE0, GE10, GE4, GE5 |
 | GE2 | `sessions.md` | Planned | | ENG-930; after GE0; ADR-0038 is Proposed — label it |
 | GE3 | `skills.md` | Planned | | ENG-931; after GE10, GE4, GE5 |
@@ -141,3 +141,25 @@ Filed ENG-979 (GE0), ENG-980 (GE10) and ENG-981 (GE9) under ENG-928.
 - Planted defects caught: a key marked "any", a dropped override, a changed
   chord, a reworded message.
 - Workspace fmt, clippy and tests pass; the site builds.
+
+### 2026-09-30 — GE0 rebased onto v0.1.5; GE10 in review
+
+- v0.1.5 shipped with a new rule (#228, runbook step 6): the bump PR keeps
+  the guide's pins, and a follow-up PR moves them once the assets exist.
+  GE0.1's exact-version check and bump-time rewrite contradicted it.
+  - The check now requires one QQ version across the guide and README:
+    the manifest's, or the previous `CHANGELOG.md` release.
+  - `cargo xtask release --docs` moves the pins for step 6; the bump no
+    longer rewrites docs. Tried on a scratch 0.1.6 bump.
+- GE10 `concepts.md`:
+  - The nesting diagram, a "what is saved where" table (including what is
+    not: queued drafts, a held call's wait), and 20 glossary terms, each
+    linked to its home page.
+  - Checked in code: held calls become `interrupted` on restart; queued
+    drafts live only in the TUI; delegation depth is 1 by default, at most 3.
+  - `glossary_defines_each_term_with_the_builds_names_and_bounds`: every
+    term is a `###` heading; approval modes and roles are checked against
+    the enums; the TUI default and 3 bounds are checked against constants.
+- Found, not fixed (not guide pages): `design/protocol.md:746` and
+  `design/architecture.md:761` still say sub-agent depth is "fixed at 1".
+- Workspace fmt, clippy and tests pass; the site builds (549 links).
