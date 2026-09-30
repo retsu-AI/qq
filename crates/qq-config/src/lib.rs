@@ -68,7 +68,10 @@ pub const ENVIRONMENT_VARIABLES: [&str; 8] = [
     "QQ_APPROVAL_DELEGATE",
 ];
 
-pub use document::{DOCUMENT_FIELD_NAMES, POLICY_FIELD_NAMES};
+pub use document::{
+    DOCUMENT_FIELD_NAMES, MANAGED_ONLY_POLICY_FIELD_NAMES,
+    ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES, POLICY_FIELD_NAMES,
+};
 pub use providers::provider_credential_variables;
 
 /// All process-dependent inputs captured before a configuration load begins.

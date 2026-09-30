@@ -148,7 +148,7 @@ degrades that server: the run proceeds and the catalog reports
 `unavailable MCP servers: NAME (credential `…` is not registered; run `qq
 auth set …`)` (see below); `qq doctor` warns about it under `mcp`.
 
-### `credential `…` is registered in keyring, but its secret is missing`
+### `credential `…` is registered in OS keyring, but its secret is missing`
 
 The index knows the name but the keyring entry is gone (a keyring reset, a
 different login session). `qq auth logout name`, then store it again.
@@ -159,7 +159,7 @@ The stored secret was created with `--endpoint` for one host and the
 provider's `base_url` is another. Store a separate credential for the new
 endpoint or re-store without the binding.
 
-### `the OS keyring is unavailable while attempting to … credential …`
+### `the OS keyring is unavailable while attempting to … credential `…``
 
 Linux: no Secret Service on the session bus (a container, SSH without a
 desktop session, or the keyring daemon not started). Start one (`gnome-keyring
