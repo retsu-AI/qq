@@ -121,12 +121,10 @@ continuation link. Rendering them nicely is AC14.
 | AC1 | `RunState` extraction: every counter and flag in `CompiledAgentPlan::execute` moves into typed state structs grouped by reset scope (`RunScope`, `WindowScope`, `SliceScope`, `TurnScope`); turn streaming, tool settlement, checkpoint and compaction become methods returning a typed `TurnStep`; no behaviour change | 7 | `crates/qq-core/src/lib.rs` → `crates/qq-core/src/runtime/run_loop.rs` (+ siblings per `AGENTS.md` module rule) | Whole workspace test suite green with **zero test edits**; `context_assembly`, `tool_dispatch` and AC0 `turn_overhead` within noise (A/B + A/A per perf runbook); each scope struct's doc names its reset seam; `stream!` body < 300 lines |
 | AC2 | Bounds reset at seams (ADR-0048 § 1): context reservation re-based in the in-run marker's transaction (the retained weight travels in `InRunCompactionRequest`); streamed model text per window; empty-output retries per streak (reasoning bytes are already per turn and stay so); in-run compactions no longer charged to the between-run `MAX_COMPACTION_STEPS` (32) budget | 1, 2, 4 | `runtime/run_loop.rs`, `runtime/compaction.rs`, `sessions/{claim,compaction,in_run_compaction,store,execution}.rs`, `sessions/tests/context_capacity.rs` | Regression tests, each failing on `main` first: (a) a 3 000-call run with 4 KiB results and in-run compactions completes; (b) 40 MiB streamed text across windows completes; (c) two reasoning-only truncations 100 turns apart both recover; (d) **a run that needs 40 successful in-run compactions completes** (fails on `main` at the 33rd, `compaction.rs:613–622`). The 4 MiB limit still fails a single window that genuinely exceeds it; the between-run fold still stops at 32 steps |
 | AC3 | No single-shot fatal faults (ADR-0048 § 2): summarizer under turn recovery; transient summarizer exhaustion → `paused`; empty checkpoint → placeholder | 4 | `runtime/run_loop.rs`, `sessions/in_run_compaction.rs` | Scripted: summarizer 529×3 then success → run continues; 529×6 → `paused` with every prior turn durable; empty checkpoint → next slice runs. Rejected summary still fails closed (ADR-0039 test unchanged) |
-| AC4 | Loop guard (ADR-0049 § 4): repeat counter over consecutive identical executed triples, plus a slice-scoped seen set for novelty; after 2 identical errors or 4 identical triples the **next** identical call is rejected; `paused { no_progress }` (reason-tagged `RunPause::NoProgress`) after 2 slices with nothing novel. Lands with AC7 as one PR (shared protocol bump) | 5 | `runtime/run_loop.rs`, `runtime/loop_guard.rs` (new), `qq-protocol` `RunPause`, `crates/qq-client/src/state/reduce.rs` | Fixture loop of identical failing `shell` calls: calls 1 and 2 execute, call 3 gets the rejection result. A no-progress fixture pauses after 512 calls. An **alternating** `A, B, A, B` stable-read loop pauses too. Untouched fixtures: varied-argument polling; the **same** `read_file` call separated by an edit; the same call whose result changes each time; a **read-only audit** making 1 500 distinct successful reads with no prose (never pauses). T13 ablation (ENG-813) shows no completed-task regression before the default ships. **Wire:** protocol fixtures for both `RunPause` variants; the `NoProgress` notice does not claim a provider retry |
-| AC5 | `ContinueRun { session, run_id }` (ADR-0048 § 3): admission (latest prompt run, paused/interrupted, no successor), `UNIQUE(continues_run_id)`, unrecorded calls settled interrupted, notice instead of re-submitted prompt, chain-remainder limits. Lands with AC6 as one PR (shared protocol bump) | 3 | `qq-protocol` (command, events, `PROTOCOL_VERSION`), `sessions/{commands,claim,settlement,transcript}.rs`, `runtime/budget.rs`, schema, `qq-client::state`, TUI action, headless | Continue a `paused` run → completes with one chain in headless. Continue an `interrupted` run whose tool call had no result → the call is **not** re-executed and the model sees `INTERRUPTED_TOOL_RESULT`. **Request-shape golden:** the successor's first request contains the task prompt exactly once, followed by the continuation notice. **Race:** two distinct `ContinueRun` commands on one run → exactly one successor, the other `already_continued`. **Stale:** A pauses, prompt B completes, `ContinueRun(A)` → `superseded`. Same `CommandId` idempotent. `completed`/`failed` without an active goal → typed rejection. **Limits:** a test enumerates every `RunLimits` field. For each cumulative one (turns, tool calls, total/input/output tokens, cost, tool-output bytes, children), a chain whose predecessor spent part of the bound gets exactly the remainder; duration uses the original absolute deadline, so cooldown counts; `max_concurrent_children` carries unchanged. **Repairs:** a run paused mid-repair continues with only the remaining `repair_turns` |
+| AC4 | Loop guard (ADR-0049 § 8): repeat counter over consecutive identical executed triples, plus a slice-scoped seen set for novelty; after 2 identical errors or 4 identical triples the **next** identical call is rejected; `paused { no_progress }` (reason-tagged `RunPause::NoProgress`) after 2 slices with nothing novel. Lands in the goal PR with `goals.md` G0 (shared protocol bump) | 5 | `runtime/run_loop.rs`, `runtime/loop_guard.rs` (new), `qq-protocol` `RunPause`, `crates/qq-client/src/state/reduce.rs` | Fixture loop of identical failing `shell` calls: calls 1 and 2 execute, call 3 gets the rejection result. A no-progress fixture pauses after 512 calls. An **alternating** `A, B, A, B` stable-read loop pauses too. Untouched fixtures: varied-argument polling; the **same** `read_file` call separated by an edit; the same call whose result changes each time; a **read-only audit** making 1 500 distinct successful reads with no prose (never pauses). T13 ablation (ENG-813) shows no completed-task regression before the default ships. **Wire:** protocol fixtures for both `RunPause` variants; the `NoProgress` notice does not claim a provider retry |
+| AC5 | `ContinueRun { session, run_id }` (ADR-0048 § 3): admission (latest prompt run without a goal snapshot, paused/interrupted, no successor), `UNIQUE(continues_run_id)`, unrecorded calls settled interrupted, notice instead of re-submitted prompt, chain-remainder limits. Lands with AC6 as one PR (shared protocol bump) | 3 | `qq-protocol` (command, events, `PROTOCOL_VERSION`), `sessions/{commands,claim,settlement,transcript}.rs`, `runtime/budget.rs`, schema, `qq-client::state`, TUI action, headless | Continue a `paused` run → completes with one chain in headless. Continue an `interrupted` run whose tool call had no result → the call is **not** re-executed and the model sees `INTERRUPTED_TOOL_RESULT`. **Request-shape golden:** the successor's first request contains the task prompt exactly once, followed by the continuation notice. **Race:** two distinct `ContinueRun` commands on one run → exactly one successor, the other `already_continued`. **Stale:** A pauses, prompt B completes, `ContinueRun(A)` → `superseded`. Same `CommandId` idempotent. `completed`/`failed` or any run with a goal snapshot → typed rejection (the goal driver uses fresh runs for all recovery). **Limits:** a test enumerates every `RunLimits` field. For each cumulative one (turns, tool calls, total/input/output tokens, cost, tool-output bytes, children), a chain whose predecessor spent part of the bound gets exactly the remainder; duration uses the original absolute deadline, so cooldown counts; `max_concurrent_children` carries unchanged. **Repairs:** a run paused mid-repair continues with only the remaining `repair_turns` |
 | AC6 | `AutoContinue { cooldown, max_continuations }` (ADR-0048 § 4): cooldown continuation of `paused` (never `no_progress`); startup continuation of `interrupted`; stored schedule; bounded by `max_continuations` along the chain and the original absolute deadline; config key and `qq run --auto-continue` | 3 | `sessions/{runtime,scheduler,settlement}.rs`, `qq-config`, `src/` flag, `docs/guide/` | Soak (AC0) with 3 outages and 2 kills completes. A client prompt or cancel during cooldown cancels the pending continuation. A restart during cooldown fires the stored schedule once, not twice. The deadline is honoured on both sides (a continuation scheduled before it runs; one that would start after it settles `budget_exhausted`). A `no_progress` pause is not auto-continued. Off by default: existing headless goldens unchanged |
-| AC7 | Goal record (ADR-0049 § 1–2): goal bound to the run chain and activated at claim; `SubmitPrompt.goal`, `SetGoal { run_id }`, `update_goal` built-in present in every catalog and exposed by the per-run include filter, `run_goals` table, writes checked against `MAX_GOAL_RENDER_BYTES` in rendered form, complete verbatim re-statement after every compaction and continuation | 6 | `qq-protocol`, `sessions/{commands,claim,transcript,compaction}.rs`, schema, `tools/goal.rs` (new), `catalog.rs` (`ToolHost::UpdateGoal`, include flag), `plan/descriptor.rs`, `crates/qq-client/src/state/reduce.rs` (the exhaustive `reduce_event` match, `reduce.rs:117`, must handle `goal_updated` / `goal_audit_requested`; state only, no UI) | A **maximum-size** goal (2 KiB objective, 24 × 120 B items) is present **complete and verbatim** in the request after each of ≥ 3 in-run compactions (assembly test + reference oracle), and its rendering is ≤ `MAX_GOAL_RENDER_BYTES` (asserted). **Queued follow-up:** prompt B with a goal is queued while goal-less run A is running → A's compactions never render B's goal, A has no `update_goal`, and B sees its own goal. A run without a goal is byte-identical to `main` (golden request). Plan-cache test: goal and goal-less runs share one compiled plan in either order. Over-cap `update_goal` input is a result, not a failure. **Reducer tests** for both goal events. **Reconnect:** a client that installs a snapshot after a goal update sees the current goal |
-| AC8 | Completion audit (ADR-0049 § 3): `achieved_pending_audit`, own allowance persisted along the chain | 6 | `runtime/run_loop.rs`, `output.rs`, `tools/goal.rs` | A goal run with no output contract that ends with unchecked items receives one audit notice and continues; confirming with evidence completes. The allowance is 1 per window and 8 per chain. **Restart** between an `achieved` proposal and its confirmation → the successor re-issues the audit; the goal is never `achieved` without it. A run with an output contract spends its `repair_turns` unchanged by audits (ADR-0014 test unchanged) |
-| AC9 | Continue-if-idle (ADR-0049 § 5): `ContinueRun` admits `completed` + active goal; `AutoContinue` issues it; headless follows the chain | 6 | `sessions/{commands,scheduler}.rs`, `src/headless.rs` | Active goal, completed run, policy on → one continuation per cooldown up to the cap. Policy off → none. Goal `achieved`/`blocked` → none. A later prompt in the session → `superseded`. **Headless:** `qq run --auto-continue` on a goal run whose first run completes with the goal active keeps running and follows successor ids to the final outcome. Today it returns on the first `RunFinished` for its own run id (`headless.rs:1230`). It exits when the goal is non-active or a chain limit stops it |
+| AC7–AC9 | **Moved to [`goals.md`](./goals.md) (G0–G3).** The goal became a session goal driven by the runtime, not a property of one run chain; see revised ADR-0049. The goal PR still pairs with AC4 for one `PROTOCOL_VERSION` bump | 6 | see `goals.md` | see `goals.md` |
 | AC10 | `qq-core` embedding surface (ADR-0050 § 1): `examples/embed.rs` in CI, public `resolved_model`, `LoadedRuntime::from_runtime`, async compile, lifecycle crate doc | 8 | `crates/qq-core/{Cargo.toml,examples,src/lib.rs,src/plan.rs,src/sessions/runtime.rs}` (dev-dependency `qq-provider` with `features = ["test-support"]`), `.github/workflows/ci.yml` (root request) | Example uses only public items, runs prompt → approval → completion against `qq_provider::test_support`, < 100 lines; `cargo doc -p qq-core` shows the lifecycle; `tests/mcp_session.rs` shrinks to use the new constructors |
 | AC11 | `tool-fetch` feature; minimal profile in CI (ADR-0050 § 3) | 8 (B4) | `crates/qq-core/Cargo.toml`, `tools.rs`, `tools/fetch.rs`, and fetch's four consumers: `approval.rs`, `sessions/approvals.rs`, `tools/dispatch.rs`, `tools/specs.rs`; CI (root request) | `cargo test -p qq-core --no-default-features` green; `cargo tree` shows no `htmd`; with the feature off, `fetch` is absent from the catalog (not a runtime error); release size budget unchanged for the default |
 | AC12 | `qq-harness` crate (ADR-0050 § 2), in three mechanical PRs ordered so each builds on its own. AC12.1 creates the crate with the shared runtime pieces `plan.rs` and `mcp.rs` depend on (`describe_endpoint`, `LiveBindings`, and an MCP-specific `McpBuildError` split out of `RuntimeBuildError`). `RuntimeBuildError` itself stays in `src/runtime.rs`, because its `CatalogClientUnavailable(#[from] crate::catalog::ModelDiscoveryError)` variant (`src/runtime.rs:3841`) ties it to the binary-only `src/catalog.rs`; it gains `#[from] McpBuildError`. `PlanCache` and the MCP bridge move with those pieces. AC12.2 moves config → provider/`ResolvedModel`, the `RuntimeLoader` impl, the reviewer, the rest of `RuntimeBuildError`, and `src/catalog.rs`'s `ModelDiscoveryError` with it. AC12.3 extracts `drive_to_outcome` from headless. Then the external smoke crate | 8 | `crates/qq-harness/` (new), `tests/embed-smoke/` (new workspace member, `publish = false`), `src/{runtime,plan,mcp,headless,catalog}.rs`, root `Cargo.toml` (root request), `architecture.md` § Repository Layout, `AGENTS.md` repository map | Each move PR has no behaviour change: all goldens and workspace tests green, `plan_compile` and startup budgets within noise. **One-dependency proof:** `tests/embed-smoke/Cargo.toml` depends only on `qq-harness` (plus `tokio`), builds a session from an inline RON string through `qq_harness`'s public API and re-exports, and drives it to an outcome in < 100 lines |
@@ -138,9 +136,8 @@ continuation link. Rendering them nicely is AC14.
 ### Order and dependencies
 
 ```text
-AC0 ─┬─ AC1 ─┬─ AC2 ─ AC3 ─┬─ AC5 ─ AC6 ─┐
-     │       ├─ AC4 ───────┘             ├─ AC9 ─ AC14
-     │       └─ AC7 ─ AC8 ───────────────┘
+AC0 ─┬─ AC1 ─┬─ AC2 ─ AC3 ─ AC5 ─ AC6 ─ AC14
+     │       └─ AC4 + goals G0 ─ G2 ─ G3 ─ G4 ─ G5
      ├─ AC10 ─ AC11 ─ AC12.1 ─ AC12.2 ─ AC12.3 ─ AC13
      └─ AC15 ─ (AC16 with ENG-803)
 ```
@@ -153,8 +150,13 @@ AC0 ─┬─ AC1 ─┬─ AC2 ─ AC3 ─┬─ AC5 ─ AC6 ─┐
   track. It touches `src/` and the public surface, not the run loop.
 - **AC2 and AC3 are the minimum** that makes a multi-hour run possible. If
   the plan is cut short, ship AC0–AC3 and AC5.
+- **Goal recovery is independent of AC5/AC6.** G2 creates fresh goal runs,
+  not prompt-chain successors. G0 defines check authorization state/actions
+  in its protocol bump; G3 implements execution. The read-only G4 panel can
+  follow G0, but its execution controls follow G2/G3.
 - Independent review is required (per `workflow.md` § 4) for AC1–AC3,
-  AC5–AC7 and AC15, because they touch `sessions/` or the store.
+  AC5, AC6 and AC15 (and goals G0–G3), because they touch `sessions/` or the
+  store.
 
 ### Protocol and schema sequencing
 
@@ -165,13 +167,15 @@ unused variant ships early:
 
 - **continuation PR:** AC5 and AC6 (`continue_run`, `continued_from`,
   `auto_continue_scheduled`);
-- **goal PR:** AC4 and AC7 (reason-tagged `RunPause`, `goal`, `set_goal`,
-  `goal_updated`, `goal_audit_requested`).
+- **goal PR:** AC4 with [`goals.md`](./goals.md) G0 (reason-tagged
+  `RunPause`, `set_goal`, `goal_control`, `goal_updated`, `goal_cleared`,
+  `SessionSnapshot.goal`, `RunOrigin`, scope-labelled check authorization
+  and its pending state/reasons).
 
-AC8 and AC9 add no wire shapes of their own: their events and the
-completed-with-goal admission case are defined and versioned in the goal
-PR. Each PR needs a root-ledger row before it starts. Store schema bumps
-(AC5, AC7, AC15) are separate and are recorded in the ledger receipt.
+The later goal slices, G2 and G3, add no wire shapes of their own: their
+states and reasons are defined and versioned in the goal PR. Each PR needs a
+root-ledger row before it starts. Store schema bumps (AC5, goals G0, AC15)
+are separate and are recorded in the ledger receipt.
 
 ## Design notes
 
@@ -179,10 +183,10 @@ PR. Each PR needs a root-ledger row before it starts. Store schema bumps
 
 | Scope | Opens | Holds today (moved by AC1) |
 | --- | --- | --- |
-| Run | admission | `BudgetMeter`, output-contract repairs, deadline, `compacted_turns`, goal-audit run cap (AC8) |
-| Window | admission and every in-run compaction | streamed model text bytes (was run), context reservation base (was run), goal-audit window allowance (AC8) |
+| Run | admission | `BudgetMeter`, output-contract repairs, deadline, `compacted_turns` |
+| Window | admission and every in-run compaction | streamed model text bytes (was run), context reservation base (was run) |
 | Slice | every 256-call checkpoint | `slice_tool_calls`, no-progress observation (AC4) |
-| Progress | any progress event, including a new `(call, result)` pair (ADR-0049 § 4) | loop-guard ring (AC4) |
+| Progress | any progress event, including a new `(call, result)` pair (ADR-0049 § 8) | loop-guard ring (AC4) |
 | Streak | first consecutive truncated or faulted turn | `output_continuations`, `empty_output_retries` (was run), `turn_retries` |
 | Turn | each provider request | blocks, calls, activity, reasoning bytes (already per turn) |
 
@@ -201,7 +205,7 @@ the invariant that marker and reservation always move together.
 ### Continuation (AC5, AC6)
 
 ```text
-stopped run R (paused | interrupted | completed-with-active-goal), latest prompt run of its session
+stopped run R (paused | interrupted), latest prompt run of its session
   └─ ContinueRun{session, run_id: R, command_id}  ─ or ─ AutoContinue timer / startup sweep
        one txn:
          a. verify R is continuable and still the session's latest prompt run
@@ -224,26 +228,14 @@ stopped run R (paused | interrupted | completed-with-active-goal), latest prompt
   session. Limit remainders are computed from the chain's committed run
   accounting at insert time.
 
-### Goal rendering (AC7)
+### Goals
 
-The goal message is rendered from the run chain's `run_goals` row and placed
-immediately after the compaction summary, or after the prompt when nothing
-has been compacted. When the goal changed during the run, it is appended
-once per window. It is framed like other runtime notices (`[QQ runtime
-notice; not a user instruction]`) and gives `objective`, then the checklist
-with states, then the status.
-
-It is rendered **whole**. Every write is checked against
-`MAX_GOAL_RENDER_BYTES` = 8 KiB in its rendered form, framing included.
-The field bounds (2 KiB objective, 24 items of 120 B, runtime-assigned
-`u8` ids) keep the worst case at about 5.7 KiB, so nothing is ever
-truncated and AC7 tests exactly that maximum. The reference assembly oracle
-renders it identically. The tool
-`update_goal { edits: [...], status?: {...}, evidence?: string }` returns
-`ok` and the new counts, and rejects edits that would exceed the bounds as
-a result. Clients show the checklist from `goal_updated`, so the transcript
-never has to be read for progress, which is the token-efficiency property
-later frontends rely on.
+The goal design (rendering, the driver, completion checks and budgets) is in
+[`goals.md`](./goals.md) and ADR-0049. Whenever the goal remains active,
+its driver queues a fresh goal run from committed history and the current
+goal snapshot after all waiting prompts. It never uses `ContinueRun`,
+including after provider pauses or process interruption; uncertain calls
+are settled as interrupted and never automatically re-executed.
 
 ### Embedding shape (AC10, AC12)
 

@@ -56,7 +56,7 @@ written.
 - [ADR-0046: pin an MCP server's advertised tool set in configuration and plan identity; enforce the pin at dispatch](0046-mcp-tool-set-pinning.md) — Accepted (ENG-939; supersedes the contributed #163/#165/#171 design; `DESCRIPTOR_VERSION` 9 → 10).
 - [ADR-0047: explicit Jev consent and a durable held-approval lifecycle](0047-jev-approval-hold-lifecycle.md) — Proposed (Jev plan JV1–JV6; from draft #193).
 - [ADR-0048: a run's bounds reset at its seams, and a stopped unattended run continues itself](0048-run-bounds-reset-at-seams-and-continuation.md) — Proposed (autonomous-core AC2–AC6); extends ADR-0039/0040.
-- [ADR-0049: a run carries a durable goal re-stated after every compaction; loops and idle goals are runtime policy](0049-durable-run-goal-and-loop-guard.md) — Proposed (autonomous-core AC4, AC7–AC9).
+- [ADR-0049: a session goal is pursued by the runtime across runs, restarts and days; completion is checked, budgets are enforced, loops are guarded](0049-durable-run-goal-and-loop-guard.md) — Proposed (goals G0–G5; autonomous-core AC4). Revised before acceptance from a run-chain goal.
 - [ADR-0050: composition moves from the binary into a `qq-harness` library; `qq-core` gets tool features and a tested embedding example](0050-qq-harness-composition-library.md) — Proposed (autonomous-core AC10–AC13); refines ADR-0027.
 
 - [ADR-0051: 0ver product versioning; compatibility is carried by contract versions](0051-zerover-product-versioning.md) — Accepted (v0.1.5 release, ENG-969; replaces the runbook's MINOR-on-contract-bump rule).
