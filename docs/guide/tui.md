@@ -57,7 +57,8 @@ below works the same either way.
 
 \* `Esc` focuses the parent only when nothing else claims it. An open
 picker, palette, or overlay (`/models`, `/sessions`, `Ctrl-K`, …) closes
-first, and a pending approval or question claims it (see below). Otherwise
+first, the trust prompt quits on it, and a pending approval or question
+claims it (see below). Otherwise
 it first closes an open `@` completion list, clears a transcript selection,
 closes a workspace view, dismisses an error notice for the focused session,
 and while a run is active arms `Esc Esc` to cancel it. Informational notices do not claim it. `Alt-Up` is not a
@@ -256,8 +257,8 @@ searchable palette that runs the highlighted command on `Enter`.
 
 Keys shown beside `?`, `Enter`, `Esc`, and `Esc Esc` apply only in context:
 `?` on an empty composer, `Enter` steers only while a run is active, `Esc`
-focuses the parent only when there is no overlay, approval or question
-prompt, `@` completion list, transcript selection, open view, error notice,
+focuses the parent only when there is no overlay, trust, approval, or
+question prompt, `@` completion list, transcript selection, open view, error notice,
 or active run to claim it, and `Esc Esc` cancels only while running.
 The keys for creating sessions, the navigator, cancel, and interrupt are
 defaults; rebind them in [`tui.ron`](configuration.md#tuiron).

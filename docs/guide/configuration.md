@@ -213,11 +213,12 @@ policy: (
 | `deny_tools`, `deny_shell_prefixes`, `deny_hosts` | managed layers only | remove grants no matter who declared them |
 
 "Managed layers" are `managed.ron`, `managed.d/`, and MDM (rows 9 and 10
-above). An organization manifest may not plant approval grants: `qq org enroll`
-and `qq org refresh` reject one that sets `allow_tools`,
-`allow_shell_prefixes`, `allow_hosts`, or `shell_env`. Setting one of these anywhere else fails with `managed-only policy
-settings are only allowed in managed configuration`; to cap output tokens
-for yourself, set the top-level `max_output_tokens` instead.
+above). Setting a `managed layers only` key anywhere else fails with
+`managed-only policy settings are only allowed in managed configuration`;
+to cap output tokens for yourself, set the top-level `max_output_tokens`
+instead. An organization manifest may not plant approval grants: `qq org
+enroll` and `qq org refresh` reject one that sets `allow_tools`,
+`allow_shell_prefixes`, `allow_hosts`, or `shell_env`.
 
 The approval prompt's `w` key appends to `allow_tools` /
 `allow_shell_prefixes` / `allow_hosts` in the project's `.qq/config.ron`.
