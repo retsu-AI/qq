@@ -30,7 +30,7 @@ which tool calls run straight away and which are [held](#held-call) for a
 | which project files you trusted | `trust.ron` in your data directory | yes |
 | credentials | the OS keyring (details in [Providers](providers.md#where-credentials-go)) | yes |
 | drafts queued with `Ctrl-Enter` | the TUI's memory | no |
-| a tool call waiting for an answer | the sessions database, but the wait itself is live | no: after a restart it is `interrupted` and never runs |
+| a run in progress, and any tool call it is waiting on | the sessions database, but the work itself is live | no: when the `qq` process running it exits, the run and its held calls end `interrupted`, and nothing held runs |
 
 `qq config paths` prints the directories for your machine; the defaults are
 in [Where things live](README.md#where-things-live).
@@ -54,15 +54,15 @@ hexadecimal characters. See [Sessions](tui.md#sessions).
 
 A session started under another one: a sub-agent the model spawns with the
 `spawn_agent` tool, or one you open with `Alt-C`. It has its own runs and
-history and stays in its parent's workspace; a spawned child's cost is
-included in its parent's totals. The [roster](#roster) bounds how many and how deep. See
-[`delegation`](configuration.md#delegation).
+history and stays in its parent's workspace. The [roster](#roster) bounds
+how many and how deep. See [`delegation`](configuration.md#delegation).
 
 ### Run
 
 One prompt carried to a final answer, a failure, or a cancellation. Each
-prompt you submit starts a run; a session runs one at a time. `qq run` is
-one run, unattended. See [While a run is executing](tui.md#while-a-run-is-executing).
+prompt you submit starts a run (a [steer](#steer) joins the current one);
+a session runs one at a time. `qq run` is one run, unattended. See
+[While a run is executing](tui.md#while-a-run-is-executing).
 
 ### Turn
 
@@ -74,16 +74,15 @@ none. `--max-turns` caps them. See [Limits](headless.md#limits).
 
 One action the model asked for in a turn: read a file, edit, run a shell
 command, fetch a URL, call an MCP tool. The session's
-[approval mode](#approval-mode) and [grants](#grant) decide whether it runs, is held for an answer, or is
-refused. See [Permissions and trust](permissions.md#approval-modes).
+[approval mode](#approval-mode) and [grants](#grant) decide whether it runs,
+is held for an answer, or is refused. See [Permissions and trust](permissions.md#approval-modes).
 
 ### Steer
 
 Send more input to a run while it is working. `Enter` during a run steers:
 the text reaches the model at the next boundary between model and tool,
 without starting a new run. `Alt-S` interrupts the current turn or tool
-first.
-Steering the run has not used when it ends is dropped. See
+first. Steering the run has not used when it ends is dropped. See
 [While a run is executing](tui.md#while-a-run-is-executing).
 
 ### Queue
@@ -139,37 +138,39 @@ grants for every new session. See
 ### Approval mode
 
 How much a session may do without asking: `read_only`, `supervised`, `ask`,
-`auto` (the TUI default), or `full`. `qq run` defaults to `read_only`;
-`supervised` is what sub-agents that may edit run under. Change it with
-`/approval` or `qq run --approval`. See [Approval modes](permissions.md#approval-modes).
+`auto` (the TUI default), or `full`. `qq run` defaults to `read_only`
+(`--approval read-only`); `supervised` is what sub-agents that may edit run
+under. Change it with `/approval` or `qq run --approval`. See [Approval modes](permissions.md#approval-modes).
 
 ### Held call
 
 A [tool call](#tool-call) waiting for an answer because its session's mode
 does not let it run on its own. A [delegate](#delegate) or you settle it; it
-waits until then, until the run's deadline, or until you cancel. See
+waits until then, until the run's deadline or `approval_timeout_seconds`,
+or until you cancel. See
 [Who decides a held call](permissions.md#who-decides-a-held-call).
 
 ### Delegate
 
 Who answers a [held call](#held-call) before you are asked: [Jev](#jev) when
-`jev_approval` is on, then the [reviewer](#reviewer); if neither decides, you.
-`approval_delegate`, `QQ_APPROVAL_DELEGATE`, and `/delegate` choose whether a
-delegate is asked. See [Who decides a held call](permissions.md#who-decides-a-held-call).
+`jev_approval` is on and its key is stored, then the [reviewer](#reviewer);
+if neither decides, you. `approval_delegate`, `QQ_APPROVAL_DELEGATE`, and
+`/delegate` choose whether a delegate is asked. See [Who decides a held call](permissions.md#who-decides-a-held-call).
 
 ### Reviewer
 
 The model named by `reviewer_model`. It answers [held calls](#held-call) as a
-[delegate](#delegate): approve, deny, or send to you. A sub-agent may edit
-files only when one is configured. See
+[delegate](#delegate): approve, deny, or send to you. Sub-agents that edit
+files need one. See
 [Who decides a held call](permissions.md#who-decides-a-held-call).
 
 ### Trust
 
 Your permission for a project's configuration to take effect. A project
-file that declares anything sensitive (providers, MCP servers, grants,
-packs) is ignored until you accept its exact content in the TUI or with
-`qq trust`; changing those parts asks again. See
+file that declares anything sensitive (such as the model, providers, MCP
+servers, packs, or grants) does not load until you accept its exact content:
+the TUI asks, and `qq ask`, `qq run`, and `qq serve` exit until you run
+`qq trust`. Editing a sensitive part asks again. See
 [Project trust](permissions.md#project-trust).
 
 ### Jev
