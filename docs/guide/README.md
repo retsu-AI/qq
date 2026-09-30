@@ -11,6 +11,7 @@ published at <https://retsu-ai.github.io/qq/>.
 | --- | --- |
 | install QQ | [Install](install.md) |
 | go from nothing to a first answer in a minute | [Quickstart](quickstart.md) |
+| know what a session, run, grant, or approval mode is | [Concepts and glossary](concepts.md) |
 | connect a model provider (OpenAI, Anthropic, Google, xAI, Codex, Bedrock, a gateway) | [Providers and credentials](providers.md) |
 | check my setup before the first run | [`qq doctor`](cli.md#qq-doctor---json) |
 | understand what the agent may do without asking | [Permissions and trust](permissions.md) |

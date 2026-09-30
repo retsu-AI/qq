@@ -1751,4 +1751,141 @@ mod tests {
             invented.join("\n")
         );
     }
+
+    /// `concepts.md` defines each term once as a `###` heading other pages
+    /// link to, and the names and bounds it states are the build's.
+    #[test]
+    fn glossary_defines_each_term_with_the_builds_names_and_bounds() {
+        use qq_config::DelegationRole;
+        use qq_protocol::ApprovalMode;
+
+        let pages = guide_pages();
+        let text = &pages
+            .iter()
+            .find(|(name, _)| name == "concepts.md")
+            .expect("docs/guide/concepts.md exists")
+            .1;
+        let mut problems = Vec::new();
+        let headings: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("### "))
+            .collect();
+        for term in [
+            "Workspace",
+            "Session",
+            "Child session",
+            "Run",
+            "Turn",
+            "Tool call",
+            "Steer",
+            "Queue",
+            "Compaction",
+            "Profile",
+            "Pack",
+            "Roster",
+            "Role",
+            "Grant",
+            "Approval mode",
+            "Held call",
+            "Delegate",
+            "Reviewer",
+            "Trust",
+            "Jev",
+        ] {
+            if !headings.contains(&term) {
+                problems.push(format!("  no `### {term}` heading"));
+            }
+        }
+        let section = |heading: &str| -> &str {
+            let start = text
+                .find(&format!("### {heading}\n"))
+                .unwrap_or_else(|| panic!("concepts.md has no `### {heading}`"));
+            let body = &text[start..];
+            let end = body[4..].find("\n#").map_or(body.len(), |at| at + 4);
+            &body[..end]
+        };
+        // A new mode or role is a compile error in these matches until it is
+        // added to the list the glossary is checked against.
+        let modes = [
+            ApprovalMode::ReadOnly,
+            ApprovalMode::Supervised,
+            ApprovalMode::Ask,
+            ApprovalMode::Auto,
+            ApprovalMode::Full,
+        ];
+        for mode in modes {
+            let listed = match mode {
+                ApprovalMode::ReadOnly => 0,
+                ApprovalMode::Supervised => 1,
+                ApprovalMode::Ask => 2,
+                ApprovalMode::Auto => 3,
+                ApprovalMode::Full => 4,
+            };
+            assert_eq!(modes[listed], mode);
+        }
+        let roles = [
+            DelegationRole::Fast,
+            DelegationRole::Balanced,
+            DelegationRole::Strong,
+        ];
+        for role in roles {
+            let listed = match role {
+                DelegationRole::Fast => 0,
+                DelegationRole::Balanced => 1,
+                DelegationRole::Strong => 2,
+            };
+            assert_eq!(roles[listed], role);
+        }
+        let name = |mode: ApprovalMode| {
+            serde_json::to_value(mode)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let modes_named = spans(section("Approval mode"));
+        for mode in modes {
+            if !modes_named.contains(&name(mode).as_str()) {
+                problems.push(format!("  Approval mode does not name `{}`", name(mode)));
+            }
+        }
+        let default = name(ApprovalMode::default());
+        if !section("Approval mode").contains(&format!("`{default}` (the TUI default)")) {
+            problems.push(format!("  Approval mode's TUI default is not `{default}`"));
+        }
+        let roles_named = spans(section("Role"));
+        for role in roles {
+            if !roles_named.contains(&role.as_str()) {
+                problems.push(format!("  Role does not name `{}`", role.as_str()));
+            }
+        }
+        for (heading, claim) in [
+            (
+                "Roster",
+                format!("up to {} routes", qq_config::MAX_DELEGATION_ROSTER),
+            ),
+            (
+                "Roster",
+                format!("at most {}", qq_config::MAX_DELEGATION_DEPTH),
+            ),
+            (
+                "Queue",
+                format!("up to {} per session", qq_client::state::MAX_QUEUED_DRAFTS),
+            ),
+        ] {
+            if !section(heading)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains(&claim)
+            {
+                problems.push(format!("  {heading} does not say \"{claim}\""));
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "concepts.md is wrong:\n{}",
+            problems.join("\n")
+        );
+    }
 }
