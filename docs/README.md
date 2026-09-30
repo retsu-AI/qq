@@ -27,9 +27,12 @@ below is for people changing QQ.
 - [`headless-contract.md`](design/headless-contract.md) — `qq run` JSONL/exit
   contract and the supervisor boundary.
 - [`providers.md`](design/providers.md) — provider validation standard.
-- [`jev.md`](design/jev.md) — optional TypeSafe Jev: what it is, the four
-  capabilities as built, why it hands work back today, and the direction the
-  [Jev plan](plans/jev.md) follows. The only Jev design doc.
+- [`decision-models.md`](design/decision-models.md) — optional decision
+  models (TypeSafe Jev today, OpenAI Decisions API next): vendors, the four
+  Jev capabilities as built, why they hand work back today, the
+  `qq-decision` architecture (ADR-0053), how future models land, and what
+  sets QQ apart. The [decision-model plan](plans/decision-models.md) builds
+  toward it. The only decision-model design doc.
 - [`tools.md`](design/tools.md) — tool loop, built-in tools and their
   bounding/spill boundary, containment, edit semantics, shell classification,
   `@` mentions, approvals, MCP and embedded hosts.
@@ -84,7 +87,7 @@ evidence.
 
 ## Runbooks — `runbooks/`
 
-- [`jev.md`](runbooks/jev.md) — enable, inspect, and turn off Jev review,
+- [`decision-models.md`](runbooks/decision-models.md) — enable, inspect, and turn off Jev review,
   routing, approval, and the advisory observer.
 - [`local-dev.md`](runbooks/local-dev.md) — toolchain, gates, test
   environment, worktrees.
