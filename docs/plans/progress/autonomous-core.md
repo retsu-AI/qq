@@ -13,9 +13,9 @@ appended below, newest last.
 | AC4 | Loop guard | Planned | | | ADR-0049 § 8; takes RR12's loop item; lands in the goal PR with goals G0 |
 | AC5 | `ContinueRun` | Planned | | | ADR-0048 § 3; protocol bump (continuation) |
 | AC6 | `AutoContinue` policy | Planned | | | ADR-0048 § 4; same bump as AC5 |
-| AC7 | Goal record and re-statement | Moved | | | Now `goals.md` G0 |
-| AC8 | Completion audit | Moved | | | Now `goals.md` G3 |
-| AC9 | Continue-if-idle | Moved | | | Now `goals.md` G2 |
+| AC7 | Goal record and re-statement | Dropped (moved to goals G0) | | | Now `goals.md` G0 |
+| AC8 | Completion audit | Dropped (moved to goals G3) | | | Now `goals.md` G3 |
+| AC9 | Continue-if-idle | Dropped (moved to goals G2) | | | Now `goals.md` G2 |
 | AC10 | `qq-core` embedding surface + example | Planned | | | ADR-0050 § 1 |
 | AC11 | `tool-fetch` feature; minimal profile CI | Planned | | | ADR-0050 § 3 |
 | AC12 | `qq-harness` crate (three mechanical moves) | Planned | | | ADR-0050 § 2 |
@@ -171,3 +171,12 @@ Changes here:
 - AC5's `ContinueRun` no longer admits completed runs. The goal driver
   queues a fresh goal run for those.
 - The goal-audit counters are gone from the reset-scope table.
+
+### 2026-09-30 — #226 follow-up design review
+
+The AC7–AC9 current-state rows now use `Dropped (moved to goals …)` per
+workflow § 3. The proposed goal driver no longer uses AC5's latest-prompt
+continuation path: it queues fresh runs from durable history after every
+stop that leaves the goal active. AC5/AC6 reject/skip runs with a goal
+snapshot; G2 does not depend on AC5. The dependency diagram and goal notes
+match `goals.md`. AC4 still lands with G0 in one protocol bump.

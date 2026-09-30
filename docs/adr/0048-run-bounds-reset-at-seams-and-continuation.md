@@ -70,6 +70,7 @@ A bound on a run measures what the *next request* would carry or what the
    - `run_id` is `paused` or `interrupted`;
    - it is the session's **latest prompt run**: no later prompt has been
      queued, started or settled;
+   - it has no goal snapshot (ADR-0049's driver owns goal recovery);
    - it has no successor yet.
 
    Otherwise it is a typed rejection (`not_continuable`, `superseded`,
@@ -129,9 +130,11 @@ A bound on a run measures what the *next request* would carry or what the
      how a client adds direction after a pause.
    - Continuations are ordinary runs: durable, observable, cancellable. A
      cancel or new prompt from a client cancels the pending continuation.
-   - `AutoContinue` never continues a run that has a goal snapshot. The
-     goal driver (ADR-0049 § 3) is that run's only scheduler, and it uses
-     the goal's own limits and first message.
+   - `AutoContinue` never continues a run that has a goal snapshot, and
+     explicit `ContinueRun` rejects it. The goal driver (ADR-0049 § 3)
+     queues a **fresh** run from committed history and the current goal,
+     after any waiting user prompts. Goal recovery is not a continuation
+     chain and does not weaken the latest-prompt admission rule.
 
 ## Consequences
 

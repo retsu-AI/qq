@@ -5,10 +5,10 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
 | G0 | The goal PR: protocol, store, goal in runs, `update_goal`, and autonomous-core AC4 | Planned | | | One PR, one protocol bump |
-| G1 | — | Merged into G0 | | | |
-| G2 | The driver | Planned | | | Depends on autonomous-core AC5 |
-| G3 | Completion check | Planned | | | |
-| G4 | Surfaces: `/goal`, `qq run --goal`, `qq goal` | Planned | | | |
+| G1 | — | Dropped (combined into G0) | | | No separate slice |
+| G2 | The driver | Planned | | | Depends on G0; fresh goal recovery, not AC5 |
+| G3 | Completion check | Planned | | | Depends on G2; owns full checked Goal 1 |
+| G4 | Surfaces: `/goal`, `qq run --goal`, `qq goal` | Planned | | | Read-only panel after G0; execution after G2/G3 |
 | G5 | Evidence | Planned | | | ENG-809 |
 
 ## Entries
@@ -81,3 +81,33 @@ All 17 were checked, and none were file-list comments. All 17 are fixed.
   - G0 and G1 merged into one goal PR that includes AC4;
   - the stale AC7–AC9 ledger rows and the § 4 → § 8 references are fixed.
 - None were declined.
+
+### 2026-09-30 — #226 latest review closure (12 comments on `fb1e510`)
+
+Worktree `.worktrees/pr-226-review`, branch `fix/eng-982-goal-review`, based
+on PR head `5ebde18`. Design only; no Rust, wire, schema or runtime changed.
+All 12 findings are valid at that head; the proposed ADR and plan now specify:
+- explicit once/for-goal check consent, never a widened ordinary approval;
+- one deadline for check exclusion/process; stale status/wait and results fenced;
+- exact identity/revision CAS, immutable achieved goals, explicit stopped-goal resume;
+- cancellation retains ownership; early resume rejects; archived spend remains charged;
+- fresh goal recovery, not prompt-chain continuation; queued checks yield to prompts;
+- final-slot handoff for prompt runs too; checked Goal 1 gate moves from G2 to G3;
+- workflow-valid dropped statuses and synchronized dependencies/protocol shapes.
+Two read-only source reviews confirmed approval, continuation, cancellation
+and accounting contracts; final consistency review and verification follow.
+
+### 2026-09-30 — final review and verification receipt for #226
+
+- Verdict: **Approve for the proposed docs-only design** after independent recheck.
+- Every spec edit invalidates its audit; neutral controls retag only valid audits.
+- `cargo test -p qq docs_truth`: 5 passed in this worktree.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
+- Initial unrestricted workspace tests: 5 deadline failures; no Rust changed.
+- `cargo test -p qq-core --lib sessions::tests::deadlines -- --test-threads=1`: 12 passed.
+- `cargo test --workspace -- --test-threads=4`: passed; original timing failures disclosed.
+- `cargo build --workspace`: passed. Cargo gates share `../../target`, not source changes.
+- Full-PR relative links, fences, ledger status checks and `git diff --check`: passed.
+- No runtime/hot-path changes; provider minimal profile and performance benches not applicable.
+- ADR-0049 remains Proposed; lead decisions are in `decisions-needed.md` row 11.
