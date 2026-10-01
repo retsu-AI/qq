@@ -9,8 +9,9 @@
 mod support;
 
 use std::{
+    io,
     path::PathBuf,
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -237,6 +238,72 @@ async fn streamed_text_hard_guard_rejects_a_single_oversized_turn() {
     );
 }
 
+struct WorkerGuard {
+    child: Child,
+    reaped: bool,
+}
+
+impl WorkerGuard {
+    fn terminate(&mut self) -> io::Result<ExitStatus> {
+        let kill_error = self.child.kill().err();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    self.reaped = true;
+                    // A failed kill can mean the worker exited concurrently;
+                    // reaping its status is authoritative in that race.
+                    return Ok(status);
+                }
+                Ok(None) => {}
+                Err(error) => return Err(error),
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "worker {} was not reaped after kill; kill error: {kill_error:?}",
+                        self.child.id()
+                    ),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        if !self.reaped
+            && let Err(error) = self.terminate()
+        {
+            eprintln!("bounded fixture cleanup failed: {error}");
+        }
+    }
+}
+
+#[test]
+fn worker_guard_reaps_an_already_exited_worker() {
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "process_kill_worker", "--ignored"])
+        .env_clear()
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut worker = WorkerGuard {
+        child,
+        reaped: false,
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while worker.child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "worker exit timed out");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(worker.terminate().unwrap().success());
+    assert!(worker.reaped);
+}
+
 #[test]
 #[ignore = "AC0 kill/reopen fixture; launches only this integration-test executable"]
 fn process_kill_preserves_the_side_effect_without_reexecution() {
@@ -245,7 +312,7 @@ fn process_kill_preserves_the_side_effect_without_reexecution() {
     for kill in 0..2 {
         let workspace = directory.path().join(format!("kill-{kill}"));
         std::fs::create_dir(&workspace).unwrap();
-        let mut child = Command::new(&executable)
+        let child = Command::new(&executable)
             .args(["--exact", "process_kill_worker", "--ignored", "--nocapture"])
             .env_clear()
             .env("QQ_SOAK_WORKER_DIR", &workspace)
@@ -253,24 +320,25 @@ fn process_kill_preserves_the_side_effect_without_reexecution() {
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
+        let mut worker = WorkerGuard {
+            child,
+            reaped: false,
+        };
         let ready = workspace.join("ready");
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if ready.exists() {
                 break;
             }
-            if let Some(status) = child.try_wait().unwrap() {
+            if let Some(status) = worker.child.try_wait().unwrap() {
+                worker.reaped = true;
                 panic!("worker exited before barrier: {status}");
             }
-            if Instant::now() >= deadline {
-                child.kill().expect("kill stalled worker");
-                child.wait().expect("reap stalled worker");
-                panic!("durable barrier timed out");
-            }
+            assert!(Instant::now() < deadline, "durable barrier timed out");
             std::thread::sleep(Duration::from_millis(5));
         }
-        child.kill().expect("inject process kill");
-        child.wait().expect("reap killed process");
+        let status = worker.terminate().expect("kill and bounded reap of worker");
+        assert!(!status.success(), "worker must remain alive until killed");
         let journal = workspace.join("effects");
         assert_eq!(std::fs::read_to_string(&journal).unwrap(), "0\n");
         let tokio = tokio::runtime::Builder::new_current_thread()
@@ -292,11 +360,16 @@ fn process_kill_preserves_the_side_effect_without_reexecution() {
             runtime.close().await.unwrap();
         });
         let connection = rusqlite::Connection::open(workspace.join("sessions.sqlite3")).unwrap();
-        let (status, result): (String, String) = connection.query_row(
-            "SELECT r.status, t.result FROM runs r JOIN tool_calls t ON t.run_id = r.id WHERE r.kind = 'prompt'",
-            [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        let (status, state, result, is_error): (String, String, String, bool) = connection.query_row(
+            "SELECT r.status, t.state, t.result, t.is_error FROM runs r JOIN tool_calls t ON t.run_id = r.id WHERE r.kind = 'prompt'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
         assert_eq!(status, "interrupted");
-        assert!(result.contains("interrupted"), "{result}");
+        assert_eq!(state, "interrupted");
+        assert!(is_error);
+        assert_eq!(
+            result,
+            "Tool execution was interrupted before a durable result was recorded."
+        );
         assert_eq!(
             std::fs::read_to_string(&journal).unwrap(),
             "0\n",

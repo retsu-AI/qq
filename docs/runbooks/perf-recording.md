@@ -68,9 +68,11 @@ cargo bench -p qq-core --bench turn_overhead
 The ignored characterization tests assert **current** stopping behavior, not
 successful autonomy: lifetime context reservation, the shared 32-compaction
 budget, separated empty-output retries, a single-shot summarizer outage, and
-kill/reopen without tool re-execution. Each JSON receipt records requested vs
-reached work, observed committed compactions, tool execution/settlement counts,
-RSS samples on Linux, DB/WAL high-water bytes and raw work-turn gaps. The
+kill/reopen without tool re-execution. Scripted `Report` receipts record
+requested vs reached work, observed committed compactions, tool
+execution/settlement counts, RSS samples on Linux, DB/WAL sampled high-water
+bytes and raw work-turn gaps. The hard-text receipt contains only its terminal
+event; kill receipts contain the recovery status and side-effect count. The
 `QQ_SOAK_EXPECT_COMPLETED` mode supplies AC2's desired-completion regression
 oracles; run it separately and retain its nonzero result as baseline evidence.
 The one-turn 16 MiB hard-guard test is **not** a cross-window lifetime test:

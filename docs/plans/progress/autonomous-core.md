@@ -13,7 +13,7 @@ appended below, newest last.
 | AP3b | Stall report and child answer | Planned | | | ADR-0054 § 1, § 3; before AC1; independent review |
 | AP4 | Non-blocking delegation | Planned | | | ADR-0054 § 4; independent review; `DESCRIPTOR_VERSION` bump |
 | AP5 | Evidence after AP3b and AP4 | Planned | | | Goal 6; 7-day windows |
-| AC0 | Soak and resource harness | In progress | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | `test/eng-986-ac0-soak` | AC0.1 characterization fixtures first; baseline `0bd8f6b` |
+| AC0 | Soak and resource harness | In review (AC0.1); AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | `test/eng-986-ac0-soak` | AC0.1 stacked on AP1 (#235); AC0.2 = H0 registration, concurrency/fsync qualification |
 | AC1 | `RunState` extraction by reset scope | Planned | | | No behaviour change; independent review; after AP3b |
 | AC2 | Bounds reset at seams | Planned | | | ADR-0048 § 1 |
 | AC3 | No single-shot fatal faults | Planned | | | ADR-0048 § 2; empty-checkpoint item moved to AP3a |
@@ -268,3 +268,40 @@ space remained. These are diagnostic baselines, not quiet-host tail
 qualification. New completion-oracle failures are recorded against unchanged
 production code; default characterization assertions stay green until their
 owning behavior slices flip them.
+
+### 2026-09-30 — AC0.1 review and DiskFull recovery
+
+Candidate `177f4ea` reviewed read-only in `.worktrees/eng-986-review`:
+request changes for unbounded post-kill reap; also tighten the ambiguous-tool
+sentinel and qualify receipt shapes. Fixes retain a bounded cleanup guard,
+including early-exit/panic paths, with an already-exited worker regression.
+Workspace fmt and all-feature Clippy passed before interruption; workspace
+tests failed at link with `No space left on device`, not a test assertion.
+QQ then reported `DiskFull`. No interrupted execution is retried blindly.
+Resumed from the clean committed worktree; host now has 137 GiB free without
+any cleanup by this agent. Another worktree has an active workspace test;
+remaining gates use the separate `target/ac0-verify` cache (four jobs,
+no incremental/debug info) and logs under the original evidence directory.
+Full workspace test/build and follow-up independent review are still pending.
+
+### 2026-10-01 — AC0.1 taken over, rebased onto the AP stack (ENG-986)
+
+The lead handed AC0.1 over. The worktree was idle, with no QQ run active.
+The review fixes left uncommitted at `177f4ea` cover all three findings:
+- a bounded `WorkerGuard` kill and reap on every path, including panics, with
+  the regression `worker_guard_reaps_an_already_exited_worker`;
+- the exact interrupted-result sentinel, plus `state` and `is_error`;
+- receipt shapes described per fixture in the perf runbook.
+
+Rebased onto `feat/eng-989-ap1-subagent-brief`. Only the ledger conflicted,
+and both sides were kept. Gates on the stack:
+- `--test soak` default: 7 passed, 6 ignored.
+- `--ignored` (characterization, kill/reopen ×2 included): 5 passed in
+  22 s.
+- `QQ_SOAK_EXPECT_COMPLETED=1`: 4 completion oracles fail, as intended.
+  These are the 500-turn context reservation, 40 compactions, the empty
+  checkpoint and separated empty truncations. They are the failing tests
+  that AP3a, AC2 and AC3 flip.
+- Workspace 2019 passed, after one unrelated timing flake in
+  `child_mutation_drains_before_steering_or_a_replacement_run_can_write`
+  that passed 6 of 6 on rerun. fmt and clippy are clean.
