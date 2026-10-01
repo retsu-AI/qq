@@ -441,7 +441,10 @@ a goal.
      triples.
    - **Pausing.** After two slices (512 calls) with no novel triple, no
      mutation event and no new assistant text, the run settles
-     `paused` with `RunPause::NoProgress`.
+     `paused` with `RunPause::NoProgress`. Text written in a
+     runtime-requested report turn (ADR-0054 § 2) is not "new assistant
+     text" for this rule, so answering reports does not keep a stuck run
+     alive.
 
 ## Consequences
 

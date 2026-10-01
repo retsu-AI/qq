@@ -93,6 +93,9 @@ evidence.
   may be a leaf symlink; this fixture still requires a regular `config.ron`.
 - [`perf-recording.md`](runbooks/perf-recording.md) — baseline/candidate
   procedure, focused fixtures, same-binary control, host conditions.
+- [`progress-report.md`](runbooks/progress-report.md) — read-only session
+  store queries: do long runs and sub-agents produce output, or only
+  activity.
 - [`windows-ci.md`](runbooks/windows-ci.md) — the targeted Windows job and how
   to extend it.
 - [`release.md`](runbooks/release.md) — `cargo xtask release`, the tag-driven

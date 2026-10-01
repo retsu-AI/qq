@@ -74,6 +74,7 @@ may append a **request** row; only root changes a request's status.
 | 0050 | `qq-harness` composition library; `qq-core` tool features, embedding example and surface hygiene | autonomous-core AC10–AC13 | Proposed 2026-09-28: `docs/adr/0050-qq-harness-composition-library.md` |
 | 0051 | 0ver product versioning; compatibility carried by contract versions | v0.1.5 release (ENG-969), PR #212 | Accepted 2026-09-28: `docs/adr/0051-zerover-product-versioning.md` |
 | 0052 | Jev approval activation from the compiled plan; supersedes ADR-0041 decision 5's activation | v0.1.5 release (ENG-971), PR #214 | Accepted 2026-09-28: `docs/adr/0052-jev-approval-activation-from-plan.md` |
+| 0054 | Progress means output: stall reports, a sub-agent answers its brief, non-blocking delegation | autonomous-core AP1–AP5 (ENG-978) | Proposed 2026-09-30: `docs/adr/0054-progress-means-output.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -145,7 +146,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0053. Reserve here before opening a PR that adds an ADR.
+Next free number: 0055. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -443,3 +444,22 @@ files (ENG-974; `search_walk` unchanged within noise); schema-35 upgrade test
 (ENG-975); docs drift (ENG-976); release bump (ENG-977). Deferred, not
 release fixes: audit findings 1, 3, 6–8 (PR #193), ENG-870 remaining RR8
 goals, Merkle index robustness, ENG-834 size budget.
+
+### 2026-09-30 — AP0 progress baseline (autonomous-core, ENG-978)
+
+`docs/runbooks/progress-report.md` on the lead's store: 30 days ending
+2026-10-01 (UTC), schema 39, 425 runs in the window, read-only. No AP
+slice is on `main`.
+- Long runs (≥ 20 turns): 95 roots, 85 children. No child made a change or
+  ran a shell command (0 / 0).
+- Silent stretch ≥ 64 / 128 / 256 / 320 calls: children 51 / 22 / 13 / 10,
+  roots 1 / 0 / 0 / 0. No-work stretch: children 65 / 33 / 15 / 11, roots
+  12 / 3 / 0 / 0.
+- Children: median first-text turn 22. 41 of 85 long children, and 30 of
+  74 children with ≥ 64 calls, had no text before their final turn.
+- Slice checkpoints (whole store): 30 runs reached one, and 20 of them
+  skipped at least one. 25 checkpoint turns were answered with calls, and
+  23 of those had no text.
+- Delegating runs: 41 runs, 4 351 wall minutes, 1 722 minutes (40 %) with a
+  `spawn_agent` call open (merged intervals). 34 of 124 spawns returned an
+  error, 12 of them children over their context limit.
