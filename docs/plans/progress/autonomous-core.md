@@ -236,3 +236,11 @@ only because it embeds the prompt version; the encoding is unchanged and
 `DESCRIPTOR_VERSION` stays 12. Workspace: 2009 passed. `plan_compile`
 (4 × 2 000 iterations): 24.9–25.2 µs before, 25.0–26.0 µs after, within
 noise. Evidence: `target/qq-perf/ap1-2026-10-01/`.
+Owned-path deviations, which the plan's ownership rule allows as forced
+consumers: `sessions/execution.rs` (child detection), `lib.rs`
+(`RunCapabilities` and tests), `sessions/tests/delegation.rs`, and
+`src/headless.rs` (pinned prompt version). The `architecture.md` amendment
+has a root request row. Review (independent, read-only): two blocking items,
+both fixed. A golden test now pins the root prompt and tools against
+version 14's hashes except for the new bullet and `task` text; two planted
+edits made it fail. A read-only root test was added.

@@ -10793,6 +10793,87 @@ mod tests {
     }
 
     #[test]
+    fn a_root_prompt_and_tools_change_only_by_the_brief_guidance() {
+        // Golden against prompt version 14 (`356092a`): a root's system
+        // prompt gains only the delegation bullet, and its tools block only
+        // the `spawn_agent` `task` description. Everything else is
+        // byte-identical, so a root keeps its prompt-cache prefix up to the
+        // Delegation section.
+        const NEW_BULLET: &str = "- Write the brief as a question to answer, what the answer is \
+            for, and the shape you want back (a list of path:line findings, a yes or no with \
+            evidence, a short plan). A sub-agent stops when it can answer, so an open-ended brief \
+            gets a long search and a late answer. Prefer several narrow briefs over one broad \
+            one.\n";
+        const OLD_TASK: &str = "A complete, self-contained brief for the sub-agent.";
+        const NEW_TASK: &str = "A complete, self-contained brief for the sub-agent: the question \
+            to answer, what the answer is for, and the answer shape you want back. The sub-agent \
+            starts with no other context and stops once it can answer.";
+        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
+        let instructions = workspace::WorkspaceInstructions::empty();
+        let mut specs = tools::specs();
+        specs.push(tools::spawn_agent_spec(&[], &DelegationRoster::default()));
+        let prompt = runtime::agent_system_prompt(
+            workspace,
+            &specs,
+            runtime::PromptSections::default(),
+            &instructions,
+            None,
+            None,
+        );
+        assert!(prompt.contains(NEW_BULLET), "{prompt}");
+        let v14 = prompt.replacen(NEW_BULLET, "", 1);
+        assert_ne!(v14, prompt);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(v14.as_bytes())),
+            "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
+        );
+        // Every built-in declaration is unchanged.
+        assert_eq!(
+            runtime::tool_schema_measurement(&tools::specs())
+                .hash
+                .to_string(),
+            "568cef80e021a4c69625eb992086993b9c0f43857ae74ff253f70253a752f24f"
+        );
+        let spawn = specs.last().unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(spawn.description().as_bytes())),
+            "09105474547d899bf0bf5346f2c72079425d0f0c236c9a201378a33f0421c5ac"
+        );
+        let schema = spawn.input_schema().get();
+        assert!(schema.contains(NEW_TASK), "{schema}");
+        assert_eq!(
+            format!(
+                "{:x}",
+                Sha256::digest(schema.replacen(NEW_TASK, OLD_TASK, 1).as_bytes())
+            ),
+            "deb5f0866f1f90db28995823bd38e3bbdeaf565b35cf0ffaf24c3812cc7b1762"
+        );
+    }
+
+    #[test]
+    fn a_read_only_root_keeps_the_implement_line_and_has_no_subagent_section() {
+        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
+        let instructions = workspace::WorkspaceInstructions::empty();
+        // The schemas a ReadOnly root is offered: the mutating, shell and
+        // network built-ins are withheld (`catalog.rs` read-only filter).
+        let read_only = tools::specs()
+            .into_iter()
+            .filter(|spec| matches!(spec.name(), "read_file" | "tree" | "search" | "ask_user"))
+            .collect::<Vec<_>>();
+        assert_eq!(read_only.len(), 4);
+        let prompt = runtime::agent_system_prompt(
+            workspace,
+            &read_only,
+            runtime::PromptSections::default(),
+            &instructions,
+            None,
+            None,
+        );
+        assert!(prompt.contains("- Implement requested changes rather than stopping at analysis"));
+        assert!(!prompt.contains("Sub-agent:"));
+    }
+
+    #[test]
     fn agent_prompt_teaches_delegation_only_when_spawn_agent_is_declared() {
         let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();

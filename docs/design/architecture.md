@@ -428,7 +428,7 @@ index, the workspace instructions, and the pack persona, as a `PromptPrefix`
 per capability set (which optional static tools the run may use, whether it
 may load guidance, and whether it is a model-spawned child with read or write
 authority) together with the SHA-256 state of those bytes. The common set is
-built at compile; other sets on first use, bounded by the possible keys. A run appends only its suffix — the selected command or skill document,
+built at compile; other sets on first use, bounded by the 198 possible keys. A run appends only its suffix — the selected command or skill document,
 context-source blocks, the output contract — and finalizes a clone of the
 prefix hasher over that suffix, so `system_prompt_hash` equals a digest of the
 whole prompt and the prompt body is neither rebuilt nor rehashed per run.
