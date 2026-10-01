@@ -654,7 +654,7 @@ pub(super) fn runtime_notice(outcome: &RunOutcome) -> Option<String> {
 }
 
 /// Replaces read-only tool results older than the recency window with
-/// one-line stubs. A result is prunable when the call was admitted with the
+/// short stubs (the result's header line, when it has one, then one line). A result is prunable when the call was admitted with the
 /// `read_only` effect class (`effects` maps assembled message/block positions
 /// to their stored effects) — its output is re-derivable on demand; mutating, shell, and
 /// external outputs are not. Rows recorded before the effect was stored fall
@@ -776,12 +776,21 @@ pub(super) fn prunable_stub(
     // that hash returns no body, and the body is what pruning removed.
     let size = content.len();
     let (header, hint) = if name == "read_file" {
+        // The hash is the only ` h:` token after the path, and no later field
+        // can contain one; searching from the end leaves a path that happens
+        // to contain ` h:` intact.
         let header = crate::tools::header_line("read", content).map(|header| {
-            header
-                .split(' ')
-                .filter(|token| !is_read_hash_token(token))
-                .collect::<Vec<_>>()
-                .join(" ")
+            match header.rfind(" h:").map(|at| {
+                let end = header[at + 1..]
+                    .find(' ')
+                    .map_or(header.len(), |len| at + 1 + len);
+                (at, end)
+            }) {
+                Some((at, end)) if is_read_hash_token(&header[at + 1..end]) => {
+                    format!("{}{}", &header[..at], &header[end..])
+                }
+                Some(_) | None => header.to_owned(),
+            }
         });
         (header, PRUNED_READ_REREAD)
     } else {

@@ -2486,6 +2486,14 @@ async fn a_run_that_outgrows_the_window_stubs_its_stale_reads_instead_of_failing
         "{stubbed}"
     );
     assert!(results.last().unwrap().contains(&"n".repeat(127)));
+    // Live pruning produces the stub assembly would: the read header without
+    // its hash, and the re-read hint (AP2).
+    for stub in results.iter().filter(|r| r.contains("[pruned")) {
+        let (header, tail) = stub.split_once('\n').expect("a read stub keeps its header");
+        assert!(header.starts_with("read note.txt L"), "{header}");
+        assert!(!header.contains(" h:"), "{header}");
+        assert!(tail.ends_with("without if_changed_since]"), "{tail}");
+    }
     // The stored rows are untouched: the persisted result text is verbatim.
     let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
     let pruned_rows: u64 = connection

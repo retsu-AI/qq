@@ -132,6 +132,8 @@ fn pruned_read_file_stubs_keep_the_window_drop_the_hash_and_name_the_reread() {
     let body = "fn line() {}\n".repeat(60);
     let windowed = format!("read src/lib.rs L1-60/240 h:3f9a0c1d2e4b clipped=2\n{body}");
     let unscanned = format!("read big.log L1-60/- h:-\n{body}");
+    // A path segment can look like a hash; only the trailing hash goes.
+    let odd_path = format!("read docs/a h:0123456789ab b.md L1-60/60 h:3f9a0c1d2e4b\n{body}");
     let result = |id: &str, content: &str| ContentBlock::ToolResult {
         call_id: id.to_owned(),
         content: content.to_owned(),
@@ -144,9 +146,17 @@ fn pruned_read_file_stubs_keep_the_window_drop_the_hash_and_name_the_reread() {
             vec![
                 call("c1", serde_json::json!({"path": "src/lib.rs", "limit": 60})),
                 call("c2", serde_json::json!({"path": "big.log"})),
+                call(
+                    "c3",
+                    serde_json::json!({"path": "docs/a h:0123456789ab b.md"}),
+                ),
             ],
         ),
-        Message::tool_results(vec![result("c1", &windowed), result("c2", &unscanned)]),
+        Message::tool_results(vec![
+            result("c1", &windowed),
+            result("c2", &unscanned),
+            result("c3", &odd_path),
+        ]),
         Message::assistant("a"),
         Message::assistant("b"),
         Message::assistant("c"),
@@ -182,6 +192,11 @@ fn pruned_read_file_stubs_keep_the_window_drop_the_hash_and_name_the_reread() {
              without if_changed_since]",
             unscanned.len()
         )
+    );
+    assert!(
+        stubs[2].starts_with("read docs/a h:0123456789ab b.md L1-60/60\n"),
+        "{}",
+        stubs[2]
     );
 }
 

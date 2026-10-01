@@ -213,4 +213,11 @@ or to end with the old hint, and were updated. `qq-core`: 754 passed.
 `context_assembly` (500 iterations, 4 runs each, A then B on one host,
 IO pressure 20–37 %): assemble medians 50.3 / 50.9 / 54.1 µs before and
 50.0 / 53.1 / 55.3 µs after at 10 / 1 000 / 10 000 archived runs, with
-overlapping ranges. Within noise. Evidence: `target/qq-perf/ap2-2026-10-01/`.
+overlapping ranges. Within noise; the bench's results have no header, so it
+measures the unchanged path, and the new header splice is one `rfind` and
+one `format!` per pruned read. Evidence: `target/qq-perf/ap2-2026-10-01/`.
+Review (independent, read-only): approve with should-fixes, all taken. Only
+the trailing hash is spliced out, so a path segment shaped like `h:<hex>` is
+kept (tested). The live-pruning test asserts the same stub shape as assembly.
+The logic lives in `sessions/transcript.rs` rather than the plan's
+`tools/output.rs`, because that is where stubs are built.

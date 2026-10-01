@@ -574,7 +574,8 @@ never on a Tokio worker.
 
 `read_file` reads the whole file (to the 4 MiB scan cap) once, hashes it,
 and renders one of three shapes. Every result opens with a `read` header
-so the model, the TUI, and a pruning stub all get the same facts:
+so the model, the TUI, and a pruning stub all get the same facts (a pruning
+stub omits only the hash; see § Headers):
 
 ```
 read crates/qq-core/src/tools/read.rs L1-40,88-91/412 h:3f9a1c0b7e2d
