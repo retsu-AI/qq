@@ -48,7 +48,7 @@ pub(crate) use history::{
 #[cfg(test)]
 pub(crate) use prompt::agent_system_prompt;
 pub(crate) use prompt::{
-    AGENT_PROMPT_VERSION, PromptPrefix, PromptSections, ToolSchemaMeasurement,
+    AGENT_PROMPT_VERSION, PromptPrefix, PromptSections, SubagentAuthority, ToolSchemaMeasurement,
     delegation_roster_text, measure_tool_schemas, tool_schema_measurement,
 };
 pub(crate) use shell_policy::builtin_alternative;

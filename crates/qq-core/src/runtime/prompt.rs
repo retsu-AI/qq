@@ -12,16 +12,18 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(14) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(15) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// Version 14 of the base agent prompt (10 → 11 covers the tool-layer
+/// Version 15 of the base agent prompt (10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
-/// batch independent calls and names the 16-call executable cap).
+/// batch independent calls and names the 16-call executable cap; 14 → 15
+/// adds the sub-agent section for child runs, drops the implement-instead
+/// line for read children, and asks parents for a question-shaped brief).
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -39,6 +41,17 @@ pub(crate) struct PromptSections<'a> {
     pub(crate) roster: Option<&'a str>,
     /// Disclosed skills the model may load.
     pub(crate) skill_index: Option<&'a str>,
+    /// Set for a model-spawned child run: it answers a waiting parent, not a
+    /// user. `None` for roots and for a user's own prompt in a child session.
+    pub(crate) subagent: Option<SubagentAuthority>,
+}
+
+/// What a sub-agent may do, as far as its prompt is concerned. A read child
+/// cannot implement anything; a write child (supervised) can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubagentAuthority {
+    Read,
+    Write,
 }
 
 #[cfg(test)]
@@ -124,6 +137,7 @@ fn agent_prompt_prefix(
         tool_index,
         roster: roster_text,
         skill_index,
+        subagent,
     } = sections;
     let mut tool_names = String::new();
     let mut has_external = tool_index.is_some();
@@ -166,6 +180,10 @@ fn agent_prompt_prefix(
             "\n\nDelegation:\n\
          - spawn_agent runs a one-shot read-only sub-agent in this workspace from a \
          self-contained task brief and returns only its final answer.\n\
+         - Write the brief as a question to answer, what the answer is for, and the shape \
+         you want back (a list of path:line findings, a yes or no with evidence, a short \
+         plan). A sub-agent stops when it can answer, so an open-ended brief gets a long \
+         search and a late answer. Prefer several narrow briefs over one broad one.\n\
 {model_guidance}\
          - Delegate when all three hold: the raw evidence would dwarf the distilled answer, \
          you will not need that evidence verbatim later, and the task needs no mid-flight \
@@ -177,6 +195,14 @@ fn agent_prompt_prefix(
         )
     } else {
         String::new()
+    };
+    // A read child cannot implement anything; telling it to keep going until
+    // it has only keeps it reading. Every other run keeps the line.
+    let implement = if subagent == Some(SubagentAuthority::Read) {
+        ""
+    } else {
+        "- Implement requested changes rather than stopping at analysis unless the user \
+         requested analysis-only work.\n"
     };
     let mut prompt = format!(
         "You are QQ, a coding agent operating in the workspace rooted at {root}.\n\
@@ -197,7 +223,7 @@ fn agent_prompt_prefix(
          - Give every tool path relative to the workspace root; absolute paths are rejected.\n\
          - When a result ends in a …[qq: … omitted; full output t:…]… marker, the complete output is stored: call read_tool_result with that handle (offset/limit to page, query to search) instead of re-running the command.\n\
          - Before changing files below a subdirectory, inspect each directory from the workspace root to the target for AGENTS.md; when AGENTS.md is absent at one scope, check CLAUDE.md. Apply selected instructions root-to-leaf, with more-specific instructions taking precedence.\n\
-         - Implement requested changes rather than stopping at analysis unless the user requested analysis-only work.\n\
+{implement}\
          - Treat failed tools and tests as evidence: diagnose them and continue when a safe path remains.\n\
          - Run the narrowest relevant verification before broader checks.\n\
          - Do not claim success without evidence from the resulting state.\n\
@@ -209,6 +235,12 @@ fn agent_prompt_prefix(
          - Use ask_user only when the request is genuinely ambiguous and a wrong guess would be expensive to undo; offer concrete options, ask once, and never ask what you can find out with a tool. If the result says no user is available, decide and state the assumption.{spawn_section}",
         root = workspace.display(),
     );
+    if let Some(authority) = subagent {
+        prompt.push_str(SUBAGENT_SECTION);
+        if authority == SubagentAuthority::Read {
+            prompt.push_str(SUBAGENT_READ_ONLY_LINE);
+        }
+    }
     if let Some(index) = tool_index {
         prompt.push_str("\n\n");
         prompt.push_str(index.trim_end());
@@ -223,6 +255,23 @@ fn agent_prompt_prefix(
     }
     prompt
 }
+
+/// Appended for a model-spawned child run (ADR-0054 § 5). The parent is
+/// blocked on this run and receives only its last reply.
+const SUBAGENT_SECTION: &str = "\n\nSub-agent:\n\
+- You are a sub-agent. Another agent is waiting for you, and only your final reply reaches it; \
+nothing else you say or read in this run does. Your first message is its brief.\n\
+- Stop as soon as you can answer the brief. Do not survey the codebase beyond what the answer \
+needs.\n\
+- Reply with the answer first, then the evidence as path:line, then what you could not \
+establish.\n\
+- Do not re-read text that is still in your context. Re-read a file only for lines you have not \
+seen or that may have changed.";
+
+/// Appended after [`SUBAGENT_SECTION`] for a read child.
+const SUBAGENT_READ_ONLY_LINE: &str = "\n\
+- You cannot change files or run commands. If the brief asks for a change, answer with what \
+should change and where, and stop.";
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ToolSchemaMeasurement {

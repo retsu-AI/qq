@@ -7,7 +7,7 @@ appended below, newest last.
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
 | AP0 | Progress report and baseline | In review | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) | `docs/eng-978-ac-progress-first` | Runbook + baseline in `root.md` (2026-09-30); ships with the plan revision |
-| AP1 | Sub-agent brief and delegation guidance | Planned | | | ADR-0054 § 5; prompt-only; priority 2 |
+| AP1 | Sub-agent brief and delegation guidance | In review | [ENG-989](https://linear.app/retsu-ai/issue/ENG-989) | `feat/eng-989-ap1-subagent-brief` | Stacked on #233; prompt 14 → 15 |
 | AP2 | Pruned `read_file` stubs keep their header | In review | [ENG-988](https://linear.app/retsu-ai/issue/ENG-988) | `fix/eng-988-ap2-pruned-read-stub` | Stacked on #232 |
 | AP3a | Report turns as persisted turns | Planned | | | ADR-0054 § 2; after AC0.1; one store column; independent review; takes AC3's empty-checkpoint item |
 | AP3b | Stall report and child answer | Planned | | | ADR-0054 § 1, § 3; before AC1; independent review |
@@ -221,3 +221,18 @@ the trailing hash is spliced out, so a path segment shaped like `h:<hex>` is
 kept (tested). The live-pruning test asserts the same stub shape as assembly.
 The logic lives in `sessions/transcript.rs` rather than the plan's
 `tools/output.rs`, because that is where stubs are built.
+
+### 2026-10-01 — AP1 sub-agent brief (ENG-989)
+
+`AGENT_PROMPT_VERSION` 14 → 15. A model-spawned task run gets a
+`Sub-agent:` section, keyed in `PromptPrefixKey` by being a child (read or
+write), not by the read-only filter. A read child drops the implement-instead
+line; a read-only root keeps it. Audit children and a user's prompt in a
+child session are unchanged. The delegation guidance and the `spawn_agent`
+`task` description ask for a question, a purpose and an answer shape.
+Tests: two prompt unit tests, plus assertions added to the read-child,
+write-child and audit end-to-end tests. The golden descriptor digest moved
+only because it embeds the prompt version; the encoding is unchanged and
+`DESCRIPTOR_VERSION` stays 12. Workspace: 2009 passed. `plan_compile`
+(4 × 2 000 iterations): 24.9–25.2 µs before, 25.0–26.0 µs after, within
+noise. Evidence: `target/qq-perf/ap1-2026-10-01/`.
