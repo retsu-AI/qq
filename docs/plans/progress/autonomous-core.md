@@ -8,7 +8,7 @@ appended below, newest last.
 | --- | --- | --- | --- | --- | --- |
 | AP0 | Progress report and baseline | In review | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) | `docs/eng-978-ac-progress-first` | Runbook + baseline in `root.md` (2026-09-30); ships with the plan revision |
 | AP1 | Sub-agent brief and delegation guidance | Planned | | | ADR-0054 § 5; prompt-only; priority 2 |
-| AP2 | Pruned `read_file` stubs keep their header | Planned | | | Priority 2; independent of AP1 |
+| AP2 | Pruned `read_file` stubs keep their header | In review | [ENG-988](https://linear.app/retsu-ai/issue/ENG-988) | `fix/eng-988-ap2-pruned-read-stub` | Stacked on #232 |
 | AP3a | Report turns as persisted turns | Planned | | | ADR-0054 § 2; after AC0.1; one store column; independent review; takes AC3's empty-checkpoint item |
 | AP3b | Stall report and child answer | Planned | | | ADR-0054 § 1, § 3; before AC1; independent review |
 | AP4 | Non-blocking delegation | Planned | | | ADR-0054 § 4; independent review; `DESCRIPTOR_VERSION` bump |
@@ -199,3 +199,18 @@ Goal 6. AC3's empty-checkpoint item moves to AP3a, and AP3a/AP3b edit the
 run loop before AC1, with the reason in § Order. AP0's runbook and baseline ship
 with this revision. AC0.1 (ENG-986) is unaffected and continues in
 `.worktrees/eng-986-ac0`; its ledger rows land with that PR.
+
+### 2026-10-01 — AP2 pruned `read_file` stubs (ENG-988)
+
+Regression
+`pruned_read_file_stubs_keep_the_window_drop_the_hash_and_name_the_reread`
+failed on the base (no header at all). It passes now. A pruned `read_file`
+stub keeps `read <path> L…/… [fields]` without the `h:` token and names the
+re-read without `if_changed_since`. Other tools' stubs are unchanged. Live
+and assembly pruning share `prune_stale_tool_results`, so they produce the
+same text. Four existing tests expected the stub to start with `[pruned`
+or to end with the old hint, and were updated. `qq-core`: 754 passed.
+`context_assembly` (500 iterations, 4 runs each, A then B on one host,
+IO pressure 20–37 %): assemble medians 50.3 / 50.9 / 54.1 µs before and
+50.0 / 53.1 / 55.3 µs after at 10 / 1 000 / 10 000 archived runs, with
+overlapping ranges. Within noise. Evidence: `target/qq-perf/ap2-2026-10-01/`.

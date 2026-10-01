@@ -254,7 +254,10 @@ deterministic: the same text and bounds produce the same bytes.
 whitespace. `shell` ships it: `shell exit=0 elapsed=1.2 bytes=428890`. The
 header is where the verdict lives, so a head-only glance, a truncated tail,
 or a pruned stub all still say how the call ended. Context pruning keeps
-the header line in front of its `[pruned: …]` stub.
+the header line in front of its `[pruned: …]` stub. A pruned `read_file`
+stub keeps its window and line count but drops the `h:` token, and says to
+re-read without `if_changed_since`. With that hash, the re-read would answer
+`unchanged` with no body, and the body is what pruning removed.
 
 **Secret masking** applies to `model_text` before bounding and replaces each
 hit with `[masked:<kind>]`: AWS access keys, GitHub tokens, `sk-`/`sk_live_`/

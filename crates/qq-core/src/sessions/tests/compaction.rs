@@ -904,7 +904,7 @@ async fn pruned_history_still_compacts_a_known_overflow_before_the_retry() {
                 .flat_map(Message::content)
                 .any(|block| matches!(
                     block,
-                    ContentBlock::ToolResult { content, .. } if content.starts_with("[pruned")
+                    ContentBlock::ToolResult { content, .. } if content.contains("\n[pruned: ")
                 )),
             "the overflowing request must already carry pruned history"
         );
@@ -1626,13 +1626,25 @@ async fn assembly_prunes_stale_read_only_results_but_never_mutating_ones() {
             .collect()
     };
     assert_eq!(results.len(), 3);
-    // The old read is a stub naming the tool, arguments, and size.
+    // The old read is a stub: its header without the hash, then the tool,
+    // arguments, size and how to get the text back.
+    let (header, stub) = results[0].split_once('\n').unwrap_or_else(|| {
+        panic!(
+            "stale read-only result must be stubbed, got {:?}",
+            results[0]
+        )
+    });
+    assert!(header.starts_with("read note.txt L"), "{header}");
     assert!(
-        results[0].starts_with("[pruned: read_file {\"path\":\"note.txt\"} returned"),
+        !header.contains(" h:"),
+        "a pruned read must not offer its hash: {header}"
+    );
+    assert!(
+        stub.starts_with("[pruned: read_file {\"path\":\"note.txt\"} returned"),
         "stale read-only result must be stubbed, got {:?}",
         results[0]
     );
-    assert!(results[0].ends_with("call it again if needed]"));
+    assert!(stub.ends_with("without if_changed_since]"));
     // The equally old mutation is never pruned: not re-derivable.
     assert!(
         !results[1].starts_with("[pruned"),
@@ -2585,7 +2597,7 @@ async fn measured_occupancy_survives_assembly_pruning_and_admits_the_next_prompt
             .flat_map(Message::content)
             .any(|block| matches!(
                 block,
-                ContentBlock::ToolResult { content, .. } if content.starts_with("[pruned")
+                ContentBlock::ToolResult { content, .. } if content.contains("\n[pruned: ")
             )),
         "the final request carries pruned history"
     );
