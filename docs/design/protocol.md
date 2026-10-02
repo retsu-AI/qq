@@ -772,7 +772,8 @@ persisted with the run and enforced by the runtime, not the client, so every
 surface observes the same outcome. The wall clock starts at admission and
 spans provider retries, tool execution, and sub-agent work. When the turn or
 tool-call budget is nearly spent, the runtime reserves the last permitted turn
-as a tool-free final status response. `max_cost_usd_nanos` requires the
+as a final status response that asks for no tool calls (the tools stay
+declared; a call made anyway settles the run). `max_cost_usd_nanos` requires the
 resolved model to carry pricing; otherwise the run fails with a
 `configuration` failure before any provider work. Sub-agents receive the
 parent's *remaining* wall clock, cost, and token bounds at spawn time (never

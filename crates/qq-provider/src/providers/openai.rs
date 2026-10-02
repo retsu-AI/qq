@@ -345,6 +345,8 @@ pub(crate) struct ResponsesRequest<'a> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ResponsesTool<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ReasoningConfig>,
@@ -395,6 +397,7 @@ impl<'a> ResponsesRequest<'a> {
             instructions: request.system().map(Text),
             input,
             tools: request.tools().iter().map(ResponsesTool::from).collect(),
+            tool_choice: request.tools_disabled().then_some("none"),
             max_output_tokens: matches!(kind, ResponsesRequestKind::Standard)
                 .then(|| request.max_output_tokens()),
             reasoning: request.reasoning_effort().map(|effort| ReasoningConfig {
@@ -875,6 +878,32 @@ mod tests {
             ProviderError::Configuration(message)
                 if message == "authentication header secret must not be empty"
         ));
+    }
+
+    #[test]
+    fn a_tool_choice_of_none_keeps_the_tools_and_sends_none() {
+        let tools = vec![crate::ToolSpec::new(
+            "read_file",
+            "Reads one file",
+            json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        )];
+        for kind in [ResponsesRequestKind::Standard, ResponsesRequestKind::Codex] {
+            let request = ModelRequest::new("gpt-test", vec![Message::user("ping")], 64)
+                .with_tools(tools.clone())
+                .with_tool_choice(crate::ToolChoice::None);
+            let body = serde_json::to_value(ResponsesRequest::new(&request, kind)).unwrap();
+            assert_eq!(body["tool_choice"], "none");
+            assert_eq!(body["tools"][0]["name"], "read_file");
+
+            let auto = ModelRequest::new("gpt-test", vec![Message::user("ping")], 64)
+                .with_tools(tools.clone());
+            let body = serde_json::to_value(ResponsesRequest::new(&auto, kind)).unwrap();
+            assert!(body.get("tool_choice").is_none());
+            let bare = ModelRequest::new("gpt-test", vec![Message::user("ping")], 64)
+                .with_tool_choice(crate::ToolChoice::None);
+            let body = serde_json::to_value(ResponsesRequest::new(&bare, kind)).unwrap();
+            assert!(body.get("tool_choice").is_none());
+        }
     }
 
     #[test]

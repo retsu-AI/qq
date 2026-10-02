@@ -363,6 +363,10 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
             if cache_points {
                 builder = builder.tools(Tool::CachePoint(cache_point()));
             }
+            // Converse's tool choice has no "none" (only auto, any, and a
+            // named tool), and dropping the tools is rejected once history
+            // holds tool calls. `ToolChoice::None` therefore sends the tools
+            // unchanged; the caller rejects any call the model makes anyway.
             Some(builder.build().map_err(|_| {
                 ProviderError::Configuration(
                     "could not construct an Amazon Bedrock tool configuration".to_owned(),
@@ -951,6 +955,33 @@ mod tests {
                 Bedrock::new(auth, region).expect_err("invalid configuration must be rejected");
             assert!(matches!(error, ProviderError::Configuration(_)));
         }
+    }
+
+    #[test]
+    fn a_tool_choice_of_none_still_declares_the_tools() {
+        // Converse rejects a request whose history holds tool calls when no
+        // tool configuration is sent, and has no "none" choice: the tools go
+        // out unchanged, with no tool choice.
+        let tools = vec![crate::ToolSpec::new(
+            "read_file",
+            "Reads one file",
+            json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        )];
+        let request = ModelRequest::new("anthropic.claude-test", vec![Message::user("ping")], 64)
+            .with_tools(tools.clone())
+            .with_tool_choice(crate::ToolChoice::None);
+        let auto = ModelRequest::new("anthropic.claude-test", vec![Message::user("ping")], 64)
+            .with_tools(tools);
+        let none = ConverseRequest::try_from(&request)
+            .unwrap()
+            .tool_config
+            .unwrap();
+        let auto = ConverseRequest::try_from(&auto)
+            .unwrap()
+            .tool_config
+            .unwrap();
+        assert_eq!(none, auto);
+        assert!(none.tool_choice().is_none());
     }
 
     #[test]

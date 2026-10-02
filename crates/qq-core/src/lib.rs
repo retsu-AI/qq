@@ -1767,7 +1767,12 @@ impl plan::CompiledAgentPlan {
                 } else {
                     Arc::clone(&system)
                 };
-                let request_has_tools = allow_tools && !budget_final_turn;
+                // A budget-final turn keeps its tools declared and asks for
+                // none: dropping them is rejected by Bedrock once history
+                // holds tool calls, and an unchanged tool list keeps the
+                // cached prefix. A call the model makes anyway still settles
+                // the run (below), so the choice is advice, not the bound.
+                let request_has_tools = allow_tools;
                 let request_system_hash = if budget_final_turn {
                     ContentHash::from_bytes(Sha256::digest(request_system.as_bytes()).into())
                 } else {
@@ -1971,9 +1976,14 @@ impl plan::CompiledAgentPlan {
                     None => request,
                 };
                 let request = if request_has_tools {
-                    request
+                    let request = request
                         .with_tools(Arc::clone(&tool_specs))
-                        .with_system(Arc::clone(&request_system))
+                        .with_system(Arc::clone(&request_system));
+                    if budget_final_turn {
+                        request.with_tool_choice(qq_provider::ToolChoice::None)
+                    } else {
+                        request
+                    }
                 } else {
                     request.with_system(Arc::clone(&request_system))
                 };
@@ -9299,8 +9309,8 @@ mod tests {
         );
     }
 
-    /// When the turn after a slice report is the budget-final turn, it has no
-    /// tools, so it is not told that tools are available again: it carries
+    /// When the turn after a slice report is the budget-final turn, it asks
+    /// for no tool calls, so it is not told that tools are available again: it carries
     /// only the budget-final notice, and its turn records no continuation.
     #[tokio::test]
     async fn a_budget_final_turn_after_a_report_gets_no_continuation_notice() {
@@ -9312,7 +9322,9 @@ mod tests {
         impl Provider for ReportThenFinal {
             fn stream(&self, request: ModelRequest) -> ProviderStream {
                 self.requests.lock().unwrap().push(request.clone());
-                if is_checkpoint_request(&request) || request.tools().is_empty() {
+                if is_checkpoint_request(&request)
+                    || request.tool_choice() == qq_provider::ToolChoice::None
+                {
                     return Box::pin(stream::iter([
                         Ok(ProviderEvent::OutputTextDelta {
                             text: "report".to_owned(),
@@ -9383,9 +9395,14 @@ mod tests {
         let requests = requests.lock().unwrap();
         let report_at = requests.iter().position(is_checkpoint_request).unwrap();
         let final_request = &requests[report_at + 1];
+        assert_eq!(
+            final_request.tool_choice(),
+            qq_provider::ToolChoice::None,
+            "the final response asks for no tool calls"
+        );
         assert!(
-            final_request.tools().is_empty(),
-            "the final response has no tools"
+            !final_request.tools().is_empty(),
+            "the final response keeps its tools declared"
         );
         assert!(
             final_request

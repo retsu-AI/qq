@@ -310,7 +310,20 @@ pub(crate) struct GenerateContentRequest<'a> {
     contents: Vec<GoogleContent<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<GoogleTool<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_config: Option<GoogleToolConfig>,
     generation_config: GenerationConfig,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleToolConfig {
+    function_calling_config: FunctionCallingConfig,
+}
+
+#[derive(Serialize)]
+struct FunctionCallingConfig {
+    mode: &'static str,
 }
 
 #[derive(Serialize)]
@@ -400,6 +413,9 @@ impl<'a> GenerateContentRequest<'a> {
             }),
             contents,
             tools,
+            tool_config: request.tools_disabled().then_some(GoogleToolConfig {
+                function_calling_config: FunctionCallingConfig { mode: "NONE" },
+            }),
             generation_config: GenerationConfig { max_output_tokens },
         })
     }
@@ -851,6 +867,36 @@ mod tests {
         let body =
             serde_json::to_value(GenerateContentRequest::new(&without, 64).unwrap()).unwrap();
         assert!(body.get("systemInstruction").is_none());
+    }
+
+    #[test]
+    fn a_tool_choice_of_none_keeps_the_tools_and_sets_mode_none() {
+        let tools = vec![crate::ToolSpec::new(
+            "read_file",
+            "Reads one file",
+            json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        )];
+        let request = ModelRequest::new("gemini-test", vec![Message::user("ping")], 64)
+            .with_tools(tools.clone())
+            .with_tool_choice(crate::ToolChoice::None);
+        let body =
+            serde_json::to_value(GenerateContentRequest::new(&request, 64).unwrap()).unwrap();
+        assert_eq!(
+            body["toolConfig"],
+            json!({"functionCallingConfig": {"mode": "NONE"}})
+        );
+        assert_eq!(
+            body["tools"][0]["functionDeclarations"][0]["name"],
+            "read_file"
+        );
+        let auto =
+            ModelRequest::new("gemini-test", vec![Message::user("ping")], 64).with_tools(tools);
+        let body = serde_json::to_value(GenerateContentRequest::new(&auto, 64).unwrap()).unwrap();
+        assert!(body.get("toolConfig").is_none());
+        let bare = ModelRequest::new("gemini-test", vec![Message::user("ping")], 64)
+            .with_tool_choice(crate::ToolChoice::None);
+        let body = serde_json::to_value(GenerateContentRequest::new(&bare, 64).unwrap()).unwrap();
+        assert!(body.get("toolConfig").is_none());
     }
 
     #[tokio::test]
