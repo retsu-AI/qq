@@ -69,12 +69,6 @@ impl ToolGate for CompactionRunGate {
     }
 }
 
-/// Output tokens reserved for the summarizer's reply. A long session's
-/// structured summary runs well past 2 k tokens; a reserve that small forced
-/// the output-truncation continuation path on every real compaction and
-/// failed any summary longer than the continuation cap allowed.
-pub(super) const COMPACTION_OUTPUT_RESERVE_TOKENS: u32 = 8_192;
-
 struct PreparedExecution {
     events: crate::RuntimeStream,
     audit: PreparedRunAudit,
@@ -320,12 +314,10 @@ async fn prepare_execution(
                 None,
             )
             .without_tools()
-            .with_max_output_tokens(
-                loaded
-                    .resolved_model()
-                    .max_output_tokens
-                    .min(COMPACTION_OUTPUT_RESERVE_TOKENS),
-            )
+            .with_max_output_tokens(context::summarizer_output_tokens(
+                loaded.resolved_model().max_output_tokens,
+                loaded.resolved_model().context_window,
+            ))
     } else {
         // A hard cost cap without pricing cannot be enforced. Reject it
         // before any provider work rather than pretend, exactly as the
@@ -1323,10 +1315,10 @@ async fn run_auto_compaction(
             original.identity.session_id,
             context::summarizer_message_byte_budget(
                 loaded.resolved_model().context_window,
-                loaded
-                    .resolved_model()
-                    .max_output_tokens
-                    .min(COMPACTION_OUTPUT_RESERVE_TOKENS),
+                context::summarizer_output_tokens(
+                    loaded.resolved_model().max_output_tokens,
+                    loaded.resolved_model().context_window,
+                ),
                 original_audit.weight.system_bytes,
                 original_audit.weight.tool_schema_bytes,
             ),
@@ -3164,6 +3156,7 @@ async fn execute_started_run(
                             &claimed,
                             summary,
                             Some(accounting.snapshot()),
+                            record_budget(resolved_model.context_window),
                             teardown,
                         )
                         .await

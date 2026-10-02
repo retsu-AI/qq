@@ -839,6 +839,8 @@ One durable run follows a guarded loop:
    runs the summarizer as an internal `compaction` run owned by the prompt
    run (no session slot taken, own usage/cost/events) and commits a marker
    scoped to that run (`session_compactions.scope_run_id`, `turn_cutoff`).
+   The commit appends the run-scoped compaction record (ADR-0055) and returns
+   the stored text, so the live splice and replay render the same bytes.
    The loop splices the summary in where the replaced turns stood and
    continues in the same run; a later overflow folds the previous summary
    with the next turns. Each in-run step counts against the same
