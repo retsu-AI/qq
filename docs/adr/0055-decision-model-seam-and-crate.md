@@ -1,4 +1,4 @@
-# ADR-0053 — Decision models get a provider seam in `qq-provider` and their own `qq-decision` crate
+# ADR-0055 — Decision models get a provider seam in `qq-provider` and their own `qq-decision` crate
 
 **Status:** Accepted 2026-09-30 (owner decision on PR #231: reverse the no-new-crate rule)
 **Date:** 2026-09-30

@@ -19,7 +19,7 @@ implementation or paid evaluation.
 
 **Basis:** [`design/decision-models.md`](../design/decision-models.md),
 § 3 findings 1–8 and §§ 4–7. Crate boundary:
-[ADR-0053](../adr/0053-decision-model-seam-and-crate.md) (Accepted 2026-09-30).
+[ADR-0055](../adr/0055-decision-model-seam-and-crate.md) (Accepted 2026-09-30).
 
 **Ledger:** [`progress/decision-models.md`](progress/decision-models.md).
 **Operator procedure:** [`runbooks/decision-models.md`](../runbooks/decision-models.md).
@@ -53,7 +53,7 @@ an independently verified result, broken down by decision model.
   QQ calibrates the specific (model, rubric) pair.
 - A general decision *framework*: a plugin registry, user-defined consumers,
   a second agent loop, or a planner. `qq-decision` has a closed consumer set
-  (ADR-0053). The Jev plan's "no new crates" non-goal is withdrawn for this
+  (ADR-0055). The Jev plan's "no new crates" non-goal is withdrawn for this
   one crate only.
 - Guessing OpenAI's wire. DM5 waits for the published contract.
 - Treating decisions as chat calls with structured output, or falling back
@@ -97,8 +97,8 @@ an independently verified result, broken down by decision model.
 
 | Slice | Goal | Inputs | Owned paths | Acceptance |
 | --- | --- | --- | --- | --- |
-| DM0 | This plan, the design, ADR-0053, and the doc rename | — | `docs/**` | Links resolve; one plan; § Docs gate |
-| DM1 | Neutral decision types, `DecisionProvider`, `DecisionCapabilities` and `DecisionError` in `qq-provider`; empty `qq-decision` crate with the answer validator | DM0 merged (ADR-0053 accepted 2026-09-30) | `crates/qq-provider/src/decision.rs`, `crates/qq-decision/**`, root `Cargo.toml` (root request) | D1 |
+| DM0 | This plan, the design, ADR-0055, and the doc rename | — | `docs/**` | Links resolve; one plan; § Docs gate |
+| DM1 | Neutral decision types, `DecisionProvider`, `DecisionCapabilities` and `DecisionError` in `qq-provider`; empty `qq-decision` crate with the answer validator | DM0 merged (ADR-0055 accepted 2026-09-30) | `crates/qq-provider/src/decision.rs`, `crates/qq-decision/**`, root `Cargo.toml` (root request) | D1 |
 | DM2 | System One adapter (`providers/typesafe.rs`) on `HttpExchange`; recorded-reply fixtures; replaces `routing::typesafe_evaluate` and `typesafe_http_client` | DM1 | `qq-provider` adapter and recipe; `src/runtime{,/routing,/approval}.rs` call sites; `src/advisory.rs` | D2 |
 | DM3 | Move the rubrics, parsers and thresholds of routing, approval and checkpoint into `qq-decision` consumers, **behavior-identical** (same requests, same dispositions, same policy identities) | DM2 | `crates/qq-decision/**`, `src/runtime*.rs`, `src/advisory.rs` | D3 |
 | DM4 | Receipt-ready interpretation: raw distribution kept, QQ-computed confidence, vendor confidence side by side; JV3 precision lands here once for all consumers | DM3 | `qq-decision` validator | A3 + D4 |
@@ -512,7 +512,7 @@ repository map. When the plan ships, move durable content into
 
 1. **Accept this plan and close ENG-938 / #193 as superseded.** The crate
    question is decided: on 2026-09-30 the owner reversed the "no new
-   crate" non-goal and accepted ADR-0053.
+   crate" non-goal and accepted ADR-0055.
 2. **Config naming for DM6:** `decision_models` + `decisions`, or keep
    `jev_*` as the primary spelling with a `decision_model` key.
 3. **Immediate stop vs. next-run Off** semantics for JV9.

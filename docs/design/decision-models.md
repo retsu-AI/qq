@@ -19,7 +19,7 @@ This document covers:
 
 Sections 1–3 describe the system as built. Sections 4–7 are the target the
 [decision-model plan](../plans/decision-models.md) builds toward. Accepted
-[ADR-0053](../adr/0053-decision-model-seam-and-crate.md) records the crate
+[ADR-0055](../adr/0055-decision-model-seam-and-crate.md) records the crate
 boundary. Operator procedure is in the
 [runbook](../runbooks/decision-models.md), and progress in the
 [ledger](../plans/progress/decision-models.md).
@@ -382,7 +382,7 @@ serial wait to the hot path.**
   the same agent loop under the same limits.
 
 The Jev plan also rejected "a generic decision-engine crate". That rejection
-is **reversed** by ADR-0053, for the reasons in § 5.1. What stays rejected
+is **reversed** by ADR-0055, for the reasons in § 5.1. What stays rejected
 is a general framework: `qq-decision` has a closed set of consumers, a
 typed rubric per consumer, and no plugin registry.
 
