@@ -6,10 +6,10 @@ newest last.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| CX0 | Plan, ADR-0056, ledger and baseline | In review | [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) | `perf/eng-994-cx1-compaction-summary` | Same PR as CX1 |
-| CX1 | Narrative plus rendered record; resolved output cap | In review | [ENG-994](https://linear.app/retsu-ai/issue/ENG-994) | `perf/eng-994-cx1-compaction-summary` | No schema or protocol change |
+| CX0 | Plan, ADR-0056, ledger and baseline | In review | [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) | [#239](https://github.com/retsu-AI/qq/pull/239) | Same PR as CX1 |
+| CX1 | Narrative plus rendered record; resolved output cap | In review | [ENG-994](https://linear.app/retsu-ai/issue/ENG-994) | [#239](https://github.com/retsu-AI/qq/pull/239) | No schema or protocol change |
 | CX2 | Cache-aligned summarizer requests | Planned | [ENG-995](https://linear.app/retsu-ai/issue/ENG-995) | | Stacked on CX1 |
-| CX3 | Durable prune watermark | Planned | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | | Schema 40 → 41 |
+| CX3 | Durable prune watermark | Planned | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | | Schema 41 → 42 |
 | CX4 | `RunActivity::Compacting` | Planned | [ENG-997](https://linear.app/retsu-ai/issue/ENG-997) | | `PROTOCOL_VERSION` 30 → 31; takes AC14's compaction-activity item |
 | CX5 | Live qualification | Planned | [ENG-998](https://linear.app/retsu-ai/issue/ENG-998) | | 7 days after CX3 |
 
@@ -115,3 +115,10 @@ its cap, so they land in the second row. The worst case adds about 45 µs
 per assembly, which is negligible next to time to first token. Tests:
 `cargo test --workspace` passed, 13 ignored; the compaction suite has 63
 tests, 7 of them new.
+
+### 2026-10-04 — Rebased on `main` after #231, #238, #240, #242 and #244
+
+#231 merged with its decision-model ADR renumbered to 0055, so this plan's
+ADR is now **0056**: file renamed, reservation moved in `root.md`, next free
+0057. #240 and #244 moved the store schema to 41, so CX3's bump is now
+41 → 42. CX1 still changes no schema or protocol.

@@ -100,7 +100,7 @@ to move in the same PR.
 
 ### CX3 — Durable prune watermark
 **Inputs:** CX2
-**Owned paths:** `crates/qq-core/src/sessions/{transcript,context}.rs`, schema (40 → 41), `crates/qq-core/src/lib.rs` (live overflow prune)
+**Owned paths:** `crates/qq-core/src/sessions/{transcript,context}.rs`, schema (41 → 42), `crates/qq-core/src/lib.rs` (live overflow prune)
 **Gates:** `context_assembly` within noise
 **Acceptance:**
 - Assembly stubs stale read-only results only up to a durable watermark.
@@ -108,7 +108,7 @@ to move in the same PR.
   proactive threshold.
 - A golden test shows that each run's first request extends the previous
   run's last request byte for byte when no seam fell between them.
-- The schema upgrade test runs from 40.
+- The schema upgrade test runs from 41.
 **Docs:** `design/tools.md` § Context Budget; coordinate the schema number with open PRs that touch `store/schema.rs` (#166) through `progress/root.md`
 
 ### CX4 — `RunActivity::Compacting`
