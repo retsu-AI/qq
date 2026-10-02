@@ -386,6 +386,12 @@ async fn prepare_execution(
                 | ApprovalMode::Auto
                 | ApprovalMode::Full => crate::runtime::SubagentAuthority::Write,
             })
+        } else if claimed.depth > 0
+            && !claimed.user_initiated
+            && claimed.purpose == SessionPurpose::Audit
+        {
+            // An auditor is bounded at a few turns already (ADR-0054 § 1).
+            base.stall_exempt()
         } else {
             base
         };

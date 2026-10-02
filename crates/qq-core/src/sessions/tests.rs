@@ -17,6 +17,7 @@ mod deadlines;
 mod delegation;
 mod feeds;
 mod migrations;
+mod progress;
 mod replay_identity;
 mod runs;
 mod settlement;
@@ -976,6 +977,11 @@ impl Provider for RenewableSliceProvider {
                     "edit_file",
                     r#"{"edits":[{"path":"slice-effects.txt","old":"seed","new":"seedx"}]}"#,
                 )
+            } else if index == crate::MAX_TOOL_CALLS_PER_TURN - 1 {
+                // One write per turn is progress (ADR-0054 § 1), so these
+                // slice fixtures reach the 256-call checkpoint, not the
+                // 64-call stall report.
+                ("write_file", r#"{"path":"progress.txt","content":"x"}"#)
             } else {
                 ("read_file", r#"{"path":"note.txt"}"#)
             };
@@ -2744,13 +2750,17 @@ mod reference_assembly {
                 let (_, text) = steering.pop_front().expect("front was just checked");
                 context.push(Message::user(text));
             }
-            // The checkpoint or continuation notice the live run placed
-            // before this turn's request.
+            // The runtime notice (report, stall report, continuation, or
+            // final answer) the live run placed before this turn's request.
             match notice.as_deref() {
                 None => {}
                 Some("report") => context.push(Message::user(crate::SLICE_CHECKPOINT_NOTICE)),
                 Some("continuation") => {
                     context.push(Message::user(crate::SLICE_CONTINUATION_NOTICE));
+                }
+                Some("stall_report") => context.push(Message::user(crate::STALL_REPORT_NOTICE)),
+                Some("final_answer") => {
+                    context.push(Message::user(crate::SUBAGENT_FINAL_ANSWER_NOTICE));
                 }
                 Some(_) => return Err(SessionRuntimeError::CODEC),
             }

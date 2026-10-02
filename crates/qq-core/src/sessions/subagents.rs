@@ -610,8 +610,26 @@ async fn run_owned_child(
     // settled child also names its session so callers can point at it.
     let mut settled = match outcome {
         RunOutcome::Completed => match inner.store.run_final_text(run_id).await {
+            // A child that ended without a final answer (an empty
+            // final-answer turn, ADR-0054 § 3) still leaves its own durable
+            // reports; the latest one is the parent's answer, labelled.
             Ok(text) if text.trim().is_empty() => {
-                spawn_error_with_spend("the sub-agent completed without producing any text", spend)
+                match inner.store.run_latest_report_text(run_id).await {
+                    Ok(Some(report)) => SpawnAgentOutcome {
+                        content: format!("{INTERIM_REPORT_LABEL}\n\n{report}"),
+                        is_error: false,
+                        spend,
+                        session_id: None,
+                    },
+                    Ok(None) => spawn_error_with_spend(
+                        "the sub-agent completed without producing any text",
+                        spend,
+                    ),
+                    Err(error) => spawn_error_with_spend(
+                        format!("the sub-agent answer could not be read: {error}"),
+                        spend,
+                    ),
+                }
             }
             Ok(text) => SpawnAgentOutcome {
                 content: text,
@@ -650,6 +668,11 @@ async fn run_owned_child(
     settled.session_id = Some(child_session_id);
     settled
 }
+
+/// Heads a child's latest report when it ended without a final answer, so
+/// the parent knows the text is partial.
+pub(crate) const INTERIM_REPORT_LABEL: &str = "[interim report: the sub-agent ended without \
+a final answer; this is its latest progress report]";
 
 /// Cancels a still-running child run when the spawn future awaiting it is
 /// dropped before the child finished.

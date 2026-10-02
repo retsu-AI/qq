@@ -1928,6 +1928,70 @@ impl Store {
         .await
     }
 
+    /// The run's latest report with text: the reply to the last report or
+    /// stall-report notice that has any (ADR-0054 § 3). A report keeps its
+    /// notice on the first attempt's row and spans the rows after it up to
+    /// the next notice. Every later row in the span was asked to continue
+    /// the same reply from where it stopped (an output cut, a mid-stream
+    /// fault, an interrupt), so the report is the span's text joined in
+    /// order. `None` when the run never reported with text.
+    pub(super) async fn run_latest_report_text(
+        &self,
+        run_id: RunId,
+    ) -> Result<Option<String>, SessionRuntimeError> {
+        self.call(Priority::AwaitControl, move |connection| {
+            let mut statement = connection.prepare(
+                "SELECT t.notice, m.id
+                 FROM model_turns t
+                 LEFT JOIN messages m
+                   ON m.run_id = t.run_id
+                  AND m.turn_ordinal = t.turn_ordinal
+                  AND m.role = 'assistant'
+                  AND m.state = 'complete'
+                 WHERE t.run_id = ?1
+                 ORDER BY t.turn_ordinal, m.ordinal",
+            )?;
+            let rows = statement
+                .query_map([run_id.to_string()], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            // Walk forward: each notice opens a span, and a report span's
+            // text accumulates across its attempts. The last report with
+            // text wins.
+            let mut in_report = false;
+            let mut span = String::new();
+            let mut latest: Option<String> = None;
+            for (notice, message) in rows {
+                if let Some(notice) = notice {
+                    in_report = match crate::runtime::TurnNotice::from_stored(&notice) {
+                        Some(
+                            crate::runtime::TurnNotice::Report
+                            | crate::runtime::TurnNotice::StallReport,
+                        ) => true,
+                        Some(
+                            crate::runtime::TurnNotice::Continuation
+                            | crate::runtime::TurnNotice::FinalAnswer,
+                        ) => false,
+                        None => return Err(SessionRuntimeError::CODEC),
+                    };
+                    span.clear();
+                }
+                if in_report && let Some(id) = message {
+                    span.push_str(&load_message(connection, parse_id(&id)?)?.output);
+                    if !span.trim().is_empty() {
+                        latest = Some(span.clone());
+                    }
+                }
+            }
+            Ok(latest)
+        })
+        .await
+    }
+
     /// Stops the worker as a crash would: no settlement, no final commit.
     /// The caller joins the handle so ownership is released before a
     /// successor opens the store.

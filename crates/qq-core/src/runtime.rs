@@ -6,6 +6,7 @@ mod deadline;
 mod events;
 mod gate;
 mod history;
+mod progress;
 mod prompt;
 mod shell_policy;
 mod spill;
@@ -45,6 +46,9 @@ pub(crate) use history::{
     MAX_HISTORY_MATCHES, SearchHistoryArgs, excerpt_around, render_history_matches,
     search_history_spec,
 };
+#[cfg(test)]
+pub(crate) use progress::STALL_REPORT_CALLS;
+pub(crate) use progress::{ReportDue, StallPolicy, StallScope, is_progress};
 #[cfg(test)]
 pub(crate) use prompt::agent_system_prompt;
 pub(crate) use prompt::{
