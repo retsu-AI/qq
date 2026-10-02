@@ -7,8 +7,8 @@ One writer per ledger per `workflow.md` § 3. This was `progress/jev.md` until
 
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
-| DM0 | Decision-model plan, design, ADR-0053, doc rename | In review | ENG-985 | This PR |
-| DM1 | Decision seam in `qq-provider`; `qq-decision` crate | Planned | — | ADR-0053 accepted; root request for `Cargo.toml` |
+| DM0 | Decision-model plan, design, ADR-0055, doc rename | In review | ENG-985 | This PR |
+| DM1 | Decision seam in `qq-provider`; `qq-decision` crate | Planned | — | ADR-0055 accepted; root request for `Cargo.toml` |
 | DM2 | System One adapter on `HttpExchange` | Planned | — | |
 | DM3 | Move consumers into `qq-decision`, behavior-identical | Planned | — | J8 off-path gate |
 | DM4 | Interpretation and precision (absorbs JV3) | Planned | — | |
@@ -127,7 +127,7 @@ its qualification procedure to § Qualification procedure.
     shape (design § 1.3).
   - **Code survey.** About 1,750 non-test lines of Jev code in the binary,
     with three copies of the parse, threshold and usage logic and a private
-    HTTP client outside `qq-provider` (ADR-0053 § Evidence).
+    HTTP client outside `qq-provider` (ADR-0055 § Evidence).
   - **Competitors.** Codex Guardian V2 (a Luna one-token scorer), fx's Jev
     reviewer (records probabilities but doesn't gate on them), and
     OpenCode's `DOOM_LOOP`. Design § 7 lists differentiators X1–X14; the
@@ -136,14 +136,26 @@ its qualification procedure to § Qualification procedure.
   `plans/decision-models.md`, this ledger, and `runbooks/jev.md` →
   `runbooks/decision-models.md`, using `git mv`. Every inbound link was
   updated.
-- Reserved ADR-0053 (Proposed). It reverses the Jev plan's "no new crate"
+- Reserved ADR-0055 (Proposed). It reverses the Jev plan's "no new crate"
   non-goal and ADR-0047's rejected alternative. ADR-0047's other decisions
   stand, and immutable ADRs 0028/0030/0034/0041/0052 are unchanged apart
   from link paths.
 - Status corrections: JV0, JV1 activation and JV2 are merged on `main`
   (`08694a3`, `a944be8`, `0e2eb64`).
-- **Owner decision, 2026-09-30:** reverse the no-new-crate rule. ADR-0053
+- **Owner decision, 2026-09-30:** reverse the no-new-crate rule. ADR-0055
   is now Accepted, and the indexes and the root reservation say so. Plan
   acceptance and closing ENG-938 / #193 are still open.
 - Docs only: no Rust, config, protocol or schema change. Worktree
   `.worktrees/eng-985-decisions`, base `origin/main` `0bd8f6b`.
+
+
+### 2026-10-01 — PR #231 sync and ADR renumber
+
+- Fetched origin and rebased DM0 onto `origin/main` `2a672fe`; retained
+  main's ADR-0054 reservation and guide-expansion updates.
+- Renumbered the decision-model ADR to **0055**, including its filename,
+  indexes, plan, design, ledger and root reservation; next free is 0056.
+- Updated the newly merged concepts page's runbook link after the doc rename.
+- Verification: `git diff --check`; relative Markdown link scan (the existing
+  ADR-0039 link to deleted `plans/mid-run-compaction.md` remains unrelated).
+  No Rust or runtime changes; Rust gates and performance checks not rerun.

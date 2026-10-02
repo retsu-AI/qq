@@ -30,7 +30,7 @@ below is for people changing QQ.
 - [`decision-models.md`](design/decision-models.md) — optional decision
   models (TypeSafe Jev today, OpenAI Decisions API next): vendors, the four
   Jev capabilities as built, why they hand work back today, the
-  `qq-decision` architecture (ADR-0053), how future models land, and what
+  `qq-decision` architecture (ADR-0055), how future models land, and what
   sets QQ apart. The [decision-model plan](plans/decision-models.md) builds
   toward it. The only decision-model design doc.
 - [`tools.md`](design/tools.md) — tool loop, built-in tools and their

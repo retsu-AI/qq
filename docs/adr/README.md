@@ -62,4 +62,19 @@ written.
 - [ADR-0051: 0ver product versioning; compatibility is carried by contract versions](0051-zerover-product-versioning.md) — Accepted (v0.1.5 release, ENG-969; replaces the runbook's MINOR-on-contract-bump rule).
 - [ADR-0052: Jev approval activation comes from the run's compiled plan](0052-jev-approval-activation-from-plan.md) — Accepted (ENG-971, Jev JV1 activation); supersedes ADR-0041 decision 5's per-hold configuration read and per-workspace cache.
 - [ADR-0054: progress means output — a run reports when it stops changing things, a sub-agent answers its brief, and delegation does not block the parent](0054-progress-means-output.md) — Proposed (autonomous-core AP1–AP5); takes ADR-0048 § 2's empty-checkpoint fault; complements ADR-0049 § 8.
-- [ADR-0053: decision models get a provider seam in `qq-provider` and their own `qq-decision` crate](0053-decision-model-seam-and-crate.md) — Accepted 2026-09-30 (decision-models DM0, ENG-985); reverses ADR-0047's rejected "generic decision-engine crate" alternative.
+- [ADR-0055: decision models get a provider seam in `qq-provider` and their own `qq-decision` crate](0055-decision-model-seam-and-crate.md) — Accepted 2026-09-30 (decision-models DM0, ENG-985); reverses ADR-0047's rejected "generic decision-engine crate" alternative.
+
+## When to write one
+
+Write an ADR when a change:
+
+- alters a system boundary, dependency direction, or crate ownership;
+- changes a durability, ordering, retry, approval, or bounding invariant;
+- bumps `PROTOCOL_VERSION`, `DESCRIPTOR_VERSION`, or the store schema with a
+  behavioral meaning change;
+- adds or removes a Cargo feature, build profile, or budget;
+- rejects a design the plan had accepted (supersede it explicitly); or
+- is something a future agent would otherwise re-litigate.
+
+Do not write one for a bug fix, a refactor with no behavior change, or a
+measurement receipt; those go in the plan ledger.
