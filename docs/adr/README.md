@@ -61,6 +61,7 @@ written.
 
 - [ADR-0051: 0ver product versioning; compatibility is carried by contract versions](0051-zerover-product-versioning.md) — Accepted (v0.1.5 release, ENG-969; replaces the runbook's MINOR-on-contract-bump rule).
 - [ADR-0052: Jev approval activation comes from the run's compiled plan](0052-jev-approval-activation-from-plan.md) — Accepted (ENG-971, Jev JV1 activation); supersedes ADR-0041 decision 5's per-hold configuration read and per-workspace cache.
+- [ADR-0054: progress means output — a run reports when it stops changing things, a sub-agent answers its brief, and delegation does not block the parent](0054-progress-means-output.md) — Proposed (autonomous-core AP1–AP5); takes ADR-0048 § 2's empty-checkpoint fault; complements ADR-0049 § 8.
 
 ## When to write one
 

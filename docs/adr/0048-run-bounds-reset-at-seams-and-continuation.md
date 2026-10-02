@@ -63,8 +63,8 @@ A bound on a run measures what the *next request* would carry or what the
    turn goes through the same `TurnRecoveryPolicy`/`MAX_TURN_RETRIES` path as
    a model turn. A summarizer that is exhausted or rejected settles the run
    `paused` (transient) or fails (rejected output), and never discards the
-   durable turns. An empty checkpoint reply takes the placeholder path
-   already used for an empty turn.
+   durable turns. *(The empty-checkpoint clause is superseded by ADR-0054
+   § 2: an empty checkpoint is a missed report, and the run continues.)*
 3. **`ContinueRun { session, run_id }`.** A new session command names the
    stopped run explicitly. It is admitted only if all of these hold:
    - `run_id` is `paused` or `interrupted`;

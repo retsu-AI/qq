@@ -6,10 +6,17 @@ appended below, newest last.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
+| AP0 | Progress report and baseline | In review | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) | `docs/eng-978-ac-progress-first` | Runbook + baseline in `root.md` (2026-09-30); ships with the plan revision |
+| AP1 | Sub-agent brief and delegation guidance | Planned | | | ADR-0054 § 5; prompt-only; priority 2 |
+| AP2 | Pruned `read_file` stubs keep their header | Planned | | | Priority 2; independent of AP1 |
+| AP3a | Report turns as persisted turns | Planned | | | ADR-0054 § 2; after AC0.1; one store column; independent review; takes AC3's empty-checkpoint item |
+| AP3b | Stall report and child answer | Planned | | | ADR-0054 § 1, § 3; before AC1; independent review |
+| AP4 | Non-blocking delegation | Planned | | | ADR-0054 § 4; independent review; `DESCRIPTOR_VERSION` bump |
+| AP5 | Evidence after AP3b and AP4 | Planned | | | Goal 6; 7-day windows |
 | AC0 | Soak and resource harness | Planned | | | First; reproduces findings 1–3 as failing tests |
-| AC1 | `RunState` extraction by reset scope | Planned | | | No behaviour change; independent review |
+| AC1 | `RunState` extraction by reset scope | Planned | | | No behaviour change; independent review; after AP3b |
 | AC2 | Bounds reset at seams | Planned | | | ADR-0048 § 1 |
-| AC3 | No single-shot fatal faults | Planned | | | ADR-0048 § 2 |
+| AC3 | No single-shot fatal faults | Planned | | | ADR-0048 § 2; empty-checkpoint item moved to AP3a |
 | AC4 | Loop guard | Planned | | | ADR-0049 § 8; takes RR12's loop item; lands in the goal PR with goals G0 |
 | AC5 | `ContinueRun` | Planned | | | ADR-0048 § 3; protocol bump (continuation) |
 | AC6 | `AutoContinue` policy | Planned | | | ADR-0048 § 4; same bump as AC5 |
@@ -180,3 +187,15 @@ continuation path: it queues fresh runs from durable history after every
 stop that leaves the goal active. AC5/AC6 reject/skip runs with a goal
 snapshot; G2 does not depend on AC5. The dependency diagram and goal notes
 match `goals.md`. AC4 still lands with G0 in one protocol bump.
+
+### 2026-09-30 — progress track added ahead of AC1 (ENG-978)
+
+The lead's session store shows long runs and sub-agents producing activity
+without output. One child made 690 calls in 76 minutes with no answer, and
+delegating parents had a `spawn_agent` open for 40 % of their wall time. The lead ruled
+out spend caps, since multi-day runs are the goal. ADR-0054 (Proposed)
+defines progress as output. The plan gains AP0–AP5, ordered first, and
+Goal 6. AC3's empty-checkpoint item moves to AP3a, and AP3a/AP3b edit the
+run loop before AC1, with the reason in § Order. AP0's runbook and baseline ship
+with this revision. AC0.1 (ENG-986) is unaffected and continues in
+`.worktrees/eng-986-ac0`; its ledger rows land with that PR.
