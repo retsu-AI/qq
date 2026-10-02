@@ -79,7 +79,22 @@ async fn compact_session_is_refused_while_active_and_rejects_undeclared_provider
     );
     let requests = harness.requests.lock().unwrap();
     assert_eq!(requests.len(), request_count_before + 1);
-    assert!(requests.last().unwrap().tools().is_empty());
+    let summary = requests.last().unwrap();
+    assert!(summary.tools().is_empty());
+    // It still carries the session's tool history: the shape the Bedrock
+    // codec renders as text (ENG-1002).
+    assert!(
+        summary
+            .messages()
+            .iter()
+            .flat_map(Message::content)
+            .any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolCall { .. } | ContentBlock::ToolResult { .. }
+                )
+            })
+    );
     // The summarizer loaded through the ordinary loader path.
     assert_eq!(harness.models.lock().unwrap().len(), 2);
 }

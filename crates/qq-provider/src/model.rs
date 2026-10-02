@@ -26,9 +26,9 @@ pub struct ModelRequest {
 /// Whether the model may call the declared tools on this request.
 ///
 /// A turn that must answer in text keeps its tools *declared* and sets
-/// `None`, instead of dropping the declarations: Amazon Bedrock rejects a
-/// request whose history holds tool calls when no tools are declared, and an
-/// unchanged tool list keeps the provider's cached prefix. The choice is a
+/// `None`, instead of dropping the declarations: an unchanged tool list
+/// keeps the provider's cached prefix and the history's native tool blocks
+/// (Bedrock Converse accepts those only alongside a tool configuration). The choice is a
 /// request to the model, not a guarantee: Bedrock Converse has no "none"
 /// choice and sends the tools unchanged, so a caller that must not run tools
 /// on such a turn still rejects any call it makes.

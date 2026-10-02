@@ -333,7 +333,12 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
                     ContentBlock::ToolCall { id, name, .. } => Some((id.as_str(), name.as_str())),
                     ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,
                 })
-                .collect::<HashMap<_, _>>()
+                // The first call with an id names its results; ids are unique
+                // within one provider's history.
+                .fold(HashMap::new(), |mut names, (id, name)| {
+                    names.entry(id).or_insert(name);
+                    names
+                })
         });
         let messages = request
             .messages()
@@ -383,9 +388,9 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
                 builder = builder.tools(Tool::CachePoint(cache_point()));
             }
             // Converse's tool choice has no "none" (only auto, any, and a
-            // named tool), and dropping the tools is rejected once history
-            // holds tool calls. `ToolChoice::None` therefore sends the tools
-            // unchanged; the caller rejects any call the model makes anyway.
+            // named tool). `ToolChoice::None` therefore sends the tools
+            // unchanged, keeping the native tool blocks and the cached
+            // prefix; the caller rejects any call the model makes anyway.
             Some(builder.build().map_err(|_| {
                 ProviderError::Configuration(
                     "could not construct an Amazon Bedrock tool configuration".to_owned(),

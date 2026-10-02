@@ -564,3 +564,20 @@ clean.
     `the_tool_dispatch_bench_run_completes`, which runs one iteration under
     a 10 s timeout. It times out with the old fixture.
 
+### 2026-10-02: ENG-1002/1003 independent review: approved
+
+The review's should-fixes are done:
+- **Mantle.** I verified live that Bedrock Mantle's Anthropic Messages path
+  accepts tool blocks without declared tools: `/compact` after a
+  `read_file` call completes on `bedrock-mantle/anthropic.claude-sonnet-5`.
+  So the codec rule stays Converse-only.
+- **First-party Anthropic** is not verified live (no key here). Its
+  documentation does not list a `tools` requirement for tool-block history.
+  If it rejects that shape, the same render-as-text treatment applies there.
+- **Docs.** In architecture.md the compaction sentence moved out of the
+  budget-final passage. The `bedrock.rs` and `ToolChoice` comments no
+  longer give the stale reason.
+- **Code.** Result labels use the first call with an id.
+- **Tests.** The between-run `/compact` test now asserts the summary still
+  carries tool blocks.
+
