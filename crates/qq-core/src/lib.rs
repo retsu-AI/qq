@@ -594,6 +594,9 @@ pub(crate) struct RunCapabilities {
     /// answer is validated at the completion boundary and repaired within
     /// the contract's turn allowance. Compaction and children have none.
     output: Option<Arc<output::CompiledOutputSchema>>,
+    /// Set for a model-spawned child task: its prompt says a parent is
+    /// waiting on it (ADR-0054 § 5).
+    subagent: Option<runtime::SubagentAuthority>,
 }
 
 impl RunCapabilities {
@@ -616,6 +619,7 @@ impl RunCapabilities {
             audit_hook: None,
             tool_tasks: None,
             output: None,
+            subagent: None,
         }
     }
 
@@ -689,6 +693,13 @@ impl RunCapabilities {
         self
     }
 
+    /// Marks a model-spawned child task, so its prompt carries the sub-agent
+    /// section for its authority.
+    pub(crate) fn for_subagent(mut self, authority: runtime::SubagentAuthority) -> Self {
+        self.subagent = Some(authority);
+        self
+    }
+
     /// Installs a spawner on a restricted run: a model-authored child task at a
     /// depth the roster still permits to delegate.
     pub(crate) fn with_spawner(mut self, spawner: Arc<dyn SubagentSpawner>) -> Self {
@@ -726,6 +737,7 @@ impl RunCapabilities {
             audit_hook: None,
             tool_tasks: None,
             output: None,
+            subagent: None,
         }
     }
 }
@@ -1419,6 +1431,7 @@ impl plan::CompiledAgentPlan {
                 audit_hook,
                 tool_tasks,
                 output,
+                subagent,
             } = capabilities;
             let tool_tasks = tool_tasks.unwrap_or_default();
             let mut steering = steering;
@@ -1593,6 +1606,7 @@ impl plan::CompiledAgentPlan {
                 plan::PromptPrefixKey {
                     tools: static_filter,
                     guidance: allow_guidance,
+                    subagent,
                 },
                 &base_specs,
             );
@@ -4465,6 +4479,7 @@ mod tests {
                 tool_index: plan.catalog.index_text().map(Arc::as_ref),
                 roster: plan.roster_text.as_deref(),
                 skill_index: plan.skills.disclosure_text(),
+                subagent: None,
             },
             &plan.instructions,
             plan.persona.as_deref(),
@@ -10692,6 +10707,170 @@ mod tests {
             "{}",
             refusal.0
         );
+    }
+
+    #[test]
+    fn subagent_prompts_say_a_parent_is_waiting_and_read_children_drop_the_implement_line() {
+        const IMPLEMENT: &str = "- Implement requested changes rather than stopping at analysis";
+        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
+        let instructions = workspace::WorkspaceInstructions::empty();
+        let render = |subagent| {
+            runtime::agent_system_prompt(
+                workspace,
+                &tools::specs(),
+                runtime::PromptSections {
+                    subagent,
+                    ..runtime::PromptSections::default()
+                },
+                &instructions,
+                None,
+                None,
+            )
+        };
+        let root = render(None);
+        let read = render(Some(runtime::SubagentAuthority::Read));
+        let write = render(Some(runtime::SubagentAuthority::Write));
+
+        // A root, including a read-only one, keeps today's conventions and
+        // has no sub-agent section.
+        assert!(root.contains(IMPLEMENT));
+        assert!(!root.contains("Sub-agent:"));
+        // Every child is told who reads its reply and how to shape it.
+        for child in [&read, &write] {
+            assert!(child.contains("\n\nSub-agent:\n"), "{child}");
+            assert!(child.contains("only your final reply reaches it"));
+            assert!(child.contains("Stop as soon as you can answer"));
+            assert!(child.contains("answer first, then the evidence as path:line"));
+            assert!(child.contains("Do not re-read text that is still in your context"));
+        }
+        // A read child cannot implement anything, so the line that tells it
+        // to keep going until it has would only keep it reading.
+        assert!(!read.contains(IMPLEMENT));
+        assert!(read.contains("You cannot change files or run commands"));
+        assert!(write.contains(IMPLEMENT));
+        // Only those lines differ from the root prompt.
+        let without_section = |prompt: &str| {
+            let (head, _) = prompt.split_once("\n\nSub-agent:\n").unwrap();
+            head.to_owned()
+        };
+        assert_eq!(without_section(&write), root);
+        assert_eq!(
+            without_section(&read),
+            root.replacen(
+                "- Implement requested changes rather than stopping at analysis unless the user \
+                 requested analysis-only work.\n",
+                "",
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn delegation_guidance_asks_for_a_question_a_purpose_and_an_answer_shape() {
+        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
+        let instructions = workspace::WorkspaceInstructions::empty();
+        let mut specs = tools::specs();
+        specs.push(tools::spawn_agent_spec(&[], &DelegationRoster::default()));
+        let prompt = runtime::agent_system_prompt(
+            workspace,
+            &specs,
+            runtime::PromptSections::default(),
+            &instructions,
+            None,
+            None,
+        );
+        assert!(prompt.contains(
+            "- Write the brief as a question to answer, what the answer is for, and the shape \
+             you want back"
+        ));
+        assert!(prompt.contains("Prefer several narrow briefs over one broad one"));
+        let spawn = specs.last().unwrap();
+        let task = spawn.input_schema().get();
+        assert!(
+            task.contains("the question to answer, what the answer is for, and the answer shape"),
+            "{task}"
+        );
+    }
+
+    #[test]
+    fn a_root_prompt_and_tools_change_only_by_the_brief_guidance() {
+        // Golden against prompt version 14 (`356092a`): a root's system
+        // prompt gains only the delegation bullet, and its tools block only
+        // the `spawn_agent` `task` description. Everything else is
+        // byte-identical, so a root keeps its prompt-cache prefix up to the
+        // Delegation section.
+        const NEW_BULLET: &str = "- Write the brief as a question to answer, what the answer is \
+            for, and the shape you want back (a list of path:line findings, a yes or no with \
+            evidence, a short plan). A sub-agent stops when it can answer, so an open-ended brief \
+            gets a long search and a late answer. Prefer several narrow briefs over one broad \
+            one.\n";
+        const OLD_TASK: &str = "A complete, self-contained brief for the sub-agent.";
+        const NEW_TASK: &str = "A complete, self-contained brief for the sub-agent: the question \
+            to answer, what the answer is for, and the answer shape you want back. The sub-agent \
+            starts with no other context and stops once it can answer.";
+        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
+        let instructions = workspace::WorkspaceInstructions::empty();
+        let mut specs = tools::specs();
+        specs.push(tools::spawn_agent_spec(&[], &DelegationRoster::default()));
+        let prompt = runtime::agent_system_prompt(
+            workspace,
+            &specs,
+            runtime::PromptSections::default(),
+            &instructions,
+            None,
+            None,
+        );
+        assert!(prompt.contains(NEW_BULLET), "{prompt}");
+        let v14 = prompt.replacen(NEW_BULLET, "", 1);
+        assert_ne!(v14, prompt);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(v14.as_bytes())),
+            "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
+        );
+        // Every built-in declaration is unchanged.
+        assert_eq!(
+            runtime::tool_schema_measurement(&tools::specs())
+                .hash
+                .to_string(),
+            "568cef80e021a4c69625eb992086993b9c0f43857ae74ff253f70253a752f24f"
+        );
+        let spawn = specs.last().unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(spawn.description().as_bytes())),
+            "09105474547d899bf0bf5346f2c72079425d0f0c236c9a201378a33f0421c5ac"
+        );
+        let schema = spawn.input_schema().get();
+        assert!(schema.contains(NEW_TASK), "{schema}");
+        assert_eq!(
+            format!(
+                "{:x}",
+                Sha256::digest(schema.replacen(NEW_TASK, OLD_TASK, 1).as_bytes())
+            ),
+            "deb5f0866f1f90db28995823bd38e3bbdeaf565b35cf0ffaf24c3812cc7b1762"
+        );
+    }
+
+    #[test]
+    fn a_read_only_root_keeps_the_implement_line_and_has_no_subagent_section() {
+        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
+        let instructions = workspace::WorkspaceInstructions::empty();
+        // The schemas a ReadOnly root is offered: the mutating, shell and
+        // network built-ins are withheld (`catalog.rs` read-only filter).
+        let read_only = tools::specs()
+            .into_iter()
+            .filter(|spec| matches!(spec.name(), "read_file" | "tree" | "search" | "ask_user"))
+            .collect::<Vec<_>>();
+        assert_eq!(read_only.len(), 4);
+        let prompt = runtime::agent_system_prompt(
+            workspace,
+            &read_only,
+            runtime::PromptSections::default(),
+            &instructions,
+            None,
+            None,
+        );
+        assert!(prompt.contains("- Implement requested changes rather than stopping at analysis"));
+        assert!(!prompt.contains("Sub-agent:"));
     }
 
     #[test]

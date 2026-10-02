@@ -370,6 +370,25 @@ async fn prepare_execution(
         } else {
             RunCapabilities::user(spawner)
         };
+        // A model-spawned task run answers its parent, not a user. Audit
+        // children keep their fixed brief and reply shape, and a user's own
+        // prompt in a child session is a user run.
+        let base = if claimed.depth > 0
+            && !claimed.user_initiated
+            && claimed.purpose == SessionPurpose::Task
+        {
+            // Read children are ReadOnly and write children Supervised; a
+            // client may only lower a child's mode, never raise it.
+            base.for_subagent(match claimed.approval_mode {
+                ApprovalMode::ReadOnly => crate::runtime::SubagentAuthority::Read,
+                ApprovalMode::Supervised
+                | ApprovalMode::Ask
+                | ApprovalMode::Auto
+                | ApprovalMode::Full => crate::runtime::SubagentAuthority::Write,
+            })
+        } else {
+            base
+        };
         // A read-only session (every read child) never sees the schemas its
         // policy denies; the catalog filter is part of the request, not a
         // gate-time refusal. A Supervised child keeps the full catalog: its

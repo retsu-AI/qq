@@ -478,7 +478,9 @@ pub struct CompiledAgentPlan {
     pub(crate) hosts: Arc<[Arc<dyn ExternalToolHost>]>,
     /// The plan-constant system prompt per capability set, built on first
     /// use and shared by every later run with the same set. Bounded by the
-    /// number of `PromptPrefixKey` values (32).
+    /// number of `PromptPrefixKey` values: 2⁵ tool filters plus none, times
+    /// guidance, times three sub-agent states (198). In practice a plan sees a
+    /// handful: roots, read children and write children.
     prompt_prefixes: std::sync::Mutex<Vec<(PromptPrefixKey, Arc<crate::runtime::PromptPrefix>)>>,
     resolved_model: Arc<ResolvedModel>,
     descriptor: Arc<AgentPlanDescriptor>,
@@ -492,11 +494,13 @@ pub struct CompiledAgentPlan {
 }
 
 /// What varies the plan-constant prompt between runs of one plan: which
-/// static tools the run may use and whether it may load guidance.
+/// static tools the run may use, whether it may load guidance, and whether
+/// it is a model-spawned child (and with what authority).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PromptPrefixKey {
     pub(crate) tools: Option<crate::catalog::StaticFilter>,
     pub(crate) guidance: bool,
+    pub(crate) subagent: Option<crate::runtime::SubagentAuthority>,
 }
 
 impl CompiledAgentPlan {
@@ -532,6 +536,7 @@ impl CompiledAgentPlan {
                 } else {
                     None
                 },
+                subagent: key.subagent,
             },
             &self.instructions,
             self.persona.as_deref(),
@@ -870,6 +875,7 @@ impl CompiledAgentPlan {
                 read_only: false,
             }),
             guidance: true,
+            subagent: None,
         };
         let full_prefix = Arc::new(crate::runtime::PromptPrefix::new(
             opened.path(),
@@ -878,6 +884,7 @@ impl CompiledAgentPlan {
                 tool_index: catalog.index_text().map(Arc::as_ref),
                 roster: roster_text.as_deref(),
                 skill_index: skills.disclosure_text(),
+                subagent: None,
             },
             &instructions,
             persona.as_deref(),
@@ -1374,10 +1381,12 @@ mod tests {
         );
         // The golden digest pins the canonical encoding. A change here means
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
-        // from a different encoding.
+        // from a different encoding. The descriptor also carries
+        // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
+        // changing the encoding (prompt 15: ADR-0054 § 5).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "2f6f25fab3e6d0625cb56a896779e236f1f506f04f5817b6a4d5c0325377c984"
+            "9abb6d9cdf5a37ead19e6a167aaa35bdcaaa76ecdf8d0c0f3e75af5b86b45b0f"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v12\0".len()..]).unwrap();

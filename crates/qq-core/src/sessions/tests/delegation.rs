@@ -324,6 +324,18 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
             .contains("User-selected guidance only."),
         "an explicit user prompt in a child session may select runtime guidance"
     );
+    // The spawned task answers its parent; the user's own follow-up in the
+    // same child session is a user run and gets the ordinary prompt.
+    let spawned_system = child_reqs[0].system().unwrap();
+    assert!(
+        spawned_system.contains("\n\nSub-agent:\n"),
+        "{spawned_system}"
+    );
+    assert!(spawned_system.contains("You cannot change files or run commands"));
+    assert!(!spawned_system.contains("- Implement requested changes"));
+    let follow_up_system = child_reqs[2].system().unwrap();
+    assert!(!follow_up_system.contains("Sub-agent:"));
+    assert!(follow_up_system.contains("- Implement requested changes"));
     assert!(
         !child_reqs[2]
             .tools()
@@ -339,6 +351,7 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
             .iter()
             .any(|spec| spec.name() == "spawn_agent")
     );
+    assert!(!parent_reqs[0].system().unwrap().contains("Sub-agent:"));
     assert!(matches!(
         parent_reqs[1].messages()[2].content(),
         [ContentBlock::ToolResult { content, is_error: false, .. }] if content == "done"
@@ -2249,6 +2262,12 @@ async fn a_write_child_runs_supervised_and_the_reviewer_adjudicates_each_action(
             .iter()
             .any(|spec| spec.name() == "write_file")
     );
+    // A write child is told a parent waits on it, and keeps the line that
+    // tells it to implement the change rather than describe it.
+    let child_system = child_reqs[0].system().unwrap();
+    assert!(child_system.contains("\n\nSub-agent:\n"), "{child_system}");
+    assert!(child_system.contains("- Implement requested changes"));
+    assert!(!child_system.contains("You cannot change files or run commands"));
     // The spawn itself was a mutating call under the parent's Auto policy
     // and executed without a prompt.
     assert!(!observed.iter().any(|event| matches!(
@@ -4369,6 +4388,9 @@ async fn a_mutating_run_is_audited_by_a_read_only_child_and_passes() {
             .iter()
             .any(|spec| spec.name() == "write_file")
     );
+    // The audit child keeps its fixed one-line JSON contract; the sub-agent
+    // section's "answer, then evidence" shape would contradict it.
+    assert!(!brief[0].system().unwrap().contains("Sub-agent:"));
     // The parent completed with the audit ordered before RunFinished,
     // and the snapshot carries the record.
     assert!(matches!(

@@ -426,9 +426,9 @@ The plan also carries the plan-constant part of the system prompt (ADR-0024):
 the header with the tool list, the progressive-exposure index, the skill
 index, the workspace instructions, and the pack persona, as a `PromptPrefix`
 per capability set (which optional static tools the run may use, whether it
-may load guidance) together with the SHA-256 state of those bytes. The common
-set is built at compile; other sets on first use, bounded by the 32 possible
-keys. A run appends only its suffix — the selected command or skill document,
+may load guidance, and whether it is a model-spawned child with read or write
+authority) together with the SHA-256 state of those bytes. The common set is
+built at compile; other sets on first use, bounded by the 198 possible keys. A run appends only its suffix — the selected command or skill document,
 context-source blocks, the output contract — and finalizes a clone of the
 prefix hasher over that suffix, so `system_prompt_hash` equals a digest of the
 whole prompt and the prompt body is neither rebuilt nor rehashed per run.
@@ -1045,6 +1045,15 @@ child when it interrupts the owning parent. Parent cancellation uses the same
 durable ownership link for in-process children. Once a child completes, only
 its final committed model turn's text or refusal is returned to the parent;
 earlier turns remain visible in the child's authoritative transcript.
+
+A model-spawned task run's system prompt carries a `Sub-agent:` section
+(ADR-0054 § 5). It says that a parent is waiting and receives only the final
+reply, and that the child should stop once it can answer. It asks for the
+answer first, then `path:line` evidence, then open questions, and tells the
+child not to re-read text still in context. A read child also drops the
+"implement rather than stop at analysis" convention and is told it cannot
+change files. Audit children keep their fixed brief and JSON reply, and a
+user's own prompt in a child session gets the ordinary prompt.
 
 An owned child task retains admission, loader work, and the writer permit even
 if an interrupting parent drops its result waiter. Accepted creation is awaited
