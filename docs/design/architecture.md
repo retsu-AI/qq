@@ -986,17 +986,23 @@ turn, resets the slice counter, and continues the same run. The request
 carries the report notice as a runtime message at the end of the
 conversation, and the first turn of the next slice carries a continuation
 notice the same way. The system prompt never changes, so the provider's
-cached prefix survives the seam. Each notice is stored as the turn's
-`model_turns.notice` (`report` or `continuation`) and replayed before that
-turn, so a later run assembles exactly the messages the live run sent
-(ADR-0054 § 2).
+cached prefix survives the seam. Each notice is stored on the first turn
+row whose request carried it, as `model_turns.notice` (`report` or
+`continuation`), and replayed before that turn, so a later run assembles
+exactly the messages the live run sent (ADR-0054 § 2). The column records
+where a notice entered the conversation, not every attempt it covered: a
+report retried after a fault or an output-limit cut is placed once and
+stored once. An in-run compaction drops the notice and steering in front of
+its first kept turn along with the summarized span, on both sides.
 
 Tools stay declared on the checkpoint turn: the persisted turn is the
 boundary, not the model's obedience. A call the model makes anyway is
 admitted with a not-executed result (the same path as calls past the per-turn
 cap), and the run continues into the next slice, where the model re-issues
-it. An empty reply is a missed report, not a failure. The live context fills
-it with the same placeholder assembly inserts, and the run continues.
+it. An empty reply that reports usage is a missed report, not a failure. The
+live context fills it with the same placeholder assembly inserts, and the run
+continues. An empty reply with no usage after fresh tool results is treated
+like any swallowed gateway failure: it is retried as a transient fault.
 Steering that arrives during the report is applied before the continuation
 notice. Clients observe no terminal run event at the slice seam. Genuine completion,
 explicit caller budgets, cancellation, and failures remain the only user-level

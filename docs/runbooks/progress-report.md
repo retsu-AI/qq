@@ -135,15 +135,27 @@ rejection text RR1 introduced, so they only count checkpoints since RR1
 (#108) shipped, and they cannot see a checkpoint the model answered with
 text only or with nothing.
 
-From store schema 40 (AP3a), every checkpoint turn is recorded with
-`model_turns.notice = 'report'`. This query counts them in the window, and
-how many had no text: the missed reports.
+From store schema 40 (AP3a), each slice report is marked by
+`model_turns.notice = 'report'` on the first turn whose request carried it.
+A report retried after a fault or an output-limit cut continues on later
+turn rows without the mark. Its final attempt is the last row before the row
+marked `continuation`. This query counts reports in the window, and how many
+ended without text (the missed reports), judging each report by its last
+attempt.
 
 ```sh
-q "SELECT count(*), sum(instr(m.assistant_content_json, '\"type\":\"text\"') = 0)
-FROM model_turns m JOIN runs r ON r.id = m.run_id
-WHERE m.notice = 'report'
-  AND r.started_at_ms >= strftime('%s','@END@','-30 days') * 1000 AND r.started_at_ms < strftime('%s','@END@') * 1000;"
+q "WITH m AS (SELECT t.run_id, t.turn_ordinal, t.notice, t.assistant_content_json c FROM model_turns t
+     JOIN runs r ON r.id = t.run_id
+     WHERE r.started_at_ms >= strftime('%s','@END@','-30 days') * 1000 AND r.started_at_ms < strftime('%s','@END@') * 1000),
+reports AS (SELECT run_id, turn_ordinal start,
+     coalesce((SELECT min(n.turn_ordinal) FROM m n WHERE n.run_id = m.run_id
+               AND n.turn_ordinal > m.turn_ordinal AND n.notice = 'continuation'), 1 << 31) stop
+   FROM m WHERE notice = 'report'),
+last AS (SELECT r.run_id, (SELECT max(t.turn_ordinal) FROM m t WHERE t.run_id = r.run_id
+            AND t.turn_ordinal >= r.start AND t.turn_ordinal < r.stop) ordinal FROM reports r)
+SELECT count(*), sum(NOT EXISTS (SELECT 1 FROM m t, json_each(t.c) b WHERE t.run_id = last.run_id
+            AND t.turn_ordinal = last.ordinal AND json_extract(b.value, '$.type') = 'text'
+            AND trim(json_extract(b.value, '$.text')) <> '')) FROM last;"
 ```
 
 Goal 6's checkpoint target uses this query once the window starts after

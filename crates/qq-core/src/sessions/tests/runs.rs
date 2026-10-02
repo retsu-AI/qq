@@ -2956,3 +2956,160 @@ fn snapshots_stay_under_the_wire_cap_for_large_sessions() {
     assert!(!focused.has_older_tool_calls);
     assert_eq!(focused.tool_calls.len(), 3);
 }
+
+/// Steering queued while the slice report is in flight joins at the next
+/// boundary: after the report and before the continuation notice, in the
+/// live request and in every later assembly. An empty report gets the
+/// placeholder in the same position. (AP3a acceptance (l).)
+#[tokio::test]
+async fn steering_during_a_slice_report_lands_before_the_continuation_notice() {
+    for (reply, expected_report) in [
+        ("slice report", Message::assistant("slice report")),
+        ("", Message::assistant(crate::EMPTY_TURN_PLACEHOLDER)),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.txt"), "tool result\n").unwrap();
+        std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
+        let database = directory.path().join("sessions.sqlite3");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gate = CheckpointGate {
+            reached: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+            reply,
+        };
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(database.clone()),
+            Arc::new(GatedSliceLoader {
+                requests: Arc::clone(&requests),
+                gate: gate.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created =
+            create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("unexpected receipt")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+        let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
+        tokio::time::timeout(Duration::from_secs(30), gate.reached.notified())
+            .await
+            .expect("the run reaches its slice report");
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SteerRun {
+                    run_id,
+                    input: vec![InputPart::text("also check the docs")],
+                    interrupt: false,
+                },
+            )
+            .await
+            .unwrap();
+        gate.release.notify_one();
+        let observed = collect_until(&mut events, finished_for(run_id)).await;
+        assert!(
+            matches!(
+                observed.last().map(|event| &event.event),
+                Some(SessionEvent::RunFinished {
+                    outcome: RunOutcome::Completed,
+                    ..
+                })
+            ),
+            "reply {reply:?}"
+        );
+        assert!(
+            observed
+                .iter()
+                .any(|event| matches!(event.event, SessionEvent::SteeringApplied { .. }))
+        );
+
+        let live = requests.lock().unwrap().last().unwrap().messages().to_vec();
+        assert_eq!(
+            live[live.len() - 4..],
+            [
+                Message::user(crate::SLICE_CHECKPOINT_NOTICE),
+                expected_report,
+                Message::user("also check the docs"),
+                Message::user(crate::SLICE_CONTINUATION_NOTICE),
+            ],
+            "reply {reply:?}"
+        );
+        let follow_up = queue_prompt(&runtime, session_id, "and then?".to_owned()).await;
+        collect_until(&mut events, finished_for(follow_up)).await;
+        let replayed = requests.lock().unwrap().last().unwrap().messages().to_vec();
+        assert_eq!(&replayed[..live.len()], live.as_slice(), "reply {reply:?}");
+        assert_assembly_matches_reference(&database, session_id);
+    }
+}
+
+/// A slice report cut at the output limit keeps its notice: the report
+/// notice is placed once, the truncation notice follows the partial report,
+/// the finished report and the continuation follow, and a later assembly
+/// reproduces the live order exactly. (AP3a acceptance (k).)
+#[tokio::test]
+async fn a_truncated_slice_report_keeps_its_notice_on_replay() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("note.txt"), "tool result\n").unwrap();
+    std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
+    let database = directory.path().join("sessions.sqlite3");
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(database.clone()),
+        Arc::new(TruncatedReportLoader {
+            requests: Arc::clone(&requests),
+        }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("unexpected receipt")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
+    let observed = collect_until(&mut events, finished_for(run_id)).await;
+    assert!(matches!(
+        observed.last().map(|event| &event.event),
+        Some(SessionEvent::RunFinished {
+            outcome: RunOutcome::Completed,
+            ..
+        })
+    ));
+    let live = requests.lock().unwrap().last().unwrap().messages().to_vec();
+    assert_eq!(
+        live[live.len() - 5..],
+        [
+            Message::user(crate::SLICE_CHECKPOINT_NOTICE),
+            Message::assistant("report part one"),
+            Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE),
+            Message::assistant(" and part two"),
+            Message::user(crate::SLICE_CONTINUATION_NOTICE),
+        ]
+    );
+    assert_eq!(
+        live.iter()
+            .filter(|message| **message == Message::user(crate::SLICE_CHECKPOINT_NOTICE))
+            .count(),
+        1,
+        "the retried report attempt reuses its notice"
+    );
+    let follow_up = queue_prompt(&runtime, session_id, "and then?".to_owned()).await;
+    collect_until(&mut events, finished_for(follow_up)).await;
+    let replayed = requests.lock().unwrap().last().unwrap().messages().to_vec();
+    assert_eq!(&replayed[..live.len()], live.as_slice());
+    assert_assembly_matches_reference(&database, session_id);
+}

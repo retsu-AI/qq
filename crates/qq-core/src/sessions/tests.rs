@@ -697,6 +697,152 @@ struct RenewableSliceLoader {
     metered_empty_checkpoint: bool,
 }
 
+/// A `RenewableSliceProvider` whose first checkpoint reply stops at the
+/// output limit with partial text; the request that follows (the output-limit
+/// continuation, still a checkpoint attempt) finishes the report.
+struct TruncatedReportProvider {
+    inner: RenewableSliceProvider,
+    truncated: StdMutex<bool>,
+}
+
+impl Provider for TruncatedReportProvider {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        let continuing_report = request.messages().last()
+            == Some(&Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE));
+        let at_report =
+            request.messages().last() == Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE));
+        if !at_report && !continuing_report {
+            return self.inner.stream(request);
+        }
+        self.inner.requests.lock().unwrap().push(request);
+        let mut truncated = self.truncated.lock().unwrap();
+        let first = !*truncated;
+        *truncated = true;
+        Box::pin(stream::iter(if first {
+            vec![
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: "report part one".to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::Incomplete {
+                    usage: None,
+                    reason: qq_provider::IncompleteReason::OutputTokens,
+                }),
+            ]
+        } else {
+            vec![
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: " and part two".to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+            ]
+        }))
+    }
+}
+
+struct TruncatedReportLoader {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+}
+
+impl RuntimeLoader for TruncatedReportLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let requests = Arc::clone(&self.requests);
+        Box::pin(async move {
+            Runtime::new(
+                TruncatedReportProvider {
+                    inner: RenewableSliceProvider {
+                        requests,
+                        checkpoint_wait: None,
+                        metered_empty_checkpoint: false,
+                    },
+                    truncated: StdMutex::new(false),
+                },
+                "test-model",
+                256,
+            )
+            .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+            .map_err(|error| RuntimeLoadError {
+                kind: RunFailureKind::Configuration,
+                message: error.to_string(),
+            })
+        })
+    }
+}
+
+/// Holds the checkpoint request until the test releases it, then answers
+/// with `reply` (empty: a missed report). The test can act while the report
+/// is in flight.
+#[derive(Clone)]
+struct CheckpointGate {
+    reached: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    reply: &'static str,
+}
+
+/// A `RenewableSliceLoader` whose checkpoint request waits on `gate`.
+struct GatedSliceLoader {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    gate: CheckpointGate,
+}
+
+impl RuntimeLoader for GatedSliceLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let requests = Arc::clone(&self.requests);
+        let gate = self.gate.clone();
+        Box::pin(async move {
+            Runtime::new(
+                GatedSliceProvider {
+                    inner: RenewableSliceProvider {
+                        requests,
+                        checkpoint_wait: None,
+                        metered_empty_checkpoint: false,
+                    },
+                    gate,
+                },
+                "test-model",
+                256,
+            )
+            .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+            .map_err(|error| RuntimeLoadError {
+                kind: RunFailureKind::Configuration,
+                message: error.to_string(),
+            })
+        })
+    }
+}
+
+struct GatedSliceProvider {
+    inner: RenewableSliceProvider,
+    gate: CheckpointGate,
+}
+
+impl Provider for GatedSliceProvider {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        if request.messages().last() != Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE)) {
+            return self.inner.stream(request);
+        }
+        self.inner.requests.lock().unwrap().push(request);
+        let gate = self.gate.clone();
+        Box::pin(async_stream! {
+            gate.reached.notify_one();
+            gate.release.notified().await;
+            if !gate.reply.is_empty() {
+                yield Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: gate.reply.to_owned(),
+                });
+            }
+            yield Ok(qq_provider::ProviderEvent::Completed {
+                usage: Some(qq_provider::ProviderUsage {
+                    input_tokens: 1,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 1,
+                    reasoning_tokens: None,
+                }),
+            });
+        })
+    }
+}
+
 impl RuntimeLoader for RenewableSliceLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
@@ -2552,9 +2698,16 @@ mod reference_assembly {
                 .count();
             if replaced > 0 {
                 turns.drain(..replaced);
+                // The live run's summary replaced every message up to the
+                // first kept assistant turn: that turn's steering and its
+                // runtime notice went with the summarized span.
+                let first_kept = turns.first().map_or(turn_cutoff, |turn| turn.0);
+                if let Some(first) = turns.first_mut() {
+                    first.3 = None;
+                }
                 while steering
                     .front()
-                    .is_some_and(|(applied_before, _)| *applied_before <= turn_cutoff)
+                    .is_some_and(|(applied_before, _)| *applied_before <= first_kept)
                 {
                     steering.pop_front();
                 }

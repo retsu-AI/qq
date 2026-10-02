@@ -1052,18 +1052,6 @@ pub(super) fn assembled_context_bytes(
         .saturating_add(usize::try_from(streaming_bytes).unwrap_or(usize::MAX)))
 }
 
-/// Replays one run's persisted model turns (assistant content and tool
-/// results) into `context`, in turn order.
-/// Replays one run's committed turns into `context`: each assistant turn,
-/// then exactly one result per `ToolCall` block in block order, with applied
-/// steering placed immediately before the turn whose request first carried it
-/// and the continuation notice after a truncated turn.
-///
-/// Results pass through the same per-turn output budget the live run applied
-/// (`TurnOutputBudget`, in block order, which is call order), so a turn whose
-/// results together exceeded the budget replays exactly the reduced text the
-/// model saw rather than the larger per-call rows. The projection is a pure
-/// function of the stored rows; nothing extra is persisted.
 /// One committed model turn as context assembly reads it.
 pub(super) struct StoredTurn {
     pub(super) ordinal: u32,
@@ -1075,6 +1063,19 @@ pub(super) struct StoredTurn {
     pub(super) notice: Option<crate::runtime::TurnNotice>,
 }
 
+/// Replays one run's committed turns into `context`: each assistant turn,
+/// then exactly one result per `ToolCall` block in block order. Applied
+/// steering, then the turn's runtime notice (slice checkpoint or
+/// continuation), go immediately before the turn whose request first carried
+/// them, and the output-limit notice goes after a truncated turn. An in-run
+/// marker drops what the live splice replaced: the turns through its cutoff,
+/// and the steering and notice before the first kept turn.
+///
+/// Results pass through the same per-turn output budget the live run applied
+/// (`TurnOutputBudget`, in block order, which is call order), so a turn whose
+/// results together exceeded the budget replays exactly the reduced text the
+/// model saw rather than the larger per-call rows. The projection is a pure
+/// function of the stored rows; nothing extra is persisted.
 pub(super) fn append_run_turns(
     turns: Vec<StoredTurn>,
     mut recorded: RecordedTurnResults,
@@ -1099,9 +1100,20 @@ pub(super) fn append_run_turns(
             for ordinal in 1..=marker.turn_cutoff {
                 recorded.remove(&ordinal);
             }
+            // The live splice replaced everything before the first kept
+            // assistant message, which includes the steering and the runtime
+            // notice that preceded that kept turn's request
+            // (`in_run_compaction_boundary`). Drop them here too.
+            let first_kept = match turns.first_mut() {
+                Some(first) => {
+                    first.notice = None;
+                    first.ordinal
+                }
+                None => marker.turn_cutoff,
+            };
             while steering
                 .front()
-                .is_some_and(|(applied_before, _)| *applied_before <= marker.turn_cutoff)
+                .is_some_and(|(applied_before, _)| *applied_before <= first_kept)
             {
                 steering.pop_front();
             }

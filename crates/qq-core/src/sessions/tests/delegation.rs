@@ -5217,3 +5217,51 @@ async fn child_duration_is_reduced_by_preflight_and_prior_children() {
         );
     }
 }
+
+/// A text-only slice report is not the run's answer: it never completes the
+/// run and is never audited. With `audit: always`, the one audit judges the
+/// real final answer after the continuation. (AP3a acceptance (j).)
+#[tokio::test]
+async fn a_text_only_slice_report_is_never_audited_or_treated_as_the_answer() {
+    let parent_requests = Arc::new(StdMutex::new(Vec::new()));
+    let parent: Arc<dyn Provider> = Arc::new(RenewableSliceProvider {
+        requests: Arc::clone(&parent_requests),
+        checkpoint_wait: None,
+        metered_empty_checkpoint: false,
+    });
+    let auditor_requests = Arc::new(StdMutex::new(Vec::new()));
+    let auditor: Arc<dyn Provider> = Arc::new(VerdictProvider {
+        reply: r#"{"verdict":"pass"}"#,
+        requests: Arc::clone(&auditor_requests),
+    });
+    let mut harness = audit_harness(parent, auditor, crate::runtime::AuditMode::Always, 1).await;
+    std::fs::write(harness._directory.path().join("note.txt"), "tool result\n").unwrap();
+    std::fs::write(harness._directory.path().join("slice-effects.txt"), "seed").unwrap();
+    let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "long task").await;
+    let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+
+    assert!(matches!(
+        finished_outcome(&observed, run_id),
+        Some(RunOutcome::Completed)
+    ));
+    let (_, completed) = audit_events(&observed, run_id);
+    assert_eq!(completed.len(), 1, "exactly one audit, of the final answer");
+    let auditor_requests = auditor_requests.lock().unwrap();
+    assert_eq!(auditor_requests.len(), 1);
+    let brief = request_texts(&auditor_requests[0]).join("\n");
+    assert!(brief.contains("task complete"), "{brief}");
+    assert!(!brief.contains("slice checkpoint"), "{brief}");
+    // The run kept going after its report: the continuation request
+    // followed it, and the answer came after that.
+    let parent_requests = parent_requests.lock().unwrap();
+    let report_at = parent_requests
+        .iter()
+        .position(|request| {
+            request.messages().last() == Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE))
+        })
+        .expect("the run reached its slice report");
+    assert_eq!(
+        parent_requests[report_at + 1].messages().last(),
+        Some(&Message::user(crate::SLICE_CONTINUATION_NOTICE))
+    );
+}

@@ -340,3 +340,25 @@ and both sides were kept. Gates on the stack:
     15.6 ms after. The ranges overlap, and one turn-10 outlier (19.3 ms) is
     a single sample.
   - Both within noise. Evidence: `target/qq-perf/ap3a-2026-10-01/`.
+
+### 2026-10-01 — AP3a review follow-up (ENG-990)
+
+Independent review: request changes. Every item is fixed.
+- **Blocking.** The in-run splice removed the notice and steering in front
+  of the first kept turn, but replay kept them. The steering half predates
+  this slice. Replay and the reference oracle now drop both.
+  `replay_drops_the_notice_and_steering_the_in_run_splice_removed` failed
+  on the old rule and passes now.
+- **Should-fix:**
+  - a budget-final turn never gets the continuation notice;
+  - an unmetered empty checkpoint is retried as a swallowed gateway failure
+    (decision: kept), documented and tested;
+  - `notice` marks where a notice entered the conversation, not every
+    attempt (decision: kept, because it gives byte-identity). Architecture
+    and the runbook query were rewritten to judge each report by its last
+    attempt;
+  - a misplaced doc comment was fixed.
+- **Tests added:** steering during a report, for text and empty reports
+  (l); audit `always` audits only the final answer (j); a truncated report
+  keeps one notice and replays identically (k); one static prefix across
+  the seam (a′).

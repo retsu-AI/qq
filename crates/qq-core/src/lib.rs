@@ -1743,10 +1743,14 @@ impl plan::CompiledAgentPlan {
                 // The checkpoint and continuation notices join the
                 // conversation as runtime messages, so the system prompt and
                 // its cached prefix stay the run's own (ADR-0054 § 2).
+                // A checkpoint resets the slice, so the next turn is never a
+                // checkpoint too; a budget-final turn has no tools, so it is
+                // not told that tools are available again.
+                debug_assert!(!(checkpoint_turn && continuation_turn));
                 let notice = if checkpoint_turn && !checkpoint_noticed {
                     checkpoint_noticed = true;
                     Some(runtime::TurnNotice::Report)
-                } else if continuation_turn && !checkpoint_turn {
+                } else if continuation_turn && !budget_final_turn {
                     Some(runtime::TurnNotice::Continuation)
                 } else {
                     None
@@ -8555,11 +8559,10 @@ mod tests {
 
     #[tokio::test]
     async fn the_measured_token_chain_survives_the_slice_checkpoint_and_continuation() {
-        // Every turn reports usage. The checkpoint turn changes the system
-        // prompt, the continuation turn changes it again, and the turn after
-        // that restores it: three requests that used to fall back to the raw
-        // byte estimate. Each must still carry a measurement-derived
-        // estimate, adjusted by the byte deltas.
+        // Every turn reports usage. The checkpoint and continuation turns add
+        // a notice message each; the system prompt and the static prefix stay
+        // the run's own (ADR-0054 § 2). Each request must still carry a
+        // measurement-derived estimate, adjusted by the byte deltas.
         struct MeasuredCheckpoint {
             emitted: Mutex<usize>,
         }
@@ -8659,6 +8662,20 @@ mod tests {
                 _ => None,
             })
             .collect();
+        // One static prefix for the whole run: the seam no longer changes it,
+        // so occupancy reuse and the provider cache hold across it.
+        let prefixes = events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::Prepared { static_prefix, .. } => Some(*static_prefix),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(prefixes.len() > 3);
+        assert!(
+            prefixes.iter().all(|prefix| *prefix == prefixes[0]),
+            "{prefixes:?}"
+        );
         // The first request has nothing to inherit; every later one does,
         // including the checkpoint, the continuation, and the turn after.
         assert_eq!(prepared[0].1, None);
@@ -8674,9 +8691,8 @@ mod tests {
         // Every measured turn reports 1,000 tokens, so each request after the
         // first estimates 1,000 plus the byte delta of one turn's calls and
         // results (~300 tokens here), never the raw byte count of the whole
-        // transcript. The checkpoint request keeps its schemas and is charged
-        // only its notice; the continuation swaps notices; the turn after is
-        // credited the notice back and converges on the measurement again.
+        // transcript. The checkpoint and continuation requests are charged
+        // only their notice message on top of the measurement.
         for (turn, tokens) in &prepared[1..] {
             let tokens = tokens.expect("measured");
             assert!((900..=1_400).contains(&tokens), "turn {turn}: {tokens}");
@@ -9281,6 +9297,102 @@ mod tests {
                 Message::user(SLICE_CONTINUATION_NOTICE),
             ]
         );
+    }
+
+    /// A checkpoint reply with no content *and no usage* after fresh tool
+    /// results is a gateway that swallowed a failure, not a missed report:
+    /// it is retried like any transient fault. The report notice is placed
+    /// once and the retry's report is the one that stands. (A metered empty
+    /// reply is a missed report; see the test above.)
+    #[tokio::test(start_paused = true)]
+    async fn an_unmetered_empty_checkpoint_is_retried_as_a_transient_fault() {
+        struct SwallowedCheckpoint {
+            calls: Mutex<usize>,
+            checkpoint_attempts: Mutex<usize>,
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for SwallowedCheckpoint {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.requests.lock().unwrap().push(request.clone());
+                if is_checkpoint_request(&request) {
+                    let mut attempts = self.checkpoint_attempts.lock().unwrap();
+                    *attempts += 1;
+                    if *attempts == 1 {
+                        return Box::pin(stream::iter([Ok(ProviderEvent::Completed {
+                            usage: None,
+                        })]));
+                    }
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "report after retry".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                if last_user_text(&request) == Some(SLICE_CONTINUATION_NOTICE) {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let mut calls = self.calls.lock().unwrap();
+                let first = *calls;
+                *calls += MAX_TOOL_CALLS_PER_TURN;
+                let mut events = Vec::new();
+                for index in first..first + MAX_TOOL_CALLS_PER_TURN {
+                    let id = format!("call-{index}");
+                    events.push(Ok(ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "unknown".to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: "{}".to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
+                }
+                events.push(Ok(ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
+            }
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            SwallowedCheckpoint {
+                calls: Mutex::new(0),
+                checkpoint_attempts: Mutex::new(0),
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run(RunCommand::new("hello"))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RunEvent::Completed)),
+            "{:?}",
+            events.last()
+        );
+        let requests = requests.lock().unwrap();
+        // The swallowed reply was re-issued: two checkpoint requests.
+        assert_eq!(
+            requests.iter().filter(|r| is_checkpoint_request(r)).count(),
+            2
+        );
+        let last = requests.last().unwrap().messages();
+        assert_eq!(
+            last.iter()
+                .filter(|message| **message == Message::user(SLICE_CHECKPOINT_NOTICE))
+                .count(),
+            1
+        );
+        assert!(last.contains(&Message::assistant("report after retry")));
     }
 
     #[tokio::test(start_paused = true)]

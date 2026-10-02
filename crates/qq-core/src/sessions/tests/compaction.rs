@@ -3998,6 +3998,95 @@ async fn an_exhausted_fold_admits_the_prompt_with_summary_only_history() {
     assert_eq!(prompts, 4);
 }
 
+/// The live splice removes every message before the first kept assistant
+/// turn, including the steering and the runtime notice that preceded that
+/// turn's request. Replay must drop them too, or a run that compacted right
+/// after a slice checkpoint (or a steer) assembles a message the live request
+/// never carried. Live context is built and spliced with the real boundary;
+/// replay goes through `append_run_turns` with the matching cutoff.
+#[test]
+fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
+    use crate::runtime::TurnNotice;
+    let assistant = |n: u32| Message::assistant(format!("turn {n}"));
+    // Seven turns, four kept: turn 4 is the first kept turn. It was the
+    // first turn of a new slice, and a steer joined before it.
+    let mut live = vec![Message::user("prompt")];
+    for n in 1..=7 {
+        if n == 4 {
+            live.push(Message::user("steer before four"));
+            live.push(Message::user(TurnNotice::Continuation.text()));
+        }
+        live.push(assistant(n));
+    }
+    let (replace_through, replaced_turns) =
+        crate::sessions::in_run_compaction_boundary(&live[1..], 4).unwrap();
+    assert_eq!(replaced_turns, 3);
+    let summary = Message::user(format!("{IN_RUN_COMPACTION_PREAMBLE}\n\nsummary"));
+    live.splice(1..1 + replace_through, [summary]);
+    // The live splice took the steer and the notice with the summarized span.
+    assert!(!live.contains(&Message::user(TurnNotice::Continuation.text())));
+    assert!(!live.contains(&Message::user("steer before four")));
+
+    let turns = (1..=7)
+        .map(|n| StoredTurn {
+            ordinal: n,
+            content_json: format!("[{{\"type\":\"text\",\"text\":\"turn {n}\"}}]"),
+            truncated: false,
+            notice: (n == 4).then_some(TurnNotice::Continuation),
+        })
+        .collect();
+    let mut replayed = vec![Message::user("prompt")];
+    append_run_turns(
+        turns,
+        HashMap::new(),
+        std::collections::VecDeque::from([(4, "steer before four".to_owned())]),
+        Some(InRunCompaction {
+            summary: "summary".to_owned(),
+            turn_cutoff: replaced_turns,
+        }),
+        &mut replayed,
+        &mut HashMap::new(),
+    )
+    .unwrap();
+    assert_eq!(replayed, live);
+
+    // A notice on a kept turn after the first one survives on both sides.
+    let mut live = vec![Message::user("prompt")];
+    for n in 1..=7 {
+        if n == 5 {
+            live.push(Message::user(TurnNotice::Report.text()));
+        }
+        live.push(assistant(n));
+    }
+    let (replace_through, replaced_turns) =
+        crate::sessions::in_run_compaction_boundary(&live[1..], 4).unwrap();
+    let summary = Message::user(format!("{IN_RUN_COMPACTION_PREAMBLE}\n\nsummary"));
+    live.splice(1..1 + replace_through, [summary]);
+    let turns = (1..=7)
+        .map(|n| StoredTurn {
+            ordinal: n,
+            content_json: format!("[{{\"type\":\"text\",\"text\":\"turn {n}\"}}]"),
+            truncated: false,
+            notice: (n == 5).then_some(TurnNotice::Report),
+        })
+        .collect();
+    let mut replayed = vec![Message::user("prompt")];
+    append_run_turns(
+        turns,
+        HashMap::new(),
+        std::collections::VecDeque::new(),
+        Some(InRunCompaction {
+            summary: "summary".to_owned(),
+            turn_cutoff: replaced_turns,
+        }),
+        &mut replayed,
+        &mut HashMap::new(),
+    )
+    .unwrap();
+    assert_eq!(replayed, live);
+    assert!(replayed.contains(&Message::user(TurnNotice::Report.text())));
+}
+
 #[test]
 fn in_run_compaction_boundary_keeps_the_recent_turns_with_their_results() {
     use crate::sessions::in_run_compaction_boundary as boundary;
@@ -4007,9 +4096,9 @@ fn in_run_compaction_boundary_keeps_the_recent_turns_with_their_results() {
     // two turns (four messages) and reports cutoff 2.
     let run: Vec<Message> = (0..6).flat_map(|_| [assistant(), results()]).collect();
     assert_eq!(boundary(&run, 4), Some((4, 2)));
-    // Steering applied before the first kept turn was part of the replaced
-    // span's request and is summarized with it — the same rule assembly
-    // uses (`applied_before <= turn_cutoff`).
+    // Steering applied before the first kept turn is replaced with the
+    // summarized span — assembly drops steering with `applied_before` up to
+    // and including the first kept turn.
     let mut with_steer = run.clone();
     with_steer.insert(4, Message::user("steer"));
     assert_eq!(boundary(&with_steer, 4), Some((5, 2)));
