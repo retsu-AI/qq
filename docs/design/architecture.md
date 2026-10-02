@@ -958,7 +958,12 @@ spent the last permitted turn becomes a final status response that asks for
 no tool calls. The tools stay declared with `ToolChoice::None` (OpenAI and
 Anthropic `tool_choice: none`, Gemini `mode: NONE`; Bedrock Converse has no
 such choice and rejects a request whose history holds tool calls without
-tools, so it sends them unchanged). A call the model makes anyway settles the
+tools, so it sends them unchanged). A request that genuinely declares no
+tools, such as a compaction summary of a session that used tools, still
+carries tool history; the Bedrock codec renders those calls and results as
+text (`[tool call: name {args}]`, `[tool result from name]`) so Converse
+accepts it, and every other codec sends them as tool blocks. A call the model
+makes anyway settles the
 run as `budget_exhausted` without running; an
 elapsed wall clock or a provider turn that omits usage under a cost cap grants
 no further provider turn. Every bound produces the typed `budget_exhausted` outcome, never a

@@ -528,3 +528,39 @@ also fixed:
 Long doc lines are fixed. Workspace: 2066 passed. Clippy and fmt are
 clean.
 
+### 2026-10-02: ENG-1002 and ENG-1003, stacked on AP3b (#240)
+
+- **ENG-1002: Bedrock compaction fails once a session has used a tool.**
+  - Both summarizers send a transcript holding tool calls and results with
+    no tools declared: the between-run `/compact` (`claim.rs`,
+    `.without_tools()`) and the in-run summary (`CompiledAgentPlan::summarize`).
+    Converse rejects every such request.
+  - **Fix, in the Bedrock codec only:** a request without tools renders its
+    tool blocks as text (`[tool call: read_file {...}]`,
+    `[tool result from read_file]` / `[tool error ...]`). The model reads the
+    same history and cannot call anything. Requests with tools keep their
+    blocks, so their cached prefix is unchanged. The other APIs accept tool
+    blocks without declared tools.
+  - I chose this over declaring the run's tools on the summary
+    (`ToolChoice::None`) because that costs tool-schema bytes the summarizer
+    budget would have to reserve on every provider.
+  - **Live, `bedrock/` Claude Haiku 4.5** (`lima` profile, isolated data and
+    runtime dirs): a session with one `read_file` call, then
+    `CompactSession` over `qq serve`.
+    - `main`: the compaction run fails with "The toolConfig field must be
+      defined when using toolUse and toolResult content blocks".
+    - This branch: the compaction completes.
+  - Tests:
+    - Codec: `a_request_without_tools_sends_its_tool_history_as_text`
+      covers both shapes.
+    - Core: `one_run_spanning_several_windows…` now asserts that the in-run
+      summary request declares no tools and still carries tool blocks.
+- **ENG-1003: the `tool_dispatch` bench hung.**
+  - The fixture answered after a tool result with a bare unmetered
+    completion, which the run loop has retried as a gateway fault since
+    #196.
+  - The fixture now answers with text. It lives in
+    `tests/support/read_tool.rs`, shared with a new integration test,
+    `the_tool_dispatch_bench_run_completes`, which runs one iteration under
+    a 10 s timeout. It times out with the old fixture.
+

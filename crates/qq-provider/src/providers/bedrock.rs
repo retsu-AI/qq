@@ -35,8 +35,8 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 
 use crate::{
-    ContentBlock, IncompleteReason, ModelRequest, Provider, ProviderError, ProviderErrorKind,
-    ProviderEvent, ProviderStream, ProviderUsage, Role,
+    ContentBlock, IncompleteReason, Message, ModelRequest, Provider, ProviderError,
+    ProviderErrorKind, ProviderEvent, ProviderStream, ProviderUsage, Role,
     aws::{AwsConfigLoadError, load_aws_config, validate_configuration},
     bedrock_auth::BedrockAuth,
     limits::{ByteCounter, StreamLimits},
@@ -319,6 +319,22 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
         // system prompt, after the last tool, after the last message block.
         let cache_points = supports_cache_points(request.model());
         let last_message = request.messages().len().checked_sub(1);
+        // Converse rejects tool-use and tool-result blocks unless the request
+        // declares tools. A request that declares none (a compaction
+        // summary) carries its tool history as text instead: the model reads
+        // the same calls and results and cannot call anything. Requests with
+        // tools keep their blocks, so their cached prefix is unchanged.
+        let tool_names = request.tools().is_empty().then(|| {
+            request
+                .messages()
+                .iter()
+                .flat_map(Message::content)
+                .filter_map(|block| match block {
+                    ContentBlock::ToolCall { id, name, .. } => Some((id.as_str(), name.as_str())),
+                    ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,
+                })
+                .collect::<HashMap<_, _>>()
+        });
         let messages = request
             .messages()
             .iter()
@@ -329,7 +345,10 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
                     Role::Assistant => ConversationRole::Assistant,
                 });
                 for block in message.content() {
-                    builder = builder.content(bedrock_content_block(block)?);
+                    builder = builder.content(match &tool_names {
+                        Some(names) => BedrockContentBlock::Text(tool_block_as_text(block, names)),
+                        None => bedrock_content_block(block)?,
+                    });
                 }
                 if cache_points && Some(index) == last_message {
                     builder = builder.content(BedrockContentBlock::CachePoint(cache_point()));
@@ -389,6 +408,28 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
                 .max_tokens(max_tokens)
                 .build(),
         })
+    }
+}
+
+/// One content block as plain text, for a request that declares no tools.
+fn tool_block_as_text(block: &ContentBlock, names: &HashMap<&str, &str>) -> String {
+    match block {
+        ContentBlock::Text { text } => text.clone(),
+        ContentBlock::ToolCall {
+            name, arguments, ..
+        } => format!("[tool call: {name} {}]", arguments.get()),
+        ContentBlock::ToolResult {
+            call_id,
+            content,
+            is_error,
+        } => format!(
+            "[tool {} from {}]\n{content}",
+            if *is_error { "error" } else { "result" },
+            names
+                .get(call_id.as_str())
+                .copied()
+                .unwrap_or("an earlier call"),
+        ),
     }
 }
 
@@ -886,7 +927,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{Message, ToolSpec};
+    use crate::ToolSpec;
 
     #[test]
     fn constructor_is_network_free_and_debug_redacts_api_keys() {
@@ -1057,6 +1098,82 @@ mod tests {
         let tools = mapped.tool_config.as_ref().unwrap().tools();
         assert_eq!(tools.len(), 2);
         assert!(matches!(tools[1], Tool::CachePoint(_)));
+    }
+
+    /// Converse rejects tool-use and tool-result blocks when no tools are
+    /// declared, which is every compaction summary of a session that used a
+    /// tool (ENG-1002). Such a request carries its tool history as text.
+    #[test]
+    fn a_request_without_tools_sends_its_tool_history_as_text() {
+        let history = vec![
+            Message::user("read the config"),
+            Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::Text {
+                        text: "Reading it now.".to_owned(),
+                    },
+                    ContentBlock::tool_call(
+                        "toolu_1".to_owned(),
+                        "read_file".to_owned(),
+                        &json!({"path": "config.ron"}),
+                    ),
+                ],
+            ),
+            Message::tool_results(vec![
+                ContentBlock::ToolResult {
+                    call_id: "toolu_1".to_owned(),
+                    content: "(config)".to_owned(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    call_id: "toolu_9".to_owned(),
+                    content: "denied".to_owned(),
+                    is_error: true,
+                },
+            ]),
+            Message::user("Summarize this conversation."),
+        ];
+        let request = ModelRequest::new("anthropic.claude-test", history.clone(), 128);
+        let mapped = ConverseRequest::try_from(&request).unwrap();
+        assert!(mapped.tool_config.is_none());
+        let texts = |index: usize| {
+            mapped.messages[index]
+                .content()
+                .iter()
+                .filter_map(|block| block.as_text().ok().cloned())
+                .collect::<Vec<_>>()
+        };
+        for message in &mapped.messages {
+            assert!(
+                message
+                    .content()
+                    .iter()
+                    .all(|block| block.is_text() || block.is_cache_point()),
+                "no tool blocks without tools: {message:?}"
+            );
+        }
+        assert_eq!(
+            texts(1),
+            [
+                "Reading it now.",
+                r#"[tool call: read_file {"path":"config.ron"}]"#
+            ]
+        );
+        assert_eq!(
+            texts(2),
+            [
+                "[tool result from read_file]\n(config)",
+                "[tool error from an earlier call]\ndenied"
+            ]
+        );
+        // With tools declared, the same history keeps its tool blocks.
+        let request = ModelRequest::new("anthropic.claude-test", history, 128).with_tools(vec![
+            ToolSpec::new("read_file", "Reads one file", json!({"type": "object"})),
+        ]);
+        let mapped = ConverseRequest::try_from(&request).unwrap();
+        assert!(mapped.messages[1].content()[1].as_tool_use().is_ok());
+        assert!(mapped.messages[2].content()[0].as_tool_result().is_ok());
     }
 
     #[test]

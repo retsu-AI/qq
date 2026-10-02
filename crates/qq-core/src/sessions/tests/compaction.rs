@@ -3300,6 +3300,32 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
                 if run_id == compaction
         )));
     }
+    // An in-run summary declares no tools yet carries the run's tool calls
+    // and results: the shape Bedrock's codec renders as text (ENG-1002).
+    {
+        let requests = harness.requests.lock().unwrap();
+        let summary = requests
+            .iter()
+            .find(|request| {
+                request_texts(request)
+                    .last()
+                    .is_some_and(|text| text.starts_with("The task above is still in progress"))
+            })
+            .expect("an in-run summary request");
+        assert!(summary.tools().is_empty());
+        assert!(
+            summary
+                .messages()
+                .iter()
+                .flat_map(Message::content)
+                .any(|block| {
+                    matches!(
+                        block,
+                        ContentBlock::ToolCall { .. } | ContentBlock::ToolResult { .. }
+                    )
+                })
+        );
+    }
     // Every request the model saw fit the window by the estimate (system
     // prompt and tool schemas included, as the loop counts them).
     let results = {
