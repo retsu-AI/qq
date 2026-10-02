@@ -254,7 +254,10 @@ deterministic: the same text and bounds produce the same bytes.
 whitespace. `shell` ships it: `shell exit=0 elapsed=1.2 bytes=428890`. The
 header is where the verdict lives, so a head-only glance, a truncated tail,
 or a pruned stub all still say how the call ended. Context pruning keeps
-the header line in front of its `[pruned: …]` stub.
+the header line in front of its `[pruned: …]` stub. A pruned `read_file`
+stub keeps its window and line count but drops the `h:` token, and says to
+re-read without `if_changed_since`. With that hash, the re-read would answer
+`unchanged` with no body, and the body is what pruning removed.
 
 **Secret masking** applies to `model_text` before bounding and replaces each
 hit with `[masked:<kind>]`: AWS access keys, GitHub tokens, `sk-`/`sk_live_`/
@@ -571,7 +574,8 @@ never on a Tokio worker.
 
 `read_file` reads the whole file (to the 4 MiB scan cap) once, hashes it,
 and renders one of three shapes. Every result opens with a `read` header
-so the model, the TUI, and a pruning stub all get the same facts:
+so the model, the TUI, and a pruning stub all get the same facts (a pruning
+stub omits only the hash; see § Headers):
 
 ```
 read crates/qq-core/src/tools/read.rs L1-40,88-91/412 h:3f9a1c0b7e2d

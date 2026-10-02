@@ -904,7 +904,7 @@ async fn pruned_history_still_compacts_a_known_overflow_before_the_retry() {
                 .flat_map(Message::content)
                 .any(|block| matches!(
                     block,
-                    ContentBlock::ToolResult { content, .. } if content.starts_with("[pruned")
+                    ContentBlock::ToolResult { content, .. } if content.contains("\n[pruned: ")
                 )),
             "the overflowing request must already carry pruned history"
         );
@@ -1626,13 +1626,25 @@ async fn assembly_prunes_stale_read_only_results_but_never_mutating_ones() {
             .collect()
     };
     assert_eq!(results.len(), 3);
-    // The old read is a stub naming the tool, arguments, and size.
+    // The old read is a stub: its header without the hash, then the tool,
+    // arguments, size and how to get the text back.
+    let (header, stub) = results[0].split_once('\n').unwrap_or_else(|| {
+        panic!(
+            "stale read-only result must be stubbed, got {:?}",
+            results[0]
+        )
+    });
+    assert!(header.starts_with("read note.txt L"), "{header}");
     assert!(
-        results[0].starts_with("[pruned: read_file {\"path\":\"note.txt\"} returned"),
+        !header.contains(" h:"),
+        "a pruned read must not offer its hash: {header}"
+    );
+    assert!(
+        stub.starts_with("[pruned: read_file {\"path\":\"note.txt\"} returned"),
         "stale read-only result must be stubbed, got {:?}",
         results[0]
     );
-    assert!(results[0].ends_with("call it again if needed]"));
+    assert!(stub.ends_with("without if_changed_since]"));
     // The equally old mutation is never pruned: not re-derivable.
     assert!(
         !results[1].starts_with("[pruned"),
@@ -2474,6 +2486,14 @@ async fn a_run_that_outgrows_the_window_stubs_its_stale_reads_instead_of_failing
         "{stubbed}"
     );
     assert!(results.last().unwrap().contains(&"n".repeat(127)));
+    // Live pruning produces the stub assembly would: the read header without
+    // its hash, and the re-read hint (AP2).
+    for stub in results.iter().filter(|r| r.contains("[pruned")) {
+        let (header, tail) = stub.split_once('\n').expect("a read stub keeps its header");
+        assert!(header.starts_with("read note.txt L"), "{header}");
+        assert!(!header.contains(" h:"), "{header}");
+        assert!(tail.ends_with("without if_changed_since]"), "{tail}");
+    }
     // The stored rows are untouched: the persisted result text is verbatim.
     let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
     let pruned_rows: u64 = connection
@@ -2585,7 +2605,7 @@ async fn measured_occupancy_survives_assembly_pruning_and_admits_the_next_prompt
             .flat_map(Message::content)
             .any(|block| matches!(
                 block,
-                ContentBlock::ToolResult { content, .. } if content.starts_with("[pruned")
+                ContentBlock::ToolResult { content, .. } if content.contains("\n[pruned: ")
             )),
         "the final request carries pruned history"
     );

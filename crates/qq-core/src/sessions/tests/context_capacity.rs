@@ -50,7 +50,8 @@ fn assembly_pruning_stubs_old_read_only_results_and_preserves_errors() {
         (
             "c1",
             "[pruned: read_file {\"path\":\"src/lib.rs\"} returned 500 bytes; \
-             call it again if needed]",
+             the text is no longer in context: read_file the lines you need again, \
+             without if_changed_since]",
             false
         )
     );
@@ -116,6 +117,87 @@ fn pruning_stubs_keep_a_result_header_line() {
     );
     // A first line that does not follow `<tool> …` is not a header.
     assert!(stubs[1].starts_with("[pruned: search"), "{}", stubs[1]);
+}
+
+#[test]
+fn pruned_read_file_stubs_keep_the_window_drop_the_hash_and_name_the_reread() {
+    // `read_file`'s header names the operation (`read`), not the tool. The
+    // stub keeps the window and line count so the model can re-read only
+    // what it needs, and drops `h:` so it cannot pass that hash back through
+    // `if_changed_since`, which would return no body for text that is no
+    // longer in context.
+    let call = |id: &str, arguments: serde_json::Value| {
+        ContentBlock::tool_call(id.to_owned(), "read_file".to_owned(), &arguments)
+    };
+    let body = "fn line() {}\n".repeat(60);
+    let windowed = format!("read src/lib.rs L1-60/240 h:3f9a0c1d2e4b clipped=2\n{body}");
+    let unscanned = format!("read big.log L1-60/- h:-\n{body}");
+    // A path segment can look like a hash; only the trailing hash goes.
+    let odd_path = format!("read docs/a h:0123456789ab b.md L1-60/60 h:3f9a0c1d2e4b\n{body}");
+    let result = |id: &str, content: &str| ContentBlock::ToolResult {
+        call_id: id.to_owned(),
+        content: content.to_owned(),
+        is_error: false,
+    };
+    let mut context = vec![
+        Message::user("start"),
+        Message::new(
+            Role::Assistant,
+            vec![
+                call("c1", serde_json::json!({"path": "src/lib.rs", "limit": 60})),
+                call("c2", serde_json::json!({"path": "big.log"})),
+                call(
+                    "c3",
+                    serde_json::json!({"path": "docs/a h:0123456789ab b.md"}),
+                ),
+            ],
+        ),
+        Message::tool_results(vec![
+            result("c1", &windowed),
+            result("c2", &unscanned),
+            result("c3", &odd_path),
+        ]),
+        Message::assistant("a"),
+        Message::assistant("b"),
+        Message::assistant("c"),
+        Message::assistant("d"),
+    ];
+
+    assert!(prune_stale_tool_results(&mut context, &HashMap::new()));
+
+    let stubs = context
+        .iter()
+        .flat_map(Message::content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stubs[0],
+        format!(
+            "read src/lib.rs L1-60/240 clipped=2\n\
+             [pruned: read_file {{\"limit\":60,\"path\":\"src/lib.rs\"}} returned {} bytes; \
+             the text is no longer in context: read_file the lines you need again, \
+             without if_changed_since]",
+            windowed.len()
+        )
+    );
+    assert_eq!(
+        stubs[1],
+        format!(
+            "read big.log L1-60/-\n\
+             [pruned: read_file {{\"path\":\"big.log\"}} returned {} bytes; \
+             the text is no longer in context: read_file the lines you need again, \
+             without if_changed_since]",
+            unscanned.len()
+        )
+    );
+    assert!(
+        stubs[2].starts_with("read docs/a h:0123456789ab b.md L1-60/60\n"),
+        "{}",
+        stubs[2]
+    );
 }
 
 #[test]

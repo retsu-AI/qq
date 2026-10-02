@@ -654,7 +654,7 @@ pub(super) fn runtime_notice(outcome: &RunOutcome) -> Option<String> {
 }
 
 /// Replaces read-only tool results older than the recency window with
-/// one-line stubs. A result is prunable when the call was admitted with the
+/// short stubs (the result's header line, when it has one, then one line). A result is prunable when the call was admitted with the
 /// `read_only` effect class (`effects` maps assembled message/block positions
 /// to their stored effects) — its output is re-derivable on demand; mutating, shell, and
 /// external outputs are not. Rows recorded before the effect was stored fall
@@ -770,19 +770,55 @@ pub(super) fn prunable_stub(
         arguments.push_str("...");
     }
     // A result that follows the header convention keeps its header: the
-    // counts, hash, and cursor it carries let the model continue without
-    // re-running the call.
-    let stub = match crate::tools::header_line(name, content) {
-        Some(header) => format!(
-            "{header}\n[pruned: {name} {arguments} returned {} bytes; call it again if needed]",
-            content.len()
-        ),
-        None => format!(
-            "[pruned: {name} {arguments} returned {} bytes; call it again if needed]",
-            content.len()
-        ),
+    // counts, window, and cursor it carries let the model continue without
+    // re-running the whole call. `read_file` names its header `read` and is
+    // the one tool whose hash would mislead here: `if_changed_since` with
+    // that hash returns no body, and the body is what pruning removed.
+    let size = content.len();
+    let (header, hint) = if name == "read_file" {
+        // The hash is the only ` h:` token after the path, and no later field
+        // can contain one; searching from the end leaves a path that happens
+        // to contain ` h:` intact.
+        let header = crate::tools::header_line("read", content).map(|header| {
+            match header.rfind(" h:").map(|at| {
+                let end = header[at + 1..]
+                    .find(' ')
+                    .map_or(header.len(), |len| at + 1 + len);
+                (at, end)
+            }) {
+                Some((at, end)) if is_read_hash_token(&header[at + 1..end]) => {
+                    format!("{}{}", &header[..at], &header[end..])
+                }
+                Some(_) | None => header.to_owned(),
+            }
+        });
+        (header, PRUNED_READ_REREAD)
+    } else {
+        (
+            crate::tools::header_line(name, content).map(str::to_owned),
+            "call it again if needed",
+        )
+    };
+    let stub = match header {
+        Some(header) => {
+            format!("{header}\n[pruned: {name} {arguments} returned {size} bytes; {hint}]")
+        }
+        None => format!("[pruned: {name} {arguments} returned {size} bytes; {hint}]"),
     };
     (content.len() > stub.len()).then_some(stub)
+}
+
+/// What a pruned `read_file` stub tells the model. A re-read with
+/// `if_changed_since` would return only an `unchanged` header.
+const PRUNED_READ_REREAD: &str = "the text is no longer in context: read_file the lines you \
+need again, without if_changed_since";
+
+/// `h:` followed by the twelve-digit short hash, or `h:-` when the file was
+/// too large to hash (`tools/read.rs`).
+fn is_read_hash_token(token: &str) -> bool {
+    token.strip_prefix("h:").is_some_and(|hash| {
+        hash == "-" || (hash.len() == 12 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    })
 }
 
 /// The byte weight the assembled context contributes to the session budget:
