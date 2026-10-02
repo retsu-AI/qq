@@ -409,3 +409,77 @@ async fn an_audit_child_never_gets_a_stall_report() {
         "no report or final-answer notice reached the auditor"
     );
 }
+
+/// A child whose last report was cut at the output limit and continued:
+/// its interim answer is the whole report, both parts joined in order.
+#[tokio::test]
+async fn a_continued_report_reaches_the_parent_whole() {
+    struct CutsThirdReport {
+        inner: StuckReader,
+        reports: StdMutex<usize>,
+    }
+    impl Provider for CutsThirdReport {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            let continuing = request.messages().last()
+                == Some(&Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE));
+            if continuing {
+                self.inner.requests.lock().unwrap().push(request);
+                return metered(vec![Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: " and the gadgets in gadgets.rs:4".to_owned(),
+                })]);
+            }
+            if request.messages().last() == Some(&Message::user(crate::STALL_REPORT_NOTICE)) {
+                let mut reports = self.reports.lock().unwrap();
+                *reports += 1;
+                if *reports == 3 {
+                    drop(reports);
+                    self.inner.requests.lock().unwrap().push(request);
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: "widgets live in inventory.rs:12".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Incomplete {
+                            usage: None,
+                            reason: qq_provider::IncompleteReason::OutputTokens,
+                        }),
+                    ]));
+                }
+            }
+            self.inner.stream(request)
+        }
+    }
+    let parent_requests = Arc::new(StdMutex::new(Vec::new()));
+    let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::clone(&parent_requests),
+        script: vec![(
+            "spawn_agent",
+            r#"{"task":"Where do widgets live?","model":"test/child"}"#.to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let child: Arc<dyn Provider> = Arc::new(CutsThirdReport {
+        inner: stuck_reader(None),
+        reports: StdMutex::new(0),
+    });
+    let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
+    std::fs::write(
+        harness._directory.path().join("inventory.rs"),
+        "struct Widget;\n",
+    )
+    .unwrap();
+    let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
+    let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+    assert!(matches!(
+        finished_outcome(&observed, run_id),
+        Some(RunOutcome::Completed)
+    ));
+    let (content, is_error) = spawn_result(&parent_requests.lock().unwrap());
+    assert!(!is_error, "{content}");
+    assert_eq!(
+        content,
+        format!(
+            "{}\n\nwidgets live in inventory.rs:12 and the gadgets in gadgets.rs:4",
+            crate::sessions::subagents::INTERIM_REPORT_LABEL
+        )
+    );
+}

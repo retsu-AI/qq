@@ -122,7 +122,16 @@ impl Provider for Scripted {
                 Ok(ProviderEvent::ToolCallCompleted { id }),
             ]);
         }
-        events.push(Ok(ProviderEvent::Completed { usage: None }));
+        // Metered like every other turn, so token bounds stay known.
+        events.push(Ok(ProviderEvent::Completed {
+            usage: Some(qq_provider::ProviderUsage {
+                input_tokens: 1,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                output_tokens: 1,
+                reasoning_tokens: None,
+            }),
+        }));
         Box::pin(stream::iter(events))
     }
 }
@@ -677,4 +686,306 @@ async fn a_truncated_stall_report_is_continued_under_one_notice() {
         .filter(|message| **message == Message::user(STALL_REPORT_NOTICE))
         .count();
     assert_eq!(report_notices, 1);
+}
+
+/// An interrupting steer during a stall report applies the steer (progress)
+/// and resumes the same report under its notice; the next stall report is
+/// asked for with its notice again. Regression: the applied steer reset the
+/// count while the report's notice stayed marked as placed, so 64 calls
+/// later the report turn went out with no notice at all.
+#[tokio::test]
+async fn an_interrupted_stall_report_keeps_its_notice_and_the_next_report_gets_one() {
+    struct InterruptsFirstReport {
+        inner: Scripted,
+        sender: runtime::SteeringSender,
+        interrupted: Mutex<bool>,
+    }
+    impl Provider for InterruptsFirstReport {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            let at_report = request.messages().last() == Some(&Message::user(STALL_REPORT_NOTICE));
+            let mut interrupted = self.interrupted.lock().unwrap();
+            if at_report && !*interrupted {
+                *interrupted = true;
+                drop(interrupted);
+                self.inner.requests.lock().unwrap().push(request);
+                self.sender
+                    .messages
+                    .try_send(runtime::SteeringMessage::text(
+                        qq_protocol::MessageId::from_bytes([7; 16]),
+                        "also check the tests",
+                    ))
+                    .unwrap();
+                self.sender.interrupt();
+                return Box::pin(stream::pending());
+            }
+            drop(interrupted);
+            self.inner.stream(request)
+        }
+    }
+    let (sender, receiver) = runtime::steering_channel();
+    let inner = Scripted::new(reads(160));
+    let requests = Arc::clone(&inner.requests);
+    let runtime = Runtime::new(
+        InterruptsFirstReport {
+            inner,
+            sender,
+            interrupted: Mutex::new(false),
+        },
+        "gpt-test",
+        256,
+    )
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    let events = runtime
+        .run_loop_with_spawner(
+            vec![Message::user("work")],
+            directory.path().to_owned(),
+            RunCancellation::new(),
+            Arc::new(StaticPolicyGate {
+                mode: ApprovalMode::Full,
+                grants: approval::SessionGrants::default(),
+                network: Arc::default(),
+            }),
+            Arc::new(workspace::FileState::default()),
+            RunCapabilities::user(None).with_steering(receiver),
+        )
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(
+        completed_text(&events).as_deref(),
+        Some("done"),
+        "{:?}",
+        events.last()
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::SteeringApplied { .. }))
+    );
+    // Every request answered with the stall-report rejection carried the
+    // notice: no report turn ever went out unannounced.
+    let requests = requests.lock().unwrap();
+    let report_requests = requests
+        .iter()
+        .filter(|request| last_notice(request) == Some(STALL_REPORT_NOTICE))
+        .count();
+    assert!(
+        report_requests >= 3,
+        "interrupted, resumed, and a later report: {report_requests}"
+    );
+    let notices = notices(&events);
+    assert_eq!(
+        notices
+            .iter()
+            .filter(|notice| **notice == runtime::TurnNotice::StallReport)
+            .count(),
+        2,
+        "two reports, each announced once: {notices:?}"
+    );
+    let unannounced = events.iter().any(|event| {
+        matches!(event, RuntimeEvent::ToolCallFinished { result, .. } if result == STALL_REPORT_REJECTION)
+    });
+    assert!(
+        !unannounced,
+        "no call was rejected by an unannounced report"
+    );
+}
+
+/// A sub-agent's final-answer turn interrupted by a steer stays final: the
+/// steer is applied, the turn is resent under the same notice, and the
+/// child still ends with its answer.
+#[tokio::test]
+async fn an_interrupted_final_answer_stays_final() {
+    struct InterruptsFinal {
+        inner: Scripted,
+        sender: runtime::SteeringSender,
+        interrupted: Mutex<bool>,
+    }
+    impl Provider for InterruptsFinal {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            let at_final =
+                request.messages().last() == Some(&Message::user(SUBAGENT_FINAL_ANSWER_NOTICE));
+            let mut interrupted = self.interrupted.lock().unwrap();
+            if at_final && !*interrupted {
+                *interrupted = true;
+                drop(interrupted);
+                self.inner.requests.lock().unwrap().push(request);
+                self.sender
+                    .messages
+                    .try_send(runtime::SteeringMessage::text(
+                        qq_protocol::MessageId::from_bytes([8; 16]),
+                        "keep it short",
+                    ))
+                    .unwrap();
+                self.sender.interrupt();
+                return Box::pin(stream::pending());
+            }
+            drop(interrupted);
+            self.inner.stream(request)
+        }
+    }
+    let (sender, receiver) = runtime::steering_channel();
+    let inner = Scripted::new(reads(400));
+    let requests = Arc::clone(&inner.requests);
+    let runtime = Runtime::new(
+        InterruptsFinal {
+            inner,
+            sender,
+            interrupted: Mutex::new(false),
+        },
+        "gpt-test",
+        256,
+    )
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    let events = runtime
+        .run_loop_with_spawner(
+            vec![Message::user("work")],
+            directory.path().to_owned(),
+            RunCancellation::new(),
+            Arc::new(StaticPolicyGate {
+                mode: ApprovalMode::Full,
+                grants: approval::SessionGrants::default(),
+                network: Arc::default(),
+            }),
+            Arc::new(workspace::FileState::default()),
+            RunCapabilities::user(None)
+                .for_subagent(runtime::SubagentAuthority::Read)
+                .with_steering(receiver),
+        )
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(
+        completed_text(&events).as_deref(),
+        Some("final answer: the brief's answer"),
+        "{:?}",
+        events.last()
+    );
+    let requests = requests.lock().unwrap();
+    let last = requests.last().unwrap();
+    assert_eq!(last.tool_choice(), qq_provider::ToolChoice::None);
+    assert_eq!(last_notice(last), Some(SUBAGENT_FINAL_ANSWER_NOTICE));
+    let executed = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                RuntimeEvent::ToolCallFinished {
+                    is_error: false,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        executed,
+        4 * 64,
+        "no work ran after the final-answer notice"
+    );
+}
+
+/// An external tool its server marks read-only is a read: looping on it
+/// still reaches the report. One without the hint is work.
+#[tokio::test]
+async fn read_only_external_tools_are_reads_and_others_are_work() {
+    for (read_only_hint, reports) in [(true, 1), (false, 0)] {
+        let mut host = WideHost::new(1);
+        host.read_only_hint = read_only_hint;
+        let provider = Scripted::new(vec![("ext__wide__tool00", "{}"); 64]);
+        let requests = Arc::clone(&provider.requests);
+        let runtime = Runtime::new(provider, "gpt-test", 256)
+            .unwrap()
+            .with_tool_host(Arc::new(host));
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_loop(
+                vec![Message::user("look things up")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Full,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(
+            completed_text(&events).as_deref(),
+            Some("done"),
+            "hint {read_only_hint}"
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            calls_before_reports(&requests, STALL_REPORT_NOTICE).len(),
+            reports,
+            "read_only hint {read_only_hint}"
+        );
+    }
+}
+
+/// A final-answer turn whose calls were rejected still settles as
+/// exhausted when that turn pushed the run past its cost bound: a
+/// completed run never overran its bounds.
+#[tokio::test]
+async fn a_final_answer_turn_over_its_cost_bound_settles_as_exhausted() {
+    struct CostlyFinal(Scripted);
+    impl Provider for CostlyFinal {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            if last_notice(&request) == Some(SUBAGENT_FINAL_ANSWER_NOTICE) {
+                self.0.requests.lock().unwrap().push(request);
+                let mut events = reply_events(Reply::Call(WRITE), "final".to_owned());
+                events.pop();
+                events.push(Ok(ProviderEvent::Completed {
+                    usage: Some(qq_provider::ProviderUsage {
+                        input_tokens: 1_000_000,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        output_tokens: 1,
+                        reasoning_tokens: None,
+                    }),
+                }));
+                return Box::pin(stream::iter(events));
+            }
+            self.0.stream(request)
+        }
+    }
+    let runtime = Runtime::new(CostlyFinal(Scripted::new(reads(400))), "gpt-test", 256).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    let events = runtime
+        .run_loop_with_spawner(
+            vec![Message::user("work")],
+            directory.path().to_owned(),
+            RunCancellation::new(),
+            Arc::new(StaticPolicyGate {
+                mode: ApprovalMode::Full,
+                grants: approval::SessionGrants::default(),
+                network: Arc::default(),
+            }),
+            Arc::new(workspace::FileState::default()),
+            RunCapabilities::user(None)
+                .for_subagent(runtime::SubagentAuthority::Read)
+                .with_limits(
+                    RunLimits {
+                        max_total_tokens: Some(100_000),
+                        ..RunLimits::default()
+                    },
+                    None,
+                ),
+        )
+        .collect::<Vec<_>>()
+        .await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(RuntimeEvent::BudgetExhausted { exhaustion })
+                if exhaustion.limit == BudgetLimitKind::TotalTokens
+        ),
+        "{:?}",
+        events.last()
+    );
 }

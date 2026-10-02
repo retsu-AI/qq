@@ -270,8 +270,8 @@ struct AppliedSteering {
 }
 
 /// Drains every steering message that is ready and appends each as a user
-/// message; applying any restarts the stall count. Returns what was applied, in order, or `None` when nothing was
-/// pending. Never waits for more steering: messages that arrive after the
+/// message; applying any restarts the stall count. Returns what was
+/// applied, in order, or `None` when nothing was pending. Never waits for more steering: messages that arrive after the
 /// drain wait for the next boundary. A message with file parts reads them
 /// here — off the executor, through the plan's workspace — so the model sees
 /// the bytes as they are at the boundary and the store can keep them as
@@ -1742,9 +1742,12 @@ impl plan::CompiledAgentPlan {
                 .unwrap_or_default();
             let mut model_text_bytes = 0_usize;
             let mut continuing_slice = false;
-            // The slice's report notice is in the conversation; a retried,
-            // truncated, or interrupted checkpoint attempt reuses it.
-            let mut checkpoint_noticed = false;
+            // The report or final-answer notice already in the conversation
+            // and not yet answered. It pins the turn's kind: a retried,
+            // truncated, or interrupted attempt is the same report under the
+            // same notice, even when an applied steer has since reset the
+            // stall count, and a final-answer turn stays final.
+            let mut placed_report: Option<runtime::TurnNotice> = None;
             // The notice placed before the next turn's request, persisted with
             // the first turn row that request produces.
             let mut pending_notice: Option<runtime::TurnNotice> = None;
@@ -1791,13 +1794,25 @@ impl plan::CompiledAgentPlan {
                 // `STALL_REPORT_CALLS` calls that produced nothing. A
                 // sub-agent's report turn after enough of them without work
                 // is its final answer. The budget-final turn outranks both.
-                let report_due = if budget_final_turn {
-                    runtime::ReportDue::None
-                } else {
-                    stall.due(slice_checkpoint)
+                let report_due = match (budget_final_turn, placed_report) {
+                    (true, _) => runtime::ReportDue::None,
+                    (false, Some(runtime::TurnNotice::FinalAnswer)) => runtime::ReportDue::FinalAnswer,
+                    (false, Some(runtime::TurnNotice::Report | runtime::TurnNotice::StallReport)) => {
+                        runtime::ReportDue::Report
+                    }
+                    (false, Some(runtime::TurnNotice::Continuation) | None) => {
+                        stall.due(slice_checkpoint)
+                    }
                 };
                 let final_answer_turn = report_due == runtime::ReportDue::FinalAnswer;
                 let checkpoint_turn = report_due == runtime::ReportDue::Report;
+                // Which report this is: a pinned one keeps the kind it was
+                // asked as; a new one is the slice checkpoint when the slice
+                // is full, else a stall report.
+                let slice_report = match placed_report {
+                    Some(placed) => placed == runtime::TurnNotice::Report,
+                    None => slice_checkpoint,
+                };
                 let continuation_turn = std::mem::take(&mut continuing_slice);
                 // The checkpoint and continuation notices join the
                 // conversation as runtime messages, so the system prompt and
@@ -1806,15 +1821,16 @@ impl plan::CompiledAgentPlan {
                 // checkpoint too; a budget-final turn asks for no tool calls,
                 // so it is not told that tools are available again.
                 debug_assert!(!(checkpoint_turn && continuation_turn));
-                let notice = if (checkpoint_turn || final_answer_turn) && !checkpoint_noticed {
-                    checkpoint_noticed = true;
-                    Some(if final_answer_turn {
+                let notice = if (checkpoint_turn || final_answer_turn) && placed_report.is_none() {
+                    let notice = if final_answer_turn {
                         runtime::TurnNotice::FinalAnswer
-                    } else if slice_checkpoint {
+                    } else if slice_report {
                         runtime::TurnNotice::Report
                     } else {
                         runtime::TurnNotice::StallReport
-                    })
+                    };
+                    placed_report = Some(notice);
+                    Some(notice)
                 } else if continuation_turn && !budget_final_turn && !final_answer_turn {
                     Some(runtime::TurnNotice::Continuation)
                 } else {
@@ -2252,7 +2268,7 @@ impl plan::CompiledAgentPlan {
                             let over_cap = pending_calls.len() >= MAX_TOOL_CALLS_PER_TURN;
                             let rejection = if final_answer_turn {
                                 Some(SUBAGENT_FINAL_ANSWER_REJECTION.to_owned())
-                            } else if checkpoint_turn && slice_checkpoint {
+                            } else if checkpoint_turn && slice_report {
                                 Some(SLICE_CHECKPOINT_REJECTION.to_owned())
                             } else if checkpoint_turn {
                                 Some(STALL_REPORT_REJECTION.to_owned())
@@ -2865,11 +2881,11 @@ impl plan::CompiledAgentPlan {
                     // resets and the run continues (ADR-0054 § 2). A stall
                     // report is the same kind of turn; it leaves the slice
                     // count alone, since its calls still ran in this slice.
-                    if slice_checkpoint {
+                    if slice_report {
                         slice_tool_calls = 0;
                     }
                     stall.reported();
-                    checkpoint_noticed = false;
+                    placed_report = None;
                     continuing_slice = true;
                     if calls.is_empty() {
                         // Assembly drops an empty turn and fills the gap
@@ -3681,7 +3697,7 @@ impl plan::CompiledAgentPlan {
                         if call.rejection.is_none() {
                             stall.settled(runtime::is_progress(
                                 &call,
-                                catalog.lookup(&call.name).map(|entry| entry.host),
+                                catalog.lookup(&call.name),
                                 &result,
                             ));
                         }
@@ -3769,7 +3785,7 @@ impl plan::CompiledAgentPlan {
                         if call.rejection.is_none() {
                             stall.settled(runtime::is_progress(
                                 &call,
-                                catalog.lookup(&call.name).map(|entry| entry.host),
+                                catalog.lookup(&call.name),
                                 &result,
                             ));
                         }
@@ -3987,6 +4003,20 @@ impl plan::CompiledAgentPlan {
                 // durable, so the run completes with the turn as it stands
                 // (ADR-0054 § 3). Steering is left for the child's next run.
                 if final_answer_turn {
+                    // As at any completion: a run that overran its cost or
+                    // token bound settles as exhausted, never completed.
+                    if let Some(kind) = budget.exceeded(tokio::time::Instant::now())
+                        && matches!(
+                            kind,
+                            BudgetLimitKind::Cost
+                                | BudgetLimitKind::CostUnknown
+                                | BudgetLimitKind::TotalTokens
+                        )
+                    {
+                        let exhaustion = budget.exhaustion(kind, false, tokio::time::Instant::now());
+                        yield RuntimeEvent::BudgetExhausted { exhaustion };
+                        return;
+                    }
                     yield RuntimeEvent::Completed { final_output: None };
                     return;
                 }

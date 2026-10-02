@@ -1012,7 +1012,8 @@ like any swallowed gateway failure: it is retried as a transient fault.
 
 A run that stops producing output reports too (ADR-0054 § 1–2). The stall
 scope counts settled calls since the last *progress event*: a successful
-mutating or external call, a non-read-only shell command that ran (any exit
+mutating call or external call its server does not mark read-only, a
+non-read-only shell command that ran (any exit
 status, timeouts included), a successful blocking `spawn_agent` result, an
 applied steer, an answered `ask_user`, or a report. Reads, searches, and
 read-only shell commands are never progress; denied calls count, runtime
@@ -1024,9 +1025,11 @@ ended by this rule. A model-spawned task child that reports
 final-answer turn instead of its fourth report: its tools stay declared with
 `ToolChoice::None`, any call it makes is admitted with a not-executed result,
 and the run completes with the turn whatever it returned, bypassing Jev
-final review, the audit hook, and steering. When that reply is empty the
-parent's `spawn_agent` result is the child's latest report with text, under
-an interim-report label; with no report text either, it is the existing
+final review and the audit hook. An interrupting steer resends the turn
+under the same notice: a placed report or final-answer notice pins the
+turn's kind until it settles. When that reply is empty the parent's
+`spawn_agent` result is the child's latest report with text (a report
+continued after an output cut is joined), under an interim-report label; with no report text either, it is the existing
 "completed without producing any text" error. Audit children are exempt;
 they are bounded at a few turns already. The budget-final turn outranks both
 report kinds.

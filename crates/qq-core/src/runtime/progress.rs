@@ -119,14 +119,24 @@ impl StallScope {
 /// A shell command counts when it is not read-only and it ran: its result
 /// opens with the shell header (`shell exit=…` / `exec exit=…`, timeouts
 /// included), which a refused, malformed, or unstartable command never has.
+///
+/// An external tool its server marks read-only (an MCP search or lookup) is
+/// a read like any other, so a run looping on one still reports.
 pub(crate) fn is_progress(
     call: &crate::runtime::RuntimeToolCall,
-    host: Option<catalog::ToolHost>,
+    entry: Option<&catalog::ToolEntry>,
     result: &tools::ToolOutput,
 ) -> bool {
-    if host == Some(catalog::ToolHost::SpawnAgent) {
+    match entry.map(|entry| entry.host) {
         // A blocking spawn returns the child's answer; an error is not one.
-        return !result.is_error;
+        Some(catalog::ToolHost::SpawnAgent) => return !result.is_error,
+        _ if entry.is_some_and(|entry| {
+            entry.effect == catalog::EffectClass::External && entry.hints.read_only
+        }) =>
+        {
+            return false;
+        }
+        _ => {}
     }
     match approval::classify(
         call.effect,

@@ -114,6 +114,12 @@ without producing anything.
      (`sessions/transcript.rs:1149–1151`), so live and restart assembly
      stay byte-identical. This is a store schema change (39 → 40); AP3b's
      two values landed before 40 shipped in a release.
+   - A placed report or final-answer notice pins the turn's kind until the
+     turn settles. A retried, truncated or interrupted attempt is the same
+     report under the same notice, even after an applied steer has reset
+     the count.
+   - An external tool its server marks read-only (an MCP search or lookup)
+     is a read, not progress.
    - The stall report asks for the same report as the slice checkpoint,
      under its own opening line ("The last 64 tool calls changed nothing and
      produced no answer"), so the model is told why it is reporting. A
@@ -136,8 +142,11 @@ without producing anything.
      guarantee, not the model's obedience: models answered 23 of 25
      checkpoint turns with calls. A call made on it is admitted with a
      not-executed result and never runs, and the run completes once those
-     results are durable. Jev final review, the audit hook and steering do
-     not redirect it.
+     results are durable. Jev final review and the audit hook do not
+     redirect it. Steering that arrives during the turn is applied, and an
+     interrupting steer resends the turn under the same notice, so the run
+     still ends on it. A turn with calls still settles as
+     `budget_exhausted` when it overran the run's cost or token bound.
    - Its tools stay **declared**, with `ToolChoice::None` (ENG-1001): the
      request asks for no calls where the API can (OpenAI and Anthropic
      `tool_choice: none`, Gemini `mode: NONE`). *Amended 2026-10-01:* this

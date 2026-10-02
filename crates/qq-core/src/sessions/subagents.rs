@@ -669,13 +669,13 @@ async fn run_owned_child(
     settled
 }
 
-/// Cancels a still-running child run when the spawn future awaiting it is
-/// dropped before the child finished.
 /// Heads a child's latest report when it ended without a final answer, so
 /// the parent knows the text is partial.
 pub(crate) const INTERIM_REPORT_LABEL: &str = "[interim report: the sub-agent ended without \
 a final answer; this is its latest progress report]";
 
+/// Cancels a still-running child run when the spawn future awaiting it is
+/// dropped before the child finished.
 struct CancelChildOnDrop {
     inner: Arc<SessionRuntimeInner>,
     run_id: Option<RunId>,

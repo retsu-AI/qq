@@ -476,3 +476,41 @@ Independent review: request changes. Every item is fixed.
   the 256-call checkpoint rather than a stall report. The headless
   rollover fixture answers stall reports.
 
+### 2026-10-02: AP3b independent review: request changes, all fixed
+
+- **Blocking: an interrupting steer during a report left the notice
+  marked as placed.**
+  - The applied steer reset the count, so the next turn was not a report
+    and the bool never cleared. Sixty-four calls later, the report turn went
+    out with no notice: every call was rejected and `model_turns.notice` was
+    NULL.
+  - Interrupting a final-answer turn also handed the child its tools back.
+  - **Fix:** `placed_report: Option<TurnNotice>` pins the turn's kind until
+    the turn settles, replacing `checkpoint_noticed`.
+  - Regressions: `an_interrupted_stall_report_keeps_its_notice_and_the_next_report_gets_one`
+    and `an_interrupted_final_answer_stays_final`. Both fail on the bool;
+    the latter trips the `debug_assert`.
+- **Should-fixes (all fixed):**
+  - Read-only MCP tools (`hints.read_only`) are reads, not progress
+    (`read_only_external_tools_are_reads_and_others_are_work`).
+  - A final-answer turn with calls checks the cost and token bounds before
+    completing (`a_final_answer_turn_over_its_cost_bound_settles_as_exhausted`,
+    which fails without the guard).
+  - A report continued after an output cut reaches the parent whole:
+    `run_latest_report_text` joins a span's messages across `truncated`
+    rows (`a_continued_report_reaches_the_parent_whole`).
+  - The benchmarks are recorded below.
+- **Nits:** the misplaced doc comment and the long doc line are fixed.
+  ADR-0054 § 2–3 and architecture.md now describe interrupt behaviour and
+  the read-only external rule.
+- **Benchmarks** (interleaved before/after against #238's head, medians):
+  - `context_assembly` assemble at 10 archived runs: 73.6 / 50.8 µs, 5 runs
+    each (noise; minimums 52.4 / 49.8);
+  - `turn_overhead` at 100 turns: 36.6 / 36.7 ms, 5 runs (minimums
+    15.6 / 15.1);
+  - `tool_dispatch` read loop: 65.8 / 51.1 µs, 9 runs (minimums
+    48.2 / 46.7). No regression.
+  - `tool_dispatch` hangs on `main` (#196 made its empty
+    after-tool-results completion a retried fault), so I measured both
+    sides with a local one-line fixture fix. Filed as ENG-1003.
+
