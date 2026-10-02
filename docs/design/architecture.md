@@ -1028,11 +1028,12 @@ and the run completes with the turn whatever it returned, bypassing Jev
 final review and the audit hook. An interrupting steer resends the turn
 under the same notice: a placed report or final-answer notice pins the
 turn's kind until it settles. When that reply is empty the parent's
-`spawn_agent` result is the child's latest report with text (a report
-continued after an output cut is joined), under an interim-report label; with no report text either, it is the existing
-"completed without producing any text" error. Audit children are exempt;
-they are bounded at a few turns already. The budget-final turn outranks both
-report kinds.
+`spawn_agent` result is the child's latest report with text, under an
+interim-report label. A report continued after an output cut, a mid-stream
+fault, or an interrupt is its attempts joined in order. With no report text
+either, it is the existing "completed without producing any text" error.
+Audit children are exempt; they are bounded at a few turns already. The
+budget-final turn outranks both report kinds.
 Steering that arrives during the report is applied before the continuation
 notice. Clients observe no terminal run event at the slice seam. Genuine completion,
 explicit caller budgets, cancellation, and failures remain the only user-level

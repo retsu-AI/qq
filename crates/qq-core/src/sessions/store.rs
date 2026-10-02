@@ -1931,19 +1931,17 @@ impl Store {
     /// The run's latest report with text: the reply to the last report or
     /// stall-report notice that has any (ADR-0054 § 3). A report keeps its
     /// notice on the first attempt's row and spans the rows after it up to
-    /// the next notice. A report continued after an output-limit cut is
-    /// those rows' text joined in order; a retried one is its last attempt.
-    /// `None` when the run never reported with text.
+    /// the next notice. Every later row in the span was asked to continue
+    /// the same reply from where it stopped (an output cut, a mid-stream
+    /// fault, an interrupt), so the report is the span's text joined in
+    /// order. `None` when the run never reported with text.
     pub(super) async fn run_latest_report_text(
         &self,
         run_id: RunId,
     ) -> Result<Option<String>, SessionRuntimeError> {
         self.call(Priority::AwaitControl, move |connection| {
             let mut statement = connection.prepare(
-                "SELECT t.notice, m.id,
-                        coalesce((SELECT p.truncated FROM model_turns p
-                                  WHERE p.run_id = t.run_id
-                                    AND p.turn_ordinal = t.turn_ordinal - 1), 0)
+                "SELECT t.notice, m.id
                  FROM model_turns t
                  LEFT JOIN messages m
                    ON m.run_id = t.run_id
@@ -1958,17 +1956,16 @@ impl Store {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
                         row.get::<_, Option<String>>(1)?,
-                        row.get::<_, bool>(2)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
-            // Walk forward: each notice opens a span; within a report span
-            // a cut attempt's continuation appends to its text and a fresh
-            // attempt replaces it. The last report with text wins.
+            // Walk forward: each notice opens a span, and a report span's
+            // text accumulates across its attempts. The last report with
+            // text wins.
             let mut in_report = false;
             let mut span = String::new();
             let mut latest: Option<String> = None;
-            for (notice, message, truncated_before) in rows {
+            for (notice, message) in rows {
                 if let Some(notice) = notice {
                     in_report = match crate::runtime::TurnNotice::from_stored(&notice) {
                         Some(
@@ -1984,11 +1981,7 @@ impl Store {
                     span.clear();
                 }
                 if in_report && let Some(id) = message {
-                    let message = load_message(connection, parse_id(&id)?)?;
-                    if !truncated_before {
-                        span.clear();
-                    }
-                    span.push_str(&message.output);
+                    span.push_str(&load_message(connection, parse_id(&id)?)?.output);
                     if !span.trim().is_empty() {
                         latest = Some(span.clone());
                     }

@@ -234,7 +234,7 @@ impl TurnRecoveryPolicy {
 /// Sent after a partial turn is committed when the provider fault cut the
 /// model off mid-reply. Alternation holds because the partial assistant
 /// message precedes it.
-const TURN_RETRY_CONTINUE_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe \
+pub(crate) const TURN_RETRY_CONTINUE_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe \
 previous response was cut off by a transient provider error and QQ is retrying. Continue \
 exactly from where it stopped; do not repeat what was already written.";
 /// Fills a skipped empty assistant turn so the follow-up user message does
@@ -271,8 +271,9 @@ struct AppliedSteering {
 
 /// Drains every steering message that is ready and appends each as a user
 /// message; applying any restarts the stall count. Returns what was
-/// applied, in order, or `None` when nothing was pending. Never waits for more steering: messages that arrive after the
-/// drain wait for the next boundary. A message with file parts reads them
+/// applied, in order, or `None` when nothing was pending. Never waits for
+/// more steering: messages that arrive after the drain wait for the next
+/// boundary. A message with file parts reads them
 /// here — off the executor, through the plan's workspace — so the model sees
 /// the bytes as they are at the boundary and the store can keep them as
 /// this message's attachments. A file that cannot be read is reported to the

@@ -514,3 +514,17 @@ Independent review: request changes. Every item is fixed.
     after-tool-results completion a retried fault), so I measured both
     sides with a local one-line fixture fix. Filed as ENG-1003.
 
+### 2026-10-02: AP3b re-review: approved
+
+All five findings verified fixed. The reviewer's remaining should-fix,
+also fixed:
+- A report retried after a mid-stream fault or an interrupt continues
+  under "continue exactly from where it stopped". Its earlier attempt is
+  stored with `truncated = 0`, so the fallback kept only the tail.
+- `run_latest_report_text` now joins every attempt in a report span; the
+  `truncated` subquery is gone.
+- Regression: `a_report_retried_after_a_fault_reaches_the_parent_whole`.
+
+Long doc lines are fixed. Workspace: 2066 passed. Clippy and fmt are
+clean.
+
