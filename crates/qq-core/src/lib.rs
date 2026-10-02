@@ -11117,7 +11117,7 @@ mod tests {
 
     #[test]
     fn a_root_prompt_and_tools_change_only_by_the_brief_guidance() {
-        // Golden against prompt version 14 (`356092a`): a root's system
+        // Golden against prompt version 14: a root's system
         // prompt gains only the delegation bullet, and its tools block only
         // the `spawn_agent` `task` description. Everything else is
         // byte-identical, so a root keeps its prompt-cache prefix up to the

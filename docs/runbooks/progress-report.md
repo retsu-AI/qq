@@ -13,7 +13,8 @@ record counts only.
 ## Setup
 
 The database is `sessions.sqlite3` in the data directory (`qq config paths`
-prints it). The queries were written against store schema 39. `end` pins
+prints it). The queries in §§ 1–2 and 4 run on store schema 39 or later; § 3's
+report-turn query needs schema 40 (`model_turns.notice`). `end` pins
 the window, so a recorded baseline can be reproduced later. Every query
 covers the 30 days before `end`.
 
@@ -21,7 +22,7 @@ covers the 30 days before `end`.
 db="file:$HOME/.local/share/qq/sessions.sqlite3?mode=ro"   # your data directory
 end="2026-10-01"                                             # window end (UTC date); 30 days before it
 q() { nix shell nixpkgs#sqlite -c sqlite3 -separator ' | ' "$db" "${1//@END@/$end}"; }
-q "SELECT value FROM metadata WHERE key = 'schema_version';"   # the queries assume 39
+q "SELECT value FROM metadata WHERE key = 'schema_version';"   # 39 or later; § 3's report query needs 40
 ```
 
 `@END@` in a query is replaced with `end`. A run is in the window when

@@ -381,3 +381,27 @@ Independent review: request changes. Every item is fixed.
 - **S4** (cutoff unit drift, which predates this slice) is filed as
   ENG-991 and becomes an AC2 input.
 - Workspace and soak results are recorded in the PR.
+
+### 2026-10-01 — Stack review and live provider check (ENG-990)
+
+- **Whole-stack review: ready to merge.** No cross-slice defect. A copy of
+  the live store (schema 39, 13,882 `model_turns` rows) migrated to 40, and
+  `qq doctor` reads it.
+- **Live Bedrock Converse check** of the shape AP3a makes routine: tool
+  results, then a user text message.
+  - Claude (Haiku 4.5, Sonnet 4.5), Nova Micro, Qwen3 and gpt-oss accept
+    it.
+  - Llama 3.3 and Pixtral reject it, and they reject the merged
+    single-message form too ("Conversation blocks and tool result blocks
+    cannot be provided in the same turn"). Coalescing in `qq-provider`
+    therefore would not help, and none was added.
+  - These models already fail on `main` the first time steering lands after
+    tool results. AP3a adds the slice checkpoint as a second trigger.
+  - No route in the live store uses them.
+  - Filed as ENG-999 with three options.
+- **Doc drift fixed:**
+  - the plan header and plans index;
+  - "turn's kind" in the plan and ADR-0054 becomes `model_turns.notice`;
+  - the runbook's schema note;
+  - the golden test comment no longer cites a SHA;
+  - row order in `root.md`.
