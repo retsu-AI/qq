@@ -41,6 +41,7 @@ opencode.json
 # Harbor adapter environments and generated evaluation artifacts
 benchmarks/harbor/.venv/
 benchmarks/harbor/jobs/
+benchmarks/wasm-ui-spike/dist/
 **/__pycache__/
 
 # Local-only configuration fragments (gateway hostnames, personal overrides)

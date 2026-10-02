@@ -1,0 +1,13 @@
+[package]
+name = "spike-baseline"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+spike-common.workspace = true
+qq-client.workspace = true
+qq-protocol.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+web-sys.workspace = true
