@@ -67,7 +67,6 @@ async fn compact_in_run(
     if *inner.failed.borrow() {
         return Err(Error::Unavailable("session runtime failed".to_owned()));
     }
-    let session_id = prompt_run.identity.session_id;
     let turn_cutoff = request.turn_cutoff;
     let started = inner
         .store
@@ -121,22 +120,17 @@ async fn compact_in_run(
     // One provider turn: the run's transcript through the cutoff, then the
     // instruction. The summarizer sees the prompt so it knows the task, and
     // is told the summary replaces the model's own work, not the user's.
-    let instruction = match inner.store.compaction_instruction(session_id).await {
-        Ok(instruction) => instruction,
-        Err(error) => {
-            guard.disarm();
-            settle_failed(inner, &compaction, error.to_string()).await;
-            return Err(Error::Unavailable(error.to_string()));
-        }
-    };
     let mut messages = request.transcript;
     messages.push(Message::user(format!(
-        "{IN_RUN_COMPACTION_INSTRUCTION_PREFIX}\n\n{instruction}"
+        "{IN_RUN_COMPACTION_INSTRUCTION_PREFIX}\n\n{COMPACTION_INSTRUCTION}"
     )));
-    let max_output_tokens = resolved_model
-        .max_output_tokens
-        .min(super::execution::COMPACTION_OUTPUT_RESERVE_TOKENS);
-    let summarize = plan.runtime.summarize(messages, max_output_tokens);
+    let summarize = plan.runtime.summarize(
+        messages,
+        super::context::summarizer_output_tokens(
+            resolved_model.max_output_tokens,
+            resolved_model.context_window,
+        ),
+    );
     let reply = tokio::select! {
         biased;
         changed = cancelled.changed() => {
@@ -185,16 +179,23 @@ async fn compact_in_run(
     });
     let committed = inner
         .store
-        .finish_in_run_compaction(&compaction, summary.clone(), accounting)
+        .finish_in_run_compaction(
+            &compaction,
+            summary,
+            accounting,
+            record_budget(resolved_model.context_window),
+        )
         .await;
     match committed {
-        Ok((events, true)) => {
+        // The splice uses the stored text, so the live request and replay
+        // render the same bytes.
+        Ok((events, Some(summary))) => {
             for event in events {
                 inner.notify(event.cursor);
             }
             Ok(crate::runtime::InRunCompaction { summary })
         }
-        Ok((events, false)) => {
+        Ok((events, None)) => {
             for event in events {
                 inner.notify(event.cursor);
             }
@@ -291,5 +292,6 @@ async fn settle_failed(inner: &Arc<SessionRuntimeInner>, compaction: &ClaimedRun
 /// replaces the assistant's own earlier turns of a task still in progress.
 const IN_RUN_COMPACTION_INSTRUCTION_PREFIX: &str = "The task above is still in progress. The \
 messages after the first user message are your own earlier work on it; summarize that work so \
-it can replace those messages while you continue. Record exactly what was done, what each tool \
-returned that still matters, and what remains.";
+it can replace those messages while you continue. Record what was done, what each tool \
+returned that still matters, and what remains. The task prompt stays verbatim above the \
+summary.";

@@ -405,7 +405,8 @@ const PRUNABLE_READ_ONLY_TOOLS: [&str; 6] = [
 /// conversation's opening message.
 const COMPACTION_SUMMARY_PREAMBLE: &str = "The earlier part of this conversation was compacted \
 into the summary below. Treat it as authoritative context; the verbatim conversation resumes \
-after it.";
+after it. A QQ compaction record at its end was copied exactly from the session store and wins \
+over the narrative above it; use search_history for anything else you need verbatim.";
 /// Opens a run whose prompt could not be admitted even after the fold was
 /// exhausted: the retained transcript is dropped from this request and only
 /// the latest summary stands in for it. The session keeps every row.
@@ -418,32 +419,42 @@ from the session; use search_history for verbatim detail.";
 /// what was summarized.
 pub(crate) const IN_RUN_COMPACTION_PREAMBLE: &str = "Your earlier work on this task was compacted into \
 the summary below. Treat it as authoritative: the tool results it describes were real and \
-their effects stand. The verbatim conversation resumes after it; continue the task.";
+their effects stand. A QQ compaction record at its end was copied exactly from the session \
+store. The verbatim conversation resumes after it; continue the task.";
 /// The fixed instruction appended as the final user message of a compaction
-/// run. It demands the structured schema; the mechanically seeded file list
-/// is appended beneath it.
+/// run. The model writes only the narrative; QQ renders the exact record
+/// from stored rows when the summary commits (ADR-0055).
 const COMPACTION_INSTRUCTION: &str = "Summarize this conversation so it can replace the \
-transcript as model context. Do not call any tools. Reply with exactly these sections:\n\
-1. Intent: what the user is trying to accomplish, in their terms.\n\
-2. Decisions and constraints: each decision with its why. Use exact names, paths, and flags \
-verbatim; vague references are forbidden.\n\
-3. Work state: what was done, what is in flight, what is pending.\n\
-4. Files touched: annotate the seeded list below with each file's role; add any files it is \
-missing.\n\
-5. Errors: every error seen and how it was resolved, with error strings verbatim.\n\
-6. User messages: every user message, preserved verbatim or near-verbatim.\n\
-If the conversation begins with a prior compaction summary, fold it into these sections rather \
-than referring to it.";
-/// The section headings `COMPACTION_INSTRUCTION` demands, in order. A summary
-/// missing any of them is rejected before it can replace the transcript.
-const COMPACTION_REQUIRED_SECTIONS: [&str; 6] = [
+transcript as model context. Do not call any tools. After your summary QQ appends an exact \
+record copied from the session store: every user message verbatim, the last assistant reply, \
+the files read and modified, and the failed tool calls. Do not restate any of it. Write at most \
+about 1,200 words, in exactly these sections:\n\
+1. Intent: what the user is trying to accomplish and what done looks like, in their terms.\n\
+2. Decisions and constraints: each decision or constraint with its reason, using exact names, \
+paths, flags, and commands.\n\
+3. Work state: what is done and verified, what is in flight, what is pending.\n\
+4. Open problems: unresolved errors, failing checks, and open questions, quoting only the error \
+text that still matters.\n\
+5. Next step: the next action, specific enough to start without re-reading anything.\n\
+If the conversation begins with a prior compaction summary, fold it into these sections: newer \
+information wins, and anything you do not carry forward is lost. Skip any earlier compaction \
+record; QQ renders a new one.";
+/// The section headings `COMPACTION_INSTRUCTION` demands, in order. A
+/// narrative missing any of them is rejected before it can replace the
+/// transcript. Summaries stored in an earlier format are never re-validated;
+/// the next compaction folds them into these sections.
+const COMPACTION_REQUIRED_SECTIONS: [&str; 5] = [
     "Intent",
     "Decisions and constraints",
     "Work state",
-    "Files touched",
-    "Errors",
-    "User messages",
+    "Open problems",
+    "Next step",
 ];
+/// Opens the record QQ appends to a committed summary. A summarizer reply
+/// that echoes a record is cut here, so the stored record is always the one
+/// rendered from rows.
+const COMPACTION_RECORD_HEADER: &str =
+    "[QQ compaction record: copied exactly from the session store, not written by the model]";
 
 /// Where an in-run compaction cuts a run's live transcript. `run_messages`
 /// is everything after the prompt: assistant turns, tool results, steering,
