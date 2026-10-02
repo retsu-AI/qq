@@ -1656,7 +1656,7 @@ impl plan::CompiledAgentPlan {
             // The last provider-measured request as (system bytes, tool
             // schema bytes, message bytes, measured input tokens). The next
             // request's estimate starts from the measurement and follows each
-            // component's byte delta, so a checkpoint notice, a tool-free
+            // component's byte delta, so a checkpoint notice, a budget-final
             // turn, or an in-run prune adjusts the chain instead of dropping
             // it back to the raw byte estimate.
             let mut compatible_request: Option<(u64, u64, u64, u64)> = None;
@@ -1713,8 +1713,8 @@ impl plan::CompiledAgentPlan {
             let mut reactive_compaction_turn: Option<u32> = None;
             'turns: for turn_ordinal in 1..=u32::MAX {
                 // Caller budgets are decided at the turn boundary, before any
-                // provider request. A spent work budget grants one tool-free
-                // final response; a second spent check, an elapsed wall
+                // provider request. A spent work budget grants one final
+                // response that asks for no tool calls; a second spent check, an elapsed wall
                 // clock, or unmeasurable cost settles the run here.
                 let budget_final_turn = match budget.before_turn(
                     tokio::time::Instant::now(),
@@ -1744,8 +1744,8 @@ impl plan::CompiledAgentPlan {
                 // conversation as runtime messages, so the system prompt and
                 // its cached prefix stay the run's own (ADR-0054 § 2).
                 // A checkpoint resets the slice, so the next turn is never a
-                // checkpoint too; a budget-final turn has no tools, so it is
-                // not told that tools are available again.
+                // checkpoint too; a budget-final turn asks for no tool calls,
+                // so it is not told that tools are available again.
                 debug_assert!(!(checkpoint_turn && continuation_turn));
                 let notice = if checkpoint_turn && !checkpoint_noticed {
                     checkpoint_noticed = true;
@@ -1767,7 +1767,12 @@ impl plan::CompiledAgentPlan {
                 } else {
                     Arc::clone(&system)
                 };
-                let request_has_tools = allow_tools && !budget_final_turn;
+                // A budget-final turn keeps its tools declared and asks for
+                // none: dropping them is rejected by Bedrock once history
+                // holds tool calls, and an unchanged tool block keeps its
+                // cache entry. A call the model makes anyway still settles
+                // the run (below), so the choice is advice, not the bound.
+                let request_has_tools = allow_tools;
                 let request_system_hash = if budget_final_turn {
                     ContentHash::from_bytes(Sha256::digest(request_system.as_bytes()).into())
                 } else {
@@ -1971,9 +1976,14 @@ impl plan::CompiledAgentPlan {
                     None => request,
                 };
                 let request = if request_has_tools {
-                    request
+                    let request = request
                         .with_tools(Arc::clone(&tool_specs))
-                        .with_system(Arc::clone(&request_system))
+                        .with_system(Arc::clone(&request_system));
+                    if budget_final_turn {
+                        request.with_tool_choice(qq_provider::ToolChoice::None)
+                    } else {
+                        request
+                    }
                 } else {
                     request.with_system(Arc::clone(&request_system))
                 };
@@ -2121,8 +2131,9 @@ impl plan::CompiledAgentPlan {
                         }
                         Ok(ProviderEvent::ToolCallStarted { id, name }) => {
                             if budget_final_turn {
-                                // The model ignored the tool-free final
-                                // response request. The budget still settles
+                                // The model called a tool on the final
+                                // response anyway (Bedrock Converse cannot
+                                // ask for none). The budget still settles
                                 // the run: exhaustion is never a provider
                                 // failure, and no more work may be spent.
                                 let BudgetDecision::Exhausted(mut exhaustion) = budget
@@ -8190,6 +8201,89 @@ mod tests {
         );
     }
 
+    /// Bedrock Converse cannot ask for no tool calls, so a model may call a
+    /// tool on the budget-final turn anyway. The call never runs and the run
+    /// settles as exhausted without a final response, never as a provider
+    /// failure.
+    #[tokio::test]
+    async fn a_tool_call_on_the_budget_final_turn_settles_without_running() {
+        struct AlwaysCalls {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for AlwaysCalls {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let mut requests = self.requests.lock().unwrap();
+                let id = format!("call-{}", requests.len());
+                requests.push(request);
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "__test_mutate".to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: "{}".to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallCompleted { id }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            AlwaysCalls {
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("work")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Auto,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).with_limits(
+                    RunLimits {
+                        max_model_turns: Some(2),
+                        ..RunLimits::default()
+                    },
+                    None,
+                ),
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].tool_choice(), qq_provider::ToolChoice::None);
+        assert_eq!(requests[1].tools(), requests[0].tools());
+        let started = events
+            .iter()
+            .filter(|event| matches!(event, RuntimeEvent::ToolCallStarted { .. }))
+            .count();
+        assert_eq!(started, 1, "only the first turn's call runs: {events:?}");
+        let turns = events
+            .iter()
+            .filter(|event| matches!(event, RuntimeEvent::AssistantTurnCompleted { .. }))
+            .count();
+        assert_eq!(turns, 1, "the final turn's call is never committed");
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::BudgetExhausted { exhaustion })
+                if exhaustion.limit == BudgetLimitKind::ModelTurns && !exhaustion.final_response
+        ));
+    }
+
     #[tokio::test]
     async fn a_truncated_budget_final_turn_settles_as_exhausted_not_continued() {
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -9299,8 +9393,8 @@ mod tests {
         );
     }
 
-    /// When the turn after a slice report is the budget-final turn, it has no
-    /// tools, so it is not told that tools are available again: it carries
+    /// When the turn after a slice report is the budget-final turn, it asks
+    /// for no tool calls, so it is not told that tools are available again: it carries
     /// only the budget-final notice, and its turn records no continuation.
     #[tokio::test]
     async fn a_budget_final_turn_after_a_report_gets_no_continuation_notice() {
@@ -9312,7 +9406,9 @@ mod tests {
         impl Provider for ReportThenFinal {
             fn stream(&self, request: ModelRequest) -> ProviderStream {
                 self.requests.lock().unwrap().push(request.clone());
-                if is_checkpoint_request(&request) || request.tools().is_empty() {
+                if is_checkpoint_request(&request)
+                    || request.tool_choice() == qq_provider::ToolChoice::None
+                {
                     return Box::pin(stream::iter([
                         Ok(ProviderEvent::OutputTextDelta {
                             text: "report".to_owned(),
@@ -9383,9 +9479,14 @@ mod tests {
         let requests = requests.lock().unwrap();
         let report_at = requests.iter().position(is_checkpoint_request).unwrap();
         let final_request = &requests[report_at + 1];
+        assert_eq!(
+            final_request.tool_choice(),
+            qq_provider::ToolChoice::None,
+            "the final response asks for no tool calls"
+        );
         assert!(
-            final_request.tools().is_empty(),
-            "the final response has no tools"
+            !final_request.tools().is_empty(),
+            "the final response keeps its tools declared"
         );
         assert!(
             final_request

@@ -5814,7 +5814,7 @@ struct BudgetLoopProvider {
 
 impl Provider for BudgetLoopProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
-        let has_tools = !request.tools().is_empty();
+        let has_tools = request.tool_choice() == qq_provider::ToolChoice::Auto;
         self.requests.lock().unwrap().push(request);
         if self.hang {
             return Box::pin(stream::pending());

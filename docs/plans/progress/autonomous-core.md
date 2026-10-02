@@ -405,3 +405,21 @@ Independent review: request changes. Every item is fixed.
   - the runbook's schema note;
   - the golden test comment no longer cites a SHA;
   - row order in `root.md`.
+
+### 2026-10-01: Stack merged; ENG-1001 (tool choice none) ahead of AP3b
+
+- **Merged** with merge commits:
+  - #232 `ac859be`, #233 `fc88136`, #235 `7870b20`, #236 `d1e51c2` and #237 `2a672fe`;
+  - ENG-986, 988, 989 and 990 are Done.
+- **Bug found while designing AP3b's child final-answer turn.** ADR-0054 § 3 says that turn "declares no tools". Native Bedrock Converse rejects any request whose history holds tool calls when it declares no tools: "The toolConfig field must be defined when using toolUse and toolResult content blocks".
+  - The budget-final turn already drops its tools, so on `main` a `bedrock/` run that exhausts its budget after a tool call ends `failed` instead of giving its final response.
+  - Reproduced live with `qq run --max-turns 2` on Claude Haiku 4.5.
+- **Fix: ENG-1001**, its own PR, with AP3b stacked on it.
+  - Add `qq_provider::ToolChoice { Auto, None }`. A no-tool-call turn keeps its tools declared and asks for none.
+  - Mappings: OpenAI Responses and Chat `"none"`, Anthropic `{type: none}`, Gemini `mode: NONE`.
+  - Bedrock has no "none" choice (Converse `toolChoice` takes only auto, any or tool), so it sends the tools unchanged. The run loop already settles a budget-final turn that calls a tool anyway.
+  - The tool block and its cache breakpoint are unchanged, so the cached prefix survives the turn.
+- **AP3b design consequence** (ADR-0054 § 3 is amended in the AP3b PR): the child final-answer turn keeps its tools declared with `ToolChoice::None`, and it *settles whatever it returns*.
+  - Calls made on it are never executed.
+  - The answer is the turn's text, otherwise the child's latest report, labelled interim.
+  - The guarantee is the harness's, not the model's obedience.
