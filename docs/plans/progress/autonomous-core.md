@@ -362,3 +362,22 @@ Independent review: request changes. Every item is fixed.
   (l); audit `always` audits only the final answer (j); a truncated report
   keeps one notice and replays identically (k); one static prefix across
   the seam (a′).
+
+### 2026-10-01 — AP3a second review: approved (ENG-990)
+
+- **Approved,** with S1–S3 to land in this PR. They did:
+  - S1: the budget-final regression test fails if the guard reverts;
+  - S2: the runbook query reads `$.content` from replay-envelope turns.
+    It was checked on object, whitespace-only and plain shapes;
+  - S3: added the end-to-end G2 test. It reaches the report and compacts
+    three times, once four requests after the report. It fails on the
+    pre-fix replay rule.
+- **G5:** a faulted report is retried under one notice, and the stored rows
+  replay in live order.
+- **(j) for Jev:** this case is unreachable. Jev admits one call per turn
+  and caps a run at `MAX_CHECKPOINT_REVIEWS_PER_RUN` (32, now a named
+  constant), far below the 241 calls that trigger a checkpoint. A test
+  fails if that ever changes.
+- **S4** (cutoff unit drift, which predates this slice) is filed as
+  ENG-991 and becomes an AC2 input.
+- Workspace and soak results are recorded in the PR.

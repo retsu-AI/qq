@@ -19,8 +19,6 @@ pub use audit::{
     MAX_AUDIT_CHILD_TURNS, MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS,
 };
 pub(crate) use budget::{BUDGET_FINAL_RESPONSE_NOTICE, BudgetDecision, BudgetMeter, ChildBudget};
-#[cfg(test)]
-pub(crate) use checkpoint::MAX_CHECKPOINT_TEXT_BYTES;
 pub(crate) use checkpoint::{
     CheckpointContext, assess_checkpoint, bounded_checkpoint_text, checkpoint_text_fits,
 };
@@ -28,6 +26,8 @@ pub use checkpoint::{
     CheckpointFuture, CheckpointOutcome, CheckpointPhase, CheckpointRequest, CheckpointReviewer,
     CheckpointVerdict,
 };
+#[cfg(test)]
+pub(crate) use checkpoint::{MAX_CHECKPOINT_REVIEWS_PER_RUN, MAX_CHECKPOINT_TEXT_BYTES};
 pub(crate) use compaction::{
     InRunCompaction, InRunCompactionError, InRunCompactionFuture, InRunCompactionRequest,
     InRunCompactor,

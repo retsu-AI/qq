@@ -3065,6 +3065,7 @@ async fn a_truncated_slice_report_keeps_its_notice_on_replay() {
         SessionRuntimeOptions::new(database.clone()),
         Arc::new(TruncatedReportLoader {
             requests: Arc::clone(&requests),
+            fault: false,
         }),
     )
     .await
@@ -3111,5 +3112,106 @@ async fn a_truncated_slice_report_keeps_its_notice_on_replay() {
     collect_until(&mut events, finished_for(follow_up)).await;
     let replayed = requests.lock().unwrap().last().unwrap().messages().to_vec();
     assert_eq!(&replayed[..live.len()], live.as_slice());
+    assert_assembly_matches_reference(&database, session_id);
+}
+
+/// A slice report whose stream fails partway is retried: the partial turn is
+/// durable, the retry notice and the finished report follow, and the report
+/// notice is placed and stored once. Replay reproduces the live order for
+/// every message the store records; the retry notice is live-only, as it was
+/// before this slice. (AP3a review gap G5.)
+#[tokio::test]
+async fn a_faulted_slice_report_is_retried_under_one_notice() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("note.txt"), "tool result\n").unwrap();
+    std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
+    let database = directory.path().join("sessions.sqlite3");
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(database.clone()),
+        Arc::new(TruncatedReportLoader {
+            requests: Arc::clone(&requests),
+            fault: true,
+        }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("unexpected receipt")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
+    let observed = collect_until(&mut events, finished_for(run_id)).await;
+    assert!(
+        matches!(
+            observed.last().map(|event| &event.event),
+            Some(SessionEvent::RunFinished {
+                outcome: RunOutcome::Completed,
+                ..
+            })
+        ),
+        "{:?}",
+        observed.last()
+    );
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::RunTurnRetrying { .. }))
+    );
+    let live = requests.lock().unwrap().last().unwrap().messages().to_vec();
+    let report_notices = |messages: &[Message]| {
+        messages
+            .iter()
+            .filter(|message| **message == Message::user(crate::SLICE_CHECKPOINT_NOTICE))
+            .count()
+    };
+    assert_eq!(
+        report_notices(&live),
+        1,
+        "the retried report reuses its notice"
+    );
+    let notices: Vec<Option<String>> = {
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT notice FROM model_turns WHERE notice IS NOT NULL ORDER BY turn_ordinal",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        notices,
+        [Some("report".to_owned()), Some("continuation".to_owned())]
+    );
+    let follow_up = queue_prompt(&runtime, session_id, "and then?".to_owned()).await;
+    collect_until(&mut events, finished_for(follow_up)).await;
+    let replayed = requests.lock().unwrap().last().unwrap().messages().to_vec();
+    assert_eq!(report_notices(&replayed), 1);
+    // Every stored message replays in live order; only the retry notice,
+    // which was never persisted, is absent.
+    let without_retry_notice = live
+        .iter()
+        .filter(|message| {
+            !message.content().iter().any(|block| {
+                matches!(block, ContentBlock::Text { text } if text.contains("transient provider error"))
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        &replayed[..without_retry_notice.len()],
+        without_retry_notice.as_slice()
+    );
     assert_assembly_matches_reference(&database, session_id);
 }

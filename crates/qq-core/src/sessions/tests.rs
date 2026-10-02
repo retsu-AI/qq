@@ -697,18 +697,26 @@ struct RenewableSliceLoader {
     metered_empty_checkpoint: bool,
 }
 
-/// A `RenewableSliceProvider` whose first checkpoint reply stops at the
-/// output limit with partial text; the request that follows (the output-limit
-/// continuation, still a checkpoint attempt) finishes the report.
+/// A `RenewableSliceProvider` whose first checkpoint reply is cut: with
+/// `fault`, the stream streams partial text and then fails transiently (the
+/// run retries the report); otherwise it stops at the output limit (the run
+/// continues it). The next attempt finishes the report.
 struct TruncatedReportProvider {
     inner: RenewableSliceProvider,
     truncated: StdMutex<bool>,
+    fault: bool,
 }
 
 impl Provider for TruncatedReportProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
         let continuing_report = request.messages().last()
-            == Some(&Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE));
+            == Some(&Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE))
+            || request.messages().last().is_some_and(|message| {
+                message.role() == Role::User
+                    && message.content().iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text } if text.contains("transient provider error"))
+                    })
+            });
         let at_report =
             request.messages().last() == Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE));
         if !at_report && !continuing_report {
@@ -718,7 +726,16 @@ impl Provider for TruncatedReportProvider {
         let mut truncated = self.truncated.lock().unwrap();
         let first = !*truncated;
         *truncated = true;
-        Box::pin(stream::iter(if first {
+        Box::pin(stream::iter(if first && self.fault {
+            vec![
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: "report part one".to_owned(),
+                }),
+                Err(qq_provider::ProviderError::Transport(
+                    "connection reset mid-report".to_owned(),
+                )),
+            ]
+        } else if first {
             vec![
                 Ok(qq_provider::ProviderEvent::OutputTextDelta {
                     text: "report part one".to_owned(),
@@ -741,11 +758,13 @@ impl Provider for TruncatedReportProvider {
 
 struct TruncatedReportLoader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    fault: bool,
 }
 
 impl RuntimeLoader for TruncatedReportLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
+        let fault = self.fault;
         Box::pin(async move {
             Runtime::new(
                 TruncatedReportProvider {
@@ -755,6 +774,7 @@ impl RuntimeLoader for TruncatedReportLoader {
                         metered_empty_checkpoint: false,
                     },
                     truncated: StdMutex::new(false),
+                    fault,
                 },
                 "test-model",
                 256,
@@ -3024,6 +3044,12 @@ enum AutoCompactScript {
         summary: String,
         overflows: Arc<AtomicUsize>,
     },
+    /// Sixteen `write_file` calls per turn, so a slice checkpoint arrives after
+    /// sixteen turns; the checkpoint is answered with a text report, and the
+    /// task ends once `calls` results are in context or summarized. The
+    /// summarizer instruction is answered with a valid summary carrying
+    /// `turns_done`, so in-run compactions after the checkpoint keep going.
+    ShellBatchesAcrossACheckpoint { calls: usize, text: String },
     /// `ShellRepeatedlyWithSummaries` whose summarizer reply is cut at the
     /// output limit after `cut` bytes on the first request and completed on
     /// the continuation, so an in-run summary exercises the truncation join.
@@ -3381,6 +3407,55 @@ impl Provider for AutoCompactProvider {
                         Ok(qq_provider::ProviderEvent::Completed { usage: None }),
                     ]))
                 }
+            }
+            AutoCompactScript::ShellBatchesAcrossACheckpoint { calls, text } => {
+                if last_text.contains("Summarize this conversation") {
+                    let summarized = prior_results.len() + summarized_before;
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: format!(
+                                "{}\nturns_done={summarized}",
+                                valid_summary("batched shell work")
+                            ),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                if last_text == crate::SLICE_CHECKPOINT_NOTICE {
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: "report: batches so far are done".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let done = prior_results.len() + summarized_before;
+                if done >= *calls {
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let mut events = Vec::new();
+                for index in done..done + crate::MAX_TOOL_CALLS_PER_TURN {
+                    let id = format!("call_batch_{index}");
+                    // A mutating built-in, not a process spawn: never stubbed
+                    // by pruning, and cheap enough for 384 calls in one test.
+                    events.push(Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "write_file".to_owned(),
+                    }));
+                    events.push(Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: format!(
+                            r#"{{"path":"batch/{index}.txt","content":"{}"}}"#,
+                            "x".repeat(400)
+                        ),
+                    }));
+                    events.push(Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }));
+                }
+                events.push(Ok(qq_provider::ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
             }
             AutoCompactScript::ShellRepeatedlyWithProviderOverflow {
                 turns,

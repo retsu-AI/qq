@@ -141,7 +141,9 @@ A report retried after a fault or an output-limit cut continues on later
 turn rows without the mark. Its final attempt is the last row before the row
 marked `continuation`. This query counts reports in the window, and how many
 ended without text (the missed reports), judging each report by its last
-attempt.
+attempt. A turn that carries a provider replay envelope is stored as
+`{"content": [...], "replay": ...}`, so the query reads blocks from
+`$.content` in that case.
 
 ```sh
 q "WITH m AS (SELECT t.run_id, t.turn_ordinal, t.notice, t.assistant_content_json c FROM model_turns t
@@ -153,7 +155,9 @@ reports AS (SELECT run_id, turn_ordinal start,
    FROM m WHERE notice = 'report'),
 last AS (SELECT r.run_id, (SELECT max(t.turn_ordinal) FROM m t WHERE t.run_id = r.run_id
             AND t.turn_ordinal >= r.start AND t.turn_ordinal < r.stop) ordinal FROM reports r)
-SELECT count(*), sum(NOT EXISTS (SELECT 1 FROM m t, json_each(t.c) b WHERE t.run_id = last.run_id
+SELECT count(*), sum(NOT EXISTS (SELECT 1 FROM m t,
+            json_each(t.c, CASE json_type(t.c) WHEN 'object' THEN '$.content' ELSE '$' END) b
+            WHERE t.run_id = last.run_id
             AND t.turn_ordinal = last.ordinal AND json_extract(b.value, '$.type') = 'text'
             AND trim(json_extract(b.value, '$.text')) <> '')) FROM last;"
 ```

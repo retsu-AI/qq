@@ -9299,6 +9299,134 @@ mod tests {
         );
     }
 
+    /// When the turn after a slice report is the budget-final turn, it has no
+    /// tools, so it is not told that tools are available again: it carries
+    /// only the budget-final notice, and its turn records no continuation.
+    #[tokio::test]
+    async fn a_budget_final_turn_after_a_report_gets_no_continuation_notice() {
+        struct ReportThenFinal {
+            calls: Mutex<usize>,
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for ReportThenFinal {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.requests.lock().unwrap().push(request.clone());
+                if is_checkpoint_request(&request) || request.tools().is_empty() {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "report".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let mut calls = self.calls.lock().unwrap();
+                let first = *calls;
+                *calls += MAX_TOOL_CALLS_PER_TURN;
+                let mut events = Vec::new();
+                for index in first..first + MAX_TOOL_CALLS_PER_TURN {
+                    let id = format!("call-{index}");
+                    events.push(Ok(ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "read_file".to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: r#"{"path":"note.txt"}"#.to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
+                }
+                events.push(Ok(ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
+            }
+        }
+
+        // Sixteen-call turns fill the slice exactly: after sixteen of them
+        // (256 calls) the next turn could pass the ceiling, so turn 17 is the
+        // report. With 18 turns allowed, turn 18 is the reserved tool-free
+        // final response, which is also the first turn of the next slice.
+        let report_turn =
+            u32::try_from(MAX_TOOL_CALLS_PER_SLICE / MAX_TOOL_CALLS_PER_TURN).unwrap() + 1;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            ReportThenFinal {
+                calls: Mutex::new(0),
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("long task")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Auto,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).with_limits(
+                    RunLimits {
+                        max_model_turns: Some(report_turn + 1),
+                        ..RunLimits::default()
+                    },
+                    None,
+                ),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        let requests = requests.lock().unwrap();
+        let report_at = requests.iter().position(is_checkpoint_request).unwrap();
+        let final_request = &requests[report_at + 1];
+        assert!(
+            final_request.tools().is_empty(),
+            "the final response has no tools"
+        );
+        assert!(
+            final_request
+                .system()
+                .is_some_and(|system| system.contains(BUDGET_FINAL_RESPONSE_NOTICE))
+        );
+        assert!(
+            !final_request
+                .messages()
+                .contains(&Message::user(SLICE_CONTINUATION_NOTICE)),
+            "a tool-free turn is never told tools are available again"
+        );
+        let notices = events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::AssistantTurnCompleted { notice, .. } => Some(*notice),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notices.last(),
+            Some(&None),
+            "the final turn records no continuation: {notices:?}"
+        );
+        assert!(notices.contains(&Some(runtime::TurnNotice::Report)));
+    }
+
+    /// A run under Jev review can never reach a slice report: Jev admits one
+    /// tool call per turn and at most 32 reviews per run, both far below the
+    /// 241 executed calls that trigger a checkpoint, so the report turn can
+    /// never become a Jev final candidate. If either bound is raised past the
+    /// slice, report turns need an explicit Jev rule (ADR-0054 § 2).
+    #[test]
+    fn a_jev_run_cannot_reach_a_slice_report() {
+        let reviews = usize::from(runtime::MAX_CHECKPOINT_REVIEWS_PER_RUN);
+        assert!(
+            reviews < MAX_TOOL_CALLS_PER_SLICE - MAX_TOOL_CALLS_PER_TURN,
+            "Jev's review cap now reaches the slice checkpoint"
+        );
+    }
+
     /// A checkpoint reply with no content *and no usage* after fresh tool
     /// results is a gateway that swallowed a failure, not a missed report:
     /// it is retried like any transient fault. The report notice is placed
