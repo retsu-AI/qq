@@ -6,8 +6,8 @@ newest last.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| CX0 | Plan, ADR-0055, ledger and baseline | In review | [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) | `perf/eng-994-cx1-compaction-summary` | Same PR as CX1 |
-| CX1 | Narrative plus rendered record; resolved output cap | In review | [ENG-994](https://linear.app/retsu-ai/issue/ENG-994) | `perf/eng-994-cx1-compaction-summary` | No schema or protocol change |
+| CX0 | Plan, ADR-0055, ledger and baseline | In review | [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) | [#239](https://github.com/retsu-AI/qq/pull/239) | Same PR as CX1 |
+| CX1 | Narrative plus rendered record; resolved output cap | In review | [ENG-994](https://linear.app/retsu-ai/issue/ENG-994) | [#239](https://github.com/retsu-AI/qq/pull/239) | No schema or protocol change |
 | CX2 | Cache-aligned summarizer requests | Planned | [ENG-995](https://linear.app/retsu-ai/issue/ENG-995) | | Stacked on CX1 |
 | CX3 | Durable prune watermark | Planned | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | | Schema 40 → 41 |
 | CX4 | `RunActivity::Compacting` | Planned | [ENG-997](https://linear.app/retsu-ai/issue/ENG-997) | | `PROTOCOL_VERSION` 30 → 31; takes AC14's compaction-activity item |
