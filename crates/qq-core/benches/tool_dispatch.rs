@@ -1,41 +1,15 @@
 use std::{hint::black_box, time::Instant};
 
-use futures_util::{StreamExt, stream};
+use futures_util::StreamExt;
 use qq_core::Runtime;
 use qq_protocol::RunCommand;
-use qq_provider::{ContentBlock, ModelRequest, Provider, ProviderEvent, ProviderStream};
+
+#[path = "../tests/support/read_tool.rs"]
+mod support;
+
+use support::ReadToolProvider;
 
 const DEFAULT_ITERATIONS: u64 = 1_000;
-
-struct ReadToolProvider;
-
-impl Provider for ReadToolProvider {
-    fn stream(&self, request: ModelRequest) -> ProviderStream {
-        let has_result = request
-            .messages()
-            .iter()
-            .flat_map(|message| message.content())
-            .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
-        if has_result {
-            Box::pin(stream::iter([Ok(ProviderEvent::Completed { usage: None })]))
-        } else {
-            Box::pin(stream::iter([
-                Ok(ProviderEvent::ToolCallStarted {
-                    id: "benchmark-call".to_owned(),
-                    name: "read_file".to_owned(),
-                }),
-                Ok(ProviderEvent::ToolCallArgumentsDelta {
-                    id: "benchmark-call".to_owned(),
-                    json: r#"{"path":"input.txt"}"#.to_owned(),
-                }),
-                Ok(ProviderEvent::ToolCallCompleted {
-                    id: "benchmark-call".to_owned(),
-                }),
-                Ok(ProviderEvent::Completed { usage: None }),
-            ]))
-        }
-    }
-}
 
 fn main() {
     let iterations = std::env::var("QQ_BENCH_ITERATIONS")
