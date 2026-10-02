@@ -663,10 +663,7 @@ pub(super) fn reserve_next_run_recoverable(
             // the fixed instruction as the final user message. A prior
             // summary therefore folds into the next one naturally.
             let mut context = load_model_context(&transaction, session_id, u64::MAX)?;
-            context.push(Message::user(compaction_instruction(
-                &transaction,
-                session_id,
-            )?));
+            context.push(Message::user(COMPACTION_INSTRUCTION.to_owned()));
             context
         }
     };

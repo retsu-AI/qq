@@ -2935,6 +2935,15 @@ fn summarized_turns(request: &ModelRequest) -> usize {
 fn valid_summary(body: &str) -> String {
     format!(
         "1. Intent: {body}\n2. Decisions and constraints: {body}\n3. Work state: {body}\n\
+         4. Open problems: {body}\n5. Next step: {body}"
+    )
+}
+
+/// A summary in the six-section format stored before ADR-0055. It is never
+/// re-validated, and the next compaction folds it into the new sections.
+fn old_format_summary(body: &str) -> String {
+    format!(
+        "1. Intent: {body}\n2. Decisions and constraints: {body}\n3. Work state: {body}\n\
          4. Files touched: {body}\n5. Errors: {body}\n6. User messages: {body}"
     )
 }

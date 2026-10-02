@@ -1209,13 +1209,16 @@ span since the marker, so repeated compactions fold rather than stack. A
 small bounded history of prior compactions (three rows) is retained
 server-side for rollback.
 
-The summary is validated before it commits: it must be non-empty, fit the
-session context limit, carry every required section heading (Intent;
-Decisions and constraints; Work state; Files touched; Errors; User messages),
-and shrink the assembled context relative to the prior assembly once that
-assembly exceeds a small floor. A summary failing any check fails the run
-with a `policy` failure and leaves the prior compaction (or the verbatim
-transcript) in force.
+The summary is the model's narrative followed by a compaction record that
+the runtime renders from stored rows (user messages verbatim, the last
+reply, files, failed calls). The narrative is validated before it commits:
+it must be non-empty, fit the session context limit, carry every required
+section heading (Intent; Decisions and constraints; Work state; Open
+problems; Next step), and shrink the assembled context relative to the
+prior assembly once that assembly exceeds a small floor. A summary failing
+any check fails the run with a `policy` failure and leaves the prior
+compaction (or the verbatim transcript) in force. `SessionCompacted.summary`
+carries the stored text, record included, truncated to 16 KiB.
 
 Outcome:
 

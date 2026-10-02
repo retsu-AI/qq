@@ -1,19 +1,60 @@
 //! Compaction runs: summary validation, auto-compaction start and reload, the
 //! transaction that swaps a summary in for the transcript span, and the
-//! summarizer instruction.
+//! record QQ renders into it.
+
+mod record;
+
+pub(super) use record::{RecordScope, record_budget, render_compaction_record};
 
 use super::*;
 
-/// Structural validation of a summarizer reply. Shrinkage is measured
-/// separately against the real assembly inside the compaction transaction.
+/// The model's narrative alone. A reply that echoes a compaction record (for
+/// example, one copied from the prior summary) is cut at the record header,
+/// so the stored record is always the one rendered from rows.
+pub(super) fn narrative_of(mut summary: String) -> String {
+    // Only a header at the start of a line opens a record; prose that
+    // mentions it does not.
+    let at = if summary.starts_with(COMPACTION_RECORD_HEADER) {
+        Some(0)
+    } else {
+        summary
+            .match_indices(COMPACTION_RECORD_HEADER)
+            .map(|(at, _)| at)
+            .find(|&at| summary[..at].ends_with('\n'))
+    };
+    if let Some(at) = at {
+        summary.truncate(at);
+        let kept = summary.trim_end().len();
+        summary.truncate(kept);
+    }
+    summary
+}
+
+/// The stored summary: the narrative, then the record when there is one.
+fn with_record(mut narrative: String, record: &str) -> String {
+    if !record.is_empty() {
+        narrative.reserve(record.len() + 2);
+        narrative.push_str("\n\n");
+        narrative.push_str(record);
+    }
+    narrative
+}
+
+/// Structural validation of a summarizer narrative (the reply without any
+/// echoed record). Shrinkage is measured separately against the real
+/// assembly inside the compaction transaction.
 pub(super) fn validate_compaction_summary(summary: &str) -> Result<(), String> {
     if summary.trim().is_empty() {
         return Err("compaction produced an empty summary".to_owned());
     }
+    // The stored summary is the narrative plus a record of at most
+    // `COMPACTION_RECORD_BYTES`, so both must fit together.
     let replacement_bytes = COMPACTION_SUMMARY_PREAMBLE
         .len()
         .saturating_add(2)
-        .saturating_add(summary.len());
+        .saturating_add(summary.len())
+        .saturating_add(2)
+        .saturating_add(context::COMPACTION_RECORD_BYTES);
     if replacement_bytes > MAX_CONTEXT_BYTES {
         return Err("compaction summary exceeds the 4 MiB session context limit".to_owned());
     }
@@ -232,7 +273,7 @@ pub(super) fn load_summarizer_input(
     let transaction = store::begin_unit(connection)?;
     let (mut messages, _, units) =
         load_model_context_with_units(&transaction, session_id, u64::MAX)?;
-    let instruction = Message::user(compaction_instruction(&transaction, session_id)?);
+    let instruction = Message::user(COMPACTION_INSTRUCTION.to_owned());
     transaction.commit()?;
     let everything_ordinal = units.last().map(|unit| unit.prompt_ordinal);
     let (cutoff_ordinal, oversized_unit_bytes) = match (message_byte_budget, everything_ordinal) {
@@ -280,7 +321,9 @@ pub(super) fn complete_compaction(
     claimed: &ClaimedRun,
     summary: String,
     accounting: Option<RunAccounting>,
+    record_budget: usize,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+    let summary = narrative_of(summary);
     let transaction = store::begin_unit(connection)?;
     // A settled compaction already committed (or rejected) its marker; a
     // replay must not insert a second one.
@@ -320,10 +363,12 @@ pub(super) fn complete_compaction(
                 |row| row.get(0),
             )?,
         };
-        // Insert the candidate marker, then measure the assembly it
-        // produces. A summary that does not shrink the assembly is rejected
-        // and the row removed within this transaction, so the prior usable
-        // compaction stays authoritative.
+        // Insert the candidate marker with the narrative alone, then measure
+        // the assembly it produces. A narrative that does not shrink the
+        // assembly is rejected and the row removed within this transaction,
+        // so the prior usable compaction stays authoritative. The record is
+        // added after this check: it is a bounded cost QQ chose, and judging
+        // it here would fail an old summary smaller than the new record.
         transaction.execute(
             "INSERT INTO session_compactions(
                      session_id, run_id, summary, cutoff_ordinal,
@@ -338,14 +383,14 @@ pub(super) fn complete_compaction(
                 now,
             ],
         )?;
-        let after_bytes = assembled_context_bytes(&transaction, claimed.identity.session_id)?;
+        let narrative_bytes = assembled_context_bytes(&transaction, claimed.identity.session_id)?;
         // Shrinkage is the point of compaction. A short transcript is the one
         // exception: the structured summary's fixed framing can exceed it,
         // yet compacting it is still correct when the provider reported
-        // overflow. Above that floor a summary that fails to shrink the
+        // overflow. Above that floor a narrative that fails to shrink the
         // assembly is rejected outright.
         let shrinkage_required = before_bytes > COMPACTION_SHRINKAGE_FLOOR_BYTES;
-        if shrinkage_required && after_bytes >= before_bytes {
+        if shrinkage_required && narrative_bytes >= before_bytes {
             transaction.execute(
                 "DELETE FROM session_compactions WHERE session_id = ?1 AND run_id = ?2",
                 params![
@@ -358,7 +403,7 @@ pub(super) fn complete_compaction(
                     kind: RunFailureKind::Policy,
                     message: format!(
                         "compaction summary did not shrink the assembled context \
-                         ({after_bytes} bytes after, {before_bytes} before); the prior \
+                         ({narrative_bytes} bytes after, {before_bytes} before); the prior \
                          compaction, if any, remains in effect"
                     ),
                 },
@@ -383,6 +428,27 @@ pub(super) fn complete_compaction(
             transaction.commit()?;
             return Ok(events);
         }
+        let record = render_compaction_record(
+            &transaction,
+            claimed.identity.session_id,
+            RecordScope::Session { cutoff_ordinal },
+            record_budget,
+        )?;
+        let summary = with_record(summary, &record);
+        let after_bytes = if record.is_empty() {
+            narrative_bytes
+        } else {
+            transaction.execute(
+                "UPDATE session_compactions SET summary = ?3
+                     WHERE session_id = ?1 AND run_id = ?2",
+                params![
+                    claimed.identity.session_id.to_string(),
+                    claimed.identity.run_id.to_string(),
+                    summary,
+                ],
+            )?;
+            assembled_context_bytes(&transaction, claimed.identity.session_id)?
+        };
         transaction.execute(
             "UPDATE session_compactions SET after_bytes = ?3
                  WHERE session_id = ?1 AND run_id = ?2",
@@ -536,44 +602,6 @@ pub(super) fn in_run_compactions(
     Ok(markers)
 }
 
-/// The final user message of a compaction run: the fixed structured-schema
-/// instruction plus the file list seeded mechanically from the session's
-/// file-state table.
-pub(super) fn compaction_instruction(
-    connection: &Connection,
-    session_id: SessionId,
-) -> Result<String, SessionRuntimeError> {
-    let mut statement =
-        connection.prepare("SELECT path FROM session_files WHERE session_id = ?1 ORDER BY path")?;
-    let paths = statement
-        .query_map([session_id.to_string()], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut instruction = String::from(COMPACTION_INSTRUCTION);
-    instruction.push_str("\n\nFiles touched (seeded from the session file-state table):\n");
-    if paths.is_empty() {
-        instruction.push_str("(none recorded)\n");
-    } else {
-        let path_count = paths.len();
-        for (index, path) in paths.into_iter().enumerate() {
-            let required = 2_usize.saturating_add(path.len()).saturating_add(1);
-            if instruction.len().saturating_add(required) > context::COMPACTION_INSTRUCTION_BYTES {
-                let omitted = path_count.saturating_sub(index);
-                let notice = format!("- ... {omitted} additional paths omitted\n");
-                if instruction.len().saturating_add(notice.len())
-                    <= context::COMPACTION_INSTRUCTION_BYTES
-                {
-                    instruction.push_str(&notice);
-                }
-                break;
-            }
-            instruction.push_str("- ");
-            instruction.push_str(&path);
-            instruction.push('\n');
-        }
-    }
-    Ok(instruction)
-}
-
 /// Starts an in-run compaction for a prompt run that is `running`. Unlike a
 /// between-run step it never takes the session's active-run slot — the
 /// prompt run holds it — so `settle_run`'s slot release is a no-op for it.
@@ -669,23 +697,26 @@ pub(super) fn start_in_run_compaction(
     Ok(Some((claimed, started)))
 }
 
-/// Commits an in-run summary: validates it, inserts the scoped marker, checks
-/// that the prompt run's assembled context shrank, settles the compaction
-/// run, and publishes `SessionCompacted`. Returns the events and whether the
-/// marker stands. All in one transaction, like `complete_compaction`.
+/// Commits an in-run summary: validates the narrative, appends the record,
+/// inserts the scoped marker, checks that the prompt run's assembled context
+/// shrank, settles the compaction run, and publishes `SessionCompacted`.
+/// Returns the events and, when the marker stands, the stored summary the
+/// live splice must use. All in one transaction, like `complete_compaction`.
 pub(super) fn complete_in_run_compaction(
     connection: &mut Connection,
     store_id: StoreId,
     claimed: &ClaimedRun,
     summary: String,
     accounting: Option<RunAccounting>,
-) -> Result<(Vec<SessionEventEnvelope>, bool), SessionRuntimeError> {
+    record_budget: usize,
+) -> Result<(Vec<SessionEventEnvelope>, Option<String>), SessionRuntimeError> {
     let Some((scope_run_id, turn_cutoff)) = claimed.in_run_turn_cutoff else {
         return Err(SessionRuntimeError::CONSTRAINT);
     };
+    let summary = narrative_of(summary);
     let transaction = store::begin_unit(connection)?;
     if run_is_settled(&transaction, claimed.identity.run_id)? {
-        return Ok((Vec::new(), false));
+        return Ok((Vec::new(), None));
     }
     let mut outcome =
         cancellation_wins(&transaction, claimed.identity.run_id, RunOutcome::Completed)?;
@@ -700,11 +731,24 @@ pub(super) fn complete_in_run_compaction(
         };
     }
     let mut events = Vec::with_capacity(3);
-    let mut committed = false;
+    let mut committed = None;
     if matches!(outcome, RunOutcome::Completed) {
         let now = now_ms();
         let session = claimed.identity.session_id;
         let before_bytes = assembled_context_bytes(&transaction, session)?;
+        // Unlike a between-run step, the record counts toward shrinkage
+        // here: the live run continues in this window, and a running prompt
+        // never holds a summary stored in an earlier format.
+        let record = render_compaction_record(
+            &transaction,
+            session,
+            RecordScope::Run {
+                run_id: scope_run_id,
+                turn_cutoff,
+            },
+            record_budget,
+        )?;
+        let summary = with_record(summary, &record);
         transaction.execute(
             "INSERT INTO session_compactions(
                      session_id, run_id, summary, cutoff_ordinal,
@@ -763,7 +807,6 @@ pub(super) fn complete_in_run_compaction(
                      WHERE id = ?1",
                 [session.to_string()],
             )?;
-            committed = true;
             events.push(expect_settled(settle_run(
                 &transaction,
                 store_id,
@@ -778,14 +821,23 @@ pub(super) fn complete_in_run_compaction(
                 EventContext::for_run(store_id, claimed.identity, now),
                 SessionEvent::SessionCompacted {
                     session: Box::new(session_summary),
-                    summary: Some(truncate_utf8(summary, MAX_EVENT_SUMMARY_BYTES)),
+                    summary: Some({
+                        // Copy only the excerpt; the whole text goes back to
+                        // the live splice.
+                        let mut end = summary.len().min(MAX_EVENT_SUMMARY_BYTES);
+                        while !summary.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        summary[..end].to_owned()
+                    }),
                     before_bytes: u64::try_from(before_bytes).unwrap_or(u64::MAX),
                     after_bytes: u64::try_from(after_bytes).unwrap_or(u64::MAX),
                 },
             )?);
+            committed = Some(summary);
         }
     }
-    if !committed {
+    if committed.is_none() {
         events.push(expect_settled(settle_run(
             &transaction,
             store_id,
