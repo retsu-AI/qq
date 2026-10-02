@@ -103,22 +103,18 @@ async fn exhausted_outage_pauses_with_prior_results_durable() {
 }
 
 #[tokio::test]
-async fn empty_checkpoint_characterizes_the_single_shot_fatal_fault() {
+async fn an_empty_checkpoint_is_a_missed_report_and_the_run_continues() {
+    // AP3a flipped this AC0.1 oracle: an empty checkpoint used to fail the
+    // run; it is now a missed report and the run finishes its task.
     let mut script = Script::tools(120, 16, None);
     script.empty_checkpoint = true;
     let report = run(script).await;
     receipt("empty_checkpoint", &report);
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!(report.work_turns, 120);
+    assert_eq!(report.executed_calls, 300);
+    assert_eq!(report.durable_calls, 300);
     assert_eq!(report.duplicate_sequences, 0);
-    if std::env::var("QQ_SOAK_EXPECT_COMPLETED").as_deref() == Ok("1") {
-        assert_eq!(report.outcome, RunOutcome::Completed);
-    } else {
-        assert!(
-            matches!(&report.outcome, RunOutcome::Failed { failure }
-            if failure.message.contains("checkpoint")),
-            "{:?}",
-            report.outcome
-        );
-    }
 }
 
 #[tokio::test]

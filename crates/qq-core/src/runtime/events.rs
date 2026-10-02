@@ -31,9 +31,47 @@ impl PreparedRequestWeight {
     }
 }
 
+/// A runtime notice the run placed in the conversation immediately before a
+/// turn's request (ADR-0054 § 2). It is persisted with the first turn whose
+/// request carried it, so assembly replays the same message in the same
+/// place. The texts are part of replay: changing one changes how every
+/// stored run that carried it is assembled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnNotice {
+    /// The slice checkpoint: report progress without calling tools.
+    Report,
+    /// The first turn of the next slice: tools are available again.
+    Continuation,
+}
+
+impl TurnNotice {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Report => "report",
+            Self::Continuation => "continuation",
+        }
+    }
+
+    pub(crate) fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "report" => Some(Self::Report),
+            "continuation" => Some(Self::Continuation),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn text(self) -> &'static str {
+        match self {
+            Self::Report => crate::SLICE_CHECKPOINT_NOTICE,
+            Self::Continuation => crate::SLICE_CONTINUATION_NOTICE,
+        }
+    }
+}
+
 /// Identity of the exact immutable prefix placed before the conversation for
-/// one provider turn. Tool-free checkpoint and compaction turns intentionally
-/// differ from ordinary turns.
+/// one provider turn. Budget-final and compaction turns intentionally differ
+/// from ordinary turns; checkpoint turns do not, because their notice is a
+/// message (ADR-0054 § 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub(crate) struct PreparedStaticPrefix(ContentHash);
@@ -94,6 +132,8 @@ pub(crate) enum RuntimeEvent {
         /// The provider stopped this turn at its output token limit. The
         /// message is a valid prefix; `calls` is always empty.
         truncated: bool,
+        /// The runtime notice this turn's request was the first to carry.
+        notice: Option<TurnNotice>,
     },
     ToolCallStarted {
         id: ToolCallId,

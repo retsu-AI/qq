@@ -2419,6 +2419,7 @@ async fn execute_started_run(
                 usage,
                 calls,
                 truncated,
+                notice,
             })) => {
                 if internal {
                     // Usage, cost, and provider-turn identity persist like
@@ -2458,6 +2459,7 @@ async fn execute_started_run(
                                 estimated_cost_usd_nanos: turn_cost,
                                 accounting: Some(accounting.snapshot()),
                                 truncated,
+                                notice,
                             },
                         )
                         .await
@@ -2544,6 +2546,7 @@ async fn execute_started_run(
                             estimated_cost_usd_nanos: turn_cost,
                             accounting: Some(turn_accounting),
                             truncated,
+                            notice,
                         },
                     )
                     .await
@@ -3869,4 +3872,7 @@ pub(super) struct ModelTurnCommit {
     /// turn row and the turn's message so context assembly can replay the
     /// continuation notice and clients can mark the prefix.
     pub(super) truncated: bool,
+    /// The runtime notice placed before this turn's request; assembly
+    /// replays it before the turn (ADR-0054 § 2).
+    pub(super) notice: Option<crate::runtime::TurnNotice>,
 }

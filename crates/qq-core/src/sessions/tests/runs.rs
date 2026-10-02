@@ -1009,18 +1009,20 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
         let recorded_requests = requests.lock().unwrap();
         let checkpoint = &recorded_requests[recorded_requests.len() - 2];
         let continuation = recorded_requests.last().unwrap();
-        assert!(
-            checkpoint
-                .system()
-                .is_some_and(|system| system.contains(crate::SLICE_CHECKPOINT_NOTICE))
+        assert_eq!(
+            checkpoint.messages().last(),
+            Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE))
         );
         assert!(!checkpoint.tools().is_empty());
         assert!(!continuation.tools().is_empty());
-        assert!(
-            continuation
-                .system()
-                .is_some_and(|system| system.contains(crate::SLICE_CONTINUATION_NOTICE))
+        assert_eq!(
+            continuation.messages().last(),
+            Some(&Message::user(crate::SLICE_CONTINUATION_NOTICE))
         );
+        // The seam no longer changes the system prompt, so the provider's
+        // cached prefix survives it.
+        assert_eq!(checkpoint.system(), recorded_requests[0].system());
+        assert_eq!(continuation.system(), recorded_requests[0].system());
         assert!(continuation.messages().iter().any(|message| {
             message.content().iter().any(|block| {
                 matches!(
@@ -1070,6 +1072,14 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
             )
         })
     }));
+    // Replay after a restart is the live context: the first run's final
+    // request plus its final answer, followed by the new prompt. The report
+    // and continuation notices sit exactly where the live run put them.
+    let live = requests[requests.len() - 2].messages();
+    let replayed = replay_request.messages();
+    assert_eq!(&replayed[..live.len()], live);
+    assert_eq!(replayed[live.len()], Message::assistant("task complete"));
+    assert_eq!(replayed.len(), live.len() + 2);
     assert_eq!(
         std::fs::read_to_string(directory.path().join("slice-effects.txt")).unwrap(),
         "seedx",
@@ -1156,17 +1166,14 @@ async fn cancellation_at_the_slice_checkpoint_has_one_cancelled_terminal() {
         "seedx"
     );
     let requests = requests.lock().unwrap();
-    assert!(
-        requests
-            .last()
-            .unwrap()
-            .system()
-            .is_some_and(|system| system.contains(crate::SLICE_CHECKPOINT_NOTICE))
+    assert_eq!(
+        requests.last().unwrap().messages().last(),
+        Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE))
     );
     assert!(!requests.iter().any(|request| {
         request
-            .system()
-            .is_some_and(|system| system.contains(crate::SLICE_CONTINUATION_NOTICE))
+            .messages()
+            .contains(&Message::user(crate::SLICE_CONTINUATION_NOTICE))
     }));
 }
 
@@ -1326,15 +1333,16 @@ async fn runtime_failure_after_durable_tool_result_records_unavailable_checkpoin
 }
 
 #[tokio::test]
-async fn empty_checkpoint_failure_retains_the_billed_turn_accounting() {
+async fn an_empty_checkpoint_is_a_missed_report_and_the_run_completes_with_its_billing() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "tool result\n").unwrap();
     std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
+    let database = directory.path().join("sessions.sqlite3");
     let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        SessionRuntimeOptions::new(database.clone()),
         Arc::new(RenewableSliceLoader {
-            requests,
+            requests: Arc::clone(&requests),
             checkpoint_wait: None,
             metered_empty_checkpoint: true,
         }),
@@ -1355,25 +1363,25 @@ async fn empty_checkpoint_failure_retains_the_billed_turn_accounting() {
     let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
 
     let observed = collect_until(&mut events, finished_for(run_id)).await;
+    // Used to fail with "provider returned an empty slice checkpoint"; the
+    // empty reply is now a missed report and the run finishes its task.
     assert!(matches!(
         observed.last().map(|event| &event.event),
         Some(SessionEvent::RunFinished {
             run_id: finished,
-            outcome: RunOutcome::Failed {
-                failure: RunFailure {
-                    kind: RunFailureKind::ProviderResponse,
-                    message,
-                },
-            },
+            outcome: RunOutcome::Completed,
             ..
-        }) if *finished == run_id && message == "provider returned an empty slice checkpoint"
+        }) if *finished == run_id
     ));
 
+    // Sixteen metered tool turns (1 in, 1 out), the empty checkpoint
+    // (3 + 1 + 2 in, 5 out) and the final answer (7 in, 3 out): the missed
+    // report is billed like any turn.
     let expected_usage = TokenUsage {
-        input_tokens: 19,
+        input_tokens: 26,
         cache_read_input_tokens: 1,
         cache_write_input_tokens: 2,
-        output_tokens: 21,
+        output_tokens: 24,
         reasoning_tokens: None,
     };
     let snapshot = runtime
@@ -1388,14 +1396,32 @@ async fn empty_checkpoint_failure_retains_the_billed_turn_accounting() {
         .unwrap();
     let focused = snapshot.focused.unwrap();
     assert_eq!(focused.runs[0].usage, Some(expected_usage));
-    assert_eq!(focused.runs[0].estimated_cost_usd_nanos, Some(61_700));
+    let cost = focused.runs[0].estimated_cost_usd_nanos;
+    assert!(cost.is_some_and(|cost| cost > 61_700), "{cost:?}");
     let accounting = focused.summary.accounting.unwrap();
     assert_eq!(accounting.direct.usage, Some(expected_usage));
-    assert_eq!(accounting.direct.estimated_cost_usd_nanos, Some(61_700));
-    assert_eq!(focused.summary.estimated_cost_usd_nanos, Some(61_700));
-    assert!(!focused.messages.iter().any(|message| {
-        message.role == MessageRole::Assistant && message.output == "slice checkpoint"
+    assert_eq!(accounting.direct.estimated_cost_usd_nanos, cost);
+    assert_eq!(focused.summary.estimated_cost_usd_nanos, cost);
+    assert!(focused.messages.iter().any(|message| {
+        message.role == MessageRole::Assistant && message.output == "task complete"
     }));
+    // The live context filled the empty report with the placeholder; a
+    // follow-up assembles that same context from the store.
+    let live = requests.lock().unwrap().last().unwrap().messages().to_vec();
+    let window = &live[live.len() - 3..];
+    assert_eq!(
+        window,
+        [
+            Message::user(crate::SLICE_CHECKPOINT_NOTICE),
+            Message::assistant(crate::EMPTY_TURN_PLACEHOLDER),
+            Message::user(crate::SLICE_CONTINUATION_NOTICE),
+        ]
+    );
+    let follow_up = queue_prompt(&runtime, session_id, "and then?".to_owned()).await;
+    collect_until(&mut events, finished_for(follow_up)).await;
+    let replayed = requests.lock().unwrap().last().unwrap().messages().to_vec();
+    assert_eq!(&replayed[..live.len()], live.as_slice());
+    assert_assembly_matches_reference(&database, session_id);
 }
 
 #[tokio::test]
@@ -1507,6 +1533,7 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
                     estimated_cost_usd_nanos: None,
                     accounting: None,
                     truncated: false,
+                    notice: None,
                 },
             )
             .await
@@ -2471,6 +2498,7 @@ async fn manual_and_auto_compaction_share_the_terminal_run_projection() {
                 estimated_cost_usd_nanos: None,
                 accounting: None,
                 truncated: false,
+                notice: None,
             },
         )
         .await

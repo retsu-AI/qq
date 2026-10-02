@@ -748,9 +748,10 @@ impl Provider for RenewableSliceProvider {
         drop(requests);
 
         let tool_turns = crate::MAX_TOOL_CALLS_PER_SLICE / crate::MAX_TOOL_CALLS_PER_TURN;
-        let checkpoint_request = request
-            .system()
-            .is_some_and(|system| system.contains(crate::SLICE_CHECKPOINT_NOTICE));
+        // The report notice is the request's last message; the system prompt
+        // is unchanged across the seam (ADR-0054 § 2).
+        let checkpoint_request =
+            request.messages().last() == Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE));
         if checkpoint_request {
             assert!(
                 !request.tools().is_empty(),
@@ -779,11 +780,23 @@ impl Provider for RenewableSliceProvider {
             ]));
         }
         if current > tool_turns {
+            // Metered in the empty-checkpoint mode so the run's usage stays
+            // known through the turn after the missed report.
             return Box::pin(stream::iter([
                 Ok(qq_provider::ProviderEvent::OutputTextDelta {
                     text: "task complete".to_owned(),
                 }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                Ok(qq_provider::ProviderEvent::Completed {
+                    usage: self
+                        .metered_empty_checkpoint
+                        .then_some(qq_provider::ProviderUsage {
+                            input_tokens: 7,
+                            cache_read_input_tokens: 0,
+                            cache_write_input_tokens: 0,
+                            output_tokens: 3,
+                            reasoning_tokens: None,
+                        }),
+                }),
             ]));
         }
 
@@ -1615,6 +1628,7 @@ async fn spill_one_call(
                 estimated_cost_usd_nanos: None,
                 accounting: None,
                 truncated: false,
+                notice: None,
             },
         )
         .await
@@ -2484,7 +2498,7 @@ mod reference_assembly {
         context: &mut Vec<Message>,
     ) -> Result<(), SessionRuntimeError> {
         let mut statement = transaction.prepare(
-            "SELECT turn_ordinal, assistant_content_json, truncated FROM model_turns
+            "SELECT turn_ordinal, assistant_content_json, truncated, notice FROM model_turns
                  WHERE run_id = ?1 ORDER BY turn_ordinal",
         )?;
         let turns = statement
@@ -2493,6 +2507,7 @@ mod reference_assembly {
                     row.get::<_, u32>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, bool>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -2533,7 +2548,7 @@ mod reference_assembly {
         if let Some((summary, turn_cutoff)) = marker {
             let replaced = turns
                 .iter()
-                .take_while(|(ordinal, _, _)| *ordinal <= turn_cutoff)
+                .take_while(|(ordinal, _, _, _)| *ordinal <= turn_cutoff)
                 .count();
             if replaced > 0 {
                 turns.drain(..replaced);
@@ -2548,13 +2563,23 @@ mod reference_assembly {
                 )));
             }
         }
-        for (turn_ordinal, content_json, truncated) in turns {
+        for (turn_ordinal, content_json, truncated, notice) in turns {
             while steering
                 .front()
                 .is_some_and(|(applied_before, _)| *applied_before <= turn_ordinal)
             {
                 let (_, text) = steering.pop_front().expect("front was just checked");
                 context.push(Message::user(text));
+            }
+            // The checkpoint or continuation notice the live run placed
+            // before this turn's request.
+            match notice.as_deref() {
+                None => {}
+                Some("report") => context.push(Message::user(crate::SLICE_CHECKPOINT_NOTICE)),
+                Some("continuation") => {
+                    context.push(Message::user(crate::SLICE_CONTINUATION_NOTICE));
+                }
+                Some(_) => return Err(SessionRuntimeError::CODEC),
             }
             let content: Vec<ContentBlock> =
                 serde_json::from_str::<Vec<PersistedContentBlock>>(&content_json)?
@@ -3633,6 +3658,7 @@ async fn project_terminal_run_with_tool_boundaries(
                 estimated_cost_usd_nanos: None,
                 accounting: None,
                 truncated: false,
+                notice: None,
             },
         )
         .await

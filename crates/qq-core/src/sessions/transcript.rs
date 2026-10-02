@@ -354,9 +354,9 @@ pub(super) fn load_model_context_with_units(
     // join so the archive behind the compaction cutoff is never read. Old
     // history therefore costs nothing at assembly; recall goes through
     // `search_history`.
-    let mut turns: HashMap<String, Vec<(u32, String, bool)>> = HashMap::new();
+    let mut turns: HashMap<String, Vec<StoredTurn>> = HashMap::new();
     let mut statement = transaction.prepare_cached(
-        "SELECT t.run_id, t.turn_ordinal, t.assistant_content_json, t.truncated
+        "SELECT t.run_id, t.turn_ordinal, t.assistant_content_json, t.truncated, t.notice
              FROM messages m
              JOIN runs r ON r.id = m.run_id
              JOIN model_turns t ON t.run_id = r.id
@@ -377,16 +377,23 @@ pub(super) fn load_model_context_with_units(
             return Err(SessionRuntimeError::CONSTRAINT);
         }
         remaining_turn_bytes -= raw.len();
-        let (run_id, ordinal, content, truncated) = (
-            row.get::<_, String>(0)?,
-            row.get::<_, u32>(1)?,
-            raw.to_owned(),
-            row.get::<_, bool>(3)?,
-        );
+        let turn = StoredTurn {
+            ordinal: row.get::<_, u32>(1)?,
+            content_json: raw.to_owned(),
+            truncated: row.get::<_, bool>(3)?,
+            notice: match row.get_ref(4)?.as_str_or_null() {
+                Ok(None) => None,
+                Ok(Some(stored)) => Some(
+                    crate::runtime::TurnNotice::from_stored(stored)
+                        .ok_or(SessionRuntimeError::CODEC)?,
+                ),
+                Err(_) => return Err(SessionRuntimeError::CONSTRAINT),
+            },
+        };
         turns
-            .entry(run_id)
+            .entry(row.get::<_, String>(0)?)
             .or_default()
-            .push((ordinal, content, truncated));
+            .push(turn);
     }
     drop(rows);
     drop(statement);
@@ -1057,8 +1064,19 @@ pub(super) fn assembled_context_bytes(
 /// results together exceeded the budget replays exactly the reduced text the
 /// model saw rather than the larger per-call rows. The projection is a pure
 /// function of the stored rows; nothing extra is persisted.
+/// One committed model turn as context assembly reads it.
+pub(super) struct StoredTurn {
+    pub(super) ordinal: u32,
+    pub(super) content_json: String,
+    /// The provider cut the turn at its output limit; the truncation notice
+    /// followed it.
+    pub(super) truncated: bool,
+    /// The runtime notice placed before the turn's request.
+    pub(super) notice: Option<crate::runtime::TurnNotice>,
+}
+
 pub(super) fn append_run_turns(
-    turns: Vec<(u32, String, bool)>,
+    turns: Vec<StoredTurn>,
     mut recorded: RecordedTurnResults,
     mut steering: std::collections::VecDeque<(u32, String)>,
     compaction: Option<InRunCompaction>,
@@ -1074,7 +1092,7 @@ pub(super) fn append_run_turns(
     if let Some(marker) = compaction {
         let replaced = turns
             .iter()
-            .take_while(|(ordinal, _, _)| *ordinal <= marker.turn_cutoff)
+            .take_while(|turn| turn.ordinal <= marker.turn_cutoff)
             .count();
         if replaced > 0 {
             turns.drain(..replaced);
@@ -1093,7 +1111,13 @@ pub(super) fn append_run_turns(
             )));
         }
     }
-    for (turn_ordinal, content_json, truncated) in turns {
+    for StoredTurn {
+        ordinal: turn_ordinal,
+        content_json,
+        truncated,
+        notice,
+    } in turns
+    {
         let mut recorded_turn = recorded.remove(&turn_ordinal).unwrap_or_default();
         while steering
             .front()
@@ -1101,6 +1125,12 @@ pub(super) fn append_run_turns(
         {
             let (_, text) = steering.pop_front().expect("front was just checked");
             context.push(Message::user(text));
+        }
+        // The live run placed this notice after the boundary's steering and
+        // before the request that produced this turn, and kept it even when
+        // that attempt was later dropped (an empty truncation below).
+        if let Some(notice) = notice {
+            context.push(Message::user(notice.text()));
         }
         let (content, replay) =
             match serde_json::from_str::<super::codec::PersistedTurn>(&content_json)? {

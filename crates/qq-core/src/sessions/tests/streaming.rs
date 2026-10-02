@@ -53,6 +53,7 @@ async fn measured_occupancy_basis_persists_atomically_and_reloads_with_the_reser
                 estimated_cost_usd_nanos: None,
                 accounting: None,
                 truncated: false,
+                notice: None,
             },
         )
         .await
@@ -256,6 +257,7 @@ async fn interleaved_turn_framing_accepts_exact_capacity_and_rejects_one_over() 
                     estimated_cost_usd_nanos: None,
                     accounting: None,
                     truncated: false,
+                    notice: None,
                 },
             )
             .await;
@@ -393,6 +395,7 @@ async fn turn_and_event_failures_roll_back_message_counter_turn_and_tool_rows() 
                         estimated_cost_usd_nanos: None,
                         accounting: None,
                         truncated: false,
+                        notice: None,
                     },
                 )
                 .await

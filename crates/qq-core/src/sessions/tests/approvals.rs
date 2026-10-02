@@ -3389,6 +3389,7 @@ async fn recovery_marks_awaiting_approval_calls_interrupted() {
                 estimated_cost_usd_nanos: None,
                 accounting: None,
                 truncated: false,
+                notice: None,
             },
         )
         .await

@@ -310,6 +310,7 @@ async fn admitted_tool_calls_store_their_effect_class() {
                 estimated_cost_usd_nanos: None,
                 accounting: None,
                 truncated: false,
+                notice: None,
             },
         )
         .await

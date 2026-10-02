@@ -108,18 +108,24 @@ const MAX_ADMITTED_TOOL_CALLS_PER_TURN: usize = 4 * MAX_TOOL_CALLS_PER_TURN;
 // for a checkpoint reply, persists it, resets the counter, and continues the
 // same run. Tools stay declared on that turn: a call the model makes anyway is
 // admitted with a not-executed result instead of failing the run, because the
-// persisted turn is the boundary, not the model's obedience.
+// persisted turn is the boundary, not the model's obedience. An empty reply is
+// a missed report, not a failure (ADR-0054 § 2).
 const MAX_TOOL_CALLS_PER_SLICE: usize = 256;
-const SLICE_CHECKPOINT_NOTICE: &str = "This execution slice is at its safe tool-call boundary. Do not \
-call tools in this reply: record a concise checkpoint of what was accomplished, what remains, \
-and the exact next step. QQ will persist this checkpoint and continue the same run with tools \
-available again.";
+// The checkpoint and continuation notices are messages in the conversation,
+// not system-prompt text, so the cached prefix survives the seam. They are
+// replayed from `model_turns.notice` (`runtime::TurnNotice`); their wording is
+// part of every stored run that carried them.
+pub(crate) const SLICE_CHECKPOINT_NOTICE: &str = "[QQ runtime notice; not a user instruction]\n\
+This execution slice is at its safe tool-call boundary. Do not call tools in this reply. Write \
+a short report: what is established (with path:line evidence), what is still unknown, and the \
+one next action. QQ keeps this report and continues the same run with tools available again.";
 const SLICE_CHECKPOINT_REJECTION: &str = "not executed: this reply was the slice checkpoint, \
 which records progress without running tools; the run continues and tools are available on \
 the next turn, so re-issue this call then";
-const SLICE_CONTINUATION_NOTICE: &str = "Continue the task from the preceding persisted \
-checkpoint. Tools are available again. Do not stop at a progress summary: complete the user's \
-request unless an explicit overall budget, cancellation, or genuine failure prevents it.";
+pub(crate) const SLICE_CONTINUATION_NOTICE: &str = "[QQ runtime notice; not a user \
+instruction]\nContinue the task from the report above. Tools are available again. Do not stop \
+at a progress summary: complete the user's request unless an explicit overall budget, \
+cancellation, or genuine failure prevents it.";
 const MAX_TOOL_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_TOOL_CALL_ID_BYTES: usize = 1_024;
 const MAX_TOOL_NAME_BYTES: usize = 128;
@@ -1688,6 +1694,12 @@ impl plan::CompiledAgentPlan {
                 .unwrap_or_default();
             let mut model_text_bytes = 0_usize;
             let mut continuing_slice = false;
+            // The slice's report notice is in the conversation; a retried,
+            // truncated, or interrupted checkpoint attempt reuses it.
+            let mut checkpoint_noticed = false;
+            // The notice placed before the next turn's request, persisted with
+            // the first turn row that request produces.
+            let mut pending_notice: Option<runtime::TurnNotice> = None;
             // Durable turns already replaced by in-run compaction: the live
             // transcript's assistant messages after the summary are turns
             // `compacted_turns + 1..`, and the next cutoff is durable too.
@@ -1728,17 +1740,31 @@ impl plan::CompiledAgentPlan {
                         .saturating_add(MAX_TOOL_CALLS_PER_TURN)
                         > MAX_TOOL_CALLS_PER_SLICE;
                 let continuation_turn = std::mem::take(&mut continuing_slice);
+                // The checkpoint and continuation notices join the
+                // conversation as runtime messages, so the system prompt and
+                // its cached prefix stay the run's own (ADR-0054 § 2).
+                let notice = if checkpoint_turn && !checkpoint_noticed {
+                    checkpoint_noticed = true;
+                    Some(runtime::TurnNotice::Report)
+                } else if continuation_turn && !checkpoint_turn {
+                    Some(runtime::TurnNotice::Continuation)
+                } else {
+                    None
+                };
+                if let Some(notice) = notice {
+                    let message = Message::user(notice.text());
+                    irreducible_message_bytes =
+                        irreducible_message_bytes.saturating_add(measure_message(&message));
+                    Arc::make_mut(&mut messages).push(message);
+                    pending_notice = Some(notice);
+                }
                 let request_system: Arc<str> = if budget_final_turn {
                     Arc::from(format!("{system}\n\n{BUDGET_FINAL_RESPONSE_NOTICE}"))
-                } else if checkpoint_turn {
-                    Arc::from(format!("{system}\n\n{SLICE_CHECKPOINT_NOTICE}"))
-                } else if continuation_turn {
-                    Arc::from(format!("{system}\n\n{SLICE_CONTINUATION_NOTICE}"))
                 } else {
                     Arc::clone(&system)
                 };
                 let request_has_tools = allow_tools && !budget_final_turn;
-                let request_system_hash = if budget_final_turn || checkpoint_turn || continuation_turn {
+                let request_system_hash = if budget_final_turn {
                     ContentHash::from_bytes(Sha256::digest(request_system.as_bytes()).into())
                 } else {
                     system_prompt_hash
@@ -2496,6 +2522,7 @@ impl plan::CompiledAgentPlan {
                     usage: terminal_usage,
                     calls: calls.clone(),
                     truncated: truncated_turn,
+                    notice: pending_notice.take(),
                 };
                 budget.charge_turn(terminal_usage);
                 budget.charge_tool_calls(calls.iter().filter(|call| call.rejection.is_none()).count());
@@ -2733,25 +2760,41 @@ impl plan::CompiledAgentPlan {
                     return;
                 }
 
-                if checkpoint_turn && !assistant.has_content() {
-                    yield RuntimeEvent::Failed {
-                        kind: RunFailureKind::ProviderResponse,
-                        message: "provider returned an empty slice checkpoint".to_owned(),
-                    };
-                    return;
-                }
                 if checkpoint_turn {
                     // The persisted turn is the slice boundary whether or not
                     // the model obeyed the notice. Calls it made anyway were
                     // admitted with a rejection result above and settle
                     // through the ordinary result path below, so the next
                     // turn sees one result per call and can re-issue them.
+                    // An empty reply is a missed report: the slice still
+                    // resets and the run continues (ADR-0054 § 2).
                     slice_tool_calls = 0;
+                    checkpoint_noticed = false;
                     continuing_slice = true;
                     if calls.is_empty() {
+                        // Assembly drops an empty turn and fills the gap
+                        // between the two runtime notices with this same
+                        // placeholder, so live and replayed context match.
+                        let assistant = if assistant.has_content() {
+                            assistant
+                        } else {
+                            Message::assistant(EMPTY_TURN_PLACEHOLDER)
+                        };
                         irreducible_message_bytes = irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         Arc::make_mut(&mut messages).push(assistant);
+                        // Steering that arrived during the report is applied
+                        // here, before the continuation notice, exactly as at
+                        // any other turn boundary.
+                        if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                            for steer in applied {
+                                yield RuntimeEvent::SteeringApplied {
+                                    message_id: steer.message_id,
+                                    turn_ordinal: turn_ordinal.saturating_add(1),
+                                    attachments: steer.attachments,
+                                };
+                            }
+                        }
                         continue;
                     }
                 }
@@ -8491,11 +8534,23 @@ mod tests {
     }
 
     /// Whether a recorded request is the slice-checkpoint turn: tools stay
-    /// declared there, so the notice in the system prompt is the marker.
+    /// declared there and the system prompt is unchanged, so the report
+    /// notice as the last message is the marker.
     fn is_checkpoint_request(request: &ModelRequest) -> bool {
-        request
-            .system()
-            .is_some_and(|system| system.contains(SLICE_CHECKPOINT_NOTICE))
+        last_user_text(request) == Some(SLICE_CHECKPOINT_NOTICE)
+    }
+
+    /// The text of the request's last message when it is a user text, such
+    /// as a runtime notice.
+    fn last_user_text(request: &ModelRequest) -> Option<&str> {
+        let message = request.messages().last()?;
+        if message.role() != Role::User {
+            return None;
+        }
+        match message.content() {
+            [ContentBlock::Text { text }] => Some(text.as_str()),
+            _ => None,
+        }
     }
 
     #[tokio::test]
@@ -8867,15 +8922,19 @@ mod tests {
         assert!(!requests[checkpoint_index].tools().is_empty());
         let continuation = &requests[checkpoint_index + 1];
         assert!(!continuation.tools().is_empty());
-        assert!(
-            continuation
-                .system()
-                .is_some_and(|system| system.contains(SLICE_CONTINUATION_NOTICE))
+        // Neither seam touches the system prompt: the notices are messages,
+        // so the cached prefix holds across the checkpoint (ADR-0054 § 2).
+        assert_eq!(requests[checkpoint_index].system(), requests[0].system());
+        assert_eq!(continuation.system(), requests[0].system());
+        assert_eq!(
+            last_user_text(continuation),
+            Some(SLICE_CONTINUATION_NOTICE)
         );
-        // The rejected call has exactly one result, in the transcript the
-        // continuation turn sees, so the model can re-issue it.
+        // The rejected call has exactly one result, just before the
+        // continuation notice, so the model can re-issue it.
+        let messages = continuation.messages();
         assert!(matches!(
-            continuation.messages().last().unwrap().content(),
+            messages[messages.len() - 2].content(),
             [ContentBlock::ToolResult { call_id, content, is_error: true }]
                 if call_id == "checkpoint-call" && content == SLICE_CHECKPOINT_REJECTION
         ));
@@ -9127,12 +9186,25 @@ mod tests {
             })
         ));
 
+        // An empty checkpoint is a missed report, not a failure: the slice
+        // still resets and the run finishes (ADR-0054 § 2). The live context
+        // fills the empty turn with the placeholder assembly would insert.
         struct EmptyCheckpoint {
             turn: Mutex<usize>,
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
         }
 
         impl Provider for EmptyCheckpoint {
             fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.requests.lock().unwrap().push(request.clone());
+                if last_user_text(&request) == Some(SLICE_CONTINUATION_NOTICE) {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "finished after the missed report".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
                 if is_checkpoint_request(&request) {
                     return Box::pin(stream::iter([Ok(ProviderEvent::Completed {
                         usage: Some(qq_provider::ProviderUsage {
@@ -9167,9 +9239,11 @@ mod tests {
             }
         }
 
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             EmptyCheckpoint {
                 turn: Mutex::new(0),
+                requests: Arc::clone(&requests),
             },
             "gpt-test",
             256,
@@ -9191,13 +9265,22 @@ mod tests {
                 }
             }
         )));
-        assert!(matches!(
-            events.last(),
-            Some(RunEvent::Failed {
-                kind: RunFailureKind::ProviderResponse,
-                message,
-            }) if message == "provider returned an empty slice checkpoint"
-        ));
+        assert!(
+            matches!(events.last(), Some(RunEvent::Completed)),
+            "{:?}",
+            events.last()
+        );
+        let requests = requests.lock().unwrap();
+        let continuation = requests.last().unwrap();
+        let messages = continuation.messages();
+        assert_eq!(
+            messages[messages.len() - 3..],
+            [
+                Message::user(SLICE_CHECKPOINT_NOTICE),
+                Message::assistant(EMPTY_TURN_PLACEHOLDER),
+                Message::user(SLICE_CONTINUATION_NOTICE),
+            ]
+        );
     }
 
     #[tokio::test(start_paused = true)]

@@ -9,7 +9,7 @@ appended below, newest last.
 | AP0 | Progress report and baseline | In review | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) | `docs/eng-978-ac-progress-first` | Runbook + baseline in `root.md` (2026-09-30); ships with the plan revision |
 | AP1 | Sub-agent brief and delegation guidance | In review | [ENG-989](https://linear.app/retsu-ai/issue/ENG-989) | `feat/eng-989-ap1-subagent-brief` | Stacked on #233; prompt 14 → 15 |
 | AP2 | Pruned `read_file` stubs keep their header | In review | [ENG-988](https://linear.app/retsu-ai/issue/ENG-988) | `fix/eng-988-ap2-pruned-read-stub` | Stacked on #232 |
-| AP3a | Report turns as persisted turns | Planned | | | ADR-0054 § 2; after AC0.1; one store column; independent review; takes AC3's empty-checkpoint item |
+| AP3a | Report turns as persisted turns | In review | [ENG-990](https://linear.app/retsu-ai/issue/ENG-990) | `feat/eng-990-ap3a-report-turns` | Stacked on AC0.1 (#236); store schema 39 → 40 |
 | AP3b | Stall report and child answer | Planned | | | ADR-0054 § 1, § 3; before AC1; independent review |
 | AP4 | Non-blocking delegation | Planned | | | ADR-0054 § 4; independent review; `DESCRIPTOR_VERSION` bump |
 | AP5 | Evidence after AP3b and AP4 | Planned | | | Goal 6; 7-day windows |
@@ -305,3 +305,38 @@ and both sides were kept. Gates on the stack:
 - Workspace 2019 passed, after one unrelated timing flake in
   `child_mutation_drains_before_steering_or_a_replacement_run_can_write`
   that passed 6 of 6 on rerun. fmt and clippy are clean.
+
+### 2026-10-01 — AP3a report turns as persisted turns (ENG-990)
+
+- **Notices moved.** The checkpoint and continuation notices left the system
+  prompt and became runtime messages, framed as runtime notices. The
+  checkpoint text now asks for the report shape (established with
+  `path:line`, unknown, next action). It still includes "safe tool-call
+  boundary".
+- **Persistence and replay.** `runtime::TurnNotice` is carried on
+  `AssistantTurnCompleted`. It is persisted as `model_turns.notice` (schema
+  40: nullable TEXT, `report` / `continuation`) and replayed after the
+  boundary's steering and before the turn. An unknown stored value is a
+  `CODEC` error. The reference oracle mirrors the rule independently.
+- **Empty checkpoint.** It is a missed report. The live context pushes
+  `EMPTY_TURN_PLACEHOLDER`, which assembly would insert anyway. Steering at
+  a text-only checkpoint is now applied before the continuation.
+- **Tests:**
+  - flipped: the direct empty-checkpoint test, the session one (renamed;
+    the run completes and is billed for the missed report), and AC0.1's soak
+    oracle `an_empty_checkpoint_is_a_missed_report_and_the_run_continues`;
+  - live versus restart replay is byte-identical across a checkpoint and
+    continuation (text and empty), and matches the reference oracle;
+  - the system prompt is equal across the seam;
+  - new migration test `version_thirty_nine…` (NULL, replay, bad shape,
+    unknown value);
+  - migrations now assert `STORE_SCHEMA_VERSION` instead of 27 literals.
+- **Gates.** Workspace 2020 passed. fmt and clippy clean. Soak `--ignored`
+  5 passed.
+- **Benches (3 runs each, A then B).**
+  - `context_assembly` assemble medians: 51.6 / 52.7 / 55.9 µs before,
+    51.0 / 52.9 / 55.2 µs after.
+  - `turn_overhead` medians: 15.6 / 15.1 / 15.0 ms before, 16.4 / 15.4 /
+    15.6 ms after. The ranges overlap, and one turn-10 outlier (19.3 ms) is
+    a single sample.
+  - Both within noise. Evidence: `target/qq-perf/ap3a-2026-10-01/`.

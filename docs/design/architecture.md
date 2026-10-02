@@ -388,9 +388,10 @@ the new prompt is charged and shrinkage from assembly-time pruning is credited
 rather than discarding the measurement, and a code-heavy transcript that
 tokenizes near three bytes per token is no longer under-charged by a quarter
 on every turn. Within a run the same rule is applied per
-request component (system text, tool schemas, messages), so the slice
-checkpoint and continuation turns, which change the system text and drop the
-schemas, keep a measurement-derived estimate. Pricing-only refreshes are
+request component (system text, tool schemas, messages), so the budget-final
+turn, which changes the system text and drops the schemas, keeps a
+measurement-derived estimate; the slice checkpoint and continuation turns
+change only the messages. Pricing-only refreshes are
 compatible; missing usage, model changes, successful compaction, malformed or
 unsupported history, or any wire/prefix mismatch clear or disable reuse.
 Provider-overflow suppression is deliberately weaker than reuse: when the
@@ -980,13 +981,24 @@ lowered but never raised by a client command.
 A run may cross multiple bounded internal execution slices. The strict
 256-tool-call ceiling is a runaway-loop backstop for one slice, not a
 task-completion signal. Before a bounded provider turn could push a slice past
-that ceiling, the runtime asks the model for a checkpoint reply, requires and
-persists that assistant turn, resets the slice counter, and continues the same
-run. Tools stay declared on the checkpoint turn: the persisted turn is the
-boundary, not the model's obedience, so a call the model makes anyway is
+that ceiling, the runtime asks the model for a report, persists that assistant
+turn, resets the slice counter, and continues the same run. The request
+carries the report notice as a runtime message at the end of the
+conversation, and the first turn of the next slice carries a continuation
+notice the same way. The system prompt never changes, so the provider's
+cached prefix survives the seam. Each notice is stored as the turn's
+`model_turns.notice` (`report` or `continuation`) and replayed before that
+turn, so a later run assembles exactly the messages the live run sent
+(ADR-0054 § 2).
+
+Tools stay declared on the checkpoint turn: the persisted turn is the
+boundary, not the model's obedience. A call the model makes anyway is
 admitted with a not-executed result (the same path as calls past the per-turn
-cap) and the run continues into the next slice, where the model re-issues it.
-Clients observe no terminal run event at the slice seam. Genuine completion,
+cap), and the run continues into the next slice, where the model re-issues
+it. An empty reply is a missed report, not a failure. The live context fills
+it with the same placeholder assembly inserts, and the run continues.
+Steering that arrives during the report is applied before the continuation
+notice. Clients observe no terminal run event at the slice seam. Genuine completion,
 explicit caller budgets, cancellation, and failures remain the only user-level
 terminal conditions; provider adapters do not participate in slice rollover.
 

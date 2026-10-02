@@ -133,8 +133,21 @@ SELECT count(*), sum(EXISTS (SELECT 1 FROM tool_calls t WHERE t.run_id = c.run_i
 These queries cover the whole store, not a window. They key on the
 rejection text RR1 introduced, so they only count checkpoints since RR1
 (#108) shipped, and they cannot see a checkpoint the model answered with
-text only or with nothing. AP3a adds the turn's kind to `model_turns`;
-that PR replaces this section with a query on the kind.
+text only or with nothing.
+
+From store schema 40 (AP3a), every checkpoint turn is recorded with
+`model_turns.notice = 'report'`. This query counts them in the window, and
+how many had no text: the missed reports.
+
+```sh
+q "SELECT count(*), sum(instr(m.assistant_content_json, '\"type\":\"text\"') = 0)
+FROM model_turns m JOIN runs r ON r.id = m.run_id
+WHERE m.notice = 'report'
+  AND r.started_at_ms >= strftime('%s','@END@','-30 days') * 1000 AND r.started_at_ms < strftime('%s','@END@') * 1000;"
+```
+
+Goal 6's checkpoint target uses this query once the window starts after
+AP3a merged.
 
 ## 4. Time parents spend blocked on children
 
