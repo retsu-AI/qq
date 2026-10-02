@@ -106,13 +106,19 @@ without producing anything.
    - A report with text is a progress event. A report without text is a
      *missed* report. It is not a failure: it resets the count and is
      counted toward decision 3.
-   - The notice a turn answered (`report` or `continuation`) is persisted
-     with the turn as a store column, `model_turns.notice`, on the first
-     turn row whose request carried it. Replay renders that fixed notice
-     before the turn, the way it renders the truncation notice
+   - The notice a turn answered is persisted with the turn as a store
+     column, `model_turns.notice`, on the first turn row whose request
+     carried it: `report` (the slice checkpoint), `stall_report`,
+     `continuation`, or `final_answer` (decision 3). Replay renders that
+     fixed notice before the turn, the way it renders the truncation notice
      (`sessions/transcript.rs:1149–1151`), so live and restart assembly
-     stay byte-identical. This is a store schema change (39 → 40). A
-     child's final-answer turn (decision 3) adds its notice value in AP3b.
+     stay byte-identical. This is a store schema change (39 → 40); AP3b's
+     two values landed before 40 shipped in a release.
+   - The stall report asks for the same report as the slice checkpoint,
+     under its own opening line ("The last 64 tool calls changed nothing and
+     produced no answer"), so the model is told why it is reporting. A
+     stall report leaves the slice count alone: its calls still ran in
+     that slice.
 
    The 256-call slice checkpoint becomes the same kind of turn with the same
    notice, and its continuation notice moves out of the system prompt too.
@@ -126,12 +132,21 @@ without producing anything.
    answer turn**.
    - The notice says that this reply ends the run and must answer the brief
      from what the child has.
-   - The final answer turn **declares no tools**, using the machinery the
-     budget-final turn already uses (`lib.rs:1726`). The model cannot
-     answer it with calls the way it answered 23 of 25 checkpoint turns.
-     This costs one prefix-cache miss, on the child's last turn only.
-   - It settles the way the budget-final turn does. Jev final review and
-     the audit hook do not redirect it.
+   - **The turn settles the run whatever it returns.** That is the
+     guarantee, not the model's obedience: models answered 23 of 25
+     checkpoint turns with calls. A call made on it is admitted with a
+     not-executed result and never runs, and the run completes once those
+     results are durable. Jev final review, the audit hook and steering do
+     not redirect it.
+   - Its tools stay **declared**, with `ToolChoice::None` (ENG-1001): the
+     request asks for no calls where the API can (OpenAI and Anthropic
+     `tool_choice: none`, Gemini `mode: NONE`). *Amended 2026-10-01:* this
+     decision first said the turn "declares no tools", like the budget-final
+     turn. Native Bedrock Converse rejects any request whose history holds
+     tool calls when it declares no tools, which also broke the
+     budget-final turn on `bedrock/` (fixed in ENG-1001). Keeping the tools
+     also keeps the cached tool prefix: the system text and tools are
+     unchanged on the child's last turn.
    - The run completes with that reply. If the reply has no text, the parent
      receives the child's latest report, labelled as an interim report. That
      text is the child's own durable output, never runtime-written. If

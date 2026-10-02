@@ -6,14 +6,14 @@ appended below, newest last.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| AP0 | Progress report and baseline | In review | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) | `docs/eng-978-ac-progress-first` | Runbook + baseline in `root.md` (2026-09-30); ships with the plan revision |
-| AP1 | Sub-agent brief and delegation guidance | In review | [ENG-989](https://linear.app/retsu-ai/issue/ENG-989) | `feat/eng-989-ap1-subagent-brief` | Stacked on #233; prompt 14 → 15 |
-| AP2 | Pruned `read_file` stubs keep their header | In review | [ENG-988](https://linear.app/retsu-ai/issue/ENG-988) | `fix/eng-988-ap2-pruned-read-stub` | Stacked on #232 |
-| AP3a | Report turns as persisted turns | In review | [ENG-990](https://linear.app/retsu-ai/issue/ENG-990) | `feat/eng-990-ap3a-report-turns` | Stacked on AC0.1 (#236); store schema 39 → 40 |
-| AP3b | Stall report and child answer | Planned | | | ADR-0054 § 1, § 3; before AC1; independent review |
+| AP0 | Progress report and baseline | Shipped | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) | #232 (`ac859be`) | Runbook + baseline in `root.md` (2026-09-30) |
+| AP1 | Sub-agent brief and delegation guidance | Shipped | [ENG-989](https://linear.app/retsu-ai/issue/ENG-989) | #235 (`7870b20`) | Prompt 14 → 15 |
+| AP2 | Pruned `read_file` stubs keep their header | Shipped | [ENG-988](https://linear.app/retsu-ai/issue/ENG-988) | #233 (`fc88136`) | |
+| AP3a | Report turns as persisted turns | Shipped | [ENG-990](https://linear.app/retsu-ai/issue/ENG-990) | #237 (`2a672fe`) | Store schema 39 → 40 |
+| AP3b | Stall report and child answer | In review | [ENG-1000](https://linear.app/retsu-ai/issue/ENG-1000) | `feat/eng-1000-ap3b-stall-report` | Stacked on ENG-1001 (#238, tool choice none); ADR-0054 § 3 amended |
 | AP4 | Non-blocking delegation | Planned | | | ADR-0054 § 4; independent review; `DESCRIPTOR_VERSION` bump |
 | AP5 | Evidence after AP3b and AP4 | Planned | | | Goal 6; 7-day windows |
-| AC0 | Soak and resource harness | In review (AC0.1); AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | `test/eng-986-ac0-soak` | AC0.1 stacked on AP1 (#235); AC0.2 = H0 registration, concurrency/fsync qualification |
+| AC0 | Soak and resource harness | AC0.1 Shipped; AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | #236 (`d1e51c2`) | AC0.2 = H0 registration, concurrency/fsync qualification |
 | AC1 | `RunState` extraction by reset scope | Planned | | | No behaviour change; independent review; after AP3b |
 | AC2 | Bounds reset at seams | Planned | | | ADR-0048 § 1 |
 | AC3 | No single-shot fatal faults | Planned | | | ADR-0048 § 2; empty-checkpoint item moved to AP3a |
@@ -423,3 +423,56 @@ Independent review: request changes. Every item is fixed.
   - Calls made on it are never executed.
   - The answer is the turn's text, otherwise the child's latest report, labelled interim.
   - The guarantee is the harness's, not the model's obedience.
+
+### 2026-10-02 — AP3b implemented (ENG-1000), stacked on ENG-1001
+
+- **Stall scope.** `runtime/progress.rs`: `StallScope` with `StallPolicy`
+  {`Root`, `Subagent`, `Exempt`} and `ReportDue` {`None`, `Report`,
+  `FinalAnswer`}. `is_progress` reuses `approval::classify`:
+  - progress: a successful mutating or external call; a non-read-only
+    shell command that ran (its result opens with the `shell`/`exec`
+    header, any exit, timeouts included); a successful blocking
+    `spawn_agent`;
+  - counted but not progress: reads, searches, read-only shell, denied
+    calls, `select_tools`;
+  - not counted: runtime rejections;
+  - also progress: applied steers and an answered `ask_user`.
+- **Turn selection.** Budget-final outranks the slice checkpoint, which
+  outranks the stall report. A child's report turn after three reports
+  without other progress is `FinalAnswer`.
+- **Notices.** `TurnNotice` gains `StallReport` (`stall_report`, its own
+  "64 calls changed nothing" opening line) and `FinalAnswer`
+  (`final_answer`). Both are in schema 40, which has not shipped in a
+  release yet (v0.1.5 is schema 39), so there is no new migration.
+- **Final-answer turn.**
+  - Tools stay declared with `ToolChoice::None`, and calls are rejected
+    as not executed.
+  - The run completes with the turn whatever it returned, after any
+    rejected results are durable.
+  - It bypasses Jev, audit and steering.
+- **Parent fallback.** `store.run_latest_report_text` walks notice spans,
+  so a retried report's text on later rows counts. `subagents.rs` labels
+  it with `INTERIM_REPORT_LABEL`.
+- **Audit children** are `stall_exempt` (`execution.rs`).
+- **ADR-0054 § 3 amended:** tools stay declared and the turn settles
+  whatever it returns. § 2 lists the four notice values. Updated to match:
+  architecture.md § run loop slices, protocol.md's schema-40 note, and the
+  runbook's report query.
+- **Tests.**
+  - Run loop (`src/tests/progress.rs`): (a), (b), (c), (c′), read-only
+    shell, (g), (d) and (e′), (e), a call on the final turn, (h), (m) via
+    `stall_exempt`, (n), denied calls, a truncated stall report.
+  - Session (`sessions/tests/progress.rs`):
+    - (d) the parent receives the answer;
+    - (e) an interim label on the latest report (`report 3`);
+    - no text at all is still an error;
+    - (c″) a child's answer resets the parent;
+    - replay of a child that answered is byte-identical, and the
+      reference oracle agrees;
+    - (m) a real audit child making 96 reads gets no notice.
+  - The audit and run-loop tests fail with their rule removed (checked by
+    hand).
+- **Fixtures.** The slice fixtures now write once per turn, so they reach
+  the 256-call checkpoint rather than a stall report. The headless
+  rollover fixture answers stall reports.
+
