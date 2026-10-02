@@ -108,18 +108,24 @@ const MAX_ADMITTED_TOOL_CALLS_PER_TURN: usize = 4 * MAX_TOOL_CALLS_PER_TURN;
 // for a checkpoint reply, persists it, resets the counter, and continues the
 // same run. Tools stay declared on that turn: a call the model makes anyway is
 // admitted with a not-executed result instead of failing the run, because the
-// persisted turn is the boundary, not the model's obedience.
+// persisted turn is the boundary, not the model's obedience. An empty reply is
+// a missed report, not a failure (ADR-0054 § 2).
 const MAX_TOOL_CALLS_PER_SLICE: usize = 256;
-const SLICE_CHECKPOINT_NOTICE: &str = "This execution slice is at its safe tool-call boundary. Do not \
-call tools in this reply: record a concise checkpoint of what was accomplished, what remains, \
-and the exact next step. QQ will persist this checkpoint and continue the same run with tools \
-available again.";
+// The checkpoint and continuation notices are messages in the conversation,
+// not system-prompt text, so the cached prefix survives the seam. They are
+// replayed from `model_turns.notice` (`runtime::TurnNotice`); their wording is
+// part of every stored run that carried them.
+pub(crate) const SLICE_CHECKPOINT_NOTICE: &str = "[QQ runtime notice; not a user instruction]\n\
+This execution slice is at its safe tool-call boundary. Do not call tools in this reply. Write \
+a short report: what is established (with path:line evidence), what is still unknown, and the \
+one next action. QQ keeps this report and continues the same run with tools available again.";
 const SLICE_CHECKPOINT_REJECTION: &str = "not executed: this reply was the slice checkpoint, \
 which records progress without running tools; the run continues and tools are available on \
 the next turn, so re-issue this call then";
-const SLICE_CONTINUATION_NOTICE: &str = "Continue the task from the preceding persisted \
-checkpoint. Tools are available again. Do not stop at a progress summary: complete the user's \
-request unless an explicit overall budget, cancellation, or genuine failure prevents it.";
+pub(crate) const SLICE_CONTINUATION_NOTICE: &str = "[QQ runtime notice; not a user \
+instruction]\nContinue the task from the report above. Tools are available again. Do not stop \
+at a progress summary: complete the user's request unless an explicit overall budget, \
+cancellation, or genuine failure prevents it.";
 const MAX_TOOL_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_TOOL_CALL_ID_BYTES: usize = 1_024;
 const MAX_TOOL_NAME_BYTES: usize = 128;
@@ -1688,6 +1694,12 @@ impl plan::CompiledAgentPlan {
                 .unwrap_or_default();
             let mut model_text_bytes = 0_usize;
             let mut continuing_slice = false;
+            // The slice's report notice is in the conversation; a retried,
+            // truncated, or interrupted checkpoint attempt reuses it.
+            let mut checkpoint_noticed = false;
+            // The notice placed before the next turn's request, persisted with
+            // the first turn row that request produces.
+            let mut pending_notice: Option<runtime::TurnNotice> = None;
             // Durable turns already replaced by in-run compaction: the live
             // transcript's assistant messages after the summary are turns
             // `compacted_turns + 1..`, and the next cutoff is durable too.
@@ -1728,17 +1740,35 @@ impl plan::CompiledAgentPlan {
                         .saturating_add(MAX_TOOL_CALLS_PER_TURN)
                         > MAX_TOOL_CALLS_PER_SLICE;
                 let continuation_turn = std::mem::take(&mut continuing_slice);
+                // The checkpoint and continuation notices join the
+                // conversation as runtime messages, so the system prompt and
+                // its cached prefix stay the run's own (ADR-0054 § 2).
+                // A checkpoint resets the slice, so the next turn is never a
+                // checkpoint too; a budget-final turn has no tools, so it is
+                // not told that tools are available again.
+                debug_assert!(!(checkpoint_turn && continuation_turn));
+                let notice = if checkpoint_turn && !checkpoint_noticed {
+                    checkpoint_noticed = true;
+                    Some(runtime::TurnNotice::Report)
+                } else if continuation_turn && !budget_final_turn {
+                    Some(runtime::TurnNotice::Continuation)
+                } else {
+                    None
+                };
+                if let Some(notice) = notice {
+                    let message = Message::user(notice.text());
+                    irreducible_message_bytes =
+                        irreducible_message_bytes.saturating_add(measure_message(&message));
+                    Arc::make_mut(&mut messages).push(message);
+                    pending_notice = Some(notice);
+                }
                 let request_system: Arc<str> = if budget_final_turn {
                     Arc::from(format!("{system}\n\n{BUDGET_FINAL_RESPONSE_NOTICE}"))
-                } else if checkpoint_turn {
-                    Arc::from(format!("{system}\n\n{SLICE_CHECKPOINT_NOTICE}"))
-                } else if continuation_turn {
-                    Arc::from(format!("{system}\n\n{SLICE_CONTINUATION_NOTICE}"))
                 } else {
                     Arc::clone(&system)
                 };
                 let request_has_tools = allow_tools && !budget_final_turn;
-                let request_system_hash = if budget_final_turn || checkpoint_turn || continuation_turn {
+                let request_system_hash = if budget_final_turn {
                     ContentHash::from_bytes(Sha256::digest(request_system.as_bytes()).into())
                 } else {
                     system_prompt_hash
@@ -2496,6 +2526,7 @@ impl plan::CompiledAgentPlan {
                     usage: terminal_usage,
                     calls: calls.clone(),
                     truncated: truncated_turn,
+                    notice: pending_notice.take(),
                 };
                 budget.charge_turn(terminal_usage);
                 budget.charge_tool_calls(calls.iter().filter(|call| call.rejection.is_none()).count());
@@ -2733,25 +2764,41 @@ impl plan::CompiledAgentPlan {
                     return;
                 }
 
-                if checkpoint_turn && !assistant.has_content() {
-                    yield RuntimeEvent::Failed {
-                        kind: RunFailureKind::ProviderResponse,
-                        message: "provider returned an empty slice checkpoint".to_owned(),
-                    };
-                    return;
-                }
                 if checkpoint_turn {
                     // The persisted turn is the slice boundary whether or not
                     // the model obeyed the notice. Calls it made anyway were
                     // admitted with a rejection result above and settle
                     // through the ordinary result path below, so the next
                     // turn sees one result per call and can re-issue them.
+                    // An empty reply is a missed report: the slice still
+                    // resets and the run continues (ADR-0054 § 2).
                     slice_tool_calls = 0;
+                    checkpoint_noticed = false;
                     continuing_slice = true;
                     if calls.is_empty() {
+                        // Assembly drops an empty turn and fills the gap
+                        // between the two runtime notices with this same
+                        // placeholder, so live and replayed context match.
+                        let assistant = if assistant.has_content() {
+                            assistant
+                        } else {
+                            Message::assistant(EMPTY_TURN_PLACEHOLDER)
+                        };
                         irreducible_message_bytes = irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         Arc::make_mut(&mut messages).push(assistant);
+                        // Steering that arrived during the report is applied
+                        // here, before the continuation notice, exactly as at
+                        // any other turn boundary.
+                        if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                            for steer in applied {
+                                yield RuntimeEvent::SteeringApplied {
+                                    message_id: steer.message_id,
+                                    turn_ordinal: turn_ordinal.saturating_add(1),
+                                    attachments: steer.attachments,
+                                };
+                            }
+                        }
                         continue;
                     }
                 }
@@ -8491,20 +8538,31 @@ mod tests {
     }
 
     /// Whether a recorded request is the slice-checkpoint turn: tools stay
-    /// declared there, so the notice in the system prompt is the marker.
+    /// declared there and the system prompt is unchanged, so the report
+    /// notice as the last message is the marker.
     fn is_checkpoint_request(request: &ModelRequest) -> bool {
-        request
-            .system()
-            .is_some_and(|system| system.contains(SLICE_CHECKPOINT_NOTICE))
+        last_user_text(request) == Some(SLICE_CHECKPOINT_NOTICE)
+    }
+
+    /// The text of the request's last message when it is a user text, such
+    /// as a runtime notice.
+    fn last_user_text(request: &ModelRequest) -> Option<&str> {
+        let message = request.messages().last()?;
+        if message.role() != Role::User {
+            return None;
+        }
+        match message.content() {
+            [ContentBlock::Text { text }] => Some(text.as_str()),
+            _ => None,
+        }
     }
 
     #[tokio::test]
     async fn the_measured_token_chain_survives_the_slice_checkpoint_and_continuation() {
-        // Every turn reports usage. The checkpoint turn changes the system
-        // prompt, the continuation turn changes it again, and the turn after
-        // that restores it: three requests that used to fall back to the raw
-        // byte estimate. Each must still carry a measurement-derived
-        // estimate, adjusted by the byte deltas.
+        // Every turn reports usage. The checkpoint and continuation turns add
+        // a notice message each; the system prompt and the static prefix stay
+        // the run's own (ADR-0054 § 2). Each request must still carry a
+        // measurement-derived estimate, adjusted by the byte deltas.
         struct MeasuredCheckpoint {
             emitted: Mutex<usize>,
         }
@@ -8604,6 +8662,20 @@ mod tests {
                 _ => None,
             })
             .collect();
+        // One static prefix for the whole run: the seam no longer changes it,
+        // so occupancy reuse and the provider cache hold across it.
+        let prefixes = events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::Prepared { static_prefix, .. } => Some(*static_prefix),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(prefixes.len() > 3);
+        assert!(
+            prefixes.iter().all(|prefix| *prefix == prefixes[0]),
+            "{prefixes:?}"
+        );
         // The first request has nothing to inherit; every later one does,
         // including the checkpoint, the continuation, and the turn after.
         assert_eq!(prepared[0].1, None);
@@ -8619,9 +8691,8 @@ mod tests {
         // Every measured turn reports 1,000 tokens, so each request after the
         // first estimates 1,000 plus the byte delta of one turn's calls and
         // results (~300 tokens here), never the raw byte count of the whole
-        // transcript. The checkpoint request keeps its schemas and is charged
-        // only its notice; the continuation swaps notices; the turn after is
-        // credited the notice back and converges on the measurement again.
+        // transcript. The checkpoint and continuation requests are charged
+        // only their notice message on top of the measurement.
         for (turn, tokens) in &prepared[1..] {
             let tokens = tokens.expect("measured");
             assert!((900..=1_400).contains(&tokens), "turn {turn}: {tokens}");
@@ -8867,15 +8938,19 @@ mod tests {
         assert!(!requests[checkpoint_index].tools().is_empty());
         let continuation = &requests[checkpoint_index + 1];
         assert!(!continuation.tools().is_empty());
-        assert!(
-            continuation
-                .system()
-                .is_some_and(|system| system.contains(SLICE_CONTINUATION_NOTICE))
+        // Neither seam touches the system prompt: the notices are messages,
+        // so the cached prefix holds across the checkpoint (ADR-0054 § 2).
+        assert_eq!(requests[checkpoint_index].system(), requests[0].system());
+        assert_eq!(continuation.system(), requests[0].system());
+        assert_eq!(
+            last_user_text(continuation),
+            Some(SLICE_CONTINUATION_NOTICE)
         );
-        // The rejected call has exactly one result, in the transcript the
-        // continuation turn sees, so the model can re-issue it.
+        // The rejected call has exactly one result, just before the
+        // continuation notice, so the model can re-issue it.
+        let messages = continuation.messages();
         assert!(matches!(
-            continuation.messages().last().unwrap().content(),
+            messages[messages.len() - 2].content(),
             [ContentBlock::ToolResult { call_id, content, is_error: true }]
                 if call_id == "checkpoint-call" && content == SLICE_CHECKPOINT_REJECTION
         ));
@@ -9127,12 +9202,25 @@ mod tests {
             })
         ));
 
+        // An empty checkpoint is a missed report, not a failure: the slice
+        // still resets and the run finishes (ADR-0054 § 2). The live context
+        // fills the empty turn with the placeholder assembly would insert.
         struct EmptyCheckpoint {
             turn: Mutex<usize>,
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
         }
 
         impl Provider for EmptyCheckpoint {
             fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.requests.lock().unwrap().push(request.clone());
+                if last_user_text(&request) == Some(SLICE_CONTINUATION_NOTICE) {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "finished after the missed report".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
                 if is_checkpoint_request(&request) {
                     return Box::pin(stream::iter([Ok(ProviderEvent::Completed {
                         usage: Some(qq_provider::ProviderUsage {
@@ -9167,9 +9255,11 @@ mod tests {
             }
         }
 
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             EmptyCheckpoint {
                 turn: Mutex::new(0),
+                requests: Arc::clone(&requests),
             },
             "gpt-test",
             256,
@@ -9191,13 +9281,246 @@ mod tests {
                 }
             }
         )));
-        assert!(matches!(
-            events.last(),
-            Some(RunEvent::Failed {
-                kind: RunFailureKind::ProviderResponse,
-                message,
-            }) if message == "provider returned an empty slice checkpoint"
-        ));
+        assert!(
+            matches!(events.last(), Some(RunEvent::Completed)),
+            "{:?}",
+            events.last()
+        );
+        let requests = requests.lock().unwrap();
+        let continuation = requests.last().unwrap();
+        let messages = continuation.messages();
+        assert_eq!(
+            messages[messages.len() - 3..],
+            [
+                Message::user(SLICE_CHECKPOINT_NOTICE),
+                Message::assistant(EMPTY_TURN_PLACEHOLDER),
+                Message::user(SLICE_CONTINUATION_NOTICE),
+            ]
+        );
+    }
+
+    /// When the turn after a slice report is the budget-final turn, it has no
+    /// tools, so it is not told that tools are available again: it carries
+    /// only the budget-final notice, and its turn records no continuation.
+    #[tokio::test]
+    async fn a_budget_final_turn_after_a_report_gets_no_continuation_notice() {
+        struct ReportThenFinal {
+            calls: Mutex<usize>,
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for ReportThenFinal {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.requests.lock().unwrap().push(request.clone());
+                if is_checkpoint_request(&request) || request.tools().is_empty() {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "report".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let mut calls = self.calls.lock().unwrap();
+                let first = *calls;
+                *calls += MAX_TOOL_CALLS_PER_TURN;
+                let mut events = Vec::new();
+                for index in first..first + MAX_TOOL_CALLS_PER_TURN {
+                    let id = format!("call-{index}");
+                    events.push(Ok(ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "read_file".to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: r#"{"path":"note.txt"}"#.to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
+                }
+                events.push(Ok(ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
+            }
+        }
+
+        // Sixteen-call turns fill the slice exactly: after sixteen of them
+        // (256 calls) the next turn could pass the ceiling, so turn 17 is the
+        // report. With 18 turns allowed, turn 18 is the reserved tool-free
+        // final response, which is also the first turn of the next slice.
+        let report_turn =
+            u32::try_from(MAX_TOOL_CALLS_PER_SLICE / MAX_TOOL_CALLS_PER_TURN).unwrap() + 1;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            ReportThenFinal {
+                calls: Mutex::new(0),
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("long task")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Auto,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).with_limits(
+                    RunLimits {
+                        max_model_turns: Some(report_turn + 1),
+                        ..RunLimits::default()
+                    },
+                    None,
+                ),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        let requests = requests.lock().unwrap();
+        let report_at = requests.iter().position(is_checkpoint_request).unwrap();
+        let final_request = &requests[report_at + 1];
+        assert!(
+            final_request.tools().is_empty(),
+            "the final response has no tools"
+        );
+        assert!(
+            final_request
+                .system()
+                .is_some_and(|system| system.contains(BUDGET_FINAL_RESPONSE_NOTICE))
+        );
+        assert!(
+            !final_request
+                .messages()
+                .contains(&Message::user(SLICE_CONTINUATION_NOTICE)),
+            "a tool-free turn is never told tools are available again"
+        );
+        let notices = events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::AssistantTurnCompleted { notice, .. } => Some(*notice),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notices.last(),
+            Some(&None),
+            "the final turn records no continuation: {notices:?}"
+        );
+        assert!(notices.contains(&Some(runtime::TurnNotice::Report)));
+    }
+
+    /// A run under Jev review can never reach a slice report: Jev admits one
+    /// tool call per turn and at most 32 reviews per run, both far below the
+    /// 241 executed calls that trigger a checkpoint, so the report turn can
+    /// never become a Jev final candidate. If either bound is raised past the
+    /// slice, report turns need an explicit Jev rule (ADR-0054 § 2).
+    #[test]
+    fn a_jev_run_cannot_reach_a_slice_report() {
+        let reviews = usize::from(runtime::MAX_CHECKPOINT_REVIEWS_PER_RUN);
+        assert!(
+            reviews < MAX_TOOL_CALLS_PER_SLICE - MAX_TOOL_CALLS_PER_TURN,
+            "Jev's review cap now reaches the slice checkpoint"
+        );
+    }
+
+    /// A checkpoint reply with no content *and no usage* after fresh tool
+    /// results is a gateway that swallowed a failure, not a missed report:
+    /// it is retried like any transient fault. The report notice is placed
+    /// once and the retry's report is the one that stands. (A metered empty
+    /// reply is a missed report; see the test above.)
+    #[tokio::test(start_paused = true)]
+    async fn an_unmetered_empty_checkpoint_is_retried_as_a_transient_fault() {
+        struct SwallowedCheckpoint {
+            calls: Mutex<usize>,
+            checkpoint_attempts: Mutex<usize>,
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for SwallowedCheckpoint {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.requests.lock().unwrap().push(request.clone());
+                if is_checkpoint_request(&request) {
+                    let mut attempts = self.checkpoint_attempts.lock().unwrap();
+                    *attempts += 1;
+                    if *attempts == 1 {
+                        return Box::pin(stream::iter([Ok(ProviderEvent::Completed {
+                            usage: None,
+                        })]));
+                    }
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "report after retry".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                if last_user_text(&request) == Some(SLICE_CONTINUATION_NOTICE) {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let mut calls = self.calls.lock().unwrap();
+                let first = *calls;
+                *calls += MAX_TOOL_CALLS_PER_TURN;
+                let mut events = Vec::new();
+                for index in first..first + MAX_TOOL_CALLS_PER_TURN {
+                    let id = format!("call-{index}");
+                    events.push(Ok(ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "unknown".to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: "{}".to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
+                }
+                events.push(Ok(ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
+            }
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            SwallowedCheckpoint {
+                calls: Mutex::new(0),
+                checkpoint_attempts: Mutex::new(0),
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run(RunCommand::new("hello"))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RunEvent::Completed)),
+            "{:?}",
+            events.last()
+        );
+        let requests = requests.lock().unwrap();
+        // The swallowed reply was re-issued: two checkpoint requests.
+        assert_eq!(
+            requests.iter().filter(|r| is_checkpoint_request(r)).count(),
+            2
+        );
+        let last = requests.last().unwrap().messages();
+        assert_eq!(
+            last.iter()
+                .filter(|message| **message == Message::user(SLICE_CHECKPOINT_NOTICE))
+                .count(),
+            1
+        );
+        assert!(last.contains(&Message::assistant("report after retry")));
     }
 
     #[tokio::test(start_paused = true)]
@@ -10794,7 +11117,7 @@ mod tests {
 
     #[test]
     fn a_root_prompt_and_tools_change_only_by_the_brief_guidance() {
-        // Golden against prompt version 14 (`356092a`): a root's system
+        // Golden against prompt version 14: a root's system
         // prompt gains only the delegation bullet, and its tools block only
         // the `spawn_agent` `task` description. Everything else is
         // byte-identical, so a root keeps its prompt-cache prefix up to the

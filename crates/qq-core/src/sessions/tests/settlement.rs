@@ -386,6 +386,7 @@ async fn recovery_interrupts_only_the_current_turns_message() {
                 estimated_cost_usd_nanos: None,
                 accounting: None,
                 truncated: false,
+                notice: None,
             },
         )
         .await
@@ -543,6 +544,7 @@ async fn recovery_interrupts_running_tools_without_reexecuting_them() {
                 estimated_cost_usd_nanos: None,
                 accounting: None,
                 truncated: false,
+                notice: None,
             },
         )
         .await
@@ -700,6 +702,7 @@ async fn orphaned_tool_call_blocks_replay_with_synthesized_interrupted_results()
                 estimated_cost_usd_nanos: None,
                 accounting: None,
                 truncated: false,
+                notice: None,
             },
         )
         .await

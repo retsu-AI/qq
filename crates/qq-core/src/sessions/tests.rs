@@ -697,6 +697,172 @@ struct RenewableSliceLoader {
     metered_empty_checkpoint: bool,
 }
 
+/// A `RenewableSliceProvider` whose first checkpoint reply is cut: with
+/// `fault`, the stream streams partial text and then fails transiently (the
+/// run retries the report); otherwise it stops at the output limit (the run
+/// continues it). The next attempt finishes the report.
+struct TruncatedReportProvider {
+    inner: RenewableSliceProvider,
+    truncated: StdMutex<bool>,
+    fault: bool,
+}
+
+impl Provider for TruncatedReportProvider {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        let continuing_report = request.messages().last()
+            == Some(&Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE))
+            || request.messages().last().is_some_and(|message| {
+                message.role() == Role::User
+                    && message.content().iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text } if text.contains("transient provider error"))
+                    })
+            });
+        let at_report =
+            request.messages().last() == Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE));
+        if !at_report && !continuing_report {
+            return self.inner.stream(request);
+        }
+        self.inner.requests.lock().unwrap().push(request);
+        let mut truncated = self.truncated.lock().unwrap();
+        let first = !*truncated;
+        *truncated = true;
+        Box::pin(stream::iter(if first && self.fault {
+            vec![
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: "report part one".to_owned(),
+                }),
+                Err(qq_provider::ProviderError::Transport(
+                    "connection reset mid-report".to_owned(),
+                )),
+            ]
+        } else if first {
+            vec![
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: "report part one".to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::Incomplete {
+                    usage: None,
+                    reason: qq_provider::IncompleteReason::OutputTokens,
+                }),
+            ]
+        } else {
+            vec![
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: " and part two".to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+            ]
+        }))
+    }
+}
+
+struct TruncatedReportLoader {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    fault: bool,
+}
+
+impl RuntimeLoader for TruncatedReportLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let requests = Arc::clone(&self.requests);
+        let fault = self.fault;
+        Box::pin(async move {
+            Runtime::new(
+                TruncatedReportProvider {
+                    inner: RenewableSliceProvider {
+                        requests,
+                        checkpoint_wait: None,
+                        metered_empty_checkpoint: false,
+                    },
+                    truncated: StdMutex::new(false),
+                    fault,
+                },
+                "test-model",
+                256,
+            )
+            .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+            .map_err(|error| RuntimeLoadError {
+                kind: RunFailureKind::Configuration,
+                message: error.to_string(),
+            })
+        })
+    }
+}
+
+/// Holds the checkpoint request until the test releases it, then answers
+/// with `reply` (empty: a missed report). The test can act while the report
+/// is in flight.
+#[derive(Clone)]
+struct CheckpointGate {
+    reached: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    reply: &'static str,
+}
+
+/// A `RenewableSliceLoader` whose checkpoint request waits on `gate`.
+struct GatedSliceLoader {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    gate: CheckpointGate,
+}
+
+impl RuntimeLoader for GatedSliceLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let requests = Arc::clone(&self.requests);
+        let gate = self.gate.clone();
+        Box::pin(async move {
+            Runtime::new(
+                GatedSliceProvider {
+                    inner: RenewableSliceProvider {
+                        requests,
+                        checkpoint_wait: None,
+                        metered_empty_checkpoint: false,
+                    },
+                    gate,
+                },
+                "test-model",
+                256,
+            )
+            .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+            .map_err(|error| RuntimeLoadError {
+                kind: RunFailureKind::Configuration,
+                message: error.to_string(),
+            })
+        })
+    }
+}
+
+struct GatedSliceProvider {
+    inner: RenewableSliceProvider,
+    gate: CheckpointGate,
+}
+
+impl Provider for GatedSliceProvider {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        if request.messages().last() != Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE)) {
+            return self.inner.stream(request);
+        }
+        self.inner.requests.lock().unwrap().push(request);
+        let gate = self.gate.clone();
+        Box::pin(async_stream! {
+            gate.reached.notify_one();
+            gate.release.notified().await;
+            if !gate.reply.is_empty() {
+                yield Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: gate.reply.to_owned(),
+                });
+            }
+            yield Ok(qq_provider::ProviderEvent::Completed {
+                usage: Some(qq_provider::ProviderUsage {
+                    input_tokens: 1,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 1,
+                    reasoning_tokens: None,
+                }),
+            });
+        })
+    }
+}
+
 impl RuntimeLoader for RenewableSliceLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
@@ -748,9 +914,10 @@ impl Provider for RenewableSliceProvider {
         drop(requests);
 
         let tool_turns = crate::MAX_TOOL_CALLS_PER_SLICE / crate::MAX_TOOL_CALLS_PER_TURN;
-        let checkpoint_request = request
-            .system()
-            .is_some_and(|system| system.contains(crate::SLICE_CHECKPOINT_NOTICE));
+        // The report notice is the request's last message; the system prompt
+        // is unchanged across the seam (ADR-0054 § 2).
+        let checkpoint_request =
+            request.messages().last() == Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE));
         if checkpoint_request {
             assert!(
                 !request.tools().is_empty(),
@@ -779,11 +946,23 @@ impl Provider for RenewableSliceProvider {
             ]));
         }
         if current > tool_turns {
+            // Metered in the empty-checkpoint mode so the run's usage stays
+            // known through the turn after the missed report.
             return Box::pin(stream::iter([
                 Ok(qq_provider::ProviderEvent::OutputTextDelta {
                     text: "task complete".to_owned(),
                 }),
-                Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                Ok(qq_provider::ProviderEvent::Completed {
+                    usage: self
+                        .metered_empty_checkpoint
+                        .then_some(qq_provider::ProviderUsage {
+                            input_tokens: 7,
+                            cache_read_input_tokens: 0,
+                            cache_write_input_tokens: 0,
+                            output_tokens: 3,
+                            reasoning_tokens: None,
+                        }),
+                }),
             ]));
         }
 
@@ -1615,6 +1794,7 @@ async fn spill_one_call(
                 estimated_cost_usd_nanos: None,
                 accounting: None,
                 truncated: false,
+                notice: None,
             },
         )
         .await
@@ -2484,7 +2664,7 @@ mod reference_assembly {
         context: &mut Vec<Message>,
     ) -> Result<(), SessionRuntimeError> {
         let mut statement = transaction.prepare(
-            "SELECT turn_ordinal, assistant_content_json, truncated FROM model_turns
+            "SELECT turn_ordinal, assistant_content_json, truncated, notice FROM model_turns
                  WHERE run_id = ?1 ORDER BY turn_ordinal",
         )?;
         let turns = statement
@@ -2493,6 +2673,7 @@ mod reference_assembly {
                     row.get::<_, u32>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, bool>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -2533,13 +2714,20 @@ mod reference_assembly {
         if let Some((summary, turn_cutoff)) = marker {
             let replaced = turns
                 .iter()
-                .take_while(|(ordinal, _, _)| *ordinal <= turn_cutoff)
+                .take_while(|(ordinal, _, _, _)| *ordinal <= turn_cutoff)
                 .count();
             if replaced > 0 {
                 turns.drain(..replaced);
+                // The live run's summary replaced every message up to the
+                // first kept assistant turn: that turn's steering and its
+                // runtime notice went with the summarized span.
+                let first_kept = turns.first().map_or(turn_cutoff, |turn| turn.0);
+                if let Some(first) = turns.first_mut() {
+                    first.3 = None;
+                }
                 while steering
                     .front()
-                    .is_some_and(|(applied_before, _)| *applied_before <= turn_cutoff)
+                    .is_some_and(|(applied_before, _)| *applied_before <= first_kept)
                 {
                     steering.pop_front();
                 }
@@ -2548,13 +2736,23 @@ mod reference_assembly {
                 )));
             }
         }
-        for (turn_ordinal, content_json, truncated) in turns {
+        for (turn_ordinal, content_json, truncated, notice) in turns {
             while steering
                 .front()
                 .is_some_and(|(applied_before, _)| *applied_before <= turn_ordinal)
             {
                 let (_, text) = steering.pop_front().expect("front was just checked");
                 context.push(Message::user(text));
+            }
+            // The checkpoint or continuation notice the live run placed
+            // before this turn's request.
+            match notice.as_deref() {
+                None => {}
+                Some("report") => context.push(Message::user(crate::SLICE_CHECKPOINT_NOTICE)),
+                Some("continuation") => {
+                    context.push(Message::user(crate::SLICE_CONTINUATION_NOTICE));
+                }
+                Some(_) => return Err(SessionRuntimeError::CODEC),
             }
             let content: Vec<ContentBlock> =
                 serde_json::from_str::<Vec<PersistedContentBlock>>(&content_json)?
@@ -2846,6 +3044,12 @@ enum AutoCompactScript {
         summary: String,
         overflows: Arc<AtomicUsize>,
     },
+    /// Sixteen `write_file` calls per turn, so a slice checkpoint arrives after
+    /// sixteen turns; the checkpoint is answered with a text report, and the
+    /// task ends once `calls` results are in context or summarized. The
+    /// summarizer instruction is answered with a valid summary carrying
+    /// `turns_done`, so in-run compactions after the checkpoint keep going.
+    ShellBatchesAcrossACheckpoint { calls: usize, text: String },
     /// `ShellRepeatedlyWithSummaries` whose summarizer reply is cut at the
     /// output limit after `cut` bytes on the first request and completed on
     /// the continuation, so an in-run summary exercises the truncation join.
@@ -3203,6 +3407,55 @@ impl Provider for AutoCompactProvider {
                         Ok(qq_provider::ProviderEvent::Completed { usage: None }),
                     ]))
                 }
+            }
+            AutoCompactScript::ShellBatchesAcrossACheckpoint { calls, text } => {
+                if last_text.contains("Summarize this conversation") {
+                    let summarized = prior_results.len() + summarized_before;
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: format!(
+                                "{}\nturns_done={summarized}",
+                                valid_summary("batched shell work")
+                            ),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                if last_text == crate::SLICE_CHECKPOINT_NOTICE {
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: "report: batches so far are done".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let done = prior_results.len() + summarized_before;
+                if done >= *calls {
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let mut events = Vec::new();
+                for index in done..done + crate::MAX_TOOL_CALLS_PER_TURN {
+                    let id = format!("call_batch_{index}");
+                    // A mutating built-in, not a process spawn: never stubbed
+                    // by pruning, and cheap enough for 384 calls in one test.
+                    events.push(Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "write_file".to_owned(),
+                    }));
+                    events.push(Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: format!(
+                            r#"{{"path":"batch/{index}.txt","content":"{}"}}"#,
+                            "x".repeat(400)
+                        ),
+                    }));
+                    events.push(Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }));
+                }
+                events.push(Ok(qq_provider::ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
             }
             AutoCompactScript::ShellRepeatedlyWithProviderOverflow {
                 turns,
@@ -3633,6 +3886,7 @@ async fn project_terminal_run_with_tool_boundaries(
                 estimated_cost_usd_nanos: None,
                 accounting: None,
                 truncated: false,
+                notice: None,
             },
         )
         .await

@@ -9,7 +9,7 @@ appended below, newest last.
 | AP0 | Progress report and baseline | In review | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) | `docs/eng-978-ac-progress-first` | Runbook + baseline in `root.md` (2026-09-30); ships with the plan revision |
 | AP1 | Sub-agent brief and delegation guidance | In review | [ENG-989](https://linear.app/retsu-ai/issue/ENG-989) | `feat/eng-989-ap1-subagent-brief` | Stacked on #233; prompt 14 → 15 |
 | AP2 | Pruned `read_file` stubs keep their header | In review | [ENG-988](https://linear.app/retsu-ai/issue/ENG-988) | `fix/eng-988-ap2-pruned-read-stub` | Stacked on #232 |
-| AP3a | Report turns as persisted turns | Planned | | | ADR-0054 § 2; after AC0.1; one store column; independent review; takes AC3's empty-checkpoint item |
+| AP3a | Report turns as persisted turns | In review | [ENG-990](https://linear.app/retsu-ai/issue/ENG-990) | `feat/eng-990-ap3a-report-turns` | Stacked on AC0.1 (#236); store schema 39 → 40 |
 | AP3b | Stall report and child answer | Planned | | | ADR-0054 § 1, § 3; before AC1; independent review |
 | AP4 | Non-blocking delegation | Planned | | | ADR-0054 § 4; independent review; `DESCRIPTOR_VERSION` bump |
 | AP5 | Evidence after AP3b and AP4 | Planned | | | Goal 6; 7-day windows |
@@ -305,3 +305,103 @@ and both sides were kept. Gates on the stack:
 - Workspace 2019 passed, after one unrelated timing flake in
   `child_mutation_drains_before_steering_or_a_replacement_run_can_write`
   that passed 6 of 6 on rerun. fmt and clippy are clean.
+
+### 2026-10-01 — AP3a report turns as persisted turns (ENG-990)
+
+- **Notices moved.** The checkpoint and continuation notices left the system
+  prompt and became runtime messages, framed as runtime notices. The
+  checkpoint text now asks for the report shape (established with
+  `path:line`, unknown, next action). It still includes "safe tool-call
+  boundary".
+- **Persistence and replay.** `runtime::TurnNotice` is carried on
+  `AssistantTurnCompleted`. It is persisted as `model_turns.notice` (schema
+  40: nullable TEXT, `report` / `continuation`) and replayed after the
+  boundary's steering and before the turn. An unknown stored value is a
+  `CODEC` error. The reference oracle mirrors the rule independently.
+- **Empty checkpoint.** It is a missed report. The live context pushes
+  `EMPTY_TURN_PLACEHOLDER`, which assembly would insert anyway. Steering at
+  a text-only checkpoint is now applied before the continuation.
+- **Tests:**
+  - flipped: the direct empty-checkpoint test, the session one (renamed;
+    the run completes and is billed for the missed report), and AC0.1's soak
+    oracle `an_empty_checkpoint_is_a_missed_report_and_the_run_continues`;
+  - live versus restart replay is byte-identical across a checkpoint and
+    continuation (text and empty), and matches the reference oracle;
+  - the system prompt is equal across the seam;
+  - new migration test `version_thirty_nine…` (NULL, replay, bad shape,
+    unknown value);
+  - migrations now assert `STORE_SCHEMA_VERSION` instead of 27 literals.
+- **Gates.** Workspace 2020 passed. fmt and clippy clean. Soak `--ignored`
+  5 passed.
+- **Benches (3 runs each, A then B).**
+  - `context_assembly` assemble medians: 51.6 / 52.7 / 55.9 µs before,
+    51.0 / 52.9 / 55.2 µs after.
+  - `turn_overhead` medians: 15.6 / 15.1 / 15.0 ms before, 16.4 / 15.4 /
+    15.6 ms after. The ranges overlap, and one turn-10 outlier (19.3 ms) is
+    a single sample.
+  - Both within noise. Evidence: `target/qq-perf/ap3a-2026-10-01/`.
+
+### 2026-10-01 — AP3a review follow-up (ENG-990)
+
+Independent review: request changes. Every item is fixed.
+- **Blocking.** The in-run splice removed the notice and steering in front
+  of the first kept turn, but replay kept them. The steering half predates
+  this slice. Replay and the reference oracle now drop both.
+  `replay_drops_the_notice_and_steering_the_in_run_splice_removed` failed
+  on the old rule and passes now.
+- **Should-fix:**
+  - a budget-final turn never gets the continuation notice;
+  - an unmetered empty checkpoint is retried as a swallowed gateway failure
+    (decision: kept), documented and tested;
+  - `notice` marks where a notice entered the conversation, not every
+    attempt (decision: kept, because it gives byte-identity). Architecture
+    and the runbook query were rewritten to judge each report by its last
+    attempt;
+  - a misplaced doc comment was fixed.
+- **Tests added:** steering during a report, for text and empty reports
+  (l); audit `always` audits only the final answer (j); a truncated report
+  keeps one notice and replays identically (k); one static prefix across
+  the seam (a′).
+
+### 2026-10-01 — AP3a second review: approved (ENG-990)
+
+- **Approved,** with S1–S3 to land in this PR. They did:
+  - S1: the budget-final regression test fails if the guard reverts;
+  - S2: the runbook query reads `$.content` from replay-envelope turns.
+    It was checked on object, whitespace-only and plain shapes;
+  - S3: added the end-to-end G2 test. It reaches the report and compacts
+    three times, once four requests after the report. It fails on the
+    pre-fix replay rule.
+- **G5:** a faulted report is retried under one notice, and the stored rows
+  replay in live order.
+- **(j) for Jev:** this case is unreachable. Jev admits one call per turn
+  and caps a run at `MAX_CHECKPOINT_REVIEWS_PER_RUN` (32, now a named
+  constant), far below the 241 calls that trigger a checkpoint. A test
+  fails if that ever changes.
+- **S4** (cutoff unit drift, which predates this slice) is filed as
+  ENG-991 and becomes an AC2 input.
+- Workspace and soak results are recorded in the PR.
+
+### 2026-10-01 — Stack review and live provider check (ENG-990)
+
+- **Whole-stack review: ready to merge.** No cross-slice defect. A copy of
+  the live store (schema 39, 13,882 `model_turns` rows) migrated to 40, and
+  `qq doctor` reads it.
+- **Live Bedrock Converse check** of the shape AP3a makes routine: tool
+  results, then a user text message.
+  - Claude (Haiku 4.5, Sonnet 4.5), Nova Micro, Qwen3 and gpt-oss accept
+    it.
+  - Llama 3.3 and Pixtral reject it, and they reject the merged
+    single-message form too ("Conversation blocks and tool result blocks
+    cannot be provided in the same turn"). Coalescing in `qq-provider`
+    therefore would not help, and none was added.
+  - These models already fail on `main` the first time steering lands after
+    tool results. AP3a adds the slice checkpoint as a second trigger.
+  - No route in the live store uses them.
+  - Filed as ENG-999 with three options.
+- **Doc drift fixed:**
+  - the plan header and plans index;
+  - "turn's kind" in the plan and ADR-0054 becomes `model_turns.notice`;
+  - the runbook's schema note;
+  - the golden test comment no longer cites a SHA;
+  - row order in `root.md`.

@@ -106,11 +106,13 @@ without producing anything.
    - A report with text is a progress event. A report without text is a
      *missed* report. It is not a failure: it resets the count and is
      counted toward decision 3.
-   - The turn's kind (report, final answer or continuation) is persisted
-     with the turn as a store column. Replay renders the fixed notice for
-     that kind, the way it renders the truncation notice today
+   - The notice a turn answered (`report` or `continuation`) is persisted
+     with the turn as a store column, `model_turns.notice`, on the first
+     turn row whose request carried it. Replay renders that fixed notice
+     before the turn, the way it renders the truncation notice
      (`sessions/transcript.rs:1149–1151`), so live and restart assembly
-     stay byte-identical. This is a store schema change.
+     stay byte-identical. This is a store schema change (39 → 40). A
+     child's final-answer turn (decision 3) adds its notice value in AP3b.
 
    The 256-call slice checkpoint becomes the same kind of turn with the same
    notice, and its continuation notice moves out of the system prompt too.
@@ -209,7 +211,7 @@ with the AP0 runbook and changed with evidence.
 - **Contract changes.**
   - There is no `PROTOCOL_VERSION` change for decisions 1–3 and 5. A
     report is an ordinary assistant turn, so clients already render it.
-  - Decision 2 adds a store schema bump: the turn's kind.
+  - Decision 2 adds a store schema bump: the turn's notice.
   - Decision 4 adds two built-in tools, so `DESCRIPTOR_VERSION` bumps once.
     It is coordinated with the goal PR's bump, and whichever lands second
     takes the next number. It also adds a store schema bump for the

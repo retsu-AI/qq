@@ -141,6 +141,7 @@ pub(super) fn persist_model_turn(
         estimated_cost_usd_nanos,
         accounting,
         truncated,
+        notice,
     } = turn;
     if message.role() != Role::Assistant {
         return Err(SessionRuntimeError::CONSTRAINT);
@@ -211,8 +212,8 @@ pub(super) fn persist_model_turn(
     transaction.execute(
         "INSERT INTO model_turns(
                  run_id, turn_ordinal, assistant_content_json, model_json,
-                 usage_json, estimated_cost_usd_nanos, completed_at_ms, truncated
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 usage_json, estimated_cost_usd_nanos, completed_at_ms, truncated, notice
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             claimed.identity.run_id.to_string(),
             turn_ordinal,
@@ -222,6 +223,7 @@ pub(super) fn persist_model_turn(
             turn_cost,
             now,
             truncated,
+            notice.map(crate::runtime::TurnNotice::as_str),
         ],
     )?;
     let mut events = Vec::with_capacity(persisted_calls.len().saturating_add(3));

@@ -3998,6 +3998,95 @@ async fn an_exhausted_fold_admits_the_prompt_with_summary_only_history() {
     assert_eq!(prompts, 4);
 }
 
+/// The live splice removes every message before the first kept assistant
+/// turn, including the steering and the runtime notice that preceded that
+/// turn's request. Replay must drop them too, or a run that compacted right
+/// after a slice checkpoint (or a steer) assembles a message the live request
+/// never carried. Live context is built and spliced with the real boundary;
+/// replay goes through `append_run_turns` with the matching cutoff.
+#[test]
+fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
+    use crate::runtime::TurnNotice;
+    let assistant = |n: u32| Message::assistant(format!("turn {n}"));
+    // Seven turns, four kept: turn 4 is the first kept turn. It was the
+    // first turn of a new slice, and a steer joined before it.
+    let mut live = vec![Message::user("prompt")];
+    for n in 1..=7 {
+        if n == 4 {
+            live.push(Message::user("steer before four"));
+            live.push(Message::user(TurnNotice::Continuation.text()));
+        }
+        live.push(assistant(n));
+    }
+    let (replace_through, replaced_turns) =
+        crate::sessions::in_run_compaction_boundary(&live[1..], 4).unwrap();
+    assert_eq!(replaced_turns, 3);
+    let summary = Message::user(format!("{IN_RUN_COMPACTION_PREAMBLE}\n\nsummary"));
+    live.splice(1..1 + replace_through, [summary]);
+    // The live splice took the steer and the notice with the summarized span.
+    assert!(!live.contains(&Message::user(TurnNotice::Continuation.text())));
+    assert!(!live.contains(&Message::user("steer before four")));
+
+    let turns = (1..=7)
+        .map(|n| StoredTurn {
+            ordinal: n,
+            content_json: format!("[{{\"type\":\"text\",\"text\":\"turn {n}\"}}]"),
+            truncated: false,
+            notice: (n == 4).then_some(TurnNotice::Continuation),
+        })
+        .collect();
+    let mut replayed = vec![Message::user("prompt")];
+    append_run_turns(
+        turns,
+        HashMap::new(),
+        std::collections::VecDeque::from([(4, "steer before four".to_owned())]),
+        Some(InRunCompaction {
+            summary: "summary".to_owned(),
+            turn_cutoff: replaced_turns,
+        }),
+        &mut replayed,
+        &mut HashMap::new(),
+    )
+    .unwrap();
+    assert_eq!(replayed, live);
+
+    // A notice on a kept turn after the first one survives on both sides.
+    let mut live = vec![Message::user("prompt")];
+    for n in 1..=7 {
+        if n == 5 {
+            live.push(Message::user(TurnNotice::Report.text()));
+        }
+        live.push(assistant(n));
+    }
+    let (replace_through, replaced_turns) =
+        crate::sessions::in_run_compaction_boundary(&live[1..], 4).unwrap();
+    let summary = Message::user(format!("{IN_RUN_COMPACTION_PREAMBLE}\n\nsummary"));
+    live.splice(1..1 + replace_through, [summary]);
+    let turns = (1..=7)
+        .map(|n| StoredTurn {
+            ordinal: n,
+            content_json: format!("[{{\"type\":\"text\",\"text\":\"turn {n}\"}}]"),
+            truncated: false,
+            notice: (n == 5).then_some(TurnNotice::Report),
+        })
+        .collect();
+    let mut replayed = vec![Message::user("prompt")];
+    append_run_turns(
+        turns,
+        HashMap::new(),
+        std::collections::VecDeque::new(),
+        Some(InRunCompaction {
+            summary: "summary".to_owned(),
+            turn_cutoff: replaced_turns,
+        }),
+        &mut replayed,
+        &mut HashMap::new(),
+    )
+    .unwrap();
+    assert_eq!(replayed, live);
+    assert!(replayed.contains(&Message::user(TurnNotice::Report.text())));
+}
+
 #[test]
 fn in_run_compaction_boundary_keeps_the_recent_turns_with_their_results() {
     use crate::sessions::in_run_compaction_boundary as boundary;
@@ -4007,9 +4096,9 @@ fn in_run_compaction_boundary_keeps_the_recent_turns_with_their_results() {
     // two turns (four messages) and reports cutoff 2.
     let run: Vec<Message> = (0..6).flat_map(|_| [assistant(), results()]).collect();
     assert_eq!(boundary(&run, 4), Some((4, 2)));
-    // Steering applied before the first kept turn was part of the replaced
-    // span's request and is summarized with it — the same rule assembly
-    // uses (`applied_before <= turn_cutoff`).
+    // Steering applied before the first kept turn is replaced with the
+    // summarized span — assembly drops steering with `applied_before` up to
+    // and including the first kept turn.
     let mut with_steer = run.clone();
     with_steer.insert(4, Message::user("steer"));
     assert_eq!(boundary(&with_steer, 4), Some((5, 2)));
@@ -4107,4 +4196,117 @@ async fn an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verba
         })
         .count();
     assert_eq!(continuations, compactions);
+}
+
+/// End to end: a run reaches its slice report, keeps working, and then
+/// compacts in-run (more than once). Whatever the splices removed — including
+/// the report and continuation notices when their turns are summarized or are
+/// the first kept turn — a follow-up assembles exactly the live context, and
+/// the reference oracle agrees. (AP3a review gap G2.)
+#[tokio::test]
+async fn compacting_after_a_slice_report_replays_the_live_context() {
+    // Enough turns to compact twice after the report at turn 17.
+    let calls = 22 * crate::MAX_TOOL_CALLS_PER_TURN;
+    let mut harness = auto_compact_harness_with_loader_and_mode(
+        AutoCompactLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            scripts: vec![
+                AutoCompactScript::ShellBatchesAcrossACheckpoint {
+                    calls,
+                    text: "task complete".to_owned(),
+                },
+                AutoCompactScript::Text("follow-up done".to_owned()),
+            ],
+            loads: StdMutex::new(0),
+            // Sixteen 400-byte shell results per turn fill a 24k window a
+            // few turns after the report, and again later.
+            context_window: Some(24 * 1024),
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        },
+        ApprovalMode::Full,
+    )
+    .await;
+    let run = queue_prompt(&harness.runtime, harness.session_id, "do it".to_owned()).await;
+    // ~350 durable tool calls take a few seconds alone; under a loaded
+    // parallel suite allow more than the shared helper's 30 s.
+    let mut observed = Vec::new();
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let event = harness.events.next().await.unwrap().unwrap();
+            let done = finished_for(run)(&event.event);
+            observed.push(event);
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the run finishes");
+    let outcome = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id, outcome, ..
+            } if *run_id == run => Some(outcome.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
+    let compactions = observed
+        .iter()
+        .filter(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+        .count();
+    let live = {
+        let requests = harness.requests.lock().unwrap();
+        let report_at = requests
+            .iter()
+            .position(|request| {
+                request.messages().last() == Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE))
+            })
+            .expect("the run reached its slice report");
+        let first_compaction_after_report = requests[report_at..]
+            .iter()
+            .position(|request| {
+                request.messages().last().is_some_and(|message| {
+                    message.content().iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text } if text.contains("Summarize this conversation"))
+                    })
+                })
+            });
+        assert!(compactions >= 2, "{compactions}");
+        assert!(
+            first_compaction_after_report.is_some(),
+            "the run must compact after its report"
+        );
+        requests
+            .iter()
+            .rev()
+            .find(|request| {
+                !request.messages().last().is_some_and(|message| {
+                    message.content().iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text } if text.contains("Summarize this conversation"))
+                    })
+                })
+            })
+            .unwrap()
+            .messages()
+            .to_vec()
+    };
+    let follow_up =
+        queue_prompt(&harness.runtime, harness.session_id, "and then?".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(follow_up)).await;
+    let replayed = harness
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .messages()
+        .to_vec();
+    assert_eq!(&replayed[..live.len()], live.as_slice());
+    assert_assembly_matches_reference(
+        &harness.workspace_path.join("sessions.sqlite3"),
+        harness.session_id,
+    );
 }

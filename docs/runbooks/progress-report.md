@@ -13,7 +13,8 @@ record counts only.
 ## Setup
 
 The database is `sessions.sqlite3` in the data directory (`qq config paths`
-prints it). The queries were written against store schema 39. `end` pins
+prints it). The queries in §§ 1–2 and 4 run on store schema 39 or later; § 3's
+report-turn query needs schema 40 (`model_turns.notice`). `end` pins
 the window, so a recorded baseline can be reproduced later. Every query
 covers the 30 days before `end`.
 
@@ -21,7 +22,7 @@ covers the 30 days before `end`.
 db="file:$HOME/.local/share/qq/sessions.sqlite3?mode=ro"   # your data directory
 end="2026-10-01"                                             # window end (UTC date); 30 days before it
 q() { nix shell nixpkgs#sqlite -c sqlite3 -separator ' | ' "$db" "${1//@END@/$end}"; }
-q "SELECT value FROM metadata WHERE key = 'schema_version';"   # the queries assume 39
+q "SELECT value FROM metadata WHERE key = 'schema_version';"   # 39 or later; § 3's report query needs 40
 ```
 
 `@END@` in a query is replaced with `end`. A run is in the window when
@@ -133,8 +134,37 @@ SELECT count(*), sum(EXISTS (SELECT 1 FROM tool_calls t WHERE t.run_id = c.run_i
 These queries cover the whole store, not a window. They key on the
 rejection text RR1 introduced, so they only count checkpoints since RR1
 (#108) shipped, and they cannot see a checkpoint the model answered with
-text only or with nothing. AP3a adds the turn's kind to `model_turns`;
-that PR replaces this section with a query on the kind.
+text only or with nothing.
+
+From store schema 40 (AP3a), each slice report is marked by
+`model_turns.notice = 'report'` on the first turn whose request carried it.
+A report retried after a fault or an output-limit cut continues on later
+turn rows without the mark. Its final attempt is the last row before the row
+marked `continuation`. This query counts reports in the window, and how many
+ended without text (the missed reports), judging each report by its last
+attempt. A turn that carries a provider replay envelope is stored as
+`{"content": [...], "replay": ...}`, so the query reads blocks from
+`$.content` in that case.
+
+```sh
+q "WITH m AS (SELECT t.run_id, t.turn_ordinal, t.notice, t.assistant_content_json c FROM model_turns t
+     JOIN runs r ON r.id = t.run_id
+     WHERE r.started_at_ms >= strftime('%s','@END@','-30 days') * 1000 AND r.started_at_ms < strftime('%s','@END@') * 1000),
+reports AS (SELECT run_id, turn_ordinal start,
+     coalesce((SELECT min(n.turn_ordinal) FROM m n WHERE n.run_id = m.run_id
+               AND n.turn_ordinal > m.turn_ordinal AND n.notice = 'continuation'), 1 << 31) stop
+   FROM m WHERE notice = 'report'),
+last AS (SELECT r.run_id, (SELECT max(t.turn_ordinal) FROM m t WHERE t.run_id = r.run_id
+            AND t.turn_ordinal >= r.start AND t.turn_ordinal < r.stop) ordinal FROM reports r)
+SELECT count(*), sum(NOT EXISTS (SELECT 1 FROM m t,
+            json_each(t.c, CASE json_type(t.c) WHEN 'object' THEN '$.content' ELSE '$' END) b
+            WHERE t.run_id = last.run_id
+            AND t.turn_ordinal = last.ordinal AND json_extract(b.value, '$.type') = 'text'
+            AND trim(json_extract(b.value, '$.text')) <> '')) FROM last;"
+```
+
+Goal 6's checkpoint target uses this query once the window starts after
+AP3a merged.
 
 ## 4. Time parents spend blocked on children
 

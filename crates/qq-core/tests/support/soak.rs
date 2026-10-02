@@ -103,8 +103,14 @@ impl Provider for ScriptedProvider {
                 "1. Intent: finish the scripted task\n2. Decisions and constraints: local fixture only\n3. Work state: earlier steps are durable\n4. Files touched: none\n5. Errors: none\n6. User messages: finish the scripted task",
             );
         }
-        if request.system().is_some_and(|system| {
-            system.contains("This execution slice is at its safe tool-call boundary.")
+        // The checkpoint's report notice is the request's last message
+        // (ADR-0054 § 2); earlier notices stay in history, so only the last
+        // message identifies the checkpoint turn.
+        if request.messages().last().is_some_and(|message| {
+            message.content().iter().any(|block| {
+                matches!(block, qq_provider::ContentBlock::Text { text }
+                    if text.contains("This execution slice is at its safe tool-call boundary."))
+            })
         }) {
             drop(observed);
             if self.script.empty_checkpoint {
