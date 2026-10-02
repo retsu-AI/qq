@@ -1,0 +1,5 @@
+# wasm-bindgen-cli follows the `wasm-bindgen` version in Cargo.lock. wasm-opt
+# is pinned because older Binaryen releases reject the reference-types output
+# (measured in the ADR-0017 spike).
+[tools]
+wasm_opt = "version_123"

@@ -1,0 +1,10 @@
+{
+  "remotes": [
+    {
+      "name": "sessions",
+      "title": "Sessions",
+      "module": "remotes/sessions/qq-sessions.js",
+      "wasm": "remotes/sessions/qq-sessions_bg.wasm"
+    }
+  ]
+}
