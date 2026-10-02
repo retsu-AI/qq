@@ -466,3 +466,30 @@ slice is on `main`.
 - Delegating runs: 41 runs, 4 351 wall minutes, 1 722 minutes (40 %) with a
   `spawn_agent` call open (merged intervals). 34 of 124 spawns returned an
   error, 12 of them children over their context limit.
+
+
+### 2026-10-01 — Rust quality skill (user-requested, no issue supplied)
+
+- Added `.qq/skills/rust-quality/SKILL.md`: functional design, ownership, typed
+  errors, bounded/cancellation-safe async, measured performance, and `qq-verify`.
+  Adapted the three user references to QQ rules; no runtime/config changes.
+- Name/front matter/size checks passed (156-byte description, 15,042-byte file);
+  `cargo test -p qq-core workspace::skills::tests --lib` passed 3/3;
+  `git diff --check` passed. Existing unrelated work preserved.
+- Current-session `load_skill("rust-quality")` returned unknown; fresh catalog
+  discovery/loading remains unverified. Full workspace gates and benchmarks
+  not run for this Markdown-only addition. No commit, PR, or issue created.
+
+### 2026-10-01 — Rust skill reference-library revision
+
+- User rejected the shallow single-document checklist. Read Apollo's nine
+  chapters, Rust Engineer's five references, and Async Patterns' details; rebuilt
+  the entry as task-based routing to nine original detailed chapters plus sources.
+- Added ownership/functional/type/error/async/perf/testing/tooling/review examples,
+  tradeoffs, failure modes, and evidence checks. No runtime/config changes.
+- Validation: 18 Rust blocks compiled using pinned rustc and existing dependency
+  artifacts; 16 example tests passed; all local links/front matter/size checks
+  passed; skill-index tests passed 3/3; `git diff --check` passed.
+- Evidence script/binaries live in ignored `target/rust-quality-validation/`.
+  Full workspace gates not run for Markdown-only changes; fresh-session skill
+  loading still unverified. Independent review unavailable (model route rejected).
