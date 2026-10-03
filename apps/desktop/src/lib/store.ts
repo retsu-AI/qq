@@ -13,6 +13,7 @@ interface AppSnapshot {
   recents: ProjectInfo[];
   activeId: string | null;
   error: string | null;
+  providersOpen: boolean;
 }
 
 const ACTIVE_KEY = "qq.activeProject";
@@ -24,6 +25,7 @@ let snapshot: AppSnapshot = {
   recents: [],
   activeId: null,
   error: null,
+  providersOpen: false,
 };
 const listeners = new Set<() => void>();
 
@@ -96,6 +98,10 @@ export async function refreshRecents() {
   } catch {
     // The list is a convenience.
   }
+}
+
+export function showProviders(open: boolean) {
+  set({ providersOpen: open });
 }
 
 export function dismissError() {

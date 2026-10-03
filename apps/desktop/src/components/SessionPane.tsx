@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import clsx from "clsx";
-import { ArrowDown, Loader2 } from "lucide-react";
+import { ArrowDown, KeyRound, Loader2 } from "lucide-react";
+import { showProviders } from "../lib/store";
 import { activityLabel, cost, modelShort, tokens } from "../lib/format";
 import type { ProjectState, Transcript as TranscriptData } from "../lib/types";
 import { Composer } from "./Composer";
@@ -42,6 +43,7 @@ export function SessionPane({ project }: { project: ProjectState }) {
 
 function Landing({ project }: { project: ProjectState }) {
   const connecting = project.connection !== "live" && project.sessions.length === 0;
+  const signedOut = project.connection === "live" && project.models.length === 0;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="h-12 shrink-0" />
@@ -57,6 +59,8 @@ function Landing({ project }: { project: ProjectState }) {
             <div className="flex items-center justify-center gap-2 text-muted">
               <Loader2 className="h-4 w-4 animate-spin" /> Connecting to the engine…
             </div>
+          ) : signedOut ? (
+            <ConnectProvider />
           ) : (
             <>
               <NoticeLine project={project} />
@@ -65,6 +69,24 @@ function Landing({ project }: { project: ProjectState }) {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function ConnectProvider() {
+  return (
+    <div className="mx-auto max-w-[460px] rounded-xl border border-line-strong bg-raised px-6 py-5 text-center">
+      <KeyRound className="mx-auto mb-3 h-5 w-5 text-accent" />
+      <p className="font-medium">Connect a model provider to start</p>
+      <p className="mt-1 text-[12.5px] text-muted">
+        Sign in with ChatGPT, or paste an Anthropic, OpenAI, Google, or xAI API key.
+      </p>
+      <button
+        onClick={() => showProviders(true)}
+        className="mt-4 h-9 rounded-lg bg-solid px-4 text-[13px] font-medium text-white hover:bg-solid-hover"
+      >
+        Connect a provider
+      </button>
     </div>
   );
 }

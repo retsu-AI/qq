@@ -1,5 +1,5 @@
-import { FolderOpen, FolderGit2 } from "lucide-react";
-import { openProject, pickProject } from "../lib/store";
+import { FolderOpen, FolderGit2, KeyRound } from "lucide-react";
+import { openProject, pickProject, showProviders } from "../lib/store";
 import type { ProjectInfo } from "../lib/types";
 import { Logo } from "./Logo";
 
@@ -21,6 +21,13 @@ export function Welcome({ recents }: { recents: ProjectInfo[] }) {
           <FolderOpen className="h-4 w-4 text-accent" />
           <span className="flex-1 font-medium">Open project…</span>
           <kbd className="font-mono text-[11px] text-faint">Ctrl O</kbd>
+        </button>
+        <button
+          onClick={() => showProviders(true)}
+          className="mt-2 flex w-full items-center gap-3 rounded-lg border border-line px-4 py-3 text-left hover:bg-hover"
+        >
+          <KeyRound className="h-4 w-4 text-muted" />
+          <span className="flex-1">Model providers</span>
         </button>
         {recents.length > 0 && (
           <div className="mt-8">
