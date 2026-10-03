@@ -3,12 +3,23 @@ import clsx from "clsx";
 import { ArrowDown, KeyRound, Loader2 } from "lucide-react";
 import { showProviders } from "../lib/store";
 import { activityLabel, cost, modelShort, tokens } from "../lib/format";
-import type { ProjectState, Transcript as TranscriptData } from "../lib/types";
+import type { PendingFile, ProjectState, Transcript as TranscriptData } from "../lib/types";
 import { Composer } from "./Composer";
 import { Transcript } from "./Transcript";
+import { TrustPrompt } from "./TrustPrompt";
 
-export function SessionPane({ project }: { project: ProjectState }) {
+export function SessionPane({
+  project,
+  pendingTrust,
+}: {
+  project: ProjectState;
+  pendingTrust: PendingFile[];
+}) {
   const transcript = project.transcript;
+
+  if (pendingTrust.length > 0) {
+    return <TrustPrompt project={project} pending={pendingTrust} />;
+  }
 
   if (project.connection === "failed") {
     return (

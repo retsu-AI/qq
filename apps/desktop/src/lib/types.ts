@@ -203,6 +203,13 @@ export interface Provider {
   recommended_model: string;
 }
 
+/** A project file whose QQ configuration waits for trust. */
+export interface PendingFile {
+  path: string;
+  sections: string[];
+  declarations: string[];
+}
+
 export interface BrowserSignIn {
   url: string;
   user_code: string | null;

@@ -68,7 +68,8 @@ pub enum UiCommand {
     Delete(SessionId),
     /// Re-emit the full state (a webview reload lost it).
     Refresh,
-    /// Re-read the model catalog: a provider credential changed.
+    /// Re-read the model catalog and capabilities: a provider credential or
+    /// the project's trusted configuration changed.
     RefreshModels,
 }
 
@@ -84,6 +85,8 @@ pub enum ApprovalChoice {
 
 #[derive(Clone)]
 pub struct ProjectHandle {
+    /// The canonical workspace path the server knows this project by.
+    pub path: PathBuf,
     commands: mpsc::UnboundedSender<UiCommand>,
 }
 
@@ -104,7 +107,10 @@ pub fn open(
     preferred_model: Option<String>,
 ) -> ProjectHandle {
     let (commands, receiver) = mpsc::unbounded_channel();
-    let handle = ProjectHandle { commands };
+    let handle = ProjectHandle {
+        path: path.clone(),
+        commands,
+    };
     tauri::async_runtime::spawn(async move {
         let mut project = Project::new(app, engine, attentive, id, path, preferred_model);
         project.run(receiver).await;
@@ -479,6 +485,7 @@ impl Project {
                     ..ModelSelection::default()
                 };
                 self.send(client, ClientRequest::Models(selection));
+                self.send(client, ClientRequest::Capabilities);
             }
             UiCommand::Focus(target) => self.focus(client, target),
             UiCommand::NewSession => self.focused = None,

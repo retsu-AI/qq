@@ -5,6 +5,7 @@ mod auth;
 mod engine;
 mod project;
 mod settings;
+mod trust;
 mod view;
 
 use std::{
@@ -23,6 +24,7 @@ use crate::{
     engine::Engine,
     project::{ApprovalChoice, ProjectHandle, UiCommand},
     settings::Settings,
+    trust::{PendingFileDto, TrustError},
 };
 
 struct AppState {
@@ -273,6 +275,39 @@ fn delete_session(
     state.send(&project_id, UiCommand::Delete(parse_session(&session_id)?))
 }
 
+/// Project files whose QQ configuration waits for the user's trust; empty
+/// when the project has none or all of it is trusted.
+#[tauri::command]
+async fn project_trust(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<PendingFileDto>, TrustError> {
+    let Ok(project) = state.project(&project_id) else {
+        return Ok(Vec::new());
+    };
+    tauri::async_runtime::spawn_blocking(move || trust::pending(&project.path))
+        .await
+        .map_err(|_| TrustError::TaskFailed)?
+}
+
+/// Trust the project's pending files as `qq trust` does, then have the
+/// project reload what the configuration now provides.
+#[tauri::command]
+async fn trust_project(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<PendingFileDto>, TrustError> {
+    let Ok(project) = state.project(&project_id) else {
+        return Ok(Vec::new());
+    };
+    let path = project.path.clone();
+    let trusted = tauri::async_runtime::spawn_blocking(move || trust::grant(&path))
+        .await
+        .map_err(|_| TrustError::TaskFailed)??;
+    let _ = project.send(UiCommand::RefreshModels);
+    Ok(trusted)
+}
+
 #[tauri::command]
 async fn auth_providers() -> Result<Vec<ProviderDto>, SignInError> {
     tauri::async_runtime::spawn_blocking(auth::providers)
@@ -402,6 +437,8 @@ fn main() {
             auth_save_key,
             auth_sign_out,
             auth_browser_sign_in,
+            project_trust,
+            trust_project,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the QQ desktop app")

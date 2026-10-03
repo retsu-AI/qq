@@ -5,7 +5,7 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
-import type { ProjectInfo, ProjectState } from "./types";
+import type { PendingFile, ProjectInfo, ProjectState } from "./types";
 
 interface AppSnapshot {
   projects: Record<string, ProjectState>;
@@ -14,6 +14,8 @@ interface AppSnapshot {
   activeId: string | null;
   error: string | null;
   providersOpen: boolean;
+  /** Pending trust per project; absent until checked, empty when trusted. */
+  trust: Record<string, PendingFile[]>;
 }
 
 const ACTIVE_KEY = "qq.activeProject";
@@ -26,6 +28,7 @@ let snapshot: AppSnapshot = {
   activeId: null,
   error: null,
   providersOpen: false,
+  trust: {},
 };
 const listeners = new Set<() => void>();
 
@@ -66,6 +69,7 @@ export async function openProject(path: string) {
     set({ open, activeId: info.id, error: null });
     persist();
     void refreshRecents();
+    void checkTrust(info.id);
   } catch (error) {
     set({ error: String(error) });
   }
@@ -79,6 +83,24 @@ export async function pickProject() {
 export function activate(projectId: string) {
   set({ activeId: projectId });
   persist();
+  // The configuration may have changed on disk since it was last trusted.
+  void checkTrust(projectId);
+}
+
+export async function checkTrust(projectId: string) {
+  try {
+    const pending = await api.projectTrust(projectId);
+    set({ trust: { ...snapshot.trust, [projectId]: pending } });
+  } catch (error) {
+    set({ error: String(error) });
+  }
+}
+
+/** Throws so the prompt can show why trust could not be recorded. */
+export async function trustProject(projectId: string) {
+  await api.trustProject(projectId);
+  set({ trust: { ...snapshot.trust, [projectId]: [] } });
+  await checkTrust(projectId);
 }
 
 export async function closeProject(projectId: string) {
@@ -120,6 +142,11 @@ export async function start() {
     set({ projects: { ...snapshot.projects, [state.project_id]: state } });
   });
   await refreshRecents();
+  // A project file edited while the app was in the background needs trust
+  // again; ask when the user comes back rather than failing silently.
+  window.addEventListener("focus", () => {
+    if (snapshot.activeId) void checkTrust(snapshot.activeId);
+  });
   let paths: string[] = [];
   let active: string | null = null;
   try {

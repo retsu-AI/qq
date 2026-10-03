@@ -13,6 +13,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 qq-auth.workspace = true
 qq-client.workspace = true
+qq-config.workspace = true
 qq-protocol.workspace = true
 qq-server.workspace = true
 serde.workspace = true
