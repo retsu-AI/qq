@@ -46,5 +46,18 @@ cargo check -p qq-desktop
 
 ## Package
 
-`pnpm tauri build` produces NSIS and MSI installers. Bundling the `qq` engine
-binary beside the app (`bundle.externalBin`) is not wired yet.
+```sh
+cd apps/desktop
+pnpm bundle
+```
+
+This builds the release `qq` engine, stages it as a Tauri sidecar
+(`src-tauri/binaries/qq-<target-triple>.exe`, ignored by git), and builds a
+per-user NSIS installer (no administrator rights) under
+`target/release/bundle/nsis/`. The installer puts `qq.exe` beside the app,
+which is the first place the app looks for its engine.
+
+The sidecar is declared only in `src-tauri/tauri.bundle.conf.json`, merged in
+by `pnpm bundle`: Tauri requires every declared sidecar to exist at compile
+time, so keeping it out of `tauri.conf.json` lets `cargo check` and
+`pnpm tauri dev` run without building the release engine first.
