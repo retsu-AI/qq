@@ -159,3 +159,13 @@ five-server gate at `g-fleet-clients.md`. Remote push/U8 is held under decision
 and authenticated-health repairs. Local format, exact-test guard, Clippy,
 workspace test, and workspace build checks pass; no fleet implementation or
 live-provider work ran in this docs slice.
+
+### 2026-10-03 — later fleet-client review repaired
+
+Four later findings on the same proposal exposed integration gaps in the
+accepted contract. Pairing now requires an exact client-reachable advertised
+URL, including the HTTPS proxy URL for loopback + `tailscale serve`; the
+server-scoped SSE carries a per-workspace detail tier and tier-matched cursor;
+U2–U7 and M1 own the shared UI/mobile paths they must edit; and U4 consumes W5
+explicitly. This remains plan and ADR work only: no fleet runtime, remote
+listener, enrollment route, or UI was implemented or deployed.

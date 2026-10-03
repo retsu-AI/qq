@@ -41,16 +41,25 @@ Concrete shape:
   credentials are scoped to the server that issued them). `credential_hash`
   is `SHA-256(credential_bytes)`: the credential is 32 random bytes, so a fast
   hash is sufficient and a KDF would only add latency to every request.
-- **Pairing code**: `qq pair [--name <hint>] [--ttl 5m]` (running against the
-  local server) asks the server to mint a code: 8 characters from a 32-symbol
+- **Pairing code**: `qq pair [--name <hint>] [--ttl 5m]
+  [--advertised-url <https://host[:port]>]` (running against the local server)
+  asks the server to mint a code: 8 characters from a 32-symbol
   alphabet (no `0/O/1/I`), ~40 bits, single-use, expires after 5 minutes,
   invalidated after 3 wrong attempts. The server holds pending codes in
   memory only (bounded: 8 outstanding; minting a ninth fails). The CLI prints
-  the code and a `qq://pair?host=<base_url>&code=<code>` URL / QR for the
-  shells' deep-link handler. Before minting, the server-side prompt confirms
-  the exact independent scopes granted: `read`, `run`, `approve`,
-  `session_admin`, and `client_admin`. No scope is implied by another except
-  where a route explicitly also requires `read` to return state.
+  the code and a
+  `qq://pair?base_url=<base_url>&server_id=<server_id>&code=<code>` URL / QR
+  for the shells' deep-link handler. `base_url` is selected from the validated
+  one-shot override or S6's `server.advertised_url`, in that order. It uses the
+  same grammar as `ServerConnection`; the CLI never derives it from
+  `listener.local_addr()`. If neither source exists, QR/deep-link minting
+  fails and tells the operator to set `server.advertised_url` (the persistent
+  path for loopback + `tailscale serve`) or pass the override. Until S6 lands,
+  the override is required. Before minting, the server-side
+  prompt confirms the selected URL and the exact independent scopes granted:
+  `read`, `run`, `approve`, `session_admin`, and `client_admin`. No scope is
+  implied by another except where a route explicitly also requires `read` to
+  return state.
 - **Enrollment**: `POST /v1/enroll { pairing_code, client_name }` is the only
   unauthenticated data route; CORS preflight carries no application data.
   `/v1/health` remains authenticated by the loopback token or an enrolled

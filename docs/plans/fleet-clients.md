@@ -201,17 +201,26 @@ bump `PROTOCOL_VERSION` and add fixtures. Transport-only HTTP/2/TLS and auth
 policy changes do not bump the version unless their wire shape is incompatible.
 
 1. **S2 — pairing and credentials (ADR-0015).** `qq pair` prints a short code +
-   QR (URL with server id, native-client fingerprint, addresses). Client
-   exchanges it for a per-client credential; `qq clients list/revoke`.
+   QR containing the server id and one exact, client-reachable `base_url`.
+   S6's `server.advertised_url` supplies that URL for the recommended
+   loopback + `tailscale serve` topology; `qq pair --advertised-url` is the
+   validated one-shot source before S6 lands. The command never infers remote
+   reachability from a listener bind, so pairing fails with an actionable
+   configuration error rather than encoding a loopback or wildcard address.
+   Native clients may also receive the configured certificate fingerprint;
+   browser clients do not. The client exchanges the code for a per-client
+   credential; `qq clients list/revoke`.
    Credentials carry independent `read`, `run`, `approve`, `session_admin`,
    and `client_admin` scopes. The loopback credential has all scopes; pairing
    grants only the scopes confirmed on the server.
 2. **S4 — exposure (ADR-0016).** `qq serve --listen tailnet|lan|<addr>` is
    explicit; off-loopback requires TLS or sits behind `tailscale serve` (the
-   recommended path). Browser/WASM clients require browser-trusted TLS or an
-   operator-installed CA because `fetch` cannot install a QR-pinned verifier.
-   Only native/Tauri transports may pin a self-signed certificate fingerprint
-   from the pairing QR. Enable axum `http2` for TLS listeners.
+   recommended path). The Tailscale recipe configures the proxy's HTTPS URL as
+   `server.advertised_url` while `qq serve` stays on loopback. Browser/WASM
+   clients require browser-trusted TLS or an operator-installed CA because
+   `fetch` cannot install a QR-pinned verifier. Only native/Tauri transports
+   may pin a self-signed certificate fingerprint from the pairing QR. Enable
+   axum `http2` for TLS listeners.
 3. **Machine identity.** `ServerInfo.server_id` already exists (S1, #14).
    Its display name and QQ version also already exist; add stable OS/arch.
    Put uptime and other changing health values in a separate `ServerStatus`
@@ -222,18 +231,24 @@ policy changes do not bump the version unless their wire shape is incompatible.
    `workspace_roots`, as S5 specifies; this plan adds session counts per
    group and last activity per workspace so the fleet rail renders without
    subscribing to everything.
-5. **Server-scoped event stream.** `GET /v1/events?since=<per-workspace cursors>`
-   multiplexes all subscribed workspaces into one SSE (HTTP/2 or not), from the
-   same feed ring. Keeps each server at one connection regardless of workspace
-   count; resubscription is a cursor map, not N reconnects. Events already carry
-   workspace ids.
-6. **Summary-tier stream.** An opt-in `detail=summary` mode sends only
-   `SessionSummary` changes and approval requests, not token deltas. Phones and
-   background tabs use it: the fleet overview costs bytes per *state change*,
-   not per token. Summary and full-detail streams have separate cursor
-   namespaces. Opening a session first fetches an authoritative full snapshot
-   and its full-detail cursor, then subscribes from that cursor; a summary
-   cursor is never advanced past unseen transcript events or reused for detail.
+5. **Server-scoped event stream.** `GET /v1/events` accepts one bounded,
+   versioned subscription map whose entries are
+   `{ workspace_id, detail: summary|full, cursor }`. It multiplexes those
+   workspaces into one SSE (HTTP/2 or not), from the same feed ring. The open
+   workspace can therefore use `full` while every fleet-rail workspace uses
+   `summary`. Changing one entry reopens the same server connection with the
+   updated map; it never creates a second per-workspace SSE. Events already
+   carry workspace ids, and the server rejects duplicate workspace entries or
+   a cursor whose workspace/tier does not match its entry.
+6. **Per-workspace summary tier.** A `summary` subscription entry sends only
+   `SessionSummary` changes and approval requests for that workspace, not token
+   deltas. Phones and background tabs use it: the fleet overview costs bytes
+   per *state change*, not per token. Each workspace keeps independent summary
+   and full-detail cursor namespaces. Opening a session first fetches an
+   authoritative full snapshot and its full-detail cursor, then changes only
+   that workspace's subscription entry to `full`. Closing it restores that
+   entry to `summary` from its saved summary cursor. A summary cursor is never
+   advanced past unseen transcript events or reused for full detail.
 7. **History paging.** A bounded transcript-page request uses an opaque
    `before_record` cursor over the persisted order of both messages and tool
    calls. The response carries `next_before_record` plus independent completion
@@ -442,9 +457,9 @@ new slice needs a plan amendment and a ledger row before it starts.
 | This plan | Existing slice | Change proposed |
 | --- | --- | --- |
 | ADRs | S2/S4/U1 (ADR-0015 accept, 0016, 0017, 0018) | ADR-0017 records the §4.2 spike numbers; U1 owns the prerequisite |
-| Pairing | S2 | Add the §5 authorization matrix; certificate fingerprints are native-only |
-| Exposure | S4 | Enable axum `http2` on TLS listeners (removes the browser's 6-connection cap) |
-| Identity, catalog | S1 (done), S5, S6 | Add stable OS/arch and dynamic `ServerStatus`; per-workspace group counts in the S5 catalog |
+| Pairing | S2 | Add the §5 authorization matrix and the validated `--advertised-url` override; certificate fingerprints are native-only |
+| Exposure | S4 | Configure the client-reachable HTTPS proxy URL for `tailscale serve`; enable axum `http2` on TLS listeners |
+| Identity, catalog | S1 (done), S5, S6 | Add stable OS/arch and dynamic `ServerStatus`; configure `server.advertised_url`; add per-workspace group counts in the S5 catalog |
 | Server stream, tier transition, paging, approval preview, spill reads | **new S7** | §5 items 5–9; strict-shape protocol bumps, fixtures, stream bench |
 | Connection set | W3 | Address probing, backoff policy, `Reachability` (§6) |
 | Durable outbox and cache | **new W4** | `qq-fleet` crate in `apps/`; partition/duplicate/cursor-expiry tests, native + wasm |
@@ -459,7 +474,8 @@ new slice needs a plan amendment and a ledger row before it starts.
 The executable DAG keeps the owning plan's early risk gate: W1 + W2 + S1 +
 S2 + S3 → TB. S4 and S5 may proceed after their stated inputs; S6 waits for
 S2–S5. U1 begins with the ADR-0017 spike, then U2–U7 follow their existing
-dependencies. W3–W5 run when their inputs are ready. S7 must land before U6;
+dependencies, including W5 before U4. W3–W5 run when their inputs are ready.
+S7 must land before U6;
 D1 then M1–M3 follow U5. FG runs last after S7, W4, W5, U6, U7, M2, and M3. TB is not delayed
 behind S4–S6.
 
