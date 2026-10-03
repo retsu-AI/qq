@@ -180,10 +180,24 @@ async fn prepare_execution(
             },
         });
     }
+    let delegate_identity = loaded.plan.descriptor().approval_delegate.as_deref();
+    if claimed
+        .approval_delegate
+        .as_ref()
+        .is_some_and(|selection| !selection.matches(delegate_identity))
+    {
+        return Err(RunOutcome::Failed {
+            failure: RunFailure {
+                kind: RunFailureKind::Configuration,
+                message: "child loader did not preserve the parent's approval delegate".to_owned(),
+            },
+        });
+    }
     claimed.checkpoint = Some(CheckpointSelection::from_identity(identity));
     claimed.routing = Some(RoutingSelection::from_identity(
         loaded.plan.descriptor().routing.as_deref(),
     ));
+    claimed.approval_delegate = Some(ApprovalDelegateSelection::from_identity(delegate_identity));
     let deadline = RunDeadline::new(claimed.limits, execution_started);
     if let Some(deadline) = deadline.filter(|deadline| deadline.expired()) {
         return Err(RunOutcome::BudgetExhausted {
@@ -206,6 +220,7 @@ async fn prepare_execution(
             cancellation.clone(),
             loaded.plan.network_policy(),
             loaded.plan.approval_delegate(),
+            loaded.plan.jev_approval(),
         ))
     };
     // The claim carried the session's file hashes, so nothing here waits on
@@ -354,6 +369,25 @@ async fn prepare_execution(
             }
         } else {
             RunCapabilities::user(spawner)
+        };
+        // A model-spawned task run answers its parent, not a user. Audit
+        // children keep their fixed brief and reply shape, and a user's own
+        // prompt in a child session is a user run.
+        let base = if claimed.depth > 0
+            && !claimed.user_initiated
+            && claimed.purpose == SessionPurpose::Task
+        {
+            // Read children are ReadOnly and write children Supervised; a
+            // client may only lower a child's mode, never raise it.
+            base.for_subagent(match claimed.approval_mode {
+                ApprovalMode::ReadOnly => crate::runtime::SubagentAuthority::Read,
+                ApprovalMode::Supervised
+                | ApprovalMode::Ask
+                | ApprovalMode::Auto
+                | ApprovalMode::Full => crate::runtime::SubagentAuthority::Write,
+            })
+        } else {
+            base
         };
         // A read-only session (every read child) never sees the schemas its
         // policy denies; the catalog filter is part of the request, not a
@@ -674,6 +708,9 @@ async fn route_run(
             checkpoint: Some(CheckpointSelection::from_identity(
                 loaded.plan.descriptor().checkpoint.as_deref(),
             )),
+            approval_delegate: Some(ApprovalDelegateSelection::from_identity(
+                loaded.plan.descriptor().approval_delegate.as_deref(),
+            )),
             workspace: claimed.workspace.clone(),
             model: decision.model.clone(),
             profile: claimed.profile.clone(),
@@ -699,6 +736,8 @@ async fn route_run(
                     && selected.plan.descriptor().routing == loaded.plan.descriptor().routing
                     && selected.plan.descriptor().checkpoint
                         == loaded.plan.descriptor().checkpoint
+                    && selected.plan.descriptor().approval_delegate
+                        == loaded.plan.descriptor().approval_delegate
                     && selected.plan.descriptor().profile == loaded.plan.descriptor().profile =>
             {
                 decision.model = ModelSelection {
@@ -765,6 +804,7 @@ pub(super) async fn execute_run(
             reasoning_effort: claimed.reasoning_effort,
             checkpoint: claimed.checkpoint.clone(),
             routing: claimed.routing.clone(),
+            approval_delegate: claimed.approval_delegate.clone(),
             workspace: claimed.workspace.clone(),
             model: claimed.model.clone(),
             profile: claimed.profile.clone(),
@@ -1625,7 +1665,7 @@ async fn finish_prepared_run(
 
 async fn execute_started_run(
     inner: Arc<SessionRuntimeInner>,
-    claimed: ClaimedRun,
+    mut claimed: ClaimedRun,
     mut cancellation: watch::Receiver<bool>,
     prepared: PreparedExecution,
     resources: &RunResources,
@@ -2223,6 +2263,10 @@ async fn execute_started_run(
                 );
                 current_occupancy_basis = Some(basis);
                 accounting.request_basis = basis;
+                // Each turn's durable model record names the cap actually
+                // sent. The empty-truncation recovery raises it mid-run, so
+                // the claim-time value would misstate the retried turn.
+                claimed.model.max_output_tokens = Some(weight.max_output_tokens);
             }
             RunInput::Event(Some(RuntimeEvent::ActivityChanged { activity })) => {
                 if internal {
@@ -2375,6 +2419,7 @@ async fn execute_started_run(
                 usage,
                 calls,
                 truncated,
+                notice,
             })) => {
                 if internal {
                     // Usage, cost, and provider-turn identity persist like
@@ -2414,6 +2459,7 @@ async fn execute_started_run(
                                 estimated_cost_usd_nanos: turn_cost,
                                 accounting: Some(accounting.snapshot()),
                                 truncated,
+                                notice,
                             },
                         )
                         .await
@@ -2500,6 +2546,7 @@ async fn execute_started_run(
                             estimated_cost_usd_nanos: turn_cost,
                             accounting: Some(turn_accounting),
                             truncated,
+                            notice,
                         },
                     )
                     .await
@@ -3825,4 +3872,7 @@ pub(super) struct ModelTurnCommit {
     /// turn row and the turn's message so context assembly can replay the
     /// continuation notice and clients can mark the prefix.
     pub(super) truncated: bool,
+    /// The runtime notice placed before this turn's request; assembly
+    /// replays it before the turn (ADR-0054 § 2).
+    pub(super) notice: Option<crate::runtime::TurnNotice>,
 }

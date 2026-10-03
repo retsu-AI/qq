@@ -26,7 +26,9 @@ approval policy as built-ins.
             bearer: Env("LINEAR_TOKEN"),    // or Stored("linear/default")
             call_timeout_seconds: 120,      // default 60
             max_concurrent_calls: 2,        // default 4
-            pin: "5a1f…e9c0",               // refuse the server if its tool set changes
+            // Refuse the server if its tool set changes; `qq mcp inspect`
+            // prints the digest to paste here.
+            pin: "5a1f0c3d9e8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4be9c0",
         ),
 
         // Drop one an earlier layer declared.

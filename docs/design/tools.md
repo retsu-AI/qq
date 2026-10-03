@@ -254,7 +254,10 @@ deterministic: the same text and bounds produce the same bytes.
 whitespace. `shell` ships it: `shell exit=0 elapsed=1.2 bytes=428890`. The
 header is where the verdict lives, so a head-only glance, a truncated tail,
 or a pruned stub all still say how the call ended. Context pruning keeps
-the header line in front of its `[pruned: …]` stub.
+the header line in front of its `[pruned: …]` stub. A pruned `read_file`
+stub keeps its window and line count but drops the `h:` token, and says to
+re-read without `if_changed_since`. With that hash, the re-read would answer
+`unchanged` with no body, and the body is what pruning removed.
 
 **Secret masking** applies to `model_text` before bounding and replaces each
 hit with `[masked:<kind>]`: AWS access keys, GitHub tokens, `sk-`/`sk_live_`/
@@ -466,7 +469,13 @@ workspace sees the same tree. These three are the whole list, on purpose:
 the user's global git excludes are not read — they would make the tree
 depend on which editors a developer has installed, and each one is another
 file probe per directory on the `search` hot path. A rule from one of them
-that should apply here is one explicit line in `.qqignore`. Hidden entries and a fixed generated-directory list (`target`,
+that should apply here is one explicit line in `.qqignore`. Only a regular
+file of at most 256 KiB is read as an ignore file; a FIFO, device, symlink,
+or larger file is treated as absent, so an ignore file can neither block a
+walk nor make it read unbounded input. On Unix the file is opened
+`O_NOFOLLOW|O_NONBLOCK` and the type and size are checked on the open
+descriptor, so a file swapped between listing and open cannot defeat the
+check; the read is bounded regardless. Hidden entries and a fixed generated-directory list (`target`,
 `node_modules`, `dist`, `build`, `.venv`, `__pycache__`) are excluded by
 default; `include_ignored` lifts all of that except `.git`, whose objects
 are never useful results. Symlinks are reported and never followed. Files
@@ -565,7 +574,8 @@ never on a Tokio worker.
 
 `read_file` reads the whole file (to the 4 MiB scan cap) once, hashes it,
 and renders one of three shapes. Every result opens with a `read` header
-so the model, the TUI, and a pruning stub all get the same facts:
+so the model, the TUI, and a pruning stub all get the same facts (a pruning
+stub omits only the hash; see § Headers):
 
 ```
 read crates/qq-core/src/tools/read.rs L1-40,88-91/412 h:3f9a1c0b7e2d
@@ -1120,7 +1130,7 @@ validated when the document loads so a typo fails configuration rather
 than quarantining the server at first use. The composition root parses it
 into `McpServerSettings::pin` (an `McpToolSetDigest`), so `qq-mcp`
 compares digests, never text. The pin is also recorded on the plan
-descriptor's `McpServerDescriptor` (`DESCRIPTOR_VERSION` 10), so a pinned
+descriptor's `McpServerDescriptor` (`DESCRIPTOR_VERSION` 10 and later), so a pinned
 and an unpinned declaration of the same server compile to distinct plan
 digests and a run's durable identity names the tool set it was admitted
 against.
@@ -1221,9 +1231,19 @@ probability both at least 0.7 under the pinned `jev-1.13.0` contract) is the
 delegate's verdict. `abstain`, low confidence, a malformed reply, a transport
 failure, a timeout, or a missing key falls through to `reviewer_model`, then
 to the human, with the reason attached to the escalation. Jev is never failed
-open to approve. Whether Jev is consulted is the held call's workspace
-configuration, read per hold and cached per credential epoch; a stored key
-with `jev_approval` off is never read (ADR-0030). `ReviewVerdict` names the
+open to approve. Whether Jev is consulted is the held call's compiled plan
+([ADR-0052](../adr/0052-jev-approval-activation-from-plan.md)):
+the run's `jev_approval` after profile and override merging
+(`ReviewRequest::jev_approval`), so a profile's `jev_approval: false` wins
+over a top-level on, a profile-only on enables, and a configuration edit
+applies to the next root run with no credential change or restart. The value
+is in the plan descriptor as `approval_delegate` (so it is durable run
+identity and an edit yields a new plan), and a run's routed reload and owned
+children inherit it rather than re-reading configuration. The
+reviewer never reloads configuration itself; it caches only a built TypeSafe
+client, one entry per credential epoch (a failed key read is retried at the
+next hold). A stored key with `jev_approval` off
+is never read (ADR-0030). `ReviewVerdict` names the
 delegate that decided; a delegate-recorded grant row carries it as
 `source = 'jev'` or `source = 'delegate'` (§ Grant Lifetimes), and the
 `tool_approval_resolved` event carries it as `delegate: jev | reviewer`
@@ -1396,11 +1416,18 @@ fields stay managed-only:
   `TrustDeclaration`s — routes, provider names and kinds, MCP names with
   command or URL, grant counts, pack ids — never a secret, argument list,
   or environment value). Bare `qq` in a client that owns the server opens
-  the TUI on that set; `t` calls `grant_pending_trust`, the same write `qq
-  trust` performs, and `s` admits the `(path, digest)` pairs for the
-  process only through `LoadRequest::with_process_trust`, which every load
-  the embedded server makes for that workspace carries and which is part
-  of the plan cache key. Headless surfaces and a client attached to a
+  the TUI on that set, and the composition root keeps the `(path, digest)`
+  pairs the prompt displayed. Either answer covers exactly those pairs: `t`
+  calls `grant_reviewed_trust` (the same write `qq trust` performs, but
+  re-scanned under the trust-state lock) and `s` checks the set with
+  `reviewed_pending_trust` before admitting it for the process only through
+  `LoadRequest::with_process_trust`, which every load the embedded server
+  makes for that workspace carries and which is part of the plan cache key.
+  If any file is pending at a digest the prompt did not show (edited while
+  it was open), both refuse with `ConfigError::TrustChanged { pending }`,
+  write and admit nothing, and the TUI redraws the prompt with the current
+  set. `qq trust` itself still grants the current set, because it prints
+  what it records. Headless surfaces and a client attached to a
   server elsewhere keep the `TrustRequired` error: trust is decided on the
   host that holds `trust.ron`. No protocol type is involved.
 - **Promotion.** The approval prompt's workspace-lifetime choice appends

@@ -76,7 +76,7 @@ still be used by declaring it under the provider's `models`.
 
 | Provider | Routes |
 | --- | --- |
-| `openai` | `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra`, `gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.3-codex-spark`, `gpt-5.2`, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-4o`, `gpt-4o-mini` |
+| `openai` | `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra`, `gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.3-codex-spark`, `gpt-5.2`, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-4o`, `gpt-4o-mini` |
 | `openai-codex` | the OpenAI routes your subscription includes |
 | `anthropic` | `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5`, `claude-sonnet-4-6`, `claude-sonnet-4-5`, `claude-haiku-4-5` |
 | `google` | `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
@@ -88,9 +88,9 @@ For Codex, a successful response replaces implicit bundled entries: hidden or
 retired models no longer linger in the picker. Explicit `models` declarations
 and the currently selected route remain visible; neither grants account access.
 Failed discovery falls back to the bundled catalog. Results are cached for five
-minutes. QQ sends Codex client version `0.156.1` for discovery (the upstream
-release that adds GPT-6 Sol/Luna); upgrading a separately installed Codex CLI
-does not change QQ's discovery version.
+minutes. For discovery QQ sends the Codex client version it was built for,
+not its own version or that of a Codex CLI you have installed:
+`0.159.0`, the latest stable upstream release when GPT-6.1 Sol shipped. <!-- not-qq-version -->
 
 GPT-6 Sol/Luna support `none`, `low`, `medium`, `high`, `xhigh`, and `max`.
 GPT-6 Astra supports `low` through `max`, but not `none` or `minimal`.
@@ -103,9 +103,9 @@ provider request. Neither is the explicit `none` level (which disables reasoning
 only on models that advertise it). Anthropic uses
 `output_config.effort`, never an OpenAI reasoning field.
 
-The complete stack uses protocol 30 and session-store schema 39 for the new
-effort vocabulary and replay envelopes; older binaries cannot open upgraded
-stores. Back up the store before upgrading if rollback is needed.
+The complete stack uses protocol 30 and session-store schema 40 for the new
+effort vocabulary, replay envelopes and persisted checkpoint notices; older
+binaries cannot open upgraded stores. Back up the store before upgrading if rollback is needed.
 
 Anthropic discovery now follows bounded pagination before replacing implicit
 bundled model entries, preserving configured routes and failure fallback.
@@ -148,7 +148,9 @@ Bedrock Mantle exposes the same models over the OpenAI Responses, OpenAI
 Chat Completions, or Anthropic Messages protocols:
 
 ```ron
-"bedrock-mantle": AmazonBedrockMantle(region: "us-east-1", api: AnthropicMessages, auth: Aws(DefaultChain)),
+providers: {
+    "bedrock-mantle": AmazonBedrockMantle(region: "us-east-1", api: AnthropicMessages, auth: Aws(DefaultChain)),
+}
 ```
 
 Both need the default build; `--no-default-features` builds refuse Bedrock

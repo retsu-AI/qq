@@ -312,14 +312,14 @@ where
                     // queue in the channel and drain afterwards.
                     let outcome = match trust.as_mut() {
                         Some(resolve) => resolve(choice).await,
-                        None => Err(
+                        None => Err(crate::app::TrustFailure::from(
                             "this client is attached to a server on another host; run `qq trust` there"
                                 .to_owned(),
-                        ),
+                        )),
                     };
                     match outcome {
                         Ok(resolved) => queue.extend(app.apply_trust_resolved(choice, resolved)),
-                        Err(reason) => queue.extend(app.note_trust_failure(&reason)),
+                        Err(failure) => queue.extend(app.note_trust_failure(failure)),
                     }
                 }
                 Effect::Quit => quit = true,

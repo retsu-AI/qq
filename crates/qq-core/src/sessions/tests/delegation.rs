@@ -324,6 +324,18 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
             .contains("User-selected guidance only."),
         "an explicit user prompt in a child session may select runtime guidance"
     );
+    // The spawned task answers its parent; the user's own follow-up in the
+    // same child session is a user run and gets the ordinary prompt.
+    let spawned_system = child_reqs[0].system().unwrap();
+    assert!(
+        spawned_system.contains("\n\nSub-agent:\n"),
+        "{spawned_system}"
+    );
+    assert!(spawned_system.contains("You cannot change files or run commands"));
+    assert!(!spawned_system.contains("- Implement requested changes"));
+    let follow_up_system = child_reqs[2].system().unwrap();
+    assert!(!follow_up_system.contains("Sub-agent:"));
+    assert!(follow_up_system.contains("- Implement requested changes"));
     assert!(
         !child_reqs[2]
             .tools()
@@ -339,6 +351,7 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
             .iter()
             .any(|spec| spec.name() == "spawn_agent")
     );
+    assert!(!parent_reqs[0].system().unwrap().contains("Sub-agent:"));
     assert!(matches!(
         parent_reqs[1].messages()[2].content(),
         [ContentBlock::ToolResult { content, is_error: false, .. }] if content == "done"
@@ -2059,6 +2072,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
     let parent = ClaimedRun {
         checkpoint: None,
         routing: None,
+        approval_delegate: None,
         identity: RunIdentity {
             workspace_id,
             session_id,
@@ -2248,6 +2262,12 @@ async fn a_write_child_runs_supervised_and_the_reviewer_adjudicates_each_action(
             .iter()
             .any(|spec| spec.name() == "write_file")
     );
+    // A write child is told a parent waits on it, and keeps the line that
+    // tells it to implement the change rather than describe it.
+    let child_system = child_reqs[0].system().unwrap();
+    assert!(child_system.contains("\n\nSub-agent:\n"), "{child_system}");
+    assert!(child_system.contains("- Implement requested changes"));
+    assert!(!child_system.contains("You cannot change files or run commands"));
     // The spawn itself was a mutating call under the parent's Auto policy
     // and executed without a prompt.
     assert!(!observed.iter().any(|event| matches!(
@@ -4368,6 +4388,9 @@ async fn a_mutating_run_is_audited_by_a_read_only_child_and_passes() {
             .iter()
             .any(|spec| spec.name() == "write_file")
     );
+    // The audit child keeps its fixed one-line JSON contract; the sub-agent
+    // section's "answer, then evidence" shape would contradict it.
+    assert!(!brief[0].system().unwrap().contains("Sub-agent:"));
     // The parent completed with the audit ordered before RunFinished,
     // and the snapshot carries the record.
     assert!(matches!(
@@ -5193,4 +5216,52 @@ async fn child_duration_is_reduced_by_preflight_and_prior_children() {
             "later children inherit the remaining clock: {durations:?}"
         );
     }
+}
+
+/// A text-only slice report is not the run's answer: it never completes the
+/// run and is never audited. With `audit: always`, the one audit judges the
+/// real final answer after the continuation. (AP3a acceptance (j).)
+#[tokio::test]
+async fn a_text_only_slice_report_is_never_audited_or_treated_as_the_answer() {
+    let parent_requests = Arc::new(StdMutex::new(Vec::new()));
+    let parent: Arc<dyn Provider> = Arc::new(RenewableSliceProvider {
+        requests: Arc::clone(&parent_requests),
+        checkpoint_wait: None,
+        metered_empty_checkpoint: false,
+    });
+    let auditor_requests = Arc::new(StdMutex::new(Vec::new()));
+    let auditor: Arc<dyn Provider> = Arc::new(VerdictProvider {
+        reply: r#"{"verdict":"pass"}"#,
+        requests: Arc::clone(&auditor_requests),
+    });
+    let mut harness = audit_harness(parent, auditor, crate::runtime::AuditMode::Always, 1).await;
+    std::fs::write(harness._directory.path().join("note.txt"), "tool result\n").unwrap();
+    std::fs::write(harness._directory.path().join("slice-effects.txt"), "seed").unwrap();
+    let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "long task").await;
+    let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+
+    assert!(matches!(
+        finished_outcome(&observed, run_id),
+        Some(RunOutcome::Completed)
+    ));
+    let (_, completed) = audit_events(&observed, run_id);
+    assert_eq!(completed.len(), 1, "exactly one audit, of the final answer");
+    let auditor_requests = auditor_requests.lock().unwrap();
+    assert_eq!(auditor_requests.len(), 1);
+    let brief = request_texts(&auditor_requests[0]).join("\n");
+    assert!(brief.contains("task complete"), "{brief}");
+    assert!(!brief.contains("slice checkpoint"), "{brief}");
+    // The run kept going after its report: the continuation request
+    // followed it, and the answer came after that.
+    let parent_requests = parent_requests.lock().unwrap();
+    let report_at = parent_requests
+        .iter()
+        .position(|request| {
+            request.messages().last() == Some(&Message::user(crate::SLICE_CHECKPOINT_NOTICE))
+        })
+        .expect("the run reached its slice report");
+    assert_eq!(
+        parent_requests[report_at + 1].messages().last(),
+        Some(&Message::user(crate::SLICE_CONTINUATION_NOTICE))
+    );
 }

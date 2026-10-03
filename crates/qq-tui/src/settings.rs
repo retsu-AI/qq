@@ -27,6 +27,17 @@ impl Action {
     }
 }
 
+/// The compiled default chords for `action`, in `KeyChord` syntax.
+pub(crate) const fn default_chords(action: Action) -> &'static [&'static str] {
+    match action {
+        Action::ToggleNavigator => &["Ctrl-T"],
+        Action::CreateRootSession => &["Alt-N"],
+        Action::CreateChildSession => &["Alt-C"],
+        Action::CancelRun => &["Ctrl-X"],
+        Action::InterruptRun => &["Alt-S"],
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyChord {
     code: KeyCode,
@@ -239,24 +250,18 @@ pub struct SettingsBuilder {
 
 impl Default for SettingsBuilder {
     fn default() -> Self {
-        let binding = |action, values: &[&str]| {
-            (
-                action,
-                values
-                    .iter()
-                    .map(|value| value.parse().expect("default key chord is valid"))
-                    .collect(),
-            )
-        };
         Self {
             status_line: StatusItem::DEFAULT.to_vec(),
-            bindings: vec![
-                binding(Action::ToggleNavigator, &["Ctrl-T"]),
-                binding(Action::CreateRootSession, &["Alt-N"]),
-                binding(Action::CreateChildSession, &["Alt-C"]),
-                binding(Action::CancelRun, &["Ctrl-X"]),
-                binding(Action::InterruptRun, &["Alt-S"]),
-            ],
+            bindings: Action::ALL
+                .into_iter()
+                .map(|action| {
+                    let chords = default_chords(action)
+                        .iter()
+                        .map(|value| value.parse().expect("default key chord is valid"))
+                        .collect();
+                    (action, chords)
+                })
+                .collect(),
         }
     }
 }

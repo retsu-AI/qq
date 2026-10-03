@@ -19,8 +19,6 @@ pub use audit::{
     MAX_AUDIT_CHILD_TURNS, MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS,
 };
 pub(crate) use budget::{BUDGET_FINAL_RESPONSE_NOTICE, BudgetDecision, BudgetMeter, ChildBudget};
-#[cfg(test)]
-pub(crate) use checkpoint::MAX_CHECKPOINT_TEXT_BYTES;
 pub(crate) use checkpoint::{
     CheckpointContext, assess_checkpoint, bounded_checkpoint_text, checkpoint_text_fits,
 };
@@ -28,6 +26,8 @@ pub use checkpoint::{
     CheckpointFuture, CheckpointOutcome, CheckpointPhase, CheckpointRequest, CheckpointReviewer,
     CheckpointVerdict,
 };
+#[cfg(test)]
+pub(crate) use checkpoint::{MAX_CHECKPOINT_REVIEWS_PER_RUN, MAX_CHECKPOINT_TEXT_BYTES};
 pub(crate) use compaction::{
     InRunCompaction, InRunCompactionError, InRunCompactionFuture, InRunCompactionRequest,
     InRunCompactor,
@@ -35,7 +35,7 @@ pub(crate) use compaction::{
 pub(crate) use deadline::RunDeadline;
 pub(crate) use events::{
     PendingToolCall, PreparedRequestWeight, PreparedStaticPrefix, RuntimeEvent, RuntimeToolCall,
-    TurnBlock,
+    TurnBlock, TurnNotice,
 };
 pub(crate) use gate::{GateDecision, ToolGate, ToolGateFuture};
 #[cfg(test)]
@@ -48,7 +48,7 @@ pub(crate) use history::{
 #[cfg(test)]
 pub(crate) use prompt::agent_system_prompt;
 pub(crate) use prompt::{
-    AGENT_PROMPT_VERSION, PromptPrefix, PromptSections, ToolSchemaMeasurement,
+    AGENT_PROMPT_VERSION, PromptPrefix, PromptSections, SubagentAuthority, ToolSchemaMeasurement,
     delegation_roster_text, measure_tool_schemas, tool_schema_measurement,
 };
 pub(crate) use shell_policy::builtin_alternative;

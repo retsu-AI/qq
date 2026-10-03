@@ -1674,6 +1674,56 @@ fn pending_trust_scans_without_writing_and_declarations_name_what_is_admitted() 
 }
 
 #[test]
+fn a_reviewed_grant_refuses_content_edited_after_it_was_shown() {
+    // The TUI prompt shows a digest; the key press must not trust a newer
+    // one. Nothing is written, and the error carries the current set.
+    let tree = TempTree::new();
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    let request = LoadRequest::new(tree.path("work"));
+    let loader = tree.loader();
+    let shown: Vec<ProcessTrust> = loader
+        .pending_trust(&request)
+        .unwrap()
+        .iter()
+        .filter_map(PendingTrust::reviewed)
+        .collect();
+    assert_eq!(shown.len(), 1);
+
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6", mcp: {"x": Stdio(command: "x")})"#,
+    );
+    let Err(ConfigError::TrustChanged { pending }) = loader.grant_reviewed_trust(&request, &shown)
+    else {
+        panic!("expected TrustChanged");
+    };
+    assert_eq!(pending.len(), 1);
+    assert!(!tree.path("data/trust.ron").exists());
+    assert!(matches!(
+        loader.reviewed_pending_trust(&request, &shown),
+        Err(ConfigError::TrustChanged { .. })
+    ));
+
+    // Answering for the current content records it.
+    let current: Vec<ProcessTrust> = pending.iter().filter_map(PendingTrust::reviewed).collect();
+    assert_eq!(
+        loader.grant_reviewed_trust(&request, &current).unwrap(),
+        pending
+    );
+    assert!(loader.pending_trust(&request).unwrap().is_empty());
+    // Nothing pending: any review (even the stale one) is a no-op success.
+    assert!(
+        loader
+            .grant_reviewed_trust(&request, &shown)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn process_trust_admits_pending_files_without_writing_and_repends_on_edit() {
     // OB7 "this session": the request carries path + digest; the load
     // succeeds, the durable state is untouched, and a change to the
@@ -4187,6 +4237,50 @@ fn published_document_field_names_match_the_struct_and_all_parse() {
         document::Document::parse("(version: 1, modle: \"x/y\")", &managed),
         Err(ConfigError::Parse { message, .. }) if message.contains("modle")
     ));
+}
+
+#[test]
+fn published_policy_key_lists_are_exactly_what_each_layer_rejects() {
+    // Every policy key alone, from each kind of layer. The published lists
+    // are what the guide's "who may set it" column says; they must be
+    // exactly the sets the loader refuses.
+    let global = SourceIdentity::virtual_source(SourceKind::Global, "docs-truth user layer");
+    let managed = SourceIdentity::virtual_source(SourceKind::Managed, "docs-truth managed layer");
+    let mdm = SourceIdentity::virtual_source(SourceKind::Mdm, "docs-truth MDM layer");
+    let remote = SourceIdentity::virtual_source(SourceKind::Remote, "docs-truth organization");
+    let mut rejected = Vec::new();
+    let mut rejected_remotely = Vec::new();
+    for name in POLICY_FIELD_NAMES {
+        let value = match name {
+            "max_output_tokens" => "1000",
+            "require_https" | "allow_custom_providers" | "allow_literal_secrets" => "true",
+            "builtin_preference" => "hint",
+            "exposed_tools" | "allow_tools" | "deny_tools" => r#"["read_file"]"#,
+            "allow_shell_prefixes" | "deny_shell_prefixes" => r#"["cargo test"]"#,
+            "allow_hosts" | "deny_hosts" => r#"["docs.rs"]"#,
+            "shell_env" => r#"["CARGO_HOME"]"#,
+            _ => r#"["openai"]"#,
+        };
+        let content = format!("(version: 1, policy: ({name}: {value}))");
+        for administrator in [&managed, &mdm] {
+            document::Document::parse(&content, administrator).unwrap_or_else(|error| {
+                panic!("{name} should load from {administrator:?}: {error}")
+            });
+        }
+        match document::Document::parse(&content, &global) {
+            Ok(_) => {}
+            Err(ConfigError::PolicyOutsideManaged { .. }) => rejected.push(name),
+            Err(other) => panic!("{name} from a user layer: unexpected {other}"),
+        }
+        match document::Document::parse(&content, &remote) {
+            Ok(_) => {}
+            Err(ConfigError::PolicyOutsideManaged { .. }) => {}
+            Err(ConfigError::RemotePolicyGrantsForbidden { .. }) => rejected_remotely.push(name),
+            Err(other) => panic!("{name} from an organization: unexpected {other}"),
+        }
+    }
+    assert_eq!(rejected, MANAGED_ONLY_POLICY_FIELD_NAMES);
+    assert_eq!(rejected_remotely, ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES);
 }
 
 #[test]

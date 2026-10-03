@@ -23,25 +23,26 @@ const LABELS: [&str; 3] = ["approve", "deny", "abstain"];
 /// Consults Jev first and the composed reviewer only when Jev does not
 /// decide. Both speak `ReviewDecision`; the gate does not know which answered
 /// beyond `ReviewVerdict::delegate`. Whether Jev is consulted at all is the
-/// held call's workspace configuration (`jev_approval`, trust-gated), read
-/// per hold and cached per credential epoch like the model reviewer's route.
+/// held call's compiled plan (`ReviewRequest::jev_approval`: the run's
+/// `jev_approval` after profile and override merging, trust-gated), never a
+/// separate configuration read, so an explicit off in the run's profile or a
+/// configuration edit takes effect with the plan that observes it.
 pub struct JevApprovalReviewer {
     factory: RuntimeFactory,
     fallback: Arc<dyn ApprovalReviewer>,
     endpoint: Arc<str>,
-    /// Per workspace: whether Jev is opted in and, if so, the TypeSafe
-    /// client. A missing key is observed at the first hold and remembered,
-    /// not at startup, so an operator who set `jev_approval: on` without a
-    /// key still gets the reviewer and the human rather than a refused server.
-    cache: Arc<std::sync::Mutex<HashMap<PathBuf, CachedJevClient>>>,
+    /// The TypeSafe client for the current credential epoch. The key is
+    /// global, so one entry: a rotated or newly stored key replaces it. Only
+    /// a built client is cached; a missing key or a failed read is retried
+    /// at the next opted-in hold, so an operator who set `jev_approval: on`
+    /// without a key still gets the reviewer and the human meanwhile.
+    cache: Arc<std::sync::Mutex<Option<CachedJevClient>>>,
 }
 
 #[derive(Clone)]
 struct CachedJevClient {
     epoch: qq_protocol::CredentialEpoch,
-    /// `Ok(None)` when the workspace has not opted in; `Err` is remembered
-    /// too so a missing key is not re-read on every hold.
-    client: Result<Option<reqwest::Client>, &'static str>,
+    client: reqwest::Client,
 }
 
 impl JevApprovalReviewer {
@@ -50,7 +51,7 @@ impl JevApprovalReviewer {
             factory,
             fallback,
             endpoint: "https://api.typesafe.ai/v1/systemone".into(),
-            cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -69,12 +70,9 @@ impl JevApprovalReviewer {
         }
     }
 
-    /// Blocking: whether `workspace` opted Jev in and, if so, its client.
-    /// Cached per workspace and credential epoch; a rotated or newly stored
-    /// key, or a changed configuration, is observed on the next epoch. A
-    /// configuration that fails to load is "not opted in": the fallback
-    /// reviewer reports its own configuration failure.
-    fn prepare(&self, workspace: &Path) -> Result<Option<reqwest::Client>, &'static str> {
+    /// Blocking: the TypeSafe client for the current credential epoch.
+    /// Called only for an opted-in hold.
+    fn prepare(&self) -> Result<reqwest::Client, &'static str> {
         let epoch = self
             .factory
             .inner
@@ -82,38 +80,28 @@ impl JevApprovalReviewer {
             .epoch()
             .map_err(|_| "credential store unavailable")?;
         if let Ok(cache) = self.cache.lock()
-            && let Some(cached) = cache.get(workspace)
+            && let Some(cached) = cache.as_ref()
             && cached.epoch == epoch
         {
-            return cached.client.clone();
+            return Ok(cached.client.clone());
         }
-        let enabled = self
-            .factory
-            .request_for_workspace(workspace, None)
-            .ok()
-            .and_then(|load| self.factory.load(&load).ok())
-            .is_some_and(|snapshot| snapshot.jev_approval());
-        let client = if enabled {
-            typesafe_http_client(&self.factory.inner.credentials)
-                .map(Some)
-                .map_err(|error| match error {
-                    RuntimeBuildError::JevKeyRequired => "no TypeSafe key is stored",
-                    RuntimeBuildError::JevKeyInvalid => "the TypeSafe key is not a valid header",
-                    _ => "the TypeSafe client could not be constructed",
-                })
-        } else {
-            Ok(None)
-        };
+        let client =
+            typesafe_http_client(&self.factory.inner.credentials).map_err(|error| match error {
+                RuntimeBuildError::JevKeyRequired => "no TypeSafe key is stored",
+                RuntimeBuildError::JevKeyInvalid => "the TypeSafe key is not a valid header",
+                _ => "the TypeSafe client could not be constructed",
+            })?;
+        // Only a built client is cached. A failure (a keyring that was
+        // briefly locked, a client builder error, a key added outside the
+        // store) is retried at the next opted-in hold rather than pinned for
+        // the whole credential epoch, which only durable writes advance.
         if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(
-                workspace.to_owned(),
-                CachedJevClient {
-                    epoch,
-                    client: client.clone(),
-                },
-            );
+            *cache = Some(CachedJevClient {
+                epoch,
+                client: client.clone(),
+            });
         }
-        client
+        Ok(client)
     }
 }
 
@@ -156,19 +144,21 @@ impl ApprovalReviewer for JevApprovalReviewer {
     fn review(&self, request: ReviewRequest) -> ReviewFuture {
         let reviewer = self.handle();
         Box::pin(async move {
+            // Not opted in: the composed reviewer decides on its own, and
+            // neither the key nor TypeSafe is touched.
+            if !request.jev_approval {
+                return reviewer.fallback.review(request).await;
+            }
             let prepared = {
                 let reviewer = reviewer.handle();
-                let workspace = PathBuf::from(&request.workspace);
-                tokio::task::spawn_blocking(move || reviewer.prepare(&workspace)).await
+                tokio::task::spawn_blocking(move || reviewer.prepare()).await
             };
             let free = qq_core::ReviewSpend {
                 usage: None,
                 cost_usd_nanos: Some(0),
             };
             let answer = match prepared {
-                // Not opted in: the composed reviewer decides on its own.
-                Ok(Ok(None)) => return reviewer.fallback.review(request).await,
-                Ok(Ok(Some(client))) => {
+                Ok(Ok(client)) => {
                     match tokio::time::timeout(
                         JEV_APPROVAL_TIMEOUT,
                         ask_jev(&client, &reviewer.endpoint, &request),
@@ -437,6 +427,7 @@ mod tests {
             recent_actions: Vec::new(),
             granted_tools: Vec::new(),
             granted_shell_prefixes: Vec::new(),
+            jev_approval: false,
         }
     }
 
@@ -619,8 +610,40 @@ mod tests {
     fn request_in(workspace: &Path) -> ReviewRequest {
         ReviewRequest {
             workspace: workspace.display().to_string(),
+            jev_approval: true,
             ..request()
         }
+    }
+
+    #[tokio::test]
+    async fn a_held_call_whose_plan_is_off_never_reaches_jev_whatever_was_cached() {
+        // Audit finding 5: activation used to be cached per workspace until
+        // the credential epoch changed, so turning `jev_approval` off kept
+        // calling TypeSafe. The reviewer now obeys the call's compiled plan:
+        // after an opted-in hold has built and cached the client, an off
+        // hold goes straight to the fallback with no Jev spend.
+        let asked = Arc::new(StdMutex::new(Vec::new()));
+        let fallback = Arc::new(RecordingFallback {
+            asked: Arc::clone(&asked),
+            verdict: ReviewVerdict::free(ReviewDecision::Approve),
+        });
+        let (factory, workspace) = factory_with_key(Some(b"test-key"));
+        let reviewer =
+            JevApprovalReviewer::new(factory, fallback).with_endpoint("http://127.0.0.1:1/unused");
+        let on = reviewer.review(request_in(&workspace)).await;
+        assert_eq!(on.spend.cost_usd_nanos, None, "Jev was attempted");
+        assert!(reviewer.cache.lock().unwrap().is_some());
+
+        let off = reviewer
+            .review(ReviewRequest {
+                jev_approval: false,
+                ..request_in(&workspace)
+            })
+            .await;
+        assert_eq!(off.decision, ReviewDecision::Approve);
+        assert_eq!(off.delegate, DelegateIdentity::Reviewer);
+        assert_eq!(off.spend.cost_usd_nanos, Some(0), "no Jev attempt");
+        assert_eq!(asked.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -641,7 +664,12 @@ mod tests {
         });
         let reviewer =
             JevApprovalReviewer::new(factory, fallback).with_endpoint("http://127.0.0.1:1/unused");
-        let verdict = reviewer.review(request_in(&workspace)).await;
+        let verdict = reviewer
+            .review(ReviewRequest {
+                jev_approval: false,
+                ..request_in(&workspace)
+            })
+            .await;
         assert_eq!(asked.lock().unwrap().len(), 1);
         assert_eq!(verdict.decision, ReviewDecision::Approve);
         assert_eq!(verdict.delegate, DelegateIdentity::Reviewer);
@@ -668,6 +696,73 @@ mod tests {
         assert!(reason.contains("no TypeSafe key is stored"), "{reason}");
         assert!(reason.contains("reviewer unavailable"), "{reason}");
         assert_eq!(verdict.spend.cost_usd_nanos, Some(0));
+    }
+
+    /// A keyring whose first `n` reads fail as unavailable (a locked or busy
+    /// store), then behaves like memory.
+    struct FlakyKeyring {
+        failures: std::sync::atomic::AtomicUsize,
+        inner: crate::runtime::tests::MemoryKeyring,
+    }
+
+    impl qq_auth::KeyringBackend for FlakyKeyring {
+        fn get(&self, name: &str) -> Result<Vec<u8>, qq_auth::KeyringError> {
+            use std::sync::atomic::Ordering;
+            if self
+                .failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(qq_auth::KeyringError::Unavailable);
+            }
+            self.inner.get(name)
+        }
+        fn set(&self, name: &str, secret: &[u8]) -> Result<(), qq_auth::KeyringError> {
+            self.inner.set(name, secret)
+        }
+        fn remove(&self, name: &str) -> Result<(), qq_auth::KeyringError> {
+            self.inner.remove(name)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transient_key_read_failure_is_retried_at_the_next_hold() {
+        // Review (#214): the first opted-in hold's failure was cached for the
+        // whole credential epoch, which only durable writes advance, so a
+        // keyring that was briefly unavailable disabled Jev until restart.
+        let asked = Arc::new(StdMutex::new(Vec::new()));
+        let fallback = Arc::new(RecordingFallback {
+            asked: Arc::clone(&asked),
+            verdict: ReviewVerdict::free(ReviewDecision::Escalate {
+                reason: "reviewer unavailable".to_owned(),
+            }),
+        });
+        let keyring: Arc<dyn qq_auth::KeyringBackend> = Arc::new(FlakyKeyring {
+            failures: std::sync::atomic::AtomicUsize::new(1),
+            inner: crate::runtime::tests::MemoryKeyring::default(),
+        });
+        let writer: Arc<dyn qq_auth::KeyringBackend> = Arc::clone(&keyring);
+        let (factory, workspace) = factory_with(OPTED_IN, Some(b"test-key"), keyring, writer);
+        let reviewer =
+            JevApprovalReviewer::new(factory, fallback).with_endpoint("http://127.0.0.1:1/unused");
+
+        let first = reviewer.review(request_in(&workspace)).await;
+        assert_eq!(
+            first.spend.cost_usd_nanos,
+            Some(0),
+            "no Jev attempt: key unreadable"
+        );
+        assert!(
+            reviewer.cache.lock().unwrap().is_none(),
+            "the failure is not cached"
+        );
+
+        let second = reviewer.review(request_in(&workspace)).await;
+        assert_eq!(
+            second.spend.cost_usd_nanos, None,
+            "Jev is attempted once the keyring recovers, with no credential write"
+        );
+        assert!(reviewer.cache.lock().unwrap().is_some());
     }
 
     #[tokio::test]

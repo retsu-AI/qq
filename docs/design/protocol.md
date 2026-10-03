@@ -45,14 +45,17 @@ Related documents:
 
 Plan descriptor version 9 records optional `reasoning_effort`, routing policy
 and candidate-configuration fingerprint in its canonical identity; version 10
-adds each declared MCP server's configured tool-set `pin` (ADR-0046). Neither
-alters the wire envelope version or requires a database migration; historical
-descriptor JSON remains historical evidence.
+adds each declared MCP server's configured tool-set `pin` (ADR-0046); version
+11 adds each delegation roster entry's `effort` (RR8.4); version 12 adds
+`approval_delegate`, the identity of the first delegate for held calls (Jev
+approval) when enabled (ADR-0052). None alters the wire envelope version or
+requires a database migration; historical descriptor JSON remains historical
+evidence.
 
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 28
+PROTOCOL_VERSION = 30
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -193,8 +196,38 @@ from the stream alone; `set_approval_delegate` / `approval_delegate_set` on
 its held calls (`by_mode` | `on` | `off`, or absent to clear); and the
 optional `SessionSummary.approval_delegate` that carries the override. Every
 field is optional and omitted when absent; the version moves because older
-clients reject the new command, outcome, and summary field. Golden fixtures
-live under `crates/qq-protocol/tests/fixtures/v28/`; `v23`–`v27` are retained
+clients reject the new command, outcome, and summary field.
+
+Version 29 adds the `max` reasoning effort (above `xhigh`, for routes that
+advertise it). Version 29 and 30 values are accepted in every field of type
+`ReasoningEffort`, which is exactly: `create_session.reasoning_effort`,
+`set_session_effort.effort`, the `session_effort_set` receipt's `effort`,
+`SessionSummary.reasoning_effort`, `RoutingDecision.reasoning_effort`,
+`ModelDescriptor.reasoning_efforts`, and the capability document's
+`DelegationRosterEntry.effort`. Version 30 adds
+`default`, an explicit "let the provider choose" pin that overrides configured
+effort and is never sent on a provider wire, distinct from an absent pin
+(inherit). Neither adds a field; each moves the version because older decoders
+reject the new enum value. Store schema 37 and 39 gate the same values on disk.
+Golden fixtures live under `crates/qq-protocol/tests/fixtures/v30/`; `v23`–`v29`
+are retained decode-only.
+
+Version 29 adds `max` to the reasoning-effort vocabulary (every
+`reasoning_effort` / `effort` field and `ModelDescriptor.reasoning_efforts`),
+for models whose top rung is above `xhigh`. No field was added or renamed;
+the version moves because an older client rejects the new value. Store
+schema 37 persists it.
+
+Version 30 adds `default` to the same vocabulary: an explicit pin meaning
+"override the configured effort and send none", distinct from the absent
+field (inherit the configuration or profile) and from `none` (disable
+reasoning on models that advertise it). `default` is never sent on a
+provider wire and is not listed in `reasoning_efforts`. Older clients reject
+the value. Store schema 38 adds the provider continuation envelope that
+replays signed reasoning; schema 39 persists `default`. Schema 40 records each
+model turn's runtime notice (`report` or `continuation`) for replay; no wire
+shape changed. Golden fixtures live under
+`crates/qq-protocol/tests/fixtures/v30/`; `v23`–`v29` are retained
 decode-only.
 
 Clients and servers must agree on this value.
@@ -1970,7 +2003,7 @@ server's version and report the skew. Events, snapshots, and every inbound
 type stay strict.
 
 Golden encodings for every command, receipt, event, and the capability
-document live under `crates/qq-protocol/tests/fixtures/v19/` and are checked
+document live under `crates/qq-protocol/tests/fixtures/v30/` and are checked
 byte-for-byte by `crates/qq-protocol/tests/wire_fixtures.rs`. A wire change
 fails that test first; regenerate the goldens with `QQ_UPDATE_FIXTURES=1`
 after bumping `PROTOCOL_VERSION`.

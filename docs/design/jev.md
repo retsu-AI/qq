@@ -134,11 +134,14 @@ necessarily the model, causes most handoffs.
    `view/overlay.rs:606`). Even a fast Jev approval looks like a handoff. If
    the human answers first, Jev's decision is dropped.
 4. **Headless runs deny before Jev answers when only Jev is configured.**
+   *(Fixed in v0.1.5, #215; kept as recorded.)*
    `reviewer_configured` checks only `reviewer_model` (`src/main.rs:405`).
    Headless `auto` denies a root hold immediately when that flag is false
    (`src/headless.rs:987`). The only Jev headless test sets the flag by hand
    (`headless.rs:3490`), which hides the bug.
-5. **Turning Jev on or off doesn't reliably take effect.** Defaults are
+5. **Turning Jev on or off doesn't reliably take effect.** *(Fixed in
+   v0.1.5, #214: the compiled plan carries the merged `jev_approval` to each
+   held call and an edit replaces the cached plan; kept as recorded.)* Defaults are
    correct, and a stored key alone makes no Jev calls. But:
    - The approval reviewer caches the "enabled" answer per workspace and
      credential epoch (`src/runtime/approval.rs:77-116`). The epoch changes

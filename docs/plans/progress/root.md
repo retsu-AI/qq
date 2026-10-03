@@ -70,8 +70,11 @@ may append a **request** row; only root changes a request's status.
 | 0046 | MCP tool-set pinning in configuration and plan identity, enforced at dispatch; `DESCRIPTOR_VERSION` 9 → 10 | ENG-939 (supersedes contributed #163/#165/#171) | Accepted 2026-09-25: `docs/adr/0046-mcp-tool-set-pinning.md` |
 | 0047 | Durable held-approval lifecycle: delegate-pending and human-required phases; clients follow server phase | Jev plan JV5 (ENG-791) | Proposed 2026-09-28 (`0047-jev-approval-hold-lifecycle.md`); replaces draft #193's colliding "0046" proposal |
 | 0048 | Run bounds reset at seams; `ContinueRun` and opt-in auto-continue of paused/interrupted runs | autonomous-core AC2–AC6 | Proposed 2026-09-28: `docs/adr/0048-run-bounds-reset-at-seams-and-continuation.md` |
-| 0049 | Durable run goal re-stated after compaction; completion audit; always-on loop guard; continue-if-idle | autonomous-core AC4, AC7–AC9 | Proposed 2026-09-28: `docs/adr/0049-durable-run-goal-and-loop-guard.md` |
+| 0049 | Session goal pursued by the runtime across runs, restarts and days (goal driver, checked completion, goal budgets through `RunLimits`, waits and backoff); always-on loop guard | goals G0, G2–G5; autonomous-core AC4 | Proposed 2026-09-28; revised by the goals plan and #226 review through 2026-09-30 (fresh recovery, scoped check authority, fenced lifecycle/accounting): `docs/adr/0049-durable-run-goal-and-loop-guard.md` |
 | 0050 | `qq-harness` composition library; `qq-core` tool features, embedding example and surface hygiene | autonomous-core AC10–AC13 | Proposed 2026-09-28: `docs/adr/0050-qq-harness-composition-library.md` |
+| 0051 | 0ver product versioning; compatibility carried by contract versions | v0.1.5 release (ENG-969), PR #212 | Accepted 2026-09-28: `docs/adr/0051-zerover-product-versioning.md` |
+| 0052 | Jev approval activation from the compiled plan; supersedes ADR-0041 decision 5's activation | v0.1.5 release (ENG-971), PR #214 | Accepted 2026-09-28: `docs/adr/0052-jev-approval-activation-from-plan.md` |
+| 0054 | Progress means output: stall reports, a sub-agent answers its brief, non-blocking delegation | autonomous-core AP1–AP5 (ENG-978) | Proposed 2026-09-30: `docs/adr/0054-progress-means-output.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -143,7 +146,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0051. Reserve here before opening a PR that adds an ADR.
+Next free number: 0055. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -157,12 +160,16 @@ Next free number: 0051. Reserve here before opening a PR that adds an ADR.
 | 2026-09-11 | tool-layer plan | `docs/plans/README.md`, `docs/README.md` | Plan row, priority entry, catalog link | Done |
 | 2026-09-12 | tool-layer T2 | root `Cargo.toml`, `Cargo.lock` | Add `ignore = "0.4"` and `regex = "1"` to `[workspace.dependencies]` for `qq-core` (no version bumps; `regex` was already locked via tree-sitter) | Done (#32; `Cargo.toml` rows present) |
 | 2026-09-14 | tool-layer T6 (ahead of start) | root `Cargo.toml`, `Cargo.lock` | Promote `tree-sitter` and `tree-sitter-bash` to `[workspace.dependencies]` for the shell classifier (`approval/classify.rs`); `qq-tui` already depends on `tree-sitter = "0.26"` / `tree-sitter-bash = "0.25"` directly; promote those rows to the workspace table and point `qq-tui` at them so `qq-core` shares one version. No lock delta | Done (#40; `Cargo.toml` `[workspace.dependencies]`, both crates `.workspace = true`) |
-| 2026-09-20 | tui-redesign | `AGENTS.md` § Git And Reviews | Linear team is `ENG` (per the 2026-09-19 entry below and the live board), not `DEV`; fix the reference and the branch-name examples | Open |
+| 2026-09-20 | tui-redesign | `AGENTS.md` § Git And Reviews | Linear team is `ENG` (per the 2026-09-19 entry below and the live board), not `DEV`; fix the reference and the branch-name examples | Done (AGENTS.md reads `ENG` with `feat/eng-123-…` examples; closed in the v0.1.5 release stack, ENG-976) |
 | 2026-09-20 | tui-redesign | `docs/plans/README.md`, `docs/README.md`, `docs/design/architecture.md` § repository map (`qq-tui` bullet) | Plan row and priority entry for `tui-redesign.md`. The `docs/README.md` index entry and a one-sentence `architecture.md` pointer to `docs/design/layout.md` were made in the L1 PR (index and pointer only; no boundary change) | Partly done (L1) |
 | 2026-09-21 | run-reliability RR4 | root `Cargo.toml`, `Cargo.lock` (RR5: `httpdate = "1"` workspace row, already in the lock via hyper); `crates/qq-protocol` `PROTOCOL_VERSION` 25 → 26 (`run_turn_retrying`, `paused`); `docs/adr/README.md`; `docs/design/architecture.md` § run loop | Turn recovery per ADR-0040 | Done in the RR4 PR |
 | 2026-09-24 | delegated-approval DA6 (ENG-862) | `crates/qq-protocol` `PROTOCOL_VERSION` 27 → 28 (`tool_approval_resolved.delegate`, `tool_approval_escalated`, `set_approval_delegate` / `approval_delegate_set`, `SessionSummary.approval_delegate`, `/delegate` reserved); `docs/README.md` and `docs/plans/README.md` rows (target contract deleted, plan closed) | The delegate identity must be on the stream for a supervisor to tell Jev from `reviewer_model`; the plan's acceptance requires it | Done in the DA6 PR |
 | 2026-09-24 | onboarding-ux OB7 (ENG-881) | `docs/adr/README.md` (ADR-0042 row); `crates/qq-client/src/port.rs` `ClientRequest::Models` (client-internal enum, not wire) | The trust prompt is client-side per ADR-0042; **no `PROTOCOL_VERSION` change** (stays 28). The plan's "needs a protocol addition" note is superseded by the ADR | Done in the OB7 PR |
 | 2026-09-25 | mcp-pinning MP1 (ENG-939) | `Cargo.lock` (`sha2` for `qq-mcp`, already locked via other crates); `crates/qq-core/src/plan/descriptor.rs` `DESCRIPTOR_VERSION` 9 → 10 (`McpServerDescriptor.pin`); `docs/adr/README.md` (ADR-0046 row); `docs/design/architecture.md` § compiled plan identity; `docs/design/protocol.md` descriptor note; `docs/guide/cli.md` (`qq mcp inspect`) | The configured pin must be in durable plan identity or pinned and unpinned plans share a digest | Done in the ENG-939 PR |
+| 2026-09-28 | release v0.1.5 (ENG-968) | `docs/runbooks/release.md` § Versioning; `docs/design/architecture.md` § run loop and reasoning effort; root `Cargo.toml` / `Cargo.lock` version bump (release PR) | Adopt 0ver (contract bumps no longer force MINOR) and correct post-v0.1.4 drift before tagging | In review (stack ENG-969 … ENG-977) |
+| 2026-09-30 | autonomous-core AC0 (ENG-986) | `benchmarks/perf/README.md`, future `benchmarks/perf/budgets-v1.json` / `xtask/src/perf.rs` | Register standalone soak / `turn_overhead` boundaries now; qualify and register new H0 metrics together in AC0.2, never add budgets for absent metrics or widen existing gates | Open; standalone inventory amendment proposed in AC0.1 |
+| 2026-10-01 | autonomous-core AP1 (ENG-989) | `docs/design/architecture.md` § compiled plan prompt prefix (key gains the sub-agent state) and § child sessions (the `Sub-agent:` prompt section) | The prompt-prefix key and the child prompt changed; architecture must describe them as built | Done in the AP1 PR |
+| 2026-10-01 | autonomous-core AP3a (ENG-990) | `docs/design/architecture.md` § run loop slices and the measured-token paragraph; `docs/design/protocol.md` version history (store schema 40); guide `troubleshooting.md` / `providers.md` schema mentions | Store schema 39 → 40 (`model_turns.notice`); the slice seam no longer changes the system prompt | Done in the AP3a PR |
 
 Shared files: root `Cargo.toml` and `Cargo.lock` version bumps,
 `rust-toolchain.toml`, `flake.nix`, `.github/workflows/*`,
@@ -425,3 +432,37 @@ while writing ADR-0038: `commands` already has no reference to `sessions`
 (receipts survive deletion by accident today), and `delete_idle_session`
 removes every session-scoped table except the session's rows in `events` —
 the event log grows regardless of deletion, which the ADR's decision 6 fixes.
+
+### 2026-09-28 — v0.1.5 release-readiness stack (ENG-968)
+
+Release review of `main` at `7885f2c` (v0.1.4 + 36 commits): workspace tests
+1948/0/6, clippy and fmt clean, minimal provider profile 203 passed, CI green.
+Versioning moves to 0ver (ENG-969): contract bumps since v0.1.4 (protocol
+27 → 30, store 35 → 39, descriptor 9 → 11) ship as a PATCH, listed in the
+release PR. Stacked fixes: trust prompt answers only for shown digests
+(ENG-970); Jev approval follows the run's plan, off wins (ENG-971, audit
+finding 5); headless auto waits for Jev (ENG-972, finding 4); empty-truncation
+raise reachable in sessions (ENG-973); init symlink refusal and bounded ignore
+files (ENG-974; `search_walk` unchanged within noise); schema-35 upgrade test
+(ENG-975); docs drift (ENG-976); release bump (ENG-977). Deferred, not
+release fixes: audit findings 1, 3, 6–8 (PR #193), ENG-870 remaining RR8
+goals, Merkle index robustness, ENG-834 size budget.
+
+### 2026-09-30 — AP0 progress baseline (autonomous-core, ENG-978)
+
+`docs/runbooks/progress-report.md` on the lead's store: 30 days ending
+2026-10-01 (UTC), schema 39, 425 runs in the window, read-only. No AP
+slice is on `main`.
+- Long runs (≥ 20 turns): 95 roots, 85 children. No child made a change or
+  ran a shell command (0 / 0).
+- Silent stretch ≥ 64 / 128 / 256 / 320 calls: children 51 / 22 / 13 / 10,
+  roots 1 / 0 / 0 / 0. No-work stretch: children 65 / 33 / 15 / 11, roots
+  12 / 3 / 0 / 0.
+- Children: median first-text turn 22. 41 of 85 long children, and 30 of
+  74 children with ≥ 64 calls, had no text before their final turn.
+- Slice checkpoints (whole store): 30 runs reached one, and 20 of them
+  skipped at least one. 25 checkpoint turns were answered with calls, and
+  23 of those had no text.
+- Delegating runs: 41 runs, 4 351 wall minutes, 1 722 minutes (40 %) with a
+  `spawn_agent` call open (merged intervals). 34 of 124 spawns returned an
+  error, 12 of them children over their context limit.

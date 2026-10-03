@@ -100,7 +100,7 @@ async fn prune_deletes_only_idle_sessions_without_messages() {
 fn version_one_migration_is_atomic_and_marks_historical_cost_unknown() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
-    let connection = Connection::open(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -144,7 +144,7 @@ fn version_one_migration_is_atomic_and_marks_historical_cost_unknown() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     assert!(
         !connection
@@ -186,7 +186,7 @@ fn version_five_migration_defaults_existing_messages_to_turn_zero() {
     {
         // A version-5 store whose messages table predates turn_ordinal,
         // holding one completed legacy run.
-        let connection = Connection::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -271,7 +271,7 @@ fn version_five_migration_defaults_existing_messages_to_turn_zero() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     assert!(has_column(&connection, "tool_calls", "display_json").unwrap());
     let (turn_ordinal, output, state) = connection
@@ -299,7 +299,7 @@ fn version_six_migration_adds_the_display_column_and_keeps_existing_calls_bare()
     {
         // A version-6 store whose tool_calls table predates display_json,
         // holding one completed edit call.
-        let connection = Connection::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -339,7 +339,7 @@ fn version_six_migration_adds_the_display_column_and_keeps_existing_calls_bare()
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     let (display_json, result) = connection
         .query_row(
@@ -367,7 +367,7 @@ fn version_seven_migration_adds_compaction_storage_and_run_kinds() {
     {
         // A version-7 store whose runs table predates internal run kinds
         // and that has no compaction storage.
-        let connection = Connection::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -398,7 +398,7 @@ fn version_seven_migration_adds_compaction_storage_and_run_kinds() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     assert!(has_column(&connection, "runs", "kind").unwrap());
     assert_eq!(
@@ -424,7 +424,7 @@ fn version_ten_migration_adds_context_and_child_ownership_without_guessing() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     {
-        let connection = Connection::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -463,7 +463,7 @@ fn version_ten_migration_adds_context_and_child_ownership_without_guessing() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     assert!(has_column(&connection, "sessions", "context_tokens").unwrap());
     assert!(has_column(&connection, "sessions", "owner_run_id").unwrap());
@@ -513,7 +513,7 @@ fn version_eleven_migration_adds_child_ownership_and_preserves_context() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     {
-        let connection = Connection::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -551,7 +551,7 @@ fn version_eleven_migration_adds_child_ownership_and_preserves_context() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     assert!(has_column(&connection, "sessions", "owner_run_id").unwrap());
     assert_eq!(
@@ -571,7 +571,7 @@ fn version_twelve_migration_adds_prompt_identity_without_guessing() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     {
-        let connection = Connection::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -607,7 +607,7 @@ fn version_twelve_migration_adds_prompt_identity_without_guessing() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     assert!(has_column(&connection, "runs", "prompt_identity_json").unwrap());
     assert_eq!(
@@ -626,7 +626,7 @@ fn version_twelve_migration_adds_prompt_identity_without_guessing() {
 fn version_thirteen_migration_adds_per_turn_audit_columns() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
-    let connection = Connection::open(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -651,7 +651,7 @@ fn version_thirteen_migration_adds_per_turn_audit_columns() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     for column in [
         "model_json",
@@ -670,7 +670,7 @@ fn version_thirteen_migration_adds_per_turn_audit_columns() {
 fn version_fourteen_migration_adds_chunks_and_incremental_capacity_columns() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
-    let connection = Connection::open(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -718,7 +718,7 @@ fn version_fourteen_migration_adds_chunks_and_incremental_capacity_columns() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     assert!(has_column(&connection, "message_chunks", "chunk_ordinal").unwrap());
     assert!(has_column(&connection, "message_chunks", "text").unwrap());
@@ -738,7 +738,7 @@ fn version_fourteen_migration_adds_chunks_and_incremental_capacity_columns() {
 fn version_fourteen_store_with_implicit_primary_key_outbox_migrates() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
-    let connection = Connection::open(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -792,7 +792,7 @@ fn version_fourteen_store_with_implicit_primary_key_outbox_migrates() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     let command_id_not_null: bool = connection
         .query_row(
@@ -831,7 +831,7 @@ fn partially_applied_version_fourteen_linear_migration_completes_atomically() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     assert!(has_column(&connection, "message_chunks", "text").unwrap());
     assert!(has_column(&connection, "runs", "context_base_bytes").unwrap());
@@ -901,7 +901,7 @@ fn version_fifteen_migration_keeps_historical_resolved_model_unknown() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     assert!(has_column(&connection, "runs", "resolved_model_json").unwrap());
     assert_eq!(
@@ -993,7 +993,7 @@ fn version_seventeen_migration_adds_preparation_and_exact_compaction_ownership()
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     let preparing_shape: (String, bool, Option<String>) = connection
         .query_row(
@@ -1116,7 +1116,7 @@ fn version_eighteen_migration_adds_unknown_occupancy_basis_without_losing_the_me
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     let occupancy_shape: (String, bool, Option<String>) = connection
         .query_row(
@@ -1222,7 +1222,7 @@ fn partially_applied_version_eighteen_migration_completes_atomically() {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "39"
+            STORE_SCHEMA_VERSION.to_string()
         );
     }
 }
@@ -1343,7 +1343,7 @@ fn version_twenty_migration_adds_spawn_call_ownership_without_guessing() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     // A historical child keeps its parent run but has no recorded call:
     // the summary says so explicitly instead of inventing one.
@@ -1425,7 +1425,7 @@ fn version_twenty_five_migration_adds_activity_and_backfills_the_command_counter
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     assert_eq!(
         connection
@@ -1551,7 +1551,7 @@ fn version_twenty_six_migration_adds_the_tool_call_effect_and_keeps_history_unkn
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     // A historical call has no recorded effect: assembly falls back to
     // the name rather than guessing a class for it.
@@ -1593,7 +1593,7 @@ fn version_twenty_seven_migration_adds_the_output_contract_columns_and_keeps_his
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     let (contract, final_output): (Option<String>, Option<String>) = connection
         .query_row(
@@ -1628,7 +1628,7 @@ fn version_twenty_eight_migration_adds_the_spill_table_empty() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     let rows: u32 = connection
         .query_row("SELECT COUNT(*) FROM tool_spills", [], |row| row.get(0))
@@ -1659,7 +1659,7 @@ fn version_twenty_nine_migration_adds_the_attachment_tables_empty() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     for table in ["attachment_blobs", "message_attachments"] {
         let rows: u32 = connection
@@ -1696,7 +1696,7 @@ fn version_thirty_migration_adds_the_messages_run_index() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     let plan: Vec<String> = connection
         .prepare(
@@ -1956,7 +1956,7 @@ fn version_twenty_two_migration_adds_truncation_state_as_never_truncated() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     let message = load_message(&connection, message_id).unwrap();
     assert!(!message.truncated);
@@ -1982,7 +1982,12 @@ fn version_twenty_two_migration_adds_truncation_state_as_never_truncated() {
         .unwrap();
     let mut context = Vec::new();
     append_run_turns(
-        vec![(ordinal, content_json, truncated)],
+        vec![StoredTurn {
+            ordinal,
+            content_json,
+            truncated,
+            notice: None,
+        }],
         HashMap::new(),
         std::collections::VecDeque::new(),
         None,
@@ -2045,7 +2050,7 @@ fn version_nineteen_migration_keeps_historical_runs_unlimited() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     let shape: (String, bool, Option<String>) = connection
         .query_row(
@@ -2127,7 +2132,7 @@ fn partially_applied_version_seventeen_migration_completes_atomically() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
 }
 
@@ -2189,7 +2194,7 @@ fn version_thirty_four_gains_grant_provenance_and_keeps_old_rows_human() {
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     let (source, run_id): (String, Option<String>) = connection
         .query_row(
@@ -2241,7 +2246,7 @@ fn version_thirty_three_gains_the_reasoning_effort_pin_and_rejects_a_bad_shape()
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "39"
+        STORE_SCHEMA_VERSION.to_string()
     );
     connection
         .execute("ALTER TABLE sessions DROP COLUMN reasoning_effort", [])
@@ -2741,7 +2746,7 @@ fn r4_append_only_chunk_scaling_diagnostic() {
 fn version_fourteen_store_missing_audit_columns_is_rejected() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
-    let connection = Connection::open(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -2828,6 +2833,175 @@ fn malformed_version_thirty_one_routing_column_is_rejected() {
     ));
 }
 
+#[tokio::test]
+async fn a_v0_1_4_store_at_schema_thirty_five_upgrades_and_keeps_its_history() {
+    // Release gate (ENG-975): v0.1.4 shipped schema 35. A store holding a
+    // real session and a completed prompt must open under the current
+    // runtime, migrate forward exactly once, keep its transcript, and accept
+    // the post-35 commands (the session approval delegate, schema 36).
+    let version = |connection: &rusqlite::Connection| {
+        connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (workspace_id, session_id) = {
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(path.clone()),
+            Arc::new(ScriptedLoader),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let CommandOutcome::SessionCreated { session_id } =
+            create_session(&runtime, workspace_id, None).await.outcome
+        else {
+            panic!("unexpected receipt")
+        };
+        let queued = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::text("written by v0.1.4".to_owned())],
+                    limits: qq_protocol::RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: queued.committed_through,
+            })
+            .unwrap();
+        collect_through_finished(&mut events).await;
+        runtime.shutdown().await.unwrap();
+        (workspace_id, session_id)
+    };
+
+    // Rewind the file to the v0.1.4 shape: no session delegate column,
+    // schema_version 35.
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute("ALTER TABLE sessions DROP COLUMN approval_delegate", [])
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE metadata SET value = '35' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+    }
+
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(path.clone()),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(version(&connection), STORE_SCHEMA_VERSION.to_string());
+        let delegate: Option<String> = connection
+            .query_row(
+                "SELECT approval_delegate FROM sessions WHERE id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(delegate, None, "no session override is invented");
+    }
+    let focused_transcript = |snapshot: &qq_protocol::WorkspaceSnapshot| {
+        snapshot
+            .focused
+            .as_ref()
+            .expect("the session is focused")
+            .messages
+            .iter()
+            .map(|message| (message.role, message.state, message.output.clone()))
+            .collect::<Vec<_>>()
+    };
+    let snapshot = runtime
+        .snapshot(SnapshotRequest {
+            workspace_id,
+            focused_session_id: Some(session_id),
+            include_sessions: Vec::new(),
+            session_limit: 8,
+            message_limit: 8,
+        })
+        .await
+        .unwrap();
+    assert_eq!(snapshot.sessions.len(), 1);
+    // The message rows themselves, not the summary title (which copies the
+    // first prompt and would survive lost history).
+    let migrated = focused_transcript(&snapshot);
+    assert_eq!(migrated.len(), 2, "{migrated:?}");
+    assert_eq!(migrated[0].0, qq_protocol::MessageRole::User);
+    assert_eq!(migrated[0].2, "written by v0.1.4");
+    assert_eq!(migrated[1].0, qq_protocol::MessageRole::Assistant);
+    assert_eq!(migrated[1].1, qq_protocol::MessageState::Complete);
+    assert!(!migrated[1].2.is_empty(), "the assistant reply survives");
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetApprovalDelegate {
+                session_id,
+                delegate: Some(qq_protocol::ApprovalDelegate::Off),
+            },
+        )
+        .await
+        .unwrap();
+    // `close` releases the store's single-writer lock; `shutdown` alone
+    // stops the scheduler but keeps the store open.
+    runtime.close().await.unwrap();
+
+    // Reopening the upgraded store is a no-op: the version, the delegate
+    // written above and the transcript all come back unchanged.
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(path.clone()),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(version(&connection), STORE_SCHEMA_VERSION.to_string());
+        let delegate: Option<String> = connection
+            .query_row(
+                "SELECT approval_delegate FROM sessions WHERE id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(delegate.as_deref(), Some("off"));
+    }
+    let reopened = runtime
+        .snapshot(SnapshotRequest {
+            workspace_id,
+            focused_session_id: Some(session_id),
+            include_sessions: Vec::new(),
+            session_limit: 8,
+            message_limit: 8,
+        })
+        .await
+        .unwrap();
+    assert_eq!(focused_transcript(&reopened), migrated);
+    assert_eq!(
+        reopened.focused.as_ref().unwrap().summary.approval_delegate,
+        Some(qq_protocol::ApprovalDelegate::Off)
+    );
+    runtime.shutdown().await.unwrap();
+}
+
 #[test]
 fn version_thirty_two_migration_preserves_legacy_model_pins() {
     let directory = tempfile::tempdir().unwrap();
@@ -2882,6 +3056,141 @@ fn malformed_model_fallback_column_is_rejected() {
             [],
         )
         .unwrap();
+    drop(connection);
+    assert!(matches!(
+        open_database(&path),
+        Err(SessionRuntimeError::CONSTRAINT)
+    ));
+}
+
+/// Schema 40 adds the nullable turn notice to a pre-40 store: every existing
+/// turn reads as having carried no notice and replays exactly as it did. A
+/// column that already exists with the wrong shape is refused, and a stored
+/// value the build does not know fails assembly instead of being dropped.
+#[test]
+fn version_thirty_nine_gains_the_turn_notice_as_null_and_rejects_a_bad_shape() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let workspace_id = WorkspaceId::generate().unwrap();
+    let session_id = SessionId::generate().unwrap();
+    let run_id = RunId::generate().unwrap();
+    let (connection, _) = open_database(&path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO workspaces(id, path) VALUES (?1, '/v39-notice')",
+            [workspace_id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO sessions(id, workspace_id, title, status, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, 'Old', 'idle', 1, 1)",
+            params![session_id.to_string(), workspace_id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO runs(
+                 id, session_id, command_id, user_message_id, assistant_message_id,
+                 status, created_at_ms
+             ) VALUES (?1, ?2, 'cmd', 'u', 'a', 'completed', 1)",
+            params![run_id.to_string(), session_id.to_string()],
+        )
+        .unwrap();
+    // The run's prompt, so assembly selects its turns.
+    connection
+        .execute(
+            "INSERT INTO messages(id, session_id, run_id, ordinal, turn_ordinal, role, state,
+                                  output, created_at_ms)
+             VALUES (?1, ?2, ?3, 1, 0, 'user', 'complete', 'old prompt', 1)",
+            params![
+                MessageId::generate().unwrap().to_string(),
+                session_id.to_string(),
+                run_id.to_string()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO model_turns(run_id, turn_ordinal, assistant_content_json)
+             VALUES (?1, 1, '[{\"type\":\"text\",\"text\":\"legacy\"}]')",
+            [run_id.to_string()],
+        )
+        .unwrap();
+    for statement in [
+        "ALTER TABLE model_turns DROP COLUMN notice",
+        "UPDATE metadata SET value = '39' WHERE key = 'schema_version'",
+    ] {
+        connection.execute(statement, []).unwrap();
+    }
+    drop(connection);
+
+    let (connection, _) = open_database(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        STORE_SCHEMA_VERSION.to_string()
+    );
+    let notice: Option<String> = connection
+        .query_row(
+            "SELECT notice FROM model_turns WHERE run_id = ?1",
+            [run_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(notice, None);
+    let replay = |notice: Option<crate::runtime::TurnNotice>| {
+        let mut context = Vec::new();
+        append_run_turns(
+            vec![StoredTurn {
+                ordinal: 1,
+                content_json: "[{\"type\":\"text\",\"text\":\"legacy\"}]".to_owned(),
+                truncated: false,
+                notice,
+            }],
+            HashMap::new(),
+            std::collections::VecDeque::new(),
+            None,
+            &mut context,
+            &mut HashMap::new(),
+        )
+        .unwrap();
+        context
+    };
+    // A historical turn replays as it always did; a report turn replays its
+    // notice first, where the live request carried it.
+    assert_eq!(replay(None), [Message::assistant("legacy")]);
+    assert_eq!(
+        replay(Some(crate::runtime::TurnNotice::Report)),
+        [
+            Message::user(crate::SLICE_CHECKPOINT_NOTICE),
+            Message::assistant("legacy")
+        ]
+    );
+    connection
+        .execute(
+            "UPDATE model_turns SET notice = 'mystery' WHERE run_id = ?1",
+            [run_id.to_string()],
+        )
+        .unwrap();
+    let mut connection = connection;
+    let transaction = connection.transaction().unwrap();
+    assert!(matches!(
+        load_model_context_with_rewrite_status(&transaction, session_id, u64::MAX),
+        Err(SessionRuntimeError::CODEC)
+    ));
+    drop(transaction);
+    for statement in [
+        "ALTER TABLE model_turns DROP COLUMN notice",
+        "ALTER TABLE model_turns ADD COLUMN notice INTEGER NOT NULL DEFAULT 0",
+    ] {
+        connection.execute(statement, []).unwrap();
+    }
     drop(connection);
     assert!(matches!(
         open_database(&path),

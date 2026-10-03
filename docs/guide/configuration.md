@@ -36,9 +36,9 @@ Sections `delegation` and `audit` replace as a whole.
 | 5 | project layers, repository root first, current directory last | per directory: `.qq/packs/<id>/pack.ron` (trusted only), `qq.ron`, `.qq/config.ron`, `.qq/config.d/*.ron` |
 | 6 | explicit file | `QQ_CONFIG=/path/to/file.ron` |
 | 7 | inline document | `QQ_CONFIG_CONTENT='(version: 1, …)'` |
-| 8 | overrides | `--model` / `QQ_MODEL`, `--organization` / `QQ_ORGANIZATION`, `--max-output-tokens`, `QQ_JEV_CHECKPOINTS`, `QQ_JEV_ROUTING` |
+| 8 | overrides | `--model` / `QQ_MODEL`, `--organization` / `QQ_ORGANIZATION`, `--max-output-tokens`, `QQ_JEV_CHECKPOINTS`, `QQ_JEV_ROUTING`, `QQ_JEV_APPROVAL`, `QQ_APPROVAL_DELEGATE` |
 | 9 | managed | `/etc/qq/managed.ron` + `managed.d/` (Linux), `/Library/Application Support/qq/` (macOS), `%ProgramData%\qq\` (Windows); must be root-owned |
-| 10 | MDM | macOS managed preferences |
+| 10 | MDM | macOS forced preference `dev.qq` / `ManagedConfig`; Windows policy `HKLM\Software\Policies\dev.qq\ManagedConfig` (`REG_SZ`); none on Linux |
 
 `<global>` is `~/.config/qq` on Linux, `~/Library/Application
 Support/dev.qq.qq` on macOS, `%APPDATA%\qq\qq\config` on Windows;
@@ -66,8 +66,8 @@ repository should not commit; this repository's `.gitignore` excludes
 | `reviewer_model` | `"PROVIDER/MODEL"` | none | model used for `supervised` approval and the final-answer audit |
 | `worker_model` | `"PROVIDER/MODEL"` | none | deprecated; use `delegation.roster` |
 | `organization` | string | none | which enrolled organization manifest applies (`qq org`) |
-| `max_output_tokens` | integer | `16384` | cap on generated tokens per model turn; a model's own limit applies if lower |
-| `reasoning_effort` | `none` `minimal` `low` `medium` `high` `xhigh` | provider default | effort hint for reasoning models that accept one |
+| `max_output_tokens` | integer | `16384` | cap on generated tokens per model turn; a model's own limit applies if lower. One exception: when a turn is cut at this cap with nothing visible (all hidden reasoning) or right after a complete tool call, that one retry is sent with the cap doubled, up to the model's limit and never past a managed `policy.max_output_tokens`, at most once per run. Use `policy.max_output_tokens` for a hard ceiling; run budgets still bound spend |
+| `reasoning_effort` | `none` `minimal` `low` `medium` `high` `xhigh` `max` `default` | provider default | effort hint for reasoning models that accept one. `default` lets the provider choose. Any other value outside the model's known accepted set (catalog or discovery) fails at plan time naming the accepted ones; with no known set, a rejected value fails at the provider ([providers](providers.md)) |
 | `jev_review` | `off` `final` `enforce` | `off` | optional TypeSafe Jev checkpoints; see [`../runbooks/jev.md`](../runbooks/jev.md) |
 | `jev_routing` | bool | `false` | optional Jev model routing |
 | `jev_approval` | bool | `false` | Jev decides held approvals before `reviewer_model` and you; see [`../runbooks/jev.md`](../runbooks/jev.md#approval-delegate--jev_approval) |
@@ -167,6 +167,8 @@ Per model under a provider (all optional):
 
 What the agent may do without asking, and what it may never do.
 
+Any layer (your config, a trusted project):
+
 ```ron
 policy: (
     // Grants: run without a prompt under `auto`.
@@ -175,32 +177,48 @@ policy: (
     allow_hosts: ["docs.rs", "*.github.com"],
     shell_env: ["CARGO_HOME"],            // extra env vars shell may pass through
     builtin_preference: hint,             // off | hint | strict
-
-    // Catalog shaping.
     exposed_tools: ["read_file", "search", "edit_file", "shell"],
+)
+```
+
+Administrators only, in `managed.ron` or MDM (anywhere else is an error):
+
+```ron managed.ron
+policy: (
     allowed_providers: ["anthropic", "openai"],
     denied_providers: ["xai"],
     max_output_tokens: 32000,
     require_https: true,
     allow_custom_providers: true,
     allow_literal_secrets: false,
+    deny_tools: ["write_file"],
+    deny_shell_prefixes: ["git push"],
+    deny_hosts: ["*.internal.example.com"],
 )
 ```
 
 | Key | Who may set it | Meaning |
 | --- | --- | --- |
-| `allow_tools` | any layer | tool names approved for the workspace. Grants layer: `"name"` adds, `Remove("name")` drops one a lower layer added |
-| `allow_shell_prefixes` | any layer | shell commands approved by word-boundary prefix: `"cargo test"` covers `cargo test -p x`, never `cargo test \| sh` |
-| `allow_hosts` | any layer | hosts `fetch` may reach under `auto`; exact or `*.suffix` |
-| `shell_env` | any layer | variable names passed to shell children beyond `PATH HOME LANG TERM TMPDIR` |
+| `allow_tools` | any layer except an organization manifest | tool names approved for the workspace. Grants layer: `"name"` adds, `Remove("name")` drops one a lower layer added |
+| `allow_shell_prefixes` | any layer except an organization manifest | shell commands approved by word-boundary prefix: `"cargo test"` covers `cargo test -p x`, never `cargo test \| sh` |
+| `allow_hosts` | any layer except an organization manifest | hosts `fetch` may reach under `auto`; exact or `*.suffix` |
+| `shell_env` | any layer except an organization manifest | variable names passed to shell children beyond `PATH HOME LANG TERM TMPDIR` |
 | `builtin_preference` | any; only tightens | how hard the model is steered from shell habits to built-in tools |
 | `exposed_tools` | any; intersects | the tool catalog; empty list exposes nothing |
-| `allowed_providers` / `denied_providers` | any; denies accumulate | which providers a model route may use |
-| `max_output_tokens` | any; only lowers | ceiling for the top-level key |
-| `require_https` | any; default `true` | reject `http://` custom endpoints (loopback exempt) |
-| `allow_custom_providers` | any; default `true` | allow `Custom`/`LiteLlm` declarations |
-| `allow_literal_secrets` | any; default `false` | allow `Value(...)` |
+| `allowed_providers` / `denied_providers` | managed layers only | which providers a model route may use; denies accumulate |
+| `max_output_tokens` | managed layers only | ceiling for the top-level key; only lowers |
+| `require_https` | managed layers only | reject `http://` custom endpoints (loopback exempt); default `true` |
+| `allow_custom_providers` | managed layers only | allow `Custom`/`LiteLlm` declarations; default `true` |
+| `allow_literal_secrets` | managed layers only | allow `Value(...)`; default `false` |
 | `deny_tools`, `deny_shell_prefixes`, `deny_hosts` | managed layers only | remove grants no matter who declared them |
+
+"Managed layers" are `managed.ron`, `managed.d/`, and MDM (rows 9 and 10
+above). Setting a `managed layers only` key anywhere else fails with
+`managed-only policy settings are only allowed in managed configuration`;
+to cap output tokens for yourself, set the top-level `max_output_tokens`
+instead. An organization manifest may not plant approval grants: `qq org
+enroll` and `qq org refresh` reject one that sets `allow_tools`,
+`allow_shell_prefixes`, `allow_hosts`, or `shell_env`.
 
 The approval prompt's `w` key appends to `allow_tools` /
 `allow_shell_prefixes` / `allow_hosts` in the project's `.qq/config.ron`.
@@ -243,11 +261,11 @@ packs: {
 
 `pack.ron`:
 
-```ron
+```ron pack.ron
 (
     schema: 1,
     id: "reviewer",
-    version: "0.1.0",
+    version: "2026.09",                  // the pack's own version; any 1–64 bytes
     name: "Code reviewer",
     requires: (protocol: 14),
     profiles: {
@@ -260,7 +278,7 @@ packs: {
             mcp: [],                       // subset of this pack's mcp; absent = all
         ),
     },
-    mcp: { … same shape as config `mcp` … },
+    mcp: {},                               // same shape as config `mcp`
 )
 ```
 
@@ -313,7 +331,7 @@ twelve or more tool calls, or spawned a child.
 Terminal preferences live in a separate document, loaded from
 `<global>/tui.ron` then `.qq/tui.ron` root-to-leaf.
 
-```ron
+```ron tui.ron
 (
     version: 1,
     theme: "ink",           // qq | ink | ember | gruvbox | tokyonight | catppuccin | dracula | nord | solarized | onedark | rose-pine | kanagawa | everforest | monokai | <your-theme>
