@@ -8,10 +8,9 @@
 use super::*;
 
 /// Byte bound on one delivered answer: a tool result's own bound. The
-/// answers delivered at one boundary also share one turn's tool-output
-/// budget (`TurnOutputBudget`), applied in delivery order, so however many
-/// settle together they cost the parent no more context than one turn of
-/// tool results.
+/// answers one delivery stamps also share one turn's tool-output budget, in
+/// delivery order, so however many settle together they cost the parent no
+/// more context than one turn of tool results.
 pub(super) const MAX_DELIVERED_ANSWER_BYTES: usize = crate::tools::output::MAX_MODEL_TEXT_BYTES;
 
 /// Opens a delivered answer in the parent's context. The child's text is
@@ -302,6 +301,7 @@ pub(super) fn delivery_notice(
     child_session: SessionId,
     title: &str,
     answer: &ChildAnswer,
+    max_bytes: usize,
 ) -> String {
     let status = if answer.is_error {
         "It did not answer"
@@ -312,10 +312,7 @@ pub(super) fn delivery_notice(
     // result is; the complete answer stays in the child's transcript.
     let content = crate::tools::output::bound_text(
         crate::tools::output::mask_secrets(answer.content.clone()),
-        &crate::tools::output::Bounds::new(
-            MAX_DELIVERED_ANSWER_BYTES,
-            crate::tools::output::MAX_MODEL_TEXT_LINES,
-        ),
+        &crate::tools::output::Bounds::new(max_bytes, crate::tools::output::MAX_MODEL_TEXT_LINES),
         Some(&format!(
             "the full answer is in sub-agent session {child_session}"
         )),
@@ -402,7 +399,9 @@ pub(super) fn deliver_settled_children(
         |row| row.get(0),
     )?;
     let mut delivered = Vec::with_capacity(settled.len());
-    let mut boundary = crate::tools::TurnOutputBudget::new();
+    // The answers stamped by this call share one turn's tool-output budget,
+    // in delivery order, as one turn's tool results do.
+    let mut boundary_remaining = crate::tools::output::MAX_TURN_TOOL_OUTPUT_BYTES;
     for (child_run, child_session, outcome_json, title) in settled {
         let child_run_id: RunId = parse_id(&child_run)?;
         let child_session_id: SessionId = parse_id(&child_session)?;
@@ -416,10 +415,19 @@ pub(super) fn deliver_settled_children(
             Err(error) => return Err(error),
         };
         let answer = child_answer(transaction, child_run_id, &outcome)?;
-        let mut notice = delivery_notice(child_session_id, &title, &answer);
         // The stored text is what the model sees: the cut is persisted, so
-        // replay needs no projection.
-        boundary.admit(&mut notice, crate::tools::ResultRecall::None);
+        // replay needs no projection, and its marker names the child session
+        // that keeps the whole answer.
+        let notice = delivery_notice(
+            child_session_id,
+            &title,
+            &answer,
+            boundary_remaining.clamp(
+                crate::tools::output::MIN_MODEL_TEXT_BYTES,
+                MAX_DELIVERED_ANSWER_BYTES,
+            ),
+        );
+        boundary_remaining = boundary_remaining.saturating_sub(notice.len());
         let stamped = transaction.execute(
             "UPDATE child_deliveries
                  SET delivered_at_ms = ?2, delivery_ordinal = ?3, turn_ordinal = ?4, text = ?5

@@ -15,6 +15,28 @@ struct ChildDeliveryHook {
 #[cfg(test)]
 static CHILD_DELIVERY_HOOKS: Mutex<Vec<ChildDeliveryHook>> = Mutex::new(Vec::new());
 
+/// Parents (by session) whose next detached child a test holds between its
+/// detachment and the receipt the spawn call returns.
+#[cfg(test)]
+static RECEIPT_HOOKS: Mutex<Vec<ChildDeliveryHook>> = Mutex::new(Vec::new());
+
+/// Holds `session_id`'s next detached spawn after the child is detached and
+/// before its receipt is offered: the window in which a dropped spawn call
+/// must not cancel the child.
+#[cfg(test)]
+pub(super) fn hold_child_receipt(
+    session_id: SessionId,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (entered, entered_rx) = oneshot::channel();
+    let (release, release_rx) = oneshot::channel();
+    RECEIPT_HOOKS.lock().unwrap().push(ChildDeliveryHook {
+        session_id,
+        entered,
+        release: release_rx,
+    });
+    (entered_rx, release)
+}
+
 /// Parents (by session) a test is watching enter their wait for answers.
 #[cfg(test)]
 static WAIT_HOOKS: Mutex<Vec<(SessionId, oneshot::Sender<()>)>> = Mutex::new(Vec::new());
@@ -807,6 +829,20 @@ async fn run_owned_child(
         && child_mode == ApprovalMode::ReadOnly
         && tasks.detach(call_id, run_id)
     {
+        #[cfg(test)]
+        {
+            let hook = {
+                let mut hooks = RECEIPT_HOOKS.lock().unwrap();
+                hooks
+                    .iter()
+                    .position(|hook| hook.session_id == parent.identity.session_id)
+                    .map(|index| hooks.remove(index))
+            };
+            if let Some(hook) = hook {
+                let _ = hook.entered.send(());
+                let _ = hook.release.await;
+            }
+        }
         let _ = admitted.send(child_session_id);
     }
     let mut cancelled = false;
@@ -1152,5 +1188,32 @@ impl crate::runtime::AuditHook for SessionAuditHook {
             }
             verdict
         })
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    /// A poisoned child registry never lets the parent settle past detached
+    /// work it cannot see: it reads as an outstanding, settled child, and the
+    /// delivery that follows reports the poison instead of succeeding.
+    #[test]
+    fn a_poisoned_registry_reads_as_outstanding_and_fails_delivery() {
+        let tasks = Arc::new(ChildTasks::default());
+        let poisoner = Arc::clone(&tasks);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.tasks.lock().unwrap();
+            panic!("poison the registry");
+        })
+        .join();
+        assert!(tasks.tasks.is_poisoned());
+        assert_eq!(tasks.outstanding_detached(), 1);
+        assert!(tasks.settled_detached());
+        assert!(!tasks.detach(ToolCallId::from_bytes([1; 16]), RunId::from_bytes([2; 16])));
+        assert!(matches!(
+            tasks.forget_delivered(&[]),
+            Err(crate::runtime::DeliveryError::Registry)
+        ));
     }
 }

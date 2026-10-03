@@ -11,7 +11,7 @@ appended below, newest last.
 | AP2 | Pruned `read_file` stubs keep their header | Shipped | [ENG-988](https://linear.app/retsu-ai/issue/ENG-988) | #233 (`fc88136`) | |
 | AP3a | Report turns as persisted turns | Shipped | [ENG-990](https://linear.app/retsu-ai/issue/ENG-990) | #237 (`2a672fe`) | Store schema 39 → 40 |
 | AP3b | Stall report and child answer | In review | [ENG-1000](https://linear.app/retsu-ai/issue/ENG-1000) | `feat/eng-1000-ap3b-stall-report` | Stacked on ENG-1001 (#238, tool choice none); ADR-0054 § 3 amended |
-| AP4.1 | Non-blocking read spawns, exactly-once delivery, tool-free wait | In progress | [ENG-1004](https://linear.app/retsu-ai/issue/ENG-1004) | `feat/eng-1004-ap4-nonblocking-delegation` | Store schema 40 → 41 (`child_deliveries`); prompt 15 → 16; stacked on #242 |
+| AP4.1 | Non-blocking read spawns, exactly-once delivery, tool-free wait | In review | [ENG-1004](https://linear.app/retsu-ai/issue/ENG-1004) | `feat/eng-1004-ap4-nonblocking-delegation` | Store schema 40 → 41 (`child_deliveries`); prompt 15 → 16; stacked on #242 |
 | AP4.2 | `wait_agents`, `cancel_agent`, interim-report delivery | Planned | | | `DESCRIPTOR_VERSION` 12 → 13 (two built-in tools); independent review |
 | AP5 | Evidence after AP3b and AP4 | Planned | | | Goal 6; 7-day windows |
 | AC0 | Soak and resource harness | AC0.1 Shipped; AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | #236 (`d1e51c2`) | AC0.2 = H0 registration, concurrency/fsync qualification |
@@ -735,4 +735,22 @@ from real use, in AP5.
 - the delivery retry backs off from 20 ms to 1 s;
 - the wait comment names the owners that drop the stream;
 - the audit-drain comment says why it is attached-only.
+
+### 2026-10-02: AP4.1 re-review: approved; its should-fixes are done
+
+- **S1.** The wait hook is registered before the prompt is submitted in every
+  test.
+- **S2.** Regression tests now cover the poisoned registry
+  (`registry_tests`) and the admission window
+  (`a_spawn_call_dropped_while_its_receipt_is_in_flight_keeps_the_child`,
+  using a `hold_child_receipt` hook). The window test fails when the waiter
+  cancels unconditionally on drop.
+- **S3.** The boundary budget cuts with `bound_text` under the same "the full
+  answer is in sub-agent session X" note, instead of `TurnOutputBudget`'s
+  "not stored" marker.
+- **One budget per boundary.** A boundary the wait has already delivered for
+  is not delivered again with a fresh budget at the top of the next turn.
+- **Nits:**
+  - the `DeliveryError` doc is corrected;
+  - the replay check compares block counts.
 

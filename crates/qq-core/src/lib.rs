@@ -1844,12 +1844,19 @@ impl plan::CompiledAgentPlan {
             // second rejection of the same turn fails the run as before.
             let mut provider_overflowed = false;
             let mut reactive_compaction_turn: Option<u32> = None;
+            // The turn a wait for sub-agent answers already delivered for.
+            let mut wait_delivered_for: Option<u32> = None;
             'turns: for turn_ordinal in 1..=u32::MAX {
                 // Settled detached children answer here, at the one boundary
                 // every turn passes: after the previous turn's results and
                 // steering, before this request is built (ADR-0054 § 4). The
                 // store commits the delivery before the notice joins context.
+                // A wait that just delivered for this turn used its boundary;
+                // anything settling since waits for the next one, so one
+                // boundary spends one turn's tool-output budget.
+                let delivered_by_wait = std::mem::take(&mut wait_delivered_for) == Some(turn_ordinal);
                 if let Some(spawner) = &spawner
+                    && !delivered_by_wait
                     && spawner.settled_detached()
                     && let Err(error) = deliver_children(
                         spawner,
@@ -3112,7 +3119,10 @@ impl plan::CompiledAgentPlan {
                                     delivery_retry = (delivery_retry * 2).min(SUBAGENT_DELIVERY_RETRY_MAX);
                                 }
                                 Ok(0) => {}
-                                Ok(_) => break,
+                                Ok(_) => {
+                                    wait_delivered_for = Some(turn_ordinal.saturating_add(1));
+                                    break;
+                                }
                                 Err(error) => {
                                     yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
                                     return;

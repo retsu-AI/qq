@@ -218,6 +218,11 @@ async fn assert_replay_matches_live(delegation: &mut Delegation) {
         let (live_role, live_content) = comparable(live);
         let (replayed_role, replayed_content) = comparable(replayed);
         assert_eq!(live_role, replayed_role, "role at {index}");
+        assert_eq!(
+            live_content.len(),
+            replayed_content.len(),
+            "block count at {index}"
+        );
         // A live result the replay stubbed compares by call id alone.
         let live_content = live_content
             .into_iter()
@@ -323,6 +328,7 @@ async fn a_parent_keeps_working_and_receives_each_answer_once() {
         "widgets live in inventory.rs:1",
     )
     .await;
+    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -345,7 +351,6 @@ async fn a_parent_keeps_working_and_receives_each_answer_once() {
         assert!(delivered_answers(&requests).is_empty());
     }
     // The parent then replies without tools; it waits instead of settling.
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
     tokio::time::timeout(Duration::from_secs(5), waiting)
         .await
         .unwrap()
@@ -415,6 +420,7 @@ async fn an_answer_after_the_parent_settles_reaches_its_next_run() {
         "the answer for later",
     )
     .await;
+    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -423,7 +429,6 @@ async fn an_answer_after_the_parent_settles_reaches_its_next_run() {
     .await;
     // The parent's third turn is text while the child runs: it waits, and
     // the cancellation arrives inside that wait.
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
     tokio::time::timeout(Duration::from_secs(5), waiting)
         .await
         .unwrap()
@@ -483,6 +488,7 @@ async fn steering_wakes_a_parent_waiting_for_answers() {
         "late answer",
     )
     .await;
+    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
     let run = submit_prompt_to(
         &delegation.harness.runtime,
         delegation.harness.session_id,
@@ -490,7 +496,6 @@ async fn steering_wakes_a_parent_waiting_for_answers() {
     )
     .await;
     // Turn 2 is the tool-free reply that waits; the steer lands inside it.
-    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
     tokio::time::timeout(Duration::from_secs(5), waiting)
         .await
         .unwrap()
@@ -799,7 +804,12 @@ fn a_long_delivered_answer_is_bounded_and_names_where_the_rest_is() {
         content: "finding\n".repeat(20_000),
         is_error: false,
     };
-    let notice = super::deliveries::delivery_notice(child, "survey", &answer);
+    let notice = super::deliveries::delivery_notice(
+        child,
+        "survey",
+        &answer,
+        super::deliveries::MAX_DELIVERED_ANSWER_BYTES,
+    );
     assert!(notice.len() <= super::deliveries::MAX_DELIVERED_ANSWER_BYTES + 256);
     assert!(
         notice.contains(&format!("sub-agent session {child}")),
@@ -1132,4 +1142,77 @@ async fn an_answer_waiting_on_a_grandchild_is_delivered_when_it_settles() {
         .unwrap();
     assert!(delivered().await.unwrap());
     store.close().await.unwrap();
+}
+
+/// The admission window: the child is detached and its receipt is in flight
+/// when an interrupting steer drops the parent's spawn call. The receipt is
+/// lost (the call settles as interrupted), but the child is not cancelled:
+/// it keeps reading and its answer is still delivered once.
+#[tokio::test]
+async fn a_spawn_call_dropped_while_its_receipt_is_in_flight_keeps_the_child() {
+    let mut delegation = delegation(
+        vec![ParentTurn::Calls(vec![spawn("survey")])],
+        "answer despite the interrupt",
+    )
+    .await;
+    let (held, release) = subagents::hold_child_receipt(delegation.harness.session_id);
+    let run = submit_prompt_to(
+        &delegation.harness.runtime,
+        delegation.harness.session_id,
+        "survey",
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), held)
+        .await
+        .unwrap()
+        .unwrap();
+    // The spawn call is waiting for its receipt: interrupt it now.
+    delegation
+        .harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SteerRun {
+                run_id: run,
+                input: vec![InputPart::text("change of plan")],
+                interrupt: true,
+            },
+        )
+        .await
+        .unwrap();
+    // The interrupt drops the spawn call; give it time to settle the call
+    // before the owner task resumes.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = delegation.harness.events.next().await.unwrap().unwrap();
+            if matches!(event.event, SessionEvent::RunInterrupted { run_id, .. } if run_id == run) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    release.send(()).unwrap();
+    delegation.gate.add_permits(1);
+    let observed = tokio::time::timeout(
+        Duration::from_secs(10),
+        collect_until_run_finished(&mut delegation.harness.events, run),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    ));
+    assert!(!observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Cancelled, .. }
+            if *run_id != run
+    )));
+    let requests = delegation.parent_requests.lock().unwrap().clone();
+    assert_eq!(
+        delivered_answers(&requests),
+        [("answer despite the interrupt".to_owned(), true)]
+    );
+    delegation.harness.runtime.shutdown().await.unwrap();
 }

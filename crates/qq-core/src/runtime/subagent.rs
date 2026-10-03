@@ -90,8 +90,9 @@ pub(crate) struct DeliveredChild {
     pub(crate) spend: SpawnAgentSpend,
 }
 
-/// A delivery the store could not commit. The run fails as a persistence
-/// failure: an answer the parent would act on must be durable first.
+/// A delivery the store could not commit. The run fails (a server failure,
+/// as a failed persistence does): an answer the parent would act on must be
+/// durable before it joins context.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DeliveryError {
     #[error("a sub-agent answer could not be delivered durably: {0}")]
