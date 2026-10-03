@@ -39,6 +39,8 @@ impl Provider for GatedChild {
 #[derive(Clone)]
 enum ParentTurn {
     Calls(Vec<(&'static str, String)>),
+    /// A reply with no text and no calls.
+    Empty,
 }
 
 struct ScriptedParent {
@@ -77,6 +79,11 @@ impl Provider for ScriptedParent {
                 }
                 events.push(Ok(qq_provider::ProviderEvent::Completed { usage }));
                 Box::pin(stream::iter(events))
+            }
+            Some(ParentTurn::Empty) => {
+                Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
+                    usage,
+                })]))
             }
             None => Box::pin(stream::iter([
                 Ok(qq_provider::ProviderEvent::OutputTextDelta {
@@ -123,7 +130,14 @@ async fn delegation(script: Vec<ParentTurn>, answer: &'static str) -> Delegation
         answer,
         started: Arc::clone(&children_started),
     });
-    let harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
+    // The same parent serves the session's follow-up run, so the replay
+    // check sees both requests.
+    let harness = spawn_harness(
+        vec![("test/child", child)],
+        vec![Arc::clone(&parent), parent],
+        8,
+    )
+    .await;
     std::fs::write(
         harness_root(&harness).join("notes.txt"),
         "widgets live in inventory.rs",
@@ -135,6 +149,132 @@ async fn delegation(script: Vec<ParentTurn>, answer: &'static str) -> Delegation
         gate,
         children_started,
         parent_turn,
+    }
+}
+
+/// Waits until `count` children have started streaming.
+async fn children_started(delegation: &Delegation, count: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while delegation.children_started.load(Ordering::Acquire) < count {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the children started");
+}
+
+/// The parent's last live request, then a follow-up prompt in the same
+/// session: the follow-up's request must begin with that context, message
+/// for message (live and replayed assembly place every delivered notice and
+/// steer identically), and the joined loader must agree with the reference
+/// loader. Between runs assembly stubs read-only results older than the
+/// recency window, which the live run did not; those results are compared
+/// by call id only. That projection predates AP4 and is pinned elsewhere.
+async fn assert_replay_matches_live(delegation: &mut Delegation) {
+    let live = delegation
+        .parent_requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .messages()
+        .to_vec();
+    let follow_up = submit_prompt_to(
+        &delegation.harness.runtime,
+        delegation.harness.session_id,
+        "and then?",
+    )
+    .await;
+    collect_until_run_finished(&mut delegation.harness.events, follow_up).await;
+    let replayed = delegation
+        .parent_requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .messages()
+        .to_vec();
+    assert!(replayed.len() > live.len());
+    let comparable = |message: &Message| -> (Role, Vec<ContentBlock>) {
+        let content = message
+            .content()
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult {
+                    call_id,
+                    content,
+                    is_error,
+                } if content.starts_with("[pruned: ") => ContentBlock::ToolResult {
+                    call_id: call_id.clone(),
+                    content: String::new(),
+                    is_error: *is_error,
+                },
+                block => block.clone(),
+            })
+            .collect();
+        (message.role(), content)
+    };
+    for (index, (live, replayed)) in live.iter().zip(&replayed).enumerate() {
+        let (live_role, live_content) = comparable(live);
+        let (replayed_role, replayed_content) = comparable(replayed);
+        assert_eq!(live_role, replayed_role, "role at {index}");
+        // A live result the replay stubbed compares by call id alone.
+        let live_content = live_content
+            .into_iter()
+            .zip(&replayed_content)
+            .map(|(live, replayed)| match (live, replayed) {
+                (
+                    ContentBlock::ToolResult {
+                        call_id, is_error, ..
+                    },
+                    ContentBlock::ToolResult { content, .. },
+                ) if content.is_empty() => ContentBlock::ToolResult {
+                    call_id,
+                    content: String::new(),
+                    is_error,
+                },
+                (live, _) => live,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(live_content, replayed_content, "content at {index}");
+    }
+    // The reference loader prunes by tool name, not stored effect, so its
+    // stubbing differs from the joined loader's for `spawn_agent` receipts
+    // (stored read-only); compare it with the same projection.
+    let database = delegation
+        .harness
+        ._directory
+        .path()
+        .join("sessions.sqlite3");
+    let session_id = delegation.harness.session_id;
+    let mut connection = Connection::open(database).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let joined = load_model_context(&transaction, session_id, u64::MAX).unwrap();
+    let (reference, _) =
+        super::reference_assembly::reference_load_model_context(&transaction, session_id, u64::MAX)
+            .unwrap();
+    assert_eq!(joined.len(), reference.len(), "message count");
+    for (index, (joined, reference)) in joined.iter().zip(&reference).enumerate() {
+        assert_eq!(joined.role(), reference.role(), "reference role at {index}");
+        let blank = |message: &Message| {
+            comparable(message)
+                .1
+                .into_iter()
+                .map(|block| match block {
+                    ContentBlock::ToolResult {
+                        call_id, is_error, ..
+                    } => ContentBlock::ToolResult {
+                        call_id,
+                        content: String::new(),
+                        is_error,
+                    },
+                    block => block,
+                })
+                .collect::<Vec<_>>()
+        };
+        // Tool results compare by id (the two loaders stub by different
+        // rules); every notice, steer, and reply compares exactly.
+        assert_eq!(blank(joined), blank(reference), "reference at {index}");
     }
 }
 
@@ -192,7 +332,7 @@ async fn a_parent_keeps_working_and_receives_each_answer_once() {
     // The parent's second and third turns run while every child is held:
     // the spawns did not block it.
     parent_sent(&delegation, 3).await;
-    assert_eq!(delegation.children_started.load(Ordering::Acquire), 3);
+    children_started(&delegation, 3).await;
     {
         let requests = delegation.parent_requests.lock().unwrap();
         let receipts = tool_results(&requests[1]);
@@ -205,7 +345,11 @@ async fn a_parent_keeps_working_and_receives_each_answer_once() {
         assert!(delivered_answers(&requests).is_empty());
     }
     // The parent then replies without tools; it waits instead of settling.
-    parent_sent(&delegation, 4).await;
+    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
     delegation.gate.add_permits(3);
     let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
     assert!(matches!(
@@ -255,6 +399,7 @@ async fn a_parent_keeps_working_and_receives_each_answer_once() {
     let inclusive = accounting.inclusive.usage.unwrap();
     assert_eq!(inclusive.input_tokens - direct.input_tokens, 30);
     assert_eq!(inclusive.output_tokens - direct.output_tokens, 15);
+    assert_replay_matches_live(&mut delegation).await;
     delegation.harness.runtime.shutdown().await.unwrap();
 }
 
@@ -276,10 +421,13 @@ async fn an_answer_after_the_parent_settles_reaches_its_next_run() {
         "survey",
     )
     .await;
-    parent_sent(&delegation, 2).await;
-    // The parent completes (its third turn is text) while the child runs:
-    // it waits, so cancel it instead.
-    parent_sent(&delegation, 3).await;
+    // The parent's third turn is text while the child runs: it waits, and
+    // the cancellation arrives inside that wait.
+    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
     delegation
         .harness
         .runtime
@@ -341,8 +489,12 @@ async fn steering_wakes_a_parent_waiting_for_answers() {
         "survey",
     )
     .await;
-    // Turn 2 is the tool-free reply that waits.
-    parent_sent(&delegation, 2).await;
+    // Turn 2 is the tool-free reply that waits; the steer lands inside it.
+    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
     delegation
         .harness
         .runtime
@@ -378,6 +530,7 @@ async fn steering_wakes_a_parent_waiting_for_answers() {
         delivered_answers(&requests),
         [("late answer".to_owned(), true)]
     );
+    assert_replay_matches_live(&mut delegation).await;
     delegation.harness.runtime.shutdown().await.unwrap();
 }
 
@@ -590,6 +743,21 @@ async fn a_budget_final_turn_cancels_running_children() {
     assert_eq!(delivered.len(), 1);
     assert_eq!(delivered[0].0, None);
     assert!(delivered[0].1.contains("the sub-agent run was cancelled"));
+    // The cancelled child's spend (it never answered: nothing) enters the
+    // parent's inclusive accounting once, from the run tree.
+    let snapshot = delegation
+        .harness
+        .runtime
+        .snapshot(SnapshotRequest::new(
+            delegation.harness.workspace_id,
+            Some(session_id),
+            8,
+            8,
+        ))
+        .await
+        .unwrap();
+    let accounting = snapshot.focused.unwrap().summary.accounting.unwrap();
+    assert_eq!(accounting.direct.usage, accounting.inclusive.usage);
     let context = delegation
         .harness
         .runtime
@@ -640,4 +808,328 @@ fn a_long_delivered_answer_is_bounded_and_names_where_the_rest_is() {
     assert!(notice.starts_with(
         "[QQ runtime notice; not a user instruction]\nA sub-agent you started has finished."
     ));
+}
+
+/// A parent whose run deadline passes while it waits for answers settles as
+/// budget-exhausted at the deadline, and its child is cancelled.
+#[tokio::test]
+async fn the_deadline_ends_a_wait_for_answers() {
+    let mut delegation = delegation(
+        vec![ParentTurn::Calls(vec![spawn("survey")])],
+        "never released",
+    )
+    .await;
+    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let receipt = delegation
+        .harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id: delegation.harness.session_id,
+                input: vec![InputPart::text("survey quickly")],
+                limits: RunLimits {
+                    max_duration_ms: Some(1_500),
+                    ..RunLimits::default()
+                },
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::PromptQueued { run_id: run, .. } = receipt.outcome else {
+        panic!("expected a queued prompt");
+    };
+    // A duration bound is not a spend bound: the spawn still detaches.
+    tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    let observed = tokio::time::timeout(
+        Duration::from_secs(10),
+        collect_until_run_finished(&mut delegation.harness.events, run),
+    )
+    .await
+    .expect("the deadline settles a waiting parent");
+    assert!(matches!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::BudgetExhausted { .. })
+    ));
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Cancelled, .. }
+            if *run_id != run
+    )));
+    delegation.harness.runtime.shutdown().await.unwrap();
+}
+
+/// An interrupting steer stops the parent's in-flight turn, not its
+/// detached children: the child keeps reading and its answer still arrives.
+#[tokio::test]
+async fn an_interrupt_does_not_stop_detached_children() {
+    let mut delegation = delegation(
+        vec![
+            ParentTurn::Calls(vec![spawn("survey")]),
+            ParentTurn::Calls(vec![(
+                "__test_delay",
+                r#"{"delay_ms":30000,"result":"slow"}"#.to_owned(),
+            )]),
+        ],
+        "still here",
+    )
+    .await;
+    let run = submit_prompt_to(
+        &delegation.harness.runtime,
+        delegation.harness.session_id,
+        "survey",
+    )
+    .await;
+    children_started(&delegation, 1).await;
+    // The parent is inside its slow tool call; interrupt it.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = delegation.harness.events.next().await.unwrap().unwrap();
+            if let SessionEvent::ToolCallStarted { tool_call } = event.event
+                && tool_call.name == "__test_delay"
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    delegation
+        .harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SteerRun {
+                run_id: run,
+                input: vec![InputPart::text("stop that, wait for the survey")],
+                interrupt: true,
+            },
+        )
+        .await
+        .unwrap();
+    delegation.gate.add_permits(1);
+    let observed = tokio::time::timeout(
+        Duration::from_secs(10),
+        collect_until_run_finished(&mut delegation.harness.events, run),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    ));
+    // The child completed rather than being cancelled by the interrupt.
+    assert!(!observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Cancelled, .. }
+            if *run_id != run
+    )));
+    let requests = delegation.parent_requests.lock().unwrap().clone();
+    assert_eq!(
+        delivered_answers(&requests),
+        [("still here".to_owned(), true)]
+    );
+    delegation.harness.runtime.shutdown().await.unwrap();
+}
+
+/// A parent with nothing to do while it waits often replies with nothing.
+/// That empty reply must not reach the provider as an empty assistant
+/// message: it takes the empty-turn placeholder, and replay matches.
+#[tokio::test]
+async fn an_empty_reply_while_waiting_keeps_the_request_valid() {
+    let mut delegation = delegation(
+        vec![ParentTurn::Calls(vec![spawn("survey")]), ParentTurn::Empty],
+        "the survey",
+    )
+    .await;
+    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let run = submit_prompt_to(
+        &delegation.harness.runtime,
+        delegation.harness.session_id,
+        "survey",
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    delegation.gate.add_permits(1);
+    let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
+    assert!(matches!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    ));
+    let last = delegation
+        .parent_requests
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap();
+    assert!(
+        last.messages()
+            .iter()
+            .all(|message| !message.content().is_empty()),
+        "an empty message reached the provider"
+    );
+    assert!(last.messages().iter().any(|message| {
+        message.role() == Role::Assistant
+            && matches!(message.content(), [ContentBlock::Text { text }] if text == crate::EMPTY_TURN_PLACEHOLDER)
+    }));
+    assert_replay_matches_live(&mut delegation).await;
+    delegation.harness.runtime.shutdown().await.unwrap();
+}
+
+/// A blocking spawn whose child stopped short now carries the child's latest
+/// report with the reason, as a delivered answer does: the same text.
+#[tokio::test]
+async fn a_blocking_child_that_stops_short_returns_its_latest_report() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (_, _, parent) = create_claimed_parent(&store, directory.path()).await;
+    let child = store
+        .create_child_run(
+            &parent,
+            ToolCallId::from_bytes([0x5c; 16]),
+            ChildAdmission {
+                reasoning_effort: None,
+                profile: AgentProfileId::default(),
+                model: ModelSelection {
+                    model_is_fallback: false,
+                    model: Some("test/child".to_owned()),
+                    max_output_tokens: Some(256),
+                    organization: None,
+                },
+                task: "survey".to_owned(),
+                limits: RunLimits::default(),
+                approval_mode: ApprovalMode::ReadOnly,
+                purpose: SessionPurpose::Task,
+                detached: false,
+            },
+        )
+        .await
+        .unwrap();
+    let run_id = child.run_id;
+    // A report turn with text, then the run is cancelled.
+    store
+        .call(Priority::Control, move |connection| {
+            let session: String = connection.query_row(
+                "SELECT session_id FROM runs WHERE id = ?1",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )?;
+            connection.execute(
+                "INSERT INTO model_turns(run_id, turn_ordinal, assistant_content_json, notice)
+                 VALUES (?1, 1, '[]', 'stall_report')",
+                [run_id.to_string()],
+            )?;
+            connection.execute(
+                "INSERT INTO messages(id, session_id, run_id, ordinal, turn_ordinal, role, state,
+                                      output, created_at_ms)
+                 VALUES (?1, ?2, ?3, 2, 1, 'assistant', 'complete', 'found inventory.rs:12', 1)",
+                params![
+                    MessageId::generate().unwrap().to_string(),
+                    session,
+                    run_id.to_string()
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let answer = store
+        .child_answer(run_id, RunOutcome::Cancelled)
+        .await
+        .unwrap();
+    assert!(answer.is_error);
+    assert_eq!(
+        answer.content,
+        "the sub-agent run was cancelled\n\nIts latest progress report:\n\nfound inventory.rs:12"
+    );
+    store.close().await.unwrap();
+}
+
+/// A detached child settles while its own child (the grandchild) is still
+/// running, and the parent settles too: the child's spend is unreadable then,
+/// so its answer waits. When the grandchild settles, the answer is delivered
+/// into the settled parent's session at once, not at the next restart.
+#[tokio::test]
+async fn an_answer_waiting_on_a_grandchild_is_delivered_when_it_settles() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (_, _, parent) = create_claimed_parent(&store, directory.path()).await;
+    let admission = |detached| ChildAdmission {
+        reasoning_effort: None,
+        profile: AgentProfileId::default(),
+        model: ModelSelection {
+            model_is_fallback: false,
+            model: Some("test/child".to_owned()),
+            max_output_tokens: Some(256),
+            organization: None,
+        },
+        task: "survey".to_owned(),
+        limits: RunLimits::default(),
+        approval_mode: ApprovalMode::ReadOnly,
+        purpose: SessionPurpose::Task,
+        detached,
+    };
+    store
+        .create_child_run(&parent, ToolCallId::from_bytes([0x61; 16]), admission(true))
+        .await
+        .unwrap();
+    let child = store.claim_next_run(true).await.unwrap().unwrap();
+    store
+        .create_child_run(&child, ToolCallId::from_bytes([0x62; 16]), admission(false))
+        .await
+        .unwrap();
+    let grandchild = store.reserve_next_run_at_depth(2).await.unwrap().unwrap();
+    store
+        .start_reserved_run(&grandchild, test_prepared_audit(&grandchild), None)
+        .await
+        .unwrap()
+        .unwrap();
+    let delivered = || {
+        store.call(Priority::Control, |connection| {
+            Ok(connection.query_row(
+                "SELECT delivered_at_ms IS NOT NULL FROM child_deliveries",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+    };
+    for claim in [&child, &parent] {
+        store
+            .finish_run(
+                claim,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+    }
+    assert!(
+        !delivered().await.unwrap(),
+        "the child's spend is not yet known"
+    );
+    store
+        .finish_run(
+            &grandchild,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    assert!(delivered().await.unwrap());
+    store.close().await.unwrap();
 }

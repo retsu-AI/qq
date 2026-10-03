@@ -391,7 +391,8 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
          it when the raw evidence would dwarf the distilled answer and you will not need that \
          evidence verbatim later; several independent questions can be delegated in parallel. \
          Single reads, searches, and quick lookups are cheaper inline. The task brief must carry \
-         everything the sub-agent needs: it starts with no other context. Choose the sub-agent by role (see Delegation in the system prompt for each role's route \
+         everything the sub-agent needs: it starts with no other context. Choose the sub-agent \
+         by role (see Delegation in the system prompt for each role's route \
          and relative cost); omit role for the default. Set model only when the user explicitly \
          requests an exact roster route; never guess, translate, or invent a route."
     } else {
@@ -400,7 +401,8 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
          it when the raw evidence would dwarf the distilled answer and you will not need that \
          evidence verbatim later; several independent questions can be delegated in parallel. \
          Single reads, searches, and quick lookups are cheaper inline. The task brief must carry \
-         everything the sub-agent needs: it starts with no other context. Omit model by default so QQ uses its configured worker model or the current session's \
+         everything the sub-agent needs: it starts with no other context. Omit model by \
+         default so QQ uses its configured worker model or the current session's \
          selected model. Set model only when the user explicitly requests an exact provider/model \
          route listed by this tool; never guess, translate, or invent a route."
     };

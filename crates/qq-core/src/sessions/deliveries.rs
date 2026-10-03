@@ -7,12 +7,12 @@
 
 use super::*;
 
-/// Byte bound on one delivered answer. Several answers can arrive at one
-/// boundary, so each is held to a third of a turn's whole tool-output
-/// budget: the three children a run may have in flight together cost the
-/// parent no more context than one turn of tool results.
-pub(super) const MAX_DELIVERED_ANSWER_BYTES: usize =
-    crate::tools::output::MAX_TURN_TOOL_OUTPUT_BYTES / MAX_CONCURRENT_CHILDREN_PER_RUN as usize;
+/// Byte bound on one delivered answer: a tool result's own bound. The
+/// answers delivered at one boundary also share one turn's tool-output
+/// budget (`TurnOutputBudget`), applied in delivery order, so however many
+/// settle together they cost the parent no more context than one turn of
+/// tool results.
+pub(super) const MAX_DELIVERED_ANSWER_BYTES: usize = crate::tools::output::MAX_MODEL_TEXT_BYTES;
 
 /// Opens a delivered answer in the parent's context. The child's text is
 /// evidence the parent asked for, not a user instruction.
@@ -402,6 +402,7 @@ pub(super) fn deliver_settled_children(
         |row| row.get(0),
     )?;
     let mut delivered = Vec::with_capacity(settled.len());
+    let mut boundary = crate::tools::TurnOutputBudget::new();
     for (child_run, child_session, outcome_json, title) in settled {
         let child_run_id: RunId = parse_id(&child_run)?;
         let child_session_id: SessionId = parse_id(&child_session)?;
@@ -415,7 +416,10 @@ pub(super) fn deliver_settled_children(
             Err(error) => return Err(error),
         };
         let answer = child_answer(transaction, child_run_id, &outcome)?;
-        let notice = delivery_notice(child_session_id, &title, &answer);
+        let mut notice = delivery_notice(child_session_id, &title, &answer);
+        // The stored text is what the model sees: the cut is persisted, so
+        // replay needs no projection.
+        boundary.admit(&mut notice, crate::tools::ResultRecall::None);
         let stamped = transaction.execute(
             "UPDATE child_deliveries
                  SET delivered_at_ms = ?2, delivery_ordinal = ?3, turn_ordinal = ?4, text = ?5
@@ -437,31 +441,43 @@ pub(super) fn deliver_settled_children(
     Ok(delivered)
 }
 
-/// A child settling after its parent did (recovery, a panicked parent)
-/// delivers into that parent's session at once: no boundary will come.
+/// A run settled: every settled parent above it whose undelivered answer
+/// was waiting on it (its own row, or an ancestor's row whose spend could
+/// not be read while this run was unsettled) is delivered now, since no
+/// boundary of a settled parent will come. Climbs the ownership chain, which
+/// is bounded by the delegation depth.
 pub(super) fn deliver_to_settled_parent(
     transaction: &Connection,
-    child_run_id: RunId,
+    settled_run_id: RunId,
     now: u64,
 ) -> Result<(), SessionRuntimeError> {
-    let parent = transaction
-        .query_row(
-            "SELECT d.parent_run_id FROM child_deliveries d
-             JOIN runs p ON p.id = d.parent_run_id
-             WHERE d.child_run_id = ?1 AND d.delivered_at_ms IS NULL
-               AND p.outcome_json IS NOT NULL",
-            [child_run_id.to_string()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    if let Some(parent) = parent {
-        deliver_settled_children(
-            transaction,
-            parse_id(&parent)?,
-            None,
-            usize::from(MAX_SPAWNED_CHILDREN_PER_RUN),
-            now,
-        )?;
+    let mut run = settled_run_id.to_string();
+    for _ in 0..=MAX_CHILD_DEPTH {
+        // The run that owns `run`'s session, and whether it has settled.
+        let owner = transaction
+            .query_row(
+                "SELECT s.owner_run_id, o.outcome_json IS NOT NULL
+                 FROM runs r
+                 JOIN sessions s ON s.id = r.session_id
+                 JOIN runs o ON o.id = s.owner_run_id
+                 WHERE r.id = ?1",
+                [&run],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .optional()?;
+        let Some((owner, owner_settled)) = owner else {
+            return Ok(());
+        };
+        if owner_settled {
+            deliver_settled_children(
+                transaction,
+                parse_id(&owner)?,
+                None,
+                usize::from(MAX_SPAWNED_CHILDREN_PER_RUN),
+                now,
+            )?;
+        }
+        run = owner;
     }
     Ok(())
 }

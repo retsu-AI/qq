@@ -2327,6 +2327,16 @@ fn validate_child_deliveries_table(connection: &Connection) -> Result<(), Sessio
             return Err(SessionRuntimeError::CONSTRAINT);
         }
     }
+    // Delivery and assembly read by parent run in delivery order.
+    let indexed: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                       WHERE type = 'index' AND name = 'child_deliveries_parent_run')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !indexed {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
     Ok(())
 }
 

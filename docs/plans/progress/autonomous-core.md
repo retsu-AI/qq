@@ -671,3 +671,68 @@ Hot paths:
 The AP0 measurement this slice is judged by (blocked share below 20 %) comes
 from real use, in AP5.
 
+### 2026-10-02: AP4.1 independent review: changes requested, all addressed
+
+**Blocking:**
+- **Empty replies.** An empty tool-free reply was pushed into the live
+  context, both while waiting and when steering continued the run, and the
+  provider would reject the request. Both paths now use
+  `EMPTY_TURN_PLACEHOLDER`, as the checkpoint path does. Test:
+  `an_empty_reply_while_waiting_keeps_the_request_valid`.
+- **Live/replay identity was untested** with deliveries, and the reference
+  loader did not know about `child_deliveries`.
+  - The reference loader now reads deliveries, on both the turns path and
+    the legacy path.
+  - `assert_replay_matches_live` compares the last live request with the
+    follow-up run's assembled context, message for message, then the joined
+    loader with the reference loader. It runs in the three-child, steer and
+    empty-reply tests.
+  - `replay_drops_and_keeps_delivered_answers_as_the_in_run_splice_did` pins
+    the in-run compaction splice.
+  - The joined loader stubs results older than the recency window by their
+    stored effect; the live run does not, and the reference loader stubs by
+    name. So the `[pruned: …]` stubs compare by call id only. This
+    projection predates AP4.
+
+**Should-fix:**
+- **Test timing.** The `children_started` assertion polls instead of reading
+  once. Steer and cancel now land inside the wait: an
+  `observe_parent_wait(session)` hook fires on entry.
+- **New tests:**
+  - `the_deadline_ends_a_wait_for_answers`: a duration bound still detaches.
+  - `an_interrupt_does_not_stop_detached_children`.
+  - The budget-final test now checks inclusive accounting.
+- **Answer bounds.** An answer is bounded like a tool result (128 KiB). The
+  answers at one boundary share a `TurnOutputBudget`, and the persisted text
+  is the cut text. Each counts against `max_tool_output_bytes`. The comment
+  is corrected.
+- **Grandchild settling late.** `deliver_to_settled_parent` climbs the
+  ownership chain, so an answer waiting on a grandchild is delivered when
+  the grandchild settles. Test:
+  `an_answer_waiting_on_a_grandchild_is_delivered_when_it_settles`. It fails
+  with the one-level version.
+- **Error handling.** `DeliveryError::Store` keeps its source. A poisoned
+  registry no longer passes silently:
+  - an outstanding or settled-but-undelivered child reads as present, so the
+    next delivery reports the poison;
+  - `detach` returns `false`, and the child stays blocking.
+- **Admission window.** The owner task marks the child detached before it
+  offers the receipt. `CancelChildWaiter` cancels only a child that is not
+  detached, so a spawn call dropped in that window no longer cancels a child
+  the parent never heard about.
+- **Blocking spawns changed too.** A blocking spawn whose child stopped
+  short (cancelled, failed, paused, budget) now also carries the child's
+  latest report, because blocking and delivered answers share `child_answer`.
+  Test: `a_blocking_child_that_stops_short_returns_its_latest_report`.
+- **Deadline wording.** A blocking spawn still rewrites the deadline case to
+  "duration budget is spent". A delivered answer says "was cancelled",
+  because the parent's deadline cancels it.
+
+**Nits:**
+- doc-comment placement;
+- spec line wrap;
+- the `child_deliveries_parent_run` index is validated;
+- the delivery retry backs off from 20 ms to 1 s;
+- the wait comment names the owners that drop the stream;
+- the audit-drain comment says why it is attached-only.
+

@@ -90,9 +90,15 @@ pub(crate) struct DeliveredChild {
     pub(crate) spend: SpawnAgentSpend,
 }
 
-#[derive(Debug, Clone, Copy, thiserror::Error)]
-#[error("a sub-agent answer could not be delivered durably")]
-pub(crate) struct DeliveryError;
+/// A delivery the store could not commit. The run fails as a persistence
+/// failure: an answer the parent would act on must be durable first.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DeliveryError {
+    #[error("a sub-agent answer could not be delivered durably: {0}")]
+    Store(#[source] crate::sessions::SessionRuntimeError),
+    #[error("the sub-agent owner registry is unavailable")]
+    Registry,
+}
 
 pub(crate) type DeliverFuture =
     Pin<Box<dyn Future<Output = Result<Vec<DeliveredChild>, DeliveryError>> + Send>>;
@@ -147,6 +153,9 @@ pub(crate) trait SubagentSpawner: Send + Sync {
     fn deliver(&self, _turn_ordinal: u32) -> DeliverFuture {
         Box::pin(std::future::ready(Ok(Vec::new())))
     }
+    /// Test hook: the parent entered its wait for answers.
+    #[cfg(test)]
+    fn waiting_for_test(&self) {}
 }
 
 /// The dispatcher's defensive answer when `spawn_agent` is called by a run

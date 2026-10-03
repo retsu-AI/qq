@@ -263,9 +263,11 @@ async fn interrupt_requested(steering: &mut Option<runtime::SteeringReceiver>, h
     }
 }
 
-/// How long a parent waiting for answers pauses before retrying a settled
-/// child whose spend is not yet readable (its descendants are settling).
+/// How long a parent waiting for answers first pauses before retrying a
+/// settled child whose spend is not yet readable (its descendants are
+/// settling); the pause doubles up to `SUBAGENT_DELIVERY_RETRY_MAX`.
 const SUBAGENT_DELIVERY_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
+const SUBAGENT_DELIVERY_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Resolves when steering arrives (the message is kept for the next
 /// boundary) or an interrupt newer than `handled` is requested; pending
@@ -318,6 +320,10 @@ async fn deliver_children(
     let mut checkpoint = checkpoint;
     for child in &delivered {
         budget.charge_child(child.spend.usage, child.spend.cost_usd_nanos);
+        // Answers are output the parent asked for, like tool results: they
+        // count against its tool-output bound. The store bounded each
+        // boundary's notices together.
+        budget.charge_tool_output(child.notice.len());
         if child.answered {
             stall.progress();
         }
@@ -3015,6 +3021,14 @@ impl plan::CompiledAgentPlan {
                     // dropped: the run continues with it instead of
                     // completing, exactly as if the model had called a tool.
                     if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                        // A reply the run continues past stays in context, so
+                        // it must be provider-valid: an empty one takes the
+                        // placeholder assembly fills the gap with on replay.
+                        let assistant = if assistant.has_content() {
+                            assistant
+                        } else {
+                            Message::assistant(EMPTY_TURN_PLACEHOLDER)
+                        };
                         irreducible_message_bytes = irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
@@ -3033,11 +3047,21 @@ impl plan::CompiledAgentPlan {
                     // A reply without tool calls while detached children are
                     // still out is not the run's answer yet: wait for the next
                     // answer (or steering), deliver it at the next boundary,
-                    // and run another turn (ADR-0054 § 4). Cancellation and
-                    // the deadline drop this stream from outside.
+                    // and run another turn (ADR-0054 § 4). Nothing here
+                    // selects on cancellation or the deadline: the session
+                    // consumer drops this stream on cancellation
+                    // (`execution.rs`, the `cancellation.changed()` arm) and
+                    // `RunDeadline::enforce` drops it at the deadline.
                     if let Some(spawner) = &spawner
                         && spawner.outstanding_detached() > 0
                     {
+                        // Empty while waiting is likely (nothing left to do):
+                        // the same placeholder keeps the request valid.
+                        let assistant = if assistant.has_content() {
+                            assistant
+                        } else {
+                            Message::assistant(EMPTY_TURN_PLACEHOLDER)
+                        };
                         irreducible_message_bytes = irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         Arc::make_mut(&mut messages).push(assistant);
@@ -3046,6 +3070,9 @@ impl plan::CompiledAgentPlan {
                         // The wait ends with something in context after the
                         // reply, applied steering or a delivered answer, so
                         // live and replayed context stay identical.
+                        #[cfg(test)]
+                        spawner.waiting_for_test();
+                        let mut delivery_retry = SUBAGENT_DELIVERY_RETRY;
                         loop {
                             tokio::select! {
                                 biased;
@@ -3081,7 +3108,8 @@ impl plan::CompiledAgentPlan {
                                 // its delivery is retried after they settle.
                                 // Pause briefly so the wake does not spin.
                                 Ok(0) if spawner.settled_detached() => {
-                                    tokio::time::sleep(SUBAGENT_DELIVERY_RETRY).await;
+                                    tokio::time::sleep(delivery_retry).await;
+                                    delivery_retry = (delivery_retry * 2).min(SUBAGENT_DELIVERY_RETRY_MAX);
                                 }
                                 Ok(0) => {}
                                 Ok(_) => break,

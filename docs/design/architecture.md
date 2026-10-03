@@ -1117,9 +1117,13 @@ the row before that turn, so live and restart context match. The stamp
 happens once: a parent that settles first (cancelled, interrupted, failed)
 gets every settled child's answer committed with its own settlement, after
 its run, and recovery delivers answers whose parent was settled before the
-child; the session's next run assembles them either way. The child's spend
-is charged to the parent at delivery, exactly once; a delivered answer is a
-progress event, the admission receipt is not. A parent reply without tool
+child; the session's next run assembles them either way. An answer whose
+spend is not yet readable (a grandchild still settling) waits, and is
+delivered the moment that descendant settles. Each answer is bounded like a
+tool result, and the answers delivered at one boundary share one turn's
+tool-output budget and count against `max_tool_output_bytes`. The child's
+spend is charged to the parent at delivery, exactly once; a delivered answer
+is a progress event, the admission receipt is not. A parent reply without tool
 calls while children are outstanding does not settle the run: the loop waits
 for the next settled child or steering, delivers or applies it, and runs
 another turn. Cancellation and the run deadline end the wait from outside,
