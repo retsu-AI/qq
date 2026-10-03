@@ -1,6 +1,13 @@
 // Typed wrappers over the Tauri commands in `src-tauri/src/main.rs`.
 import { invoke } from "@tauri-apps/api/core";
-import type { ApprovalChoice, ApprovalMode, BrowserSignIn, ProjectInfo, Provider } from "./types";
+import type {
+  ApprovalChoice,
+  ApprovalMode,
+  BrowserSignIn,
+  PendingFile,
+  ProjectInfo,
+  Provider,
+} from "./types";
 
 export const api = {
   launchPaths: () => invoke<string[]>("launch_paths"),
@@ -28,6 +35,8 @@ export const api = {
     invoke<void>("select_model", { projectId, model }),
   deleteSession: (projectId: string, sessionId: string) =>
     invoke<void>("delete_session", { projectId, sessionId }),
+  projectTrust: (projectId: string) => invoke<PendingFile[]>("project_trust", { projectId }),
+  trustProject: (projectId: string) => invoke<PendingFile[]>("trust_project", { projectId }),
   authProviders: () => invoke<Provider[]>("auth_providers"),
   authSaveKey: (provider: string, key: string) => invoke<void>("auth_save_key", { provider, key }),
   authSignOut: (provider: string) => invoke<void>("auth_sign_out", { provider }),
