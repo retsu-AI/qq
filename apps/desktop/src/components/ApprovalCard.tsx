@@ -153,7 +153,7 @@ function ActionButton({
       disabled={disabled}
       className={clsx(
         "flex h-8 items-center gap-2 rounded-lg px-3 text-[12.5px] font-medium disabled:opacity-50",
-        primary && "bg-accent text-white hover:bg-accent-strong",
+        primary && "bg-solid text-white hover:bg-solid-hover",
         danger && "border border-line-strong text-danger hover:bg-danger-soft",
         !primary && !danger && "border border-line-strong bg-bg hover:bg-hover",
       )}
@@ -201,7 +201,7 @@ function QuestionCard({
                   className={clsx(
                     "rounded-lg border px-3 py-1.5 text-[12.5px]",
                     answers[index] === option
-                      ? "border-accent bg-accent text-white"
+                      ? "border-[var(--solid)] bg-solid text-white"
                       : "border-line-strong bg-bg hover:bg-hover",
                   )}
                 >

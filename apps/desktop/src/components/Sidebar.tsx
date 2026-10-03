@@ -4,13 +4,14 @@ import {
   ChevronDown,
   CircleAlert,
   FolderPlus,
+  KeyRound,
   Loader2,
   SquarePen,
   Trash2,
   X,
 } from "lucide-react";
 import { api } from "../lib/api";
-import { activate, closeProject, pickProject } from "../lib/store";
+import { activate, closeProject, pickProject, showProviders } from "../lib/store";
 import { relativeTime } from "../lib/format";
 import type { Connection, ProjectInfo, ProjectState, SessionRow } from "../lib/types";
 import { Logo } from "./Logo";
@@ -83,6 +84,14 @@ export function Sidebar({ app, project }: Props) {
             <span className="text-faint"> · shared server</span>
           )}
         </span>
+        <button
+          onClick={() => showProviders(true)}
+          title="Model providers"
+          className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-muted hover:bg-hover hover:text-fg"
+        >
+          <KeyRound className="h-3.5 w-3.5" />
+          Providers
+        </button>
       </footer>
     </aside>
   );
