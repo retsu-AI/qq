@@ -3,7 +3,11 @@ import clsx from "clsx";
 import { ArrowUp, ChevronDown, Shield, Square } from "lucide-react";
 import { api } from "../lib/api";
 import { modelShort } from "../lib/format";
+import { showProviders } from "../lib/store";
 import type { ApprovalMode, ProjectState, Transcript } from "../lib/types";
+
+/** Model-picker entry that opens the provider dialog instead of selecting. */
+const MANAGE = "__manage_providers__";
 
 /** Unsent text per session (or per project for a new session). */
 const drafts = new Map<string, string>();
@@ -103,7 +107,7 @@ export function Composer({
           className={clsx(
             "flex h-8 w-8 items-center justify-center rounded-lg",
             text.trim()
-              ? "bg-accent text-white hover:bg-accent-strong"
+              ? "bg-solid text-white hover:bg-solid-hover"
               : "bg-hover text-faint",
           )}
         >
@@ -123,26 +127,44 @@ function ModelPicker({
 }) {
   const current = transcript?.model ?? project.selected_model;
   if (project.models.length === 0) {
-    return <span className="px-2 text-[12px] text-faint">{modelShort(current)}</span>;
+    return (
+      <button
+        onClick={() => showProviders(true)}
+        className="flex h-8 items-center rounded-lg px-2 text-[12.5px] text-accent hover:bg-hover"
+      >
+        Connect a provider…
+      </button>
+    );
   }
+  const providers = [...new Set(project.models.map((m) => m.provider))];
   return (
     <label className="relative flex h-8 items-center gap-1 rounded-lg px-2 text-[12.5px] text-muted hover:bg-hover hover:text-fg">
       <span className="max-w-[200px] truncate">{modelShort(current)}</span>
       <ChevronDown className="h-3.5 w-3.5" />
       <select
         value={current ?? ""}
-        onChange={(event) => void api.selectModel(project.project_id, event.target.value)}
+        onChange={(event) => {
+          if (event.target.value === MANAGE) showProviders(true);
+          else void api.selectModel(project.project_id, event.target.value);
+        }}
         className="absolute inset-0 cursor-pointer opacity-0"
         title="Model"
       >
         {current && !project.models.some((m) => m.id === current) && (
           <option value={current}>{current}</option>
         )}
-        {project.models.map((model) => (
-          <option key={model.id} value={model.id}>
-            {model.name ?? model.id}
-          </option>
+        {providers.map((provider) => (
+          <optgroup key={provider} label={provider}>
+            {project.models
+              .filter((model) => model.provider === provider)
+              .map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.name ?? model.model}
+                </option>
+              ))}
+          </optgroup>
         ))}
+        <option value={MANAGE}>Manage providers…</option>
       </select>
     </label>
   );

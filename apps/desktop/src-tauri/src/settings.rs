@@ -26,7 +26,9 @@ impl Settings {
 
     /// Best effort: a failed write loses a preference, never work.
     pub fn save(&self, app: &AppHandle) {
-        let Some(path) = settings_path(app) else { return };
+        let Some(path) = settings_path(app) else {
+            return;
+        };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }

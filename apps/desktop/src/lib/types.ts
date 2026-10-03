@@ -191,3 +191,24 @@ export type ApprovalChoice =
   | { type: "workspace" }
   | { type: "deny" }
   | { type: "answer"; answers: string[] };
+
+export interface Provider {
+  id: string;
+  /** Credential backend (`keyring`, `file`, …) when one is stored. */
+  stored: string | null;
+  /** Environment variable already supplying a key. */
+  environment: string | null;
+  accepts_key: boolean;
+  browser_sign_in: boolean;
+  recommended_model: string;
+}
+
+export interface BrowserSignIn {
+  url: string;
+  user_code: string | null;
+}
+
+export interface AuthChanged {
+  provider: string;
+  error: string | null;
+}
