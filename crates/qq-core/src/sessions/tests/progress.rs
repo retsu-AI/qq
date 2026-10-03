@@ -125,18 +125,14 @@ async fn delegate_to(
     (parent, child, outcome)
 }
 
+/// The child's answer as the parent received it: delivered at a later
+/// boundary (ADR-0054 § 4), `(text, is_error)`.
 fn spawn_result(parent_requests: &[ModelRequest]) -> (String, bool) {
-    parent_requests
-        .iter()
-        .flat_map(|request| request.messages())
-        .flat_map(Message::content)
-        .find_map(|block| match block {
-            ContentBlock::ToolResult {
-                content, is_error, ..
-            } => Some((content.clone(), *is_error)),
-            _ => None,
-        })
-        .expect("the parent received the spawn result")
+    let (text, answered) = delivered_answers(parent_requests)
+        .into_iter()
+        .next()
+        .expect("the parent received the child's answer");
+    (text, !answered)
 }
 
 fn stuck_reader(final_reply: Option<&'static str>) -> StuckReader {

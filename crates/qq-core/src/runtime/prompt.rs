@@ -12,7 +12,7 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(15) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(16) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
@@ -23,7 +23,9 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
 /// batch independent calls and names the 16-call executable cap; 14 → 15
 /// adds the sub-agent section for child runs, drops the implement-instead
-/// line for read children, and asks parents for a question-shaped brief).
+/// line for read children, and asks parents for a question-shaped brief;
+/// 15 → 16 says a read sub-agent runs in the background and its answer
+/// arrives later as a runtime notice).
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -178,8 +180,11 @@ fn agent_prompt_prefix(
     let spawn_section = if has_spawn {
         format!(
             "\n\nDelegation:\n\
-         - spawn_agent runs a one-shot read-only sub-agent in this workspace from a \
-         self-contained task brief and returns only its final answer.\n\
+         - spawn_agent starts a one-shot read-only sub-agent in this workspace from a \
+         self-contained task brief. It usually runs in the background: the call returns \
+         at once, and the sub-agent's final answer arrives at a later turn as a runtime \
+         notice. Keep working on what does not depend on it; a reply without tool calls \
+         while sub-agents are working waits for their answers.\n\
          - Write the brief as a question to answer, what the answer is for, and the shape \
          you want back (a list of path:line findings, a yes or no with evidence, a short \
          plan). A sub-agent stops when it can answer, so an open-ended brief gets a long \
@@ -191,7 +196,7 @@ fn agent_prompt_prefix(
          - Default to working inline: single reads, searches, and quick lookups are never \
          worth a sub-agent.\n\
          - Exception: several independent questions are worth delegating even when each is \
-         small, because sub-agents run concurrently."
+         small, because sub-agents run concurrently with each other and with you."
         )
     } else {
         String::new()

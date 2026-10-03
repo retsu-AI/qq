@@ -17,6 +17,7 @@ mod deadlines;
 mod delegation;
 mod feeds;
 mod migrations;
+mod nonblocking;
 mod progress;
 mod replay_identity;
 mod runs;
@@ -2557,6 +2558,16 @@ mod reference_assembly {
                         snapshot.run_id,
                         &mut context,
                     )?;
+                    let mut statement = transaction.prepare(
+                        "SELECT text FROM child_deliveries
+                             WHERE parent_run_id = ?1 AND delivered_at_ms IS NOT NULL
+                             ORDER BY delivery_ordinal",
+                    )?;
+                    for text in statement
+                        .query_map([snapshot.run_id.to_string()], |row| row.get::<_, String>(0))?
+                    {
+                        context.push(Message::user(text?));
+                    }
                 }
             }
             if matches!(status.as_str(), "cancelled" | "failed" | "interrupted") {
@@ -2706,6 +2717,20 @@ mod reference_assembly {
             .into_iter()
             .map(|(turn, output, id)| Ok((turn, render_message(transaction, &id, output)?)))
             .collect::<Result<std::collections::VecDeque<_>, SessionRuntimeError>>()?;
+        // Delivered sub-agent answers, per run, in delivery order: before the
+        // turn whose request first carried them, after its steering; a NULL
+        // turn (the run settled first) after the run.
+        let mut statement = transaction.prepare(
+            "SELECT turn_ordinal, text FROM child_deliveries
+                 WHERE parent_run_id = ?1 AND delivered_at_ms IS NOT NULL
+                 ORDER BY delivery_ordinal",
+        )?;
+        let mut delivered = statement
+            .query_map([run_id.to_string()], |row| {
+                Ok((row.get::<_, Option<u32>>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<std::collections::VecDeque<_>, _>>()?;
+        drop(statement);
         // The newest in-run marker scoped to this run replaces its turns
         // through `turn_cutoff`, plus the steering applied before them.
         let marker: Option<(String, u32)> = transaction
@@ -2737,6 +2762,12 @@ mod reference_assembly {
                 {
                     steering.pop_front();
                 }
+                while delivered
+                    .front()
+                    .is_some_and(|(before, _)| before.is_some_and(|before| before <= first_kept))
+                {
+                    delivered.pop_front();
+                }
                 context.push(Message::user(format!(
                     "{IN_RUN_COMPACTION_PREAMBLE}\n\n{summary}"
                 )));
@@ -2748,6 +2779,13 @@ mod reference_assembly {
                 .is_some_and(|(applied_before, _)| *applied_before <= turn_ordinal)
             {
                 let (_, text) = steering.pop_front().expect("front was just checked");
+                context.push(Message::user(text));
+            }
+            while delivered
+                .front()
+                .is_some_and(|(before, _)| before.is_some_and(|before| before <= turn_ordinal))
+            {
+                let (_, text) = delivered.pop_front().expect("front was just checked");
                 context.push(Message::user(text));
             }
             // The runtime notice (report, stall report, continuation, or
@@ -2852,6 +2890,9 @@ mod reference_assembly {
         // first) still reached the model's request; keep it so the transcript
         // the user saw is the transcript the next run continues from.
         for (_, text) in steering {
+            context.push(Message::user(text));
+        }
+        for (_, text) in delivered {
             context.push(Message::user(text));
         }
         Ok(())
@@ -2961,6 +3002,28 @@ async fn compact_session(runtime: &SessionRuntime, session_id: SessionId) -> Run
         panic!("unexpected receipt")
     };
     run_id
+}
+
+/// The answers delivered into a parent's requests (ADR-0054 § 4), in the
+/// order they arrived: each `(answer text, the child answered)`. The answer
+/// text is what follows the notice's header line.
+fn delivered_answers(requests: &[ModelRequest]) -> Vec<(String, bool)> {
+    let mut seen = Vec::new();
+    for request in requests {
+        for text in request_texts(request) {
+            let Some(rest) = text.strip_prefix(
+                "[QQ runtime notice; not a user instruction]\nA sub-agent you started has finished.\n",
+            ) else {
+                continue;
+            };
+            let (header, answer) = rest.split_once(":\n\n").expect("a delivery notice header");
+            let entry = (answer.to_owned(), header.ends_with("Its answer"));
+            if !seen.contains(&entry) {
+                seen.push(entry);
+            }
+        }
+    }
+    seen
 }
 
 /// The concatenated text of each message in a captured provider request.

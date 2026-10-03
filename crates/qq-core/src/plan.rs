@@ -1383,10 +1383,10 @@ mod tests {
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
         // from a different encoding. The descriptor also carries
         // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
-        // changing the encoding (prompt 15: ADR-0054 § 5).
+        // changing the encoding (prompt 16: ADR-0054 § 4).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "9abb6d9cdf5a37ead19e6a167aaa35bdcaaa76ecdf8d0c0f3e75af5b86b45b0f"
+            "d3f6a0b5e7eecb5d417af90a6936ca6757ab91d9a57623246785b6deb4fef1f6"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v12\0".len()..]).unwrap();
