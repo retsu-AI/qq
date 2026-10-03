@@ -32,6 +32,14 @@ Observable completion (the "fleet gate"):
    phone; approving from either resolves it everywhere.
 5. Reload the tab: last state paints from local cache before any network.
 
+The lead owns this final `FG` gate after S7, W4, W5, U6, U7, M2, and M3. The run must use five
+real server profiles and record the five scenarios above, exact revisions,
+commands, pass/fail, and untested limits in
+`docs/plans/progress/g-fleet-clients.md`. W4 owns scenarios 3 and 5 in its
+slice tests; S7 owns lossless tier transitions; U6 owns the approval-inbox
+scenario; `FG` repeats them together across browser and phone before the plan
+can be called shipped.
+
 ## 2. Principles and non-goals
 
 - **Federation in the client, not a control plane.** Each `qq serve` stays
@@ -135,8 +143,12 @@ server, like `qq-client` today.
 - Tauri 2 gives a native Rust process on the phone: `qq-fleet` runs there
   (not in the webview) with real sockets, SQLite, OS keychain for per-server
   credentials, background tasks, and native notifications. The webview only
-  renders; it talks to the Rust core over Tauri IPC with the same
-  `ClientUpdate` messages.
+  renders. The native reducer emits a bounded, serializable `FleetPatch` view
+  DTO over Tauri IPC (server/session summaries, transcript append/replace,
+  pending approvals, reachability). `ClientUpdate` remains reducer input and
+  never crosses IPC; the webview does not run a second reducer. One patch is
+  capped at 256 operations/1 MiB; overflow replaces the affected bounded view
+  from the native projection instead of dropping an operation.
 
 Alternatives for the spike to measure, not to adopt by default:
 
@@ -147,23 +159,31 @@ Alternatives for the spike to measure, not to adopt by default:
 | egui/wgpu canvas | Fast but no native text selection, IME, accessibility, or browser find |
 | SolidJS/React + TS | Violates the Rust-reuse goal and the no-JS-workspace rule |
 
-Spike gate (W1): streaming 3 sessions at 300 tok/s each, a 5,000-message
+Spike gate (U1 prerequisite, before framework scaffolding): streaming 3
+sessions at 300 tok/s each, a 5,000-message
 transcript, typing in the composer — p99 frame < 16 ms on a mid-range Android
-phone and Safari iOS; WASM bundle ≤ 600 KB brotli for the first route.
+phone and Safari iOS; WASM bundle ≤ 600 KB brotli for the first route. U1
+records the measurements and framework choice in the ledger before it creates
+the app workspace; W1 stays shipped and is not reopened.
 
 ### 4.3 Web runtime layout
 
 - **SharedWorker owns the connections.** All tabs share one link per server,
   one cache writer, one outbox. The UI thread only applies already-reduced
-  patches. Fallback to a dedicated Worker where SharedWorker is missing
-  (older Android Chrome).
+  patches. Where `SharedWorker` is unavailable, a Web Locks lease elects one
+  tab's DedicatedWorker as the only connection/cache/outbox owner and a
+  `BroadcastChannel` carries `FleetPatch` and requests. Other tabs cannot
+  start an owner. Lease loss closes links before takeover; crash/takeover and
+  two-tab duplicate-send tests are U1 acceptance.
 - **Service worker** caches the app shell (hashed assets), so cold start is
   a disk read. No API responses are cached by the service worker; the
   IndexedDB cache owns data.
 - **Hosting:** the app is static. It is either served by any `qq serve`
   (`GET /app/*`, embedded with `include_bytes!` behind a feature) or from any
-  static host. Servers accept it via the CORS allowlist recorded at pairing.
-  HTTPS pages need HTTPS servers (mixed content), which S4's TLS provides.
+  static host. A separate host's exact origin must be configured on the server
+  before enrollment; pairing never widens CORS. The embedded app is same-origin.
+  This avoids a credential-free preflight bootstrap exception. HTTPS pages need
+  HTTPS servers (mixed content), which S4's TLS provides.
 
 ### 4.4 Mobile runtime layout
 
@@ -176,18 +196,26 @@ phone and Safari iOS; WASM bundle ≤ 600 KB brotli for the first route.
 
 ## 5. Server and protocol work (qq side)
 
-Each item is a protocol change and bumps `PROTOCOL_VERSION` with fixtures.
+Items that change strict request, response, event, snapshot, or cursor shapes
+bump `PROTOCOL_VERSION` and add fixtures. Transport-only HTTP/2/TLS and auth
+policy changes do not bump the version unless their wire shape is incompatible.
 
 1. **S2 — pairing and credentials (ADR-0015).** `qq pair` prints a short code +
-   QR (URL with server id, fingerprint, addresses). Client exchanges it for a
-   per-client credential; `qq clients list/revoke`. Credentials are scoped
-   (`read`, `prompt`, `approve`) so a phone can be pair-with-approve or read-only.
+   QR (URL with server id, native-client fingerprint, addresses). Client
+   exchanges it for a per-client credential; `qq clients list/revoke`.
+   Credentials carry independent `read`, `run`, `approve`, `session_admin`,
+   and `client_admin` scopes. The loopback credential has all scopes; pairing
+   grants only the scopes confirmed on the server.
 2. **S4 — exposure (ADR-0016).** `qq serve --listen tailnet|lan|<addr>` is
-   explicit; off-loopback requires TLS (rustls, self-signed pinned by
-   fingerprint from the pairing QR) or sits behind `tailscale serve` (real cert,
-   the recommended path). Enable axum `http2` for TLS listeners.
+   explicit; off-loopback requires TLS or sits behind `tailscale serve` (the
+   recommended path). Browser/WASM clients require browser-trusted TLS or an
+   operator-installed CA because `fetch` cannot install a QR-pinned verifier.
+   Only native/Tauri transports may pin a self-signed certificate fingerprint
+   from the pairing QR. Enable axum `http2` for TLS listeners.
 3. **Machine identity.** `ServerInfo.server_id` already exists (S1, #14).
-   Add display name (S6 `server.display_name`), OS/arch, qq version, uptime.
+   Its display name and QQ version also already exist; add stable OS/arch.
+   Put uptime and other changing health values in a separate `ServerStatus`
+   response, never in discovery's immutable `ServerInfo` equality check.
    The client dedupes a machine reachable at several addresses (LAN IP,
    tailnet name) by `server_id`.
 4. **Workspace catalog (S5).** `GET /v1/workspaces` plus bounded browse under
@@ -202,16 +230,37 @@ Each item is a protocol change and bumps `PROTOCOL_VERSION` with fixtures.
 6. **Summary-tier stream.** An opt-in `detail=summary` mode sends only
    `SessionSummary` changes and approval requests, not token deltas. Phones and
    background tabs use it: the fleet overview costs bytes per *state change*,
-   not per token. The client upgrades a session to full detail when it is
-   opened.
-7. **History paging.** `SnapshotRequest` gains `before_message` to fetch older
-   messages in pages, so opening a long session transfers only what is on screen.
+   not per token. Summary and full-detail streams have separate cursor
+   namespaces. Opening a session first fetches an authoritative full snapshot
+   and its full-detail cursor, then subscribes from that cursor; a summary
+   cursor is never advanced past unseen transcript events or reused for detail.
+7. **History paging.** A bounded transcript-page request uses an opaque
+   `before_record` cursor over the persisted order of both messages and tool
+   calls. The response carries `next_before_record` plus independent completion
+   flags, so a tool-heavy window remains pageable even when no older message
+   boundary exists. `qq-fleet` stores pages outside the live 256-message
+   reducer tail in a byte- and page-bounded LRU view store.
 8. **Workspace targeting.** Covered by S5: enrolled callers may `resolve`
    only paths under a configured root; picking a new directory remotely uses
    S5's bounded browse.
-9. **Web Push (optional, §7).** `POST /v1/push/subscribe` stores a browser push
-   subscription; the server sends VAPID-signed pushes for approvals and run
-   completions.
+9. **Spill reads.** S7 adds a session-scoped, `read`-authorized endpoint for a
+   spill handle with a strict response cap and bounded range paging. U4/W5 do
+   not offer "expand" until `qq-client` exposes this endpoint.
+
+Authorization is fail-closed at the route and command boundary:
+
+| Operation | Required scope |
+| --- | --- |
+| pairing-code exchange | none; pairing-code validation supplies its own rate-limited authority |
+| `/v1/health`, `/v1/capabilities`, `/v1/models`, workspace/session catalog, snapshots, event streams, transcript pages, bounded browse/resolve, spill reads | `read` |
+| create/fork a session; submit/queue/steer/cancel a run; `/v1/sessions/compact`; change model/profile/effort/approval mode | `run` plus `read` for returned state |
+| approve, deny, or grant an approval scope; `/v1/sessions/approval-delegate` | `approve` plus `read`; never implied by `run` |
+| archive, restore, delete, or rename sessions; `/v1/sessions/prune`; `/v1/sessions/compact/rollback` | `session_admin` plus `read` |
+| list/revoke clients, mint pairing codes, or change server/CORS roots | `client_admin`; pairing-code exchange is the only unauthenticated mutation |
+
+Unknown routes, missing scopes, and scope downgrades return a typed forbidden
+result without attempting the operation. A read-only kiosk cannot enumerate or
+revoke clients, and no enrolled credential gains client management implicitly.
 
 Performance budgets for the server side: event persisted → SSE write p99 < 5 ms;
 a replay of 10k events streams in < 200 ms; summary-tier stream < 1 KB/s per idle
@@ -226,20 +275,35 @@ workspace.
   at 30 s, immediate retry on `online` / app-foreground, and a per-server
   `Reachability { Live, Reconnecting{since}, Offline, Unauthorized, Incompatible{version} }`.
   One slow or dead machine never blocks the others.
-- **FleetStore (`qq-fleet`).** `ServerId → WorkspaceId → qq_client::state` reused verbatim;
-  a fleet-level index computes the cross-machine inbox (`Group::NeedsYou`
+- **FleetStore (`qq-fleet`).** `ServerId → WorkspaceId → qq_client::state`
+  keeps the bounded live tail. A separate `PagedTranscriptStore` composes
+  immutable older pages with that tail and evicts by page count and bytes.
+  A fleet-level index computes the cross-machine inbox (`Group::NeedsYou`
   across all servers, newest first) incrementally from summary changes.
 - **Outbox.** A prompt/approval/steer is written to the cache with its
   `CommandId` *before* it is sent, shown immediately as pending, retried with
   the same id until the server acknowledges; server idempotency makes
   duplicates harmless. Pending items survive tab close and app kill. An
   approval that became stale (already resolved elsewhere) shows as resolved,
-  not as an error.
+  not as an error. An offline new-chat action is an atomic dependency pair:
+  durable `CreateSession(local_id, create_command_id)` first, then
+  `SubmitPrompt(depends_on=local_id, prompt_command_id)`. The submit is not
+  sent until the create receipt durably maps `local_id` to the server's
+  `SessionId`; replay after a crash uses the same command ids.
+  The outbox is capped at 256 items/4 MiB per server and 2,048 items/32 MiB
+  globally. The newest enqueue is rejected with an actionable `OutboxFull`
+  state rather than evicting accepted work. Items expire after 7 days into a
+  compact visible `Expired` record; users may cancel any pending dependency
+  chain explicitly. Terminal session/approval events retire stale controls.
 - **Cache.** `CacheStore` trait with two impls: IndexedDB (via `web-sys`/`idb`)
   and SQLite. Stores per-workspace snapshot + cursor, recently opened session
-  bodies (bounded: last 50 sessions, 2k messages each, LRU), outbox, pairing
-  records (web: credential encrypted with a non-extractable WebCrypto key;
-  mobile: OS keychain). Writes are batched per animation frame.
+  bodies (bounded: last 50 sessions, 2k live messages each, LRU), transcript
+  pages, outbox, and pairing records (web: credential encrypted with a
+  non-extractable WebCrypto key; mobile: OS keychain). Pending approvals are
+  cached atomically with their `ApprovalPreview` and cursor. Authoritative
+  snapshots also include the preview; bootstrap never offers an approval
+  action without it and resnapshots if a legacy cache lacks it. Writes are
+  batched per animation frame.
 - **Warm bootstrap:** paint from cache → connect → replay from cursor → the
   reducer applies deltas. `InvalidCursor` → resnapshot that workspace only.
 - Tests: fake server with scripted events, network partitions, duplicate and
@@ -248,17 +312,15 @@ workspace.
 
 ## 7. Notifications
 
-Local-first rules out a QQ-hosted push relay for native APNs/FCM (it needs a
-vendor key we cannot ship in every server). Staged:
+Local-first rules out a QQ-hosted push relay for Web Push and native APNs/FCM.
+One PWA service-worker registration also cannot use independent VAPID keys for
+many servers. Until decision 12 is resolved, notification scope is:
 
 1. In-app: fleet inbox badge, tab title count, `Notification` API while the tab
    or app is alive.
-2. Web Push from each server directly (VAPID keys generated per server; only
-   outbound HTTPS to the browser vendor's push service). Works for desktop
-   browsers and iOS 16.4+ installed web apps. Payload is minimal (session id +
-   kind), encrypted per the Web Push spec; the client fetches details.
-3. Native APNs/FCM for the Tauri app: **decision needed** (§12). Until then the
-   mobile app polls with platform background fetch and uses local notifications.
+2. The mobile app uses platform background fetch and local notifications when
+   the OS grants time. U8 and native remote push remain unassigned and ship no
+   subscription route, VAPID key, relay, or vendor credential.
 
 ## 8. Experience design
 
@@ -284,7 +346,9 @@ vendor key we cannot ship in every server). Staged:
   Defaults to the current session's; changing machine on a new chat is one
   keypress (`⌘1..9` or `@work-2` inline). Offline machines are shown, greyed,
   with last-seen time; prompts to them go into the outbox with a clear
-  "queued until work-2 is back" state.
+  "queued until work-2 is back" state. A new chat uses the crash-safe
+  create-then-submit dependency described in §6; the UI never fabricates a
+  `SessionId`.
 - **Fan-out prompt**: select several machines/workspaces and send one prompt
   as N independent sessions; a compare view shows them side by side.
 - **Fleet inbox**: every pending approval across machines, with the preview
@@ -335,10 +399,12 @@ vendor key we cannot ship in every server). Staged:
 - **Coalesce per frame.** Deltas arriving between frames are merged in the
   worker and applied once per `requestAnimationFrame`. Tokens never trigger
   more than one DOM patch per frame per message.
-- **Incremental markdown (`qq-render`).** Parse into stable blocks; only the
-  last open block is re-parsed as text is appended; closed blocks are frozen
-  and never touched again. Code fences stream as plain monospace text and are
-  highlighted once closed.
+- **Incremental markdown (`qq-render`).** Parse into stable blocks and retain a
+  bounded document-wide reference-definition table plus reverse dependencies.
+  Normally only the open block is reparsed; a new or changed reference
+  definition invalidates and reparses the closed blocks that depend on it.
+  Golden tests cover a reference link whose definition arrives later. Code
+  fences stream as plain monospace text and are highlighted once closed.
 - **Highlighting off the main thread.** Highlight spans are computed in the
   worker and grammars load lazily per language on first use. Tree-sitter's C
   grammars do not target `wasm32-unknown-unknown` cleanly (see
@@ -349,7 +415,8 @@ vendor key we cannot ship in every server). Staged:
 - **Virtualized transcript** with measured-height cache keyed by message id and
   width; bottom-anchored "follow" mode that disengages on scroll-up.
 - **Bounded live output**: tool output shows the last N lines live; full output
-  loads on expand (spill handles, ADR-0019).
+  loads on expand through S7's authenticated, session-scoped, range-bounded
+  spill endpoint (ADR-0019). Expansion stays disabled until that endpoint lands.
 - **Diffs** render from `similar`-style hunks computed in the worker; large
   diffs are virtualized per hunk.
 
@@ -358,7 +425,8 @@ vendor key we cannot ship in every server). Staged:
 - Per-client credentials (ADR-0015) with scopes; the phone can hold
   `approve` scope while a shared kiosk tab holds `read` only.
 - TLS or tailnet required off loopback (ADR-0016); certificate fingerprint
-  pinned from the pairing QR for self-signed listeners.
+  pinning from the pairing QR is native-only. Browser clients require a
+  browser-trusted certificate or installed CA and never bypass `fetch` TLS.
 - Remote workspace roots are allowlisted server-side (§5.8).
 - Destructive approvals still require explicit per-call confirmation in the
   UI; "approve for session" is never the default button.
@@ -373,29 +441,33 @@ new slice needs a plan amendment and a ledger row before it starts.
 
 | This plan | Existing slice | Change proposed |
 | --- | --- | --- |
-| ADRs | S2/S4/U1 (ADR-0015 accept, 0016, 0017, 0018) | ADR-0017 records the §4.2 spike numbers |
-| Pairing | S2 | Add credential scopes (`read`/`prompt`/`approve`) and a QR with the cert fingerprint |
+| ADRs | S2/S4/U1 (ADR-0015 accept, 0016, 0017, 0018) | ADR-0017 records the §4.2 spike numbers; U1 owns the prerequisite |
+| Pairing | S2 | Add the §5 authorization matrix; certificate fingerprints are native-only |
 | Exposure | S4 | Enable axum `http2` on TLS listeners (removes the browser's 6-connection cap) |
-| Identity, catalog | S1 (done), S5, S6 | Add OS/arch/version/uptime to `ServerInfo`; per-workspace group counts in the S5 catalog |
-| Server-scoped stream, summary tier, history paging | **new S7** | §5 items 5–7; protocol bump, fixtures, stream bench |
+| Identity, catalog | S1 (done), S5, S6 | Add stable OS/arch and dynamic `ServerStatus`; per-workspace group counts in the S5 catalog |
+| Server stream, tier transition, paging, approval preview, spill reads | **new S7** | §5 items 5–9; strict-shape protocol bumps, fixtures, stream bench |
 | Connection set | W3 | Address probing, backoff policy, `Reachability` (§6) |
 | Durable outbox and cache | **new W4** | `qq-fleet` crate in `apps/`; partition/duplicate/cursor-expiry tests, native + wasm |
 | Render model | **new W5** | `qq-render`: incremental markdown, highlight, diff; throughput bench; golden tests |
 | Web shell | U1–U5 | Composer target chips, palette, SharedWorker, service worker (§4.3, §8.1) |
 | Fleet features | U6 (expanded) | Fleet inbox, split panes, fan-out, jobs view (§8.1) |
-| Perf gates | U7 | Adopt the §8.3 budget table |
+| Perf gates | U7, M1 | U7 owns web budgets; M1 owns the `< 300 ms` mobile warm-start and mobile frame gates |
 | Mobile | D1, M1–M3 | M1 becomes the inbox-first layout (§8.2), not only a responsive pass; mobile runs `qq-fleet` in the native Tauri process (§4.4) |
-| Web Push | **new U8** | §7 stage 2; requires a server route, so it is a protocol slice as well |
+| Remote push | held (decision 12) | No U8 work starts until the lead chooses a fleet-compatible trust/key/relay model |
+| Fleet acceptance | **new FG** | Lead-owned final gate after S7/W4/W5/U6/U7/M2/M3; five real servers; evidence in `progress/g-fleet-clients.md` |
 
-Critical path, unchanged in shape: S2 → S4 → S5/S6 → TB → U1–U7 → D1 → M.
-W3–W5 and the ADR-0017 spike run alongside S2–S6. S7 must land before U6
-(the fleet inbox needs the summary tier to stay cheap across 16 servers).
+The executable DAG keeps the owning plan's early risk gate: W1 + W2 + S1 +
+S2 + S3 → TB. S4 and S5 may proceed after their stated inputs; S6 waits for
+S2–S5. U1 begins with the ADR-0017 spike, then U2–U7 follow their existing
+dependencies. W3–W5 run when their inputs are ready. S7 must land before U6;
+D1 then M1–M3 follow U5. FG runs last after S7, W4, W5, U6, U7, M2, and M3. TB is not delayed
+behind S4–S6.
 
 ## 12. Decisions needed
 
-1. **Native push for the Tauri app** (APNs/FCM requires a vendor key and a
-   relay): ship without it (Web Push + background fetch), or run an optional
-   self-hosted relay? Default taken: without.
+1. **Remote push for the Tauri app** (APNs/FCM requires a vendor key and a
+   relay): ship without it (background fetch + local notifications), or run an
+   optional self-hosted relay? Default taken: without.
 2. **Default exposure path**: Tailscale-only (simplest, real certs) vs also
    supporting self-signed LAN TLS with fingerprint pinning. Default taken: both,
    Tailscale documented first.
@@ -407,18 +479,18 @@ W3–W5 and the ADR-0017 spike run alongside S2–S6. S7 must land before U6
 4. **Credential scopes at pairing**: whether a phone gets `approve` by default.
    Default taken: the pairing prompt on the server asks.
 
-5. **Push vs the existing non-goal.** `multi-surface-clients.md` rules out any
-   relay or push service. Web Push sent directly by each server (§7 stage 2) is
-   not a relay QQ runs, but it is outbound traffic from the server to a
-   browser vendor. Default taken: propose it as U8, off by default, and let the
-   lead decide whether it fits the non-goal.
+5. **Fleet-compatible push trust (decision 12).** `multi-surface-clients.md`
+   rules out a relay or push service, while one PWA registration cannot bind to
+   each server's independent VAPID key. Default taken: hold U8 and every remote
+   push route. The lead must choose a shared trust/key model, a supported
+   multi-registration design, or an explicit relay/non-goal change first.
 
 ## 13. Risks
 
 - Tauri mobile webview scroll/IME quality — mitigated by the ADR-0017 spike
   gate and the Dioxus / native fallbacks.
 - WASM bundle growth from grammars — lazy grammar loading, bundle budget in CI.
-- Safari SharedWorker/Web Push quirks — dedicated Worker fallback; notifications
-  degrade to in-app.
+- Safari SharedWorker quirks — the leased DedicatedWorker fallback permits one
+  owner across tabs; notifications degrade to in-app/background fetch.
 - Server stream fan-out cost with many clients — summary tier and the feed ring
   keep it O(events), measured in S7.
