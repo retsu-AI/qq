@@ -4,7 +4,7 @@
 //! projects it. Field names stay `snake_case` so DTOs and the protocol types
 //! they embed read the same on the TypeScript side (`src/lib/types.ts`).
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
 use qq_client::state::{Group, ModelOption, SessionStore, SessionView};
 use qq_protocol::{
@@ -183,6 +183,23 @@ pub struct ApprovalDto {
     pub grant_label: String,
 }
 
+/// A path as people read it, without Windows' verbatim `\\?\` prefix. Only
+/// for display: the server is always sent the canonical form.
+pub fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
+}
+
+pub fn display_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || display_path(path),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
 pub fn group_label(group: Group) -> &'static str {
     match group {
         Group::NeedsYou => "needs_you",
@@ -331,7 +348,7 @@ fn transcript_items(
                         .started_at_ms
                         .zip(stats.finished_at_ms)
                         .map(|(start, end)| end.saturating_sub(start)),
-                    usage: stats.usage.clone(),
+                    usage: stats.usage,
                     cost_usd_nanos: stats.cost_usd_nanos.or(stats.live_cost_usd_nanos),
                     tool_calls: stats.tool_calls,
                 },
@@ -341,7 +358,12 @@ fn transcript_items(
     for call in tool_calls {
         let run = run_order[&call.run_id];
         keyed.push((
-            (run, call.turn_ordinal.max(1), 3, usize::from(call.call_ordinal)),
+            (
+                run,
+                call.turn_ordinal.max(1),
+                3,
+                usize::from(call.call_ordinal),
+            ),
             ItemDto::Tool(Box::new(tool_item(store, view, call))),
         ));
     }
@@ -374,13 +396,12 @@ fn tool_item(store: &SessionStore, view: &SessionView, call: &ToolCallSnapshot) 
             grant_label: crate::project::grant_label(&grant),
         }
     });
-    let diff = match &call.display {
-        Some(qq_protocol::ToolCallDisplay::Diff { path, diff }) => Some(DiffDto {
+    let diff = call.display.as_ref().map(|display| match display {
+        qq_protocol::ToolCallDisplay::Diff { path, diff } => DiffDto {
             path: path.clone(),
             diff: diff.clone(),
-        }),
-        None => None,
-    };
+        },
+    });
     ToolDto {
         id: call.id.to_string(),
         run_id: call.run_id,
@@ -402,5 +423,21 @@ fn tool_item(store: &SessionStore, view: &SessionView, call: &ToolCallSnapshot) 
             .and_then(|settled| settled.label()),
         approval,
         child_session: store.child_spawned_by(call.id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_path_hides_only_the_verbatim_prefix() {
+        assert_eq!(display_path(Path::new(r"\\?\C:\work\qq")), r"C:\work\qq");
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\host\share\qq")),
+            r"\\host\share\qq"
+        );
+        assert_eq!(display_path(Path::new(r"C:\work\qq")), r"C:\work\qq");
+        assert_eq!(display_name(Path::new(r"\\?\C:\work\qq")), "qq");
     }
 }

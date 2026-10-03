@@ -15,6 +15,9 @@
   --accent: #7aa2ff;
   --accent-strong: #5b8cff;
   --accent-soft: rgb(122 162 255 / 0.12);
+  /* Filled buttons: dark enough for white text (≥4.5:1). */
+  --solid: #3d63d8;
+  --solid-hover: #345ac9;
   --ok: #4ec98a;
   --warn: #f2b84b;
   --warn-soft: rgb(242 184 75 / 0.1);
@@ -40,6 +43,8 @@
     --accent: #3d6df2;
     --accent-strong: #2c5be0;
     --accent-soft: rgb(61 109 242 / 0.1);
+    --solid: #2c5be0;
+    --solid-hover: #234fc9;
     --ok: #1f9d61;
     --warn: #b7791f;
     --warn-soft: rgb(183 121 31 / 0.1);
@@ -65,6 +70,8 @@
   --color-accent: var(--accent);
   --color-accent-strong: var(--accent-strong);
   --color-accent-soft: var(--accent-soft);
+  --color-solid: var(--solid);
+  --color-solid-hover: var(--solid-hover);
   --color-ok: var(--ok);
   --color-warn: var(--warn);
   --color-warn-soft: var(--warn-soft);

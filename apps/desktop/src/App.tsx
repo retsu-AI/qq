@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { SessionPane } from "./components/SessionPane";
 import { Welcome } from "./components/Welcome";
+import { Providers } from "./components/Providers";
 import { activeProject, dismissError, pickProject, useApp } from "./lib/store";
 import { api } from "./lib/api";
 
@@ -47,6 +48,7 @@ export function App() {
         )}
         {project ? <SessionPane project={project} /> : <Welcome recents={app.recents} />}
       </main>
+      {app.providersOpen && <Providers />}
     </div>
   );
 }

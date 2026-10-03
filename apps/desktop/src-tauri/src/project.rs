@@ -26,8 +26,8 @@ use qq_client::{
 use qq_protocol::{
     ApprovalDecision, ApprovalGrant, ApprovalMode, CommandId, CommandOutcome, CommandRequest,
     Correlation, InputPart, ModelSelection, RunLimits, ServerCapabilities, SessionCommand,
-    SessionEvent, SessionEventEnvelope, SessionId, ToolCallId, ToolCallSnapshot,
-    WorkspaceSnapshot, WorkspaceId,
+    SessionEvent, SessionEventEnvelope, SessionId, ToolCallId, ToolCallSnapshot, WorkspaceId,
+    WorkspaceSnapshot,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
@@ -68,6 +68,8 @@ pub enum UiCommand {
     Delete(SessionId),
     /// Re-emit the full state (a webview reload lost it).
     Refresh,
+    /// Re-read the model catalog: a provider credential changed.
+    RefreshModels,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -113,8 +115,12 @@ pub fn open(
 enum PendingIntent {
     /// A session this client asked for, with the prompt to submit once it
     /// exists.
-    Create { draft: Option<String> },
-    Prompt { session_id: SessionId },
+    Create {
+        draft: Option<String>,
+    },
+    Prompt {
+        session_id: SessionId,
+    },
     Other,
 }
 
@@ -232,7 +238,11 @@ impl Project {
     }
 
     async fn connect(&mut self) -> Result<TuiClient, String> {
-        let connection = self.engine.ensure().await.map_err(|error| error.to_string())?;
+        let connection = self
+            .engine
+            .ensure()
+            .await
+            .map_err(|error| error.to_string())?;
         self.connection = ConnectionDto::Connecting;
         self.dirty = true;
         let engine = Arc::clone(&self.engine);
@@ -275,17 +285,31 @@ impl Project {
                 self.focused = None;
                 self.last_sequence = 0;
                 self.recent_events.clear();
-                self.set_notice(NoticeLevel::Warning, "session state reset after reconnecting");
+                self.set_notice(
+                    NoticeLevel::Warning,
+                    "session state reset after reconnecting",
+                );
                 self.apply_snapshot(client, snapshot);
             }
             ClientUpdate::Models { models, selected } => {
                 self.models = models.into_iter().map(ModelOption::from).collect();
                 self.sessions.apply_models(&self.models);
+                // Keep the user's pick while it stays usable; otherwise the
+                // configured route, the newest session's model, a provider's
+                // recommended model, then whatever the catalog lists first.
                 let valid = |id: &String| self.models.iter().any(|m| &view::model_id(m) == id);
-                let current = self.selected_model.clone().filter(valid);
-                self.selected_model = current
-                    .or_else(|| selected.and_then(|selection| selection.model))
-                    .or_else(|| self.most_recent_session_model())
+                let recommended = self.models.iter().find_map(|option| {
+                    crate::auth::recommended_model(&option.provider)
+                        .map(str::to_owned)
+                        .filter(|id| valid(id))
+                });
+                self.selected_model = self
+                    .selected_model
+                    .clone()
+                    .filter(valid)
+                    .or_else(|| selected.and_then(|selection| selection.model).filter(valid))
+                    .or_else(|| self.most_recent_session_model().filter(valid))
+                    .or(recommended)
                     .or_else(|| self.models.first().map(view::model_id));
             }
             ClientUpdate::Capabilities(capabilities) => self.capabilities = Some(capabilities),
@@ -329,7 +353,8 @@ impl Project {
         }
         if initial || sequence >= self.last_sequence {
             for summary in snapshot.sessions {
-                self.sessions.upsert_summary(summary, &self.models, sequence);
+                self.sessions
+                    .upsert_summary(summary, &self.models, sequence);
             }
         }
         for body in snapshot.included {
@@ -383,7 +408,10 @@ impl Project {
             self.reduce_event(client, &event);
         }
         if let Some(command_id) = event.caused_by
-            && !matches!(self.pending.get(&command_id), Some(PendingIntent::Create { .. }))
+            && !matches!(
+                self.pending.get(&command_id),
+                Some(PendingIntent::Create { .. })
+            )
         {
             self.pending.remove(&command_id);
         }
@@ -445,6 +473,13 @@ impl Project {
         self.dirty = true;
         match command {
             UiCommand::Refresh => self.last_emitted = None,
+            UiCommand::RefreshModels => {
+                let selection = ModelSelection {
+                    model: self.selected_model.clone(),
+                    ..ModelSelection::default()
+                };
+                self.send(client, ClientRequest::Models(selection));
+            }
             UiCommand::Focus(target) => self.focus(client, target),
             UiCommand::NewSession => self.focused = None,
             UiCommand::Submit { session_id, text } => {
@@ -466,7 +501,11 @@ impl Project {
                 else {
                     return;
                 };
-                self.command(client, SessionCommand::CancelRun { run_id }, PendingIntent::Other);
+                self.command(
+                    client,
+                    SessionCommand::CancelRun { run_id },
+                    PendingIntent::Other,
+                );
             }
             UiCommand::Approve {
                 session_id,
@@ -543,7 +582,7 @@ impl Project {
         if model.model.is_none() {
             self.set_notice(
                 NoticeLevel::Error,
-                "no model is configured; run `qq auth login` or pick a model",
+                "no model is available; connect a provider from Providers in the sidebar",
             );
             return;
         }
@@ -586,7 +625,9 @@ impl Project {
         tool_call_id: ToolCallId,
         choice: ApprovalChoice,
     ) {
-        let Some(session) = self.sessions.get(&session_id) else { return };
+        let Some(session) = self.sessions.get(&session_id) else {
+            return;
+        };
         let Some(call) = session
             .tool_calls
             .as_ref()
@@ -676,13 +717,8 @@ impl Project {
     fn state(&self) -> ProjectStateDto {
         ProjectStateDto {
             project_id: self.id.clone(),
-            path: self.path.to_string_lossy().into_owned(),
-            name: self
-                .path
-                .file_name()
-                .map_or_else(|| self.path.to_string_lossy().into_owned(), |name| {
-                    name.to_string_lossy().into_owned()
-                }),
+            path: view::display_path(&self.path),
+            name: view::display_name(&self.path),
             connection: self.connection,
             error: self.error.clone(),
             owns_server: self.engine.owns_server(),
