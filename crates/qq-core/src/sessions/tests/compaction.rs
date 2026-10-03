@@ -4081,6 +4081,7 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
         turns,
         HashMap::new(),
         std::collections::VecDeque::from([(4, "steer before four".to_owned())]),
+        std::collections::VecDeque::new(),
         Some(InRunCompaction {
             summary: "summary".to_owned(),
             turn_cutoff: replaced_turns,
@@ -4115,6 +4116,7 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
     append_run_turns(
         turns,
         HashMap::new(),
+        std::collections::VecDeque::new(),
         std::collections::VecDeque::new(),
         Some(InRunCompaction {
             summary: "summary".to_owned(),

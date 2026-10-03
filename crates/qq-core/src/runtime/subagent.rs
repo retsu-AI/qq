@@ -44,6 +44,10 @@ pub(crate) struct SpawnAgentOutcome {
     pub(crate) spend: SpawnAgentSpend,
     /// The child session that ran, when one was created.
     pub(crate) session_id: Option<qq_protocol::SessionId>,
+    /// The child was admitted detached and is still running: `content` is
+    /// the admission receipt, and the answer (with its spend) arrives later
+    /// through [`SubagentSpawner::deliver`]. `spend` is `NONE` here.
+    pub(crate) detached: bool,
 }
 
 /// One `spawn_agent` call as the run loop hands it to the spawner.
@@ -68,10 +72,31 @@ pub(crate) struct SpawnRequest {
     /// Why the child exists: an ordinary delegated task, or the parent's
     /// final-answer audit.
     pub(crate) purpose: SessionPurpose,
+    /// Return on durable admission and deliver the answer at a later turn
+    /// boundary (ADR-0054 § 4). Only unbounded read task spawns detach.
+    pub(crate) detached: bool,
 }
 
 pub(crate) type SpawnAgentFuture =
     Pin<Box<dyn Future<Output = SpawnAgentOutcome> + Send + 'static>>;
+
+/// One detached child's answer as it entered the parent's context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeliveredChild {
+    /// The notice message the next request carries, already durable.
+    pub(crate) notice: String,
+    /// Whether the child answered (a failed or cancelled child did not).
+    pub(crate) answered: bool,
+    pub(crate) spend: SpawnAgentSpend,
+}
+
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("a sub-agent answer could not be delivered durably")]
+pub(crate) struct DeliveryError;
+
+pub(crate) type DeliverFuture =
+    Pin<Box<dyn Future<Output = Result<Vec<DeliveredChild>, DeliveryError>> + Send>>;
+pub(crate) type ChildWaitFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 #[error("child execution cleanup is unavailable")]
@@ -91,7 +116,37 @@ pub(crate) trait SubagentSpawner: Send + Sync {
     fn acknowledge(&self, call_id: ToolCallId);
     /// Stops outstanding children and returns all spend not yet acknowledged.
     /// Dropping this future must preserve ownership and unconsumed receipts.
+    /// Detached children are stopped too; their spend is charged by the
+    /// delivery that settlement commits, never here.
     fn drain(&self) -> ChildDrainFuture;
+    /// Stops only the blocking children a tool call still awaits, leaving
+    /// detached children running: an interrupt drops the turn's tool calls,
+    /// not the parent's delegated work.
+    /// The default drains everything: a spawner that never detaches has
+    /// only blocking children.
+    fn drain_attached(&self) -> ChildDrainFuture {
+        self.drain()
+    }
+    /// Detached children whose answers are not yet delivered, running or
+    /// settled.
+    fn outstanding_detached(&self) -> usize {
+        0
+    }
+    /// A detached child has settled and its answer awaits delivery.
+    fn settled_detached(&self) -> bool {
+        false
+    }
+    /// Resolves when a detached child settles, at once if one already has
+    /// and is undelivered; pending forever when none is outstanding.
+    fn child_settled(&self) -> ChildWaitFuture {
+        Box::pin(std::future::pending())
+    }
+    /// Commits every settled detached child's answer into the parent's
+    /// context for its turn `turn_ordinal`, in one transaction, before that
+    /// request is built. Each answer is returned once, with its spend.
+    fn deliver(&self, _turn_ordinal: u32) -> DeliverFuture {
+        Box::pin(std::future::ready(Ok(Vec::new())))
+    }
 }
 
 /// The dispatcher's defensive answer when `spawn_agent` is called by a run

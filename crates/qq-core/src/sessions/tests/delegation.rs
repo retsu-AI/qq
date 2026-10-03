@@ -31,6 +31,7 @@ async fn owned_child_inherits_the_persisted_routing_identity() {
                 limits: RunLimits::default(),
                 approval_mode: ApprovalMode::ReadOnly,
                 purpose: SessionPurpose::Task,
+                detached: false,
             },
         )
         .await
@@ -66,6 +67,7 @@ async fn child_checkpoint_inheritance_preserves_profile_but_not_user_followups()
                 limits: RunLimits::default(),
                 approval_mode: ApprovalMode::ReadOnly,
                 purpose: SessionPurpose::Task,
+                detached: false,
             },
         )
         .await
@@ -352,10 +354,13 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
             .any(|spec| spec.name() == "spawn_agent")
     );
     assert!(!parent_reqs[0].system().unwrap().contains("Sub-agent:"));
+    // The read spawn returned on admission; the answer was delivered.
     assert!(matches!(
         parent_reqs[1].messages()[2].content(),
-        [ContentBlock::ToolResult { content, is_error: false, .. }] if content == "done"
+        [ContentBlock::ToolResult { content, is_error: false, .. }]
+            if content.contains("working in the background")
     ));
+    assert_eq!(delivered_answers(&parent_reqs), [("done".to_owned(), true)]);
     drop(parent_reqs);
     assert!(matches!(
         finished_outcome(&observed, run_id),
@@ -534,11 +539,26 @@ async fn child_final_checkpoint_is_durable_before_parent_spawn_result() {
         })
         .expect("parent settles");
 
+    // The read spawn returns on admission and its receipt is checkpointed;
+    // the child's answer, checkpointed durably first, is delivered before
+    // the parent's final candidate is reviewed.
     assert!(child_checkpoint < child_finished);
-    assert!(child_finished < parent_spawn_result);
     assert!(parent_spawn_result < parent_tool_checkpoint);
+    assert!(child_finished < parent_final_checkpoint);
     assert!(parent_tool_checkpoint < parent_final_checkpoint);
     assert!(parent_final_checkpoint < parent_finished);
+    let final_review = reviewed
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|request| request.phase == CheckpointPhase::FinalCandidate)
+        .map(|request| request.evidence.clone())
+        .unwrap();
+    assert!(
+        final_review.contains("A sub-agent you started has finished."),
+        "{final_review}"
+    );
     assert_eq!(
         reviewed
             .lock()
@@ -588,11 +608,10 @@ async fn multi_turn_child_returns_only_its_final_answer() {
         .unwrap();
     {
         let parent_requests = parent_requests.lock().unwrap();
-        assert!(matches!(
-            parent_requests[1].messages()[2].content(),
-            [ContentBlock::ToolResult { content, is_error: false, .. }]
-                if content == "done"
-        ));
+        assert_eq!(
+            delivered_answers(&parent_requests),
+            [("done".to_owned(), true)]
+        );
     }
 
     let snapshot = harness
@@ -635,11 +654,10 @@ async fn child_final_refusal_is_returned_to_the_parent() {
     collect_until_run_finished(&mut harness.events, parent_run).await;
 
     let parent_requests = parent_requests.lock().unwrap();
-    assert!(matches!(
-        parent_requests[1].messages()[2].content(),
-        [ContentBlock::ToolResult { content, is_error: false, .. }]
-            if content == "cannot complete that task"
-    ));
+    assert_eq!(
+        delivered_answers(&parent_requests),
+        [("cannot complete that task".to_owned(), true)]
+    );
 }
 
 #[tokio::test]
@@ -758,6 +776,7 @@ async fn parent_cancellation_linearizes_with_in_flight_child_creation() {
                         limits: RunLimits::default(),
                         approval_mode: ApprovalMode::ReadOnly,
                         purpose: SessionPurpose::Task,
+                        detached: false,
                     },
                 );
                 let _ = created_tx.send(result.as_ref().ok().map(|created| {
@@ -838,6 +857,7 @@ async fn parent_cancellation_linearizes_with_in_flight_child_creation() {
                 limits: RunLimits::default(),
                 approval_mode: ApprovalMode::ReadOnly,
                 purpose: SessionPurpose::Task,
+                detached: false,
             },
         )
         .await;
@@ -878,6 +898,7 @@ async fn replayed_parent_cancellation_rediscovers_its_running_child() {
                 limits: RunLimits::default(),
                 approval_mode: ApprovalMode::ReadOnly,
                 purpose: SessionPurpose::Task,
+                detached: false,
             },
         )
         .await
@@ -940,6 +961,7 @@ async fn restart_cancels_a_queued_child_owned_by_an_interrupted_parent() {
                 limits: RunLimits::default(),
                 approval_mode: ApprovalMode::ReadOnly,
                 purpose: SessionPurpose::Task,
+                detached: false,
             },
         )
         .await
@@ -1080,10 +1102,27 @@ async fn parallel_spawn_accounting_is_ordered_exact_and_survives_restart() {
         .find(|session| session.id == parent_id)
         .unwrap();
     let accounting = parent.accounting.unwrap();
-    assert_eq!(accounting.direct.usage, Some(usage(7, 10)));
-    assert_eq!(accounting.direct.estimated_cost_usd_nanos, Some(17));
-    assert_eq!(accounting.inclusive.usage, Some(usage(35, 42)));
-    assert_eq!(accounting.inclusive.estimated_cost_usd_nanos, Some(77));
+    // The parent spawned both children (2/3) and answered (5/7) after each
+    // reply that found children still running waited for the next answer
+    // (ADR-0054 § 4): one to three text turns, by when the children settle.
+    let direct = accounting.direct.usage.unwrap();
+    let text_turns = (direct.input_tokens - 2) / 5;
+    assert!((1..=3).contains(&text_turns), "{direct:?}");
+    assert_eq!(direct, usage(2 + 5 * text_turns, 3 + 7 * text_turns));
+    assert_eq!(
+        accounting.direct.estimated_cost_usd_nanos,
+        Some(5 + 12 * text_turns)
+    );
+    // The children's spend (28/32 tokens, 60 nanos) is in the inclusive
+    // figure exactly once.
+    let inclusive = accounting.inclusive.usage.unwrap();
+    assert_eq!(inclusive.input_tokens - direct.input_tokens, 28);
+    assert_eq!(inclusive.output_tokens - direct.output_tokens, 32);
+    assert_eq!(
+        accounting.inclusive.estimated_cost_usd_nanos.unwrap()
+            - accounting.direct.estimated_cost_usd_nanos.unwrap(),
+        60
+    );
     let child_costs = child_ids
         .iter()
         .map(|child_id| {
@@ -1512,8 +1551,8 @@ async fn explicit_route_outside_the_advertised_list_spawns_when_validation_accep
     assert_eq!(child.model.as_deref(), Some("test/discovered"));
     let parent_reqs = requests.lock().unwrap();
     assert!(matches!(
-        parent_reqs[1].messages()[2].content(),
-        [ContentBlock::ToolResult { content, is_error: false, .. }] if content == "done"
+        delivered_answers(&parent_reqs).as_slice(),
+        [(content, true)] if content == "done"
     ));
     drop(parent_reqs);
     assert!(matches!(
@@ -1609,8 +1648,8 @@ async fn a_failed_child_returns_a_tool_error_and_the_parent_continues() {
     // The parent saw a tool error and still completed.
     let parent_reqs = parent_requests.lock().unwrap();
     assert!(matches!(
-        parent_reqs[1].messages()[2].content(),
-        [ContentBlock::ToolResult { content, is_error: true, .. }]
+        delivered_answers(&parent_reqs).as_slice(),
+        [(content, false)]
             if content.contains("the sub-agent run paused") && content.contains("offline")
     ));
     drop(parent_reqs);
@@ -2142,6 +2181,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
             authority: qq_protocol::ChildAuthority::Read,
             budget: crate::runtime::ChildBudget::default(),
             purpose: SessionPurpose::Task,
+            detached: false,
         },
     ));
     tokio::time::timeout(Duration::from_secs(1), entered.notified())
@@ -3328,6 +3368,22 @@ async fn write_children_serialize_on_the_per_run_write_permit() {
         1,
         "two writers never share the checkout"
     );
+    // Write children stay blocking (ADR-0054 § 4): each answer is its spawn
+    // call's result, and none was admitted for delivery.
+    let delivery_rows: u32 = runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            Ok(
+                connection.query_row("SELECT COUNT(*) FROM child_deliveries", [], |row| {
+                    row.get(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(delivery_rows, 0);
+    assert!(delivered_answers(&parent_requests.lock().unwrap()).is_empty());
     assert!(matches!(
         finished_outcome(&observed, run_id),
         Some(RunOutcome::Completed)
@@ -3369,13 +3425,26 @@ async fn concurrent_children_per_run_queue_behind_the_cap() {
         results.len(),
         usize::from(MAX_CONCURRENT_CHILDREN_PER_RUN) + 1
     );
+    // Every spawn returned on admission (the one beyond the cap after a
+    // slot freed), and every answer was delivered once.
     for block in results {
         assert!(matches!(
             block,
             ContentBlock::ToolResult { content, is_error: false, .. }
-                if content == "child done"
+                if content.contains("working in the background")
         ));
     }
+    let answers = parent_reqs
+        .iter()
+        .flat_map(request_texts)
+        .filter(|text| {
+            text.contains("A sub-agent you started has finished.") && text.ends_with("child done")
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        answers.len(),
+        usize::from(MAX_CONCURRENT_CHILDREN_PER_RUN) + 1
+    );
     drop(parent_reqs);
     assert!(matches!(
         finished_outcome(&observed, run_id),
@@ -3428,7 +3497,7 @@ async fn spawns_beyond_the_per_run_budget_return_a_tool_error() {
             matches!(
                 block,
                 ContentBlock::ToolResult { content, is_error: false, .. }
-                    if content == "done"
+                    if content.contains("working in the background")
             )
         })
         .count();
@@ -3826,6 +3895,7 @@ async fn nested_spend_receipt_distinguishes_never_started_from_unknown_cancelled
                 limits: RunLimits::default(),
                 approval_mode: ApprovalMode::ReadOnly,
                 purpose: SessionPurpose::Task,
+                detached: false,
             },
         )
         .await

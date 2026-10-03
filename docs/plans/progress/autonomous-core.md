@@ -11,7 +11,8 @@ appended below, newest last.
 | AP2 | Pruned `read_file` stubs keep their header | Shipped | [ENG-988](https://linear.app/retsu-ai/issue/ENG-988) | #233 (`fc88136`) | |
 | AP3a | Report turns as persisted turns | Shipped | [ENG-990](https://linear.app/retsu-ai/issue/ENG-990) | #237 (`2a672fe`) | Store schema 39 → 40 |
 | AP3b | Stall report and child answer | In review | [ENG-1000](https://linear.app/retsu-ai/issue/ENG-1000) | `feat/eng-1000-ap3b-stall-report` | Stacked on ENG-1001 (#238, tool choice none); ADR-0054 § 3 amended |
-| AP4 | Non-blocking delegation | Planned | | | ADR-0054 § 4; independent review; `DESCRIPTOR_VERSION` bump |
+| AP4.1 | Non-blocking read spawns, exactly-once delivery, tool-free wait | In progress | [ENG-1004](https://linear.app/retsu-ai/issue/ENG-1004) | `feat/eng-1004-ap4-nonblocking-delegation` | Store schema 40 → 41 (`child_deliveries`); prompt 15 → 16; stacked on #242 |
+| AP4.2 | `wait_agents`, `cancel_agent`, interim-report delivery | Planned | | | `DESCRIPTOR_VERSION` 12 → 13 (two built-in tools); independent review |
 | AP5 | Evidence after AP3b and AP4 | Planned | | | Goal 6; 7-day windows |
 | AC0 | Soak and resource harness | AC0.1 Shipped; AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | #236 (`d1e51c2`) | AC0.2 = H0 registration, concurrency/fsync qualification |
 | AC1 | `RunState` extraction by reset scope | Planned | | | No behaviour change; independent review; after AP3b |
@@ -580,4 +581,93 @@ The review's should-fixes are done:
 - **Code.** Result labels use the first call with an id.
 - **Tests.** The between-run `/compact` test now asserts the summary still
   carries tool blocks.
+
+### 2026-10-02: AP4 split; AP4.1 (ENG-1004)
+
+AP4 is split per `workflow.md` § slices. AP4.1 is the core contract: a read spawn
+returns on admission, each answer is delivered exactly once, and a tool-free
+parent waits. AP4.2 adds the two tools and interim-report delivery. AP4.1
+adds no tool, so the `DESCRIPTOR_VERSION` bump moves to AP4.2. The plan row's
+acceptance is split the same way: `wait_agents`, `cancel_agent` and interim
+reports are AP4.2.
+
+**AP4.1 design, as built:**
+- **Admission.** `create_child_run` inserts a `child_deliveries` row in the
+  admission transaction when `ChildAdmission.detached` is set. Only read task
+  children of a run without a finite token or cost bound detach. Write
+  children, audits and bounded runs block as before.
+- **Return.** `spawn_child_run` returns the receipt when the owner task signals
+  durable admission. The admission branch is polled first, so a child that
+  already answered still answers only through its delivery row.
+- **Delivery.** At the top of every turn, before the budget check, the loop calls
+  `SubagentSpawner::deliver(turn)`. One transaction stamps every settled,
+  undelivered row (notice text, `turn_ordinal`, `delivery_ordinal`). The loop
+  then appends the notices, charges each child's spend, and treats each
+  answer as progress. A child whose descendants are still settling has
+  unreadable spend; it is skipped and delivered on a later pass, never
+  without its spend.
+- **Settlement and recovery.** `settle_run` delivers the run's own settled
+  children with `turn_ordinal NULL`, and, if the run is a child whose parent
+  already settled, delivers it to that parent. `finish_queued_run_with_outcome`
+  does the same. Recovery calls `deliver_orphaned_answers` once all runs are
+  settled.
+- **Replay.** `append_run_turns` places stamped notices after the boundary's
+  steering and before the turn notice, mirroring the live order. Notices with
+  a NULL turn follow the run's turns and steering. A run with no committed
+  turns, on the legacy path, still gets its notices.
+- **Waiting.** A tool-free reply while detached children are outstanding is
+  pushed, then the loop waits on `steering_arrived` (which keeps a received
+  message in `SteeringReceiver::peeked`) or `child_settled`. It ends only
+  after it has applied steering or delivered an answer, so the next request
+  never has two assistant messages in a row.
+- **Drains.** Interrupt drains use `drain_attached`, so detached children keep
+  running. The audit hook's drain is attached-only. Teardown's full drain
+  cancels detached children, and settlement delivers their answers.
+- **Jev.** A delivered notice is recorded as checkpoint evidence, so the final
+  review weighs it as it weighed a blocking result.
+
+**Fixtures changed with intent:**
+- About 12 delegation and progress tests asserted the answer as the spawn tool
+  result. They now assert the receipt, plus the delivered answer through
+  `delivered_answers`.
+- The accounting test allows one to three parent text turns, depending on when
+  the children settle, and asserts the children's spend once.
+- Golden updates:
+  - The root-prompt golden undoes the two reworded delegation bullets and the
+    spawn description, then checks the AP1 hashes.
+  - The descriptor golden takes the new prompt version.
+  - The headless test expects prompt version 16.
+
+**Measured on 2026-10-02**: the same machine, under background load. "Before" is
+the base branch, `fix/eng-1002-compaction-tool-history`, run in a separate
+worktree.
+
+`child_admission`, median of 20 samples, root completion time:
+
+| Case | Before | After | Note |
+| --- | --- | --- | --- |
+| unbounded-read | 140.1 ms | 140.6 ms | |
+| unbounded-read-overlap | 114.0 ms | 126.2 ms | |
+| finite-read | 164.9 ms | 168.4 ms | still blocking |
+| depth-two | 102.7 ms | 111.7 ms | still blocking |
+
+- The fixture's children answer instantly, so detaching cannot shorten its
+  wall time.
+- The unbounded cases add one parent turn (inclusive spend 30 → 35) and one
+  delivery transaction.
+- Peak concurrency is unchanged.
+
+Hot paths:
+
+| Bench | Before | After |
+| --- | --- | --- |
+| `turn_overhead` (ns/turn at turn 10 / 100 / 1000) | 18.0 / 18.8 / 17.0 ms | 15.2 / 15.4 / 15.1 ms |
+| `context_assembly`, 10 / 1000 / 10000 archived runs | 65 / 52 / 70 µs | 55 / 64 / 58 µs |
+
+- `turn_overhead`: the delivery check on a run without detached children is
+  an in-memory flag; no store call is made.
+- `context_assembly`: the added `child_deliveries` query is lost in the noise.
+
+The AP0 measurement this slice is judged by (blocked share below 20 %) comes
+from real use, in AP5.
 

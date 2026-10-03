@@ -17,6 +17,7 @@ mod deadlines;
 mod delegation;
 mod feeds;
 mod migrations;
+mod nonblocking;
 mod progress;
 mod replay_identity;
 mod runs;
@@ -2964,6 +2965,28 @@ async fn compact_session(runtime: &SessionRuntime, session_id: SessionId) -> Run
 }
 
 /// The concatenated text of each message in a captured provider request.
+/// The answers delivered into a parent's requests (ADR-0054 § 4), in the
+/// order they arrived: each `(answer text, the child answered)`. The answer
+/// text is what follows the notice's header line.
+fn delivered_answers(requests: &[ModelRequest]) -> Vec<(String, bool)> {
+    let mut seen = Vec::new();
+    for request in requests {
+        for text in request_texts(request) {
+            let Some(rest) = text.strip_prefix(
+                "[QQ runtime notice; not a user instruction]\nA sub-agent you started has finished.\n",
+            ) else {
+                continue;
+            };
+            let (header, answer) = rest.split_once(":\n\n").expect("a delivery notice header");
+            let entry = (answer.to_owned(), header.ends_with("Its answer"));
+            if !seen.contains(&entry) {
+                seen.push(entry);
+            }
+        }
+    }
+    seen
+}
+
 fn request_texts(request: &ModelRequest) -> Vec<String> {
     request
         .messages()

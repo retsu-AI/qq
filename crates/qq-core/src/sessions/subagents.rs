@@ -32,16 +32,49 @@ pub(super) fn hold_child_delivery(
     (entered_rx, release)
 }
 
+/// Holds a parent's delivery of a settled child (blocking result or detached
+/// notice) while a test observes the state between settlement and delivery.
+#[cfg(test)]
+async fn hold_delivery_for_test(parent_session: SessionId) {
+    let hook = {
+        let mut hooks = CHILD_DELIVERY_HOOKS.lock().unwrap();
+        hooks
+            .iter()
+            .position(|hook| hook.session_id == parent_session)
+            .map(|index| hooks.remove(index))
+    };
+    if let Some(hook) = hook {
+        let _ = hook.entered.send(());
+        let _ = hook.release.await;
+    }
+}
+
 struct ChildTask {
     cancel: watch::Sender<bool>,
     completed: watch::Receiver<Option<ChildReceipt>>,
+    /// The parent did not wait for this child: its spend is charged by the
+    /// durable delivery, so a drain stops it but never returns its receipt.
+    /// Set together with `run_id` once the child is durably admitted.
+    detached: bool,
+    run_id: Option<RunId>,
 }
 
 /// Owners and unconsumed receipts stay here even if a tool or a cleanup await
 /// is interrupted. Only a charged receipt or a fully drained batch is removed.
-#[derive(Default)]
 pub(super) struct ChildTasks {
     tasks: Mutex<HashMap<ToolCallId, ChildTask>>,
+    /// Bumped whenever a detached child settles; the parent's wait for its
+    /// next answer observes it.
+    settled: watch::Sender<u64>,
+}
+
+impl Default for ChildTasks {
+    fn default() -> Self {
+        Self {
+            tasks: Mutex::new(HashMap::new()),
+            settled: watch::channel(0).0,
+        }
+    }
 }
 
 impl ChildTasks {
@@ -52,11 +85,58 @@ impl ChildTasks {
             .remove(&call_id);
     }
 
+    /// Detached children not yet delivered: running, or settled and
+    /// awaiting the parent's next boundary.
+    fn outstanding_detached(&self) -> usize {
+        self.tasks.lock().map_or(0, |tasks| {
+            tasks.values().filter(|task| task.detached).count()
+        })
+    }
+
+    /// Marks an admitted child detached: from here on the parent does not
+    /// wait for it, and only a delivery or a drain removes it.
+    fn detach(&self, call_id: ToolCallId, run_id: RunId) {
+        if let Ok(mut tasks) = self.tasks.lock()
+            && let Some(task) = tasks.get_mut(&call_id)
+        {
+            task.detached = true;
+            task.run_id = Some(run_id);
+        }
+    }
+
+    /// Forgets the delivered children: their answers are durable and the
+    /// delivery charged their spend.
+    fn forget_delivered(&self, delivered: &[RunId]) {
+        if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.retain(|_, task| !task.run_id.is_some_and(|run| delivered.contains(&run)));
+        }
+    }
+
+    /// A detached child has settled and awaits delivery.
+    fn settled_detached(&self) -> bool {
+        self.tasks.lock().is_ok_and(|tasks| {
+            tasks
+                .values()
+                .any(|task| task.detached && task.completed.borrow().is_some())
+        })
+    }
+
     pub(super) async fn drain(&self) -> Result<Vec<SpawnAgentSpend>, ChildCleanupError> {
+        self.drain_matching(|_| true).await
+    }
+
+    /// Stops and awaits the children `select` picks (blocking ones only, or
+    /// all) and returns the attached receipts among them. Detached receipts
+    /// are never returned: the delivery charges them.
+    async fn drain_matching(
+        &self,
+        select: impl Fn(&ChildTask) -> bool,
+    ) -> Result<Vec<SpawnAgentSpend>, ChildCleanupError> {
         let pending = {
             let tasks = self.tasks.lock().map_err(|_| ChildCleanupError)?;
             tasks
                 .values()
+                .filter(|task| select(task))
                 .map(|task| {
                     task.cancel.send_replace(true);
                     task.completed.clone()
@@ -74,23 +154,35 @@ impl ChildTasks {
         // resumed by the session owner without losing any child's accounting.
         let mut tasks = self.tasks.lock().map_err(|_| ChildCleanupError)?;
         let mut spend = Vec::with_capacity(tasks.len());
-        for task in tasks.values() {
+        for task in tasks.values().filter(|task| select(task)) {
             match *task.completed.borrow() {
+                // The delivery charges a detached child's spend.
+                Some(Ok(_)) if task.detached => {}
                 Some(Ok(receipt)) => spend.push(receipt),
                 Some(Err(error)) => return Err(error),
                 None => return Err(ChildCleanupError),
             }
         }
-        tasks.clear();
+        tasks.retain(|_, task| !select(task));
         Ok(spend)
     }
 }
 
-struct CancelChildWaiter(watch::Sender<bool>);
+/// Cancels the child when the spawn call awaiting it is dropped. A detached
+/// child has no awaiting call and disarms it.
+struct CancelChildWaiter(Option<watch::Sender<bool>>);
+
+impl CancelChildWaiter {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
 
 impl Drop for CancelChildWaiter {
     fn drop(&mut self) {
-        self.0.send_replace(true);
+        if let Some(cancel) = self.0.take() {
+            cancel.send_replace(true);
+        }
     }
 }
 
@@ -183,6 +275,75 @@ impl SubagentSpawner for SessionSubagentSpawner {
         let tasks = Arc::clone(&self.tasks);
         Box::pin(async move { tasks.drain().await })
     }
+
+    fn drain_attached(&self) -> ChildDrainFuture {
+        let tasks = Arc::clone(&self.tasks);
+        Box::pin(async move { tasks.drain_matching(|task| !task.detached).await })
+    }
+
+    fn outstanding_detached(&self) -> usize {
+        self.tasks.outstanding_detached()
+    }
+
+    fn settled_detached(&self) -> bool {
+        self.tasks.settled_detached()
+    }
+
+    fn child_settled(&self) -> crate::runtime::ChildWaitFuture {
+        let tasks = Arc::clone(&self.tasks);
+        let mut settled = tasks.settled.subscribe();
+        Box::pin(async move {
+            // Resolve at once when a settled child awaits delivery; else
+            // wait for the next settlement while any child still runs.
+            loop {
+                if tasks.settled_detached() {
+                    return;
+                }
+                if tasks.outstanding_detached() == 0 {
+                    std::future::pending::<()>().await;
+                }
+                if settled.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        })
+    }
+
+    fn deliver(&self, turn_ordinal: u32) -> crate::runtime::DeliverFuture {
+        let inner = Arc::clone(&self.inner);
+        let parent = self.parent.clone();
+        let tasks = Arc::clone(&self.tasks);
+        Box::pin(async move {
+            #[cfg(test)]
+            hold_delivery_for_test(parent.identity.session_id).await;
+            // Settled owner tasks first: their runs are durably settled, so
+            // the store delivers every one of them (and any that settled
+            // after this read, which is harmless: they are delivered too).
+            let delivered = inner
+                .store
+                .deliver_children(
+                    &parent,
+                    turn_ordinal,
+                    usize::from(MAX_SPAWNED_CHILDREN_PER_RUN),
+                )
+                .await
+                .map_err(|_| crate::runtime::DeliveryError)?;
+            tasks.forget_delivered(
+                &delivered
+                    .iter()
+                    .map(|answer| answer.child_run_id)
+                    .collect::<Vec<_>>(),
+            );
+            Ok(delivered
+                .into_iter()
+                .map(|answer| crate::runtime::DeliveredChild {
+                    notice: answer.notice,
+                    answered: !answer.is_error,
+                    spend: answer.spend,
+                })
+                .collect())
+        })
+    }
 }
 
 /// The per-run child bookkeeping one spawn call draws from.
@@ -207,6 +368,7 @@ fn spawn_error_with_spend(content: impl Into<String>, spend: SpawnAgentSpend) ->
         is_error: true,
         spend,
         session_id: None,
+        detached: false,
     }
 }
 
@@ -243,12 +405,19 @@ pub(super) async fn spawn_child_run(
             ChildTask {
                 cancel: cancel.clone(),
                 completed: completion,
+                detached: false,
+                run_id: None,
             },
         );
     }
     let deadline = request.budget.deadline;
     let deadline_cancel = cancel.clone();
-    let _waiter = CancelChildWaiter(cancel);
+    let mut waiter = CancelChildWaiter(Some(cancel));
+    // A detached spawn returns once the child is durably admitted; the owner
+    // task keeps running it and signals its settlement to the parent.
+    let (admitted, admission) = oneshot::channel::<SessionId>();
+    let admitted = request.detached.then_some(admitted);
+    let settled = budget.tasks.settled.clone();
     #[cfg(test)]
     let parent_session = parent.identity.session_id;
     let owner_inner = Arc::clone(&inner);
@@ -260,6 +429,7 @@ pub(super) async fn spawn_child_run(
                 budget,
                 request,
                 cancellation,
+                admitted,
             ));
             let expires = async {
                 match deadline {
@@ -298,24 +468,50 @@ pub(super) async fn spawn_child_run(
             Ok(outcome.spend)
         };
         completed.send_replace(Some(receipt));
+        settled.send_modify(|generation| *generation = generation.wrapping_add(1));
+        // A detached spawn's caller is gone; nothing waits for this reply.
         let _ = reply.send(outcome);
     });
-    match response.await {
+    let mut response = response;
+    let admission = async {
+        match admission.await {
+            Ok(session_id) => session_id,
+            // A blocking spawn never detaches; an admission that failed
+            // reports through `response`.
+            Err(_) => std::future::pending().await,
+        }
+    };
+    // The admission receipt wins whenever the child was detached, even when
+    // its answer is also ready: a detached child has a delivery row, so its
+    // answer must reach the parent through that row alone, never twice.
+    // The owner task signals admission strictly before it replies.
+    let detached = tokio::select! {
+        biased;
+        session_id = admission => Ok(session_id),
+        reply = &mut response => Err(reply),
+    };
+    let response = match detached {
+        Ok(session_id) => {
+            waiter.disarm();
+            return SpawnAgentOutcome {
+                content: format!(
+                    "Sub-agent {session_id} started and is working in the background. Its \
+                     answer will reach you at a later turn as a runtime notice. Keep working \
+                     on anything that does not depend on it; when nothing is left, reply \
+                     without tool calls and QQ waits for the answers still outstanding."
+                ),
+                is_error: false,
+                spend: SpawnAgentSpend::NONE,
+                session_id: Some(session_id),
+                detached: true,
+            };
+        }
+        Err(reply) => reply,
+    };
+    match response {
         Ok(outcome) => {
             #[cfg(test)]
-            {
-                let hook = {
-                    let mut hooks = CHILD_DELIVERY_HOOKS.lock().unwrap();
-                    hooks
-                        .iter()
-                        .position(|hook| hook.session_id == parent_session)
-                        .map(|index| hooks.remove(index))
-                };
-                if let Some(hook) = hook {
-                    let _ = hook.entered.send(());
-                    let _ = hook.release.await;
-                }
-            }
+            hold_delivery_for_test(parent_session).await;
             outcome
         }
         Err(_) => {
@@ -331,6 +527,7 @@ async fn run_owned_child(
     budget: SpawnBudget,
     request: SpawnRequest,
     mut cancellation: watch::Receiver<bool>,
+    admitted: Option<oneshot::Sender<SessionId>>,
 ) -> SpawnAgentOutcome {
     let SpawnBudget {
         slots,
@@ -338,7 +535,7 @@ async fn run_owned_child(
         write_children,
         spawned,
         max_children,
-        tasks: _,
+        tasks,
     } = budget;
     let SpawnRequest {
         call_id,
@@ -348,6 +545,7 @@ async fn run_owned_child(
         authority,
         budget: child_budget,
         purpose,
+        detached,
     } = request;
     // Authority attenuates strictly: a read child is ReadOnly; a write child
     // is Supervised and needs both the roster's permission and a reviewer to
@@ -526,6 +724,9 @@ async fn run_owned_child(
                 limits: child_limits,
                 approval_mode: child_mode,
                 purpose,
+                // Only a read task child detaches: a write child holds the
+                // parent's one write slot and an audit is awaited inline.
+                detached: detached && child_mode == ApprovalMode::ReadOnly,
             },
         )
         .await
@@ -554,6 +755,12 @@ async fn run_owned_child(
     };
     drop(lifecycle);
     let _ = inner.schedule.try_send(());
+    if let Some(admitted) = admitted
+        && child_mode == ApprovalMode::ReadOnly
+    {
+        tasks.detach(call_id, run_id);
+        let _ = admitted.send(child_session_id);
+    }
     let mut cancelled = false;
     let (outcome, spend) = loop {
         if !cancelled && *cancellation.borrow() {
@@ -608,60 +815,16 @@ async fn run_owned_child(
     // Every settled child charges its real spend to the parent, whatever
     // its outcome; the parent's budgets must see failed work too. Every
     // settled child also names its session so callers can point at it.
-    let mut settled = match outcome {
-        RunOutcome::Completed => match inner.store.run_final_text(run_id).await {
-            // A child that ended without a final answer (an empty
-            // final-answer turn, ADR-0054 § 3) still leaves its own durable
-            // reports; the latest one is the parent's answer, labelled.
-            Ok(text) if text.trim().is_empty() => {
-                match inner.store.run_latest_report_text(run_id).await {
-                    Ok(Some(report)) => SpawnAgentOutcome {
-                        content: format!("{INTERIM_REPORT_LABEL}\n\n{report}"),
-                        is_error: false,
-                        spend,
-                        session_id: None,
-                    },
-                    Ok(None) => spawn_error_with_spend(
-                        "the sub-agent completed without producing any text",
-                        spend,
-                    ),
-                    Err(error) => spawn_error_with_spend(
-                        format!("the sub-agent answer could not be read: {error}"),
-                        spend,
-                    ),
-                }
-            }
-            Ok(text) => SpawnAgentOutcome {
-                content: text,
-                is_error: false,
-                spend,
-                session_id: None,
-            },
-            Err(error) => spawn_error_with_spend(
-                format!("the sub-agent answer could not be read: {error}"),
-                spend,
-            ),
+    let mut settled = match inner.store.child_answer(run_id, outcome).await {
+        Ok(answer) => SpawnAgentOutcome {
+            content: answer.content,
+            is_error: answer.is_error,
+            spend,
+            session_id: None,
+            detached: false,
         },
-        RunOutcome::Cancelled => spawn_error_with_spend("the sub-agent run was cancelled", spend),
-        RunOutcome::Interrupted => {
-            spawn_error_with_spend("the sub-agent run was interrupted", spend)
-        }
-        RunOutcome::BudgetExhausted { exhaustion } => spawn_error_with_spend(
-            format!(
-                "the sub-agent run exhausted its budget: {}",
-                exhaustion.message
-            ),
-            spend,
-        ),
-        RunOutcome::Paused { pause } => spawn_error_with_spend(
-            format!(
-                "the sub-agent run paused on a provider fault after {} retries: {}",
-                pause.attempts, pause.message
-            ),
-            spend,
-        ),
-        RunOutcome::Failed { failure } => spawn_error_with_spend(
-            format!("the sub-agent run failed: {}", failure.message),
+        Err(error) => spawn_error_with_spend(
+            format!("the sub-agent answer could not be read: {error}"),
             spend,
         ),
     };
@@ -816,9 +979,11 @@ impl crate::runtime::AuditHook for SessionAuditHook {
         }
     }
 
+    /// Stops the audit child alone: the parent's detached read children
+    /// share the registry and keep running (ADR-0054 § 4).
     fn drain(&self) -> ChildDrainFuture {
         let tasks = Arc::clone(&self.tasks);
-        Box::pin(async move { tasks.drain().await })
+        Box::pin(async move { tasks.drain_matching(|task| !task.detached).await })
     }
 
     fn audit(
@@ -891,6 +1056,7 @@ impl crate::runtime::AuditHook for SessionAuditHook {
                     authority: ChildAuthority::Read,
                     budget,
                     purpose: SessionPurpose::Audit,
+                    detached: false,
                 },
             )
             .await;
