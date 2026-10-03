@@ -68,8 +68,9 @@ rule and may reach plain-HTTP LAN servers through the host HTTP client.
                                                + `tailscale serve` for TLS
 ```
 
-No new wire protocol: HTTP and SSE only. One `PROTOCOL_VERSION` bump (16 → 17)
-carries every additive server change in Phase 2.
+No new transport protocol: HTTP and SSE only. Each incompatible strict wire
+change bumps the current `PROTOCOL_VERSION`; HTTP/2, TLS, and policy-only
+changes do not force a bump.
 
 ## Task Index
 
@@ -82,25 +83,29 @@ mobile. Phases 1 and 2 are independent and may run in parallel worktrees.
 | W2 | 1 | Extract reducer and client model into `qq-client::state` | W1 | `crates/qq-client/src/state*`, `crates/qq-tui/src/{app,model}.rs` |
 | W3 | 1 | Multi-server client model and overview | W1, W2, S1 | `crates/qq-client/src/servers*` |
 | S1 | 2 | Stable `ServerId` and display name in `ServerInfo`; protocol 17 | — | `crates/qq-server/`, `crates/qq-protocol/`, `crates/qq-core/src/store*` (metadata), `src/runtime.rs` |
-| S2 | 2 | Client enrollment: pairing codes, credentials, revocation, CLI | S1 | `crates/qq-server/`, `crates/qq-core/src/store*`, `src/cli.rs`, `src/main.rs` |
+| S2 | 2 | Client enrollment: scoped credentials, pairing, revocation, CLI | S1 | `crates/qq-server/`, `crates/qq-core/src/store*`, `src/cli.rs`, `src/main.rs` |
 | S3 | 2 | CORS layer, off by default | — | `crates/qq-server/` |
 | S4 | 2 | Explicit non-loopback bind with TLS, gated on enrollment | S2 | `crates/qq-server/`, `crates/qq-protocol/src/local.rs`, `src/main.rs`, `docs/runbooks/remote-server.md` |
 | S5 | 2 | Workspace catalog and bounded browse under configured roots | S1 | `crates/qq-server/`, `crates/qq-core/src/store*`, `crates/qq-protocol/` |
 | S6 | 2 | `server` configuration section and root translation | S2–S5 | `crates/qq-config/`, `src/` |
 | TB | gate | Tracer bullet: throwaway page streams a transcript from a remote server | W1, W2, S1, S2, S3 | none committed |
-| U1 | 3 | `apps/` workspace, framework per ADR-0017, CI, size gate, PWA | W1, W2 | `apps/`, `.github/workflows/` (root request) |
+| S7 | 2 | Server stream tiers, transcript paging, approval previews, spill reads | S2, S5 | `crates/qq-server/`, `crates/qq-protocol/`, `crates/qq-client/` |
+| W4 | 3 | Bounded durable fleet cache and dependent-command outbox | W3, S7 | `apps/fleet/` |
+| W5 | 3 | Incremental render model with document-wide reference correctness | U1 | `apps/render/` |
+| U1 | 3 | ADR-0017 measured spike, then `apps/` workspace, CI, size gate, PWA | W1, W2 | `apps/`, `.github/workflows/` (root request) |
 | U2 | 3 | Servers screen: pair, list, connection state, overview | U1, W3, S2 | `apps/web/` |
 | U3 | 3 | Workspaces and session tree | U2, S5 | `apps/web/` |
 | U4 | 3 | Transcript: turn-ordered, virtualized, markdown, diffs | U3 | `apps/web/` |
 | U5 | 3 | Act: composer, steer, approvals, pickers, session commands | U4 | `apps/web/` |
 | U6 | 3 | Attention view and notifications | U5 | `apps/web/` |
-| U7 | 3 | Resilience states and measured performance gates; hosting | U5 | `apps/web/` |
+| U7 | 3 | Web resilience states and measured performance gates; hosting | U5 | `apps/web/` |
 | D1 | 4 | Tauri shell, keychain credentials, deep-link pairing | U5 | `apps/shell/` |
 | D2 | 4 | Bundled `qq` sidecar local server | D1 | `apps/shell/`, `xtask/` |
 | D3 | 4 | Host-side HTTP for plain-HTTP LAN servers; installers | D1 | `apps/shell/`, `xtask/` |
-| M1 | 5 | Responsive pass | U5 | `apps/web/` |
+| M1 | 5 | Inbox-first mobile layout and measured mobile startup/frame gates | U5 | `apps/web/` |
 | M2 | 5 | Keystore credentials and QR pairing | D1 | `apps/shell/` |
 | M3 | 5 | Foreground notifications | M1 | `apps/shell/` |
+| FG | gate | Five-server browser/phone fleet acceptance | S7, W4, W5, U6, U7, M2, M3 | `docs/plans/progress/g-fleet-clients.md` (evidence only) |
 
 ## Phase 1 — Client Core
 
@@ -148,13 +153,20 @@ Shipped in #14: `ServerInfo.server_id` is a stable per-store identity. See `prot
 hash lookup per request; measure).
 **Acceptance:**
 
-- Store table `client_credentials { client_id, name, credential_hash,
+- Store table `client_credentials { client_id, name, credential_hash, scope_bits,
   created_at, last_seen_at, revoked_at }`.
 - `POST /v1/enroll { pairing_code, client_name }` → `{ client_id, credential,
   server_info }`, unauthenticated, rate-limited (5 attempts per minute per
   peer; a code is invalidated after 3 failures; codes expire after 5 minutes
-  and are single-use). `GET /v1/clients`, `POST /v1/clients/revoke`
-  authenticated.
+  and are single-use).
+- The loopback credential has all scopes. Enrolled credentials carry only the
+  server-confirmed `read`, `run`, `approve`, `session_admin`, and
+  `client_admin` bits; the complete route/command matrix is in
+  `fleet-clients.md` §5 and is tested fail-closed, including authenticated
+  health/capabilities/models reads and explicit prune, compact, compaction
+  rollback, and approval-delegate command assignments.
+- `GET /v1/clients`, pairing-code minting, and
+  `POST /v1/clients/revoke` require loopback or `client_admin`.
 - Auth middleware accepts the loopback token or an enrolled credential in
   constant time; revoked credentials fail immediately.
 - CLI: `qq pair` prints a code and a `qq://pair?host=…&code=…` URL;
