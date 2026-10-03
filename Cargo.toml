@@ -35,7 +35,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/retsu-AI/qq"
@@ -125,6 +125,11 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 webbrowser.workspace = true
+
+# `qq init` opens its target relative to a no-follow directory handle.
+# Already in the lock through qq-core; this only enables `fs` for the root.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
 
 [profile.release]
 # The shipped binary is size- and latency-gated (`benchmarks/perf`). Symbols

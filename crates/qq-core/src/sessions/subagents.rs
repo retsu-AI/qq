@@ -466,6 +466,7 @@ async fn run_owned_child(
                 reasoning_effort: child_effort.or(parent.reasoning_effort),
                 checkpoint: parent.checkpoint.clone(),
                 routing: parent.routing.clone(),
+                approval_delegate: parent.approval_delegate.clone(),
                 workspace: parent.workspace.clone(),
                 model: selection.clone(),
                 profile: parent.profile.clone(),

@@ -381,28 +381,49 @@ impl RuntimeFactory {
         }
     }
 
-    /// Answer the TUI's trust prompt. `Persist` records every pending file
-    /// exactly as `qq trust` does; `Session` admits them for this process
-    /// only. Either way the configuration is then loaded and the client's
-    /// model state recomputed. Blocking: trust-state I/O, the load, and
-    /// credential probes. An empty pending set with `Session` is not an
-    /// error: the files were trusted meanwhile (another `qq trust`) and the
-    /// load simply succeeds.
+    /// Answer the TUI's trust prompt for exactly the files it showed.
+    /// `reviewed` is the `(path, digest)` of every file on the prompt;
+    /// when the pending set now holds a file at any other digest (it was
+    /// edited while the prompt was open) nothing is trusted and
+    /// `ConfigError::TrustChanged` carries the set to show again.
+    /// `Persist` records the files exactly as `qq trust` does; `Session`
+    /// admits them for this process only. Either way the configuration is
+    /// then loaded and the client's model state recomputed. Blocking:
+    /// trust-state I/O, the load, and credential probes. An empty pending
+    /// set is not an error: the files were trusted meanwhile (another `qq
+    /// trust`) and the load simply succeeds.
     pub fn resolve_trust(
         &self,
         request: &LoadRequest,
         choice: TrustResolution,
+        reviewed: &[ProcessTrust],
+    ) -> Result<TrustGranted, RuntimeBuildError> {
+        self.resolve_trust_with(request, choice, reviewed, || {})
+    }
+
+    /// [`Self::resolve_trust`] with a hook run between the grant and the
+    /// post-grant load, where a concurrent edit can land; tests use it to
+    /// place that edit deterministically.
+    fn resolve_trust_with(
+        &self,
+        request: &LoadRequest,
+        choice: TrustResolution,
+        reviewed: &[ProcessTrust],
+        after_grant: impl FnOnce(),
     ) -> Result<TrustGranted, RuntimeBuildError> {
         let trusted: Vec<String> = match choice {
             TrustResolution::Persist => self
                 .inner
                 .config
-                .grant_pending_trust(request)?
+                .grant_reviewed_trust(request, reviewed)?
                 .iter()
                 .map(|item| item.source().label().to_owned())
                 .collect(),
             TrustResolution::Session => {
-                let pending = self.inner.config.pending_trust(request)?;
+                let pending = self
+                    .inner
+                    .config
+                    .reviewed_pending_trust(request, reviewed)?;
                 let mut grants = Vec::with_capacity(pending.len());
                 let mut labels = Vec::with_capacity(pending.len());
                 for item in &pending {
@@ -426,7 +447,20 @@ impl RuntimeFactory {
             }
         };
         let request = request.clone().with_process_trust(self.process_trust()?);
-        let snapshot = self.load_for_client(&request)?;
+        after_grant();
+        // A file rewritten after the grant's scan but before this load is
+        // pending again at a digest nobody reviewed. That is the same event
+        // as an edit while the prompt was open, so report it the same way:
+        // the TUI redraws the prompt with the new content instead of showing
+        // a generic error over the old declarations.
+        let snapshot = match self.load_for_client(&request) {
+            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { pending, .. })) => {
+                return Err(RuntimeBuildError::Config(ConfigError::TrustChanged {
+                    pending,
+                }));
+            }
+            other => other?,
+        };
         Ok(TrustGranted {
             trusted,
             state: self.tui_model_state(&snapshot, &request),
@@ -507,6 +541,12 @@ impl RuntimeFactory {
                             qq_core::CheckpointSelection::ReviewerIdentity(identity.clone())
                         }
                         None => qq_core::CheckpointSelection::Disabled,
+                    }),
+                    approval_delegate: Some(match plan.descriptor().approval_delegate.as_ref() {
+                        Some(identity) => {
+                            qq_core::ApprovalDelegateSelection::DelegateIdentity(identity.clone())
+                        }
+                        None => qq_core::ApprovalDelegateSelection::Disabled,
                     }),
                     workspace: plan.workspace_path().display().to_string(),
                     profile: plan.descriptor().profile.clone(),
@@ -1413,6 +1453,7 @@ impl RuntimeFactory {
             explicit_config_content: request.explicit_content().map(str::to_owned),
             jev_review: request.overrides().jev_review(),
             jev_routing: request.overrides().jev_routing(),
+            jev_approval: request.overrides().jev_approval(),
             approval_delegate: request.overrides().approval_delegate(),
             reasoning_effort: request.overrides().reasoning_effort(),
             process_trust: crate::plan::ProcessTrustFingerprint::of(request.process_trust()),
@@ -1562,6 +1603,23 @@ impl RuntimeFactory {
             }
         };
         let resolved_model = self.resolved_model_for_snapshot(&snapshot)?;
+        // How far the empty-truncation recovery may raise a turn's cap: the
+        // catalog limit, never past a managed policy ceiling.
+        let output_ceiling = snapshot
+            .providers()
+            .get(snapshot.model().provider())
+            .and_then(|provider| provider.models().get(snapshot.model().model()))
+            .and_then(qq_config::ModelMetadata::max_output_tokens)
+            .map(|limit| match snapshot.policy().max_output_tokens() {
+                Some(ceiling) if ceiling < limit => qq_core::OutputCeiling {
+                    tokens: ceiling,
+                    policy_bound: true,
+                },
+                _ => qq_core::OutputCeiling {
+                    tokens: limit,
+                    policy_bound: false,
+                },
+            });
         if snapshot
             .reasoning_effort()
             .is_some_and(|effort| effort != qq_provider::ReasoningEffort::Default)
@@ -1685,6 +1743,12 @@ impl RuntimeFactory {
                 .with_shell_policy(shell)
                 .with_network_policy(network)
                 .with_approval_delegate(approval_delegate)
+                .with_approval_delegate_identity(
+                    snapshot
+                        .jev_approval()
+                        .then(|| approval::JEV_APPROVAL_IDENTITY.to_owned()),
+                )
+                .with_output_ceiling(output_ceiling)
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
                 .with_profile_id(profile_id.clone());
@@ -1739,6 +1803,7 @@ impl RuntimeFactory {
         let mut bindings = LiveBindings {
             provider: provider_config.access().cloned(),
             mcp: None,
+            runtime: crate::plan::RuntimeSwitches { output_ceiling },
         };
         if let Some(progress) = progress {
             progress.set(qq_core::RuntimeLoadStage::LoadingTools);
@@ -2466,6 +2531,25 @@ impl RuntimeLoader for RuntimeFactory {
                 }
                 if let Some(organization) = request.model.organization {
                     overrides = overrides.with_organization(organization);
+                }
+                // A reload (routing, owned child) keeps the parent's approval
+                // delegate: disabled stays disabled whatever the file now
+                // says, and only the delegate this build knows is honoured.
+                if let Some(selection) = &request.approval_delegate {
+                    let enabled = match selection {
+                        qq_core::ApprovalDelegateSelection::Disabled => false,
+                        qq_core::ApprovalDelegateSelection::DelegateIdentity(identity)
+                            if identity == approval::JEV_APPROVAL_IDENTITY =>
+                        {
+                            true
+                        }
+                        qq_core::ApprovalDelegateSelection::DelegateIdentity(identity) => {
+                            return Err(RuntimeBuildError::InheritedApprovalDelegate(
+                                identity.clone(),
+                            ));
+                        }
+                    };
+                    overrides = overrides.with_jev_approval(enabled);
                 }
                 load = load.with_overrides(overrides);
                 let plan =
@@ -3847,6 +3931,8 @@ pub enum RuntimeBuildError {
     InheritedCheckpoint(String),
     #[error("unsupported inherited routing identity: {0}")]
     InheritedRouting(String),
+    #[error("unsupported inherited approval delegate identity: {0}")]
+    InheritedApprovalDelegate(String),
     #[error("TYPESAFE_API_KEY cannot be encoded as an authorization header")]
     JevKeyInvalid,
     #[error("the TypeSafe JEV client could not be constructed")]
@@ -3901,6 +3987,7 @@ impl RuntimeBuildError {
             | Self::PackRequiresNewerProtocol { .. }
             | Self::InheritedCheckpoint(_)
             | Self::InheritedRouting(_)
+            | Self::InheritedApprovalDelegate(_)
             | Self::JevKeyRequired
             | Self::JevKeyInvalid
             | Self::UnsupportedReasoningEffort(_)
@@ -3939,7 +4026,7 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use futures_util::stream;
     use qq_auth::{CredentialPaths, KeyringBackend, KeyringError};
-    use qq_config::{ConfigPaths, ProviderKind, RuntimeOverrides, UsageType};
+    use qq_config::{ConfigPaths, PendingTrust, ProviderKind, RuntimeOverrides, UsageType};
     use qq_core::Runtime;
     use qq_protocol::{
         CommandId, CommandOutcome, ModelSelection, RunId, RunPromptIdentity, RunStatus,
@@ -5342,6 +5429,66 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_carries_the_catalog_output_ceiling_bounded_by_policy() {
+        // ENG-973: the resolved cap stays the configured 16 384, but the
+        // empty-truncation raise may reach the catalog limit, never past a
+        // managed policy ceiling, and nothing when the catalog is silent.
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let plan = |models: &str| {
+            let request = LoadRequest::new(fixture.path("work")).with_explicit_content(format!(
+                r#"(version: 1, model: "custom/test-model",
+                    providers: {{ "custom": Custom(connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth), models: {{"test-model": ({models})}}) }})"#
+            ));
+            factory.plan_for(&request).unwrap()
+        };
+        let known = plan("name: \"M\", max_output_tokens: 128000");
+        assert_eq!(
+            known.resolved_model().max_output_tokens,
+            qq_config::DEFAULT_MAX_OUTPUT_TOKENS
+        );
+        assert_eq!(
+            known.output_ceiling(),
+            Some(qq_core::OutputCeiling {
+                tokens: 128_000,
+                policy_bound: false
+            })
+        );
+        assert_eq!(plan("name: \"M\"").output_ceiling(), None);
+        fs::write(
+            fixture.path("managed/managed.ron"),
+            r#"(version: 1, policy: (max_output_tokens: 32000))"#,
+        )
+        .unwrap();
+        assert_eq!(
+            plan("name: \"M\", max_output_tokens: 128000").output_ceiling(),
+            Some(qq_core::OutputCeiling {
+                tokens: 32_000,
+                policy_bound: true
+            })
+        );
+
+        // Review (#216): lowering only the managed ceiling (still above the
+        // 16 384 request cap, so the digest is unchanged) must replace the
+        // cached plan, not revalidate the one compiled under 32 000.
+        let before = plan("name: \"M\", max_output_tokens: 128000");
+        fs::write(
+            fixture.path("managed/managed.ron"),
+            r#"(version: 1, policy: (max_output_tokens: 20000))"#,
+        )
+        .unwrap();
+        let after = plan("name: \"M\", max_output_tokens: 128000");
+        assert_eq!(before.digest(), after.digest(), "outside the digest");
+        assert_eq!(
+            after.output_ceiling(),
+            Some(qq_core::OutputCeiling {
+                tokens: 20_000,
+                policy_bound: true
+            })
+        );
+    }
+
+    #[test]
     fn resolved_model_caps_output_to_known_metadata_and_preserves_unknown_limits() {
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
@@ -6014,6 +6161,7 @@ mod tests {
                 &factory,
                 RuntimeLoadRequest {
                     routing: None,
+                    approval_delegate: None,
                     reasoning_effort: None,
                     checkpoint: None,
                     workspace: workspace.display().to_string(),
@@ -6614,6 +6762,7 @@ mod tests {
             &factory,
             RuntimeLoadRequest {
                 routing: None,
+                approval_delegate: None,
                 reasoning_effort: None,
                 checkpoint: None,
                 workspace: workspace.display().to_string(),
@@ -6800,6 +6949,8 @@ mod tests {
             other => panic!("expected TrustRequired, got {other:?}"),
         };
         assert_eq!(pending.len(), 1);
+        let reviewed: Vec<ProcessTrust> =
+            pending.iter().filter_map(PendingTrust::reviewed).collect();
         assert_eq!(
             pending[0]
                 .declarations()
@@ -6809,7 +6960,7 @@ mod tests {
             ["model openai/gpt-5.6", "MCP tool → tool"]
         );
         let granted = factory
-            .resolve_trust(&request, TrustResolution::Session)
+            .resolve_trust(&request, TrustResolution::Session, &reviewed)
             .unwrap();
         assert_eq!(granted.trusted, [pending[0].source().label().to_owned()]);
         assert_eq!(
@@ -6837,7 +6988,7 @@ mod tests {
 
         // Persist: recorded on disk, so a fresh factory loads too.
         let granted = fresh
-            .resolve_trust(&request, TrustResolution::Persist)
+            .resolve_trust(&request, TrustResolution::Persist, &reviewed)
             .unwrap();
         assert_eq!(granted.trusted.len(), 1);
         assert!(fixture.path("data/trust.ron").exists());
@@ -6850,9 +7001,121 @@ mod tests {
         // Persist with nothing pending is not an error: the load runs and
         // the answer names no file.
         let again = fresh
-            .resolve_trust(&request, TrustResolution::Persist)
+            .resolve_trust(&request, TrustResolution::Persist, &[])
             .unwrap();
         assert!(again.trusted.is_empty());
+    }
+
+    #[test]
+    fn a_trust_answer_covers_only_the_content_the_prompt_showed() {
+        // A project file edited while the prompt is open (a `git pull`
+        // adds an MCP server) must not be trusted by the key pressed for
+        // the old content, under either answer. The error carries the new
+        // set, and answering for that set succeeds.
+        let fixture = RuntimeFixture::new();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        );
+        credentials
+            .set("openai/default", "test-secret", false)
+            .unwrap();
+        fs::create_dir_all(fixture.path("work/.qq")).unwrap();
+        let config = fixture.path("work/.qq/config.ron");
+        fs::write(&config, r#"(version: 1, model: "openai/gpt-5.6")"#).unwrap();
+        let request = LoadRequest::new(fs::canonicalize(fixture.path("work")).unwrap());
+        let factory = fixture.factory_with_credentials(credentials);
+        let shown = match factory.load_for_client(&request) {
+            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { pending, .. })) => pending,
+            other => panic!("expected TrustRequired, got {other:?}"),
+        };
+        let reviewed: Vec<ProcessTrust> = shown.iter().filter_map(PendingTrust::reviewed).collect();
+
+        fs::write(
+            &config,
+            r#"(version: 1, model: "openai/gpt-5.6", mcp: {"evil": Stdio(command: "evil")})"#,
+        )
+        .unwrap();
+        for choice in [TrustResolution::Session, TrustResolution::Persist] {
+            let current = match factory.resolve_trust(&request, choice, &reviewed) {
+                Err(RuntimeBuildError::Config(ConfigError::TrustChanged { pending })) => pending,
+                other => panic!("expected TrustChanged for {choice:?}, got {other:?}"),
+            };
+            assert_eq!(current.len(), 1);
+            assert_ne!(current[0].digest(), shown[0].digest());
+            assert!(
+                current[0]
+                    .declarations()
+                    .iter()
+                    .any(|declaration| declaration.to_string() == "MCP evil → evil")
+            );
+        }
+        assert!(!fixture.path("data/trust.ron").exists(), "nothing recorded");
+        assert!(
+            factory.process_trust().unwrap().is_empty(),
+            "nothing admitted"
+        );
+
+        let current = factory
+            .inner
+            .config
+            .pending_trust(&request)
+            .unwrap()
+            .iter()
+            .filter_map(PendingTrust::reviewed)
+            .collect::<Vec<_>>();
+        let granted = factory
+            .resolve_trust(&request, TrustResolution::Session, &current)
+            .unwrap();
+        assert_eq!(granted.trusted.len(), 1);
+    }
+
+    #[test]
+    fn an_edit_after_the_grant_scan_redraws_the_prompt_instead_of_failing() {
+        // Review (#213): a file rewritten after the grant's scan but before
+        // the post-grant load made that load fail `TrustRequired`, a generic
+        // error over the old declarations. It is the same event as an edit
+        // while the prompt was open and must come back as `TrustChanged`
+        // carrying the new content. The hook places the edit exactly there.
+        let fixture = RuntimeFixture::new();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        );
+        credentials
+            .set("openai/default", "test-secret", false)
+            .unwrap();
+        fs::create_dir_all(fixture.path("work/.qq")).unwrap();
+        let config = fixture.path("work/.qq/config.ron");
+        fs::write(&config, r#"(version: 1, model: "openai/gpt-5.6")"#).unwrap();
+        let request = LoadRequest::new(fs::canonicalize(fixture.path("work")).unwrap());
+        let factory = fixture.factory_with_credentials(credentials);
+        let shown = match factory.load_for_client(&request) {
+            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { pending, .. })) => pending,
+            other => panic!("expected TrustRequired, got {other:?}"),
+        };
+        let reviewed: Vec<ProcessTrust> = shown.iter().filter_map(PendingTrust::reviewed).collect();
+        let edit = || {
+            fs::write(
+                &config,
+                r#"(version: 1, model: "openai/gpt-5.6", mcp: {"late": Stdio(command: "late")})"#,
+            )
+            .unwrap();
+        };
+        let result =
+            factory.resolve_trust_with(&request, TrustResolution::Session, &reviewed, edit);
+        let current = match result {
+            Err(RuntimeBuildError::Config(ConfigError::TrustChanged { pending })) => pending,
+            other => panic!("expected TrustChanged, got {other:?}"),
+        };
+        assert_eq!(current.len(), 1);
+        assert!(
+            current[0]
+                .declarations()
+                .iter()
+                .any(|declaration| declaration.to_string() == "MCP late → late"),
+            "the redraw carries the content that was actually written"
+        );
     }
 
     #[test]
@@ -6882,8 +7145,17 @@ mod tests {
             factory.plan_for(&before),
             Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
         ));
+        let request = LoadRequest::new(&workspace);
+        let reviewed: Vec<ProcessTrust> = factory
+            .inner
+            .config
+            .pending_trust(&request)
+            .unwrap()
+            .iter()
+            .filter_map(PendingTrust::reviewed)
+            .collect();
         factory
-            .resolve_trust(&LoadRequest::new(&workspace), TrustResolution::Session)
+            .resolve_trust(&request, TrustResolution::Session, &reviewed)
             .unwrap();
         let after = factory.request_for_workspace(&workspace, None).unwrap();
         assert_eq!(after.process_trust().len(), 1);
@@ -7755,6 +8027,7 @@ mod tests {
             explicit_config_content: None,
             jev_review: None,
             jev_routing: None,
+            jev_approval: None,
             approval_delegate: None,
             reasoning_effort: None,
             process_trust: None,
@@ -8292,7 +8565,7 @@ mod tests {
                 "descriptor leaked {forbidden}"
             );
         }
-        assert!(canonical.starts_with("qq-agent-plan-descriptor-v11\0{"));
+        assert!(canonical.starts_with("qq-agent-plan-descriptor-v12\0{"));
     }
 
     #[test]
@@ -8624,6 +8897,7 @@ mod tests {
             .to_string();
         let request = RuntimeLoadRequest {
             routing: None,
+            approval_delegate: None,
             reasoning_effort: None,
             workspace,
             model: ModelSelection::default(),
@@ -8638,6 +8912,7 @@ mod tests {
             &factory,
             RuntimeLoadRequest {
                 routing: None,
+                approval_delegate: None,
                 reasoning_effort: None,
                 checkpoint: Some(qq_core::CheckpointSelection::ReviewerIdentity(
                     "unknown/reviewer".into(),
@@ -8897,6 +9172,113 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_on_disk_jev_approval_edit_replaces_the_cached_plan() {
+        // Review (#214): an edit to only `jev_approval` used to revalidate the
+        // cached generation and keep the old plan; turning it off kept
+        // sending previews to Jev. Activation is now in the descriptor, so
+        // the edit yields a new digest and a new plan.
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let config = fixture.path("global/config.ron");
+        let request = LoadRequest::new(fixture.path("work"));
+        let document = |enabled: bool| {
+            format!(
+                r#"(version: 1, model: "custom/test", jev_approval: {enabled},
+                    providers: {{ "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: {{ "test": (name: "test") }}) }})"#
+            )
+        };
+        fs::write(&config, document(true)).unwrap();
+        let on = factory.plan_for(&request).unwrap();
+        assert!(on.jev_approval());
+
+        fs::write(&config, document(false)).unwrap();
+        let (off, lookup) = factory
+            .plan_with_lookup(&request, &AgentProfileId::default())
+            .unwrap();
+        assert_eq!(lookup, PlanLookup::Compiled, "the edit must not revalidate");
+        assert!(!off.jev_approval());
+        assert_ne!(
+            on.digest(),
+            off.digest(),
+            "activation is durable plan identity (descriptor approval_delegate)"
+        );
+        assert_eq!(
+            on.descriptor().approval_delegate.as_deref(),
+            Some(approval::JEV_APPROVAL_IDENTITY)
+        );
+        assert_eq!(off.descriptor().approval_delegate, None);
+
+        // An unrelated byte change with the same setting still revalidates.
+        fs::write(&config, format!("{}\n// comment\n", document(false))).unwrap();
+        let (same, lookup) = factory
+            .plan_with_lookup(&request, &AgentProfileId::default())
+            .unwrap();
+        assert_eq!(lookup, PlanLookup::Revalidated);
+        assert!(Arc::ptr_eq(&off, &same));
+    }
+
+    #[test]
+    fn jev_approval_reaches_the_plan_from_config_profile_and_override_and_follows_edits() {
+        // Audit finding 5: activation is the compiled plan's merged value,
+        // not a separate profile-less reload. A profile's off beats a
+        // top-level on, a profile-only on enables, an override wins, and a
+        // configuration edit to off is seen by the next plan without any
+        // credential change.
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let document = |top: &str| {
+            format!(
+                r#"(
+            version: 1, model: "custom/test"{top},
+            profiles: {{
+                "quiet": Profile(jev_approval: false),
+                "jev": Profile(jev_approval: true),
+            }},
+            providers: {{ "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: {{ "test": (name: "test") }}) }},
+        )"#
+            )
+        };
+        let request = fixture.request(document(", jev_approval: true"));
+        assert!(factory.plan_for(&request).unwrap().jev_approval());
+        let quiet = AgentProfileId::new("quiet").unwrap();
+        let jev = AgentProfileId::new("jev").unwrap();
+        assert!(
+            !factory
+                .plan_for_profile(&request, &quiet)
+                .unwrap()
+                .jev_approval(),
+            "a profile's explicit off wins over the top-level on"
+        );
+        let overridden = request
+            .clone()
+            .with_overrides(request.overrides().clone().with_jev_approval(false));
+        assert!(
+            !factory
+                .plan_for_profile(&overridden, &jev)
+                .unwrap()
+                .jev_approval(),
+            "an explicit override wins over the profile"
+        );
+        assert!(
+            factory
+                .plan_for_profile(&request, &jev)
+                .unwrap()
+                .jev_approval(),
+            "the override is its own cache slot"
+        );
+
+        // Edit to off (no credential change): the next plan observes it.
+        let request = fixture.request(document(""));
+        assert!(!factory.plan_for(&request).unwrap().jev_approval());
+        assert!(
+            factory
+                .plan_for_profile(&request, &jev)
+                .unwrap()
+                .jev_approval(),
+            "profile-only activation enables"
+        );
+    }
     /// A pin outside a route's advertised ladder fails at plan time with the
     /// accepted set named; a route that advertises nothing accepts any pin
     /// (unknown is not unsupported), and a pin inside the ladder compiles.
@@ -9151,6 +9533,7 @@ mod tests {
         let factory = fixture.factory();
         let request = RuntimeLoadRequest {
             routing: Some(qq_core::RoutingSelection::Disabled),
+            approval_delegate: None,
             checkpoint: None,
             reasoning_effort: None,
             workspace: fs::canonicalize(fixture.path("work"))
@@ -9179,6 +9562,84 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.message.contains("inherited routing identity"));
+    }
+
+    #[tokio::test]
+    async fn a_reload_keeps_the_parent_approval_delegate_whatever_the_file_now_says() {
+        // Review (#214): routing and owned children reload their runtime;
+        // a configuration edit between the parent's compile and that reload
+        // must not turn Jev approval on (or off) for the same run tree.
+        let fixture = RuntimeFixture::new();
+        let config = fixture.path("global/config.ron");
+        let document = |enabled: bool| {
+            format!(
+                r#"(version: 1, model: "custom/test", jev_approval: {enabled},
+                    providers: {{ "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: {{ "test": (name: "test") }}) }})"#
+            )
+        };
+        fs::write(&config, document(true)).unwrap();
+        let factory = fixture.factory();
+        let request = RuntimeLoadRequest {
+            routing: None,
+            approval_delegate: Some(qq_core::ApprovalDelegateSelection::Disabled),
+            checkpoint: None,
+            reasoning_effort: None,
+            workspace: fs::canonicalize(fixture.path("work"))
+                .unwrap()
+                .display()
+                .to_string(),
+            model: ModelSelection::default(),
+            profile: AgentProfileId::default(),
+        };
+        let inherited_off = RuntimeLoader::load(&factory, request.clone())
+            .await
+            .unwrap();
+        assert!(!inherited_off.plan.jev_approval(), "parent off stays off");
+
+        fs::write(&config, document(false)).unwrap();
+        let inherited_on = RuntimeLoader::load(
+            &factory,
+            RuntimeLoadRequest {
+                approval_delegate: Some(qq_core::ApprovalDelegateSelection::DelegateIdentity(
+                    approval::JEV_APPROVAL_IDENTITY.to_owned(),
+                )),
+                ..request.clone()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(inherited_on.plan.jev_approval(), "parent on stays on");
+
+        let root = RuntimeLoader::load(
+            &factory,
+            RuntimeLoadRequest {
+                approval_delegate: None,
+                ..request.clone()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!root.plan.jev_approval(), "a root resolves the file");
+
+        let result = RuntimeLoader::load(
+            &factory,
+            RuntimeLoadRequest {
+                approval_delegate: Some(qq_core::ApprovalDelegateSelection::DelegateIdentity(
+                    "unknown/delegate".to_owned(),
+                )),
+                ..request
+            },
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("unknown approval delegate accepted"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .message
+                .contains("inherited approval delegate identity")
+        );
     }
 
     #[test]

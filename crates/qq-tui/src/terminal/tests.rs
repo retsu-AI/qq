@@ -727,3 +727,39 @@ async fn a_trust_resolver_is_awaited_off_the_loop_and_its_result_applied() {
     let app = task.await.expect("loop task").expect("loop exits cleanly");
     assert!(app.pending_trust.is_empty());
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_trust_answer_for_changed_files_redraws_the_prompt_with_the_new_content() {
+    let mut harness = Harness::new(64);
+    let resolver: TrustResolver = Box::new(move |_choice| {
+        Box::pin(async move {
+            Err(crate::TrustFailure {
+                reason: "project configuration changed while the prompt was open".to_owned(),
+                changed: Some(vec![crate::PendingTrustNotice {
+                    path: "/repo/.qq/config.ron".to_owned(),
+                    declarations: vec!["MCP evil → evil".to_owned()],
+                }]),
+            })
+        })
+    });
+    let task = harness.spawn_with_trust(App::new(untrusted_options()), Some(resolver));
+    harness.update(ClientUpdate::Connection(ConnectionState::Live));
+    harness.settle().await;
+
+    harness.key(KeyCode::Char('t'), KeyModifiers::NONE);
+    harness.settle().await;
+    let painted = painted_since_start(&harness);
+    assert!(
+        painted.contains("changed while the prompt was open"),
+        "{painted}"
+    );
+    assert!(painted.contains("MCP evil"), "{painted}");
+    assert!(harness.sent().is_empty(), "nothing is asked of the server");
+
+    harness.quit();
+    let app = task.await.expect("loop task").expect("loop exits cleanly");
+    assert_eq!(
+        app.pending_trust[0].declarations,
+        ["MCP evil → evil".to_owned()]
+    );
+}

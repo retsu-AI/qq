@@ -25,15 +25,23 @@ pub struct ReleaseArgs {
     /// workspace version. Bumps, writes the `CHANGELOG.md` section from the
     /// Conventional Commit subjects since the last tag, and commits on the
     /// current branch.
-    #[arg(required_unless_present = "tag", conflicts_with = "tag")]
+    #[arg(
+        required_unless_present_any = ["tag", "docs"],
+        conflicts_with_all = ["tag", "docs"]
+    )]
     version: Option<String>,
     /// Update `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md` but do not commit.
     #[arg(long, conflicts_with = "tag")]
     no_commit: bool,
     /// Tag the checked-out `main` with the manifest version. Run after the
     /// bump PR has merged and `main` is pulled.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "docs")]
     tag: bool,
+    /// Move the guide's and README's version pins from the previous release
+    /// to the manifest version. Run once the release's assets are
+    /// published (runbook step 6); writes the files and does not commit.
+    #[arg(long)]
+    docs: bool,
 }
 
 #[derive(Debug, Error)]
@@ -61,6 +69,8 @@ pub enum ReleaseError {
     },
     #[error("`[workspace.package] version = \"...\"` not found in Cargo.toml")]
     VersionLineMissing,
+    #[error("CHANGELOG.md has no release before {0}; nothing to move the guide from")]
+    NoPreviousRelease(Version),
     #[error("the worktree has uncommitted changes; commit or stash them first")]
     DirtyWorktree,
     #[error("tag v{0} already exists")]
@@ -143,6 +153,9 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
     if args.tag {
         return tag_main(&root, &manifest);
     }
+    if args.docs {
+        return move_doc_pins(&root, &manifest);
+    }
 
     let requested_text = args.version.as_deref().unwrap_or_default();
     let requested = Version::parse(requested_text)
@@ -201,7 +214,13 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
     let message = format!("chore(release): v{requested}");
     git(
         &root,
-        &["add", "Cargo.toml", "Cargo.lock", changelog::FILE_NAME],
+        &[
+            "add",
+            "--",
+            "Cargo.toml",
+            "Cargo.lock",
+            changelog::FILE_NAME,
+        ],
         Stdio::inherit(),
     )?
     .success_or("git", "add")?;
@@ -217,6 +236,144 @@ fn run_blocking(args: ReleaseArgs) -> Result<(), ReleaseError> {
     println!("next: push this branch, open a PR titled \"{message}\", merge it, then");
     println!("      git switch main && git pull --ff-only && cargo xtask release --tag");
     Ok(())
+}
+
+/// Moves every whole token of the previous release (the newest
+/// `CHANGELOG.md` release below the manifest version) in [`VERSIONED_DOCS`]
+/// to the manifest version. The bump PR leaves the pins alone, because the
+/// site deploys on merge before the tag's assets exist; docs-truth accepts
+/// either version until this runs.
+fn move_doc_pins(root: &Path, manifest: &str) -> Result<(), ReleaseError> {
+    let (_, current) = bump_workspace_version(manifest, Version::parse("0.0.0").unwrap())?;
+    let changelog_path = root.join(changelog::FILE_NAME);
+    let changelog =
+        std::fs::read_to_string(&changelog_path).map_err(|source| ReleaseError::Read {
+            path: changelog_path,
+            source,
+        })?;
+    let previous =
+        previous_release(&changelog, current).ok_or(ReleaseError::NoPreviousRelease(current))?;
+    let mut moved = 0;
+    for path in versioned_doc_paths(root)? {
+        let text = std::fs::read_to_string(&path).map_err(|source| ReleaseError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        let (updated, count) = rewrite_version_tokens(&text, previous, current);
+        if count == 0 {
+            continue;
+        }
+        std::fs::write(&path, updated).map_err(|source| ReleaseError::Write {
+            path: path.clone(),
+            source,
+        })?;
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        println!("  {}: {count} version reference(s)", relative.display());
+        moved += count;
+    }
+    println!("moved {moved} guide pin(s) {previous} -> {current} (not committed)");
+    println!("next: update the doctor and --version samples' commit and date, then open a");
+    println!("      docs(guide): PR");
+    Ok(())
+}
+
+/// The newest `## X.Y.Z — date` release in `changelog` below `current`.
+fn previous_release(changelog: &str, current: Version) -> Option<Version> {
+    changelog
+        .lines()
+        .filter_map(|line| Version::parse(line.strip_prefix("## ")?.split(' ').next()?))
+        .filter(|version| *version < current)
+        .max()
+}
+
+/// Files whose QQ version strings follow the release: the user guide and the
+/// README. The root crate's docs-truth test fails when any of them names a
+/// version other than the manifest's or the previous release's, and
+/// `--docs` moves them.
+const VERSIONED_DOCS: [&str; 2] = ["docs/guide", "README.md"];
+
+/// Marks a line whose version strings are not QQ's (an upstream client, an
+/// example pack): the release leaves the line alone and docs-truth does not
+/// hold it to the workspace version. Shared with `src/docs_truth.rs`.
+pub const NOT_QQ_VERSION: &str = "<!-- not-qq-version -->";
+
+/// The tracked Markdown files under [`VERSIONED_DOCS`], sorted. Only what
+/// `git ls-files` reports is rewritten, and only regular files: an
+/// untracked draft or a symlink is never read, written, or committed.
+fn versioned_doc_paths(root: &Path) -> Result<Vec<PathBuf>, ReleaseError> {
+    let mut args = vec!["ls-files", "-z", "--"];
+    args.extend(VERSIONED_DOCS);
+    let output = ProcessCommand::new("git")
+        .args(&args)
+        .current_dir(root)
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|source| ReleaseError::Launch {
+            program: "git",
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(ReleaseError::Failed {
+            program: "git",
+            args: args.join(" "),
+            status: output.status,
+        });
+    }
+    let mut paths = Vec::new();
+    for name in output.stdout.split(|byte| *byte == 0) {
+        let Ok(name) = std::str::from_utf8(name) else {
+            continue;
+        };
+        if !name.ends_with(".md") {
+            continue;
+        }
+        let path = root.join(name);
+        let metadata = std::fs::symlink_metadata(&path).map_err(|source| ReleaseError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        if metadata.is_file() {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// Replaces every whole `current` version token in `text` with `requested`
+/// and returns the new text with the number replaced. A token is whole when
+/// it is not part of a longer dotted number: `0.1.4` matches in `v0.1.4` and
+/// `qq 0.1.4 (`, never inside `10.1.4` or `0.1.4.1`. Lines carrying
+/// [`NOT_QQ_VERSION`] are left unchanged.
+pub fn rewrite_version_tokens(text: &str, current: Version, requested: Version) -> (String, usize) {
+    let current = current.to_string();
+    let requested = requested.to_string();
+    let mut out = String::with_capacity(text.len());
+    let mut replaced = 0;
+    for line in text.split_inclusive('\n') {
+        if line.contains(NOT_QQ_VERSION) {
+            out.push_str(line);
+            continue;
+        }
+        let bytes = line.as_bytes();
+        let mut copied = 0;
+        for (at, _) in line.match_indices(&current) {
+            let end = at + current.len();
+            let joined_before = at > 0 && (bytes[at - 1].is_ascii_digit() || bytes[at - 1] == b'.');
+            let joined_after = end < bytes.len()
+                && (bytes[end].is_ascii_digit()
+                    || (bytes[end] == b'.' && bytes.get(end + 1).is_some_and(u8::is_ascii_digit)));
+            if joined_before || joined_after {
+                continue;
+            }
+            out.push_str(&line[copied..at]);
+            out.push_str(&requested);
+            copied = end;
+            replaced += 1;
+        }
+        out.push_str(&line[copied..]);
+    }
+    (out, replaced)
 }
 
 /// Creates `vX.Y.Z` from the manifest version on a clean `main` that matches
@@ -396,6 +553,103 @@ mod tests {
         let manifest = "[package]\nname = \"qq\"\nversion = \"0.1.0\"\n";
         let error = bump_workspace_version(manifest, Version::parse("0.2.0").unwrap()).unwrap_err();
         assert!(matches!(error, ReleaseError::VersionLineMissing), "{error}");
+    }
+
+    #[test]
+    fn rewrites_whole_version_tokens_only() {
+        let current = Version::parse("0.1.4").unwrap();
+        let requested = Version::parse("0.2.0").unwrap();
+        let text = "--version 0.1.4 --dir x\nnix run github:o/qq/v0.1.4\n`qq 0.1.4 (abc 2026-09-22)`\n\
+                    10.1.4 and 0.1.40 and 0.1.4.1 and client 0.156.1 stay\nends 0.1.4.\n";
+        let (updated, count) = rewrite_version_tokens(text, current, requested);
+        assert_eq!(count, 4, "{updated}");
+        assert_eq!(
+            updated,
+            "--version 0.2.0 --dir x\nnix run github:o/qq/v0.2.0\n`qq 0.2.0 (abc 2026-09-22)`\n\
+             10.1.4 and 0.1.40 and 0.1.4.1 and client 0.156.1 stay\nends 0.2.0.\n"
+        );
+        let (unchanged, none) = rewrite_version_tokens("no versions here", current, requested);
+        assert_eq!((unchanged.as_str(), none), ("no versions here", 0));
+
+        // A marked line keeps a foreign version even when it equals QQ's.
+        let marked = format!("pack version: \"0.1.4\", {NOT_QQ_VERSION}\nqq 0.1.4\n");
+        let (updated, count) = rewrite_version_tokens(&marked, current, requested);
+        assert_eq!(count, 1);
+        assert_eq!(
+            updated,
+            format!("pack version: \"0.1.4\", {NOT_QQ_VERSION}\nqq 0.2.0\n")
+        );
+    }
+
+    #[test]
+    fn previous_release_is_the_newest_changelog_release_below_the_manifest() {
+        let changelog = "# Changelog\n\n## 0.1.6 — 2026-10-01\n\n### Fixes\n- x\n\n\
+                         ## 0.1.5 — 2026-09-29\n\n## 0.1.4 — 2026-09-22\n";
+        let version = |text| Version::parse(text).unwrap();
+        assert_eq!(
+            previous_release(changelog, version("0.1.6")),
+            Some(version("0.1.5"))
+        );
+        assert_eq!(
+            previous_release(changelog, version("0.1.5")),
+            Some(version("0.1.4"))
+        );
+        assert_eq!(previous_release(changelog, version("0.1.4")), None);
+    }
+
+    #[test]
+    fn not_qq_version_marker_matches_the_docs_truth_test() {
+        let docs_truth = include_str!("../../src/docs_truth.rs");
+        assert!(
+            docs_truth.contains(&format!(
+                "const NOT_QQ_VERSION: &str = \"{NOT_QQ_VERSION}\";"
+            )),
+            "src/docs_truth.rs must use the same NOT_QQ_VERSION marker"
+        );
+    }
+
+    #[test]
+    fn versioned_docs_skip_untracked_files_and_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let git = |args: &[&str]| {
+            let status = ProcessCommand::new("git")
+                .args(args)
+                .current_dir(root)
+                .stdout(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::create_dir_all(root.join("docs/guide")).unwrap();
+        std::fs::write(root.join("docs/guide/install.md"), "0.1.4").unwrap();
+        std::fs::write(root.join("README.md"), "0.1.4").unwrap();
+        git(&["add", "docs/guide/install.md", "README.md"]);
+        std::fs::write(root.join("docs/guide/draft.md"), "0.1.4").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("README.md"), root.join("docs/guide/link.md"))
+            .unwrap();
+        #[cfg(unix)]
+        git(&["add", "docs/guide/link.md"]);
+        let paths = versioned_doc_paths(root).unwrap();
+        assert_eq!(
+            paths,
+            [root.join("README.md"), root.join("docs/guide/install.md")]
+        );
+    }
+
+    #[test]
+    fn versioned_docs_cover_the_guide_and_readme() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let paths = versioned_doc_paths(&root).unwrap();
+        assert!(paths.iter().any(|path| path.ends_with("README.md")));
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.ends_with("docs/guide/install.md"))
+        );
+        assert!(paths.iter().all(|path| path.is_file()), "{paths:?}");
     }
 
     /// `main` carries the version of the last release until the next bump PR.

@@ -324,7 +324,7 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
         json!({
             "type": "string",
             "minLength": 1,
-            "description": "A complete, self-contained brief for the sub-agent."
+            "description": "A complete, self-contained brief for the sub-agent: the question to answer, what the answer is for, and the answer shape you want back. The sub-agent starts with no other context and stops once it can answer."
         }),
     )]);
     let has_roster = !delegation.roster.is_empty();

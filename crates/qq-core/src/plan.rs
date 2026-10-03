@@ -121,6 +121,10 @@ pub struct AgentProfile {
     network: crate::tools::network::NetworkPolicy,
     turn_recovery: crate::TurnRecoveryPolicy,
     approval_delegate: crate::approval::ApprovalDelegate,
+    /// Identity of the delegate consulted first for held calls (Jev), or
+    /// `None` when that delegate is off. In the descriptor (version 12).
+    approval_delegate_identity: Option<String>,
+    output_ceiling: Option<crate::OutputCeiling>,
     adapter_build: String,
     provenance: Vec<String>,
     credential_epoch: CredentialEpoch,
@@ -164,6 +168,8 @@ impl AgentProfile {
             network: crate::tools::network::NetworkPolicy::default(),
             turn_recovery: crate::TurnRecoveryPolicy::default(),
             approval_delegate: crate::approval::ApprovalDelegate::default(),
+            approval_delegate_identity: None,
+            output_ceiling: None,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -190,6 +196,32 @@ impl AgentProfile {
         delegate: crate::approval::ApprovalDelegate,
     ) -> Self {
         self.approval_delegate = delegate;
+        self
+    }
+
+    /// The identity of the delegate the effective configuration (profile and
+    /// overrides merged) opted in ahead of the reviewer model for held calls
+    /// (Jev approval), or `None`. Part of the descriptor, so durable run
+    /// identity records whether an external approval delegate was
+    /// authorized, and owned children and routed reloads inherit it
+    /// (ADR-0052). The installed reviewer consults that delegate only when
+    /// this is set.
+    #[must_use]
+    pub fn with_approval_delegate_identity(mut self, identity: Option<String>) -> Self {
+        self.approval_delegate_identity = identity;
+        self
+    }
+
+    /// The model's catalog output limit, bounded by policy: how far a run may
+    /// raise a turn's cap once when the whole cap went to hidden reasoning.
+    /// Not part of the digest: the plan's request cap is, and this only
+    /// bounds a recovery of it.
+    #[must_use]
+    pub const fn with_output_ceiling(
+        mut self,
+        output_ceiling: Option<crate::OutputCeiling>,
+    ) -> Self {
+        self.output_ceiling = output_ceiling;
         self
     }
 
@@ -235,6 +267,11 @@ impl AgentProfile {
             network: runtime.network.as_ref().clone(),
             turn_recovery: runtime.turn_recovery,
             approval_delegate: runtime.approval_delegate,
+            approval_delegate_identity: runtime
+                .approval_delegate_identity
+                .as_deref()
+                .map(str::to_owned),
+            output_ceiling: runtime.output_ceiling,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
             credential_epoch: CredentialEpoch::NONE,
@@ -441,7 +478,9 @@ pub struct CompiledAgentPlan {
     pub(crate) hosts: Arc<[Arc<dyn ExternalToolHost>]>,
     /// The plan-constant system prompt per capability set, built on first
     /// use and shared by every later run with the same set. Bounded by the
-    /// number of `PromptPrefixKey` values (32).
+    /// number of `PromptPrefixKey` values: 2⁵ tool filters plus none, times
+    /// guidance, times three sub-agent states (198). In practice a plan sees a
+    /// handful: roots, read children and write children.
     prompt_prefixes: std::sync::Mutex<Vec<(PromptPrefixKey, Arc<crate::runtime::PromptPrefix>)>>,
     resolved_model: Arc<ResolvedModel>,
     descriptor: Arc<AgentPlanDescriptor>,
@@ -455,11 +494,13 @@ pub struct CompiledAgentPlan {
 }
 
 /// What varies the plan-constant prompt between runs of one plan: which
-/// static tools the run may use and whether it may load guidance.
+/// static tools the run may use, whether it may load guidance, and whether
+/// it is a model-spawned child (and with what authority).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PromptPrefixKey {
     pub(crate) tools: Option<crate::catalog::StaticFilter>,
     pub(crate) guidance: bool,
+    pub(crate) subagent: Option<crate::runtime::SubagentAuthority>,
 }
 
 impl CompiledAgentPlan {
@@ -495,6 +536,7 @@ impl CompiledAgentPlan {
                 } else {
                     None
                 },
+                subagent: key.subagent,
             },
             &self.instructions,
             self.persona.as_deref(),
@@ -541,6 +583,8 @@ impl CompiledAgentPlan {
             network,
             turn_recovery,
             approval_delegate,
+            approval_delegate_identity,
+            output_ceiling,
             adapter_build,
             provenance,
             credential_epoch,
@@ -562,13 +606,15 @@ impl CompiledAgentPlan {
             resolved_model.max_output_tokens,
         )?
         .with_context_window(resolved_model.context_window)
+        .with_output_ceiling(output_ceiling)
         .with_spawn_model_routes(spawn_model_routes)
         .with_delegation(delegation)
         .with_audit(audit)
         .with_shell_policy(shell)
         .with_network_policy(network)
         .with_turn_recovery(turn_recovery)
-        .with_approval_delegate(approval_delegate);
+        .with_approval_delegate(approval_delegate)
+        .with_approval_delegate_identity(approval_delegate_identity.as_deref().map(Arc::from));
         if let Some(effort) = reasoning_effort {
             runtime = runtime.with_reasoning_effort(effort);
         }
@@ -780,6 +826,10 @@ impl CompiledAgentPlan {
             delegation: runtime.delegation.as_ref().clone(),
             audit: AuditDescriptor::from(runtime.audit),
             checkpoint: runtime.checkpoint_identity.as_deref().map(str::to_owned),
+            approval_delegate: runtime
+                .approval_delegate_identity
+                .as_deref()
+                .map(str::to_owned),
             routing_configuration: runtime
                 .task_router
                 .as_ref()
@@ -825,6 +875,7 @@ impl CompiledAgentPlan {
                 read_only: false,
             }),
             guidance: true,
+            subagent: None,
         };
         let full_prefix = Arc::new(crate::runtime::PromptPrefix::new(
             opened.path(),
@@ -833,6 +884,7 @@ impl CompiledAgentPlan {
                 tool_index: catalog.index_text().map(Arc::as_ref),
                 roster: roster_text.as_deref(),
                 skill_index: skills.disclosure_text(),
+                subagent: None,
             },
             &instructions,
             persona.as_deref(),
@@ -913,6 +965,19 @@ impl CompiledAgentPlan {
     #[must_use]
     pub const fn approval_delegate(&self) -> crate::approval::ApprovalDelegate {
         self.runtime.approval_delegate
+    }
+
+    /// Whether this plan's held calls go to its first approval delegate (Jev)
+    /// before the reviewer model: the descriptor's `approval_delegate`.
+    #[must_use]
+    pub fn jev_approval(&self) -> bool {
+        self.descriptor.approval_delegate.is_some()
+    }
+
+    /// The highest cap the empty-truncation recovery may raise a turn to.
+    #[must_use]
+    pub const fn output_ceiling(&self) -> Option<crate::OutputCeiling> {
+        self.runtime.output_ceiling
     }
 
     pub(crate) fn workspace_handle(&self) -> Workspace {
@@ -1261,6 +1326,7 @@ mod tests {
             },
             checkpoint: None,
             routing: None,
+            approval_delegate: None,
             routing_configuration: None,
             reasoning_effort: None,
             skills: SkillIndexDescriptor {
@@ -1310,18 +1376,20 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v11\0{\"version\":11,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v12\0{\"version\":12,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
-        // from a different encoding.
+        // from a different encoding. The descriptor also carries
+        // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
+        // changing the encoding (prompt 15: ADR-0054 § 5).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "21138d846da89ce3db4ae1f5213358c5e44666be585fe6746315b0e2b0786bda"
+            "9abb6d9cdf5a37ead19e6a167aaa35bdcaaa76ecdf8d0c0f3e75af5b86b45b0f"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v11\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v12\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }
@@ -1451,6 +1519,10 @@ mod tests {
             (
                 "checkpoint",
                 Box::new(|d| d.checkpoint = Some("typesafe/jev/enforce".to_owned())),
+            ),
+            (
+                "approval_delegate",
+                Box::new(|d| d.approval_delegate = Some("typesafe/jev/approval".to_owned())),
             ),
             (
                 "routing",

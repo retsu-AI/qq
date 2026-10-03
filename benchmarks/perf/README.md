@@ -130,6 +130,17 @@ source control.
 | Streaming fairness | eight-stream batch, control-call upper bound, cancellation, persisted output-service gap, transactions, temporary RSS | Eight concurrent 256 KiB streams with 16 snapshots and one cancellation; the service gap uses stored event times so replay delivery cannot compress a backlog |
 | Restart reconstruction | open-to-snapshot, replay, temporary RSS | Byte-identical one MiB snapshot and exact event-envelope digest after final close and reopen |
 | Load | ack, completion, batch, spread, throughput, active runs, RSS for 1/10/100 sessions | Concurrent admitted sessions with the default eight-run cap |
+| Autonomous-core diagnostic (AC0.1) | requested/reached turns, executed/settled calls, committed compactions, RSS and DB/WAL samples, work-turn gaps at 10/100/1,000 | Standalone `cargo test -p qq-core --test soak` / `cargo bench -p qq-core --bench turn_overhead`; immediate local provider, public durable runtime, no H0 report or budget entry yet |
+
+AC0.1 is a characterization baseline, not autonomous-run qualification.
+Known failures are asserted by the default fixtures; explicit completion
+oracles fail until their owning slices repair the bounds. Its work-turn gap
+includes dispatch, settlement and planning, not only runtime CPU. Periodic
+RSS and WAL high-water samples do not claim continuous peaks or fsync counts.
+See the [recording procedure](../../docs/runbooks/perf-recording.md#autonomous-core-characterization-ac0).
+AC0.2 owns the full concurrency/fsync recording and H0 registration; a new
+budget is added only alongside the metric emitter and a comparable fixture
+version. Existing H0 fixture version 4 and budgets are unchanged.
 
 The deterministic runtime loader carries a known version-2 provider
 request-shape identity. Provider-handoff and completion samples therefore

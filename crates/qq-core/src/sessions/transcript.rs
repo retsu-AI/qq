@@ -354,9 +354,9 @@ pub(super) fn load_model_context_with_units(
     // join so the archive behind the compaction cutoff is never read. Old
     // history therefore costs nothing at assembly; recall goes through
     // `search_history`.
-    let mut turns: HashMap<String, Vec<(u32, String, bool)>> = HashMap::new();
+    let mut turns: HashMap<String, Vec<StoredTurn>> = HashMap::new();
     let mut statement = transaction.prepare_cached(
-        "SELECT t.run_id, t.turn_ordinal, t.assistant_content_json, t.truncated
+        "SELECT t.run_id, t.turn_ordinal, t.assistant_content_json, t.truncated, t.notice
              FROM messages m
              JOIN runs r ON r.id = m.run_id
              JOIN model_turns t ON t.run_id = r.id
@@ -377,16 +377,23 @@ pub(super) fn load_model_context_with_units(
             return Err(SessionRuntimeError::CONSTRAINT);
         }
         remaining_turn_bytes -= raw.len();
-        let (run_id, ordinal, content, truncated) = (
-            row.get::<_, String>(0)?,
-            row.get::<_, u32>(1)?,
-            raw.to_owned(),
-            row.get::<_, bool>(3)?,
-        );
+        let turn = StoredTurn {
+            ordinal: row.get::<_, u32>(1)?,
+            content_json: raw.to_owned(),
+            truncated: row.get::<_, bool>(3)?,
+            notice: match row.get_ref(4)?.as_str_or_null() {
+                Ok(None) => None,
+                Ok(Some(stored)) => Some(
+                    crate::runtime::TurnNotice::from_stored(stored)
+                        .ok_or(SessionRuntimeError::CODEC)?,
+                ),
+                Err(_) => return Err(SessionRuntimeError::CONSTRAINT),
+            },
+        };
         turns
-            .entry(run_id)
+            .entry(row.get::<_, String>(0)?)
             .or_default()
-            .push((ordinal, content, truncated));
+            .push(turn);
     }
     drop(rows);
     drop(statement);
@@ -654,7 +661,7 @@ pub(super) fn runtime_notice(outcome: &RunOutcome) -> Option<String> {
 }
 
 /// Replaces read-only tool results older than the recency window with
-/// one-line stubs. A result is prunable when the call was admitted with the
+/// short stubs (the result's header line, when it has one, then one line). A result is prunable when the call was admitted with the
 /// `read_only` effect class (`effects` maps assembled message/block positions
 /// to their stored effects) — its output is re-derivable on demand; mutating, shell, and
 /// external outputs are not. Rows recorded before the effect was stored fall
@@ -770,19 +777,55 @@ pub(super) fn prunable_stub(
         arguments.push_str("...");
     }
     // A result that follows the header convention keeps its header: the
-    // counts, hash, and cursor it carries let the model continue without
-    // re-running the call.
-    let stub = match crate::tools::header_line(name, content) {
-        Some(header) => format!(
-            "{header}\n[pruned: {name} {arguments} returned {} bytes; call it again if needed]",
-            content.len()
-        ),
-        None => format!(
-            "[pruned: {name} {arguments} returned {} bytes; call it again if needed]",
-            content.len()
-        ),
+    // counts, window, and cursor it carries let the model continue without
+    // re-running the whole call. `read_file` names its header `read` and is
+    // the one tool whose hash would mislead here: `if_changed_since` with
+    // that hash returns no body, and the body is what pruning removed.
+    let size = content.len();
+    let (header, hint) = if name == "read_file" {
+        // The hash is the only ` h:` token after the path, and no later field
+        // can contain one; searching from the end leaves a path that happens
+        // to contain ` h:` intact.
+        let header = crate::tools::header_line("read", content).map(|header| {
+            match header.rfind(" h:").map(|at| {
+                let end = header[at + 1..]
+                    .find(' ')
+                    .map_or(header.len(), |len| at + 1 + len);
+                (at, end)
+            }) {
+                Some((at, end)) if is_read_hash_token(&header[at + 1..end]) => {
+                    format!("{}{}", &header[..at], &header[end..])
+                }
+                Some(_) | None => header.to_owned(),
+            }
+        });
+        (header, PRUNED_READ_REREAD)
+    } else {
+        (
+            crate::tools::header_line(name, content).map(str::to_owned),
+            "call it again if needed",
+        )
+    };
+    let stub = match header {
+        Some(header) => {
+            format!("{header}\n[pruned: {name} {arguments} returned {size} bytes; {hint}]")
+        }
+        None => format!("[pruned: {name} {arguments} returned {size} bytes; {hint}]"),
     };
     (content.len() > stub.len()).then_some(stub)
+}
+
+/// What a pruned `read_file` stub tells the model. A re-read with
+/// `if_changed_since` would return only an `unchanged` header.
+const PRUNED_READ_REREAD: &str = "the text is no longer in context: read_file the lines you \
+need again, without if_changed_since";
+
+/// `h:` followed by the twelve-digit short hash, or `h:-` when the file was
+/// too large to hash (`tools/read.rs`).
+fn is_read_hash_token(token: &str) -> bool {
+    token.strip_prefix("h:").is_some_and(|hash| {
+        hash == "-" || (hash.len() == 12 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    })
 }
 
 /// The byte weight the assembled context contributes to the session budget:
@@ -1009,12 +1052,24 @@ pub(super) fn assembled_context_bytes(
         .saturating_add(usize::try_from(streaming_bytes).unwrap_or(usize::MAX)))
 }
 
-/// Replays one run's persisted model turns (assistant content and tool
-/// results) into `context`, in turn order.
+/// One committed model turn as context assembly reads it.
+pub(super) struct StoredTurn {
+    pub(super) ordinal: u32,
+    pub(super) content_json: String,
+    /// The provider cut the turn at its output limit; the truncation notice
+    /// followed it.
+    pub(super) truncated: bool,
+    /// The runtime notice placed before the turn's request.
+    pub(super) notice: Option<crate::runtime::TurnNotice>,
+}
+
 /// Replays one run's committed turns into `context`: each assistant turn,
-/// then exactly one result per `ToolCall` block in block order, with applied
-/// steering placed immediately before the turn whose request first carried it
-/// and the continuation notice after a truncated turn.
+/// then exactly one result per `ToolCall` block in block order. Applied
+/// steering, then the turn's runtime notice (slice checkpoint or
+/// continuation), go immediately before the turn whose request first carried
+/// them, and the output-limit notice goes after a truncated turn. An in-run
+/// marker drops what the live splice replaced: the turns through its cutoff,
+/// and the steering and notice before the first kept turn.
 ///
 /// Results pass through the same per-turn output budget the live run applied
 /// (`TurnOutputBudget`, in block order, which is call order), so a turn whose
@@ -1022,7 +1077,7 @@ pub(super) fn assembled_context_bytes(
 /// model saw rather than the larger per-call rows. The projection is a pure
 /// function of the stored rows; nothing extra is persisted.
 pub(super) fn append_run_turns(
-    turns: Vec<(u32, String, bool)>,
+    turns: Vec<StoredTurn>,
     mut recorded: RecordedTurnResults,
     mut steering: std::collections::VecDeque<(u32, String)>,
     compaction: Option<InRunCompaction>,
@@ -1038,16 +1093,27 @@ pub(super) fn append_run_turns(
     if let Some(marker) = compaction {
         let replaced = turns
             .iter()
-            .take_while(|(ordinal, _, _)| *ordinal <= marker.turn_cutoff)
+            .take_while(|turn| turn.ordinal <= marker.turn_cutoff)
             .count();
         if replaced > 0 {
             turns.drain(..replaced);
             for ordinal in 1..=marker.turn_cutoff {
                 recorded.remove(&ordinal);
             }
+            // The live splice replaced everything before the first kept
+            // assistant message, which includes the steering and the runtime
+            // notice that preceded that kept turn's request
+            // (`in_run_compaction_boundary`). Drop them here too.
+            let first_kept = match turns.first_mut() {
+                Some(first) => {
+                    first.notice = None;
+                    first.ordinal
+                }
+                None => marker.turn_cutoff,
+            };
             while steering
                 .front()
-                .is_some_and(|(applied_before, _)| *applied_before <= marker.turn_cutoff)
+                .is_some_and(|(applied_before, _)| *applied_before <= first_kept)
             {
                 steering.pop_front();
             }
@@ -1057,7 +1123,13 @@ pub(super) fn append_run_turns(
             )));
         }
     }
-    for (turn_ordinal, content_json, truncated) in turns {
+    for StoredTurn {
+        ordinal: turn_ordinal,
+        content_json,
+        truncated,
+        notice,
+    } in turns
+    {
         let mut recorded_turn = recorded.remove(&turn_ordinal).unwrap_or_default();
         while steering
             .front()
@@ -1065,6 +1137,12 @@ pub(super) fn append_run_turns(
         {
             let (_, text) = steering.pop_front().expect("front was just checked");
             context.push(Message::user(text));
+        }
+        // The live run placed this notice after the boundary's steering and
+        // before the request that produced this turn, and kept it even when
+        // that attempt was later dropped (an empty truncation below).
+        if let Some(notice) = notice {
+            context.push(Message::user(notice.text()));
         }
         let (content, replay) =
             match serde_json::from_str::<super::codec::PersistedTurn>(&content_json)? {

@@ -14,7 +14,8 @@ under `target/qq-perf/` and never committed.
 | [`multi-surface-clients.md`](./multi-surface-clients.md) | agent on the multi-surface plan | W, S, U, D, M slices and the tracer-bullet gate |
 | [`tool-layer.md`](./tool-layer.md) | agent on the tool-layer plan | T1–T14 built-in tool slices and the A0–A5 ablation |
 | [`run-reliability.md`](./run-reliability.md) | agent on the run-reliability plan | RR1–RR12: turn recovery, checkpoint tolerance, admission validation, tool leniency (RR12's loop result moved to autonomous-core AC4) |
-| [`autonomous-core.md`](./autonomous-core.md) | agent on the autonomous-core plan | AC0–AC16: soak harness, reset scopes, continuation, goal and loop guard, `qq-harness`, tool features, store write amplification |
+| [`autonomous-core.md`](./autonomous-core.md) | agent on the autonomous-core plan | AC0–AC16: soak harness, reset scopes, continuation, loop guard, `qq-harness`, tool features, store write amplification (AC7–AC9 moved to goals) |
+| [`goals.md`](./goals.md) | agent on the goals plan | G0–G5: goal state and protocol, goal in runs, driver, completion check, surfaces, evidence |
 | [`delegated-approval.md`](./delegated-approval.md) | closed 2026-09-24 (receipt) | DA1–DA6 shipped: reviewer denial is final, two clocks, `approval_delegate`, exact delegate grants, `jev_approval` (ADR-0041), `/delegate` and delegate identity on the wire (protocol 28). Acceptance 3 (one week of use) to be recorded |
 | [`onboarding-ux.md`](./onboarding-ux.md) | closed 2026-09-25 (receipt) | OB0–OB12 shipped: user guide, actionable startup errors, TUI opens without model/credential/trust, doctor, init, install paths, first-session guidance, MCP credential degrade, docs-truth CI, docs site |
 | [`guide-expansion.md`](./guide-expansion.md) | agent on the guide-expansion plan | GE0 guide corrections; GE9 workflows, GE10 concepts; GE1–GE8: agents, sessions, skills, environment, keybindings, server, enterprise, changelog pages |

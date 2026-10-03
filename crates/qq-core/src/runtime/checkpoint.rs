@@ -8,6 +8,8 @@ pub const MAX_CHECKPOINT_TEXT_BYTES: usize = 24 * 1024;
 const MAX_EVIDENCE_BYTES: usize = 16 * 1024;
 const MAX_EVIDENCE_ITEM_BYTES: usize = 2048;
 const MAX_EVIDENCE_ITEMS: usize = 32;
+/// Jev reviews one run may request.
+pub(crate) const MAX_CHECKPOINT_REVIEWS_PER_RUN: u16 = 32;
 
 /// A bounded selection of observations, never a claim that omitted history was
 /// assessed. Only enabled review runs allocate or maintain this projection.
@@ -23,7 +25,7 @@ pub(crate) struct CheckpointContext {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CheckpointAdmissionError {
-    #[error("Jev reached the per-run limit of 32 review requests")]
+    #[error("Jev reached the per-run limit of {MAX_CHECKPOINT_REVIEWS_PER_RUN} review requests")]
     Requests,
     #[error("Jev cannot run under a hard cost budget without a maximum request price")]
     UnknownPrice,
@@ -85,7 +87,7 @@ impl CheckpointContext {
         cost_limit: Option<u64>,
         maximum_cost: Option<u64>,
     ) -> Result<(), CheckpointAdmissionError> {
-        if self.reviews >= 32 {
+        if self.reviews >= MAX_CHECKPOINT_REVIEWS_PER_RUN {
             return Err(CheckpointAdmissionError::Requests);
         }
         if let Some(limit) = cost_limit {

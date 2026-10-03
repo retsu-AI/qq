@@ -4,7 +4,8 @@
     "items": [
       { "page": "index", "label": "Introduction", "description": "What QQ is, the two things it needs, and where its files live." },
       { "page": "install", "label": "Install", "description": "Install script, Homebrew, Nix, cargo binstall, release archives, or build from source." },
-      { "page": "quickstart", "label": "Quickstart", "description": "From an installed qq to a working agent: a credential, a model, and a first session." }
+      { "page": "quickstart", "label": "Quickstart", "description": "From an installed qq to a working agent: a credential, a model, and a first session." },
+      { "page": "concepts", "label": "Concepts and glossary", "description": "Workspaces, sessions, runs, turns, grants, approval modes, and the other words the guide uses." }
     ]
   },
   {

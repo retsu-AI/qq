@@ -21,8 +21,8 @@ with a pointer to the releases page.
 Pin a version or change the directory with flags or environment variables:
 
 ```sh
-curl -fsSL https://retsu-ai.github.io/qq/install.sh | sh -s -- --version 0.1.3 --dir /opt/qq/bin
-QQ_VERSION=0.1.3 QQ_INSTALL_DIR="$HOME/bin" sh install.sh
+curl -fsSL https://retsu-ai.github.io/qq/install.sh | sh -s -- --version 0.1.5 --dir /opt/qq/bin
+QQ_VERSION=0.1.5 QQ_INSTALL_DIR="$HOME/bin" sh install.sh
 ```
 
 `sh install.sh --help` lists the options. To upgrade, run it again.
@@ -48,7 +48,7 @@ nix profile install github:retsu-AI/qq     # install into your profile
 
 The flake exposes `packages.qq` (also `packages.default`) built from source
 with the pinned toolchain, and `apps.default` runs it. Pin a release with a
-ref: `nix run github:retsu-AI/qq/v0.1.3`. `nix build .#qq` inside a clone
+ref: `nix run github:retsu-AI/qq/v0.1.5`. `nix build .#qq` inside a clone
 builds the same package; `nix develop` gives a shell with the exact
 toolchain.
 
@@ -61,7 +61,7 @@ cargo binstall --git https://github.com/retsu-AI/qq qq
 [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall) reads the
 `[package.metadata.binstall]` table in `Cargo.toml` and downloads the
 release archive for your target instead of compiling. Pass
-`--version 0.1.3` to pin. The `--git` form is required because the crate is
+`--version 0.1.5` to pin. The `--git` form is required because the crate is
 not published on crates.io; a plain `cargo binstall qq` would resolve a
 different crate of the same name.
 
@@ -72,7 +72,7 @@ automatically inside the repository):
 
 ```sh
 cargo install --git https://github.com/retsu-AI/qq --locked qq            # latest main
-cargo install --git https://github.com/retsu-AI/qq --tag v0.1.3 --locked qq
+cargo install --git https://github.com/retsu-AI/qq --tag v0.1.5 --locked qq
 ```
 
 or from a clone: `cargo build --release` and install
@@ -105,7 +105,7 @@ covering all of them:
 sums before installing; a mismatch installs nothing. To verify by hand:
 
 ```sh
-V=0.1.3 T=x86_64-unknown-linux-musl
+V=0.1.5 T=x86_64-unknown-linux-musl
 curl -fsSLO "https://github.com/retsu-AI/qq/releases/download/v$V/qq-v$V-$T.tar.gz"
 curl -fsSLO "https://github.com/retsu-AI/qq/releases/download/v$V/SHA256SUMS"
 sha256sum --ignore-missing -c SHA256SUMS      # macOS: shasum -a 256 --ignore-missing -c SHA256SUMS
@@ -119,7 +119,7 @@ affected.
 ## Check the install
 
 ```sh
-qq --version        # qq 0.1.3 (abc1234 2026-09-22)
+qq --version        # qq 0.1.5 (abc1234 2026-09-29)
 qq version          # adds the protocol, capabilities, descriptor, and store schema versions
 qq config paths     # where QQ will look for configuration and keep sessions
 ```

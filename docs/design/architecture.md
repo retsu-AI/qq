@@ -355,7 +355,11 @@ the vendor segment of the gateway id), the compiled default would be spent on
 hidden reasoning before any visible output, so the wire cap is the catalog
 ceiling instead, still bounded by a managed `policy.max_output_tokens`. A
 `max_output_tokens` the operator set in any configuration layer or override is
-honoured verbatim; run budgets bound spend either way. A new session row pins
+honoured verbatim as the request cap; the one exception is the empty-truncation
+recovery below (§ run loop), which may send a single retry with the cap
+doubled toward the catalog limit, still bounded by a managed
+`policy.max_output_tokens`. A hard ceiling is the policy value, not the
+configured one; run budgets bound spend either way. A new session row pins
 `max_output_tokens` only when the cap has non-compiled provenance (a
 configuration layer, `--max-output-tokens`, a profile, a picker); the compiled
 default is never persisted as a choice. Rows from older releases that recorded
@@ -384,9 +388,10 @@ the new prompt is charged and shrinkage from assembly-time pruning is credited
 rather than discarding the measurement, and a code-heavy transcript that
 tokenizes near three bytes per token is no longer under-charged by a quarter
 on every turn. Within a run the same rule is applied per
-request component (system text, tool schemas, messages), so the slice
-checkpoint and continuation turns, which change the system text and drop the
-schemas, keep a measurement-derived estimate. Pricing-only refreshes are
+request component (system text, tool schemas, messages), so the budget-final
+turn, which changes the system text and drops the schemas, keeps a
+measurement-derived estimate; the slice checkpoint and continuation turns
+change only the messages. Pricing-only refreshes are
 compatible; missing usage, model changes, successful compaction, malformed or
 unsupported history, or any wire/prefix mismatch clear or disable reuse.
 Provider-overflow suppression is deliberately weaker than reuse: when the
@@ -422,9 +427,9 @@ The plan also carries the plan-constant part of the system prompt (ADR-0024):
 the header with the tool list, the progressive-exposure index, the skill
 index, the workspace instructions, and the pack persona, as a `PromptPrefix`
 per capability set (which optional static tools the run may use, whether it
-may load guidance) together with the SHA-256 state of those bytes. The common
-set is built at compile; other sets on first use, bounded by the 32 possible
-keys. A run appends only its suffix — the selected command or skill document,
+may load guidance, and whether it is a model-spawned child with read or write
+authority) together with the SHA-256 state of those bytes. The common set is
+built at compile; other sets on first use, bounded by the 198 possible keys. A run appends only its suffix — the selected command or skill document,
 context-source blocks, the output contract — and finalizes a clone of the
 prefix hasher over that suffix, so `system_prompt_hash` equals a digest of the
 whole prompt and the prompt body is neither rebuilt nor rehashed per run.
@@ -468,13 +473,14 @@ with runtime overrides first. A session pin (`/effort`, `set_session_effort`)
 takes precedence for that session's next run. Descriptor version 9 records the
 choice and its cache key distinguishes overrides. Every model turn uses the
 compiled choice; omission uses provider defaults, while explicit `none` requests
-disabled reasoning. This does not enable Jev. HTTP OpenAI Responses/Chat adapters carry
-effort; other adapter families reject it before credential lookup. Capability
-means transport support, not that every remote model accepts every effort value.
-The bundled catalog records the ladder each OpenAI-shaped route documents
-(`ModelMetadata::reasoning_efforts`, surfaced as `ModelDescriptor.reasoning_efforts`);
-Anthropic-shaped routes advertise none because their adapters never transmit
-effort. A pin outside a non-empty ladder is a plan-time `ReasoningEffortNotAdvertised`
+disabled reasoning and explicit `default` overrides a configured value with the
+provider's own choice. This does not enable Jev. HTTP OpenAI Responses/Chat
+adapters and Anthropic Messages (`output_config.effort`, `low` through `max`)
+carry effort; other adapter families reject it before credential lookup.
+Capability means transport support, not that every remote model accepts every
+effort value. The bundled catalog records the ladder each route documents
+(`ModelMetadata::reasoning_efforts`, surfaced as `ModelDescriptor.reasoning_efforts`),
+and Anthropic discovery fills it for live models. A pin outside a non-empty ladder is a plan-time `ReasoningEffortNotAdvertised`
 error naming the accepted values, so the operator sees it before the provider
 would fail the turn. An empty ladder is unknown, not unsupported, and is not
 checked.
@@ -736,14 +742,21 @@ message to keep role alternation, and issues the next turn with tools
 available. Context assembly replays that notice after every truncated turn so
 the durable transcript matches the requests the provider saw. Past the cap the
 run settles as `provider_output_truncated`, naming the limit and turn count. A
-turn cut at the output limit with nothing visible streamed (no text, refusal,
-or tool call: the whole cap went to hidden reasoning) is not continued, because
-there is nothing to continue and the resend would be byte-identical; the loop
-instead doubles
-the request's output cap toward the resolved model's ceiling once per run
-(`MAX_EMPTY_OUTPUT_RETRIES`) and, if the next turn is empty again or the cap
-was already at the ceiling, settles at once with the cause and both remedies
-(`max_output_tokens`, `reasoning_effort`) named. The summarizer applies the
+turn cut at the output limit with no text is not continued with a notice while
+its cap can still grow, because the resend would be byte-identical: the whole
+cap went to hidden reasoning, or the model streamed a complete tool call that
+the cut then dropped. The loop instead doubles the request's output cap once
+per run (`MAX_EMPTY_OUTPUT_RETRIES`) toward the plan's output ceiling: the
+catalog's model limit bounded by `policy.max_output_tokens`, which sits above
+the configured cap whenever the catalog knows the model (a plan without one
+cannot raise). When the raise is spent or unavailable, an all-reasoning turn
+settles at once with the cause, the ceiling, and the remedies that can work:
+`max_output_tokens` or `reasoning_effort` when the model limit binds, or
+`reasoning_effort` and the managed policy when `policy.max_output_tokens`
+binds. The count of consecutive empty turns it reports is reset by any turn
+that produced text or a complete call, so a raise taken for a call-then-cut
+turn is not attributed to reasoning; a turn that streamed a
+complete call is continued like any visible truncation. The summarizer applies the
 same rule and fails its step rather than continuing an empty reply. Such an
 empty truncated turn is persisted as truncated but replays as nothing, matching
 the live request. A provider pause with no text is resent, not treated as
@@ -968,13 +981,30 @@ lowered but never raised by a client command.
 A run may cross multiple bounded internal execution slices. The strict
 256-tool-call ceiling is a runaway-loop backstop for one slice, not a
 task-completion signal. Before a bounded provider turn could push a slice past
-that ceiling, the runtime asks the model for a checkpoint reply, requires and
-persists that assistant turn, resets the slice counter, and continues the same
-run. Tools stay declared on the checkpoint turn: the persisted turn is the
-boundary, not the model's obedience, so a call the model makes anyway is
+that ceiling, the runtime asks the model for a report, persists that assistant
+turn, resets the slice counter, and continues the same run. The request
+carries the report notice as a runtime message at the end of the
+conversation, and the first turn of the next slice carries a continuation
+notice the same way. The system prompt never changes, so the provider's
+cached prefix survives the seam. Each notice is stored on the first turn
+row whose request carried it, as `model_turns.notice` (`report` or
+`continuation`), and replayed before that turn, so a later run assembles
+exactly the messages the live run sent (ADR-0054 § 2). The column records
+where a notice entered the conversation, not every attempt it covered: a
+report retried after a fault or an output-limit cut is placed once and
+stored once. An in-run compaction drops the notice and steering in front of
+its first kept turn along with the summarized span, on both sides.
+
+Tools stay declared on the checkpoint turn: the persisted turn is the
+boundary, not the model's obedience. A call the model makes anyway is
 admitted with a not-executed result (the same path as calls past the per-turn
-cap) and the run continues into the next slice, where the model re-issues it.
-Clients observe no terminal run event at the slice seam. Genuine completion,
+cap), and the run continues into the next slice, where the model re-issues
+it. An empty reply that reports usage is a missed report, not a failure. The
+live context fills it with the same placeholder assembly inserts, and the run
+continues. An empty reply with no usage after fresh tool results is treated
+like any swallowed gateway failure: it is retried as a transient fault.
+Steering that arrives during the report is applied before the continuation
+notice. Clients observe no terminal run event at the slice seam. Genuine completion,
 explicit caller budgets, cancellation, and failures remain the only user-level
 terminal conditions; provider adapters do not participate in slice rollover.
 
@@ -1033,6 +1063,15 @@ child when it interrupts the owning parent. Parent cancellation uses the same
 durable ownership link for in-process children. Once a child completes, only
 its final committed model turn's text or refusal is returned to the parent;
 earlier turns remain visible in the child's authoritative transcript.
+
+A model-spawned task run's system prompt carries a `Sub-agent:` section
+(ADR-0054 § 5). It says that a parent is waiting and receives only the final
+reply, and that the child should stop once it can answer. It asks for the
+answer first, then `path:line` evidence, then open questions, and tells the
+child not to re-read text still in context. A read child also drops the
+"implement rather than stop at analysis" convention and is told it cannot
+change files. Audit children keep their fixed brief and JSON reply, and a
+user's own prompt in a child session gets the ordinary prompt.
 
 An owned child task retains admission, loader work, and the writer permit even
 if an interrupting parent drops its result waiter. Accepted creation is awaited

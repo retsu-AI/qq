@@ -7,13 +7,14 @@ First stop for anything: `qq doctor`. It runs every local readiness check and
 puts the fix next to whatever failed:
 
 ```
-qq 0.1.3 (ad01547 2026-09-22) · protocol 27 · capabilities 1 · descriptor 9 · store schema 34
+qq 0.1.5 (1a2b3c4 2026-09-29) · protocol 30 · capabilities 1 · descriptor 12 · store schema 40
 ok    configuration    2 sources; qq config sources lists them
 ok    project trust    nothing pending
 ok    model            anthropic/claude-sonnet-5
 fail  credential       anthropic: none found
                        run `qq auth login anthropic` or set ANTHROPIC_API_KEY
 ok    credential store 0 stored (keyring)
+ok    mcp              none declared
 ok    server           none running; qq starts one on demand
 ok    workspace        /home/you/repo (AGENTS.md)
 ok    data             /home/you/.local/share/qq (no sessions yet)
@@ -147,7 +148,7 @@ degrades that server: the run proceeds and the catalog reports
 `unavailable MCP servers: NAME (credential `…` is not registered; run `qq
 auth set …`)` (see below); `qq doctor` warns about it under `mcp`.
 
-### `credential `…` is registered in keyring, but its secret is missing`
+### `credential `…` is registered in OS keyring, but its secret is missing`
 
 The index knows the name but the keyring entry is gone (a keyring reset, a
 different login session). `qq auth logout name`, then store it again.
@@ -158,7 +159,7 @@ The stored secret was created with `--endpoint` for one host and the
 provider's `base_url` is another. Store a separate credential for the new
 endpoint or re-store without the binding.
 
-### `the OS keyring is unavailable while attempting to … credential …`
+### `the OS keyring is unavailable while attempting to … credential `…``
 
 Linux: no Secret Service on the session bus (a container, SSH without a
 desktop session, or the keyring daemon not started). Start one (`gnome-keyring
@@ -285,14 +286,20 @@ The TUI lost its server and could not reconnect; the reason follows. If a
 
 ### `qq server already running at …`
 
-Only one user-scoped server runs per machine; the TUI and `qq run` connect
-to it. Stop it to bind another address.
+Only one user-scoped server runs per machine, and every `qq` TUI attaches
+to it — including a server another open `qq` started. Stop it (`Ctrl-C` in
+its terminal, or quit the `qq` that started it) to bind another address;
+that cancels its queued and running runs.
 
-### The sessions database is locked / `StoreBusy`
+### `session store is owned by another running qq process`
 
-Another QQ process owns the store (an advisory lock protects it). Find it
-with `ps`, or wait for it to exit. Two machines must not share one data
-directory.
+`qq run` exits `4` with this when another process owns the session store: a
+`qq` TUI, `qq serve`, or another `qq run` still working. Only one process may
+own the store (an advisory lock protects it), and `qq run` does not connect
+to a running server. Close the TUI or stop `qq serve`, send the prompt from
+the TUI instead, or run jobs one after another. Concurrent CI jobs on one
+machine each need their own data directory (`XDG_DATA_HOME` on Linux). Two
+machines must not share one data directory.
 
 ## Getting more detail
 

@@ -63,13 +63,14 @@ A bound on a run measures what the *next request* would carry or what the
    turn goes through the same `TurnRecoveryPolicy`/`MAX_TURN_RETRIES` path as
    a model turn. A summarizer that is exhausted or rejected settles the run
    `paused` (transient) or fails (rejected output), and never discards the
-   durable turns. An empty checkpoint reply takes the placeholder path
-   already used for an empty turn.
+   durable turns. *(The empty-checkpoint clause is superseded by ADR-0054
+   § 2: an empty checkpoint is a missed report, and the run continues.)*
 3. **`ContinueRun { session, run_id }`.** A new session command names the
    stopped run explicitly. It is admitted only if all of these hold:
    - `run_id` is `paused` or `interrupted`;
    - it is the session's **latest prompt run**: no later prompt has been
      queued, started or settled;
+   - it has no goal snapshot (ADR-0049's driver owns goal recovery);
    - it has no successor yet.
 
    Otherwise it is a typed rejection (`not_continuable`, `superseded`,
@@ -83,7 +84,7 @@ A bound on a run measures what the *next request* would carry or what the
    The successor is a new run linked by `continues_run_id`. It carries:
    - the output contract, with the **remaining** `repair_turns` (ADR-0014)
      rather than a fresh allowance. The spent count is persisted on the run
-     as `output_repairs_used`, alongside the goal-audit counts (ADR-0049);
+     as `output_repairs_used`;
    - the session grants;
    - the **remainder** of every cumulative `RunLimits` bound, computed from
      the predecessor chain's committed accounting: `max_model_turns`,
@@ -129,6 +130,11 @@ A bound on a run measures what the *next request* would carry or what the
      how a client adds direction after a pause.
    - Continuations are ordinary runs: durable, observable, cancellable. A
      cancel or new prompt from a client cancels the pending continuation.
+   - `AutoContinue` never continues a run that has a goal snapshot, and
+     explicit `ContinueRun` rejects it. The goal driver (ADR-0049 § 3)
+     queues a **fresh** run from committed history and the current goal,
+     after any waiting user prompts. Goal recovery is not a continuation
+     chain and does not weaken the latest-prompt admission rule.
 
 ## Consequences
 
