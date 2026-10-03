@@ -46,7 +46,11 @@ export function App() {
             </button>
           </div>
         )}
-        {project ? <SessionPane project={project} /> : <Welcome recents={app.recents} />}
+        {project ? (
+          <SessionPane project={project} pendingTrust={app.trust[project.project_id] ?? []} />
+        ) : (
+          <Welcome recents={app.recents} />
+        )}
       </main>
       {app.providersOpen && <Providers />}
     </div>
