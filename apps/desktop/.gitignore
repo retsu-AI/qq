@@ -3,3 +3,4 @@ dist/
 src-tauri/gen/
 src-tauri/target/
 *.tsbuildinfo
+src-tauri/binaries/
