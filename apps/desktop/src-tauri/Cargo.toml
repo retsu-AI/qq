@@ -1,0 +1,23 @@
+[package]
+name = "qq-desktop"
+description = "QQ desktop app: a Tauri shell over the QQ server protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+qq-client.workspace = true
+qq-protocol.workspace = true
+qq-server.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+thiserror.workspace = true
+tokio.workspace = true
