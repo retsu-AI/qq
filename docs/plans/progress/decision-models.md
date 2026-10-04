@@ -159,3 +159,9 @@ its qualification procedure to § Qualification procedure.
 - Verification: `git diff --check`; relative Markdown link scan (the existing
   ADR-0039 link to deleted `plans/mid-run-compaction.md` remains unrelated).
   No Rust or runtime changes; Rust gates and performance checks not rerun.
+
+### 2026-10-04 — DM0 backlog acceptance correction
+
+- QQ readiness chat `01a0d95e-d2ce-7350-9a9a-125f78a1be6a` owns this bounded PR231 documentation repair; original accepted decision and planned DM1–DM9 scope are preserved.
+- Independent docs review accepted architecture/authority/calibration separation and identified one stale plan-index clause. The index now requires only plan acceptance; ADR0055 was already accepted by the owner. PR description will match that settled decision and the current ADR allocation. No runtime, configuration, protocol or schema changed.
+- Focused pinned Rust 1.97.1 verification: `cargo test --locked -p qq --bin qq docs_truth -- --test-threads=2` passed **23 tests**, none ignored (the older five-test author receipt is historical). All 247 relative links in changed Markdown resolve; `git diff --check` passed. Rust/config/build inputs are unchanged by this two-file correction, so unchanged runtime/benchmark gates are reused rather than repeated. Exact new-head hosted checks remain a separate follow-through; backlog root `01a1050a-2286-7392-a390-147f132c9d68` owns integration.

@@ -63,7 +63,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | — | Quiet-host recordings: Phase 5a H0 tail comparison; H20 eight-stream p95 then the 50→20 ms budget | `speed-first-…` | Implemented; tails not repeatable on the shared host; retained, not waived |
 | — | Seven H22 deferrals (`StaticHttpAuth`, headless writer, config parse-once, reviewer via `PlanCache`, run-loop enums, args-parse-once, `Arc` calls) | `speed-first-…` § Bundled Fixes | Each is its own slice when that code is next opened |
 | — | Run snapshots, LSP diagnostics | proposed plans | No scheduled slice |
-| — | JV1 remainder, JV4 and DM1 (parallel), then DM2–DM4, JV5–JV6 | [`decision-models.md`](./decision-models.md) | Opted-in users are prompted for most held calls, and a second vendor (OpenAI Decisions) needs one decision seam instead of a fourth copy of the Jev code. Awaiting plan and ADR-0055 acceptance |
+| — | JV1 remainder, JV4 and DM1 (parallel), then DM2–DM4, JV5–JV6 | [`decision-models.md`](./decision-models.md) | Opted-in users are prompted for most held calls, and a second vendor (OpenAI Decisions) needs one decision seam instead of a fourth copy of the Jev code. Awaiting plan acceptance; ADR-0055 is accepted |
 | — | TE1 offline efficiency baseline, then TE2/TE4 | [`token-efficiency.md`](token-efficiency.md) | Measurement first; paid runs remain with ENG-809 and existing reliability priorities are unchanged |
 
 ## Ownership
