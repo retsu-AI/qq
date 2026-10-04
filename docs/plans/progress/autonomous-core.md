@@ -602,8 +602,9 @@ reports are AP4.2.
 - **Delivery.** At the top of every turn, before the budget check, the loop calls
   `SubagentSpawner::deliver(turn)`. One transaction stamps every settled,
   undelivered row (notice text, `turn_ordinal`, `delivery_ordinal`). The loop
-  then appends the notices, charges each child's spend, and treats each
-  answer as progress. A child whose descendants are still settling has
+  then appends the notices and charges each child's spend. An answer from a
+  child that answered is progress; a failed, cancelled or paused child is
+  not, matching a blocking spawn's error result (ADR-0054 § 1). A child whose descendants are still settling has
   unreadable spend; it is skipped and delivered on a later pass, never
   without its spend.
 - **Settlement and recovery.** `settle_run` delivers the run's own settled
@@ -753,4 +754,21 @@ from real use, in AP5.
 - **Nits:**
   - the `DeliveryError` doc is corrected;
   - the replay check compares block counts.
+
+### 2026-10-03: Codex review on #244: the docs were imprecise, the code stands
+
+Codex suggested resetting the parent's stall count on every delivered notice,
+including those for failed, cancelled and paused children. I kept the
+behaviour: only a child that answered is progress.
+- It matches the blocking path, where only a successful `spawn_agent` result
+  is progress (`runtime::is_progress`).
+- It follows ADR-0054 § 1: a child's answer is progress, its failure is not.
+  § 4 adds that even an interim report does not reset the count.
+- It closes a loophole: otherwise a parent spawning children that fail could
+  stay out of its stall report indefinitely.
+
+The finding was right that `architecture.md` and this ledger said "a delivered
+answer is a progress event" without the qualifier. Both now say "an answer
+from a child that answered". `only_a_delivered_answer_restarts_the_stall_count`
+pins the rule, and it fails with Codex's suggested change.
 

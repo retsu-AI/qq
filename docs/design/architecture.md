@@ -1021,7 +1021,8 @@ scope counts settled calls since the last *progress event*: a successful
 mutating call or external call its server does not mark read-only, a
 non-read-only shell command that ran (any exit
 status, timeouts included), a successful blocking `spawn_agent` result or a
-delivered sub-agent answer, an
+delivered answer from a child that answered (a failed, cancelled, paused, or
+budget-exhausted child is not progress, blocking or detached), an
 applied steer, an answered `ask_user`, or a report. Reads, searches, and
 read-only shell commands are never progress; denied calls count, runtime
 rejections do not. After `STALL_REPORT_CALLS = 64` such calls the next turn
@@ -1122,8 +1123,11 @@ spend is not yet readable (a grandchild still settling) waits, and is
 delivered the moment that descendant settles. Each answer is bounded like a
 tool result, and the answers delivered at one boundary share one turn's
 tool-output budget and count against `max_tool_output_bytes`. The child's
-spend is charged to the parent at delivery, exactly once; a delivered answer
-is a progress event, the admission receipt is not. A parent reply without tool
+spend is charged to the parent at delivery, exactly once. A delivered answer
+from a child that answered is a progress event; a notice that the child
+failed or was cancelled is not, exactly as a blocking spawn's error result is
+not, so a parent cannot stay out of its stall report by spawning children
+that fail. The admission receipt is not progress either. A parent reply without tool
 calls while children are outstanding does not settle the run: the loop waits
 for the next settled child or steering, delivers or applies it, and runs
 another turn. Cancellation and the run deadline end the wait from outside,

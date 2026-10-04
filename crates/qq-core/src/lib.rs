@@ -305,8 +305,10 @@ async fn steering_arrived(steering: &mut Option<runtime::SteeringReceiver>, hand
 /// Commits every settled detached child's answer for the parent's turn
 /// `turn_ordinal` and appends each as a runtime notice, after the boundary's
 /// steering (ADR-0054 § 4). The store commits before the message joins
-/// context; each answer is charged once here, and an answer is progress.
-/// Returns how many were delivered.
+/// context; each answer is charged once here. Only a child that answered is
+/// progress (ADR-0054 § 1): a failed or cancelled child's notice is evidence
+/// for the parent, not output, exactly as a blocking spawn's error result is
+/// not progress. Returns how many were delivered.
 async fn deliver_children(
     spawner: &Arc<dyn SubagentSpawner>,
     turn_ordinal: u32,
@@ -11088,6 +11090,75 @@ mod tests {
             self.requests.lock().unwrap().push(request);
             let outcome = self.outcome.clone();
             Box::pin(std::future::ready(outcome))
+        }
+    }
+
+    /// Delivers a fixed set of children once.
+    struct DeliveringSpawner {
+        delivered: Mutex<Vec<runtime::DeliveredChild>>,
+    }
+
+    impl SubagentSpawner for DeliveringSpawner {
+        fn acknowledge(&self, _: ToolCallId) {}
+        fn drain(&self) -> runtime::ChildDrainFuture {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn spawn(&self, _: SpawnRequest) -> SpawnAgentFuture {
+            unreachable!("this spawner only delivers")
+        }
+        fn deliver(&self, _: u32) -> runtime::DeliverFuture {
+            let delivered = std::mem::take(&mut *self.delivered.lock().unwrap());
+            Box::pin(std::future::ready(Ok(delivered)))
+        }
+    }
+
+    /// Only a child that answered is progress for its parent (ADR-0054 § 1),
+    /// exactly as only a successful blocking spawn result is. A delivered
+    /// notice that the child failed or was cancelled is still context the
+    /// parent sees and spend it pays, but it does not hold off the parent's
+    /// stall report: a parent spawning children that fail must still report.
+    #[tokio::test]
+    async fn only_a_delivered_answer_restarts_the_stall_count() {
+        let child = |answered: bool| runtime::DeliveredChild {
+            notice: format!("child answered: {answered}"),
+            answered,
+            spend: SpawnAgentSpend::NONE,
+        };
+        for (answered, restarts) in [(false, false), (true, true)] {
+            let spawner: Arc<dyn SubagentSpawner> = Arc::new(DeliveringSpawner {
+                delivered: Mutex::new(vec![child(answered)]),
+            });
+            let mut stall = runtime::StallScope::new(runtime::StallPolicy::Root);
+            for _ in 0..runtime::STALL_REPORT_CALLS {
+                stall.settled(false);
+            }
+            assert_eq!(stall.due(false), runtime::ReportDue::Report);
+            let mut messages = vec![Message::user("prompt")];
+            let mut bytes = 0;
+            let mut budget =
+                BudgetMeter::new(RunLimits::default(), None, tokio::time::Instant::now());
+            let delivered = deliver_children(
+                &spawner,
+                2,
+                &mut messages,
+                &mut bytes,
+                &mut budget,
+                &mut stall,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(delivered, 1);
+            // Either way the notice is in context.
+            assert_eq!(
+                messages.last().unwrap(),
+                &Message::user(format!("child answered: {answered}"))
+            );
+            assert_eq!(
+                stall.due(false) == runtime::ReportDue::None,
+                restarts,
+                "answered: {answered}"
+            );
         }
     }
 
