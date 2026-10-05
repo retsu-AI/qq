@@ -469,9 +469,22 @@ async fn run_sample(case: Case) -> Sample {
         measured.deepest_child,
         if case == Case::DepthTwo { 2 } else { 1 }
     );
-    let expected_spend = if case == Case::DepthTwo { 25 } else { 30 };
-    assert_eq!(measured.root_inclusive_tokens, Some(expected_spend));
-    assert_eq!(measured.root_inclusive_cost_usd_nanos, Some(expected_spend));
+    // Each provider turn spends 5. Bounded cases block on their children:
+    // the root spends two turns. An unbounded root does not block
+    // (ADR-0054 § 4): its reply while children run waits for the next
+    // answer and runs another turn, so it takes two to five turns, by when
+    // the children settle.
+    let children_spend = if case == Case::DepthTwo { 15 } else { 20 };
+    let root_turns = match case {
+        Case::FiniteRead | Case::DepthTwo => 2..=2,
+        Case::UnboundedRead | Case::UnboundedReadOverlap => 2..=(2 + CHILDREN as u64),
+    };
+    let spend = measured.root_inclusive_tokens.expect("known spend");
+    assert!(
+        root_turns.contains(&((spend - children_spend) / 5)) && (spend - children_spend) % 5 == 0,
+        "unexpected root spend {spend}"
+    );
+    assert_eq!(measured.root_inclusive_cost_usd_nanos, Some(spend));
     assert_eq!(activity.active.load(Ordering::SeqCst), 0, "provider leaked");
     if case == Case::UnboundedReadOverlap {
         assert_eq!(

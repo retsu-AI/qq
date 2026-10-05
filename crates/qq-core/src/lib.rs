@@ -263,6 +263,85 @@ async fn interrupt_requested(steering: &mut Option<runtime::SteeringReceiver>, h
     }
 }
 
+/// How long a parent waiting for answers first pauses before retrying a
+/// settled child whose spend is not yet readable (its descendants are
+/// settling); the pause doubles up to `SUBAGENT_DELIVERY_RETRY_MAX`.
+const SUBAGENT_DELIVERY_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
+const SUBAGENT_DELIVERY_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Resolves when steering arrives (the message is kept for the next
+/// boundary) or an interrupt newer than `handled` is requested; pending
+/// forever for runs without steering.
+async fn steering_arrived(steering: &mut Option<runtime::SteeringReceiver>, handled: u64) {
+    let Some(steering) = steering else {
+        return std::future::pending().await;
+    };
+    if steering.peeked.is_some() || *steering.interrupts.borrow() > handled {
+        return;
+    }
+    let runtime::SteeringReceiver {
+        messages,
+        interrupts,
+        peeked,
+    } = steering;
+    tokio::select! {
+        message = messages.recv() => match message {
+            Some(message) => *peeked = Some(message),
+            None => std::future::pending::<()>().await,
+        },
+        () = async {
+            loop {
+                if *interrupts.borrow() > handled {
+                    return;
+                }
+                if interrupts.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        } => {}
+    }
+}
+
+/// Commits every settled detached child's answer for the parent's turn
+/// `turn_ordinal` and appends each as a runtime notice, after the boundary's
+/// steering (ADR-0054 § 4). The store commits before the message joins
+/// context; each answer is charged once here. Only a child that answered is
+/// progress (ADR-0054 § 1): a failed or cancelled child's notice is evidence
+/// for the parent, not output, exactly as a blocking spawn's error result is
+/// not progress. Returns how many were delivered.
+async fn deliver_children(
+    spawner: &Arc<dyn SubagentSpawner>,
+    turn_ordinal: u32,
+    messages: &mut Vec<Message>,
+    irreducible_message_bytes: &mut u64,
+    budget: &mut BudgetMeter,
+    stall: &mut runtime::StallScope,
+    checkpoint: Option<&mut runtime::CheckpointContext>,
+) -> Result<usize, runtime::DeliveryError> {
+    let delivered = spawner.deliver(turn_ordinal).await?;
+    let mut checkpoint = checkpoint;
+    for child in &delivered {
+        budget.charge_child(child.spend.usage, child.spend.cost_usd_nanos);
+        // Answers are output the parent asked for, like tool results: they
+        // count against its tool-output bound. The store bounded each
+        // boundary's notices together.
+        budget.charge_tool_output(child.notice.len());
+        if child.answered {
+            stall.progress();
+        }
+        // A delivered answer is evidence the final review weighs, exactly
+        // as a blocking spawn's result was.
+        if let Some(context) = checkpoint.as_deref_mut() {
+            context.record(child.notice.clone());
+        }
+        let notice = Message::user(child.notice.clone());
+        *irreducible_message_bytes =
+            irreducible_message_bytes.saturating_add(measure_message(&notice));
+        messages.push(notice);
+    }
+    Ok(delivered.len())
+}
+
 /// One steering message the loop has injected: its id and the files it read.
 struct AppliedSteering {
     message_id: qq_protocol::MessageId,
@@ -290,7 +369,11 @@ async fn apply_steering(
 ) -> Option<Vec<AppliedSteering>> {
     let steering = steering.as_mut()?;
     let mut applied = Vec::new();
-    while let Ok(message) = steering.messages.try_recv() {
+    while let Some(message) = steering
+        .peeked
+        .take()
+        .or_else(|| steering.messages.try_recv().ok())
+    {
         let has_files = message
             .input
             .iter()
@@ -1763,7 +1846,34 @@ impl plan::CompiledAgentPlan {
             // second rejection of the same turn fails the run as before.
             let mut provider_overflowed = false;
             let mut reactive_compaction_turn: Option<u32> = None;
+            // The turn a wait for sub-agent answers already delivered for.
+            let mut wait_delivered_for: Option<u32> = None;
             'turns: for turn_ordinal in 1..=u32::MAX {
+                // Settled detached children answer here, at the one boundary
+                // every turn passes: after the previous turn's results and
+                // steering, before this request is built (ADR-0054 § 4). The
+                // store commits the delivery before the notice joins context.
+                // A wait that just delivered for this turn used its boundary;
+                // anything settling since waits for the next one, so one
+                // boundary spends one turn's tool-output budget.
+                let delivered_by_wait = std::mem::take(&mut wait_delivered_for) == Some(turn_ordinal);
+                if let Some(spawner) = &spawner
+                    && !delivered_by_wait
+                    && spawner.settled_detached()
+                    && let Err(error) = deliver_children(
+                        spawner,
+                        turn_ordinal,
+                        Arc::make_mut(&mut messages),
+                        &mut irreducible_message_bytes,
+                        &mut budget,
+                        &mut stall,
+                        checkpoint_context.as_mut(),
+                    )
+                    .await
+                {
+                    yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
+                    return;
+                }
                 // Caller budgets are decided at the turn boundary, before any
                 // provider request. A spent work budget grants one final
                 // response that asks for no tool calls; a second spent check, an elapsed wall
@@ -2920,6 +3030,14 @@ impl plan::CompiledAgentPlan {
                     // dropped: the run continues with it instead of
                     // completing, exactly as if the model had called a tool.
                     if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                        // A reply the run continues past stays in context, so
+                        // it must be provider-valid: an empty one takes the
+                        // placeholder assembly fills the gap with on replay.
+                        let assistant = if assistant.has_content() {
+                            assistant
+                        } else {
+                            Message::assistant(EMPTY_TURN_PLACEHOLDER)
+                        };
                         irreducible_message_bytes = irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
@@ -2932,6 +3050,86 @@ impl plan::CompiledAgentPlan {
                                 turn_ordinal: turn_ordinal.saturating_add(1),
                                 attachments: steer.attachments,
                             };
+                        }
+                        continue;
+                    }
+                    // A reply without tool calls while detached children are
+                    // still out is not the run's answer yet: wait for the next
+                    // answer (or steering), deliver it at the next boundary,
+                    // and run another turn (ADR-0054 § 4). Nothing here
+                    // selects on cancellation or the deadline: the session
+                    // consumer drops this stream on cancellation
+                    // (`execution.rs`, the `cancellation.changed()` arm) and
+                    // `RunDeadline::enforce` drops it at the deadline.
+                    if let Some(spawner) = &spawner
+                        && spawner.outstanding_detached() > 0
+                    {
+                        // Empty while waiting is likely (nothing left to do):
+                        // the same placeholder keeps the request valid.
+                        let assistant = if assistant.has_content() {
+                            assistant
+                        } else {
+                            Message::assistant(EMPTY_TURN_PLACEHOLDER)
+                        };
+                        irreducible_message_bytes = irreducible_message_bytes
+                            .saturating_add(measure_message(&assistant));
+                        Arc::make_mut(&mut messages).push(assistant);
+                        // A "waiting for sub-agents" activity is client work
+                        // (AC14); clients see the child sessions meanwhile.
+                        // The wait ends with something in context after the
+                        // reply, applied steering or a delivered answer, so
+                        // live and replayed context stay identical.
+                        #[cfg(test)]
+                        spawner.waiting_for_test();
+                        let mut delivery_retry = SUBAGENT_DELIVERY_RETRY;
+                        loop {
+                            tokio::select! {
+                                biased;
+                                () = steering_arrived(&mut steering, handled_interrupt) => {}
+                                () = spawner.child_settled() => {}
+                            }
+                            handled_interrupt = steering
+                                .as_ref()
+                                .map_or(handled_interrupt, |steering| *steering.interrupts.borrow());
+                            if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                                for steer in applied {
+                                    yield RuntimeEvent::SteeringApplied {
+                                        message_id: steer.message_id,
+                                        turn_ordinal: turn_ordinal.saturating_add(1),
+                                        attachments: steer.attachments,
+                                    };
+                                }
+                                break;
+                            }
+                            match deliver_children(
+                                spawner,
+                                turn_ordinal.saturating_add(1),
+                                Arc::make_mut(&mut messages),
+                                &mut irreducible_message_bytes,
+                                &mut budget,
+                                &mut stall,
+                                checkpoint_context.as_mut(),
+                            )
+                            .await
+                            {
+                                // A settled child whose own descendants are
+                                // still settling has no readable spend yet;
+                                // its delivery is retried after they settle.
+                                // Pause briefly so the wake does not spin.
+                                Ok(0) if spawner.settled_detached() => {
+                                    tokio::time::sleep(delivery_retry).await;
+                                    delivery_retry = (delivery_retry * 2).min(SUBAGENT_DELIVERY_RETRY_MAX);
+                                }
+                                Ok(0) => {}
+                                Ok(_) => {
+                                    wait_delivered_for = Some(turn_ordinal.saturating_add(1));
+                                    break;
+                                }
+                                Err(error) => {
+                                    yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
+                                    return;
+                                }
+                            }
                         }
                         continue;
                     }
@@ -3372,6 +3570,16 @@ impl plan::CompiledAgentPlan {
                     .into_iter()
                     .filter(|call| results[usize::from(call.call_ordinal - 1)].is_none())
                     .collect::<Vec<_>>();
+                let bounded_child_spend = limits.max_cost_usd_nanos.is_some()
+                    || limits.max_total_tokens.is_some()
+                    || limits.max_input_tokens.is_some()
+                    || limits.max_output_tokens.is_some();
+                // A read spawn returns on durable admission and its answer
+                // arrives at a later boundary (ADR-0054 § 4), unless the run
+                // has a finite token or cost bound: each child is granted the
+                // parent's whole remainder, so overlapping children could
+                // overspend it, and those runs keep blocking spawns.
+                let detach_spawns = !bounded_child_spend;
                 let execute_one = |call: RuntimeToolCall,
                                    output: Option<
                     tokio::sync::mpsc::Sender<String>,
@@ -3475,9 +3683,15 @@ impl plan::CompiledAgentPlan {
                                                             authority: arguments.authority,
                                                             budget: child_budget,
                                                             purpose: qq_protocol::SessionPurpose::Task,
+                                                            detached: detach_spawns,
                                                         })
                                                         .await;
-                                                    child_spend = Some(outcome.spend);
+                                                    // A detached child's spend is
+                                                    // charged when its answer is
+                                                    // delivered, not here.
+                                                    if !outcome.detached {
+                                                        child_spend = Some(outcome.spend);
+                                                    }
                                                     tools::bounded_result(
                                                         outcome.content,
                                                         outcome.is_error,
@@ -3635,10 +3849,6 @@ impl plan::CompiledAgentPlan {
                 // read child may overlap: a write child is a mutation.
                 // Finite spend cannot be granted independently to overlapping children.
                 // Unbounded and duration-only read fanout retains its concurrency.
-                let bounded_child_spend = limits.max_cost_usd_nanos.is_some()
-                    || limits.max_total_tokens.is_some()
-                    || limits.max_input_tokens.is_some()
-                    || limits.max_output_tokens.is_some();
                 let overlaps = |call: &RuntimeToolCall| {
                     !(bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
                     && matches!(
@@ -3696,11 +3906,12 @@ impl plan::CompiledAgentPlan {
                         // turn, Jev's one-call rule, unknown or malformed)
                         // never ran and are not counted.
                         if call.rejection.is_none() {
-                            stall.settled(runtime::is_progress(
-                                &call,
-                                catalog.lookup(&call.name),
-                                &result,
-                            ));
+                            // A detached spawn's receipt is not an answer: the
+                            // answer is progress when it is delivered.
+                            let entry = catalog.lookup(&call.name);
+                            let receipt = entry.is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent)
+                                && child_spend.is_none();
+                            stall.settled(!receipt && runtime::is_progress(&call, entry, &result));
                         }
                         let result = cite_spill(result, &call.name, call.id, spills.is_some());
                         results[usize::from(call.call_ordinal - 1)] =
@@ -3739,7 +3950,7 @@ impl plan::CompiledAgentPlan {
                                         return;
                                     }
                                     if let Some(spawner) = &spawner {
-                                        match spawner.drain().await {
+                                        match spawner.drain_attached().await {
                                             Ok(spends) => for spend in spends { budget.charge_child(spend.usage, spend.cost_usd_nanos); },
                                             Err(error) => {
                                                 yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
@@ -3784,11 +3995,12 @@ impl plan::CompiledAgentPlan {
                         // turn, Jev's one-call rule, unknown or malformed)
                         // never ran and are not counted.
                         if call.rejection.is_none() {
-                            stall.settled(runtime::is_progress(
-                                &call,
-                                catalog.lookup(&call.name),
-                                &result,
-                            ));
+                            // A detached spawn's receipt is not an answer: the
+                            // answer is progress when it is delivered.
+                            let entry = catalog.lookup(&call.name);
+                            let receipt = entry.is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent)
+                                && child_spend.is_none();
+                            stall.settled(!receipt && runtime::is_progress(&call, entry, &result));
                         }
                         let result = cite_spill(result, &call.name, call.id, spills.is_some());
                         results[usize::from(call.call_ordinal - 1)] =
@@ -3813,7 +4025,7 @@ impl plan::CompiledAgentPlan {
                                         return;
                                     }
                     if let Some(spawner) = &spawner {
-                        match spawner.drain().await {
+                        match spawner.drain_attached().await {
                             Ok(spends) => for spend in spends { budget.charge_child(spend.usage, spend.cost_usd_nanos); },
                             Err(error) => {
                                 yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
@@ -10881,6 +11093,75 @@ mod tests {
         }
     }
 
+    /// Delivers a fixed set of children once.
+    struct DeliveringSpawner {
+        delivered: Mutex<Vec<runtime::DeliveredChild>>,
+    }
+
+    impl SubagentSpawner for DeliveringSpawner {
+        fn acknowledge(&self, _: ToolCallId) {}
+        fn drain(&self) -> runtime::ChildDrainFuture {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn spawn(&self, _: SpawnRequest) -> SpawnAgentFuture {
+            unreachable!("this spawner only delivers")
+        }
+        fn deliver(&self, _: u32) -> runtime::DeliverFuture {
+            let delivered = std::mem::take(&mut *self.delivered.lock().unwrap());
+            Box::pin(std::future::ready(Ok(delivered)))
+        }
+    }
+
+    /// Only a child that answered is progress for its parent (ADR-0054 § 1),
+    /// exactly as only a successful blocking spawn result is. A delivered
+    /// notice that the child failed or was cancelled is still context the
+    /// parent sees and spend it pays, but it does not hold off the parent's
+    /// stall report: a parent spawning children that fail must still report.
+    #[tokio::test]
+    async fn only_a_delivered_answer_restarts_the_stall_count() {
+        let child = |answered: bool| runtime::DeliveredChild {
+            notice: format!("child answered: {answered}"),
+            answered,
+            spend: SpawnAgentSpend::NONE,
+        };
+        for (answered, restarts) in [(false, false), (true, true)] {
+            let spawner: Arc<dyn SubagentSpawner> = Arc::new(DeliveringSpawner {
+                delivered: Mutex::new(vec![child(answered)]),
+            });
+            let mut stall = runtime::StallScope::new(runtime::StallPolicy::Root);
+            for _ in 0..runtime::STALL_REPORT_CALLS {
+                stall.settled(false);
+            }
+            assert_eq!(stall.due(false), runtime::ReportDue::Report);
+            let mut messages = vec![Message::user("prompt")];
+            let mut bytes = 0;
+            let mut budget =
+                BudgetMeter::new(RunLimits::default(), None, tokio::time::Instant::now());
+            let delivered = deliver_children(
+                &spawner,
+                2,
+                &mut messages,
+                &mut bytes,
+                &mut budget,
+                &mut stall,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(delivered, 1);
+            // Either way the notice is in context.
+            assert_eq!(
+                messages.last().unwrap(),
+                &Message::user(format!("child answered: {answered}"))
+            );
+            assert_eq!(
+                stall.due(false) == runtime::ReportDue::None,
+                restarts,
+                "answered: {answered}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn spawner_less_runs_neither_declare_nor_dispatch_spawn_agent() {
         let directory = tempfile::tempdir().unwrap();
@@ -10963,6 +11244,7 @@ mod tests {
                 is_error: false,
                 spend: SpawnAgentSpend::NONE,
                 session_id: None,
+                detached: false,
             },
             Arc::clone(&tasks),
         ));
@@ -11040,6 +11322,7 @@ mod tests {
                     is_error: false,
                     spend: SpawnAgentSpend::NONE,
                     session_id: None,
+                    detached: false,
                 },
                 Arc::clone(&tasks),
             ));
@@ -11144,6 +11427,7 @@ mod tests {
                     }),
                 },
                 session_id: None,
+                detached: false,
             },
             Arc::new(Mutex::new(Vec::new())),
         ));
@@ -11258,6 +11542,7 @@ mod tests {
                 is_error: false,
                 spend: SpawnAgentSpend::NONE,
                 session_id: None,
+                detached: false,
             },
             Arc::new(Mutex::new(Vec::new())),
         ));
@@ -11408,6 +11693,29 @@ mod tests {
             gets a long search and a late answer. Prefer several narrow briefs over one broad \
             one.\n";
         const OLD_TASK: &str = "A complete, self-contained brief for the sub-agent.";
+        const BLOCKING_SPAWN: &str = "- spawn_agent runs a one-shot read-only sub-agent in this \
+            workspace from a self-contained task brief and returns only its final answer.\n";
+        const BACKGROUND_SPAWN: &str = "- spawn_agent starts a one-shot read-only sub-agent in \
+            this workspace from a self-contained task brief. It usually runs in the background: \
+            the call returns at once, and the sub-agent's final answer arrives at a later turn as \
+            a runtime notice. Keep working on what does not depend on it; a reply without tool \
+            calls while sub-agents are working waits for their answers.\n";
+        const CONCURRENT: &str = "because sub-agents run concurrently.";
+        const CONCURRENT_WITH_YOU: &str =
+            "because sub-agents run concurrently with each other and with you.";
+        const BLOCKING_DESCRIPTION: &str = "Delegate one self-contained task to a read-only \
+            sub-agent in this workspace and receive only its final answer. Worth it when the raw \
+            evidence would dwarf the distilled answer and you will not need that evidence \
+            verbatim later; several independent questions can be delegated in parallel. Single \
+            reads, searches, and quick lookups are cheaper inline. The task brief must carry \
+            everything the sub-agent needs: it starts with no other context. Omit model";
+        const BACKGROUND_DESCRIPTION: &str = "Delegate one self-contained task to a read-only \
+            sub-agent in this workspace; only its final answer comes back, usually later as a \
+            runtime notice while you keep working. Worth it when the raw evidence would dwarf the \
+            distilled answer and you will not need that evidence verbatim later; several \
+            independent questions can be delegated in parallel. Single reads, searches, and \
+            quick lookups are cheaper inline. The task brief must carry everything the sub-agent \
+            needs: it starts with no other context. Omit model";
         const NEW_TASK: &str = "A complete, self-contained brief for the sub-agent: the question \
             to answer, what the answer is for, and the answer shape you want back. The sub-agent \
             starts with no other context and stops once it can answer.";
@@ -11424,8 +11732,15 @@ mod tests {
             None,
         );
         assert!(prompt.contains(NEW_BULLET), "{prompt}");
-        let v14 = prompt.replacen(NEW_BULLET, "", 1);
-        assert_ne!(v14, prompt);
+        // Prompt 16 (ADR-0054 § 4) rewords only the first and last
+        // delegation bullets; undo them, then the brief bullet.
+        assert!(prompt.contains(BACKGROUND_SPAWN), "{prompt}");
+        assert!(prompt.contains(CONCURRENT_WITH_YOU), "{prompt}");
+        let v15 = prompt
+            .replacen(BACKGROUND_SPAWN, BLOCKING_SPAWN, 1)
+            .replacen(CONCURRENT_WITH_YOU, CONCURRENT, 1);
+        let v14 = v15.replacen(NEW_BULLET, "", 1);
+        assert_ne!(v14, v15);
         assert_eq!(
             format!("{:x}", Sha256::digest(v14.as_bytes())),
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
@@ -11438,8 +11753,21 @@ mod tests {
             "568cef80e021a4c69625eb992086993b9c0f43857ae74ff253f70253a752f24f"
         );
         let spawn = specs.last().unwrap();
+        assert!(
+            spawn.description().starts_with(BACKGROUND_DESCRIPTION),
+            "{}",
+            spawn.description()
+        );
         assert_eq!(
-            format!("{:x}", Sha256::digest(spawn.description().as_bytes())),
+            format!(
+                "{:x}",
+                Sha256::digest(
+                    spawn
+                        .description()
+                        .replacen(BACKGROUND_DESCRIPTION, BLOCKING_DESCRIPTION, 1)
+                        .as_bytes()
+                )
+            ),
             "09105474547d899bf0bf5346f2c72079425d0f0c236c9a201378a33f0421c5ac"
         );
         let schema = spawn.input_schema().get();

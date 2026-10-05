@@ -1020,7 +1020,9 @@ A run that stops producing output reports too (ADR-0054 § 1–2). The stall
 scope counts settled calls since the last *progress event*: a successful
 mutating call or external call its server does not mark read-only, a
 non-read-only shell command that ran (any exit
-status, timeouts included), a successful blocking `spawn_agent` result, an
+status, timeouts included), a successful blocking `spawn_agent` result or a
+delivered answer from a child that answered (a failed, cancelled, paused, or
+budget-exhausted child is not progress, blocking or detached), an
 applied steer, an answered `ask_user`, or a report. Reads, searches, and
 read-only shell commands are never progress; denied calls count, runtime
 rejections do not. After `STALL_REPORT_CALLS = 64` such calls the next turn
@@ -1098,8 +1100,45 @@ owned and claimable; it cannot survive a failed submission as an idle orphan.
 If the process stops before a queued child is claimed, recovery cancels that
 child when it interrupts the owning parent. Parent cancellation uses the same
 durable ownership link for in-process children. Once a child completes, only
-its final committed model turn's text or refusal is returned to the parent;
-earlier turns remain visible in the child's authoritative transcript.
+its final committed model turn's text or refusal reaches the parent; earlier
+turns remain visible in the child's authoritative transcript.
+
+A read `spawn_agent` does not block the parent (ADR-0054 § 4). The call
+returns as soon as the child is durably admitted, with its session id, and
+the parent keeps working; a spawn beyond the per-run concurrency cap still
+waits for a slot. The admission transaction also inserts the child's
+`child_deliveries` row. When the child settles, its answer (the same text a
+blocking spawn returns: the final reply, the latest report labelled as
+interim, or the outcome as an error with any report) is delivered at the
+parent's next turn boundary, after that boundary's steering, as a runtime
+notice naming the child session. One transaction stamps the row with the
+notice text and the parent turn whose request first carries it; the notice
+joins the live context only after that commit, and assembly replays it from
+the row before that turn, so live and restart context match. The stamp
+happens once: a parent that settles first (cancelled, interrupted, failed)
+gets every settled child's answer committed with its own settlement, after
+its run, and recovery delivers answers whose parent was settled before the
+child; the session's next run assembles them either way. An answer whose
+spend is not yet readable (a grandchild still settling) waits, and is
+delivered the moment that descendant settles. Each answer is bounded like a
+tool result, and the answers delivered at one boundary share one turn's
+tool-output budget and count against `max_tool_output_bytes`. The child's
+spend is charged to the parent at delivery, exactly once. A delivered answer
+from a child that answered is a progress event; a notice that the child
+failed or was cancelled is not, exactly as a blocking spawn's error result is
+not, so a parent cannot stay out of its stall report by spawning children
+that fail. The admission receipt is not progress either. A parent reply without tool
+calls while children are outstanding does not settle the run: the loop waits
+for the next settled child or steering, delivers or applies it, and runs
+another turn. Cancellation and the run deadline end the wait from outside,
+and a budget-final turn still settles: teardown cancels the children and the
+settlement delivers their answers. An interrupting steer stops only the
+turn's blocking work; detached children keep running, and the audit hook's
+drain stops only the auditor. Write children, audits, and every spawn of a
+run with a finite token or cost bound stay blocking: each child of such a
+run is granted the parent's whole remainder, so overlapping children could
+overspend it. `wait_agents`, `cancel_agent`, and interim-report delivery are
+the AP4 follow-up slice.
 
 A model-spawned task run's system prompt carries a `Sub-agent:` section
 (ADR-0054 § 5). It says that a parent is waiting and receives only the final

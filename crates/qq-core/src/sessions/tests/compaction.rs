@@ -4081,6 +4081,7 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
         turns,
         HashMap::new(),
         std::collections::VecDeque::from([(4, "steer before four".to_owned())]),
+        std::collections::VecDeque::new(),
         Some(InRunCompaction {
             summary: "summary".to_owned(),
             turn_cutoff: replaced_turns,
@@ -4116,6 +4117,7 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
         turns,
         HashMap::new(),
         std::collections::VecDeque::new(),
+        std::collections::VecDeque::new(),
         Some(InRunCompaction {
             summary: "summary".to_owned(),
             turn_cutoff: replaced_turns,
@@ -4126,6 +4128,63 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
     .unwrap();
     assert_eq!(replayed, live);
     assert!(replayed.contains(&Message::user(TurnNotice::Report.text())));
+}
+
+/// Delivered sub-agent answers (ADR-0054 § 4) splice like steering: the one
+/// before the first kept turn went with the summarized span, after that
+/// boundary's steering; one before a later kept turn survives. Replay places
+/// both exactly where the live run did, and an answer delivered after the
+/// run settled follows the run.
+#[test]
+fn replay_drops_and_keeps_delivered_answers_as_the_in_run_splice_did() {
+    let assistant = |n: u32| Message::assistant(format!("turn {n}"));
+    let mut live = vec![Message::user("prompt")];
+    for n in 1..=7 {
+        if n == 4 {
+            live.push(Message::user("steer before four"));
+            live.push(Message::user("answer before four"));
+        }
+        if n == 6 {
+            live.push(Message::user("answer before six"));
+        }
+        live.push(assistant(n));
+    }
+    let (replace_through, replaced_turns) =
+        crate::sessions::in_run_compaction_boundary(&live[1..], 4).unwrap();
+    assert_eq!(replaced_turns, 3);
+    let summary = Message::user(format!("{IN_RUN_COMPACTION_PREAMBLE}\n\nsummary"));
+    live.splice(1..1 + replace_through, [summary]);
+    assert!(!live.contains(&Message::user("answer before four")));
+    assert!(live.contains(&Message::user("answer before six")));
+    live.push(Message::user("answer after the run"));
+
+    let turns = (1..=7)
+        .map(|n| StoredTurn {
+            ordinal: n,
+            content_json: format!("[{{\"type\":\"text\",\"text\":\"turn {n}\"}}]"),
+            truncated: false,
+            notice: None,
+        })
+        .collect();
+    let mut replayed = vec![Message::user("prompt")];
+    append_run_turns(
+        turns,
+        HashMap::new(),
+        std::collections::VecDeque::from([(4, "steer before four".to_owned())]),
+        std::collections::VecDeque::from([
+            (Some(4), "answer before four".to_owned()),
+            (Some(6), "answer before six".to_owned()),
+            (None, "answer after the run".to_owned()),
+        ]),
+        Some(InRunCompaction {
+            summary: "summary".to_owned(),
+            turn_cutoff: replaced_turns,
+        }),
+        &mut replayed,
+        &mut HashMap::new(),
+    )
+    .unwrap();
+    assert_eq!(replayed, live);
 }
 
 #[test]

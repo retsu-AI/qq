@@ -226,7 +226,10 @@ provider wire and is not listed in `reasoning_efforts`. Older clients reject
 the value. Store schema 38 adds the provider continuation envelope that
 replays signed reasoning; schema 39 persists `default`. Schema 40 records each
 model turn's runtime notice (`report`, `stall_report`, `continuation`, or
-`final_answer`) for replay; no wire shape changed. Golden fixtures live under
+`final_answer`) for replay; schema 41 adds `child_deliveries`, the delivered
+answers of non-blocking sub-agents (ADR-0054 § 4). No wire shape changed:
+a delivered answer reaches clients through the child session's own events.
+Golden fixtures live under
 `crates/qq-protocol/tests/fixtures/v30/`; `v23`–`v29` are retained
 decode-only.
 

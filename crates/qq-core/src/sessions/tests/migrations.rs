@@ -1990,6 +1990,7 @@ fn version_twenty_two_migration_adds_truncation_state_as_never_truncated() {
         }],
         HashMap::new(),
         std::collections::VecDeque::new(),
+        std::collections::VecDeque::new(),
         None,
         &mut context,
         &mut HashMap::new(),
@@ -3155,6 +3156,7 @@ fn version_thirty_nine_gains_the_turn_notice_as_null_and_rejects_a_bad_shape() {
             }],
             HashMap::new(),
             std::collections::VecDeque::new(),
+            std::collections::VecDeque::new(),
             None,
             &mut context,
             &mut HashMap::new(),
@@ -3188,6 +3190,55 @@ fn version_thirty_nine_gains_the_turn_notice_as_null_and_rejects_a_bad_shape() {
     for statement in [
         "ALTER TABLE model_turns DROP COLUMN notice",
         "ALTER TABLE model_turns ADD COLUMN notice INTEGER NOT NULL DEFAULT 0",
+    ] {
+        connection.execute(statement, []).unwrap();
+    }
+    drop(connection);
+    assert!(matches!(
+        open_database(&path),
+        Err(SessionRuntimeError::CONSTRAINT)
+    ));
+}
+
+/// Schema 41 adds the delivery table for non-blocking children (ADR-0054
+/// § 4). A pre-41 store gains it empty, its sessions assemble exactly as
+/// before, and a table with the wrong shape is refused.
+#[test]
+fn version_forty_gains_the_child_delivery_table_and_rejects_a_bad_shape() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, _) = open_database(&path).unwrap();
+    for statement in [
+        "DROP TABLE child_deliveries",
+        "UPDATE metadata SET value = '40' WHERE key = 'schema_version'",
+    ] {
+        connection.execute(statement, []).unwrap();
+    }
+    drop(connection);
+
+    let (connection, _) = open_database(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        STORE_SCHEMA_VERSION.to_string()
+    );
+    let rows: u32 = connection
+        .query_row("SELECT COUNT(*) FROM child_deliveries", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 0);
+    // Reopening a current store does not rerun the step.
+    drop(connection);
+    let (connection, _) = open_database(&path).unwrap();
+    for statement in [
+        "DROP TABLE child_deliveries",
+        "CREATE TABLE child_deliveries (child_run_id TEXT PRIMARY KEY, text INTEGER)",
     ] {
         connection.execute(statement, []).unwrap();
     }

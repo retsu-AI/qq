@@ -386,21 +386,23 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
         );
     }
     let description = if has_roster {
-        "Delegate one self-contained task to a read-only sub-agent in this workspace and receive \
-         only its final answer. Worth it when the raw evidence would dwarf the distilled answer \
-         and you will not need that evidence verbatim later; several independent questions can be \
-         delegated in parallel. Single reads, searches, and quick lookups are cheaper inline. The \
-         task brief must carry everything the sub-agent needs: it starts with no other context. \
-         Choose the sub-agent by role (see Delegation in the system prompt for each role's route \
+        "Delegate one self-contained task to a read-only sub-agent in this workspace; only its \
+         final answer comes back, usually later as a runtime notice while you keep working. Worth \
+         it when the raw evidence would dwarf the distilled answer and you will not need that \
+         evidence verbatim later; several independent questions can be delegated in parallel. \
+         Single reads, searches, and quick lookups are cheaper inline. The task brief must carry \
+         everything the sub-agent needs: it starts with no other context. Choose the sub-agent \
+         by role (see Delegation in the system prompt for each role's route \
          and relative cost); omit role for the default. Set model only when the user explicitly \
          requests an exact roster route; never guess, translate, or invent a route."
     } else {
-        "Delegate one self-contained task to a read-only sub-agent in this workspace and receive \
-         only its final answer. Worth it when the raw evidence would dwarf the distilled answer \
-         and you will not need that evidence verbatim later; several independent questions can be \
-         delegated in parallel. Single reads, searches, and quick lookups are cheaper inline. The \
-         task brief must carry everything the sub-agent needs: it starts with no other context. \
-         Omit model by default so QQ uses its configured worker model or the current session's \
+        "Delegate one self-contained task to a read-only sub-agent in this workspace; only its \
+         final answer comes back, usually later as a runtime notice while you keep working. Worth \
+         it when the raw evidence would dwarf the distilled answer and you will not need that \
+         evidence verbatim later; several independent questions can be delegated in parallel. \
+         Single reads, searches, and quick lookups are cheaper inline. The task brief must carry \
+         everything the sub-agent needs: it starts with no other context. Omit model by \
+         default so QQ uses its configured worker model or the current session's \
          selected model. Set model only when the user explicitly requests an exact provider/model \
          route listed by this tool; never guess, translate, or invent a route."
     };

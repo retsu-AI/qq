@@ -53,6 +53,7 @@ mod codec;
 mod commands;
 mod compaction;
 pub(crate) mod context;
+mod deliveries;
 mod events;
 mod execution;
 mod feed;

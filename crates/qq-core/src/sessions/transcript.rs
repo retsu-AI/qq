@@ -347,6 +347,8 @@ pub(super) fn load_model_context_with_units(
     let mut attachments =
         load_retained_attachments(transaction, &session, through_ordinal, cutoff_ordinal)?;
     let mut in_run = in_run_compactions(transaction, &session, through_ordinal, cutoff_ordinal)?;
+    let mut delivered =
+        deliveries::retained_deliveries(transaction, &session, through_ordinal, cutoff_ordinal)?;
 
     // Every committed turn of a retained run, grouped by run. The retained
     // runs are exactly those whose prompt the query above selected: the
@@ -549,15 +551,23 @@ pub(super) fn load_model_context_with_units(
                     run_turns,
                     results.remove(&prompt.run_id).unwrap_or_default(),
                     steering.remove(&prompt.run_id).unwrap_or_default(),
+                    delivered.remove(&prompt.run_id).unwrap_or_default(),
                     in_run.remove(&prompt.run_id),
                     &mut context,
                     &mut effects,
                 )?,
-                None => append_legacy_run_messages(
-                    transaction,
-                    parse_id(&prompt.run_id)?,
-                    &mut context,
-                )?,
+                None => {
+                    append_legacy_run_messages(
+                        transaction,
+                        parse_id(&prompt.run_id)?,
+                        &mut context,
+                    )?;
+                    // A run that settled before committing a turn can still
+                    // own delivered answers (its child finished first).
+                    for (_, text) in delivered.remove(&prompt.run_id).unwrap_or_default() {
+                        context.push(Message::user(text));
+                    }
+                }
             }
         }
         if matches!(
@@ -1080,6 +1090,7 @@ pub(super) fn append_run_turns(
     turns: Vec<StoredTurn>,
     mut recorded: RecordedTurnResults,
     mut steering: std::collections::VecDeque<(u32, String)>,
+    mut delivered: std::collections::VecDeque<(Option<u32>, String)>,
     compaction: Option<InRunCompaction>,
     context: &mut Vec<Message>,
     effects: &mut HashMap<(usize, usize), EffectClass>,
@@ -1117,6 +1128,12 @@ pub(super) fn append_run_turns(
             {
                 steering.pop_front();
             }
+            while delivered
+                .front()
+                .is_some_and(|(before, _)| before.is_some_and(|before| before <= first_kept))
+            {
+                delivered.pop_front();
+            }
             context.push(Message::user(format!(
                 "{IN_RUN_COMPACTION_PREAMBLE}\n\n{}",
                 marker.summary
@@ -1136,6 +1153,15 @@ pub(super) fn append_run_turns(
             .is_some_and(|(applied_before, _)| *applied_before <= turn_ordinal)
         {
             let (_, text) = steering.pop_front().expect("front was just checked");
+            context.push(Message::user(text));
+        }
+        // Delivered sub-agent answers follow the boundary's steering, as the
+        // live run applied them (ADR-0054 § 4).
+        while delivered
+            .front()
+            .is_some_and(|(before, _)| before.is_some_and(|before| before <= turn_ordinal))
+        {
+            let (_, text) = delivered.pop_front().expect("front was just checked");
             context.push(Message::user(text));
         }
         // The live run placed this notice after the boundary's steering and
@@ -1232,6 +1258,11 @@ pub(super) fn append_run_turns(
     // first) still reached the model's request; keep it so the transcript
     // the user saw is the transcript the next run continues from.
     for (_, text) in steering {
+        context.push(Message::user(text));
+    }
+    // Answers delivered at a boundary whose turn never committed, then those
+    // committed when the run settled first: both follow the run.
+    for (_, text) in delivered {
         context.push(Message::user(text));
     }
     Ok(())
