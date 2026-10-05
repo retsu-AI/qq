@@ -1,5 +1,19 @@
 # Ledger — Autonomous core
 
+## 2026-10-05 — AC12.1 extraction (ENG-1009)
+
+Stacked on AC11 #256 and AC10 #253. Concrete qq-harness library now owns the
+unchanged PlanCache/LiveBindings and configured MCP bridge. Binary re-export shims
+preserve call sites. Endpoint redaction moved; typed McpBuildError isolates cache
+and MCP configuration failures without moving binary-only model discovery.
+Repository layout and root manifests/maps updated. No default/wire/schema change.
+22 moved cache/MCP tests pass. Workspace tests and all-target/all-feature Clippy
+passed before the final review fix. Independent review caught cache poison changing
+Server to Configuration; restored classification with a focused passing regression.
+Startup/plan-compile A/B+A/A evidence still pending; no performance acceptance claimed.
+One-dependency smoke belongs after AC12.3, not this support-module extraction.
+
+
 ## 2026-10-05 — AC10 implementation (ENG-1006)
 
 Based on c37afe25 (CX0–CX2 merged); AP4.2 remains owned by a separate active agent.
@@ -72,7 +86,7 @@ appended below, newest last.
 | AC9 | Continue-if-idle | Dropped (moved to goals G2) | | | Now `goals.md` G2 |
 | AC10 | `qq-core` embedding surface + example | In progress | [ENG-1006](https://linear.app/retsu-ai/issue/ENG-1006) | `feat/eng-1006-ac10-core-embedding` | Public async constructors; credential-free runnable example; ADR-0050 § 1 |
 | AC11 | `tool-fetch` feature; minimal profile CI | In progress | [ENG-1008](https://linear.app/retsu-ai/issue/ENG-1008) | `feat/eng-1008-ac11-tool-fetch` stacked on #253 | Minimal tests and Clippy pass; htmd absent; default size qualification pending |
-| AC12 | `qq-harness` crate (three mechanical moves) | Planned | | | ADR-0050 § 2 |
+| AC12 | `qq-harness` crate (three mechanical moves) | AC12.1 In progress; .2/.3 Planned | [ENG-1009](https://linear.app/retsu-ai/issue/ENG-1009) | `refactor/eng-1009-ac12-1-harness-mcp` stacked on #256 | Plan cache/MCP bridge moved; performance qualification pending |
 | AC13 | Public-surface hygiene (`!`) | Planned | | | ADR-0050 § 4 |
 | AC14 | Surfaces for new state (was MRC-4) | Planned | | | |
 | AC15 | Store write amplification | Planned | | | ADR if `synchronous` changes |
