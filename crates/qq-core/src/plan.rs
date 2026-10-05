@@ -1228,6 +1228,28 @@ mod tests {
     use qq_protocol::PromptVersion;
 
     use super::{tests_support::*, *};
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_compilation_bounds_waiters_and_releases_cancelled_requests() {
+        use std::task::Poll;
+        let workspace = canonical_temp();
+        let permits = COMPILE_SLOTS.acquire_many(4).await.unwrap();
+        let mut cancelled = Box::pin(CompiledAgentPlan::compile(profile(workspace.path())));
+        assert!(matches!(futures_util::poll!(&mut cancelled), Poll::Pending));
+        drop(cancelled);
+        let mut queued = Box::pin(CompiledAgentPlan::compile(profile(workspace.path())));
+        assert!(matches!(futures_util::poll!(&mut queued), Poll::Pending));
+        tokio::task::yield_now().await;
+        drop(permits);
+        let expected = queued.await.unwrap().digest();
+        let results = futures_util::future::join_all(
+            (0..12).map(|_| CompiledAgentPlan::compile(profile(workspace.path()))),
+        )
+        .await;
+        for result in results {
+            assert_eq!(result.unwrap().digest(), expected);
+        }
+        assert!(COMPILE_SLOTS.try_acquire_many(4).is_ok());
+    }
 
     #[test]
     fn explicit_exposure_narrows_the_catalog_and_empty_exposes_nothing() {
