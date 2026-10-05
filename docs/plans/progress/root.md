@@ -469,3 +469,9 @@ slice is on `main`.
 - Delegating runs: 41 runs, 4 351 wall minutes, 1 722 minutes (40 %) with a
   `spawn_agent` call open (merged intervals). 34 of 124 spawns returned an
   error, 12 of them children over their context limit.
+
+### 2026-10-05 — embedding stack review readiness
+
+User authorized publishing regression and merging AC10 forward through AC11/AC12.1 without force pushes.
+Shared manifest/CI/map extraction remains limited to #253 → #256 → #258; AP4.2 untouched.
+Relative performance/size evidence in autonomous-core ledger; inherited 48 MB absolute size failure and high host pressure explicitly retained, not waived.
