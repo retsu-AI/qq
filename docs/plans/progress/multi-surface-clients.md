@@ -15,10 +15,14 @@ dated entries appended below, newest last.
 | S4 | Remote exposure with TLS | Planned | | ADR-0016; rustls root request |
 | S5 | Workspace catalog | Planned | | |
 | S6 | `server` configuration | Planned | | |
+| S7 | Server stream tiers, paging, approval previews, spill reads | Planned | | Added by fleet plan; strict wire changes only bump protocol |
 | TB | Tracer bullet gate | Planned | | Lead runs; `g-multi-surface-tb.md` |
+| W4 | Bounded durable fleet cache and dependent-command outbox | Planned | | `apps/fleet/` |
+| W5 | Incremental render model | Planned | | `apps/render/` |
 | U1–U7 | Web app | Planned | | ADR-0017, ADR-0018 |
 | D1–D3 | Desktop shell | Planned | | |
 | M1–M3 | Mobile | Planned | | |
+| FG | Five-server browser/phone fleet acceptance | Planned | | Lead-run; `g-fleet-clients.md` |
 
 ## Entries
 
@@ -127,3 +131,41 @@ Open: `ClientPort: Send` bound (port.rs) is still native-only shaped; W3.
 W2 merged as #19 (`e0c8121`) on 2026-09-10; the row above had stayed at "In
 review". Phase A (W1, S1, S3) and W2 are the shipped set; S2 and S4 wait on
 ADR-0015/0016 and the rustls root request. No slice in progress.
+
+
+### 2026-09-28 — fleet-clients design proposed
+
+Wrote `docs/plans/fleet-clients.md`: the multi-machine experience (fleet rail,
+cross-machine inbox, composer target chips, fan-out, jobs view, inbox-first
+mobile), a Leptos + Tauri 2 recommendation for the ADR-0017 spike with a
+measured gate, a speed-budget table, and the reference-harness gap analysis
+(`.source/opencode`, `.source/codex`, `.source/pi`, `.source/fx`). It maps onto
+the existing slices and proposes new ones: S7 (server-scoped stream, summary
+tier, history paging), W4 (durable outbox and cache, `qq-fleet`), W5
+(`qq-render`), U8 (Web Push). No slice status changed; the new slices need the
+lead's acceptance before rows are added. Web Push versus the "no push
+service" non-goal is open (plan §12 item 5). Docs only, no code.
+
+### 2026-10-03 — fleet-clients review contract repaired
+
+Refreshed the proposal onto current main and addressed the 21 review findings.
+The plan now separates browser trust from native certificate pinning; requires
+preconfigured CORS; defines fail-closed credential scopes, lossless stream-tier
+transitions, combined transcript cursors, bounded dependent outbox commands,
+approval-preview bootstrap, spill reads, and a post-reducer `FleetPatch` IPC.
+U1 owns the framework spike, M1 owns mobile budgets, and FG owns the integrated
+five-server gate at `g-fleet-clients.md`. Remote push/U8 is held under decision
+12. Independent re-review accepted the final auth cache, route-scope matrix,
+and authenticated-health repairs. Local format, exact-test guard, Clippy,
+workspace test, and workspace build checks pass; no fleet implementation or
+live-provider work ran in this docs slice.
+
+### 2026-10-03 — later fleet-client review repaired
+
+Four later findings on the same proposal exposed integration gaps in the
+accepted contract. Pairing now requires an exact client-reachable advertised
+URL, including the HTTPS proxy URL for loopback + `tailscale serve`; the
+server-scoped SSE carries a per-workspace detail tier and tier-matched cursor;
+U2–U7 and M1 own the shared UI/mobile paths they must edit; and U4 consumes W5
+explicitly. This remains plan and ADR work only: no fleet runtime, remote
+listener, enrollment route, or UI was implemented or deployed.
