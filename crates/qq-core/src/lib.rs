@@ -6655,7 +6655,10 @@ mod tests {
         );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].tools().len(), 9);
+        assert_eq!(
+            requests[0].tools().len(),
+            8 + usize::from(cfg!(feature = "tool-fetch"))
+        );
         let system = requests[0]
             .system()
             .expect("agent runs set a system prompt");
@@ -11327,7 +11330,10 @@ mod tests {
             !names.contains(&"rogue_tool"),
             "specs outside the mcp__ namespace must be discarded"
         );
-        assert_eq!(requests[0].tools().len(), 10);
+        assert_eq!(
+            requests[0].tools().len(),
+            9 + usize::from(cfg!(feature = "tool-fetch"))
+        );
         let system = requests[0].system().unwrap();
         assert!(system.contains("mcp__srv__ping"));
         assert!(system.contains("external tool hosts"));
@@ -12158,6 +12164,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "tool-fetch")]
     fn a_root_prompt_and_tools_change_only_by_the_brief_guidance() {
         // Golden against prompt version 14: a root's system
         // prompt gains only the delegation bullet, and its tools block only

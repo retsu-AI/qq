@@ -23,6 +23,28 @@ and wider gates pending. Full baseline workspace hit headless timing test
 turn_budget_cancels_before_a_silent_over_budget_turn_can_hang; isolated rerun passed.
 No seven-day/live-soak acceptance claimed.
 
+## 2026-10-05 — AC11 minimal profile (ENG-1008), stacked on AC10 #253
+
+Default tool-fetch preserves the existing catalog/prompt golden hashes. Feature-off
+compiles no fetch implementation and advertises no fetch tool; htmd is optional.
+Kept approval wire/state and host grants available, gated the implementation and
+fetch-only tests; shell nudges no longer recommend a missing fetch tool. CI runs
+minimal tests/Clippy and checks the normal dependency tree for htmd absence.
+Independent read-only review found no blockers; release-size comparison remains
+unmeasured and not claimed. No protocol/schema/descriptor bump.
+
+Commands passed on the combined stack: cargo test --workspace;
+cargo clippy --workspace --all-targets --all-features -- -D warnings;
+cargo build --workspace; cargo test -p qq-core --no-default-features;
+cargo clippy -p qq-core --no-default-features --all-targets -- -D warnings.
+Normal minimal cargo tree contains no htmd. Full core default tests pass.
+AC10 candidate plan_compile 25,389 ns, digest 2,462 ns; different host load from
+baseline, without A/A control, so no speed improvement or within-noise claim.
+Example runs successfully and is 99 formatted lines; embedding four tests pass.
+Compilation concurrency/cancellation fixture and default release-size measurement
+remain qualification work. Draft stack until these gates are resolved.
+
+
 
 Plan: [`../autonomous-core.md`](../autonomous-core.md). Only the agent
 working this plan edits this file. Current state on top; dated entries
@@ -49,7 +71,7 @@ appended below, newest last.
 | AC8 | Completion audit | Dropped (moved to goals G3) | | | Now `goals.md` G3 |
 | AC9 | Continue-if-idle | Dropped (moved to goals G2) | | | Now `goals.md` G2 |
 | AC10 | `qq-core` embedding surface + example | In progress | [ENG-1006](https://linear.app/retsu-ai/issue/ENG-1006) | `feat/eng-1006-ac10-core-embedding` | Public async constructors; credential-free runnable example; ADR-0050 § 1 |
-| AC11 | `tool-fetch` feature; minimal profile CI | Planned | | | ADR-0050 § 3 |
+| AC11 | `tool-fetch` feature; minimal profile CI | In progress | [ENG-1008](https://linear.app/retsu-ai/issue/ENG-1008) | `feat/eng-1008-ac11-tool-fetch` stacked on #253 | Minimal tests and Clippy pass; htmd absent; default size qualification pending |
 | AC12 | `qq-harness` crate (three mechanical moves) | Planned | | | ADR-0050 § 2 |
 | AC13 | Public-surface hygiene (`!`) | Planned | | | ADR-0050 § 4 |
 | AC14 | Surfaces for new state (was MRC-4) | Planned | | | |
