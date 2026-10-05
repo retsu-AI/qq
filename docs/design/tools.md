@@ -355,7 +355,7 @@ mid-run applies the same stubbing to its live transcript before failing.
 Compaction is the second. The summarizer writes a short narrative in five
 sections (Intent, Decisions and constraints, Work state, Open problems, Next
 step); QQ then appends a compaction record rendered from stored rows in the
-commit transaction (ADR-0055). The record carries every user message and
+commit transaction (ADR-0056). The record carries every user message and
 applied steering verbatim (newest kept first; older prompts are listed by
 ordinal for `search_history` and older steering is counted), the last
 assistant reply, the files modified and read through the built-in

@@ -27,7 +27,7 @@ pub(crate) const fn estimate_tokens(bytes: u64) -> u64 {
 /// Output tokens a summarizer request reserves: the run's resolved cap, held
 /// to an eighth of a declared window (but never below 8 192) so the reserve
 /// cannot crowd out the transcript it summarizes. A narrative of about 1 200
-/// words fits well inside either bound (ADR-0055).
+/// words fits well inside either bound (ADR-0056).
 pub(crate) fn summarizer_output_tokens(max_output_tokens: u32, context_window: Option<u32>) -> u32 {
     match context_window {
         Some(window) => max_output_tokens.min((window / 8).max(8_192)),
@@ -128,7 +128,7 @@ const MAX_CALIBRATED_BYTES_PER_TOKEN: u64 = 6;
 /// proactively, while it still fits, instead of waiting for the estimate to
 /// cross the window itself. Codex compacts at 90 %; fx at 80 %.
 const PROACTIVE_COMPACTION_HEADROOM_DIVISOR: u64 = 10;
-/// Upper bound on the compaction record QQ appends to a summary (ADR-0055).
+/// Upper bound on the compaction record QQ appends to a summary (ADR-0056).
 /// The storage envelope an eligible prompt reserves covers it.
 pub(crate) const COMPACTION_RECORD_BYTES: usize = 64 * 1024;
 const COMPACTION_STORAGE_ENVELOPE_BYTES: u64 = COMPACTION_RECORD_BYTES as u64 + 32;

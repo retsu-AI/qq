@@ -423,7 +423,7 @@ their effects stand. A QQ compaction record at its end was copied exactly from t
 store. The verbatim conversation resumes after it; continue the task.";
 /// The fixed instruction appended as the final user message of a compaction
 /// run. The model writes only the narrative; QQ renders the exact record
-/// from stored rows when the summary commits (ADR-0055).
+/// from stored rows when the summary commits (ADR-0056).
 const COMPACTION_INSTRUCTION: &str = "Summarize this conversation so it can replace the \
 transcript as model context. Do not call any tools. After your summary QQ appends an exact \
 record copied from the session store: every user message verbatim, the last assistant reply, \

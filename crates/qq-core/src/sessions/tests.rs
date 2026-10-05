@@ -2990,7 +2990,7 @@ fn valid_summary(body: &str) -> String {
     )
 }
 
-/// A summary in the six-section format stored before ADR-0055. It is never
+/// A summary in the six-section format stored before ADR-0056. It is never
 /// re-validated, and the next compaction folds it into the new sections.
 fn old_format_summary(body: &str) -> String {
     format!(

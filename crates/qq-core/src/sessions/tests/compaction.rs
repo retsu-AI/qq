@@ -1056,7 +1056,7 @@ async fn storage_overflow_compacts_before_the_queued_prompt() {
 async fn compaction_sends_and_persists_the_effective_output_cap() {
     // The summarizer asks for the run's own resolved cap. It used to clamp
     // at 8 192, which cut every long summary into a continuation turn
-    // (ADR-0055).
+    // (ADR-0056).
     for (configured, expected) in [(1_024, 1_024), (16_384, 16_384)] {
         // The prior answer leaves the prompt run over the storage backstop
         // (its reserve is the configured cap at 32 B/token plus the
@@ -2569,7 +2569,7 @@ async fn rollback_is_refused_while_the_session_is_not_idle() {
 
 #[tokio::test]
 async fn repeated_compactions_keep_every_user_message_verbatim_without_the_model_retyping_them() {
-    // ADR-0055: the record, not the model, carries user messages. This
+    // ADR-0056: the record, not the model, carries user messages. This
     // summarizer writes only a fixed narrative and never repeats a user
     // message; every message must still be verbatim in the latest summary
     // after several folds, and history stays bounded.
@@ -2702,7 +2702,7 @@ async fn repeated_compactions_keep_every_user_message_verbatim_without_the_model
 
 #[tokio::test]
 async fn an_old_format_summary_folds_into_the_new_format_even_when_the_record_is_larger() {
-    // A session compacted before ADR-0055 holds a small six-section
+    // A session compacted before ADR-0056 holds a small six-section
     // summary that hid a long first message. The next record restores that
     // message from rows, so the assembly grows past what the old summary
     // left. Shrinkage is required of the narrative only, so the fold still

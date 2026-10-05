@@ -1,4 +1,4 @@
-//! The compaction record (ADR-0055): the exact part of a compaction summary,
+//! The compaction record (ADR-0056): the exact part of a compaction summary,
 //! rendered by QQ from stored rows inside the commit transaction and stored
 //! after the model's narrative. It is rebuilt from rows at every compaction
 //! and never folded, so it stays exact however many times a session
