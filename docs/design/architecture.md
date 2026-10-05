@@ -1169,9 +1169,9 @@ progress: only a child's answer restarts the parent's stall count. The
 turn-top boundary takes reports; the tool-free wait takes them only in the
 same transaction as an answer, which ends the wait. So the wait delivers at
 most once per boundary, with one budget, and nothing it delivers can land
-between the waiting reply and steering that replay places first. Answers and reports share one
-delivery ordinal per parent run, so assembly replays them in the order the
-live run applied them. A child whose answer the store delivered before its
+between the waiting reply and steering that replay places first. Answers
+and reports share one delivery ordinal per parent run, so assembly replays
+them in the order the live run applied them. A child whose answer the store delivered before its
 owner task finished stays in the run's child registry, no longer
 outstanding, until that task ends, so teardown still awaits it.
 

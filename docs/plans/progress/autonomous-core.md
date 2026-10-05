@@ -1038,3 +1038,18 @@ the finding-3 fix.
     whose splice is pinned by
     `replay_drops_and_keeps_delivered_answers_as_the_in_run_splice_did`.
 
+### 2026-10-05: AP4.2 third review: approved
+
+NEW-1, NEW-2, NIT 1 and NIT 2 are resolved, and the reviewer accepted the
+reason for skipping NIT 3. The one new nit, an over-long line in
+`architecture.md`, is re-wrapped. The reviewer confirmed:
+
+- the store's `WithAnswers` rule guarantees the wait loop's
+  `debug_assert_eq!(delivered.reports, 0)` on every path, including the
+  poisoned registry, the default trait method and the test stubs;
+- a pending report reaches the next turn-top boundary after any steer, in
+  replay order.
+
+Verification: 2103 workspace tests pass; fmt and clippy are clean; the soak
+passes.
+
