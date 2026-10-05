@@ -35,6 +35,7 @@ url.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+qq-provider = { workspace = true, features = ["test-support"] }
 axum.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

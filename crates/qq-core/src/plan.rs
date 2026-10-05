@@ -402,9 +402,17 @@ impl AgentProfile {
     }
 }
 
+// Bound filesystem/catalog compilation independently of Tokio's blocking pool.
+pub(crate) static COMPILE_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
 /// Why a profile could not be compiled into a plan.
 #[derive(Debug, Error)]
 pub enum PlanCompileError {
+    #[error("plan compilation task did not finish: {source}")]
+    CompilationTask {
+        #[source]
+        source: tokio::task::JoinError,
+    },
     #[error(
         "exposed tool {name:?} is not a known static tool or a member of the discovered catalog"
     )]
@@ -560,6 +568,24 @@ impl fmt::Debug for CompiledAgentPlan {
 }
 
 impl CompiledAgentPlan {
+    /// Compiles off the async executor, with at most four concurrent compiler tasks.
+    /// Dropping this future does not interrupt filesystem work already started.
+    pub async fn compile(profile: AgentProfile) -> Result<Arc<Self>, PlanCompileError> {
+        let permit = COMPILE_SLOTS
+            .acquire()
+            .await
+            .expect("compile semaphore stays open");
+        match tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            Self::compile_blocking(profile)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(source) => Err(PlanCompileError::CompilationTask { source }),
+        }
+    }
+
     /// Compiles a profile. This opens the workspace, reads its instruction
     /// file, indexes its skill roots, builds the tool catalog from the static
     /// declarations and the host snapshots, and encodes the descriptor. It

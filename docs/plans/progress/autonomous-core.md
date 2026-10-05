@@ -1,5 +1,29 @@
 # Ledger — Autonomous core
 
+## 2026-10-05 — AC10 implementation (ENG-1006)
+
+Based on c37afe25 (CX0–CX2 merged); AP4.2 remains owned by a separate active agent.
+Read-only reconnaissance and independent review used. Isolated write-worker launches
+failed on shared store ownership; subsequent isolated launch was denied by approval
+review, so implementation proceeded directly without bypassing the denial.
+
+Added public Runtime::resolved_model, bounded async compilation and
+LoadedRuntime::from_runtime, lifecycle docs, and an under-100-line formatted example
+that actually approves and completes a file write without network/credentials.
+Simplified MCP session composition. Review found the pre-existing loader omitted
+shell/network policy; fixed and regression-tested against direct embedded digest.
+A subprocess test verifies explicit workspace independence from cwd.
+Shared paths authorized by coordinator: CI runs the example; provider test-support
+adds finite ScriptedProvider. No wire, schema, descriptor or default behavior bump.
+
+Verification so far: embedding 3/3 and MCP 1/1 passed; core library 831 passed,
+3 ignored. Initial new-public-API fixture failed on baseline as expected.
+Baseline plan_compile 49,877 ns/iteration, digest 4,701 ns/iteration; candidate
+and wider gates pending. Full baseline workspace hit headless timing test
+turn_budget_cancels_before_a_silent_over_budget_turn_can_hang; isolated rerun passed.
+No seven-day/live-soak acceptance claimed.
+
+
 Plan: [`../autonomous-core.md`](../autonomous-core.md). Only the agent
 working this plan edits this file. Current state on top; dated entries
 appended below, newest last.
@@ -24,7 +48,7 @@ appended below, newest last.
 | AC7 | Goal record and re-statement | Dropped (moved to goals G0) | | | Now `goals.md` G0 |
 | AC8 | Completion audit | Dropped (moved to goals G3) | | | Now `goals.md` G3 |
 | AC9 | Continue-if-idle | Dropped (moved to goals G2) | | | Now `goals.md` G2 |
-| AC10 | `qq-core` embedding surface + example | Planned | | | ADR-0050 § 1 |
+| AC10 | `qq-core` embedding surface + example | In progress | [ENG-1006](https://linear.app/retsu-ai/issue/ENG-1006) | `feat/eng-1006-ac10-core-embedding` | Public async constructors; credential-free runnable example; ADR-0050 § 1 |
 | AC11 | `tool-fetch` feature; minimal profile CI | Planned | | | ADR-0050 § 3 |
 | AC12 | `qq-harness` crate (three mechanical moves) | Planned | | | ADR-0050 § 2 |
 | AC13 | Public-surface hygiene (`!`) | Planned | | | ADR-0050 § 4 |
