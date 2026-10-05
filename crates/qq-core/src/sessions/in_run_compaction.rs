@@ -117,6 +117,20 @@ async fn compact_in_run(
             return Err(Error::Unavailable(error.to_string()));
         }
     }
+    // Like a between-run step, the compaction run reports one activity for
+    // its life; the prompt run already said `Compacting` before asking.
+    match inner
+        .store
+        .append_run_activity(&compaction, RunActivity::Compacting)
+        .await
+    {
+        Ok(event) => inner.notify(event.cursor),
+        Err(error) => {
+            guard.disarm();
+            settle_failed(inner, &compaction, error.to_string()).await;
+            return Err(Error::Unavailable(error.to_string()));
+        }
+    }
 
     // One provider turn: the run's transcript through the cutoff, then the
     // instruction. The summarizer sees the prompt so it knows the task, and

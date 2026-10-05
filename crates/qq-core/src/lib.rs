@@ -2313,6 +2313,11 @@ impl plan::CompiledAgentPlan {
                         } else {
                             messages[reducible_messages..cut].to_vec()
                         };
+                        // The summarizer is one silent provider turn; this
+                        // run's next turn reports `WaitingForProvider` again.
+                        yield RuntimeEvent::ActivityChanged {
+                            activity: RunActivity::Compacting,
+                        };
                         match compactor
                             .compact(runtime::InRunCompactionRequest {
                                 transcript,

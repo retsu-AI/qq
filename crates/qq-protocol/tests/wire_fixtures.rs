@@ -208,7 +208,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 30);
+    assert_eq!(PROTOCOL_VERSION, 31);
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
@@ -782,6 +782,17 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 usage: None,
                 context_tokens: None,
                 final_output: None,
+            },
+        ),
+    );
+    // Version 31: a run reports `compacting` while QQ summarizes context.
+    check(
+        "event_run_activity_compacting",
+        &envelope(
+            21,
+            SessionEvent::RunActivityChanged {
+                run_id,
+                activity: RunActivity::Compacting,
             },
         ),
     );

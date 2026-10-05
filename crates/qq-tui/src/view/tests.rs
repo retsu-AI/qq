@@ -4682,6 +4682,35 @@ fn the_composer_rule_carries_run_telemetry_notices_and_hints_in_priority_order()
     let rule = rule_at(&mut app, 140);
     assert!(rule.contains("turn 2  $0.10"), "{rule}");
 
+    // CX4: while the run compacts its own context the rule says so, and the
+    // sidebar row names it the same way.
+    app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(run_id),
+        occurred_at_ms: started + 5_000,
+        ..fixtures::envelope(
+            9,
+            session_id,
+            SessionEvent::RunActivityChanged {
+                run_id,
+                activity: qq_protocol::RunActivity::Compacting,
+            },
+        )
+    }));
+    let rule = rule_at(&mut app, 140);
+    assert!(rule.contains("compacting context 5.0s"), "{rule}");
+    app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(run_id),
+        occurred_at_ms: started + 5_000,
+        ..fixtures::envelope(
+            10,
+            session_id,
+            SessionEvent::RunActivityChanged {
+                run_id,
+                activity: qq_protocol::RunActivity::GeneratingResponse,
+            },
+        )
+    }));
+
     // A notice takes the left side and the hints step aside.
     app.apply_notice(None, crate::app::NoticeLevel::Info, "saved".to_owned());
     let rule = rule_at(&mut app, 100);

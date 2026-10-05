@@ -178,6 +178,7 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
                 Some(qq_protocol::RunActivity::Reasoning) => "reasoning",
                 Some(qq_protocol::RunActivity::GeneratingResponse) => "generating",
                 Some(qq_protocol::RunActivity::PreparingToolCall) => "preparing tool call",
+                Some(qq_protocol::RunActivity::Compacting) => "compacting context",
                 None => "working",
             },
             info(),

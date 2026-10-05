@@ -1,6 +1,67 @@
 use super::*;
 
 #[tokio::test]
+async fn a_compaction_run_reports_compacting_and_nothing_else() {
+    // CX4: a compaction run is one activity from start to finish. A
+    // snapshot taken while the summarizer is at the model already names it,
+    // and the summarizer's own provider activity is never published.
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("hello".to_owned()),
+        AutoCompactScript::Text(valid_summary("work so far")),
+        AutoCompactScript::Text("hello again".to_owned()),
+        AutoCompactScript::Stall,
+    ])
+    .await;
+    let first = queue_prompt(&harness.runtime, harness.session_id, "hi".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(first)).await;
+
+    let compaction = compact_session(&harness.runtime, harness.session_id).await;
+    let observed = collect_until(&mut harness.events, finished_for(compaction)).await;
+    assert_eq!(
+        finished_outcome(&observed, compaction),
+        Some(RunOutcome::Completed)
+    );
+    let activities: Vec<(RunId, RunActivity)> = observed
+        .iter()
+        .filter_map(|event| match &event.event {
+            SessionEvent::RunActivityChanged { run_id, activity } => Some((*run_id, *activity)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(activities, [(compaction, RunActivity::Compacting)]);
+
+    // A second compaction parks at the model; the snapshot says why.
+    let second = queue_prompt(&harness.runtime, harness.session_id, "more".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(second)).await;
+    let parked = compact_session(&harness.runtime, harness.session_id).await;
+    collect_until(&mut harness.events, |event| {
+        matches!(
+            event,
+            SessionEvent::RunActivityChanged { run_id, activity: RunActivity::Compacting }
+                if *run_id == parked
+        )
+    })
+    .await;
+    let snapshot = harness
+        .runtime
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            8,
+        ))
+        .await
+        .unwrap();
+    let summary = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == harness.session_id)
+        .unwrap();
+    assert_eq!(summary.active_run_id, Some(parked));
+    assert_eq!(summary.activity, Some(RunActivity::Compacting));
+}
+
+#[tokio::test]
 async fn compact_session_is_refused_while_active_and_never_runs_a_summarizer_tool_call() {
     let mut harness = session_management_harness().await;
     let queued = harness
@@ -4126,6 +4187,57 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
             SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. }
                 if run_id == compaction
         )));
+    }
+    // CX4: the prompt run reports `Compacting` before each of its
+    // compaction runs starts and `WaitingForProvider` after it finishes; the
+    // compaction run itself reports only `Compacting`.
+    let activities: Vec<(RunId, RunActivity)> = observed
+        .iter()
+        .filter_map(|event| match &event.event {
+            SessionEvent::RunActivityChanged { run_id, activity } => Some((*run_id, *activity)),
+            _ => None,
+        })
+        .collect();
+    for compaction in &compactions {
+        let position = |wanted: &dyn Fn(&SessionEvent) -> bool| {
+            observed
+                .iter()
+                .position(|event| wanted(&event.event))
+                .unwrap()
+        };
+        let started = position(
+            &|event| matches!(event, SessionEvent::RunStarted { run_id, .. } if run_id == compaction),
+        );
+        let finished = position(
+            &|event| matches!(event, SessionEvent::RunFinished { run_id, .. } if run_id == compaction),
+        );
+        let prompt_activity_before =
+            observed[..started]
+                .iter()
+                .rev()
+                .find_map(|event| match &event.event {
+                    SessionEvent::RunActivityChanged { run_id, activity } if *run_id == run => {
+                        Some(*activity)
+                    }
+                    _ => None,
+                });
+        assert_eq!(prompt_activity_before, Some(RunActivity::Compacting));
+        let prompt_activity_after =
+            observed[finished..]
+                .iter()
+                .find_map(|event| match &event.event {
+                    SessionEvent::RunActivityChanged { run_id, activity } if *run_id == run => {
+                        Some(*activity)
+                    }
+                    _ => None,
+                });
+        assert_eq!(prompt_activity_after, Some(RunActivity::WaitingForProvider));
+        let own: Vec<RunActivity> = activities
+            .iter()
+            .filter(|(run_id, _)| run_id == compaction)
+            .map(|(_, activity)| *activity)
+            .collect();
+        assert_eq!(own, [RunActivity::Compacting]);
     }
     // An in-run summary sends the run's own system prompt and tools, and
     // its messages are a prefix of the request the run sent just before it

@@ -636,7 +636,11 @@ impl SessionStore {
                     (Some(before), Some(after)) => Some(after.saturating_sub(before)),
                     _ => None,
                 };
-                view.activity = None;
+                // An in-run compaction run finishes while its prompt run
+                // still holds the session; that run's activity stays.
+                if view.activity.is_some_and(|(active, _)| active == *run_id) {
+                    view.activity = None;
+                }
                 view.live.active_tool = None;
                 view.live.awaiting_approval.clear();
                 if let Some(reasoning) = view.reasoning.get_mut(run_id) {

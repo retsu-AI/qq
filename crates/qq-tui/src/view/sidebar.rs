@@ -377,6 +377,7 @@ pub(super) fn live_status_line(app: &App, session_id: SessionId) -> Option<(Stri
             Some(qq_protocol::RunActivity::Reasoning) => "reasoning",
             Some(qq_protocol::RunActivity::GeneratingResponse) => "responding",
             Some(qq_protocol::RunActivity::PreparingToolCall) => "preparing a tool call",
+            Some(qq_protocol::RunActivity::Compacting) => "compacting context",
         };
         return Some((label.to_owned(), muted().italic()));
     }

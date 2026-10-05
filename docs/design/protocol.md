@@ -55,7 +55,7 @@ evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 30
+PROTOCOL_VERSION = 31
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -209,7 +209,7 @@ advertise it). Version 29 and 30 values are accepted in every field of type
 effort and is never sent on a provider wire, distinct from an absent pin
 (inherit). Neither adds a field; each moves the version because older decoders
 reject the new enum value. Store schema 37 and 39 gate the same values on disk.
-Golden fixtures live under `crates/qq-protocol/tests/fixtures/v30/`; `v23`–`v29`
+Golden fixtures live under `crates/qq-protocol/tests/fixtures/v31/`; `v23`–`v30`
 are retained decode-only.
 
 Version 29 adds `max` to the reasoning-effort vocabulary (every
@@ -230,8 +230,14 @@ model turn's runtime notice (`report`, `stall_report`, `continuation`, or
 answers of non-blocking sub-agents, and schema 42 `child_reports`, their
 delivered interim reports (ADR-0054 § 4). No wire shape changed: a delivered
 answer or report reaches clients through the child session's own events.
+
+Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
+and `SessionSummary.activity`). A compaction run reports it once, when it
+starts, and nothing else for its life; a prompt run reports it before it
+summarizes its own earlier turns and reports `waiting_for_provider` again at
+its next turn. No field was added; older clients reject the new value.
 Golden fixtures live under
-`crates/qq-protocol/tests/fixtures/v30/`; `v23`–`v29` are retained
+`crates/qq-protocol/tests/fixtures/v31/`; `v23`–`v30` are retained
 decode-only.
 
 Clients and servers must agree on this value.
@@ -1514,7 +1520,11 @@ Session status: `idle`, `queued`, `running`.
 children persisted before the call was recorded. `activity` mirrors the latest
 `run_activity_changed` for `active_run_id` and is absent when idle or unknown,
 so a client that loads mid-run shows the right label without waiting for the
-next event.
+next event. The values are `waiting_for_provider`, `reasoning`,
+`generating_response`, `preparing_tool_call`, and `compacting` (QQ is
+summarizing earlier context: a compaction run, or a prompt run compacting its
+own turns). An in-run compaction run starts and finishes while its prompt run
+holds the session; its `run_finished` does not end the prompt run's activity.
 
 `context_tokens` is the latest exact prompt-turn input total measured for the
 session. It is absent when unknown. A successful compaction or a model change
@@ -2011,7 +2021,7 @@ server's version and report the skew. Events, snapshots, and every inbound
 type stay strict.
 
 Golden encodings for every command, receipt, event, and the capability
-document live under `crates/qq-protocol/tests/fixtures/v30/` and are checked
+document live under `crates/qq-protocol/tests/fixtures/v31/` and are checked
 byte-for-byte by `crates/qq-protocol/tests/wire_fixtures.rs`. A wire change
 fails that test first; regenerate the goldens with `QQ_UPDATE_FIXTURES=1`
 after bumping `PROTOCOL_VERSION`.

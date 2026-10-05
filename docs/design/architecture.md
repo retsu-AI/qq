@@ -857,7 +857,11 @@ One durable run follows a guarded loop:
    summarizer settles its run failed/cancelled, writes no marker, and the
    prompt run fails closed with the reason — the overflowing request is
    never sent. Cancelling the prompt run cascades to its in-run compaction.
-   Direct `qq ask` runs have no compactor and fail as before.
+   Direct `qq ask` runs have no compactor and fail as before. The prompt
+   run reports `RunActivity::Compacting` before it asks and
+   `WaitingForProvider` at its next turn; every compaction run, between-run
+   or in-run, reports `Compacting` once when it starts and never publishes
+   its summarizer's provider activity.
 4. In one guarded transaction, persist the resolved model, prompt identity,
    exact request measurement, running/session/message state, and `RunStarted`.
 5. Re-read cancellation, then poll the provider only after that transaction
