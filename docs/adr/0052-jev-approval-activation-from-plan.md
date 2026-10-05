@@ -9,7 +9,7 @@ configuration per hold and cached per credential epoch". The rest of
 decision 5 (composition at the root, one reviewer handle, a missing key
 falling through at the first hold) and every other ADR-0041 decision stand.
 **Implements:** [`tools.md` § Approval Policy](../design/tools.md#approval-policy);
-[`plans/jev.md`](../plans/jev.md) JV1 (acceptance A1, activation part).
+[`plans/decision-models.md`](../plans/decision-models.md) JV1 (acceptance A1, activation part).
 **Related:** [ADR-0047](0047-jev-approval-hold-lifecycle.md) (Proposed)
 covers the wider consent and hold-lifecycle redesign. This ADR takes only
 the activation fix, which ADR-0047 decision 2 also calls for, so it can ship
@@ -20,7 +20,7 @@ before that package.
 ADR-0041 read activation from the held call's workspace configuration,
 reloaded without the run's profile or overrides, and cached the answer per
 workspace until the credential epoch changed. The 2026-09-25 audit
-(design/jev.md § 3, finding 5) reproduced three failures. Turning
+(design/decision-models.md § 3, finding 5) reproduced three failures. Turning
 `jev_approval` off kept calling TypeSafe until a credential mutation or
 restart. A profile's `jev_approval` was ignored in both directions. The
 per-workspace cache had no bound. The epoch tracks credentials, not
@@ -77,7 +77,7 @@ configuration, so it could never have observed a configuration edit.
 
 ## Evidence / references
 
-- Audit: [`design/jev.md` § 3](../design/jev.md#3-why-jev-mostly-hands-work-back), finding 5.
+- Audit: [`design/decision-models.md` § 3](../design/decision-models.md#3-why-jev-mostly-hands-work-back), finding 5.
 - Tests: `a_held_call_whose_plan_is_off_never_reaches_jev_whatever_was_cached`,
   `jev_approval_reaches_the_plan_from_config_profile_and_override_and_follows_edits`,
   `an_on_disk_jev_approval_edit_replaces_the_cached_plan`,
