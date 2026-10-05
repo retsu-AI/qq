@@ -10,23 +10,27 @@
 //! stood. The loop then splices the summary into its live transcript and
 //! continues. Direct runs have no compactor and fail as before.
 
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
-use qq_provider::Message;
+use qq_provider::{Message, ToolSpec};
 
-/// What the loop hands the compactor: the run's transcript from its prompt
-/// through the last turn to replace, and the ordinal of that turn. The
-/// compactor sees no retained turns, so its budget is the window less the
-/// output reserve, and it cannot summarize what stays verbatim.
+/// What the loop hands the compactor: the run's live request cut after the
+/// last turn to replace, and the ordinal of that turn. The compactor sees no
+/// retained turns, so it cannot summarize what stays verbatim. The request
+/// keeps the run's system prompt, tools, and message prefix so it reads the
+/// provider cache the run's own turns wrote (ADR-0056 § 5).
 pub(crate) struct InRunCompactionRequest {
-    /// The prompt and everything the run appended through `turn_cutoff`:
-    /// assistant turns, tool results, applied steering, runtime notices. The
-    /// preceding session context (already covered by between-run compaction)
-    /// is not included; the summarizer is told it is continuing a task.
+    /// The session context before the prompt, the prompt, and everything the
+    /// run appended through `turn_cutoff`: assistant turns, tool results,
+    /// applied steering, runtime notices.
     pub(crate) transcript: Vec<Message>,
     /// The last model turn ordinal the summary replaces. Turns after it stay
     /// verbatim in the live transcript and in replay.
     pub(crate) turn_cutoff: u32,
+    /// The run's system prompt (without a budget-final notice).
+    pub(crate) system: Arc<str>,
+    /// The run's declared tools. Calls are rejected, never run.
+    pub(crate) tools: Arc<[ToolSpec]>,
 }
 
 /// A committed in-run summary the loop splices in.

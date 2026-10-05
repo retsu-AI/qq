@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn compact_session_is_refused_while_active_and_rejects_undeclared_provider_tools() {
+async fn compact_session_is_refused_while_active_and_never_runs_a_summarizer_tool_call() {
     let mut harness = session_management_harness().await;
     let queued = harness
         .runtime
@@ -49,24 +49,20 @@ async fn compact_session_is_refused_while_active_and_rejects_undeclared_provider
     collect_through_finished(&mut harness.events).await;
 
     // Idle now: the compaction queues and executes through the ordinary
-    // machinery. Its request declares no tools, so a provider tool call
-    // is a protocol violation and cannot create a transient second turn.
+    // machinery. Its request declares the session's tools so it shares the
+    // provider cache (ADR-0056 § 5), but nothing runs: the call is rejected
+    // and the model asked again. This provider then answers "done", which is
+    // no summary, so the step fails closed on validation.
     let request_count_before = harness.requests.lock().unwrap().len();
     let compaction_run = compact_session(&harness.runtime, harness.session_id).await;
     let observed = collect_through_finished(&mut harness.events).await;
-    assert!(observed.iter().any(|event| matches!(
-        &event.event,
-        SessionEvent::RunFinished {
-            run_id,
-            outcome: RunOutcome::Failed {
-                failure: RunFailure {
-                    kind: RunFailureKind::ProviderProtocol,
-                    ..
-                }
-            },
-            ..
-        } if *run_id == compaction_run
-    )));
+    match finished_outcome(&observed, compaction_run) {
+        Some(RunOutcome::Failed { failure }) => {
+            assert_eq!(failure.kind, RunFailureKind::Policy, "{failure:?}");
+            assert!(failure.message.contains("missing required sections"));
+        }
+        other => panic!("expected a policy failure, got {other:?}"),
+    }
     assert!(
         !observed.iter().any(|event| matches!(
             &event.event,
@@ -78,11 +74,25 @@ async fn compact_session_is_refused_while_active_and_rejects_undeclared_provider
         "an internal run must publish no transcript or tool events"
     );
     let requests = harness.requests.lock().unwrap();
-    assert_eq!(requests.len(), request_count_before + 1);
-    let summary = requests.last().unwrap();
-    assert!(summary.tools().is_empty());
-    // It still carries the session's tool history: the shape the Bedrock
-    // codec renders as text (ENG-1002).
+    assert_eq!(requests.len(), request_count_before + 2);
+    let prompt = &requests[request_count_before - 1];
+    let summary = &requests[request_count_before];
+    assert_eq!(summary.system(), prompt.system());
+    assert_eq!(summary.tools(), prompt.tools());
+    // The retry answers the rejected call with its rejection.
+    let retry = requests.last().unwrap();
+    assert!(
+        retry
+            .messages()
+            .iter()
+            .flat_map(Message::content)
+            .any(|block| matches!(
+                block,
+                ContentBlock::ToolResult { content, is_error: true, .. }
+                    if content.starts_with("not executed: this is a compaction request")
+            ))
+    );
+    // It still carries the session's tool history.
     assert!(
         summary
             .messages()
@@ -97,6 +107,210 @@ async fn compact_session_is_refused_while_active_and_rejects_undeclared_provider
     );
     // The summarizer loaded through the ordinary loader path.
     assert_eq!(harness.models.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_between_run_summarizer_request_extends_the_prompt_request_it_follows() {
+    // ADR-0056 § 5: the summarizer sends the prompt run's system prompt and
+    // tools, and its messages are the session context the prompt run last
+    // sent plus that run's reply, then the instruction. A provider prefix
+    // cache therefore covers everything but the instruction.
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::ReadNoteThenText("read it".to_owned()),
+        AutoCompactScript::Text(valid_summary("folded")),
+    ])
+    .await;
+    std::fs::write(harness.workspace_path.join("note.txt"), "a short note\n").unwrap();
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "read the note".to_owned(),
+    )
+    .await;
+    collect_until(&mut harness.events, finished_for(run)).await;
+    let compaction = compact_session(&harness.runtime, harness.session_id).await;
+    let observed = collect_through_compacted(&mut harness.events).await;
+    assert_eq!(
+        finished_outcome(&observed, compaction),
+        Some(RunOutcome::Completed)
+    );
+
+    let requests = harness.requests.lock().unwrap();
+    let (prompt, summarizer) = (&requests[requests.len() - 2], requests.last().unwrap());
+    assert!(prompt.system().is_some());
+    assert_eq!(summarizer.system(), prompt.system());
+    assert_eq!(summarizer.tools(), prompt.tools());
+    assert!(!summarizer.tools().is_empty());
+    assert_eq!(summarizer.reasoning_effort(), prompt.reasoning_effort());
+    assert_eq!(summarizer.tool_choice(), prompt.tool_choice());
+    let (instruction, prefix) = summarizer.messages().split_last().unwrap();
+    assert_eq!(request_texts_of(instruction), [COMPACTION_INSTRUCTION]);
+    assert!(
+        prefix.starts_with(prompt.messages()),
+        "the summarizer must extend the prompt run's last request"
+    );
+    assert_eq!(
+        prefix.len(),
+        prompt.messages().len() + 1,
+        "plus the run's final reply"
+    );
+}
+
+fn request_texts_of(message: &Message) -> Vec<&str> {
+    message
+        .content()
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_summarizer_that_calls_a_tool_is_answered_once_and_its_reply_text_is_dropped() {
+    let summary = valid_summary("after one rejected call");
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("first answer".to_owned()),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::ToolCallWithText {
+                text: "let me look first".to_owned(),
+                tool: "read_file".to_owned(),
+            },
+            AutoCompactScript::Text(summary.clone()),
+        ]),
+    ])
+    .await;
+    let run = queue_prompt(&harness.runtime, harness.session_id, "one".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(run)).await;
+    std::fs::write(harness.workspace_path.join("canary"), "untouched").unwrap();
+    let compaction = compact_session(&harness.runtime, harness.session_id).await;
+    let observed = collect_through_compacted(&mut harness.events).await;
+    assert_eq!(
+        finished_outcome(&observed, compaction),
+        Some(RunOutcome::Completed)
+    );
+    assert!(!observed.iter().any(|event| matches!(
+        event.event,
+        SessionEvent::ToolCallRequested { .. } | SessionEvent::ToolCallFinished { .. }
+    )));
+
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let stored: String = connection
+        .query_row(
+            "SELECT summary FROM session_compactions WHERE run_id = ?1",
+            [compaction.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        stored.starts_with(&format!("{summary}\n\n{COMPACTION_RECORD_HEADER}")),
+        "{stored}"
+    );
+    assert!(!stored.contains("let me look first"));
+    let calls: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1",
+            [compaction.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(calls, 0, "a summarizer call is never recorded as work");
+    let requests = harness.requests.lock().unwrap();
+    let retry = requests.last().unwrap();
+    assert!(
+        retry
+            .messages()
+            .iter()
+            .flat_map(Message::content)
+            .any(|block| matches!(
+                block,
+                ContentBlock::ToolResult { content, is_error: true, .. }
+                    if content.starts_with("not executed: this is a compaction request")
+            ))
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_call_turn_after_a_cut_reply_drops_the_abandoned_fragment() {
+    // Turn one is cut mid-reply; turn two continues it but calls a tool and
+    // is rejected; turn three writes the summary. The stored summary is
+    // turn three alone: the fragment of the abandoned reply is not joined to
+    // it.
+    let summary = valid_summary("clean");
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("first answer".to_owned()),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::Truncated("1. Intent: abandoned frag".to_owned()),
+            AutoCompactScript::ToolCallWithText {
+                text: "ment".to_owned(),
+                tool: "read_file".to_owned(),
+            },
+            AutoCompactScript::Text(summary.clone()),
+        ]),
+    ])
+    .await;
+    let run = queue_prompt(&harness.runtime, harness.session_id, "one".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(run)).await;
+    let compaction = compact_session(&harness.runtime, harness.session_id).await;
+    let observed = collect_through_compacted(&mut harness.events).await;
+    assert_eq!(
+        finished_outcome(&observed, compaction),
+        Some(RunOutcome::Completed)
+    );
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let stored: String = connection
+        .query_row(
+            "SELECT summary FROM session_compactions WHERE run_id = ?1",
+            [compaction.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        stored.starts_with(&format!("{summary}\n\n{COMPACTION_RECORD_HEADER}")),
+        "{stored}"
+    );
+    assert!(!stored.contains("abandoned"));
+}
+
+#[tokio::test]
+async fn a_summarizer_that_calls_tools_on_two_turns_fails_closed() {
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("first answer".to_owned()),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::ToolCallWithText {
+                text: String::new(),
+                tool: "read_file".to_owned(),
+            },
+            AutoCompactScript::ToolCallWithText {
+                text: String::new(),
+                tool: "shell".to_owned(),
+            },
+        ]),
+        AutoCompactScript::Text("after".to_owned()),
+    ])
+    .await;
+    let run = queue_prompt(&harness.runtime, harness.session_id, "one".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(run)).await;
+    let compaction = compact_session(&harness.runtime, harness.session_id).await;
+    let observed = collect_until(&mut harness.events, finished_for(compaction)).await;
+    match finished_outcome(&observed, compaction) {
+        Some(RunOutcome::Failed { failure }) => {
+            assert_eq!(failure.kind, RunFailureKind::ProviderProtocol);
+            assert!(
+                failure.message.contains("called a tool on two turns"),
+                "{failure:?}"
+            );
+        }
+        other => panic!("expected a protocol failure, got {other:?}"),
+    }
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+    );
+    // Exactly the prompt, the first summarizer turn, and its one retry.
+    assert_eq!(harness.requests.lock().unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -1094,7 +1308,7 @@ async fn compaction_sends_and_persists_the_effective_output_cap() {
             let requests = harness.requests.lock().unwrap();
             assert_eq!(requests.len(), 3);
             assert_eq!(requests[1].max_output_tokens(), expected);
-            assert!(requests[1].tools().is_empty());
+            assert_eq!(requests[1].tools(), requests[0].tools());
         }
         assert!(observed.iter().any(|event| matches!(
             &event.event,
@@ -3913,8 +4127,37 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
                 if run_id == compaction
         )));
     }
-    // An in-run summary declares no tools yet carries the run's tool calls
-    // and results: the shape Bedrock's codec renders as text (ENG-1002).
+    // An in-run summary sends the run's own system prompt and tools, and
+    // its messages are a prefix of the request the run sent just before it
+    // (the turn that overflowed is cut at the boundary), so a provider
+    // prefix cache covers all but the instruction (ADR-0056 § 5).
+    {
+        let requests = harness.requests.lock().unwrap();
+        let index = requests
+            .iter()
+            .position(|request| {
+                request_texts(request)
+                    .last()
+                    .is_some_and(|text| text.starts_with("The task above is still in progress"))
+            })
+            .expect("an in-run summary request");
+        let (summary, before) = (&requests[index], &requests[index - 1]);
+        assert_eq!(summary.system(), before.system());
+        assert_eq!(summary.tools(), before.tools());
+        assert_eq!(summary.reasoning_effort(), before.reasoning_effort());
+        let (_, prefix) = summary.messages().split_last().unwrap();
+        assert!(
+            before.messages().starts_with(prefix),
+            "the in-run summarizer must send a prefix of the run's last request"
+        );
+        assert_eq!(
+            prefix.first(),
+            before.messages().first(),
+            "it keeps the prompt"
+        );
+    }
+    // An in-run summary declares the run's tools and carries its tool
+    // calls and results.
     {
         let requests = harness.requests.lock().unwrap();
         let summary = requests
@@ -3925,7 +4168,7 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
                     .is_some_and(|text| text.starts_with("The task above is still in progress"))
             })
             .expect("an in-run summary request");
-        assert!(summary.tools().is_empty());
+        assert!(!summary.tools().is_empty());
         assert!(
             summary
                 .messages()
@@ -4061,6 +4304,64 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
         &harness.workspace_path.join("sessions.sqlite3"),
         harness.session_id,
     );
+}
+
+#[tokio::test]
+async fn an_in_run_summarizer_keeps_the_session_context_before_its_prompt() {
+    // The second prompt of a session compacts itself mid-run. Its
+    // summarizer request starts with the first prompt and its reply, as
+    // every turn of the run did, so the cached prefix is shared; the earlier
+    // context is not summarized away.
+    let mut harness = auto_compact_harness_with_loader_and_mode(
+        AutoCompactLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            scripts: vec![
+                AutoCompactScript::Text("first answer".to_owned()),
+                AutoCompactScript::ShellRepeatedlyWithSummaries {
+                    turns: 48,
+                    text: "task complete".to_owned(),
+                    summary: valid_summary("work so far"),
+                },
+            ],
+            loads: StdMutex::new(0),
+            context_window: Some(16 * 1024),
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        },
+        ApprovalMode::Full,
+    )
+    .await;
+    let first = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "earlier work".to_owned(),
+    )
+    .await;
+    collect_until(&mut harness.events, finished_for(first)).await;
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "do the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert_eq!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    );
+    let requests = harness.requests.lock().unwrap();
+    let summary = requests
+        .iter()
+        .find(|request| {
+            request_texts(request)
+                .last()
+                .is_some_and(|text| text.starts_with("The task above is still in progress"))
+        })
+        .expect("an in-run summary request");
+    let texts = request_texts(summary);
+    assert_eq!(texts[0], "earlier work");
+    assert_eq!(texts[1], "first answer");
+    assert_eq!(texts[2], "do the task");
 }
 
 #[tokio::test]

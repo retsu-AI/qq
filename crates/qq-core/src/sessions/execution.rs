@@ -69,6 +69,39 @@ impl ToolGate for CompactionRunGate {
     }
 }
 
+/// The prompt prefix a session's prompt runs use, for a summarizer that must
+/// share their provider cache (ADR-0056 § 5). It mirrors the capabilities
+/// `prepare_execution` gives a prompt run: a root session's prompts are the
+/// user's, a child session's are its parent's task. A user prompt typed into
+/// a child session uses the user key instead, so its compaction only misses
+/// the cache. The golden tests hold the two derivations equal.
+fn session_prompt_prefix_key(
+    claimed: &ClaimedRun,
+    loaded: &LoadedRuntime,
+) -> crate::plan::PromptPrefixKey {
+    let delegation = &loaded.plan.descriptor().delegation;
+    let user = claimed.depth == 0;
+    crate::plan::PromptPrefixKey {
+        tools: Some(crate::catalog::StaticFilter {
+            spawn_agent: claimed.depth < delegation.max_depth.min(MAX_CHILD_DEPTH),
+            search_history: true,
+            read_tool_result: true,
+            load_skill: user,
+            read_only: claimed.approval_mode == ApprovalMode::ReadOnly,
+        }),
+        guidance: user,
+        subagent: (!user && claimed.purpose == SessionPurpose::Task).then_some(
+            match claimed.approval_mode {
+                ApprovalMode::ReadOnly => crate::runtime::SubagentAuthority::Read,
+                ApprovalMode::Supervised
+                | ApprovalMode::Ask
+                | ApprovalMode::Auto
+                | ApprovalMode::Full => crate::runtime::SubagentAuthority::Write,
+            },
+        ),
+    }
+}
+
 struct PreparedExecution {
     events: crate::RuntimeStream,
     audit: PreparedRunAudit,
@@ -313,7 +346,7 @@ async fn prepare_execution(
                 },
                 None,
             )
-            .without_tools()
+            .summarizer(session_prompt_prefix_key(claimed, loaded))
             .with_max_output_tokens(context::summarizer_output_tokens(
                 loaded.resolved_model().max_output_tokens,
                 loaded.resolved_model().context_window,
@@ -2431,16 +2464,24 @@ async fn execute_started_run(
                             .and_then(|pricing| run_cost(usage, pricing))
                     });
                     accounting.record_turn(usage);
-                    for block in message.content() {
-                        if let ContentBlock::Text { text } = block {
-                            if !summary_text.is_empty() && !summary_continues_truncated_turn {
-                                summary_text.push('\n');
+                    if calls.is_empty() {
+                        for block in message.content() {
+                            if let ContentBlock::Text { text } = block {
+                                if !summary_text.is_empty() && !summary_continues_truncated_turn {
+                                    summary_text.push('\n');
+                                }
+                                summary_text.push_str(text);
+                                summary_continues_truncated_turn = false;
                             }
-                            summary_text.push_str(text);
-                            summary_continues_truncated_turn = false;
                         }
+                        summary_continues_truncated_turn = truncated;
+                    } else {
+                        // The summarizer called a tool, which was rejected:
+                        // it abandoned its reply, and the next turn starts a
+                        // new one, so nothing written so far is kept.
+                        summary_text.clear();
+                        summary_continues_truncated_turn = false;
                     }
-                    summary_continues_truncated_turn = truncated;
                     current_turn = turn_ordinal.saturating_add(1);
                     match inner
                         .store

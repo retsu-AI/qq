@@ -74,10 +74,16 @@ On the lead's store, a compaction takes 110–390 s (`progress/compaction.md`,
    (`context::summarizer_output_tokens`). The fixed 8 192 clamp is gone. A
    narrative fits in one turn, so the cap is a ceiling, and the window bound
    keeps the reserve from crowding out the transcript it summarizes.
-5. **The summarizer request is cache-aligned (CX2).** It carries the prompt
-   run's system prompt and tool declarations. Calls to declared tools are
-   denied, and one rejected-call turn is allowed before the step fails
-   closed. It inherits the session's reasoning effort.
+5. **The summarizer request is cache-aligned (CX2).** It carries the
+   system prompt and tool list of the session's prompt runs, built from the
+   same `PromptPrefixKey`, and the session's reasoning effort. Context
+   sources and an output contract are not applied to it. A between-run
+   summarizer sends the assembled context plus the instruction; an in-run
+   summarizer sends the run's live request cut before the kept turns, plus
+   the instruction. Calls to declared tools are never run: each is answered
+   with a rejection result (with the turn's replay data, which reasoning
+   providers require), everything written up to that turn is discarded, and
+   a second turn with a call fails the step closed.
 6. **Pruning advances at seams (CX3).** Assembly stubs results only up to a
    durable watermark, which moves at the live overflow prune and the
    proactive threshold. Between seams, each request extends the last one.
@@ -104,8 +110,26 @@ On the lead's store, a compaction takes 110–390 s (`progress/compaction.md`,
   2026-10-02).
 - The in-run commit returns the stored text, so the live splice and replay
   render the same bytes.
-- CX2 changes the summarizer's request shape and CX3 needs a schema bump.
-  Each is recorded in the ledger when it lands.
+- A summarizer request now pays for the tool declarations it does not use.
+  On a cache hit they are cached tokens; on a miss they cost what the
+  prompt run's first turn costs.
+- The between-run prefix key is derived from the session (depth, purpose,
+  approval mode, delegation depth), mirroring what a prompt run gets. A
+  user prompt typed into a child session uses a different key, so its
+  compaction misses the cache but is otherwise correct.
+- What is cached. The tool block always matches the prompt runs'. The
+  system prompt matches when the session uses no context sources, skill
+  invocation or output contract, which are per-run suffixes a summarizer
+  does not send. The messages extend the prompt run's last request only
+  when assembly pruned nothing since that run; today assembly stubs
+  read-only results older than four turns, and CX3 removes that
+  divergence. In-run, the messages are a prefix of the run's own last
+  request.
+- An in-run summarizer whose full prefix would not fit the window, judged
+  on the loop's own estimate, or that runs right after the provider rejected
+  that estimate, drops the session context before the prompt, as before
+  CX2: a cache miss, not an oversized request.
+- CX3 needs a schema bump and is recorded in the ledger when it lands.
 
 ## Alternatives considered
 

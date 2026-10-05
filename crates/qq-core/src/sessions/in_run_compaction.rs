@@ -9,8 +9,9 @@
 //! which the prompt run holds. The marker it commits is scoped to the prompt
 //! run (`session_compactions.scope_run_id`, `turn_cutoff`), so replay renders
 //! the summary where the replaced turns stood and the between-run cutoff is
-//! untouched. The summarizer request is provider-direct: no tools, no
-//! steering, no audit, one turn.
+//! untouched. The summarizer request is provider-direct: no steering, no
+//! audit. It declares the run's tools and system prompt only so it shares the
+//! run's provider cache; a call is rejected, never run (ADR-0056 § 5).
 
 use super::{
     execution::{RunAccounting, cancellation_requested},
@@ -126,6 +127,8 @@ async fn compact_in_run(
     )));
     let summarize = plan.runtime.summarize(
         messages,
+        request.system,
+        request.tools,
         super::context::summarizer_output_tokens(
             resolved_model.max_output_tokens,
             resolved_model.context_window,
@@ -291,7 +294,8 @@ async fn settle_failed(inner: &Arc<SessionRuntimeInner>, compaction: &ClaimedRun
 /// Prepended to the standard instruction so the summarizer knows the summary
 /// replaces the assistant's own earlier turns of a task still in progress.
 const IN_RUN_COMPACTION_INSTRUCTION_PREFIX: &str = "The task above is still in progress. The \
-messages after the first user message are your own earlier work on it; summarize that work so \
-it can replace those messages while you continue. Record what was done, what each tool \
+messages after its prompt (the last user message before your work began) are your own earlier \
+work on it; summarize that work so it can replace those messages while you continue. Earlier \
+session context before that prompt stays as it is; do not summarize it. Record what was done, what each tool \
 returned that still matters, and what remains. The task prompt stays verbatim above the \
 summary.";

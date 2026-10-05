@@ -8,7 +8,7 @@ newest last.
 | --- | --- | --- | --- | --- | --- |
 | CX0 | Plan, ADR-0056, ledger and baseline | In review | [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) | [#239](https://github.com/retsu-AI/qq/pull/239) | Same PR as CX1 |
 | CX1 | Narrative plus rendered record; resolved output cap | In review | [ENG-994](https://linear.app/retsu-ai/issue/ENG-994) | [#239](https://github.com/retsu-AI/qq/pull/239) | No schema or protocol change |
-| CX2 | Cache-aligned summarizer requests | Planned | [ENG-995](https://linear.app/retsu-ai/issue/ENG-995) | | Stacked on CX1 |
+| CX2 | Cache-aligned summarizer requests | In review | [ENG-995](https://linear.app/retsu-ai/issue/ENG-995) | `perf/eng-995-cx2-cache-aligned-summarizer` | Stacked on #239 |
 | CX3 | Durable prune watermark | Planned | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | | Schema 41 → 42 |
 | CX4 | `RunActivity::Compacting` | Planned | [ENG-997](https://linear.app/retsu-ai/issue/ENG-997) | | `PROTOCOL_VERSION` 30 → 31; takes AC14's compaction-activity item |
 | CX5 | Live qualification | Planned | [ENG-998](https://linear.app/retsu-ai/issue/ENG-998) | | 7 days after CX3 |
@@ -129,3 +129,71 @@ ADR is now **0056**: file renamed, reservation moved in `root.md`, next free
 decision-model ADR-0055. It is reopened as #249 under the same number, so
 this plan keeps **ADR-0056**, and `root.md` holds 0055 reserved for #249.
 None of the reverted content is in this branch.
+
+### 2026-10-04 — CX2 implementation (ENG-995)
+
+- **Request shape.** `RunCapabilities::summarizer(PromptPrefixKey)` replaces
+  `without_tools` for compaction runs.
+  - The request uses the prompt runs' system prompt and tools.
+  - It fetches no context sources and sends no output contract.
+  - The prefix key is derived from the session
+    (`execution::session_prompt_prefix_key`).
+- **Rejected calls.** Every summarizer call settles as a rejection and
+  nothing runs. The text of that turn is left out of the summary, and a
+  second turn with a call fails `ProviderProtocol`. `Runtime::summarize`
+  (in-run) does the same.
+- **In-run transcript.** The in-run summarizer gets the live system prompt,
+  tools, and the full message prefix through the boundary. It falls back to
+  the run alone only if that would not fit the window.
+- **Soak fixture.** It now recognizes summarizers by their instruction
+  instead of by an empty tool list.
+- **Tests.** Six were added:
+  - `a_between_run_summarizer_request_extends_the_prompt_request_it_follows`
+  - `a_summarizer_that_calls_a_tool_is_answered_once_and_its_reply_text_is_dropped`
+  - `a_summarizer_that_calls_tools_on_two_turns_fails_closed`
+  - `an_in_run_summarizer_keeps_the_session_context_before_its_prompt`
+    (fails if the full-prefix path is disabled)
+  - `a_summarizer_run_sends_the_prompt_runs_system_prompt_and_tools_without_context_sources`
+  - the in-run prefix assertion in
+    `one_run_spanning_several_windows_compacts_its_own_turns_and_completes`
+
+  Three existing tests changed: they asserted that summarizer requests had
+  no tools.
+
+Gates, on the same host against the CX1 tip `e0fd1a0a`:
+
+| Gate | Base | CX2 |
+| --- | --- | --- |
+| `context_assembly` assemble @ 10 000 archived, 200 iterations, A/B/A/B | 63.6 / 58.6 µs | 58.3 / 62.3 µs |
+| `turn_overhead` median ns/turn @ 10 / 100 / 1 000, default 3 iterations, B/A/B (host under load) | 74.9 / 73.0 / 68.3 ms | 69.3 / 72.4 / 68.5 and 71.6 / 68.1 / 67.9 ms |
+
+Both are within noise. The live cache-read share is measured in CX5.
+
+### 2026-10-04 — CX2 review (ENG-995)
+
+An independent read-only review found no blockers. Its should-fix items are
+resolved:
+- **Abandoned reply.** A rejected-call turn now discards everything the
+  summarizer wrote so far, in both paths. A cut reply followed by a call
+  turn could otherwise join its fragment to the next summary. Regression:
+  `a_rejected_call_turn_after_a_cut_reply_drops_the_abandoned_fragment`,
+  which fails without the fix.
+- **Replay data.** The in-run retry sends the rejected turn's replay data,
+  which Anthropic thinking requires.
+- **In-run fit check.** It now uses the loop's measured-chain estimate, and
+  falls back to the run alone right after a provider window rejection.
+- **Tests.** Prefix-key parity for a read child:
+  `a_child_sessions_summarizer_uses_the_childs_own_prompt_prefix`, which
+  fails if the child key is derived wrongly. `Runtime::summarize` gets unit
+  tests for one call turn with replay, a second call turn, and a cut call
+  turn.
+- **ADR wording.** ADR § Consequences now states what is cached and when:
+  pruning divergence until CX3, per-run system suffixes, and the fallback
+  trigger.
+
+Two wall-clock-timeout tests failed once under full-workspace load and pass
+3/3 alone:
+- `hard_cost_budget_cancels_an_unmetered_looping_child`
+- `wall_clock_budget_settles_a_hanging_provider_without_a_final_response`
+
+The full re-run gives 2 099 passed, 13 ignored.

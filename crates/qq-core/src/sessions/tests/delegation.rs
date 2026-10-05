@@ -423,6 +423,68 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
 }
 
 #[tokio::test]
+async fn a_child_sessions_summarizer_uses_the_childs_own_prompt_prefix() {
+    // ADR-0056 § 5: compacting a read child sends the child's system prompt
+    // (with its sub-agent section, without skills) and its read-only tool
+    // list, the prefix its own prompt runs cached, not a root's.
+    let parent_requests = Arc::new(StdMutex::new(Vec::new()));
+    let child_requests = Arc::new(StdMutex::new(Vec::new()));
+    let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::clone(&parent_requests),
+        script: vec![(
+            "spawn_agent",
+            r#"{"task":"Survey the widget inventory","model":"test/child"}"#.to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::clone(&child_requests),
+        script: vec![("read_file", r#"{"path":"a.txt"}"#.to_owned())],
+        turn: StdMutex::new(0),
+    });
+    let mut harness = spawn_harness(vec![("test/child", child)], vec![parent], 8).await;
+    std::fs::write(harness._directory.path().join("a.txt"), "widgets\n").unwrap();
+    let run_id =
+        submit_prompt_to(&harness.runtime, harness.session_id, "delegate the survey").await;
+    let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+    let child_session = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::SessionCreated { session }
+                if session.parent_id == Some(harness.session_id) =>
+            {
+                Some(session.id)
+            }
+            _ => None,
+        })
+        .expect("a child session");
+
+    let compaction = compact_session(&harness.runtime, child_session).await;
+    let observed = collect_until_run_finished(&mut harness.events, compaction).await;
+    assert_eq!(
+        finished_outcome(&observed, compaction),
+        Some(RunOutcome::Completed)
+    );
+    let requests = child_requests.lock().unwrap();
+    let summarizer = requests.last().unwrap();
+    let prompt = &requests[requests.len() - 2];
+    assert!(
+        request_texts(summarizer)
+            .last()
+            .is_some_and(|text| text.starts_with("Summarize this conversation"))
+    );
+    assert!(prompt.system().unwrap().contains("Sub-agent:"));
+    assert_eq!(summarizer.system(), prompt.system());
+    assert_eq!(summarizer.tools(), prompt.tools());
+    let tools: Vec<&str> = summarizer.tools().iter().map(|tool| tool.name()).collect();
+    assert!(tools.contains(&"read_file"));
+    assert!(
+        !tools.contains(&"edit_file"),
+        "a read child's list stays read-only"
+    );
+}
+
+#[tokio::test]
 async fn child_final_checkpoint_is_durable_before_parent_spawn_result() {
     let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::new(StdMutex::new(Vec::new())),

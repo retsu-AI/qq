@@ -3132,6 +3132,9 @@ enum AutoCompactScript {
     /// summarizer instruction is answered with a valid summary carrying
     /// `turns_done`, so in-run compactions after the checkpoint keep going.
     ShellBatchesAcrossACheckpoint { calls: usize, text: String },
+    /// One turn that writes `text` (when not empty) and then calls `tool`
+    /// with empty arguments.
+    ToolCallWithText { text: String, tool: String },
     /// `ShellRepeatedlyWithSummaries` whose summarizer reply is cut at the
     /// output limit after `cut` bytes on the first request and completed on
     /// the continuation, so an in-run summary exercises the truncation join.
@@ -3339,6 +3342,28 @@ impl Provider for AutoCompactProvider {
                     reason: qq_provider::IncompleteReason::OutputTokens,
                 }),
             ])),
+            AutoCompactScript::ToolCallWithText { text, tool } => {
+                let id = format!("call_summarizer_{}", prior_results.len());
+                let mut events = Vec::new();
+                if !text.is_empty() {
+                    events.push(Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                        text: text.clone(),
+                    }));
+                }
+                events.extend([
+                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: tool.clone(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: r#"{"path":"canary"}"#.to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
+                    Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                ]);
+                Box::pin(stream::iter(events))
+            }
             AutoCompactScript::ReadNoteThenText(text) => {
                 if already_read {
                     Box::pin(stream::iter([
