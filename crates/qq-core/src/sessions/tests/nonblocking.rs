@@ -2522,3 +2522,148 @@ async fn steering_during_a_wait_with_a_pending_report_replays_as_live() {
     assert_replay_matches_live(&mut delegation).await;
     delegation.harness.runtime.shutdown().await.unwrap();
 }
+
+/// A parent provider that holds its turn `gated` (0-based) until a permit
+/// is added, so a test can place that turn's calls against other events.
+struct GatedParent {
+    inner: ScriptedParent,
+    gated: usize,
+    permit: Arc<tokio::sync::Semaphore>,
+}
+
+impl Provider for GatedParent {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        let turn = self.inner.turn.load(Ordering::Acquire);
+        let events = self.inner.stream(request);
+        if turn != self.gated {
+            return events;
+        }
+        let permit = Arc::clone(&self.permit);
+        Box::pin(async_stream::stream! {
+            permit.acquire().await.unwrap().forget();
+            let mut events = events;
+            while let Some(event) = events.next().await {
+                yield event;
+            }
+        })
+    }
+}
+
+/// Codex review on #257: a child whose run has already settled durably while
+/// its owner task is still reading the answer finished on its own. A cancel
+/// that lands in that window must report it as already finished, and the
+/// parent then receives the child's real answer, not a cancellation.
+#[tokio::test]
+async fn cancelling_a_child_that_just_finished_reports_it_finished() {
+    fn cancel_first(children: &[String]) -> String {
+        format!(r#"{{"id":"{}"}}"#, children[0])
+    }
+    let parent_requests = Arc::new(StdMutex::new(Vec::new()));
+    let parent_turn = Arc::new(tokio::sync::Notify::new());
+    let parent_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let parent: Arc<dyn Provider> = Arc::new(GatedParent {
+        inner: ScriptedParent {
+            requests: Arc::clone(&parent_requests),
+            script: vec![
+                ParentTurn::Calls(vec![spawn("survey")]),
+                ParentTurn::WithChildren("cancel_agent", cancel_first),
+            ],
+            turn: AtomicUsize::new(0),
+            turn_started: Arc::clone(&parent_turn),
+        },
+        gated: 1,
+        permit: Arc::clone(&parent_gate),
+    });
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let started = Arc::new(AtomicUsize::new(0));
+    let child: Arc<dyn Provider> = Arc::new(GatedChild {
+        gate: Arc::clone(&gate),
+        answer: "finished on its own",
+        started: Arc::clone(&started),
+    });
+    let harness = spawn_harness(
+        vec![("test/child", child)],
+        vec![Arc::clone(&parent), parent],
+        8,
+    )
+    .await;
+    let mut delegation = Delegation {
+        harness,
+        parent_requests: Arc::clone(&parent_requests),
+        gate,
+        children_started: started,
+        parent_turn,
+    };
+    let run = submit_prompt_to(
+        &delegation.harness.runtime,
+        delegation.harness.session_id,
+        "survey",
+    )
+    .await;
+    children_started(&delegation, 1).await;
+    let session_id = delegation.harness.session_id;
+    let store = delegation.harness.runtime.inner.store.clone();
+    let child_run: RunId = store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT r.id FROM runs r JOIN sessions s ON s.id = r.session_id
+                 WHERE s.parent_id = ?1",
+                [session_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )?)
+        })
+        .await
+        .unwrap()
+        .parse()
+        .unwrap();
+    // Hold the owner task's outcome reads one at a time until it is about
+    // to read a settled outcome: the child's run is durable, but its owner
+    // has not yet published completion.
+    let (mut entered, mut release, _) = store::hold_outcome_read(child_run);
+    delegation.gate.add_permits(1);
+    let release = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            entered.await.unwrap();
+            let settled: bool = store
+                .call(Priority::Control, move |connection| {
+                    Ok(connection.query_row(
+                        "SELECT outcome_json IS NOT NULL FROM runs WHERE id = ?1",
+                        [child_run.to_string()],
+                        |row| row.get(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            if settled {
+                break release;
+            }
+            let (next_entered, next_release, _) = store::hold_outcome_read(child_run);
+            release.send(()).unwrap();
+            entered = next_entered;
+            release = next_release;
+        }
+    })
+    .await
+    .unwrap();
+    // The parent's cancel_agent lands inside that window.
+    parent_gate.add_permits(1);
+    parent_sent(&delegation, 2).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    release.send(()).unwrap();
+    let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
+    assert!(matches!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    ));
+    let requests = delegation.parent_requests.lock().unwrap().clone();
+    let cancel_result = tool_results(&requests[2]).pop().unwrap();
+    assert!(
+        cancel_result.ends_with("had already finished; its answer arrives as a runtime notice."),
+        "{cancel_result}"
+    );
+    assert_eq!(
+        delivered_answers(&requests),
+        [("finished on its own".to_owned(), true)]
+    );
+    delegation.harness.runtime.shutdown().await.unwrap();
+}

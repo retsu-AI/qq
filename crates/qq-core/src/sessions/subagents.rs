@@ -220,9 +220,13 @@ impl ChildTasks {
     }
 
     /// Stops one outstanding detached child and waits for its owner task to
-    /// settle it. Its answer stays undelivered for the next boundary.
+    /// settle it. Its answer stays undelivered for the next boundary. The
+    /// result follows the child's durable outcome: a child whose run had
+    /// already settled when the cancel arrived (its owner task was still
+    /// reading the answer) finished on its own, and is reported so.
     async fn cancel_detached(
         &self,
+        store: &Store,
         id: SessionId,
     ) -> Result<crate::runtime::CancelOutcome, crate::runtime::DeliveryError> {
         let found = {
@@ -233,9 +237,9 @@ impl ChildTasks {
             tasks
                 .values()
                 .find(|task| task.outstanding() && task.session_id == Some(id))
-                .map(|task| (task.cancel.clone(), task.completed.clone()))
+                .map(|task| (task.cancel.clone(), task.completed.clone(), task.run_id))
         };
-        let Some((cancel, mut completed)) = found else {
+        let Some((cancel, mut completed, Some(run_id))) = found else {
             return Ok(crate::runtime::CancelOutcome::Unknown);
         };
         if completed.borrow().is_some() {
@@ -247,7 +251,16 @@ impl ChildTasks {
                 return Err(crate::runtime::DeliveryError::Registry);
             }
         }
-        Ok(crate::runtime::CancelOutcome::Cancelled)
+        match store.run_outcome(run_id).await {
+            Ok(Some((RunOutcome::Cancelled, _))) => Ok(crate::runtime::CancelOutcome::Cancelled),
+            Ok(Some(_)) => Ok(crate::runtime::CancelOutcome::AlreadyFinished),
+            // A finished owner task left its run settled unless the runtime
+            // failed on the way (and that failure is already raised).
+            Ok(None) => Err(crate::runtime::DeliveryError::Store(
+                SessionRuntimeError::CONSTRAINT,
+            )),
+            Err(error) => Err(crate::runtime::DeliveryError::Store(error)),
+        }
     }
 
     /// Forgets the delivered children: their answers are durable and the
@@ -565,7 +578,8 @@ impl SubagentSpawner for SessionSubagentSpawner {
 
     fn cancel_child(&self, id: SessionId) -> crate::runtime::CancelFuture {
         let tasks = Arc::clone(&self.tasks);
-        Box::pin(async move { tasks.cancel_detached(id).await })
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { tasks.cancel_detached(&inner.store, id).await })
     }
 }
 

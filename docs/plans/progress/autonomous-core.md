@@ -1053,3 +1053,23 @@ reason for skipping NIT 3. The one new nit, an over-long line in
 Verification: 2103 workspace tests pass; fmt and clippy are clean; the soak
 passes.
 
+### 2026-10-05: Codex review on #257: cancel reports the child's real outcome
+
+Codex (P2) found a race. A child's run can settle durably while its owner
+task is still reading the answer, before the task publishes completion. A
+`cancel_agent` in that window saw the child as still running, sent cancel,
+waited, and returned "was cancelled". The owner task does not check the
+cancel signal again after the outcome is durable, so the parent then got the
+child's normal answer after being told it was cancelled.
+
+The finding is right; fixed.
+- After the owner task finishes, `cancel_detached` reads the run's durable
+  outcome: `Cancelled` stays `Cancelled`, and any other outcome is
+  `AlreadyFinished`.
+- Test: `cancelling_a_child_that_just_finished_reports_it_finished` holds
+  the owner task's outcome reads until the run is settled, lands the cancel
+  in that window, and asserts "had already finished" plus the child's real
+  answer. It fails if the post-wait result is always `Cancelled`.
+
+2104 workspace tests pass; fmt and clippy are clean.
+
