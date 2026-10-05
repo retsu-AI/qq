@@ -10,9 +10,9 @@ appended below, newest last.
 | AP1 | Sub-agent brief and delegation guidance | Shipped | [ENG-989](https://linear.app/retsu-ai/issue/ENG-989) | #235 (`7870b20`) | Prompt 14 → 15 |
 | AP2 | Pruned `read_file` stubs keep their header | Shipped | [ENG-988](https://linear.app/retsu-ai/issue/ENG-988) | #233 (`fc88136`) | |
 | AP3a | Report turns as persisted turns | Shipped | [ENG-990](https://linear.app/retsu-ai/issue/ENG-990) | #237 (`2a672fe`) | Store schema 39 → 40 |
-| AP3b | Stall report and child answer | In review | [ENG-1000](https://linear.app/retsu-ai/issue/ENG-1000) | `feat/eng-1000-ap3b-stall-report` | Stacked on ENG-1001 (#238, tool choice none); ADR-0054 § 3 amended |
-| AP4.1 | Non-blocking read spawns, exactly-once delivery, tool-free wait | In review | [ENG-1004](https://linear.app/retsu-ai/issue/ENG-1004) | `feat/eng-1004-ap4-nonblocking-delegation` | Store schema 40 → 41 (`child_deliveries`); prompt 15 → 16; stacked on #242 |
-| AP4.2 | `wait_agents`, `cancel_agent`, interim-report delivery | Planned | | | `DESCRIPTOR_VERSION` 12 → 13 (two built-in tools); independent review |
+| AP3b | Stall report and child answer | Shipped | [ENG-1000](https://linear.app/retsu-ai/issue/ENG-1000) | #240 (`594b29c`) | With ENG-1001 (#238, tool choice none); ADR-0054 § 3 amended |
+| AP4.1 | Non-blocking read spawns, exactly-once delivery, tool-free wait | Shipped | [ENG-1004](https://linear.app/retsu-ai/issue/ENG-1004) | #244 (`fc97fab`) | Store schema 40 → 41 (`child_deliveries`); prompt 15 → 16 |
+| AP4.2 | `wait_agents`, `cancel_agent`, interim-report delivery | In progress | [ENG-1005](https://linear.app/retsu-ai/issue/ENG-1005) | `feat/eng-1005-ap4-2-wait-cancel-agents` | `DESCRIPTOR_VERSION` 12 → 13; prompt 16 → 17; store schema 41 → 42 (`child_reports`); independent review |
 | AP5 | Evidence after AP3b and AP4 | Planned | | | Goal 6; 7-day windows |
 | AC0 | Soak and resource harness | AC0.1 Shipped; AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | #236 (`d1e51c2`) | AC0.2 = H0 registration, concurrency/fsync qualification |
 | AC1 | `RunState` extraction by reset scope | Planned | | | No behaviour change; independent review; after AP3b |
@@ -771,4 +771,144 @@ The finding was right that `architecture.md` and this ledger said "a delivered
 answer is a progress event" without the qualifier. Both now say "an answer
 from a child that answered". `only_a_delivered_answer_restarts_the_stall_count`
 pins the rule, and it fails with Codex's suggested change.
+
+### 2026-10-04: Stack merged; AP4.2 (ENG-1005) implemented
+
+#238, #240, #242 and #244 merged to `main` on 2026-10-05 (UTC). ENG-1000 to
+ENG-1004 are Done. AP4.2 branches from `main` (`bfbe814`), not from a stack.
+
+**What it adds** (ADR-0054 § 4, the rest of decision 4):
+
+- **`wait_agents { ids?, timeout_seconds }`.** It blocks its call until every
+  named child settles (with no ids, until any outstanding child does), or
+  until the timeout passes. The timeout is 1 to 600 s (`MAX_WAIT_AGENTS_SECS`,
+  a shell command's ceiling), and at most 8 ids are accepted. The result says
+  of each child: finished, still working, or unknown.
+- **`cancel_agent { id }`.** It sends the child's cancel signal and returns
+  once the child has settled.
+- **Interim reports.** A running child's newest closed report reaches the
+  parent at a boundary as a labelled notice: "is still working. This is its
+  latest progress report, not its answer…".
+- **Shared rules for both tools:**
+  - they are declared exactly when `spawn_agent` is (same `StaticFilter`
+    flag), are `EffectClass::ReadOnly`, and are never overlapped with the
+    turn's read batch, so they run after the spawns before them;
+  - they name a child by the session id its receipt gave.
+
+**Design decisions:**
+
+- **No answer in the tool result.** The ADR says `wait_agents` "returns their
+  answers" and `cancel_agent` returns "whatever report the child had". In
+  both cases the answer arrives at the very next boundary, as the delivered
+  notice right after the tool result, instead of inside the result.
+  - Every answer then goes through the one stamped delivery row, so
+    exactly-once holds across tool result, boundary, settlement and recovery
+    without a second path.
+  - A crash between the tool result and the delivery cannot show the answer
+    twice or lose it.
+  - The model sees the same text it would have seen in the result, one
+    message later, and the next request carries both.
+  - This is a refinement of the ADR's wording, not a change of decision.
+- **Interim reports are closed reports only.** A report span is delivered
+  once a later turn of the child's run has opened another notice. Before
+  that, a continuation of the same reply (an output cut, a fault, an
+  interrupt) could still extend the text, and the parent would get a report
+  that later changes.
+  - One report per child per boundary: the newest closed one. Older
+    undelivered reports are superseded.
+  - A child that has settled is answered instead.
+  - Store schema 42 adds `child_reports(child_run_id, child_turn_ordinal)`
+    as the primary key, one row per delivered report. The highest delivered
+    turn is the child's "seen through" mark.
+  - Answers and reports share one delivery ordinal per parent run, so
+    assembly (`retained_deliveries`, `UNION ALL` ordered by run and ordinal)
+    replays them in live order.
+  - Reports take the boundary's tool-output budget after the answers, carry
+    no spend, and leave the child outstanding (`forget_delivered` skips
+    them).
+  - `DeliveredAnswer::answered()` is false for them, so the stall count is
+    not restarted.
+- **The turn-top delivery now runs while any detached child is
+  outstanding**, not only once one has settled, because reports come from
+  running children.
+  - This costs one store transaction per parent turn while children run.
+  - A run with no background child still makes no store call.
+- **`report_spans` replaces the body of `run_latest_report_text`** with one
+  walk that also reports whether each span is closed, so the blocking
+  answer, the delivered answer and the interim report read reports the same
+  way. It only reads turns after the seen-through mark.
+  - It also fixes a latent quirk: a turn with several assistant messages
+    repeated its notice on each row, and the old walk re-opened the span on
+    each row, so it kept only the last message's text. Only a turn's first
+    row opens a span now.
+- **Prompt 16 → 17** adds one bullet. The golden test undoes exactly that
+  bullet, then the 16 and 15 changes, and still matches the v14 hash.
+- **`DESCRIPTOR_VERSION` 12 → 13.** The golden digest is updated.
+- **Other changes:**
+  - `qq-config`'s fixed `exposed_tools` vocabulary gains the two names (the
+    root contract test binds it to the catalog);
+  - deleting a session also deletes its `child_reports` rows.
+
+**Tests** (`sessions/tests/nonblocking.rs`, plus one migration test):
+
+- `wait_agents_returns_when_the_named_children_settle`: both answers follow
+  the wait result once, and replay matches live.
+- `wait_agents_with_a_timeout_returns_what_settled`: the wait reports
+  "Waited 1s; … still working.", then the boundary wait gets the late answer
+  once.
+- `cancel_agent_stops_the_child_and_delivers_what_it_had`: the child settles
+  cancelled and the cancellation answer is delivered once, not as progress.
+- `wait_and_cancel_report_unknown_children`: no children, an unknown id, a
+  malformed id, a timeout out of range, and more than 8 ids.
+- `an_interim_report_is_delivered_once_and_never_as_the_answer`: an open
+  report waits, the newer closed report supersedes the older, a delivered
+  report is not sent again, the answer still arrives, and assembly orders
+  the report before the answer.
+- `an_interim_report_does_not_restart_the_stall_count`.
+- `version_forty_one_gains_the_child_report_table_and_rejects_a_bad_shape`.
+- Declaration: `spawner_less_runs_…` asserts all three tools are absent, and
+  the plan test asserts both new names are in the descriptor.
+
+Mutation checks, each restored afterwards (every one makes its test fail):
+
+- named waits return on any child;
+- open reports are delivered;
+- already-seen reports are re-sent;
+- cancel never signals;
+- an interim report counts as progress.
+
+**Measured** on a loaded machine, base `main` against the branch,
+alternating:
+
+- `turn_overhead` 10/100/1000: round 2 was 40.4/39.8/41.0 ms against
+  42.1/39.6/40.8 ms; round 1 was noise-bound (37–85 ms on both).
+- `child_admission` medians, round 1 then round 2 (peaks and spend are
+  identical):
+
+  | Case | Base | Branch |
+  | --- | --- | --- |
+  | `unbounded_read` | 127.9 / 119.7 ms | 128.1 / 122.9 ms |
+  | `finite_read` | 151.0 / 149.6 ms | 152.3 / 152.8 ms |
+  | `depth_two` | 100.1 / 101.3 ms | 103.2 / 99.8 ms |
+  | `unbounded_read_overlap` | 124.2 / 132.2 ms | 124.1 / 122.2 ms |
+
+  All within noise.
+
+**Flaky tests under I/O load are not from this branch.**
+`child_mutation_drains_before_steering_or_a_replacement_run_can_write` failed
+2 of 5 runs on the branch at load 17. The runs were then compared against
+`main` under the same conditions:
+
+| Condition | `main` | Branch |
+| --- | --- | --- |
+| Quiet machine | 10 of 10 pass | 10 of 10 pass |
+| 32 CPU burners | 4 of 4 pass (3.6–3.8 s) | 4 of 4 pass (3.8–4.5 s) |
+| 6 `dd … conv=fsync` writers | 0 of 4 pass | 0 of 4 pass |
+
+The failures follow store fsync latency against the tests' 2-second waits,
+not anything this branch changes. The test also spawns a write child, which
+never detaches, so none of the new delivery code runs in it. The same holds
+for the `sessions::tests::deadlines` timeouts in one loaded full run: they
+pass 13 of 13, three times each, on both `main` and the branch. AC0's soak
+work owns fsync-heavy timing; this is not fixed here.
 

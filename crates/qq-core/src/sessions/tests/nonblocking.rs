@@ -39,8 +39,24 @@ impl Provider for GatedChild {
 #[derive(Clone)]
 enum ParentTurn {
     Calls(Vec<(&'static str, String)>),
+    /// One call whose arguments name the sub-agents the parent's earlier
+    /// spawn receipts reported, in spawn order.
+    WithChildren(&'static str, fn(&[String]) -> String),
     /// A reply with no text and no calls.
     Empty,
+}
+
+/// The child session ids this request's spawn receipts report, in order.
+fn receipt_ids(request: &ModelRequest) -> Vec<String> {
+    tool_results(request)
+        .iter()
+        .filter_map(|result| {
+            let rest = result.strip_prefix("Sub-agent ")?;
+            let (id, rest) = rest.split_once(' ')?;
+            rest.starts_with("started and is working in the background")
+                .then(|| id.to_owned())
+        })
+        .collect()
 }
 
 struct ScriptedParent {
@@ -52,6 +68,7 @@ struct ScriptedParent {
 
 impl Provider for ScriptedParent {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
+        let children = receipt_ids(&request);
         self.requests.lock().unwrap().push(request);
         let current = self.turn.fetch_add(1, Ordering::AcqRel);
         self.turn_started.notify_waiters();
@@ -62,7 +79,14 @@ impl Provider for ScriptedParent {
             output_tokens: 1,
             reasoning_tokens: None,
         });
-        match self.script.get(current).cloned() {
+        let script = match self.script.get(current).cloned() {
+            Some(ParentTurn::WithChildren(name, arguments)) => {
+                Some(ParentTurn::Calls(vec![(name, arguments(&children))]))
+            }
+            turn => turn,
+        };
+        match script {
+            Some(ParentTurn::WithChildren(..)) => unreachable!("resolved above"),
             Some(ParentTurn::Calls(calls)) => {
                 let mut events = Vec::new();
                 for (index, (name, arguments)) in calls.into_iter().enumerate() {
@@ -1215,4 +1239,548 @@ async fn a_spawn_call_dropped_while_its_receipt_is_in_flight_keeps_the_child() {
         [("answer despite the interrupt".to_owned(), true)]
     );
     delegation.harness.runtime.shutdown().await.unwrap();
+}
+
+/// Calls `name` with the ids of every child the receipts named.
+fn wait_for_all(children: &[String]) -> String {
+    format!(
+        r#"{{"ids":{},"timeout_seconds":5}}"#,
+        serde_json::json!(children)
+    )
+}
+
+fn wait_briefly_for_all(children: &[String]) -> String {
+    format!(
+        r#"{{"ids":{},"timeout_seconds":1}}"#,
+        serde_json::json!(children)
+    )
+}
+
+fn cancel_first(children: &[String]) -> String {
+    format!(r#"{{"id":"{}"}}"#, children[0])
+}
+
+/// `wait_agents` blocks the turn until the named children settle; their
+/// answers follow its result at the next boundary, once each, and the
+/// parent's next turn sees them (ADR-0054 § 4).
+#[tokio::test]
+async fn wait_agents_returns_when_the_named_children_settle() {
+    let mut delegation = delegation(
+        vec![
+            ParentTurn::Calls(vec![spawn("one"), spawn("two")]),
+            ParentTurn::WithChildren("wait_agents", wait_for_all),
+        ],
+        "found it at lib.rs:9",
+    )
+    .await;
+    let run = submit_prompt_to(
+        &delegation.harness.runtime,
+        delegation.harness.session_id,
+        "survey",
+    )
+    .await;
+    // The wait call is in flight while both children are held.
+    parent_sent(&delegation, 2).await;
+    children_started(&delegation, 2).await;
+    delegation.gate.add_permits(2);
+    let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
+    assert!(matches!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    ));
+    let requests = delegation.parent_requests.lock().unwrap().clone();
+    // Turn 3 carries the wait result, then both answers.
+    let third = &requests[2];
+    let wait_result = tool_results(third).pop().unwrap();
+    assert!(!wait_result.contains("Waited"), "{wait_result}");
+    assert_eq!(
+        wait_result.matches("finished; its answer follows").count(),
+        2,
+        "{wait_result}"
+    );
+    assert_eq!(
+        delivered_answers(std::slice::from_ref(third)),
+        [("found it at lib.rs:9".to_owned(), true)]
+    );
+    assert_eq!(
+        request_texts(third)
+            .iter()
+            .filter(|text| text.contains("A sub-agent you started has finished."))
+            .count(),
+        2
+    );
+    // The run then answers at once: nothing is outstanding to wait for.
+    assert_eq!(requests.len(), 3);
+    assert_replay_matches_live(&mut delegation).await;
+    delegation.harness.runtime.shutdown().await.unwrap();
+}
+
+/// A `wait_agents` that times out says so, names who is still working, and
+/// leaves them running; the answer still arrives once, later.
+#[tokio::test]
+async fn wait_agents_with_a_timeout_returns_what_settled() {
+    let mut delegation = delegation(
+        vec![
+            ParentTurn::Calls(vec![spawn("survey")]),
+            ParentTurn::WithChildren("wait_agents", wait_briefly_for_all),
+        ],
+        "the late answer",
+    )
+    .await;
+    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let run = submit_prompt_to(
+        &delegation.harness.runtime,
+        delegation.harness.session_id,
+        "survey",
+    )
+    .await;
+    // The wait times out with the child held; the parent's next tool-free
+    // reply then waits at the boundary instead.
+    tokio::time::timeout(Duration::from_secs(10), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    {
+        let requests = delegation.parent_requests.lock().unwrap();
+        let wait_result = tool_results(&requests[2]).pop().unwrap();
+        assert!(wait_result.starts_with("Waited 1s;"), "{wait_result}");
+        assert!(wait_result.ends_with("still working."), "{wait_result}");
+        assert!(delivered_answers(&requests).is_empty());
+    }
+    delegation.gate.add_permits(1);
+    let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
+    assert!(matches!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    ));
+    let requests = delegation.parent_requests.lock().unwrap().clone();
+    assert_eq!(
+        delivered_answers(&requests),
+        [("the late answer".to_owned(), true)]
+    );
+    assert_replay_matches_live(&mut delegation).await;
+    delegation.harness.runtime.shutdown().await.unwrap();
+}
+
+/// `cancel_agent` stops one child; the parent receives its answer (the
+/// cancellation with whatever it reported) once, and the child's spend is
+/// charged once.
+#[tokio::test]
+async fn cancel_agent_stops_the_child_and_delivers_what_it_had() {
+    let mut delegation = delegation(
+        vec![
+            ParentTurn::Calls(vec![spawn("survey")]),
+            ParentTurn::WithChildren("cancel_agent", cancel_first),
+        ],
+        "never released",
+    )
+    .await;
+    let run = submit_prompt_to(
+        &delegation.harness.runtime,
+        delegation.harness.session_id,
+        "survey",
+    )
+    .await;
+    let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
+    assert!(matches!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    ));
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Cancelled, .. }
+            if *run_id != run
+    )));
+    let requests = delegation.parent_requests.lock().unwrap().clone();
+    let third = &requests[2];
+    let cancel_result = tool_results(third).pop().unwrap();
+    assert!(
+        cancel_result
+            .ends_with("was cancelled. What it reported so far follows as a runtime notice."),
+        "{cancel_result}"
+    );
+    let delivered = delivered_answers(&requests);
+    assert_eq!(delivered.len(), 1, "{delivered:#?}");
+    assert!(!delivered[0].1, "a cancelled child did not answer");
+    assert!(
+        delivered[0]
+            .0
+            .starts_with("the sub-agent run was cancelled")
+    );
+    // A second cancel of the same child finds nothing outstanding.
+    assert_eq!(requests.len(), 3);
+    assert_replay_matches_live(&mut delegation).await;
+    delegation.harness.runtime.shutdown().await.unwrap();
+}
+
+/// Ids that name no outstanding child are refused or reported, never
+/// waited on: an unknown id, a malformed one, and a wait with nothing out.
+#[tokio::test]
+async fn wait_and_cancel_report_unknown_children() {
+    let unknown = SessionId::generate().unwrap();
+    let mut delegation = delegation(
+        vec![ParentTurn::Calls(vec![
+            ("wait_agents", r#"{"timeout_seconds":5}"#.to_owned()),
+            (
+                "wait_agents",
+                format!(r#"{{"ids":["{unknown}"],"timeout_seconds":5}}"#),
+            ),
+            ("cancel_agent", format!(r#"{{"id":"{unknown}"}}"#)),
+            ("cancel_agent", r#"{"id":"not-an-id"}"#.to_owned()),
+            ("wait_agents", r#"{"timeout_seconds":0}"#.to_owned()),
+            (
+                "wait_agents",
+                format!(
+                    r#"{{"ids":{},"timeout_seconds":5}}"#,
+                    serde_json::json!(vec![unknown.to_string(); 9])
+                ),
+            ),
+        ])],
+        "unused",
+    )
+    .await;
+    let run = submit_prompt_to(
+        &delegation.harness.runtime,
+        delegation.harness.session_id,
+        "survey",
+    )
+    .await;
+    let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
+    assert!(matches!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    ));
+    let requests = delegation.parent_requests.lock().unwrap().clone();
+    let results = tool_results(&requests[1]);
+    assert_eq!(
+        results[0],
+        "No background sub-agents are outstanding; there is nothing to wait for."
+    );
+    assert!(
+        results[1].ends_with("may already have reached you)."),
+        "{}",
+        results[1]
+    );
+    assert!(
+        !results[1].starts_with("Waited"),
+        "an unknown id is not waited on"
+    );
+    assert!(
+        results[2].contains("is not a background sub-agent"),
+        "{}",
+        results[2]
+    );
+    assert_eq!(
+        results[3],
+        "id must be a sub-agent id from a spawn_agent result"
+    );
+    assert!(
+        results[4].starts_with("timeout_seconds must be between 1 and"),
+        "{}",
+        results[4]
+    );
+    assert_eq!(results[5], "ids may name at most 8 sub-agents");
+    delegation.harness.runtime.shutdown().await.unwrap();
+}
+
+/// Stores one report turn with `text` for `run_id` at `turn`, then
+/// optionally a later turn that closes it.
+async fn report_turn(store: &Store, run_id: RunId, turn: u32, text: &str, closed: bool) {
+    let text = text.to_owned();
+    store
+        .call(Priority::Control, move |connection| {
+            let session: String = connection.query_row(
+                "SELECT session_id FROM runs WHERE id = ?1",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )?;
+            let ordinal: u64 = connection.query_row(
+                "SELECT MAX(ordinal) + 1 FROM messages WHERE session_id = ?1",
+                [&session],
+                |row| row.get(0),
+            )?;
+            connection.execute(
+                "INSERT INTO model_turns(run_id, turn_ordinal, assistant_content_json, notice)
+                 VALUES (?1, ?2, '[]', 'stall_report')",
+                params![run_id.to_string(), turn],
+            )?;
+            connection.execute(
+                "INSERT INTO messages(id, session_id, run_id, ordinal, turn_ordinal, role, state,
+                                      output, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'assistant', 'complete', ?6, 1)",
+                params![
+                    MessageId::generate().unwrap().to_string(),
+                    session,
+                    run_id.to_string(),
+                    ordinal,
+                    turn,
+                    text
+                ],
+            )?;
+            if closed {
+                connection.execute(
+                    "INSERT INTO model_turns(run_id, turn_ordinal, assistant_content_json, notice)
+                     VALUES (?1, ?2, '[]', 'continuation')",
+                    params![run_id.to_string(), turn + 1],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// A running child's interim report reaches its parent at a boundary once,
+/// labelled as partial (ADR-0054 § 4). A report still being written waits
+/// until a later turn closes it; a newer report supersedes an undelivered
+/// older one; a delivered report is never sent again; and the final answer
+/// still arrives once when the child settles. Assembly places the reports
+/// and the answer in delivery order.
+#[tokio::test]
+async fn an_interim_report_is_delivered_once_and_never_as_the_answer() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (_, parent_session, parent) = create_claimed_parent(&store, directory.path()).await;
+    store
+        .create_child_run(
+            &parent,
+            ToolCallId::from_bytes([0x71; 16]),
+            ChildAdmission {
+                reasoning_effort: None,
+                profile: AgentProfileId::default(),
+                model: ModelSelection {
+                    model_is_fallback: false,
+                    model: Some("test/child".to_owned()),
+                    max_output_tokens: Some(256),
+                    organization: None,
+                },
+                task: "survey".to_owned(),
+                limits: RunLimits::default(),
+                approval_mode: ApprovalMode::ReadOnly,
+                purpose: SessionPurpose::Task,
+                detached: true,
+            },
+        )
+        .await
+        .unwrap();
+    let claimed_child = store.claim_next_run(true).await.unwrap().unwrap();
+    let child_run = claimed_child.identity.run_id;
+    let interim = |delivered: &[super::deliveries::DeliveredAnswer]| {
+        delivered
+            .iter()
+            .map(|answer| {
+                assert!(answer.interim);
+                assert_eq!(answer.spend, SpawnAgentSpend::NONE);
+                answer.notice.rsplit_once(":\n\n").unwrap().1.to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    // Nothing reported yet: nothing to deliver.
+    assert!(
+        store
+            .deliver_children(&parent, 2, 8)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // A report still open (no later turn) is not delivered yet.
+    report_turn(&store, child_run, 1, "first look: lib.rs", false).await;
+    assert!(
+        store
+            .deliver_children(&parent, 2, 8)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Two closed reports since the last delivery: only the newer is sent.
+    report_turn(&store, child_run, 3, "inventory.rs:4 holds widgets", true).await;
+    let delivered = store.deliver_children(&parent, 3, 8).await.unwrap();
+    assert_eq!(interim(&delivered), ["inventory.rs:4 holds widgets"]);
+    assert!(delivered[0].notice.starts_with(
+        "[QQ runtime notice; not a user instruction]\nA sub-agent you started is still working."
+    ));
+    // Delivered once: the next boundary sends nothing new.
+    assert!(
+        store
+            .deliver_children(&parent, 4, 8)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // The child settles: its answer comes as the answer, not as a report.
+    store
+        .finish_run(
+            &claimed_child,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    let delivered = store.deliver_children(&parent, 5, 8).await.unwrap();
+    assert_eq!(delivered.len(), 1);
+    assert!(!delivered[0].interim);
+    assert!(delivered[0].notice.starts_with(
+        "[QQ runtime notice; not a user instruction]\nA sub-agent you started has finished."
+    ));
+    assert!(
+        store
+            .deliver_children(&parent, 6, 8)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Assembly: the report, then the answer, in delivery order. The parent
+    // committed no turns, so both follow its prompt.
+    store
+        .finish_run(
+            &parent,
+            RunOutcome::Interrupted,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    let assembled = store
+        .call(Priority::Control, move |connection| {
+            load_model_context(connection, parent_session, u64::MAX)
+        })
+        .await
+        .unwrap();
+    let notices = assembled
+        .iter()
+        .flat_map(Message::content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } if text.contains("A sub-agent you started") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 2, "{notices:#?}");
+    assert!(notices[0].contains("is still working"));
+    assert!(notices[1].contains("has finished"));
+    store.close().await.unwrap();
+}
+
+/// An interim report is not progress: delivering one does not hold off the
+/// parent's stall report, while an answer does (ADR-0054 § 4).
+#[tokio::test]
+async fn an_interim_report_does_not_restart_the_stall_count() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (_, _, parent) = create_claimed_parent(&store, directory.path()).await;
+    store
+        .create_child_run(
+            &parent,
+            ToolCallId::from_bytes([0x72; 16]),
+            ChildAdmission {
+                reasoning_effort: None,
+                profile: AgentProfileId::default(),
+                model: ModelSelection {
+                    model_is_fallback: false,
+                    model: Some("test/child".to_owned()),
+                    max_output_tokens: Some(256),
+                    organization: None,
+                },
+                task: "survey".to_owned(),
+                limits: RunLimits::default(),
+                approval_mode: ApprovalMode::ReadOnly,
+                purpose: SessionPurpose::Task,
+                detached: true,
+            },
+        )
+        .await
+        .unwrap();
+    let claimed_child = store.claim_next_run(true).await.unwrap().unwrap();
+    report_turn(&store, claimed_child.identity.run_id, 1, "partial", true).await;
+    let delivered = store.deliver_children(&parent, 2, 8).await.unwrap();
+    assert_eq!(delivered.len(), 1);
+    // Not an answer, so the run loop's `deliver_children` leaves the stall
+    // count alone; the child's answer is one.
+    assert!(delivered[0].interim && !delivered[0].is_error);
+    assert!(!delivered[0].answered());
+    store
+        .finish_run(
+            &claimed_child,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    let delivered = store.deliver_children(&parent, 3, 8).await.unwrap();
+    assert_eq!(delivered.len(), 1);
+    assert!(delivered[0].answered());
+    store.close().await.unwrap();
+}
+
+/// A report turn whose reply was stored as two assistant messages (an
+/// interrupted attempt, then its continuation) is one report: its text is
+/// both messages joined, not the last one alone.
+#[tokio::test]
+async fn a_report_split_across_messages_in_one_turn_is_joined() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (_, _, parent) = create_claimed_parent(&store, directory.path()).await;
+    let child = store
+        .create_child_run(
+            &parent,
+            ToolCallId::from_bytes([0x73; 16]),
+            ChildAdmission {
+                reasoning_effort: None,
+                profile: AgentProfileId::default(),
+                model: ModelSelection {
+                    model_is_fallback: false,
+                    model: Some("test/child".to_owned()),
+                    max_output_tokens: Some(256),
+                    organization: None,
+                },
+                task: "survey".to_owned(),
+                limits: RunLimits::default(),
+                approval_mode: ApprovalMode::ReadOnly,
+                purpose: SessionPurpose::Task,
+                detached: false,
+            },
+        )
+        .await
+        .unwrap();
+    let run_id = child.run_id;
+    report_turn(&store, run_id, 1, "widgets live in ", false).await;
+    store
+        .call(Priority::Control, move |connection| {
+            let session: String = connection.query_row(
+                "SELECT session_id FROM runs WHERE id = ?1",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )?;
+            connection.execute(
+                "INSERT INTO messages(id, session_id, run_id, ordinal, turn_ordinal, role, state,
+                                      output, created_at_ms)
+                 VALUES (?1, ?2, ?3, 9, 1, 'assistant', 'complete', 'inventory.rs:4', 1)",
+                params![
+                    MessageId::generate().unwrap().to_string(),
+                    session,
+                    run_id.to_string()
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let answer = store
+        .child_answer(run_id, RunOutcome::Cancelled)
+        .await
+        .unwrap();
+    assert_eq!(
+        answer.content,
+        "the sub-agent run was cancelled\n\nIts latest progress report:\n\nwidgets live in inventory.rs:4"
+    );
+    store.close().await.unwrap();
 }

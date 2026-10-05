@@ -1770,9 +1770,11 @@ impl Store {
     }
 
     /// Delivers up to `limit` settled detached children of the running
-    /// parent into its next request (turn `turn_ordinal`), in one
-    /// transaction. Nothing for a parent that is no longer running: its
-    /// settlement delivers instead.
+    /// parent into its next request (turn `turn_ordinal`), then the newest
+    /// closed report of each child still running, in one transaction.
+    /// Nothing for a parent that is no longer running: its settlement
+    /// delivers the answers instead, and reports from children that are
+    /// about to answer are moot.
     pub(super) async fn deliver_children(
         &self,
         claimed: &ClaimedRun,
@@ -1793,13 +1795,23 @@ impl Store {
             if !running {
                 return Ok(Vec::new());
             }
-            let delivered = deliveries::deliver_settled_children(
+            let now = now_ms();
+            let mut delivered = deliveries::deliver_settled_children(
                 &transaction,
                 run_id,
                 Some(turn_ordinal),
                 limit,
-                now_ms(),
+                now,
             )?;
+            let spent = delivered.iter().map(|answer| answer.notice.len()).sum();
+            delivered.extend(deliveries::deliver_interim_reports(
+                &transaction,
+                run_id,
+                turn_ordinal,
+                spent,
+                limit,
+                now,
+            )?);
             transaction.commit()?;
             Ok(delivered)
         })

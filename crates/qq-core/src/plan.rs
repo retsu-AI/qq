@@ -733,6 +733,18 @@ impl CompiledAgentPlan {
             ToolHost::SpawnAgent,
             EffectClass::ReadOnly,
         ));
+        // Waiting for and cancelling the run's own background children
+        // change nothing outside it (ADR-0054 § 4).
+        static_tools.push(StaticTool::new(
+            tools::wait_agents_spec(),
+            ToolHost::WaitAgents,
+            EffectClass::ReadOnly,
+        ));
+        static_tools.push(StaticTool::new(
+            tools::cancel_agent_spec(),
+            ToolHost::CancelAgent,
+            EffectClass::ReadOnly,
+        ));
         static_tools.push(StaticTool::new(
             search_history_spec(),
             ToolHost::SearchHistory,
@@ -1376,20 +1388,21 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v12\0{\"version\":12,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v13\0{\"version\":13,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
         // from a different encoding. The descriptor also carries
         // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
-        // changing the encoding (prompt 16: ADR-0054 § 4).
+        // changing the encoding (descriptor 13 and prompt 17: ADR-0054 § 4,
+        // the wait_agents and cancel_agent tools).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "d3f6a0b5e7eecb5d417af90a6936ca6757ab91d9a57623246785b6deb4fef1f6"
+            "17ad9cc36aed8211f1e487dc95be53dcf2b30cb886936d1b4a22fb4c4c583499"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v12\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v13\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }
@@ -1783,6 +1796,8 @@ mod tests {
             "read_file",
             "shell",
             "spawn_agent",
+            "wait_agents",
+            "cancel_agent",
             "search_history",
             "select_tools",
         ] {

@@ -2559,9 +2559,12 @@ mod reference_assembly {
                         &mut context,
                     )?;
                     let mut statement = transaction.prepare(
-                        "SELECT text FROM child_deliveries
+                        "SELECT text, delivery_ordinal FROM child_deliveries
                              WHERE parent_run_id = ?1 AND delivered_at_ms IS NOT NULL
-                             ORDER BY delivery_ordinal",
+                         UNION ALL
+                         SELECT text, delivery_ordinal FROM child_reports
+                             WHERE parent_run_id = ?1
+                         ORDER BY 2",
                     )?;
                     for text in statement
                         .query_map([snapshot.run_id.to_string()], |row| row.get::<_, String>(0))?
@@ -2717,13 +2720,17 @@ mod reference_assembly {
             .into_iter()
             .map(|(turn, output, id)| Ok((turn, render_message(transaction, &id, output)?)))
             .collect::<Result<std::collections::VecDeque<_>, SessionRuntimeError>>()?;
-        // Delivered sub-agent answers, per run, in delivery order: before the
-        // turn whose request first carried them, after its steering; a NULL
-        // turn (the run settled first) after the run.
+        // Delivered sub-agent answers and interim reports, per run, in
+        // delivery order: before the turn whose request first carried them,
+        // after its steering; a NULL turn (the run settled first) after the
+        // run.
         let mut statement = transaction.prepare(
-            "SELECT turn_ordinal, text FROM child_deliveries
+            "SELECT turn_ordinal, text, delivery_ordinal FROM child_deliveries
                  WHERE parent_run_id = ?1 AND delivered_at_ms IS NOT NULL
-                 ORDER BY delivery_ordinal",
+             UNION ALL
+             SELECT turn_ordinal, text, delivery_ordinal FROM child_reports
+                 WHERE parent_run_id = ?1
+             ORDER BY 3",
         )?;
         let mut delivered = statement
             .query_map([run_id.to_string()], |row| {

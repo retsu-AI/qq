@@ -12,12 +12,12 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(16) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(17) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// Version 15 of the base agent prompt (10 → 11 covers the tool-layer
+/// Version 17 of the base agent prompt (10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
@@ -25,7 +25,8 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// adds the sub-agent section for child runs, drops the implement-instead
 /// line for read children, and asks parents for a question-shaped brief;
 /// 15 → 16 says a read sub-agent runs in the background and its answer
-/// arrives later as a runtime notice).
+/// arrives later as a runtime notice; 16 → 17 adds interim reports,
+/// wait_agents, and cancel_agent).
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -185,6 +186,9 @@ fn agent_prompt_prefix(
          at once, and the sub-agent's final answer arrives at a later turn as a runtime \
          notice. Keep working on what does not depend on it; a reply without tool calls \
          while sub-agents are working waits for their answers.\n\
+         - A sub-agent still working may also send its latest progress report as a notice. \
+         Call wait_agents when your next step needs specific answers, and cancel_agent for a \
+         sub-agent whose answer you no longer need.\n\
          - Write the brief as a question to answer, what the answer is for, and the shape \
          you want back (a list of path:line findings, a yes or no with evidence, a short \
          plan). A sub-agent stops when it can answer, so an open-ended brief gets a long \

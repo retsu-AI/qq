@@ -1851,15 +1851,17 @@ impl plan::CompiledAgentPlan {
             'turns: for turn_ordinal in 1..=u32::MAX {
                 // Settled detached children answer here, at the one boundary
                 // every turn passes: after the previous turn's results and
-                // steering, before this request is built (ADR-0054 § 4). The
-                // store commits the delivery before the notice joins context.
+                // steering, before this request is built (ADR-0054 § 4); a
+                // child still working may send its newest report. The store
+                // commits the delivery before the notice joins context. A run
+                // with no background child makes no store call.
                 // A wait that just delivered for this turn used its boundary;
                 // anything settling since waits for the next one, so one
                 // boundary spends one turn's tool-output budget.
                 let delivered_by_wait = std::mem::take(&mut wait_delivered_for) == Some(turn_ordinal);
                 if let Some(spawner) = &spawner
                     && !delivered_by_wait
-                    && spawner.settled_detached()
+                    && spawner.outstanding_detached() > 0
                     && let Err(error) = deliver_children(
                         spawner,
                         turn_ordinal,
@@ -3709,6 +3711,64 @@ impl plan::CompiledAgentPlan {
                                     tools::bounded_result(SPAWN_UNAVAILABLE_RESULT.to_owned(), true)
                                 }
                             },
+                            // Waiting and cancelling act on this run's own
+                            // background children; their answers arrive as
+                            // delivered notices at the next boundary, never
+                            // in these results (ADR-0054 § 4).
+                            None if host == Some(catalog::ToolHost::WaitAgents) => match &spawner {
+                                Some(spawner) => match serde_json::from_str::<tools::WaitAgentsArgs>(&call.arguments) {
+                                    Ok(arguments) if !(1..=tools::MAX_WAIT_AGENTS_SECS).contains(&arguments.timeout_seconds) => {
+                                        tools::bounded_result(
+                                            format!("timeout_seconds must be between 1 and {}", tools::MAX_WAIT_AGENTS_SECS),
+                                            true,
+                                        )
+                                    }
+                                    Ok(arguments) if arguments.ids.as_ref().is_some_and(|ids| ids.len() > usize::from(sessions::MAX_SPAWNED_CHILDREN_PER_RUN)) => {
+                                        tools::bounded_result(
+                                            format!("ids may name at most {} sub-agents", sessions::MAX_SPAWNED_CHILDREN_PER_RUN),
+                                            true,
+                                        )
+                                    }
+                                    Ok(arguments) => match arguments
+                                        .ids
+                                        .map(|ids| ids.iter().map(|id| id.trim().parse::<qq_protocol::SessionId>()).collect::<Result<Vec<_>, _>>())
+                                        .transpose()
+                                    {
+                                        Err(_) => tools::bounded_result(
+                                            "ids must be sub-agent ids from spawn_agent results".to_owned(),
+                                            true,
+                                        ),
+                                        Ok(ids) => match spawner
+                                            .wait_children(ids, Duration::from_secs(arguments.timeout_seconds))
+                                            .await
+                                        {
+                                            Ok(report) => tools::bounded_result(report.render(arguments.timeout_seconds), false),
+                                            Err(error) => tools::bounded_result(error.to_string(), true),
+                                        },
+                                    },
+                                    Err(error) => tools::bounded_result(format!("invalid arguments: {error}"), true),
+                                },
+                                None => tools::bounded_result(SPAWN_UNAVAILABLE_RESULT.to_owned(), true),
+                            },
+                            None if host == Some(catalog::ToolHost::CancelAgent) => match &spawner {
+                                Some(spawner) => match serde_json::from_str::<tools::CancelAgentArgs>(&call.arguments) {
+                                    Ok(arguments) => match arguments.id.trim().parse::<qq_protocol::SessionId>() {
+                                        Ok(id) => match spawner.cancel_child(id).await {
+                                            Ok(outcome) => {
+                                                let (text, is_error) = outcome.render(id);
+                                                tools::bounded_result(text, is_error)
+                                            }
+                                            Err(error) => tools::bounded_result(error.to_string(), true),
+                                        },
+                                        Err(_) => tools::bounded_result(
+                                            "id must be a sub-agent id from a spawn_agent result".to_owned(),
+                                            true,
+                                        ),
+                                    },
+                                    Err(error) => tools::bounded_result(format!("invalid arguments: {error}"), true),
+                                },
+                                None => tools::bounded_result(SPAWN_UNAVAILABLE_RESULT.to_owned(), true),
+                            },
                             // Full-transcript recall dispatches to the session
                             // layer; the tool is declared only when a searcher
                             // exists, so a guessed call is simply unknown here.
@@ -3849,8 +3909,13 @@ impl plan::CompiledAgentPlan {
                 // read child may overlap: a write child is a mutation.
                 // Finite spend cannot be granted independently to overlapping children.
                 // Unbounded and duration-only read fanout retains its concurrency.
+                // A wait or cancel runs in request order, after the spawns
+                // before it in the turn, so it sees the children they started.
                 let overlaps = |call: &RuntimeToolCall| {
                     !(bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
+                    && !catalog.lookup(&call.name).is_some_and(|entry| {
+                        matches!(entry.host, catalog::ToolHost::WaitAgents | catalog::ToolHost::CancelAgent)
+                    })
                     && matches!(
                         approval::classify(call.effect, &call.name, &call.arguments, &network_policy),
                         approval::ToolClass::ReadOnly
@@ -11208,12 +11273,14 @@ mod tests {
             Some(RuntimeEvent::Completed { .. })
         ));
         let requests = requests.lock().unwrap();
-        assert!(
-            !requests[0]
-                .tools()
-                .iter()
-                .any(|spec| spec.name() == tools::SPAWN_AGENT_TOOL)
-        );
+        // The delegation tools come and go together: a run that cannot
+        // spawn has no background children to wait for or cancel.
+        for tool in [tools::SPAWN_AGENT_TOOL, "wait_agents", "cancel_agent"] {
+            assert!(
+                !requests[0].tools().iter().any(|spec| spec.name() == tool),
+                "{tool}"
+            );
+        }
         let system = requests[0].system().unwrap();
         assert!(!system.contains("Delegation:"));
         // Direct runs have no durable transcript, so history recall is
@@ -11700,6 +11767,9 @@ mod tests {
             the call returns at once, and the sub-agent's final answer arrives at a later turn as \
             a runtime notice. Keep working on what does not depend on it; a reply without tool \
             calls while sub-agents are working waits for their answers.\n";
+        const CONTROL_BULLET: &str = "- A sub-agent still working may also send its latest \
+            progress report as a notice. Call wait_agents when your next step needs specific \
+            answers, and cancel_agent for a sub-agent whose answer you no longer need.\n";
         const CONCURRENT: &str = "because sub-agents run concurrently.";
         const CONCURRENT_WITH_YOU: &str =
             "because sub-agents run concurrently with each other and with you.";
@@ -11732,13 +11802,18 @@ mod tests {
             None,
         );
         assert!(prompt.contains(NEW_BULLET), "{prompt}");
-        // Prompt 16 (ADR-0054 § 4) rewords only the first and last
-        // delegation bullets; undo them, then the brief bullet.
-        assert!(prompt.contains(BACKGROUND_SPAWN), "{prompt}");
-        assert!(prompt.contains(CONCURRENT_WITH_YOU), "{prompt}");
-        let v15 = prompt
-            .replacen(BACKGROUND_SPAWN, BLOCKING_SPAWN, 1)
-            .replacen(CONCURRENT_WITH_YOU, CONCURRENT, 1);
+        // Prompt 17 (ADR-0054 § 4, AP4.2) adds only the control bullet, and
+        // prompt 16 rewords only the first and last delegation bullets; undo
+        // them, then the brief bullet.
+        assert!(prompt.contains(CONTROL_BULLET), "{prompt}");
+        let v16 = prompt.replacen(CONTROL_BULLET, "", 1);
+        assert!(v16.contains(BACKGROUND_SPAWN), "{v16}");
+        assert!(v16.contains(CONCURRENT_WITH_YOU), "{v16}");
+        let v15 = v16.replacen(BACKGROUND_SPAWN, BLOCKING_SPAWN, 1).replacen(
+            CONCURRENT_WITH_YOU,
+            CONCURRENT,
+            1,
+        );
         let v14 = v15.replacen(NEW_BULLET, "", 1);
         assert_ne!(v14, v15);
         assert_eq!(

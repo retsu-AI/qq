@@ -67,7 +67,7 @@ pub(crate) use spill::{
 pub use steering::MAX_PENDING_STEERING;
 pub(crate) use steering::{SteeringMessage, SteeringReceiver, SteeringSender, steering_channel};
 pub(crate) use subagent::{
-    ChildCleanupError, ChildDrainFuture, ChildWaitFuture, DeliverFuture, DeliveredChild,
-    DeliveryError, SPAWN_UNAVAILABLE_RESULT, SpawnAgentFuture, SpawnAgentOutcome, SpawnAgentSpend,
-    SpawnRequest, SubagentSpawner,
+    CancelFuture, CancelOutcome, ChildCleanupError, ChildDrainFuture, ChildStatus, ChildWaitFuture,
+    DeliverFuture, DeliveredChild, DeliveryError, SPAWN_UNAVAILABLE_RESULT, SpawnAgentFuture,
+    SpawnAgentOutcome, SpawnAgentSpend, SpawnRequest, SubagentSpawner, WaitFuture, WaitReport,
 };

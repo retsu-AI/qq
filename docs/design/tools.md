@@ -129,7 +129,8 @@ workspace index can decide it.
 Authority follows command provenance rather than session ancestry. The
 model-authored task that creates a child session cannot select guidance, while
 an explicit user follow-up in that child may do so; child sessions remain
-depth-capped and never gain `spawn_agent` from that selection.
+depth-capped and never gain `spawn_agent` (or `wait_agents` and
+`cancel_agent`, which come with it) from that selection.
 
 Commands and skills use the same UTF-8 Markdown body contract. Their paths
 supply name and kind; the only front matter interpreted is a `description`
