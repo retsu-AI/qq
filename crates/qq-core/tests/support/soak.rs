@@ -100,7 +100,7 @@ impl Provider for ScriptedProvider {
                 })]));
             }
             return text(
-                "1. Intent: finish the scripted task\n2. Decisions and constraints: local fixture only\n3. Work state: earlier steps are durable\n4. Files touched: none\n5. Errors: none\n6. User messages: finish the scripted task",
+                "1. Intent: finish the scripted task\n2. Decisions and constraints: local fixture only\n3. Work state: earlier steps are durable\n4. Open problems: none\n5. Next step: finish the scripted task",
             );
         }
         // The checkpoint's report notice is the request's last message

@@ -352,19 +352,32 @@ pruned — they are not re-derivable. The stored rows are untouched; pruning is
 a property of assembly alone, and a run that would overflow the model window
 mid-run applies the same stubbing to its live transcript before failing.
 
-Compaction is the second. A summary must be non-empty, fit the 4 MiB context
-limit, carry the six required section headings (Intent, Decisions and
-constraints, Work state, Files touched, Errors, User messages), and shrink the
-measured assembly above a 16 KiB floor; any failure settles the internal run
-as a `policy` failure and the prior compaction stays in force. A heading is a
-line that is the section name, optionally numbered or marked up, followed by a
-colon or by nothing else — `1. Intent: …` and a markdown `## 1. Intent` line
-with its body beneath both count; a line that continues into prose does not.
-The summarizer reserves 8 192 output tokens (bounded by the model's cap); a
-reply the provider still cuts at that limit is continued like any turn, and
-its pieces are concatenated verbatim so a heading split at the cut survives.
-Three
-compactions are retained per session and `rollback_compaction` steps back
+Compaction is the second. The summarizer writes a short narrative in five
+sections (Intent, Decisions and constraints, Work state, Open problems, Next
+step); QQ then appends a compaction record rendered from stored rows in the
+commit transaction (ADR-0056). The record carries every user message and
+applied steering verbatim (newest kept first; older prompts are listed by
+ordinal for `search_history` and older steering is counted), the last
+assistant reply, the files modified and read through the built-in
+`read_file`/`edit_file`/`write_file`, and the first line of each failed call.
+It is at most 64 KiB (`context::COMPACTION_RECORD_BYTES`), or an eighth of a
+declared window, and is rebuilt from rows at every compaction, so it stays
+exact across folds. An in-run record holds the steering, files and failures
+of the replaced turns only. A narrative must be non-empty, fit the 4 MiB
+context limit next to the largest record, carry the five section headings,
+and shrink the measured assembly above a 16 KiB floor. Between runs the
+record is a bounded cost added after that check, so an older six-section
+summary always folds into the new format; an in-run step counts the record
+too. Any failure settles the internal run as a `policy` failure and the
+prior compaction stays in force. A reply that echoes a record is cut at the record
+header. A heading is a line that is the section name, optionally numbered or
+marked up, followed by a colon or by nothing else — `1. Intent: …` and a
+markdown `## 1. Intent` line with its body beneath both count; a line that
+continues into prose does not. The summarizer requests the run's resolved
+output cap, held to an eighth of a declared window but never below 8 192; a
+reply the provider still cuts at that limit is continued like
+any turn, and its pieces are concatenated verbatim so a heading split at the
+cut survives. Three compactions are retained per session and `rollback_compaction` steps back
 through them. `search_history` makes aggressive compaction safe: it walks the
 full persisted transcript including replaced spans, excludes the calling run,
 and returns at most 20 excerpts of ~240 bytes with citations naming the user

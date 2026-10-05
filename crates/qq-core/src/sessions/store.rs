@@ -1641,32 +1641,28 @@ impl Store {
         .await
     }
 
-    /// The summarizer's fixed instruction with the session's seeded file
-    /// list, for a request built outside the run loop.
-    pub(super) async fn compaction_instruction(
-        &self,
-        session_id: SessionId,
-    ) -> Result<String, SessionRuntimeError> {
-        self.call(Priority::AwaitControl, move |connection| {
-            compaction_instruction(connection, session_id)
-        })
-        .await
-    }
-
     /// Commits an in-run summary as a marker scoped to the prompt run and
     /// settles the internal run. The internal run ran no tools and owned no
-    /// children, so no teardown proof is needed. Returns the events and
-    /// whether the marker stands.
+    /// children, so no teardown proof is needed. Returns the events and, when
+    /// the marker stands, the stored summary (narrative plus record).
     pub(super) async fn finish_in_run_compaction(
         &self,
         claimed: &ClaimedRun,
         summary: String,
         accounting: Option<RunAccounting>,
-    ) -> Result<(Vec<SessionEventEnvelope>, bool), SessionRuntimeError> {
+        record_budget: usize,
+    ) -> Result<(Vec<SessionEventEnvelope>, Option<String>), SessionRuntimeError> {
         let store_id = self.store_id;
         let claimed = claimed.clone();
         self.call(Priority::Output, move |connection| {
-            complete_in_run_compaction(connection, store_id, &claimed, summary, accounting)
+            complete_in_run_compaction(
+                connection,
+                store_id,
+                &claimed,
+                summary,
+                accounting,
+                record_budget,
+            )
         })
         .await
     }
@@ -1694,12 +1690,20 @@ impl Store {
         claimed: &ClaimedRun,
         summary: String,
         accounting: Option<RunAccounting>,
+        record_budget: usize,
         _teardown: TeardownComplete,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let claimed = claimed.clone();
         self.call(Priority::Output, move |connection| {
-            complete_compaction(connection, store_id, &claimed, summary, accounting)
+            complete_compaction(
+                connection,
+                store_id,
+                &claimed,
+                summary,
+                accounting,
+                record_budget,
+            )
         })
         .await
     }
