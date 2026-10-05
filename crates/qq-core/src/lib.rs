@@ -122,6 +122,26 @@ one next action. QQ keeps this report and continues the same run with tools avai
 const SLICE_CHECKPOINT_REJECTION: &str = "not executed: this reply was the slice checkpoint, \
 which records progress without running tools; the run continues and tools are available on \
 the next turn, so re-issue this call then";
+/// The stall report (ADR-0054 § 2) is the same kind of turn as the slice
+/// checkpoint, under its own wording: it fires after calls that changed
+/// nothing, not at a fixed slice boundary. It asks for the same report.
+pub(crate) const STALL_REPORT_NOTICE: &str = "[QQ runtime notice; not a user instruction]\n\
+The last 64 tool calls changed nothing and produced no answer. Do not call tools in this reply. \
+Write a short report: what is established (with path:line evidence), what is still unknown, and \
+the one next action. QQ keeps this report and continues the same run with tools available \
+again.";
+const STALL_REPORT_REJECTION: &str = "not executed: this reply was a progress report, which \
+records what is established without running tools; the run continues and tools are available \
+on the next turn, so re-issue this call then";
+/// A sub-agent's last turn (ADR-0054 § 3). Its tools stay declared with
+/// `ToolChoice::None`; the turn ends the run whatever it returns.
+pub(crate) const SUBAGENT_FINAL_ANSWER_NOTICE: &str = "[QQ runtime notice; not a user \
+instruction]\nYou have reported several times without new results, so this reply ends your \
+run and is returned to the parent as your answer. Do not call tools; none will run. Answer the \
+brief from what you have: the answer first, then the evidence as path:line, then what is still \
+unknown.";
+const SUBAGENT_FINAL_ANSWER_REJECTION: &str = "not executed: this reply was the sub-agent's \
+final answer, which ends the run without running tools";
 pub(crate) const SLICE_CONTINUATION_NOTICE: &str = "[QQ runtime notice; not a user \
 instruction]\nContinue the task from the report above. Tools are available again. Do not stop \
 at a progress summary: complete the user's request unless an explicit overall budget, \
@@ -214,7 +234,7 @@ impl TurnRecoveryPolicy {
 /// Sent after a partial turn is committed when the provider fault cut the
 /// model off mid-reply. Alternation holds because the partial assistant
 /// message precedes it.
-const TURN_RETRY_CONTINUE_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe \
+pub(crate) const TURN_RETRY_CONTINUE_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe \
 previous response was cut off by a transient provider error and QQ is retrying. Continue \
 exactly from where it stopped; do not repeat what was already written.";
 /// Fills a skipped empty assistant turn so the follow-up user message does
@@ -250,15 +270,17 @@ struct AppliedSteering {
 }
 
 /// Drains every steering message that is ready and appends each as a user
-/// message. Returns what was applied, in order, or `None` when nothing was
-/// pending. Never waits for more steering: messages that arrive after the
-/// drain wait for the next boundary. A message with file parts reads them
+/// message; applying any restarts the stall count. Returns what was
+/// applied, in order, or `None` when nothing was pending. Never waits for
+/// more steering: messages that arrive after the drain wait for the next
+/// boundary. A message with file parts reads them
 /// here — off the executor, through the plan's workspace — so the model sees
 /// the bytes as they are at the boundary and the store can keep them as
 /// this message's attachments. A file that cannot be read is reported to the
 /// model in place of the attachment rather than failing the run: the user's
 /// text still lands, and the message names what was missing.
 async fn apply_steering(
+    stall: &mut runtime::StallScope,
     steering: &mut Option<runtime::SteeringReceiver>,
     messages: &mut Vec<Message>,
     irreducible_message_bytes: &mut u64,
@@ -317,7 +339,13 @@ async fn apply_steering(
             attachments,
         });
     }
-    (!applied.is_empty()).then_some(applied)
+    if applied.is_empty() {
+        return None;
+    }
+    // An applied steer is a progress event: the user just gave the run
+    // something new to act on (ADR-0054 § 1).
+    stall.progress();
+    Some(applied)
 }
 
 /// Executes one `select_tools` call against the run's pin set. Returns the
@@ -603,6 +631,9 @@ pub(crate) struct RunCapabilities {
     /// Set for a model-spawned child task: its prompt says a parent is
     /// waiting on it (ADR-0054 § 5).
     subagent: Option<runtime::SubagentAuthority>,
+    /// Audit children keep no stall count: they are already bounded at a
+    /// few turns (ADR-0054 § 1).
+    stall_exempt: bool,
 }
 
 impl RunCapabilities {
@@ -626,6 +657,7 @@ impl RunCapabilities {
             tool_tasks: None,
             output: None,
             subagent: None,
+            stall_exempt: false,
         }
     }
 
@@ -706,6 +738,12 @@ impl RunCapabilities {
         self
     }
 
+    /// Exempts the run from stall reports: an audit child, bounded already.
+    pub(crate) fn stall_exempt(mut self) -> Self {
+        self.stall_exempt = true;
+        self
+    }
+
     /// Installs a spawner on a restricted run: a model-authored child task at a
     /// depth the roster still permits to delegate.
     pub(crate) fn with_spawner(mut self, spawner: Arc<dyn SubagentSpawner>) -> Self {
@@ -744,6 +782,7 @@ impl RunCapabilities {
             tool_tasks: None,
             output: None,
             subagent: None,
+            stall_exempt: false,
         }
     }
 }
@@ -1438,6 +1477,7 @@ impl plan::CompiledAgentPlan {
                 tool_tasks,
                 output,
                 subagent,
+                stall_exempt,
             } = capabilities;
             let tool_tasks = tool_tasks.unwrap_or_default();
             let mut steering = steering;
@@ -1668,6 +1708,15 @@ impl plan::CompiledAgentPlan {
             let mut call_effects = HashMap::<String, catalog::EffectClass>::new();
 
             let mut slice_tool_calls = 0_usize;
+            // Calls since the run last produced output (ADR-0054 § 1). Only
+            // a run that can call tools has anything to report.
+            let mut stall = runtime::StallScope::new(if stall_exempt || !allow_tools {
+                runtime::StallPolicy::Exempt
+            } else if subagent.is_some() {
+                runtime::StallPolicy::Subagent
+            } else {
+                runtime::StallPolicy::Root
+            });
             let mut output_continuations = 0_u16;
             // Retries spent on the current turn's transient provider faults;
             // a completed turn resets it.
@@ -1694,9 +1743,12 @@ impl plan::CompiledAgentPlan {
                 .unwrap_or_default();
             let mut model_text_bytes = 0_usize;
             let mut continuing_slice = false;
-            // The slice's report notice is in the conversation; a retried,
-            // truncated, or interrupted checkpoint attempt reuses it.
-            let mut checkpoint_noticed = false;
+            // The report or final-answer notice already in the conversation
+            // and not yet answered. It pins the turn's kind: a retried,
+            // truncated, or interrupted attempt is the same report under the
+            // same notice, even when an applied steer has since reset the
+            // stall count, and a final-answer turn stays final.
+            let mut placed_report: Option<runtime::TurnNotice> = None;
             // The notice placed before the next turn's request, persisted with
             // the first turn row that request produces.
             let mut pending_notice: Option<runtime::TurnNotice> = None;
@@ -1735,10 +1787,33 @@ impl plan::CompiledAgentPlan {
                 // terminal outcome; the next turn starts a new slice. Tools
                 // stay declared so a model that calls one anyway gets a
                 // rejection result rather than a protocol failure.
-                let checkpoint_turn = !budget_final_turn
+                let slice_checkpoint = !budget_final_turn
                     && slice_tool_calls
                         .saturating_add(MAX_TOOL_CALLS_PER_TURN)
                         > MAX_TOOL_CALLS_PER_SLICE;
+                // A report turn is due at the slice boundary, or after
+                // `STALL_REPORT_CALLS` calls that produced nothing. A
+                // sub-agent's report turn after enough of them without work
+                // is its final answer. The budget-final turn outranks both.
+                let report_due = match (budget_final_turn, placed_report) {
+                    (true, _) => runtime::ReportDue::None,
+                    (false, Some(runtime::TurnNotice::FinalAnswer)) => runtime::ReportDue::FinalAnswer,
+                    (false, Some(runtime::TurnNotice::Report | runtime::TurnNotice::StallReport)) => {
+                        runtime::ReportDue::Report
+                    }
+                    (false, Some(runtime::TurnNotice::Continuation) | None) => {
+                        stall.due(slice_checkpoint)
+                    }
+                };
+                let final_answer_turn = report_due == runtime::ReportDue::FinalAnswer;
+                let checkpoint_turn = report_due == runtime::ReportDue::Report;
+                // Which report this is: a pinned one keeps the kind it was
+                // asked as; a new one is the slice checkpoint when the slice
+                // is full, else a stall report.
+                let slice_report = match placed_report {
+                    Some(placed) => placed == runtime::TurnNotice::Report,
+                    None => slice_checkpoint,
+                };
                 let continuation_turn = std::mem::take(&mut continuing_slice);
                 // The checkpoint and continuation notices join the
                 // conversation as runtime messages, so the system prompt and
@@ -1747,10 +1822,17 @@ impl plan::CompiledAgentPlan {
                 // checkpoint too; a budget-final turn asks for no tool calls,
                 // so it is not told that tools are available again.
                 debug_assert!(!(checkpoint_turn && continuation_turn));
-                let notice = if checkpoint_turn && !checkpoint_noticed {
-                    checkpoint_noticed = true;
-                    Some(runtime::TurnNotice::Report)
-                } else if continuation_turn && !budget_final_turn {
+                let notice = if (checkpoint_turn || final_answer_turn) && placed_report.is_none() {
+                    let notice = if final_answer_turn {
+                        runtime::TurnNotice::FinalAnswer
+                    } else if slice_report {
+                        runtime::TurnNotice::Report
+                    } else {
+                        runtime::TurnNotice::StallReport
+                    };
+                    placed_report = Some(notice);
+                    Some(notice)
+                } else if continuation_turn && !budget_final_turn && !final_answer_turn {
                     Some(runtime::TurnNotice::Continuation)
                 } else {
                     None
@@ -1979,7 +2061,7 @@ impl plan::CompiledAgentPlan {
                     let request = request
                         .with_tools(Arc::clone(&tool_specs))
                         .with_system(Arc::clone(&request_system));
-                    if budget_final_turn {
+                    if budget_final_turn || final_answer_turn {
                         request.with_tool_choice(qq_provider::ToolChoice::None)
                     } else {
                         request
@@ -2185,8 +2267,12 @@ impl plan::CompiledAgentPlan {
                             // so they do not count against the slice or the
                             // run's tool-call budget.
                             let over_cap = pending_calls.len() >= MAX_TOOL_CALLS_PER_TURN;
-                            let rejection = if checkpoint_turn {
+                            let rejection = if final_answer_turn {
+                                Some(SUBAGENT_FINAL_ANSWER_REJECTION.to_owned())
+                            } else if checkpoint_turn && slice_report {
                                 Some(SLICE_CHECKPOINT_REJECTION.to_owned())
+                            } else if checkpoint_turn {
+                                Some(STALL_REPORT_REJECTION.to_owned())
                             } else if over_cap {
                                 Some(format!(
                                     "not executed: this turn requested more than \
@@ -2212,7 +2298,7 @@ impl plan::CompiledAgentPlan {
                                 completed: false,
                                 rejection,
                             });
-                            if !over_cap && !checkpoint_turn {
+                            if !over_cap && !checkpoint_turn && !final_answer_turn {
                                 slice_tool_calls += 1;
                             }
                             blocks.push(TurnBlock::ToolCall(index));
@@ -2727,7 +2813,7 @@ impl plan::CompiledAgentPlan {
                     // The interrupt exists to apply steering now. Nothing
                     // queued means the client raced a finishing run; continue
                     // with the next turn so the model resumes from its text.
-                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                         for steer in applied {
                             yield RuntimeEvent::SteeringApplied {
                                 message_id: steer.message_id,
@@ -2775,6 +2861,17 @@ impl plan::CompiledAgentPlan {
                     return;
                 }
 
+                // A sub-agent's final-answer turn ends the run whatever it
+                // returned (ADR-0054 § 3): its calls were admitted with a
+                // not-executed result and settle through the result path
+                // below, then the run completes there. A reply with no calls
+                // completes here. Jev final review, the audit hook, and
+                // steering cannot redirect it; an empty reply leaves the
+                // parent the child's latest report.
+                if final_answer_turn && calls.is_empty() {
+                    yield RuntimeEvent::Completed { final_output: None };
+                    return;
+                }
                 if checkpoint_turn {
                     // The persisted turn is the slice boundary whether or not
                     // the model obeyed the notice. Calls it made anyway were
@@ -2782,9 +2879,14 @@ impl plan::CompiledAgentPlan {
                     // through the ordinary result path below, so the next
                     // turn sees one result per call and can re-issue them.
                     // An empty reply is a missed report: the slice still
-                    // resets and the run continues (ADR-0054 § 2).
-                    slice_tool_calls = 0;
-                    checkpoint_noticed = false;
+                    // resets and the run continues (ADR-0054 § 2). A stall
+                    // report is the same kind of turn; it leaves the slice
+                    // count alone, since its calls still ran in this slice.
+                    if slice_report {
+                        slice_tool_calls = 0;
+                    }
+                    stall.reported();
+                    placed_report = None;
                     continuing_slice = true;
                     if calls.is_empty() {
                         // Assembly drops an empty turn and fills the gap
@@ -2801,7 +2903,7 @@ impl plan::CompiledAgentPlan {
                         // Steering that arrived during the report is applied
                         // here, before the continuation notice, exactly as at
                         // any other turn boundary.
-                        if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                        if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                             for steer in applied {
                                 yield RuntimeEvent::SteeringApplied {
                                     message_id: steer.message_id,
@@ -2817,7 +2919,7 @@ impl plan::CompiledAgentPlan {
                     // Steering that arrived during the final turn is not
                     // dropped: the run continues with it instead of
                     // completing, exactly as if the model had called a tool.
-                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                         irreducible_message_bytes = irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
@@ -2930,7 +3032,7 @@ impl plan::CompiledAgentPlan {
                             irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
                             yield RuntimeEvent::Interrupted { turn_ordinal };
-                            if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                            if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                                 for steer in applied {
                                     yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments };
                                 }
@@ -2954,7 +3056,7 @@ impl plan::CompiledAgentPlan {
                         }
                     }
                     // Steering accepted while an audit ran still owns the next boundary.
-                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                         irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(&mut messages).split_off(keep);
@@ -3089,7 +3191,7 @@ impl plan::CompiledAgentPlan {
                                     irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                                     Arc::make_mut(&mut messages).push(assistant);
                                     yield RuntimeEvent::Interrupted { turn_ordinal };
-                                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                                         for steer in applied {
                                             yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments };
                                         }
@@ -3136,7 +3238,7 @@ impl plan::CompiledAgentPlan {
                     }
                     // A review may await remote inference. Input accepted during
                     // that wait belongs to this run, not its successor.
-                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                         irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(&mut messages).split_off(keep);
@@ -3201,12 +3303,18 @@ impl plan::CompiledAgentPlan {
                     match decision {
                         GateDecision::Execute => {}
                         GateDecision::Deny { message } => {
+                            // A denied call counts toward the stall report:
+                            // a run that keeps asking for denied calls is
+                            // not producing anything either.
+                            stall.settled(false);
                             results[index] = Some(RetainedResult::error(message.clone()));
                             yield RuntimeEvent::ToolCallDenied { id: call.id, message };
                         }
                         // The gate persisted and published the answered call;
                         // the answer is the result and nothing executes.
                         GateDecision::Answered { result } => {
+                            // The human answered: new input, like a steer.
+                            stall.progress();
                             results[index] = Some(RetainedResult::answered(result.clone()));
                             yield RuntimeEvent::ToolCallAnswered { id: call.id, result };
                         }
@@ -3244,6 +3352,7 @@ impl plan::CompiledAgentPlan {
                         continue;
                     }
                     let (result, changed) = select_tools(&catalog, &mut pins, &call.arguments);
+                    stall.settled(false);
                     pins_changed |= changed;
                     results[index] = Some(RetainedResult::retain(&result, &call.name, call.id));
                     yield RuntimeEvent::ToolCallFinished {
@@ -3583,6 +3692,16 @@ impl plan::CompiledAgentPlan {
                             &call,
                             &result,
                         );
+                        // Runtime rejections (over the cap, made in a report
+                        // turn, Jev's one-call rule, unknown or malformed)
+                        // never ran and are not counted.
+                        if call.rejection.is_none() {
+                            stall.settled(runtime::is_progress(
+                                &call,
+                                catalog.lookup(&call.name),
+                                &result,
+                            ));
+                        }
                         let result = cite_spill(result, &call.name, call.id, spills.is_some());
                         results[usize::from(call.call_ordinal - 1)] =
                             Some(RetainedResult::retain(&result, &call.name, call.id));
@@ -3661,6 +3780,16 @@ impl plan::CompiledAgentPlan {
                             &call,
                             &result,
                         );
+                        // Runtime rejections (over the cap, made in a report
+                        // turn, Jev's one-call rule, unknown or malformed)
+                        // never ran and are not counted.
+                        if call.rejection.is_none() {
+                            stall.settled(runtime::is_progress(
+                                &call,
+                                catalog.lookup(&call.name),
+                                &result,
+                            ));
+                        }
                         let result = cite_spill(result, &call.name, call.id, spills.is_some());
                         results[usize::from(call.call_ordinal - 1)] =
                             Some(RetainedResult::retain(&result, &call.name, call.id));
@@ -3871,10 +4000,31 @@ impl plan::CompiledAgentPlan {
                         .saturating_add(measure_message(&notice));
                     Arc::make_mut(&mut messages).push(notice);
                 }
+                // The final-answer turn's calls never ran; their results are
+                // durable, so the run completes with the turn as it stands
+                // (ADR-0054 § 3). Steering is left for the child's next run.
+                if final_answer_turn {
+                    // As at any completion: a run that overran its cost or
+                    // token bound settles as exhausted, never completed.
+                    if let Some(kind) = budget.exceeded(tokio::time::Instant::now())
+                        && matches!(
+                            kind,
+                            BudgetLimitKind::Cost
+                                | BudgetLimitKind::CostUnknown
+                                | BudgetLimitKind::TotalTokens
+                        )
+                    {
+                        let exhaustion = budget.exhaustion(kind, false, tokio::time::Instant::now());
+                        yield RuntimeEvent::BudgetExhausted { exhaustion };
+                        return;
+                    }
+                    yield RuntimeEvent::Completed { final_output: None };
+                    return;
+                }
                 // The boundary: every result of this turn is in context, and
                 // the next request has not been built. Steering joins here as
                 // a user message after the tool results.
-                if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                     for steer in applied {
                         yield RuntimeEvent::SteeringApplied {
                             message_id: steer.message_id,
@@ -4195,6 +4345,8 @@ pub enum RuntimeConfigError {
 
 #[cfg(test)]
 mod tests {
+    mod progress;
+
     use std::{
         sync::{
             Arc, Mutex,
@@ -8963,7 +9115,24 @@ mod tests {
                 drop(emitted);
                 let mut events = Vec::with_capacity(count * 3 + 1);
                 for index in first..first + count {
-                    events.extend(read(format!("call-{index}")));
+                    if index == first {
+                        // One write per turn is progress, so the run reaches
+                        // the slice checkpoint rather than a stall report.
+                        let id = format!("call-{index}");
+                        events.extend([
+                            Ok(ProviderEvent::ToolCallStarted {
+                                id: id.clone(),
+                                name: "write_file".to_owned(),
+                            }),
+                            Ok(ProviderEvent::ToolCallArgumentsDelta {
+                                id: id.clone(),
+                                json: r#"{"path":"progress.txt","content":"x"}"#.to_owned(),
+                            }),
+                            Ok(ProviderEvent::ToolCallCompleted { id }),
+                        ]);
+                    } else {
+                        events.extend(read(format!("call-{index}")));
+                    }
                 }
                 events.push(Ok(ProviderEvent::Completed { usage: None }));
                 Box::pin(stream::iter(events))
@@ -9008,7 +9177,10 @@ mod tests {
             .filter(|event| {
                 matches!(
                     event,
-                    RuntimeEvent::ToolCallFinished { is_error: false, result, .. } if result.contains("hello")
+                    RuntimeEvent::ToolCallFinished {
+                        is_error: false,
+                        ..
+                    }
                 )
             })
             .count();
@@ -9422,13 +9594,20 @@ mod tests {
                 let mut events = Vec::new();
                 for index in first..first + MAX_TOOL_CALLS_PER_TURN {
                     let id = format!("call-{index}");
+                    // One write per turn is progress, so the run reaches the
+                    // slice checkpoint, not a stall report.
+                    let (name, json) = if index == first {
+                        ("write_file", r#"{"path":"progress.txt","content":"x"}"#)
+                    } else {
+                        ("read_file", r#"{"path":"note.txt"}"#)
+                    };
                     events.push(Ok(ProviderEvent::ToolCallStarted {
                         id: id.clone(),
-                        name: "read_file".to_owned(),
+                        name: name.to_owned(),
                     }));
                     events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
                         id: id.clone(),
-                        json: r#"{"path":"note.txt"}"#.to_owned(),
+                        json: json.to_owned(),
                     }));
                     events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
                 }

@@ -40,8 +40,14 @@ impl PreparedRequestWeight {
 pub(crate) enum TurnNotice {
     /// The slice checkpoint: report progress without calling tools.
     Report,
-    /// The first turn of the next slice: tools are available again.
+    /// A stall report after calls without progress (ADR-0054 § 2): the same
+    /// kind of turn as the slice checkpoint, under its own wording.
+    StallReport,
+    /// The turn after a report: tools are available again.
     Continuation,
+    /// A sub-agent's last turn: answer the brief from what it has. The
+    /// reply ends the run (ADR-0054 § 3).
+    FinalAnswer,
 }
 
 impl TurnNotice {
@@ -49,6 +55,8 @@ impl TurnNotice {
         match self {
             Self::Report => "report",
             Self::Continuation => "continuation",
+            Self::StallReport => "stall_report",
+            Self::FinalAnswer => "final_answer",
         }
     }
 
@@ -56,6 +64,8 @@ impl TurnNotice {
         match value {
             "report" => Some(Self::Report),
             "continuation" => Some(Self::Continuation),
+            "stall_report" => Some(Self::StallReport),
+            "final_answer" => Some(Self::FinalAnswer),
             _ => None,
         }
     }
@@ -64,6 +74,8 @@ impl TurnNotice {
         match self {
             Self::Report => crate::SLICE_CHECKPOINT_NOTICE,
             Self::Continuation => crate::SLICE_CONTINUATION_NOTICE,
+            Self::StallReport => crate::STALL_REPORT_NOTICE,
+            Self::FinalAnswer => crate::SUBAGENT_FINAL_ANSWER_NOTICE,
         }
     }
 }

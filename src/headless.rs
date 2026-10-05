@@ -1989,6 +1989,22 @@ mod tests {
                     Ok(ProviderEvent::Completed { usage: None }),
                 ]));
             }
+            // Reads alone stall: every 64 calls without output the run is
+            // asked for a report, answers it, and keeps reading.
+            let stall_report = request.messages().last().is_some_and(|message| {
+                message.content().iter().any(|block| {
+                    matches!(block, qq_provider::ContentBlock::Text { text }
+                        if text.contains("tool calls changed nothing"))
+                })
+            });
+            if stall_report {
+                return Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "stall report".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]));
+            }
             if state.1 {
                 return Box::pin(stream::iter([
                     Ok(ProviderEvent::OutputTextDelta {

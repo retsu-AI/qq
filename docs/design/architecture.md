@@ -992,8 +992,9 @@ carries the report notice as a runtime message at the end of the
 conversation, and the first turn of the next slice carries a continuation
 notice the same way. The system prompt never changes, so the provider's
 cached prefix survives the seam. Each notice is stored on the first turn
-row whose request carried it, as `model_turns.notice` (`report` or
-`continuation`), and replayed before that turn, so a later run assembles
+row whose request carried it, as `model_turns.notice` (`report`,
+`stall_report`, `continuation`, or `final_answer`), and replayed before that
+turn, so a later run assembles
 exactly the messages the live run sent (ADR-0054 § 2). The column records
 where a notice entered the conversation, not every attempt it covered: a
 report retried after a fault or an output-limit cut is placed once and
@@ -1008,6 +1009,31 @@ it. An empty reply that reports usage is a missed report, not a failure. The
 live context fills it with the same placeholder assembly inserts, and the run
 continues. An empty reply with no usage after fresh tool results is treated
 like any swallowed gateway failure: it is retried as a transient fault.
+
+A run that stops producing output reports too (ADR-0054 § 1–2). The stall
+scope counts settled calls since the last *progress event*: a successful
+mutating call or external call its server does not mark read-only, a
+non-read-only shell command that ran (any exit
+status, timeouts included), a successful blocking `spawn_agent` result, an
+applied steer, an answered `ask_user`, or a report. Reads, searches, and
+read-only shell commands are never progress; denied calls count, runtime
+rejections do not. After `STALL_REPORT_CALLS = 64` such calls the next turn
+is a stall report: the same kind of turn as the slice checkpoint, with its
+own notice and rejection text, and the run continues. Root runs are never
+ended by this rule. A model-spawned task child that reports
+`MAX_CHILD_REPORTS_WITHOUT_WORK = 3` times without other progress gets a
+final-answer turn instead of its fourth report: its tools stay declared with
+`ToolChoice::None`, any call it makes is admitted with a not-executed result,
+and the run completes with the turn whatever it returned, bypassing Jev
+final review and the audit hook. An interrupting steer resends the turn
+under the same notice: a placed report or final-answer notice pins the
+turn's kind until it settles. When that reply is empty the parent's
+`spawn_agent` result is the child's latest report with text, under an
+interim-report label. A report continued after an output cut, a mid-stream
+fault, or an interrupt is its attempts joined in order. With no report text
+either, it is the existing "completed without producing any text" error.
+Audit children are exempt; they are bounded at a few turns already. The
+budget-final turn outranks both report kinds.
 Steering that arrives during the report is applied before the continuation
 notice. Clients observe no terminal run event at the slice seam. Genuine completion,
 explicit caller budgets, cancellation, and failures remain the only user-level
